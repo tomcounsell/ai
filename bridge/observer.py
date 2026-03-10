@@ -244,6 +244,7 @@ class Observer:
                 f"{self._log_prefix} INTERJECTION session={self.session.session_id} "
                 f"correlation={cid} count={len(queued)} action=read"
             )
+            record_interjection(self.session.session_id, cid, len(queued), "read")
         is_sdlc = self.session.is_sdlc_job()
 
         # Extract artifacts from worker output

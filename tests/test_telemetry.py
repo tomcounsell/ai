@@ -202,3 +202,104 @@ class TestGetRedis:
             mock_cls.return_value = MagicMock()
             telemetry._get_redis()
             mock_cls.assert_called_once_with(host="localhost", port=6379, socket_timeout=2)
+
+
+class TestSetLinkStructuredLogging:
+    """Test that set_link() emits structured INFO log lines."""
+
+    def test_set_link_logs_structured_info(self):
+        """set_link should emit a structured LINK log at INFO level."""
+        from models.agent_session import AgentSession
+
+        session = MagicMock(spec=AgentSession)
+        session.session_id = "test-session-123"
+        session.correlation_id = "abc123def456"
+        session.set_link = AgentSession.set_link.__get__(session, AgentSession)
+
+        with patch("models.agent_session.logger") as mock_logger:
+            session.set_link("issue", "https://github.com/foo/bar/issues/1")
+            info_calls = [str(c) for c in mock_logger.info.call_args_list]
+            assert any("LINK" in c for c in info_calls), (
+                f"Expected structured LINK log at INFO level, got: {info_calls}"
+            )
+            link_call = [c for c in info_calls if "LINK" in c][0]
+            assert "session=" in link_call
+            assert "correlation=" in link_call
+            assert "type=" in link_call or "kind=" in link_call
+            assert "url=" in link_call
+
+    def test_set_link_logs_with_correlation_id(self):
+        """set_link should include correlation_id in the structured log."""
+        from models.agent_session import AgentSession
+
+        session = MagicMock(spec=AgentSession)
+        session.session_id = "sess-42"
+        session.correlation_id = "corr-99"
+        session.set_link = AgentSession.set_link.__get__(session, AgentSession)
+
+        with patch("models.agent_session.logger") as mock_logger:
+            session.set_link("pr", "https://github.com/foo/bar/pull/5")
+            info_calls = [str(c) for c in mock_logger.info.call_args_list]
+            link_calls = [c for c in info_calls if "LINK" in c]
+            assert len(link_calls) > 0
+            assert "corr-99" in link_calls[0]
+
+
+class TestStageDetectorTelemetry:
+    """Test that stage detector calls record_stage_transition."""
+
+    def test_apply_transitions_records_telemetry(self):
+        """apply_transitions should call record_stage_transition for each applied transition."""
+        from bridge.stage_detector import apply_transitions
+
+        session = MagicMock()
+        session.get_stage_progress.return_value = {"BUILD": "pending", "TEST": "pending"}
+        session.session_id = "sess-1"
+        session.correlation_id = "corr-1"
+
+        transitions = [
+            {"stage": "BUILD", "status": "completed", "reason": "test"},
+        ]
+
+        with patch("monitoring.telemetry.record_stage_transition") as mock_record:
+            apply_transitions(session, transitions)
+            mock_record.assert_called_once_with("sess-1", "corr-1", "BUILD", "pending", "completed")
+
+
+class TestHealthCheckerTelemetry:
+    """Test that health checker includes observer telemetry."""
+
+    def test_overall_health_includes_observer_check(self):
+        """get_overall_health should include an observer telemetry check."""
+        from monitoring.health import HealthChecker, HealthCheckResult, HealthStatus
+
+        checker = HealthChecker()
+        with (
+            patch("monitoring.health.HealthChecker.check_database") as mock_db,
+            patch("monitoring.health.HealthChecker.check_telegram_connection") as mock_tg,
+            patch("monitoring.health.HealthChecker.check_disk_space") as mock_disk,
+            patch("monitoring.health.HealthChecker.check_api_keys") as mock_keys,
+            patch("monitoring.telemetry.check_observer_health") as mock_obs,
+        ):
+            mock_db.return_value = HealthCheckResult(
+                component="database", status=HealthStatus.HEALTHY, message="ok"
+            )
+            mock_tg.return_value = HealthCheckResult(
+                component="telegram", status=HealthStatus.HEALTHY, message="ok"
+            )
+            mock_disk.return_value = HealthCheckResult(
+                component="disk_space", status=HealthStatus.HEALTHY, message="ok"
+            )
+            mock_keys.return_value = {}
+            mock_obs.return_value = {
+                "status": "ok",
+                "error_rate": 0.0,
+                "total_decisions": 0,
+                "violations": [],
+            }
+
+            result = checker.get_overall_health()
+            components = [c.component for c in result.checks]
+            assert "observer_telemetry" in components, (
+                f"Expected observer_telemetry in health checks, got: {components}"
+            )

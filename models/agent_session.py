@@ -167,7 +167,6 @@ class AgentSession(Model):
             kind: Link type - 'issue', 'plan', or 'pr'
             url: The URL to store
         """
-        logger.debug(f"set_link({kind!r}, {url!r}) on session {self.session_id}")
         field_map = {
             "issue": "issue_url",
             "plan": "plan_url",
@@ -175,6 +174,13 @@ class AgentSession(Model):
         }
         field_name = field_map.get(kind)
         if field_name:
+            existing = getattr(self, field_name, None)
+            action = "update" if existing else "set"
+            cid = getattr(self, "correlation_id", None) or "unknown"
+            logger.info(
+                f"LINK session={self.session_id} correlation={cid} "
+                f"type={kind} action={action} url={url}"
+            )
             setattr(self, field_name, url)
             try:
                 self.save()

@@ -222,6 +222,44 @@ class HealthChecker:
                 details={"error": str(e)},
             )
 
+    def check_observer_telemetry(self) -> HealthCheckResult:
+        """Check observer health via telemetry metrics.
+
+        Reads decision counters from Redis and checks error rate thresholds.
+
+        Returns:
+            HealthCheckResult for observer telemetry.
+        """
+        try:
+            from monitoring.telemetry import check_observer_health
+
+            health = check_observer_health()
+            status_map = {
+                "ok": HealthStatus.HEALTHY,
+                "degraded": HealthStatus.DEGRADED,
+                "unhealthy": HealthStatus.UNHEALTHY,
+            }
+            h_status = status_map.get(health["status"], HealthStatus.UNKNOWN)
+            message = (
+                f"Observer: {health['total_decisions']} decisions, "
+                f"error_rate={health['error_rate']:.1%}"
+            )
+            if health["violations"]:
+                message += f" [{', '.join(health['violations'])}]"
+            return HealthCheckResult(
+                component="observer_telemetry",
+                status=h_status,
+                message=message,
+                details=health,
+            )
+        except Exception as e:
+            return HealthCheckResult(
+                component="observer_telemetry",
+                status=HealthStatus.UNKNOWN,
+                message=f"Observer telemetry unavailable: {e}",
+                details={"error": str(e)},
+            )
+
     def get_overall_health(self) -> OverallHealth:
         """Run all health checks and return overall status.
 
@@ -234,6 +272,7 @@ class HealthChecker:
         checks.append(self.check_database())
         checks.append(self.check_telegram_connection())
         checks.append(self.check_disk_space())
+        checks.append(self.check_observer_telemetry())
 
         # Add API key checks
         api_results = self.check_api_keys()
