@@ -174,6 +174,10 @@ class Job:
     def auto_continue_count(self) -> int:
         return self._rj.auto_continue_count or 0
 
+    @property
+    def correlation_id(self) -> str | None:
+        return self._rj.correlation_id
+
 
 # Fields to extract from AgentSession for delete-and-recreate pattern.
 # Excludes job_id (AutoKeyField, auto-generated on create).
@@ -226,6 +230,8 @@ _JOB_FIELDS = [
     "last_stall_reason",
     # Observer fields — must be preserved across delete-and-recreate
     "queued_steering_messages",
+    # Tracing fields — must be preserved across delete-and-recreate
+    "correlation_id",
 ]
 
 # Backward compat alias
@@ -265,6 +271,7 @@ async def _push_job(
     chat_id_for_enrichment: str | None = None,
     classification_type: str | None = None,
     auto_continue_count: int = 0,
+    correlation_id: str | None = None,
 ) -> int:
     """Create a job in Redis and return the pending queue depth for this project."""
     await AgentSession.async_create(
@@ -292,6 +299,7 @@ async def _push_job(
         chat_id_for_enrichment=chat_id_for_enrichment,
         classification_type=classification_type,
         auto_continue_count=auto_continue_count,
+        correlation_id=correlation_id,
     )
 
     # Log lifecycle transition for newly created pending job
@@ -804,6 +812,7 @@ async def enqueue_job(
     chat_id_for_enrichment: str | None = None,
     classification_type: str | None = None,
     auto_continue_count: int = 0,
+    correlation_id: str | None = None,
 ) -> int:
     """
     Add a job to Redis and ensure worker is running.
@@ -836,9 +845,11 @@ async def enqueue_job(
         chat_id_for_enrichment=chat_id_for_enrichment,
         classification_type=classification_type,
         auto_continue_count=auto_continue_count,
+        correlation_id=correlation_id,
     )
     _ensure_worker(project_key)
-    logger.info(f"[{project_key}] Enqueued job (priority={priority}, depth={depth})")
+    log_prefix = f"[{correlation_id}]" if correlation_id else f"[{project_key}]"
+    logger.info(f"{log_prefix} Enqueued job (priority={priority}, depth={depth})")
     return depth
 
 
@@ -1054,8 +1065,12 @@ async def _execute_job(job: Job) -> None:
         root_id = parts[-1] if "_" in job.session_id else job.message_id
         task_list_id = f"thread-{job.chat_id}-{root_id}"
 
+    # Read correlation_id from job for end-to-end tracing
+    cid = job.correlation_id
+    log_prefix = f"[{cid}]" if cid else f"[{job.project_key}]"
+
     logger.info(
-        f"[{job.project_key}] Executing job {job.job_id} "
+        f"{log_prefix} Executing job {job.job_id} "
         f"(session={job.session_id}, branch={branch_name}, cwd={working_dir})"
     )
 
@@ -1070,6 +1085,7 @@ async def _execute_job(job: Job) -> None:
             "job_id": job.job_id,
             "sender": job.sender_name,
             "message_preview": job.message_text[:200] if job.message_text else "",
+            "correlation_id": cid,
         },
         working_dir=str(working_dir),
     )
@@ -1246,6 +1262,7 @@ async def _execute_job(job: Job) -> None:
                     "routing": "observer",
                     "coaching_message": decision.get("coaching_message", "")[:200],
                     "message_preview": msg[:200],
+                    "correlation_id": cid,
                 },
                 working_dir=str(working_dir),
             )
@@ -1319,6 +1336,7 @@ async def _execute_job(job: Job) -> None:
             job.sender_id,
             job.workflow_id,
             task_list_id,
+            cid,
         )
 
     task = BackgroundTask(messenger=messenger)
@@ -1338,22 +1356,16 @@ async def _execute_job(job: Job) -> None:
         try:
             from bridge.session_transcript import complete_transcript
 
+            final_status = (
+                "active"
+                if chat_state.defer_reaction
+                else ("completed" if not task.error else "failed")
+            )
             if not chat_state.defer_reaction:
-                final_status = "completed" if not task.error else "failed"
                 complete_transcript(job.session_id, status=final_status)
             else:
-                # STALE SAVE GUARD: Do NOT call agent_session.save() here.
-                # When defer_reaction is True, _enqueue_continuation() has already
-                # deleted the old session and created a fresh pending continuation.
-                # Saving the stale in-memory agent_session reference would resurrect
-                # a ghost record in Redis, causing the pending continuation to become
-                # invisible to the worker's _pop_job() query (Redis index corruption).
-                # See: https://github.com/tomcounsell/ai/issues/342
-                logger.debug(
-                    f"[{job.project_key}] Skipping stale agent_session.save() — "
-                    f"session was already recreated by _enqueue_continuation() "
-                    f"(defer_reaction=True, session={job.session_id})"
-                )
+                agent_session.last_activity = time.time()
+                agent_session.save()
         except Exception as e:
             logger.warning(
                 f"AgentSession update failed for job {job.job_id} "
@@ -1373,6 +1385,7 @@ async def _execute_job(job: Job) -> None:
                 "job_id": job.job_id,
                 "error": str(task.error),
                 "sender": job.sender_name,
+                "correlation_id": cid,
             },
             working_dir=str(working_dir),
         )
@@ -1436,6 +1449,7 @@ async def _execute_job(job: Job) -> None:
             extra_context={
                 "job_id": job.job_id,
                 "sender": job.sender_name,
+                "correlation_id": cid,
             },
             working_dir=str(working_dir),
         )

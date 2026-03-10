@@ -223,6 +223,11 @@ class Observer:
         self.model = model or SONNET
         self._decision_made = False
         self._action_taken: str | None = None
+        self._log_prefix = (
+            f"[{session.correlation_id}]"
+            if getattr(session, "correlation_id", None)
+            else "[observer]"
+        )
 
     def _handle_read_session(self) -> dict[str, Any]:
         """Tool handler: read the current session state."""
@@ -239,6 +244,7 @@ class Observer:
 
         return {
             "session_id": self.session.session_id,
+            "correlation_id": getattr(self.session, "correlation_id", None),
             "is_sdlc": is_sdlc,
             "classification_type": self.session.classification_type,
             "stage_progress": progress,
@@ -270,7 +276,7 @@ class Observer:
             if fresh:
                 self.session = fresh[0]
         except Exception as e:
-            logger.warning(f"[observer] Failed to re-read session before update: {e}")
+            logger.warning(f"{self._log_prefix} Failed to re-read session before update: {e}")
 
         # Clear queued steering messages now (deferred from read_session peek)
         cleared_messages = False
@@ -297,7 +303,7 @@ class Observer:
             try:
                 self.session.save()
             except Exception as e:
-                logger.error(f"[observer] Failed to save session updates: {e}")
+                logger.error(f"{self._log_prefix} Failed to save session updates: {e}")
                 return {"status": "error", "error": str(e)}
 
         return {"status": "ok", "updated_fields": updated}
@@ -345,7 +351,7 @@ class Observer:
         max_continues = MAX_AUTO_CONTINUES_SDLC if is_sdlc else MAX_AUTO_CONTINUES
         has_remaining = self.session.has_remaining_stages()
         logger.info(
-            f"[observer] Session {self.session.session_id}: "
+            f"{self._log_prefix} Session {self.session.session_id}: "
             f"is_sdlc={is_sdlc}, auto_continue={self.auto_continue_count}/{max_continues}, "
             f"remaining_stages={has_remaining}"
         )
@@ -355,7 +361,7 @@ class Observer:
         transitions_applied = apply_transitions(self.session, transitions)
         if transitions_applied > 0:
             logger.info(
-                f"[observer] Stage detector applied {transitions_applied} transitions "
+                f"{self._log_prefix} Stage detector applied {transitions_applied} transitions "
                 f"for session {self.session.session_id}"
             )
 
@@ -365,7 +371,7 @@ class Observer:
 
             api_key = get_anthropic_api_key()
             if not api_key:
-                logger.error("[observer] No API key available, falling back to deliver")
+                logger.error(f"{self._log_prefix} No API key available, falling back to deliver")
                 return {
                     "action": "deliver",
                     "reason": "No API key for Observer",
@@ -413,7 +419,7 @@ class Observer:
                     # Log each iteration with tool name and result preview
                     result_preview = result_str[:120] if result_str else ""
                     logger.info(
-                        f"[observer] Iteration {iteration + 1}/{MAX_TOOL_ITERATIONS}: "
+                        f"{self._log_prefix} Iteration {iteration + 1}/{MAX_TOOL_ITERATIONS}: "
                         f"tool={tool_use.name}, result={result_preview}"
                     )
                     tool_results.append(
@@ -442,7 +448,7 @@ class Observer:
             # If the Observer didn't make a decision, default to deliver
             if not self._decision_made:
                 logger.warning(
-                    "[observer] Observer did not make a routing decision after "
+                    f"{self._log_prefix} Observer did not make a routing decision after "
                     f"{MAX_TOOL_ITERATIONS} iterations, defaulting to deliver"
                 )
                 return {
@@ -453,7 +459,7 @@ class Observer:
 
             if self._action_taken == "steer":
                 reason_preview = (coaching_message or "continue")[:120]
-                logger.info(f"[observer] Decision: steer (reason: {reason_preview})")
+                logger.info(f"{self._log_prefix} Decision: steer (reason: {reason_preview})")
                 return {
                     "action": "steer",
                     "coaching_message": coaching_message or "continue",
@@ -461,7 +467,7 @@ class Observer:
                 }
             else:
                 reason_preview = (deliver_reason or "Observer decided to deliver")[:120]
-                logger.info(f"[observer] Decision: deliver (reason: {reason_preview})")
+                logger.info(f"{self._log_prefix} Decision: deliver (reason: {reason_preview})")
                 return {
                     "action": "deliver",
                     "reason": deliver_reason or "Observer decided to deliver",
@@ -469,7 +475,7 @@ class Observer:
                 }
 
         except Exception as e:
-            logger.error(f"[observer] Observer failed: {e}", exc_info=True)
+            logger.error(f"{self._log_prefix} Observer failed: {e}", exc_info=True)
             return {
                 "action": "deliver",
                 "reason": f"Observer error: {e}",

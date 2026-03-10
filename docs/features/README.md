@@ -18,6 +18,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Coaching Loop](coaching-loop.md) | Merged classifier-coach with LLM-generated coaching, tiered fallback, error crash guard, open question gate, and stage-aware auto-continue for SDLC jobs | Shipped |
 | [Code Impact Finder](code-impact-finder.md) | Semantic search for blast radius analysis during /do-plan | Shipped |
 | [Completion Tracking](completion-tracking.md) | Branch-based work tracking and completion token system | Archived |
+| [Correlation IDs](correlation-ids.md) | End-to-end request tracing with shared correlation_id from Telegram receipt to response delivery | Shipped |
 | [Deep Plan Analysis](deep-plan-analysis.md) | Prior Art, Data Flow, Failure Analysis, and Architectural Impact investigation sections in /do-plan | Shipped |
 | [Design Review](do-design-review.md) | Review web UI against 10 premium design criteria with severity ratings | Shipped |
 | [Do Test](do-test.md) | Intelligent test orchestration with parallel dispatch, changed-file detection, structured reporting, and pytest plugin configuration | Shipped |

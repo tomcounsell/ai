@@ -96,6 +96,9 @@ class AgentSession(Model):
     plan_url = Field(null=True)
     pr_url = Field(null=True)
 
+    # === Tracing ===
+    correlation_id = Field(null=True)  # End-to-end request tracing ID
+
     # === Stall retry fields ===
     retry_count = Field(type=int, default=0)  # Stall retry attempt count
     last_stall_reason = Field(null=True)  # Diagnostic context from last stall
