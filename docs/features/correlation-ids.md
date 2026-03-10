@@ -54,7 +54,7 @@ grep -r "abc123def456" logs/sessions/*/
 - **12-character hex**: Short enough for log readability, unique enough for tracing (2^48 = 281 trillion possible values)
 - **Pass-through string**: The correlation_id is purely additive -- no behavioral dependency, no coupling
 - **null=True on Popoto field**: Safe to add to existing Redis data; old sessions simply have None
-- **No request_id deprecation**: The existing `request_id` generation in `sdk_client.py` is replaced by correlation_id as the log prefix, but the variable name `request_id` is kept as an alias for backward compatibility
+- **request_id replaced**: The `request_id` variable in `sdk_client.py` now uses the correlation_id value as its source instead of generating a separate identifier, keeping a single consistent prefix across all log lines
 
 ## Related
 
