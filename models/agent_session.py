@@ -117,12 +117,15 @@ class AgentSession(Model):
 
     # === History helpers ===
 
-    def _get_history_list(self) -> list:
+    def get_history_list(self) -> list:
         """Safely get history as a Python list."""
         h = self.history
         if isinstance(h, list):
             return h
         return []
+
+    # Keep private alias for internal callers
+    _get_history_list = get_history_list
 
     def append_history(self, role: str, text: str) -> None:
         """Append a lifecycle event to history, capped at HISTORY_MAX_ENTRIES.

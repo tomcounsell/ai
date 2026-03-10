@@ -1,5 +1,7 @@
 # Coaching Loop
 
+> **Deprecated**: The coaching loop has been replaced by the [Observer Agent](observer-agent.md) (issue #309, PR #321). The classifier (`classify_output()`), coach (`build_coaching_message()`), and routing logic (`classify_routing_decision()`) have been removed from the routing path. Stage detection is now handled deterministically by `bridge/stage_detector.py`. This document is retained for historical reference.
+
 The coaching loop prevents the auto-continue system from blindly sending "continue" when the agent pauses. Instead, it generates context-aware coaching messages that guide the agent toward productive next steps.
 
 ## Architecture

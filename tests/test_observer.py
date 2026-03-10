@@ -4,9 +4,13 @@ Tests the deterministic stage detector (pure function, no mocks needed)
 and the Observer's routing decision framework.
 """
 
+import json
+
 import pytest
 
-from bridge.stage_detector import STAGE_ORDER, detect_stages
+from bridge.observer import Observer
+from bridge.stage_detector import STAGE_ORDER, apply_transitions, detect_stages
+from models.agent_session import SDLC_STAGES
 
 # ============================================================================
 # Stage Detector Tests (pure function — no Redis, no API)
@@ -210,13 +214,10 @@ class TestObserverToolHandlers:
                     links["pr"] = self.pr_url
                 return links
 
-            def _get_history_list(self):
+            def get_history_list(self):
                 return self.history if isinstance(self.history, list) else []
 
-            def pop_steering_messages(self):
-                msgs = list(self.queued_steering_messages) if self.queued_steering_messages else []
-                self.queued_steering_messages = []
-                return msgs
+            _get_history_list = get_history_list
 
             def is_sdlc_job(self):
                 return self.classification_type == "sdlc"
@@ -242,8 +243,6 @@ class TestObserverToolHandlers:
 
     def test_read_session_returns_state(self):
         """read_session tool returns comprehensive session state."""
-        from bridge.observer import Observer
-
         session = self._make_mock_session(
             issue_url="https://github.com/foo/bar/issues/1",
             history=["[stage] ISSUE COMPLETED", "[stage] PLAN COMPLETED"],
@@ -265,8 +264,6 @@ class TestObserverToolHandlers:
 
     def test_read_session_with_queued_messages(self):
         """read_session includes queued steering messages."""
-        from bridge.observer import Observer
-
         session = self._make_mock_session(
             queued_steering_messages=["Approve the plan", "Continue with tests"]
         )
@@ -282,8 +279,6 @@ class TestObserverToolHandlers:
 
     def test_update_session_sets_fields(self):
         """update_session persists context_summary and expectations."""
-        from bridge.observer import Observer
-
         session = self._make_mock_session()
         observer = Observer(
             session=session,
@@ -303,8 +298,6 @@ class TestObserverToolHandlers:
 
     def test_dispatch_enqueue_continuation(self):
         """enqueue_continuation tool sets decision state."""
-        from bridge.observer import Observer
-
         session = self._make_mock_session()
         observer = Observer(
             session=session,
@@ -317,8 +310,6 @@ class TestObserverToolHandlers:
             "enqueue_continuation",
             {"coaching_message": "Invoke /do-test next"},
         )
-        import json
-
         data = json.loads(result)
         assert data["action"] == "enqueue_continuation"
         assert observer._decision_made is True
@@ -326,8 +317,6 @@ class TestObserverToolHandlers:
 
     def test_dispatch_deliver_to_telegram(self):
         """deliver_to_telegram tool sets decision state."""
-        from bridge.observer import Observer
-
         session = self._make_mock_session()
         observer = Observer(
             session=session,
@@ -340,8 +329,6 @@ class TestObserverToolHandlers:
             "deliver_to_telegram",
             {"reason": "All stages complete"},
         )
-        import json
-
         data = json.loads(result)
         assert data["action"] == "deliver_to_telegram"
         assert observer._decision_made is True
@@ -361,8 +348,6 @@ class TestStageDetectorApplyTransitions:
 
             def get_stage_progress(self):
                 # Parse history entries like the real implementation
-                from models.agent_session import SDLC_STAGES
-
                 progress = {stage: "pending" for stage in SDLC_STAGES}
                 for entry in self.history:
                     if not isinstance(entry, str) or "[stage]" not in entry.lower():
@@ -385,8 +370,6 @@ class TestStageDetectorApplyTransitions:
 
     def test_apply_transitions_to_clean_session(self):
         """Apply transitions to a session with no prior stage data."""
-        from bridge.stage_detector import apply_transitions
-
         session = self._make_mock_session()
         transitions = [
             {"stage": "BUILD", "status": "in_progress", "reason": "Skill /do-build invoked"},
@@ -399,8 +382,6 @@ class TestStageDetectorApplyTransitions:
 
     def test_skip_already_completed_stages(self):
         """Don't re-apply transitions for already completed stages."""
-        from bridge.stage_detector import apply_transitions
-
         session = self._make_mock_session(
             history=["[stage] PLAN COMPLETED", "[stage] ISSUE COMPLETED"]
         )
@@ -413,8 +394,6 @@ class TestStageDetectorApplyTransitions:
 
     def test_empty_transitions(self):
         """Applying empty transitions is a no-op."""
-        from bridge.stage_detector import apply_transitions
-
         session = self._make_mock_session()
         applied = apply_transitions(session, [])
         assert applied == 0
@@ -509,7 +488,6 @@ class TestObserverFallback:
     @pytest.mark.asyncio
     async def test_observer_error_returns_deliver(self):
         """When Observer errors, it returns a deliver decision."""
-        from bridge.observer import Observer
 
         class MockSession:
             session_id = "test-fallback"
@@ -529,11 +507,10 @@ class TestObserverFallback:
                     "DOCS": "pending",
                 }
 
-            def _get_history_list(self):
+            def get_history_list(self):
                 return []
 
-            def pop_steering_messages(self):
-                return []
+            _get_history_list = get_history_list
 
             def is_sdlc_job(self):
                 return True

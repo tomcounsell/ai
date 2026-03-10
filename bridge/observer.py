@@ -198,8 +198,10 @@ class Observer:
         """Tool handler: read the current session state."""
         progress = self.session.get_stage_progress()
         links = self.session.get_links()
-        history = self.session._get_history_list()
-        queued = self.session.pop_steering_messages()
+        history = self.session.get_history_list()
+        # Peek at queued messages without clearing — pop happens in update_session
+        raw = self.session.queued_steering_messages
+        queued = list(raw) if isinstance(raw, list) else []
         is_sdlc = self.session.is_sdlc_job()
 
         # Extract artifacts from worker output
@@ -240,6 +242,13 @@ class Observer:
         except Exception as e:
             logger.warning(f"[observer] Failed to re-read session before update: {e}")
 
+        # Clear queued steering messages now (deferred from read_session peek)
+        cleared_messages = False
+        queued = self.session.queued_steering_messages
+        if isinstance(queued, list) and queued:
+            self.session.queued_steering_messages = []
+            cleared_messages = True
+
         updated = []
         if context_summary is not None:
             self.session.context_summary = context_summary
@@ -254,7 +263,7 @@ class Observer:
             self.session.set_link("pr", pr_url)
             updated.append("pr_url")
 
-        if updated:
+        if updated or cleared_messages:
             try:
                 self.session.save()
             except Exception as e:

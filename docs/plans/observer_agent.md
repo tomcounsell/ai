@@ -188,13 +188,13 @@ The bridge (`bridge/telegram_bridge.py`) already calls `send_to_chat()` via the 
 ## Documentation
 
 ### Feature Documentation
-- [ ] Create `docs/features/observer-agent.md` describing the Observer architecture and decision flow
-- [ ] Add entry to `docs/features/README.md` index table
-- [ ] Update `docs/features/coaching-loop.md` to note deprecation of coaching tiers (replaced by Observer)
+- [x] Create `docs/features/observer-agent.md` describing the Observer architecture and decision flow
+- [x] Add entry to `docs/features/README.md` index table
+- [x] Update `docs/features/coaching-loop.md` to note deprecation of coaching tiers (replaced by Observer)
 
 ### Inline Documentation
-- [ ] Code comments on Observer system prompt and tool definitions
-- [ ] Docstrings for stage detector pure function
+- [x] Code comments on Observer system prompt and tool definitions
+- [x] Docstrings for stage detector pure function
 
 ## Success Criteria
 

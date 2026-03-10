@@ -1199,6 +1199,17 @@ async def _execute_job(job: Job) -> None:
             chat_state.auto_continue_count += 1
             effective_max = MAX_AUTO_CONTINUES_SDLC if _is_sdlc else MAX_AUTO_CONTINUES
 
+            # Hard guard: enforce auto-continue cap regardless of Observer decision
+            if chat_state.auto_continue_count > effective_max:
+                logger.warning(
+                    f"[{job.project_key}] Auto-continue cap reached "
+                    f"({chat_state.auto_continue_count}/{effective_max}), "
+                    f"delivering to Telegram instead of steering"
+                )
+                await send_cb(job.chat_id, msg, job.message_id, agent_session)
+                chat_state.completion_sent = True
+                return
+
             save_session_snapshot(
                 session_id=job.session_id,
                 event="auto_continue",
