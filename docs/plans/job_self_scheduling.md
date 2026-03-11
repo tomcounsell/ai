@@ -291,14 +291,41 @@ Using: builder (2), validator (1)
 - Update `docs/features/README.md` index
 - Update `docs/tools-reference.md`
 
-### 7. Final Validation
+### 7. Production Test: SDLC scheduled job
+- **Task ID**: prod-test-sdlc
+- **Depends On**: test-integration
+- **Assigned To**: integration-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Create a GitHub issue: "Update docs/features/job-queue.md to document the new priority model (urgent/high/normal/low)"
+- From a running agent session, call `python -m tools.job_scheduler schedule --issue <N>` to enqueue it
+- Verify: job appears in queue at `normal` priority
+- Verify: worker picks it up, runs full SDLC (plan → build → test → review → docs → merge)
+- Verify: AgentSession logs capture full pipeline output
+- Verify: PR gets opened, changes are correct, docs updated
+- Clean up: close the test issue after verifying
+
+### 8. Production Test: Q&A scheduled job
+- **Task ID**: prod-test-qa
+- **Depends On**: test-integration
+- **Assigned To**: integration-validator
+- **Agent Type**: validator
+- **Parallel**: true (can run alongside prod-test-sdlc)
+- From a running agent session, call `python -m tools.job_scheduler push --message "Kevin asks: what's the current architecture of the job queue system?" --project valor`
+- Verify: job enqueues at `normal` priority with no issue link
+- Verify: worker picks it up, agent produces a coherent answer
+- Verify: AgentSession logs contain the Q&A response
+- Verify: no SDLC pipeline triggered (non-SDLC classification)
+
+### 9. Final Validation
 - **Task ID**: validate-all
-- **Depends On**: document-feature
+- **Depends On**: prod-test-sdlc, prod-test-qa, document-feature
 - **Assigned To**: integration-validator
 - **Agent Type**: validator
 - **Parallel**: false
 - Run full test suite
 - Verify all success criteria met
+- Verify both production tests passed
 - Verify documentation created
 
 ## Verification
