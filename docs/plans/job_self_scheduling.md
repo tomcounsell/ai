@@ -100,6 +100,7 @@ No prerequisites — this work uses only existing Redis, GitHub CLI, and interna
 - **Redis via Popoto as intermediary**: The tool writes directly to Redis using Popoto ORM (creating AgentSession objects). The bridge worker is already polling Redis — no IPC needed. If complexity grows later, Popoto's pub/sub can signal the worker. No need to import `enqueue_job()` or the bridge dependency chain.
 - **Q&A jobs default to valor project + Tom's DM chat_id**: Non-issue jobs (Q&A, ad-hoc) use `project_key="valor"` and the unique DM chat_id with Tom. This matches how DMs already work. Local Claude Code sessions bypass the queue entirely — they're foundational/quick work that doesn't need scheduling.
 - **`scheduled_after`**: Add field to AgentSession model. Single-line check in `_pop_job()`: `if job.scheduled_after and job.scheduled_after > datetime.now(UTC): continue`.
+- **FIFO ordering**: Within the same priority tier, oldest jobs run first (FIFO). Current code uses FILO (newest first) — this must change. Sort key becomes `(priority_rank, +created_at)` instead of `(priority_rank, -created_at)`.
 - **Batch = loop**: "Handle #111, #112, #113" is just the agent calling `schedule_job` three times. No special batch API needed.
 - **Queue management skill**: A `.claude/commands/queue-status.md` skill that provides full queue inspection AND manipulation: view status, bump jobs to top, push new jobs, pop/cancel jobs.
 
