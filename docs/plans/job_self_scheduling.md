@@ -1,0 +1,316 @@
+---
+status: Planning
+type: feature
+appetite: Medium
+owner: Valor
+created: 2026-03-11
+tracking: https://github.com/tomcounsell/ai/issues/258
+---
+
+# Job Self-Scheduling: Agent-Initiated Queue Operations
+
+## Problem
+
+The job queue is production-grade for single-message → single-session flows, but the agent has no way to programmatically schedule work. This creates three pain points:
+
+**1. No self-scheduling:** An agent discovers a bug mid-conversation but can't enqueue an SDLC run for it — it must ask the human to send a new message.
+
+**2. No batch dispatch:** A human says "handle issues #111, #112, #113" and the agent can only work on one at a time inline, losing the others.
+
+**3. No deferred execution:** Everything runs immediately. There's no "run this tonight" or "schedule SDLC for this issue after the current build finishes."
+
+**Current behavior:**
+Jobs only enter the queue through `bridge/telegram_bridge.py` when a Telegram message arrives. The `enqueue_job()` function in `agent/job_queue.py` is internal — not exposed as a tool the agent can call.
+
+**Desired outcome:**
+The agent can call a `schedule_job` tool mid-conversation to enqueue SDLC runs for GitHub issues, with optional priority and deferred scheduling. Batch dispatch is just multiple `schedule_job` calls. Queue status is observable from Telegram via a `/queue-status` skill.
+
+## Prior Art
+
+- **PR #95**: Fix job queue losing enqueued jobs — established the delete-and-recreate pattern for Popoto KeyField index integrity
+- **PR #128**: Job health monitor — added stuck job detection and recovery
+- **PR #284**: SDLC session tracking — classifier type + auto-continue propagation
+- **PR #286**: AgentSession as single source of truth for auto-continue
+- **PR #321**: Observer Agent — replaced auto-continue/summarizer with stage-aware SDLC steerer
+- **PR #337**: Correlation IDs for end-to-end request tracing
+- **PR #344**: Fix session stuck in pending after BUILD COMPLETED
+- **PR #346**: Goal gates for SDLC pipeline stage enforcement
+
+All succeeded. The queue infrastructure is mature — this plan extends it, not rebuilds it.
+
+## Data Flow
+
+### Current: Telegram → Queue → Worker
+1. **Telegram message** arrives in `bridge/telegram_bridge.py`
+2. **Bridge** calls `enqueue_job()` with chat_id, message_text, sender info
+3. **Worker** pops job, creates `AgentSession`, runs via SDK
+4. **Observer** steers auto-continue or delivers to Telegram
+
+### New: Agent Tool → Queue → Worker → GitHub
+1. **Agent** calls `schedule_job` tool mid-conversation (via bridge-internal tool, not MCP)
+2. **Bridge tool handler** calls `enqueue_job()` with synthetic session params
+3. **Worker** pops job, creates `AgentSession` with `classification_type="sdlc"`
+4. **Observer** steers as normal; output goes to **originating Telegram thread** (not a headless void)
+5. **GitHub issue** gets a progress comment via the Observer's existing link tracking
+
+## Architectural Impact
+
+- **New dependency**: None — uses existing `enqueue_job()` and GitHub CLI
+- **Interface changes**: New `scheduled_after` field on AgentSession; new tool in `tools/` directory
+- **Coupling**: Low — tool is a thin wrapper around existing `enqueue_job()`
+- **Data ownership**: No change — AgentSession remains the single source of truth
+- **Reversibility**: High — tool can be removed without affecting core queue
+
+## Appetite
+
+**Size:** Medium
+
+**Team:** Solo dev
+
+**Interactions:**
+- PM check-ins: 1 (scope confirmation on headless output routing)
+- Review rounds: 1 (code review)
+
+The queue infrastructure is done. This is plumbing new entry points into it plus a small `scheduled_after` filter in `_pop_job()`.
+
+## Prerequisites
+
+No prerequisites — this work uses only existing Redis, GitHub CLI, and internal Python APIs.
+
+| Requirement | Check Command | Purpose |
+|-------------|---------------|---------|
+| Redis running | `python -c "import redis; redis.Redis().ping()"` | Queue storage |
+| GitHub CLI | `gh auth status` | Issue validation |
+
+## Solution
+
+### Key Elements
+
+- **`schedule_job` tool**: A Python tool in `tools/` that the agent calls to enqueue SDLC work for a GitHub issue
+- **`scheduled_after` field**: Optional datetime on AgentSession; `_pop_job()` skips jobs where `scheduled_after > now()`
+- **`/queue-status` skill**: Telegram-accessible wrapper around existing CLI observability
+
+### Flow
+
+**Agent mid-conversation** → calls `schedule_job(issue=113, priority="normal")` → tool validates issue exists → calls `enqueue_job()` with synthetic params → returns job ID + queue position → worker picks up when ready → output routes to originating Telegram thread
+
+### Technical Approach
+
+- **Tool, not MCP server**: The agent runs inside Claude Code which has access to `tools/` via Bash. A Python tool (`tools/job_scheduler.py`) is simpler than standing up an MCP server. The agent calls it via `python -m tools.job_scheduler schedule --issue 113 --priority normal`.
+- **Synthetic session params**: The tool needs `project_key`, `chat_id`, `message_id` to route output back. These come from the current session context (passed as CLI args or env vars by the bridge).
+- **`scheduled_after`**: Add field to AgentSession model. Single-line check in `_pop_job()`: `if job.scheduled_after and job.scheduled_after > datetime.now(UTC): continue`.
+- **Batch = loop**: "Handle #111, #112, #113" is just the agent calling `schedule_job` three times. No special batch API needed.
+- **Queue status skill**: A `.claude/commands/queue-status.md` skill that runs `python -m agent.job_queue --status` and formats output.
+
+## Failure Path Test Strategy
+
+### Exception Handling Coverage
+- [ ] `schedule_job` tool: test with invalid issue number (closed, nonexistent) → returns clear error message
+- [ ] `schedule_job` tool: test with Redis down → returns error, does not silently drop job
+- [ ] `_pop_job` with `scheduled_after`: test that future-dated jobs are skipped, not lost
+
+### Empty/Invalid Input Handling
+- [ ] Empty issue number → immediate validation error
+- [ ] Issue with no body/title → still schedules (body is optional context)
+- [ ] `scheduled_after` in the past → treated as immediate (no error)
+
+### Error State Rendering
+- [ ] Tool returns structured JSON: `{"status": "queued", "job_id": "...", "queue_position": N}` on success
+- [ ] Tool returns structured JSON: `{"status": "error", "message": "..."}` on failure
+- [ ] Agent sees the error and can report it to the user
+
+## Rabbit Holes
+
+- **Full MCP server**: Standing up a new MCP server with stdio transport, manifest, registration in `.mcp.json` etc. is overkill. A CLI tool the agent calls via Bash is simpler and sufficient. MCP can come later if other consumers need it.
+- **Headless sessions without Telegram routing**: Tempting to build sessions that only post to GitHub, but the Observer already handles output routing. Just route self-scheduled job output back to the originating Telegram thread.
+- **Job dependencies / DAGs**: "Run B after A finishes" is a DAG scheduler. Sequential processing + priority already gives ordering. Don't build a DAG engine.
+- **Parallel workers**: The issue explicitly decided concurrency=1. Don't revisit.
+
+## Risks
+
+### Risk 1: Session context unavailable when tool runs
+**Impact:** Tool can't determine `project_key` or `chat_id` to route output back
+**Mitigation:** Bridge already injects `CHAT_ID`, `PROJECT_KEY` etc. as env vars in the Claude Code subprocess. Tool reads from env. Test by checking env vars are populated in agent sessions.
+
+### Risk 2: Self-scheduling loops
+**Impact:** Agent schedules a job that schedules more jobs infinitely
+**Mitigation:** Cap: each `schedule_job` call logs the originating `correlation_id`. Worker refuses to execute `schedule_job` tool if the current session was itself scheduled (check `AgentSession.created_by` or a `scheduled=true` flag). Hard limit: max 10 scheduled jobs per hour per project.
+
+## Race Conditions
+
+### Race 1: Job scheduled while worker is in drain-guard sleep
+**Location:** `agent/job_queue.py` `_worker_loop` drain guard
+**Trigger:** Tool enqueues job during the 0.1s drain guard sleep
+**Data prerequisite:** Job must be in Redis index before worker re-checks
+**State prerequisite:** Worker must be alive
+**Mitigation:** Already handled — drain guard re-checks pending jobs after sleep. `_ensure_worker()` also restarts a dead worker.
+
+### Race 2: `scheduled_after` check vs. system clock skew
+**Location:** `_pop_job()` new scheduled_after filter
+**Trigger:** Clock drift between when the tool writes `scheduled_after` and when worker reads it
+**Data prerequisite:** `scheduled_after` must be a UTC datetime
+**State prerequisite:** System clock must be reasonably accurate
+**Mitigation:** Always use UTC. Acceptable margin: jobs may run up to 60s early/late due to worker poll interval. Not a real problem.
+
+## No-Gos (Out of Scope)
+
+- No MCP server — CLI tool via Bash is sufficient for now
+- No parallel workers — sequential-only by design
+- No job dependency DAGs — priority + sequential ordering is enough
+- No headless-only sessions — output routes to originating Telegram thread
+- No Celery/RQ — Popoto ORM handles everything
+- No GitHub progress comments for this iteration — Observer link tracking is sufficient
+
+## Update System
+
+No update system changes required. The new tool is a Python file in `tools/` and a new skill in `.claude/commands/`. Both propagate via `git pull`. No new system dependencies.
+
+## Agent Integration
+
+- **New tool**: `tools/job_scheduler.py` — CLI tool callable via `python -m tools.job_scheduler`
+- **No MCP registration needed** — agent calls it via Bash, which is already permitted
+- **Bridge env vars**: Verify that `CHAT_ID`, `PROJECT_KEY`, `MESSAGE_ID`, `SESSION_ID` are available in agent subprocess env
+- **Integration test**: Agent calls `schedule_job`, job appears in Redis queue, worker picks it up, output routes to correct chat
+
+## Documentation
+
+- [ ] Create `docs/features/job-scheduling.md` covering the `schedule_job` tool usage and `scheduled_after` behavior
+- [ ] Update `docs/features/job-queue.md` with the new `scheduled_after` field
+- [ ] Add entry to `docs/features/README.md` index table
+- [ ] Update `docs/tools-reference.md` with `job_scheduler` tool
+
+## Success Criteria
+
+- [ ] Agent can call `python -m tools.job_scheduler schedule --issue 113` and job appears in queue
+- [ ] Agent can call `python -m tools.job_scheduler schedule --issue 113 --after "2026-03-12T02:00:00Z"` for deferred execution
+- [ ] `_pop_job()` skips jobs with future `scheduled_after`
+- [ ] Output from self-scheduled jobs routes to the originating Telegram thread
+- [ ] `/queue-status` skill shows queued/running/completed jobs in Telegram-friendly format
+- [ ] Self-scheduling loop protection: tool refuses if already inside a scheduled session
+- [ ] Tests pass (`/do-test`)
+- [ ] Documentation updated (`/do-docs`)
+
+## Team Orchestration
+
+### Team Members
+
+- **Builder (scheduler-tool)**
+  - Name: scheduler-builder
+  - Role: Implement `tools/job_scheduler.py` CLI tool and `scheduled_after` field
+  - Agent Type: builder
+  - Resume: true
+
+- **Builder (queue-status-skill)**
+  - Name: skill-builder
+  - Role: Create `/queue-status` skill wrapping existing CLI
+  - Agent Type: builder
+  - Resume: true
+
+- **Validator (integration)**
+  - Name: integration-validator
+  - Role: Verify end-to-end: tool → queue → worker → Telegram output
+  - Agent Type: validator
+  - Resume: true
+
+### Available Agent Types
+
+Using: builder (2), validator (1)
+
+## Step by Step Tasks
+
+### 1. Add `scheduled_after` field to AgentSession
+- **Task ID**: build-scheduled-after
+- **Depends On**: none
+- **Assigned To**: scheduler-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- Add `scheduled_after` field to AgentSession model in `models/agent_session.py`
+- Add to `_JOB_FIELDS` list in `agent/job_queue.py`
+- Modify `_pop_job()` to skip jobs where `scheduled_after > now()`
+- Modify `_extract_job_fields()` to preserve the field
+- Add `scheduled_after` parameter to `enqueue_job()`
+
+### 2. Implement `tools/job_scheduler.py`
+- **Task ID**: build-scheduler-tool
+- **Depends On**: build-scheduled-after
+- **Assigned To**: scheduler-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- CLI with subcommands: `schedule`, `status`, `cancel`
+- `schedule`: validates issue via `gh issue view`, calls `enqueue_job()` with synthetic params
+- Reads `CHAT_ID`, `PROJECT_KEY`, `SESSION_ID` from env vars
+- Returns structured JSON response
+- Self-scheduling loop protection: check env for `SCHEDULED_JOB=true` flag
+
+### 3. Create `/queue-status` skill
+- **Task ID**: build-queue-status
+- **Depends On**: none
+- **Assigned To**: skill-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- Create `.claude/commands/queue-status.md`
+- Runs `python -m agent.job_queue --status` and formats for Telegram
+- Shows: queued count, running job details, recent completions
+
+### 4. Verify env vars available in agent sessions
+- **Task ID**: verify-env-vars
+- **Depends On**: build-scheduler-tool
+- **Assigned To**: integration-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Check `agent/sdk_client.py` for env var injection into subprocess
+- Add any missing vars (`CHAT_ID`, `PROJECT_KEY`, `MESSAGE_ID`, `SESSION_ID`)
+- Verify tool can read them
+
+### 5. Integration test
+- **Task ID**: test-integration
+- **Depends On**: verify-env-vars, build-queue-status
+- **Assigned To**: integration-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Test: `schedule_job` → job in Redis → worker picks up → output routes correctly
+- Test: `scheduled_after` in future → job skipped until time passes
+- Test: self-scheduling protection works
+- Test: `/queue-status` shows expected output
+
+### 6. Documentation
+- **Task ID**: document-feature
+- **Depends On**: test-integration
+- **Assigned To**: scheduler-builder
+- **Agent Type**: documentarian
+- **Parallel**: false
+- Create `docs/features/job-scheduling.md`
+- Update `docs/features/job-queue.md`
+- Update `docs/features/README.md` index
+- Update `docs/tools-reference.md`
+
+### 7. Final Validation
+- **Task ID**: validate-all
+- **Depends On**: document-feature
+- **Assigned To**: integration-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Run full test suite
+- Verify all success criteria met
+- Verify documentation created
+
+## Verification
+
+| Check | Command | Expected |
+|-------|---------|----------|
+| Tests pass | `pytest tests/ -x -q` | exit code 0 |
+| Lint clean | `python -m ruff check .` | exit code 0 |
+| Format clean | `python -m ruff format --check .` | exit code 0 |
+| Tool exists | `python -m tools.job_scheduler --help` | exit code 0 |
+| Skill exists | `test -f .claude/commands/queue-status.md` | exit code 0 |
+| Feature docs | `test -f docs/features/job-scheduling.md` | exit code 0 |
+
+---
+
+## Open Questions
+
+1. **Output routing for self-scheduled jobs**: Should output go to the originating Telegram thread (where the agent decided to schedule), or to a dedicated "job updates" thread/channel? Originating thread is simpler but could be noisy if the human has moved on.
+
+2. **Rate limiting**: Is 10 scheduled jobs/hour/project the right cap? Too low risks blocking legitimate batch work; too high risks runaway scheduling.
+
+3. **Cancellation UX**: Should `/queue-status` include inline "cancel job X" affordances, or is `python -m tools.job_scheduler cancel --job-id X` sufficient?
