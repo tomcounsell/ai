@@ -1,14 +1,11 @@
 """Tests for agent/checkpoint.py — stage-aware checkpoint persistence."""
 
-import json
 import time
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
 from agent.checkpoint import (
-    CHECKPOINT_DIR,
     STAGE_ORDER,
     PipelineCheckpoint,
     build_compact_context,
@@ -209,9 +206,7 @@ class TestCleanupOldCheckpoints:
         assert removed == []
 
     def test_nonexistent_dir_no_error(self, monkeypatch):
-        monkeypatch.setattr(
-            "agent.checkpoint.CHECKPOINT_DIR", Path("/nonexistent/path")
-        )
+        monkeypatch.setattr("agent.checkpoint.CHECKPOINT_DIR", Path("/nonexistent/path"))
         removed = cleanup_old_checkpoints(max_age_days=7)
         assert removed == []
 
@@ -235,9 +230,7 @@ class TestFullLifecycle:
         assert get_next_stage(loaded) == "ISSUE"  # ISSUE wasn't completed
 
         # Phase 4: Resume — record BUILD completion
-        record_stage_completion(
-            loaded, "BUILD", artifacts={"pr_url": "https://example.com/pull/1"}
-        )
+        record_stage_completion(loaded, "BUILD", artifacts={"pr_url": "https://example.com/pull/1"})
         save_checkpoint(loaded)
 
         # Phase 5: Verify accumulation
