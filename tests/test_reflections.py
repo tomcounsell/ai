@@ -228,9 +228,7 @@ class TestStepAuditDocs:
     @pytest.mark.asyncio
     @patch("scripts.reflections.asyncio.to_thread")
     @patch("scripts.reflections.DocsAuditor")
-    async def test_step_audit_docs_calls_docs_auditor(
-        self, mock_docs_auditor_cls, mock_to_thread
-    ):
+    async def test_step_audit_docs_calls_docs_auditor(self, mock_docs_auditor_cls, mock_to_thread):
         """step_audit_docs instantiates DocsAuditor and delegates to run() via asyncio.to_thread."""
         from unittest.mock import MagicMock
 
@@ -651,7 +649,7 @@ class TestBranchPlanCleanup:
     """Tests for step 14: branch and plan cleanup."""
 
     @pytest.mark.asyncio
-    async def test_deletes_merged_branches(self):
+    async def test_deletes_merged_branches(self, tmp_path):
         """Deletes local branches that are fully merged into main."""
         from scripts.reflections import ReflectionRunner
 
@@ -666,24 +664,23 @@ class TestBranchPlanCleanup:
         delete_output = MagicMock()
         delete_output.returncode = 0
 
-        call_count = {"n": 0}
-
         def fake_run(cmd, **kwargs):
-            call_count["n"] += 1
             if cmd == ["git", "branch", "--merged", "main"]:
                 return merged_output
             if cmd[0:3] == ["git", "branch", "-d"]:
                 return delete_output
             return MagicMock(returncode=0, stdout="")
 
-        with patch("scripts.reflections.subprocess.run", side_effect=fake_run):
-            await runner.step_branch_plan_cleanup()
+        # Use tmp_path with no plans dir so plan cleanup doesn't add findings
+        with patch("scripts.reflections.PROJECT_ROOT", tmp_path):
+            with patch("scripts.reflections.subprocess.run", side_effect=fake_run):
+                await runner.step_branch_plan_cleanup()
 
         progress = runner.state.step_progress.get("branch_plan_cleanup", {})
         assert progress["findings"] == 2  # two branches deleted (not main)
 
     @pytest.mark.asyncio
-    async def test_skips_failed_branch_deletion(self):
+    async def test_skips_failed_branch_deletion(self, tmp_path):
         """Does not report deletion when git branch -d fails."""
         from scripts.reflections import ReflectionRunner
 
@@ -705,8 +702,10 @@ class TestBranchPlanCleanup:
                 return delete_output
             return MagicMock(returncode=0, stdout="")
 
-        with patch("scripts.reflections.subprocess.run", side_effect=fake_run):
-            await runner.step_branch_plan_cleanup()
+        # Use tmp_path with no plans dir so plan cleanup doesn't add findings
+        with patch("scripts.reflections.PROJECT_ROOT", tmp_path):
+            with patch("scripts.reflections.subprocess.run", side_effect=fake_run):
+                await runner.step_branch_plan_cleanup()
 
         progress = runner.state.step_progress.get("branch_plan_cleanup", {})
         assert progress["findings"] == 0  # deletion failed, not counted

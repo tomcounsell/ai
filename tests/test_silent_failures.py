@@ -126,32 +126,17 @@ class TestPopJobLogging:
         )
 
 
-class TestEnqueueContinuationPlanResolutionLogging:
-    """Tests that _enqueue_continuation logs warnings on plan file resolution failures."""
+class TestEnqueueContinuationSessionLookupLogging:
+    """Tests that _enqueue_continuation handles missing session gracefully."""
 
     @pytest.mark.asyncio
-    async def test_workflow_state_failure_logs_warning(self, caplog, redis_test_db):
-        """When WorkflowState.load raises, a warning is emitted with workflow_id."""
-        import time
-
-        from models.agent_session import AgentSession
-
-        AgentSession.create(
-            session_id="test-plan-resolve",
-            project_key="test-project",
-            status="running",
-            chat_id="chat_3",
-            sender_name="Test",
-            created_at=time.time(),
-            message_text="test",
-            working_dir="/tmp/test",
-            message_id=3,
-            priority="high",
-        )
+    async def test_missing_session_logs_error_and_falls_back(self, caplog, redis_test_db):
+        """When no AgentSession exists for the session_id, an error is logged
+        and the function falls back to enqueue_job."""
 
         mock_job = MagicMock()
         mock_job.project_key = "test-project"
-        mock_job.session_id = "test-plan-resolve"
+        mock_job.session_id = "nonexistent-session-999"
         mock_job.working_dir = "/tmp/test"
         mock_job.message_text = "continue"
         mock_job.sender_name = "Test"
@@ -159,16 +144,14 @@ class TestEnqueueContinuationPlanResolutionLogging:
         mock_job.message_id = 3
         mock_job.work_item_slug = None
         mock_job.task_list_id = None
-        mock_job.workflow_id = "wf-broken-123"
+        mock_job.workflow_id = None
         mock_job.classification_type = None
 
+        from unittest.mock import AsyncMock as _AsyncMock
+
         with (
-            patch(
-                "agent.workflow_state.WorkflowState.load",
-                side_effect=Exception("Redis down"),
-            ),
-            patch("bridge.coach.build_coaching_message", return_value="continue"),
-            caplog.at_level(logging.WARNING, logger="agent.job_queue"),
+            caplog.at_level(logging.ERROR, logger="agent.job_queue"),
+            patch("agent.job_queue.enqueue_job", new_callable=_AsyncMock),
         ):
             from agent.job_queue import _enqueue_continuation
 
@@ -180,10 +163,10 @@ class TestEnqueueContinuationPlanResolutionLogging:
                 output_msg="msg",
             )
 
-        # Verify warning was logged mentioning the workflow_id
-        warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
-        assert any("wf-broken-123" in r.message for r in warning_records), (
-            f"Expected warning with workflow_id, got: {[r.message for r in warning_records]}"
+        # Verify error was logged about missing session
+        error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert any("nonexistent-session-999" in r.message for r in error_records), (
+            f"Expected error with session_id, got: {[r.message for r in error_records]}"
         )
 
 
