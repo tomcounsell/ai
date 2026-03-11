@@ -771,7 +771,7 @@ class TestClassifyOutput:
         mock_client.messages.create = AsyncMock(return_value=mock_response)
 
         with (
-            patch("utils.api_keys.get_anthropic_api_key", return_value="sk-test"),
+            patch("bridge.summarizer.get_anthropic_api_key", return_value="sk-test"),
             patch("bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client),
         ):
             result = await classify_output("Should I use approach A or B?")
@@ -790,7 +790,7 @@ class TestClassifyOutput:
         mock_client.messages.create = AsyncMock(return_value=mock_response)
 
         with (
-            patch("utils.api_keys.get_anthropic_api_key", return_value="sk-test"),
+            patch("bridge.summarizer.get_anthropic_api_key", return_value="sk-test"),
             patch("bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client),
         ):
             result = await classify_output("Some ambiguous output")
@@ -803,7 +803,7 @@ class TestClassifyOutput:
     async def test_llm_failure_falls_back_to_heuristics(self):
         """When LLM call fails, heuristics are used."""
         with (
-            patch("utils.api_keys.get_anthropic_api_key", return_value="sk-test"),
+            patch("bridge.summarizer.get_anthropic_api_key", return_value="sk-test"),
             patch(
                 "bridge.summarizer.anthropic.AsyncAnthropic",
                 side_effect=Exception("API error"),
@@ -817,7 +817,7 @@ class TestClassifyOutput:
     @pytest.mark.asyncio
     async def test_no_api_key_falls_back_to_heuristics(self):
         """When no API key, heuristics are used."""
-        with patch("utils.api_keys.get_anthropic_api_key", return_value=""):
+        with patch("bridge.summarizer.get_anthropic_api_key", return_value=""):
             result = await classify_output("Error: ModuleNotFoundError: No module named 'foo'")
 
         assert result.output_type == OutputType.ERROR
@@ -831,7 +831,7 @@ class TestClassifyOutput:
         mock_client.messages.create = AsyncMock(return_value=mock_response)
 
         with (
-            patch("utils.api_keys.get_anthropic_api_key", return_value="sk-test"),
+            patch("bridge.summarizer.get_anthropic_api_key", return_value="sk-test"),
             patch("bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client),
         ):
             result = await classify_output("Done. Committed abc1234.")
@@ -851,7 +851,7 @@ class TestClassifyOutput:
         mock_client.messages.create = AsyncMock(return_value=mock_response)
 
         with (
-            patch("utils.api_keys.get_anthropic_api_key", return_value="sk-test"),
+            patch("bridge.summarizer.get_anthropic_api_key", return_value="sk-test"),
             patch("bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client),
         ):
             result = await classify_output(long_text)
@@ -878,7 +878,7 @@ class TestClassifyOutput:
         mock_client.messages.create = AsyncMock(return_value=mock_response)
 
         with (
-            patch("utils.api_keys.get_anthropic_api_key", return_value="sk-test"),
+            patch("bridge.summarizer.get_anthropic_api_key", return_value="sk-test"),
             patch("bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client),
         ):
             result = await classify_output("I think the bug is fixed now. Should work.")
@@ -902,7 +902,7 @@ class TestClassifyOutput:
         mock_client.messages.create = AsyncMock(return_value=mock_response)
 
         with (
-            patch("utils.api_keys.get_anthropic_api_key", return_value="sk-test"),
+            patch("bridge.summarizer.get_anthropic_api_key", return_value="sk-test"),
             patch("bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client),
         ):
             result = await classify_output("All tests pass. Task complete.")
@@ -926,7 +926,7 @@ class TestClassifyOutput:
         mock_client.messages.create = AsyncMock(return_value=mock_response)
 
         with (
-            patch("utils.api_keys.get_anthropic_api_key", return_value="sk-test"),
+            patch("bridge.summarizer.get_anthropic_api_key", return_value="sk-test"),
             patch("bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client),
         ):
             result = await classify_output(

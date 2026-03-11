@@ -513,6 +513,9 @@ class TestObserverFallback:
 
             _get_history_list = get_history_list
 
+            def get_links(self):
+                return {}
+
             def is_sdlc_job(self):
                 return True
 
@@ -535,20 +538,17 @@ class TestObserverFallback:
         )
 
         # Monkeypatch to simulate API failure
-        original_fn = None
-        try:
-            # Save and replace the API key getter
-            import utils.api_keys
+        import bridge.observer as obs_mod
 
-            original_fn = utils.api_keys.get_anthropic_api_key
-            utils.api_keys.get_anthropic_api_key = lambda: None
+        original_fn = obs_mod.get_anthropic_api_key
+        try:
+            obs_mod.get_anthropic_api_key = lambda: None
 
             decision = await observer.run()
             assert decision["action"] == "deliver"
             assert "No API key" in decision.get("reason", "")
         finally:
-            if original_fn:
-                utils.api_keys.get_anthropic_api_key = original_fn
+            obs_mod.get_anthropic_api_key = original_fn
 
 
 # ============================================================================

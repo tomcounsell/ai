@@ -83,7 +83,7 @@ class TestMockedClassification:
         )
         with (
             patch("tools.classifier.anthropic.Anthropic", return_value=mock_client),
-            patch("utils.api_keys.get_anthropic_api_key", return_value="test-key"),
+            patch("tools.classifier.get_anthropic_api_key", return_value="test-key"),
         ):
             result = classify_message_intent(
                 "Actually make it blue instead",
@@ -99,7 +99,7 @@ class TestMockedClassification:
         )
         with (
             patch("tools.classifier.anthropic.Anthropic", return_value=mock_client),
-            patch("utils.api_keys.get_anthropic_api_key", return_value="test-key"),
+            patch("tools.classifier.get_anthropic_api_key", return_value="test-key"),
         ):
             result = classify_message_intent(
                 "Add dark mode to the settings page",
@@ -115,7 +115,7 @@ class TestMockedClassification:
         )
         with (
             patch("tools.classifier.anthropic.Anthropic", return_value=mock_client),
-            patch("utils.api_keys.get_anthropic_api_key", return_value="test-key"),
+            patch("tools.classifier.get_anthropic_api_key", return_value="test-key"),
         ):
             result = classify_message_intent(
                 "Looks good, ship it",
@@ -133,7 +133,7 @@ class TestMockedClassification:
         )
         with (
             patch("tools.classifier.anthropic.Anthropic", return_value=mock_client),
-            patch("utils.api_keys.get_anthropic_api_key", return_value="test-key"),
+            patch("tools.classifier.get_anthropic_api_key", return_value="test-key"),
         ):
             result = classify_message_intent(
                 "Something about the project",
@@ -148,7 +148,7 @@ class TestMockedClassification:
         mock_client.messages.create.side_effect = Exception("API timeout")
         with (
             patch("tools.classifier.anthropic.Anthropic", return_value=mock_client),
-            patch("utils.api_keys.get_anthropic_api_key", return_value="test-key"),
+            patch("tools.classifier.get_anthropic_api_key", return_value="test-key"),
         ):
             result = classify_message_intent(
                 "Follow up on the bug",
@@ -165,7 +165,7 @@ class TestMockedClassification:
         )
         with (
             patch("tools.classifier.anthropic.Anthropic", return_value=mock_client),
-            patch("utils.api_keys.get_anthropic_api_key", return_value="test-key"),
+            patch("tools.classifier.get_anthropic_api_key", return_value="test-key"),
         ):
             result = classify_message_intent(
                 "How does this work?",
@@ -188,7 +188,7 @@ class TestMockedClassification:
         mock_client.messages.create.return_value = mock_response
         with (
             patch("tools.classifier.anthropic.Anthropic", return_value=mock_client),
-            patch("utils.api_keys.get_anthropic_api_key", return_value="test-key"),
+            patch("tools.classifier.get_anthropic_api_key", return_value="test-key"),
         ):
             result = classify_message_intent(
                 "Here is more context",
@@ -204,7 +204,7 @@ class TestMockedClassification:
         )
         with (
             patch("tools.classifier.anthropic.Anthropic", return_value=mock_client),
-            patch("utils.api_keys.get_anthropic_api_key", return_value="test-key"),
+            patch("tools.classifier.get_anthropic_api_key", return_value="test-key"),
         ):
             result = classify_message_intent(
                 "One more thing",
@@ -220,7 +220,7 @@ class TestMockedClassification:
         )
         with (
             patch("tools.classifier.anthropic.Anthropic", return_value=mock_client),
-            patch("utils.api_keys.get_anthropic_api_key", return_value="test-key"),
+            patch("tools.classifier.get_anthropic_api_key", return_value="test-key"),
         ):
             result = classify_message_intent(
                 "Do something else",
@@ -397,7 +397,7 @@ class TestRealHaikuClassification:
 
     def test_graceful_failure_with_invalid_key(self):
         """API failure with bad key returns new_work gracefully."""
-        with patch("utils.api_keys.get_anthropic_api_key", return_value="invalid-key"):
+        with patch("tools.classifier.get_anthropic_api_key", return_value="invalid-key"):
             result = classify_message_intent(
                 "Follow up on the bug",
                 session_context="Working on fix",

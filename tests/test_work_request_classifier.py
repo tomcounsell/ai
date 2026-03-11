@@ -133,7 +133,7 @@ class TestClassifierSdlcType:
 
         with (
             patch("tools.classifier.anthropic.Anthropic", return_value=mock_client),
-            patch("utils.api_keys.get_anthropic_api_key", return_value="test-key"),
+            patch("tools.classifier.get_anthropic_api_key", return_value="test-key"),
         ):
             from tools.classifier import classify_request
 
