@@ -87,6 +87,18 @@ Where:
    addressed the same problem, also fill the **Why Previous Fixes Failed** section.
    **Skip if:** Small appetite AND greenfield work (no existing code being modified).
 
+4.5. **xfail test search** - For bug fixes, search the test suite for xfail markers related to the bug.
+   These represent tests that document the bug but are marked as expected failures.
+   ```bash
+   # Search for xfail markers in tests
+   grep -rn 'pytest.mark.xfail\|pytest.xfail(' tests/ --include="*.py" | head -20
+   ```
+   For each xfail found that relates to the bug being fixed:
+   - Add a task to the plan's **Step by Step Tasks**: "Convert TC{N} xfail to hard assertion"
+   - Document the test location in the **Success Criteria** section
+   - When the fix lands, the test should pass and the xfail marker must be removed
+   **Skip if:** Not a bug fix, or no xfail tests found related to this bug.
+
 5. **Data flow trace** - For changes involving multi-component interactions, trace the data
    flow end-to-end through the system. Start from the entry point (user action, API call,
    event trigger) and follow through each component, transformation, and storage layer.

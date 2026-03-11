@@ -367,6 +367,22 @@ grep -rn "def .*(" --include="*.py" agent/ bridge/ | grep "^.*:.*def .*:$" | hea
 
 Closures that replicate logic already tested elsewhere (e.g., inline routing logic that should call a shared function) are a test smell. Note them in the report.
 
+### Stale xfail Hygiene Scan
+
+After tests pass, scan for xfail-marked tests that are now passing (xpass). When a bug fix lands, the corresponding xfail marker should be removed and converted to a hard assertion. Stale xfails indicate the fix landed but the test wasn't updated.
+
+```bash
+# Find all xfail markers in the test suite
+grep -rn 'pytest.mark.xfail\|pytest.xfail(' tests/ --include="*.py" | head -20
+```
+
+For each xfail found, check if pytest reports it as `XPASS` (unexpected pass) in the test output. If any xpass is detected:
+1. Flag it prominently in the quality report: "⚠️ Stale xfail: tests/foo/test_bar.py::test_baz is passing but still marked xfail"
+2. Include the file and line number for easy removal
+3. Suggest: "This test should have its xfail marker removed and converted to a hard assertion"
+
+**Skip if:** No xfail markers found in the test suite.
+
 ## Outcome Contract
 
 When tests complete, emit a typed `SkillOutcome` block as the **last line** of your output. This enables deterministic routing by the Observer without LLM classification.

@@ -233,6 +233,7 @@ and single-threaded").]
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 - [ ] [If Agent Integration section specifies "X calls Y": grep confirms X references Y]
+- [ ] [If bug fix: All related xfail/xpass tests converted to hard assertions]
 
 ## Team Orchestration
 
@@ -341,6 +342,7 @@ Supported expectations: "exit code N", "output > N", "output contains X".]
 | Tests pass | `pytest tests/ -x -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
+| No stale xfails | `grep -rn 'xfail' tests/ \| grep -v '# open bug'` | exit code 1 |
 | [Feature-specific check] | `[command]` | [expected] |
 
 ---
