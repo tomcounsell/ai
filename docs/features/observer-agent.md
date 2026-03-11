@@ -1,6 +1,8 @@
 # Observer Agent
 
-The Observer Agent replaces the fragmented classifier/coach/routing chain with a single Sonnet-powered agent that makes routing decisions with full session context. It runs synchronously inside `send_to_chat()` at the point where `classify_output()`, `classify_routing_decision()`, and `build_coaching_message()` were previously called.
+The Observer Agent is the **sole controller of SDLC pipeline progression**. It replaces the fragmented classifier/coach/routing chain with a single Sonnet-powered agent that makes routing decisions with full session context. It runs synchronously inside `send_to_chat()` at the point where `classify_output()`, `classify_routing_decision()`, and `build_coaching_message()` were previously called.
+
+The worker agent receives only safety rails (`WORKER_RULES` in `agent/sdk_client.py`) -- no pipeline stages, no `/sdlc` invocation instructions. The Observer steers the worker one stage at a time via coaching messages, advancing through ISSUE -> PLAN -> BUILD -> TEST -> REVIEW -> DOCS as each stage completes.
 
 ## Architecture
 
@@ -126,7 +128,7 @@ The Observer replaces three interleaved systems that shared responsibility for r
 | `build_coaching_message()` | `bridge/coach.py` | 5-tier fallback chain -- overly complex, often produced generic coaching |
 | `session_progress.py` | `tools/session_progress.py` | CLI tool the worker LLM had to call -- silently failed, stages got skipped |
 
-These were removed from the routing path. See [Coaching Loop](coaching-loop.md) for historical documentation of the old system (now deprecated).
+These were removed from the routing path. See [Coaching Loop](coaching-loop.md) for historical context on the old system (no longer in use).
 
 ## Key Files
 

@@ -1,8 +1,8 @@
 """Unit tests for SDLC enforcement in agent/sdk_client.py.
 
 Covers:
-- SDLC_WORKFLOW constant exists and contains mandatory pipeline text
-- load_system_prompt() injects SDLC_WORKFLOW before SOUL.md and completion criteria
+- WORKER_RULES constant exists and contains safety rails (no pipeline orchestration)
+- load_system_prompt() injects WORKER_RULES before SOUL.md and completion criteria
 - _check_no_direct_main_push(): code on main -> hard-blocked
 - _check_no_direct_main_push(): docs-only on main -> allowed
 - _check_no_direct_main_push(): code on feature branch -> allowed
@@ -27,90 +27,108 @@ import pytest
 
 # claude_agent_sdk mock is centralized in tests/conftest.py
 from agent.sdk_client import (  # noqa: E402
-    SDLC_WORKFLOW,
+    WORKER_RULES,
     _check_no_direct_main_push,
     _is_code_file,
     load_system_prompt,
 )
 
 # ---------------------------------------------------------------------------
-# SDLC_WORKFLOW constant
+# WORKER_RULES constant
 # ---------------------------------------------------------------------------
 
 
-class TestSdlcWorkflowConstant:
+class TestWorkerRulesConstant:
     def test_constant_exists(self):
-        """SDLC_WORKFLOW module constant must exist."""
-        assert SDLC_WORKFLOW is not None
+        """WORKER_RULES module constant must exist."""
+        assert WORKER_RULES is not None
 
     def test_constant_is_string(self):
-        """SDLC_WORKFLOW must be a non-empty string."""
-        assert isinstance(SDLC_WORKFLOW, str)
-        assert len(SDLC_WORKFLOW) > 0
+        """WORKER_RULES must be a non-empty string."""
+        assert isinstance(WORKER_RULES, str)
+        assert len(WORKER_RULES) > 0
 
-    def test_contains_mandatory_pipeline_header(self):
-        """Must contain the 'Mandatory Development Pipeline' heading."""
-        assert "MANDATORY Development Pipeline" in SDLC_WORKFLOW
+    def test_contains_safety_rails_header(self):
+        """Must contain the 'Worker Safety Rails' heading."""
+        assert "Worker Safety Rails" in WORKER_RULES
 
     def test_contains_never_push_to_main(self):
         """Must contain instruction not to push to main."""
-        assert "NEVER" in SDLC_WORKFLOW
-        assert "main" in SDLC_WORKFLOW
+        assert "NEVER" in WORKER_RULES
+        assert "main" in WORKER_RULES
 
-    def test_contains_do_plan_and_do_build(self):
-        """Must reference /do-plan and /do-build skills."""
-        assert "/do-plan" in SDLC_WORKFLOW
-        assert "/do-build" in SDLC_WORKFLOW
-
-    def test_contains_issue_step(self):
-        """Must mandate a GitHub issue step."""
-        assert "ISSUE" in SDLC_WORKFLOW or "issue" in SDLC_WORKFLOW.lower()
+    def test_no_pipeline_orchestration(self):
+        """Must NOT contain pipeline orchestration or /sdlc references."""
+        assert "/sdlc" not in WORKER_RULES
+        assert "/do-plan" not in WORKER_RULES
+        assert "/do-build" not in WORKER_RULES
+        assert "MANDATORY Development Pipeline" not in WORKER_RULES
+        assert "ISSUE" not in WORKER_RULES
 
     def test_distinguishes_code_from_docs(self):
         """Must carve out docs/plan changes as allowed directly to main."""
-        assert ".md" in SDLC_WORKFLOW or "doc" in SDLC_WORKFLOW.lower()
-        assert ".py" in SDLC_WORKFLOW
+        assert ".md" in WORKER_RULES or "doc" in WORKER_RULES.lower()
+        assert ".py" in WORKER_RULES or ".js" in WORKER_RULES or ".ts" in WORKER_RULES
+
+    def test_references_observer_agent(self):
+        """Must reference the Observer Agent as the pipeline controller."""
+        assert "Observer" in WORKER_RULES
 
 
 # ---------------------------------------------------------------------------
-# load_system_prompt() — SDLC_WORKFLOW injection
+# load_system_prompt() — WORKER_RULES injection
 # ---------------------------------------------------------------------------
 
 
 class TestLoadSystemPromptInjection:
-    def test_sdlc_workflow_present_in_prompt(self):
-        """load_system_prompt() must include SDLC_WORKFLOW text."""
+    def test_worker_rules_present_in_prompt(self):
+        """load_system_prompt() must include WORKER_RULES text."""
         prompt = load_system_prompt()
-        assert "MANDATORY Development Pipeline" in prompt
+        assert "Worker Safety Rails" in prompt
 
-    def test_sdlc_workflow_is_between_soul_and_criteria(self):
-        """SDLC_WORKFLOW must appear before SOUL.md and before completion criteria."""
+    def test_no_pipeline_orchestration_in_worker_rules(self):
+        """WORKER_RULES portion of prompt must NOT contain pipeline orchestration.
+
+        Note: SOUL.md and CLAUDE.md may reference /sdlc as part of project
+        architecture docs -- those are intentionally preserved (see plan No-Gos).
+        This test validates only the WORKER_RULES constant itself.
+        """
+        assert "/sdlc" not in WORKER_RULES
+        assert "MANDATORY Development Pipeline" not in WORKER_RULES
+
+    def test_worker_rules_before_soul_and_criteria(self):
+        """WORKER_RULES must appear before SOUL.md and before completion criteria."""
         prompt = load_system_prompt()
-        sdlc_pos = prompt.find("MANDATORY Development Pipeline")
-        assert sdlc_pos > 0, "SDLC_WORKFLOW not found in prompt"
+        rules_pos = prompt.find("Worker Safety Rails")
+        assert rules_pos >= 0, "WORKER_RULES not found in prompt"
 
-        # SOUL.md starts with '# Valor' — check SDLC precedes it
+        # SOUL.md starts with '# Valor' — check rules precede it
         soul_pos = prompt.find("# Valor")
         assert soul_pos >= 0, "SOUL.md content '# Valor' not found in prompt"
-        assert sdlc_pos < soul_pos, "SDLC_WORKFLOW must come before SOUL.md content"
+        assert rules_pos < soul_pos, "WORKER_RULES must come before SOUL.md content"
 
         # Completion criteria section starts with 'Work is DONE'
         criteria_pos = prompt.find("Work is DONE")
         if criteria_pos > 0:
-            assert sdlc_pos < criteria_pos, (
-                "SDLC_WORKFLOW must appear before Work Completion Criteria"
+            assert rules_pos < criteria_pos, (
+                "WORKER_RULES must appear before Work Completion Criteria"
             )
 
-    def test_prompt_contains_separator_between_sdlc_and_soul(self):
-        """load_system_prompt() must use --- separator between SDLC and SOUL sections."""
+    def test_prompt_contains_separator_between_rules_and_soul(self):
+        """load_system_prompt() must use --- separator between WORKER_RULES and SOUL sections."""
         prompt = load_system_prompt()
-        # Find positions of SDLC and SOUL content
-        sdlc_pos = prompt.find("MANDATORY Development Pipeline")
-        assert sdlc_pos > 0, "SDLC_WORKFLOW not found in prompt"
+        rules_pos = prompt.find("Worker Safety Rails")
+        assert rules_pos >= 0, "WORKER_RULES not found in prompt"
         soul_pos = prompt.find("# Valor")
-        assert soul_pos > sdlc_pos, "SOUL.md must come after SDLC_WORKFLOW"
-        between = prompt[sdlc_pos:soul_pos]
-        assert "---" in between, "Separator '---' must appear between SDLC_WORKFLOW and SOUL.md"
+        assert soul_pos > rules_pos, "SOUL.md must come after WORKER_RULES"
+        between = prompt[rules_pos:soul_pos]
+        assert "---" in between, "Separator '---' must appear between WORKER_RULES and SOUL.md"
+
+    def test_safety_rails_in_prompt(self):
+        """load_system_prompt() must contain NEVER and main (safety rails)."""
+        prompt = load_system_prompt()
+        assert "NEVER" in prompt
+        assert "main" in prompt
 
 
 # ---------------------------------------------------------------------------

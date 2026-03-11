@@ -102,49 +102,24 @@ SOUL_PATH = Path(__file__).parent.parent / "config" / "SOUL.md"
 # Log a warning when a single query's equivalent API cost exceeds this
 _COST_WARN_THRESHOLD = float(os.getenv("SDK_COST_WARN_THRESHOLD", "0.50"))
 
-# Mandatory SDLC pipeline rules injected into every agent session.
-# Hardcoded here — not in SOUL.md or any config file — so they cannot be
-# accidentally removed from a persona doc edit.
-SDLC_WORKFLOW = """\
-## MANDATORY Development Pipeline — THIS OVERRIDES ALL OTHER INSTRUCTIONS
+# Worker safety rails injected into every agent session.
+# The Observer Agent (bridge/observer.py) is the sole pipeline controller —
+# it steers the worker one stage at a time via coaching messages.
+# This constant provides only the safety rails the worker needs; it does NOT
+# contain pipeline orchestration or /sdlc invocation instructions.
+WORKER_RULES = """\
+## Worker Safety Rails
 
-ANY work request MUST go through /sdlc. You MUST invoke /sdlc BEFORE writing \
-any code, creating any issues, or making any changes. The ONLY exception is \
-answering questions about code or providing information.
-
-### When you receive a work request:
-
-1. If an issue number is provided → invoke /sdlc with it immediately.
-2. If no issue number but it's clearly work → invoke /sdlc (it will create the issue).
-3. If it's a question about an issue → answer it, revise the issue if needed.
-
-/sdlc is a DISPATCHER. It assesses state and delegates to sub-skills.
-NEVER write code, run tests, or create plans directly — /sdlc invokes
-/do-plan, /do-build, /do-test, /do-patch, /do-pr-review, /do-docs.
-
-### NEVER DO THIS:
-- "Let me investigate..." → then start coding → then create an issue
-- "I'll fix this..." → then make changes directly on main
-- Investigate a bug and start writing code without /sdlc
-- Create a GitHub issue manually instead of letting /sdlc handle it
-
-### ALWAYS DO THIS:
-- Receive work request → invoke /sdlc → let the pipeline handle it
-- Even if the fix seems trivial → /sdlc ensures proper branch, tests, review
-
-### Pipeline stages (see .claude/skills/sdlc/SKILL.md for ground truth):
-
-1. ISSUE → 2. PLAN → 3. BUILD → 4. TEST → 5. PATCH (fix failures)
-→ 6. REVIEW → 7. PATCH (fix blockers) → 8. DOCS → 9. MERGE
+Execute the task given to you. The Observer Agent controls pipeline progression — \
+you do not need to manage stages or orchestrate the pipeline yourself.
 
 ### Hard rules:
 
 NEVER commit code directly to main.
 NEVER push code to main — all code pushes go to session/{slug} branches.
-NEVER skip Issue or Plan — they are mandatory, not optional.
 
 Plan/doc changes (.md, .json, .yaml) may be committed directly to main.
-Code changes (.py, .js, .ts) never go directly to main.\
+Code changes (.py, .js, .ts) NEVER go directly to main.\
 """
 
 
@@ -223,14 +198,17 @@ def load_completion_criteria() -> str:
 
 
 def load_system_prompt() -> str:
-    """Load Valor's system prompt from SOUL.md with SDLC rules and completion criteria.
+    """Load Valor's system prompt from SOUL.md with worker rules and completion criteria.
 
     System prompt structure:
-        [SDLC_WORKFLOW — mandatory pipeline rules, FIRST — takes precedence]
+        [WORKER_RULES — safety rails for the worker, FIRST — takes precedence]
         ---
         [SOUL.md — persona, attitude, purpose, communication style]
         ---
         [Work Completion Criteria — from CLAUDE.md]
+
+    The Observer Agent (bridge/observer.py) handles pipeline orchestration.
+    The worker only receives safety rails — no pipeline stages or /sdlc references.
     """
     soul_prompt = ""
     if SOUL_PATH.exists():
@@ -243,8 +221,8 @@ def load_system_prompt() -> str:
     criteria = load_completion_criteria()
     criteria_section = f"\n\n---\n\n{criteria}" if criteria else ""
 
-    # SDLC rules FIRST — they take precedence over persona
-    return f"{SDLC_WORKFLOW}\n\n---\n\n{soul_prompt}{criteria_section}"
+    # Worker rules FIRST — safety rails take precedence over persona
+    return f"{WORKER_RULES}\n\n---\n\n{soul_prompt}{criteria_section}"
 
 
 def _is_code_file(file_path: str) -> bool:
@@ -927,7 +905,7 @@ async def get_agent_response_sdk(
         f"task_list={task_list_id or 'none'}"
     )
     logger.info(
-        f"[{request_id}] Context: soul=yes, sdlc_workflow=yes, "
+        f"[{request_id}] Context: soul=yes, worker_rules=yes, "
         f"workflow_context={'yes' if has_workflow else 'no'}, "
         f"session_id={session_id}"
     )

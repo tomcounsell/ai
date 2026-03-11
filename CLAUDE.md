@@ -87,10 +87,10 @@ gws sheets spreadsheets values get --params '{"spreadsheetId": "ID", "range": "S
 - Do NOT parallelize sequential/dependent work
 - Always aggregate results before reporting
 
-### 9. SDLC IS AUTONOMOUS
-- `/sdlc` is the **single entry point** for all development work
-- It is a dispatcher: it assesses state and invokes `/do-plan`, `/do-build`, `/do-test`, `/do-patch`, `/do-pr-review`, `/do-docs` as needed
-- NEVER write code, run tests, or create plans directly — always delegate through sub-skills
+### 9. SDLC IS OBSERVER-STEERED
+- `/sdlc` is a **single-stage router**: it assesses state, invokes ONE sub-skill, and returns
+- The **Observer Agent** handles pipeline progression by re-invoking `/sdlc` after each stage completes
+- NEVER write code, run tests, or create plans directly -- always delegate through sub-skills
 - See `.claude/skills/sdlc/SKILL.md` for the ground truth on pipeline stages
 
 ### 10. ALWAYS RESTART RUNNING SERVICES
@@ -109,10 +109,10 @@ The standard flow from conversation to shipped feature:
 - If it's a real piece of work: create a GitHub issue
 
 ### Phase 2: SDLC (triggered by work request)
-- Invoke `/sdlc` — it assesses state and dispatches to the right sub-skill
-- Stages: Plan → Build → Test → Patch → Review → Patch → Docs → Merge
+- The Observer Agent steers the pipeline by invoking `/sdlc` one stage at a time
+- `/sdlc` assesses current state, invokes ONE sub-skill, and returns
+- Stages: Plan -> Build -> Test -> Patch -> Review -> Patch -> Docs -> Merge
 - See `.claude/skills/sdlc/SKILL.md` for the ground truth on stage definitions
-- `/sdlc` does NOT restart from scratch if prior stages are already complete
 
 ### Phase 3: Review & Merge
 - Valor may or may not be asked to merge the PR after human review
@@ -120,10 +120,10 @@ The standard flow from conversation to shipped feature:
 
 ### Auto-Continue Rules
 - The agent should only pause if there is a **legitimate open question** requiring human input
-- If there is no question — just a status update — the summarizer auto-sends "continue"
+- If there is no question -- just a status update -- the summarizer auto-sends "continue"
 - Status updates without questions or signs of completion are NOT stopping points
 - The agent keeps working until the phase is complete or it's genuinely blocked
-- **SDLC jobs** use stage-aware routing: pipeline progress from `AgentSession.history` drives auto-continue decisions (cap: 10). The classifier is only consulted when all stages are complete.
+- **SDLC jobs**: The Observer Agent steers pipeline progression by re-invoking `/sdlc` after each stage
 - **Non-SDLC jobs** use classifier-based routing with `MAX_AUTO_CONTINUES = 3`
 - The auto-continue counter resets when the human sends a new message
 
@@ -269,7 +269,7 @@ The **## Agent Integration** section should cover:
 | `/setup` | New machine configuration |
 | `/do-pr-review` | PR review with implementation validation and screenshots |
 | `/add-feature` | How to extend the system |
-| `/sdlc` | Autonomous Plan → Build → Test → Review → Docs → Ship pipeline |
+| `/sdlc` | Single-stage router: assess state, invoke one sub-skill, return |
 | `docs/deployment.md` | Multi-instance deployment |
 | `docs/tools-reference.md` | Complete tool documentation |
 | `config/SOUL.md` | Valor persona and philosophy |
