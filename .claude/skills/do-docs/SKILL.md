@@ -163,11 +163,52 @@ that gracefully — the cascade continues with Agents A and B alone.
 **Note**: Agent C may return zero results if no embedding API key is configured.
 This is expected — the cascade degrades gracefully to lexical-only matching.
 
-Wait for all three agents to complete before proceeding. If Agent C failed or returned no results, proceed with Agents A and B output only.
+### Agent D — Issue Impact Scanner
+
+Spawn a sub-agent with this prompt:
+
+```
+Review all open GitHub issues to identify any that are affected by the code change
+described below. Merged features often have downstream effects on planned work
+whose context only lives in issue descriptions.
+
+CHANGE SUMMARY:
+<Insert Agent A's structured summary here>
+
+Steps:
+
+1. List open issues:
+   gh issue list --state open --json number,title,body,labels,comments --limit 50
+
+2. For each issue, evaluate:
+   - Does the issue description reference components, APIs, or patterns that this change modifies?
+   - Does this change fulfill a prerequisite or dependency mentioned in the issue?
+   - Does this change invalidate assumptions, approaches, or estimates in the issue?
+   - Does this change introduce new capabilities the issue could leverage?
+
+3. For each affected issue, post a comment (do NOT edit the issue body):
+   gh issue comment <number> --body "$(cat <<'COMMENT'
+   **Upstream change notice** — a related change just landed that may affect this issue.
+
+   **What changed:** [1-2 sentence summary of the relevant change]
+   **Impact on this issue:** [How it affects the planned work — prerequisite met, approach invalidated, new capability available, etc.]
+   **Action needed:** [What should be reconsidered — scope, approach, dependencies, or nothing]
+
+   _Auto-posted by /do-docs cascade_
+   COMMENT
+   )"
+
+4. Report which issues were commented on and why. If no issues are affected, report that.
+
+IMPORTANT: Only comment on issues where the impact is concrete and actionable.
+Do not comment on tangentially related issues. Quality over quantity.
+```
+
+Wait for all four agents to complete before proceeding. If Agent C or D failed or returned no results, proceed with the remaining agents' output only.
 
 ## Step 2: Triage — Cross-Reference Changes Against Docs
 
-Using the outputs from Agent A (change summary), Agent B (doc inventory), and Agent C (semantic impact finder — if available), evaluate every doc file against these four triage questions:
+Using the outputs from Agent A (change summary), Agent B (doc inventory), Agent C (semantic impact finder — if available), and Agent D (issue impact scanner — if available), evaluate every doc file against these four triage questions:
 
 For each document in the inventory, ask:
 
@@ -284,6 +325,9 @@ After all edits are complete:
 
    **Issues created for human review**:
    - #<number>: <title> (if any)
+
+   **Open issues commented on** (downstream impact notices):
+   - #<number>: <title> — <impact summary> (if any)
 
    **No changes needed**: (list if applicable)
    ```

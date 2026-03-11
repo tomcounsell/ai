@@ -5,6 +5,7 @@ appetite: [Small | Medium | Large]
 owner: [Name]
 created: [YYYY-MM-DD]
 tracking: [GitHub Issue URL or Notion page URL - added automatically]
+last_comment_id: [Latest issue comment ID incorporated into this plan - updated automatically]
 ---
 
 # [Feature Name]
