@@ -7,8 +7,11 @@
 - `anthropic` -- Claude API client
 - `claude-agent-sdk` -- Agent backend
 
+**Git-pinned (direct reference to commit)** -- upgraded manually when upstream fixes land:
+- `popoto` -- Redis ORM, pinned to git commit to include unreleased index cleanup fixes
+
 **Normal (pinned with `>=`)** -- auto-synced by cron when lock file changes:
-- Everything else (httpx, dotenv, ollama, yt-dlp, popoto, google-*)
+- Everything else (httpx, dotenv, ollama, yt-dlp, google-*)
 
 ## Checking for Updates
 

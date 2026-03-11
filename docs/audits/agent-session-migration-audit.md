@@ -74,5 +74,5 @@ This works but is fragile — if `_JOB_FIELDS` misses a field, data is silently 
 
 1. ~~**Migrate stale imports**~~ — ✅ Done (issue #198). All 6 test files + daydream.py now use `AgentSession` directly.
 2. **Keep shims** — `models/session_log.py` and `RedisJob` alias should stay for now. External code may depend on them.
-3. **Monitor orphan recovery** — If `_recover_orphaned_jobs()` fires frequently in production, investigate Popoto KeyField behavior further.
+3. **Monitor orphan recovery** — ~~If `_recover_orphaned_jobs()` fires frequently in production, investigate Popoto KeyField behavior further.~~ ✅ Upstream fixes landed (popoto PRs #161-163): class set cleanup on key change, partial save obsolete key handling, and relationship on_save index cleanup. Popoto is now pinned to git commit 54e398c which includes all three fixes. Orphan recovery should fire less frequently but remains as a safety net.
 4. **Document `_JOB_FIELDS`** — Add a comment or test verifying the field list matches all AgentSession fields, to prevent silent data loss in the delete-recreate pattern.
