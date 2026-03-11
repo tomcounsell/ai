@@ -246,10 +246,10 @@ No agent integration required -- this modifies skill instructions and git hooks 
 
 ---
 
-## Open Questions
+## Resolved Questions
 
-1. **ruff format vs black baseline**: Should we run `ruff format .` on main as a separate preparatory commit before this feature branch, to avoid a large formatting diff mixed in with the feature changes? Ruff format is designed to be black-compatible, so the diff should be minimal, but there may be some differences.
+1. **ruff format vs black baseline**: Yes, run `ruff format .` on main as a preparatory commit. Consistency is more important than the specific tool choice.
 
-2. **core.hooksPath propagation**: The `git config core.hooksPath .githooks` setting is local to each clone. Should this be set in a `.gitconfig` file tracked in the repo and referenced via `include.path`, or is adding it to the update script sufficient?
+2. **core.hooksPath propagation**: Use per-project git config (`git config core.hooksPath .githooks` in each repo), not a global setting.
 
-3. **black removal scope**: Should we also remove `black` from the project dependencies in `pyproject.toml`, or keep it available for edge cases? The issue mentions simplifying the toolchain, which suggests removing it.
+3. **black removal scope**: Yes, remove black in favor of ruff across all Python repos.
