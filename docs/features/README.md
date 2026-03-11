@@ -74,6 +74,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Trace & Verify Protocol](trace-and-verify.md) | Data-driven root cause analysis replacing narrative-only 5 Whys with forward verification | Shipped |
 | [Typed Skill Outcomes](typed-skill-outcomes.md) | Structured outcome contracts for /do-* skills enabling deterministic Observer routing without LLM classification | Shipped |
 | [Worktree SDK Compatibility Experiment](worktree-sdk-compatibility.md) | Experiment results for Claude Agent SDK compatibility with git worktrees | Archived |
+| [xfail Hygiene](xfail-hygiene.md) | Three-layer xfail hygiene system preventing stale test markers after bug fixes land | Shipped |
 | [YouTube Transcription](youtube-transcription.md) | Auto-transcribe YouTube videos shared in messages for Claude context | Shipped |
 
 ## Adding New Entries
