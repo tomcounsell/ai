@@ -84,24 +84,52 @@ The current job health check (`_job_health_check` in `agent/job_queue.py`) detec
 - **SDLC Spawner**: Enqueues a high-priority SDLC job when a code bug is diagnosed, targeting the specific file and error pattern
 - **Fix-Then-Retry Gate**: Holds the original failed job in a deferred state until the fix PR is merged and bridge restarts
 - **Dedup Guard**: Prevents filing duplicate issues for the same bug pattern (reuses `has_existing_github_work()` from reflections)
-- **Blast Radius Limiter**: Restricts auto-fix to files in `agent/`, `bridge/`, and `models/` directories. Changes outside this scope get an issue filed but no auto-fix.
+- **Blast Radius Limiter**: Auto-fix is allowed for anything EXCEPT fundamental architecture (bridge core, core agent loop). Specifically, `bridge/telegram_bridge.py`, `agent/sdk_client.py`, and `agent/observer.py` are protected from auto-fix. Everything else in `agent/`, `bridge/`, `models/`, `tools/`, `mcp_servers/`, `scripts/`, `monitoring/` is fair game. Changes to protected files get an issue filed but no auto-fix.
+- **Fuzzy Cache for Haiku Requests**: Cache recent diagnosis prompts and responses with fuzzy matching (embedding similarity or normalized prompt hash) to detect and prevent: (a) race conditions where multiple health check cycles diagnose the same failure, (b) infinite loops where the same error pattern triggers repeated diagnosis, and (c) unnecessary API spend on duplicate classifications.
+
+### Two-Tier Health Check
+
+**Quick check (every 5 min):** Lightweight, no LLM calls. Detects stuck jobs, captures stall metadata (timestamp, log excerpt hash, retry count). If a stall is detected for the first time, records it and moves on. If a stall persists across 2+ cycles, flags it for full diagnosis.
+
+**Full diagnosis (scheduled as low-priority job):** LLM-powered classification. Created by the quick check when a persistent stall is detected. Runs as a regular job in the queue (not in the health check loop), so it doesn't block the health check timer. Expected volume: a few per day at most.
 
 ### Flow
 
-**Stalled job detected** -> Classify failure (LLM) -> *If code bug:* Create issue + Spawn SDLC job -> *Fix merged + bridge restarted* -> Retry original job
+**Quick check** -> Stall detected (first time) -> Record stall metadata, skip diagnosis
 
-**Stalled job detected** -> Classify failure (LLM) -> *If transient:* Re-enqueue as pending (existing behavior)
+**Quick check** -> Stall persists (2+ cycles) -> Schedule full diagnosis job (low priority)
 
-**Stalled job detected** -> Classify failure (LLM) -> *If infrastructure:* Alert human via Telegram
+**Full diagnosis job** -> Classify failure (LLM, with fuzzy cache check) -> *If code bug:* Create issue + Spawn SDLC job -> *Fix merged + bridge restarted* -> Schedule post-fix retry via `scheduled_after` (bridge restart + 10 min)
+
+**Full diagnosis job** -> Classify failure (LLM) -> *If transient:* Re-enqueue as pending (existing behavior)
+
+**Full diagnosis job** -> Classify failure (LLM) -> *If infrastructure:* Alert human via Telegram
+
+### Post-Fix Validation
+
+After a bugfix PR merges and the bridge restarts, the original failed job is not retried immediately. Instead, it's scheduled via `scheduled_after = now + 600` (10 minutes after bridge restart). This gives the system time to stabilize and confirms the bridge is healthy before retrying the job that originally failed.
 
 ### Technical Approach
 
-- Add `_diagnose_stalled_job()` function in `agent/job_queue.py` that accepts a stalled AgentSession and recent log lines, calls Haiku for classification
-- Extend `_job_health_check()` to call diagnostic before recovery, gated by a `HEALTH_CHECK_DIAGNOSIS_ENABLED` env var (default: true)
+**Quick check (in `_job_health_check()`):**
+- Existing stall detection logic unchanged
+- New: on first stall detection, record `stall_first_seen` timestamp and `stall_log_hash` on the AgentSession
+- New: if `stall_first_seen` is already set and stall persists across 2+ cycles (10+ min), schedule a full diagnosis job via `enqueue_job()` with `priority="low"` and `classification_type="diagnosis"`
+- Gate behind `HEALTH_CHECK_DIAGNOSIS_ENABLED` env var (default: true)
+
+**Full diagnosis (as a scheduled job):**
+- New `_diagnose_stalled_job()` function in `agent/job_queue.py` — accepts a stalled AgentSession and recent log lines, calls Haiku for classification
+- **Fuzzy cache**: Before calling Haiku, hash the normalized prompt (error pattern + log excerpt) and check `data/diagnosis_cache.json`. If a matching hash exists with a result from the last 30 min, reuse it. This prevents race conditions (multiple cycles diagnosing the same failure) and infinite loops.
 - For code bugs: call `enqueue_job()` with `classification_type="sdlc"` and a message that invokes `/sdlc issue {new_issue_number}`
-- Track pending fix with `scheduled_after` on the original job (set to now + 30 minutes to give SDLC time)
-- After SDLC completes, the bridge restart clears `data/restart-requested`, and the deferred job becomes eligible on next `_pop_job()` cycle
-- Add a `retry_count` ceiling (3) to prevent infinite diagnosis-retry loops
+- Track pending fix with `blocked_by_issue` field on the stalled job
+- After SDLC fix merges and bridge restarts, the original job is re-enqueued with `scheduled_after = time.time() + 600` (10 min after restart for stabilization)
+- `retry_count` ceiling (3) prevents infinite diagnosis-retry loops
+
+**Graduated auto-merge trust scoring:**
+- Implemented as a `_compute_merge_confidence()` function that evaluates red flags
+- Returns a score 0.0-1.0; auto-merge only if score >= 0.7
+- Red flags: lines changed > 20 (penalty), add/remove ratio > 3:1 (penalty), any test failure (hard block), PR review issues > 2 (hard block), files touched > 3 (penalty)
+- Threshold can be adjusted over time as trust builds
 
 ## Failure Path Test Strategy
 
@@ -133,7 +161,13 @@ The current job health check (`_job_health_check` in `agent/job_queue.py`) detec
 
 ### Risk 2: SDLC fix introduces new bugs
 **Impact:** The autonomous fix for a scheduling bug could break something else, causing a cascade of new stalls.
-**Mitigation:** Blast radius limiter restricts auto-fixes to `agent/`, `bridge/`, `models/` only. All fixes go through the standard SDLC pipeline (tests must pass). The bridge watchdog (level 4: auto-revert) catches crashes caused by bad commits. Confidence threshold: only auto-merge if the fix is < 50 changed lines and all tests pass.
+**Mitigation:** Graduated trust scoring for auto-merge. Instead of a single line-count threshold, evaluate multiple red flags:
+- **Lines changed**: More lines = higher risk. Soft limit at 20 lines, hard limit at 50.
+- **Add/remove ratio**: Heavily skewed ratios (all adds or all deletes) are riskier than balanced refactors.
+- **Test failures in first round**: Any test failures block auto-merge entirely.
+- **PR review issue count**: More than 2 review issues flagged = block auto-merge, alert human.
+- **Files touched**: Changes spanning 3+ files get extra scrutiny.
+The trust threshold starts conservative and can be relaxed over time as the system proves reliable. The bridge watchdog (level 4: auto-revert) catches crashes caused by bad commits.
 
 ### Risk 3: High API cost from frequent LLM diagnosis calls
 **Impact:** If many jobs stall simultaneously, each triggers a Haiku call for diagnosis.
@@ -157,11 +191,12 @@ The current job health check (`_job_health_check` in `agent/job_queue.py`) detec
 
 ## No-Gos (Out of Scope)
 
-- **Fixing bugs outside `agent/`, `bridge/`, `models/`**: Auto-fix is scoped to core system code only. Issues in `tools/`, `scripts/`, `mcp_servers/` get an issue filed but not auto-fixed.
+- **Fixing fundamental architecture files**: `bridge/telegram_bridge.py`, `agent/sdk_client.py`, `agent/observer.py` are protected from auto-fix. Issues in these files get filed but require human review.
 - **Multi-project health check reflection**: This feature targets the `valor` project only. Extending to other projects requires per-project SDLC capability validation.
 - **Replacing the bridge watchdog**: The watchdog (level 1-5 escalation) handles bridge-level crashes. This feature handles job-level stalls. They are complementary, not replacements.
 - **Fixing non-code issues**: If the diagnosis says "infrastructure" (e.g., Redis down, API rate limited), the system alerts but does not attempt repair.
 - **Human-in-the-loop approval for fixes**: Auto-merge is already enabled for the valor project. Adding an approval gate would defeat the purpose of autonomous self-healing.
+- **Dependency on #361**: Reflections as first-class objects is NOT a blocker. This feature is implemented independently and can be migrated to the unified model when #361 ships.
 
 ## Update System
 
@@ -239,32 +274,49 @@ Integration test: verify that `_diagnose_stalled_job()` returns a valid classifi
 
 ## Step by Step Tasks
 
-### 1. Implement failure classifier
+### 1. Implement two-tier health check and failure classifier
 - **Task ID**: build-classifier
 - **Depends On**: none
 - **Assigned To**: diagnosis-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add `_diagnose_stalled_job(job: AgentSession, log_lines: list[str]) -> str` to `agent/job_queue.py`
+- Extend `_job_health_check()` with stall tracking: add `stall_first_seen` and `stall_log_hash` to AgentSession
+- Add `_diagnose_stalled_job(job: AgentSession, log_lines: list[str]) -> dict` to `agent/job_queue.py`
 - Add `_extract_log_context(job: AgentSession) -> list[str]` to read relevant log lines around stall time
 - Haiku prompt classifies failure as: `transient`, `code_bug`, `infrastructure`, `unknown`
 - Return classification with confidence score and relevant log excerpt
+- Schedule full diagnosis as low-priority job (not inline in health check loop)
 
-### 2. Implement SDLC spawner and fix-then-retry gate
+### 2. Implement fuzzy cache for diagnosis dedup
+- **Task ID**: build-fuzzy-cache
+- **Depends On**: none
+- **Assigned To**: diagnosis-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- Create `agent/diagnosis_cache.py` with `DiagnosisCache` class
+- Hash normalized prompt (error pattern + log excerpt fingerprint) for cache key
+- Store results in `data/diagnosis_cache.json` with TTL (30 min)
+- Before calling Haiku, check cache — reuse if matching hash found within TTL
+- Prevents race conditions (multiple cycles diagnosing same failure) and infinite loops
+- Clean up expired entries on each cache check
+
+### 3. Implement SDLC spawner, trust scoring, and fix-then-retry gate
 - **Task ID**: build-spawner
 - **Depends On**: none
 - **Assigned To**: sdlc-spawner-builder
 - **Agent Type**: builder
 - **Parallel**: true
 - Add `_spawn_bugfix_sdlc(job: AgentSession, diagnosis: dict) -> str` that creates a GitHub issue and enqueues SDLC
-- Add `blocked_by_issue` field to AgentSession model
-- Modify `_job_health_check()` to call diagnostic pipeline before recovery
+- Add `blocked_by_issue` and `stall_first_seen` fields to AgentSession model
+- Implement `_compute_merge_confidence()` with graduated red flag scoring (lines changed, add/remove ratio, test failures, review issues, files touched)
 - Implement retry ceiling check (skip diagnosis if `retry_count >= 3`)
+- Post-fix: re-enqueue original job with `scheduled_after = time.time() + 600`
 - Gate behind `HEALTH_CHECK_DIAGNOSIS_ENABLED` env var
+- Blast radius: protect `bridge/telegram_bridge.py`, `agent/sdk_client.py`, `agent/observer.py` from auto-fix
 
-### 3. Validate diagnostic pipeline
+### 4. Validate diagnostic pipeline
 - **Task ID**: validate-diagnosis
-- **Depends On**: build-classifier, build-spawner
+- **Depends On**: build-classifier, build-fuzzy-cache, build-spawner
 - **Assigned To**: health-check-validator
 - **Agent Type**: validator
 - **Parallel**: false
@@ -273,7 +325,7 @@ Integration test: verify that `_diagnose_stalled_job()` returns a valid classifi
 - Verify blast radius limiter rejects fixes outside scope
 - Verify retry ceiling triggers after 3 attempts
 
-### 4. Write tests
+### 5. Write tests
 - **Task ID**: test-health-check
 - **Depends On**: validate-diagnosis
 - **Assigned To**: health-check-tester
@@ -284,7 +336,7 @@ Integration test: verify that `_diagnose_stalled_job()` returns a valid classifi
 - Integration test: stall a job, verify diagnosis runs, verify SDLC job is enqueued
 - Edge cases: empty logs, missing session fields, LLM errors
 
-### 5. Documentation
+### 6. Documentation
 - **Task ID**: document-feature
 - **Depends On**: test-health-check
 - **Assigned To**: docs-writer
@@ -294,7 +346,7 @@ Integration test: verify that `_diagnose_stalled_job()` returns a valid classifi
 - Update `docs/features/README.md` index
 - Update `docs/features/bridge-self-healing.md`
 
-### 6. Final Validation
+### 7. Final Validation
 - **Task ID**: validate-all
 - **Depends On**: document-feature
 - **Assigned To**: health-check-validator
@@ -316,14 +368,14 @@ Integration test: verify that `_diagnose_stalled_job()` returns a valid classifi
 
 ---
 
-## Open Questions
+## Resolved Questions
 
-1. **Blast radius scope**: Should auto-fix be limited to `agent/`, `bridge/`, `models/` only, or should `tools/` and `mcp_servers/` also be in scope? The current proposal restricts to core system code to minimize risk.
+1. **Blast radius scope**: ✅ Auto-fix allowed for everything EXCEPT fundamental architecture (`bridge/telegram_bridge.py`, `agent/sdk_client.py`, `agent/observer.py`). All other code is fair game.
 
-2. **Confidence threshold for auto-merge**: The issue suggests "only merge if tests pass AND the fix is < 20 lines". Should we use 20 lines or 50 lines as the threshold? Lower is safer but may reject valid multi-file fixes.
+2. **Auto-merge trust model**: ✅ Graduated trust scoring with multiple red flags (lines changed, add/remove ratio, test failures, review issues, files touched) rather than a single threshold. Starts conservative, relaxed over time.
 
-3. **Dependency on #361 (Reflections as first-class objects)**: Should this feature wait for a unified reflection model, or should it be implemented independently and migrated later? The issue lists #361 as a sibling, not a blocker.
+3. **Dependency on #361**: ✅ Not a blocker. Build independently, migrate to unified reflection model when #361 ships.
 
-4. **Diagnosis frequency**: Currently health check runs every 5 minutes. Should diagnosis run on every cycle, or only on the first detection of a stalled job (to avoid redundant LLM calls)?
+4. **Diagnosis frequency**: ✅ Two-tier: quick check every 5 min (no LLM, just capture metadata). Full diagnosis only for persistent stalls (2+ cycles), scheduled as a low-priority job.
 
-5. **Fix deployment verification**: After the SDLC fix merges and bridge restarts, how does the system verify the fix actually resolved the issue? Should there be a post-fix validation step before retrying the original job?
+5. **Post-fix validation**: ✅ Use `scheduled_after` to defer retry by 10 min after bridge restart. This gives the system time to stabilize before retrying the original failed job.
