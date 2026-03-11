@@ -297,6 +297,7 @@ Using: builder (2), validator (1)
 - **Assigned To**: integration-validator
 - **Agent Type**: validator
 - **Parallel**: false
+- **Note**: This is a full-system integration test. It exercises the new scheduling tool, but also the job queue worker, Observer routing, SDLC pipeline, SDK client, git operations, and GitHub API. Failures may surface pre-existing issues in any of these systems — diagnose carefully rather than assuming the new code is at fault.
 - Create a GitHub issue: "Update docs/features/job-queue.md to document the new priority model (urgent/high/normal/low)"
 - From a running agent session, call `python -m tools.job_scheduler schedule --issue <N>` to enqueue it
 - Verify: job appears in queue at `normal` priority
@@ -311,6 +312,7 @@ Using: builder (2), validator (1)
 - **Assigned To**: integration-validator
 - **Agent Type**: validator
 - **Parallel**: true (can run alongside prod-test-sdlc)
+- **Note**: Same cross-system exposure as the SDLC test — exercises classification, worker execution, and session logging even though no pipeline runs. A failure here likely points to worker or Observer issues, not the scheduler itself.
 - From a running agent session, call `python -m tools.job_scheduler push --message "Kevin asks: what's the current architecture of the job queue system?" --project valor`
 - Verify: job enqueues at `normal` priority with no issue link
 - Verify: worker picks it up, agent produces a coherent answer
