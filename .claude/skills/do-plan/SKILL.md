@@ -187,6 +187,36 @@ For Notion tasks, use MCP tools to create a page with Title, Status, Type, and l
 
 After linking or creating: update the plan's `tracking:` field and commit.
 
+### Phase 2.7: Sync Issue Comments into Plan
+
+Before finalizing, check the tracking issue for comments that contain feedback, scope changes, or new context that should be incorporated into the plan.
+
+```bash
+# Extract issue number from plan frontmatter tracking URL
+ISSUE_NUM=$(grep '^tracking:' docs/plans/{slug}.md | grep -oP '/issues/\K\d+')
+
+if [ -n "$ISSUE_NUM" ]; then
+  # Get all comments with IDs, sorted chronologically
+  gh api repos/{owner}/{repo}/issues/${ISSUE_NUM}/comments \
+    --jq '.[] | {id: .id, author: .user.login, created: .created_at, body: .body}' 2>/dev/null
+
+  # Get the latest comment ID
+  LATEST_COMMENT_ID=$(gh api repos/{owner}/{repo}/issues/${ISSUE_NUM}/comments \
+    --jq '.[-1].id // empty' 2>/dev/null)
+
+  # Get the plan's recorded last_comment_id
+  PLAN_COMMENT_ID=$(grep '^last_comment_id:' docs/plans/{slug}.md | sed 's/last_comment_id: *//')
+fi
+```
+
+**If new comments exist** (LATEST_COMMENT_ID != PLAN_COMMENT_ID):
+1. Read each comment since the plan's `last_comment_id`
+2. Incorporate relevant feedback into the plan (scope changes, new requirements, corrections)
+3. Update `last_comment_id:` in the plan frontmatter to `LATEST_COMMENT_ID`
+4. Commit the updated plan
+
+**If no tracking issue or no comments**: Skip this step.
+
 ### Phase 3: Critique and Enumerate Questions
 
 1. **Review assumptions** - What did I assume that might be wrong?

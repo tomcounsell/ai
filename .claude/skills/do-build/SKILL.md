@@ -119,12 +119,31 @@ Where `$PR_URL` is the full GitHub PR URL returned by `gh pr create`.
    ```
    - If state exists and `stage != "plan"`: resume from that stage, skip already-completed stages listed in `completed_stages`
    - If no state (output is `null`): proceed normally — initialize state after worktree creation
-4. **Run prerequisite validation** - `python scripts/check_prerequisites.py {PLAN_PATH}`. If any check fails, report the failures and stop. Do not proceed to task execution. If no Prerequisites section exists, this passes automatically.
-5. **Resolve target repo** - Determine which repo the plan belongs to (see "Target Repo Resolution" above):
+4. **Check issue comment freshness** - Verify the plan has incorporated the latest issue comments before building:
+   ```bash
+   # Extract tracking issue number and last_comment_id from plan frontmatter
+   ISSUE_NUM=$(grep '^tracking:' {PLAN_PATH} | grep -oP '/issues/\K\d+')
+   PLAN_COMMENT_ID=$(grep '^last_comment_id:' {PLAN_PATH} | sed 's/last_comment_id: *//' | tr -d ' ')
+   REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
+
+   if [ -n "$ISSUE_NUM" ]; then
+     LATEST_COMMENT_ID=$(gh api repos/${REPO}/issues/${ISSUE_NUM}/comments --jq '.[-1].id // empty' 2>/dev/null)
+     if [ -n "$LATEST_COMMENT_ID" ] && [ "$LATEST_COMMENT_ID" != "$PLAN_COMMENT_ID" ]; then
+       echo "STALE PLAN: Issue #${ISSUE_NUM} has new comments (latest: ${LATEST_COMMENT_ID}, plan has: ${PLAN_COMMENT_ID})"
+       echo "Run /do-plan to incorporate the latest feedback before building."
+       exit 1
+     fi
+   fi
+   ```
+   - If the plan's `last_comment_id` matches the latest comment: proceed
+   - If there are newer comments: **STOP** and report that the plan needs updating via `/do-plan` first
+   - If no tracking issue or no comments exist: skip this check
+5. **Run prerequisite validation** - `python scripts/check_prerequisites.py {PLAN_PATH}`. If any check fails, report the failures and stop. Do not proceed to task execution. If no Prerequisites section exists, this passes automatically.
+6. **Resolve target repo** - Determine which repo the plan belongs to (see "Target Repo Resolution" above):
    ```bash
    TARGET_REPO=$(git -C "$(dirname "$PLAN_PATH")" rev-parse --show-toplevel)
    ```
-6. **Ensure clean git state** - Before creating a worktree, verify the main working tree has no in-progress merge, rebase, or cherry-pick operations that would block git operations:
+7. **Ensure clean git state** - Before creating a worktree, verify the main working tree has no in-progress merge, rebase, or cherry-pick operations that would block git operations:
    ```bash
    python -c "from agent.worktree_manager import ensure_clean_git_state; from pathlib import Path; print(ensure_clean_git_state(Path('$TARGET_REPO')))"
    ```
