@@ -13,7 +13,7 @@ dependencies = [
     "requests>=2.31.0", # Required for Google API requests transport
     "ollama>=0.3.0", # Local LLM fallback for summarization
     "yt-dlp>=2024.1.0", # YouTube audio download for transcription
-    "popoto>=1.0.0b2", # Redis ORM for job queue persistence (async support)
+    "popoto @ git+https://github.com/tomcounsell/popoto.git@54e398c", # Redis ORM - pinned to include index cleanup fixes (PRs #161-163)
     "google-auth-oauthlib>=1.2.0", # Google OAuth for Workspace APIs
     "google-auth-httplib2>=0.2.0", # Google Auth HTTP transport
     "google-api-python-client>=2.100.0", # Google API client
@@ -42,6 +42,9 @@ valor-image-gen = "tools.image_gen:main"
 valor-image-analyze = "tools.image_analysis:main"
 valor-search = "tools.web:cli_search"
 valor-fetch = "tools.web:cli_fetch"
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [build-system]
 requires = ["hatchling"]
