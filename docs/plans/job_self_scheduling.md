@@ -134,7 +134,7 @@ No prerequisites — this work uses only existing Redis, GitHub CLI, and interna
 
 ### Risk 2: Self-scheduling loops
 **Impact:** Agent schedules a job that schedules more jobs infinitely
-**Mitigation:** Cap: each `schedule_job` call logs the originating `correlation_id`. Worker refuses to execute `schedule_job` tool if the current session was itself scheduled (check `AgentSession.created_by` or a `scheduled=true` flag). Hard limit: max 30 scheduled jobs per hour per project.
+**Mitigation:** Each `schedule_job` call logs the originating `correlation_id`. Depth limit: a scheduled job can schedule further jobs, but max chain depth = 3 (tracked via `scheduling_depth` field on AgentSession). Hard limit: max 30 scheduled jobs per hour per project. No human intervention required — the system self-regulates via depth and rate caps.
 
 ## Race Conditions
 
@@ -187,7 +187,7 @@ No update system changes required. The new tool is a Python file in `tools/` and
 - [ ] Output from self-scheduled jobs persists in AgentSession logs (no Telegram delivery)
 - [ ] Queue manipulation works: bump, push, pop subcommands function correctly
 - [ ] `/queue-status` skill shows queued/running/completed jobs in Telegram-friendly format
-- [ ] Self-scheduling loop protection: tool refuses if already inside a scheduled session
+- [ ] Self-scheduling depth cap: jobs at depth 3 cannot schedule further jobs (rate limit: 30/hr/project)
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 
@@ -246,7 +246,7 @@ Using: builder (2), validator (1)
 - `pop`: remove next pending job from queue without executing it
 - Reads `CHAT_ID`, `PROJECT_KEY`, `SESSION_ID` from env vars
 - Returns structured JSON response
-- Self-scheduling loop protection: check env for `SCHEDULED_JOB=true` flag
+- Self-scheduling depth tracking: increment `scheduling_depth` from parent session (cap at 3)
 
 ### 3. Create `/queue-status` skill
 - **Task ID**: build-queue-status
