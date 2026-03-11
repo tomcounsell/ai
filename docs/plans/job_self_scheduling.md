@@ -230,6 +230,8 @@ Using: builder (2), validator (1)
 - Modify `_pop_job()` to skip jobs where `scheduled_after > now()`
 - Modify `_extract_job_fields()` to preserve the field
 - Add `scheduled_after` parameter to `enqueue_job()`
+- Change `enqueue_job()` default priority from `"high"` to `"normal"`
+- Update reflection scripts to enqueue with `priority="low"`
 
 ### 2. Implement `tools/job_scheduler.py`
 - **Task ID**: build-scheduler-tool
@@ -317,4 +319,4 @@ Using: builder (2), validator (1)
 1. **Output routing**: Headless job output stays in AgentSession records and historical logs only — no Telegram delivery. Humans inspect via `/queue-status` or CLI.
 2. **Rate limiting**: 30 scheduled jobs per hour per project.
 3. **Queue manipulation**: `/queue-status` skill provides full inspection AND manipulation — bump to top, push, pop, cancel. Not just read-only.
-4. **Priority levels**: Four tiers — `urgent > high > normal > low`. Self-scheduled jobs default to `normal`. Telegram messages remain `high`. `urgent` is manual-only for emergency preemption. Sort key in `_pop_job()` updated from binary to 4-level: `{"urgent": 0, "high": 1, "normal": 2, "low": 3}`.
+4. **Priority levels**: Four tiers — `urgent > high > normal > low`. Everything defaults to `normal` — Telegram messages, self-scheduled jobs, all of it. The agent decides when to bump priority based on message content and context (e.g., production outage → urgent, routine feature request → normal). Reflection/maintenance tasks default to `low`. The system is trusted to triage intelligently — sometimes its own background work is more important than what a human just asked for. Sort key in `_pop_job()` updated from binary to 4-level: `{"urgent": 0, "high": 1, "normal": 2, "low": 3}`.
