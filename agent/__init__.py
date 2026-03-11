@@ -18,6 +18,7 @@ from .completion import (
     verify_completion,
 )
 from .job_queue import (
+    PRIORITY_RANK,
     AgentSession,
     Job,
     RedisJob,
@@ -69,6 +70,7 @@ __all__ = [
     "RedisJob",
     "Job",
     "enqueue_job",
+    "PRIORITY_RANK",
     "check_revival",
     "register_callbacks",
     "register_project_config",

@@ -1066,7 +1066,7 @@ async def main():
                 f"in {chat_title or 'DM'} (session={session_id})"
             )
 
-            # Build and enqueue the job (HIGH priority — top of FILO stack)
+            # Build and enqueue the job (normal priority — FIFO within tier)
             depth = await enqueue_job(
                 project_key=project_key,
                 session_id=session_id,
@@ -1076,7 +1076,7 @@ async def main():
                 chat_id=telegram_chat_id,
                 message_id=message.id,
                 chat_title=chat_title,
-                priority="high",
+                priority="normal",
                 sender_id=sender_id,
                 workflow_id=workflow_id,
                 has_media=has_media,
