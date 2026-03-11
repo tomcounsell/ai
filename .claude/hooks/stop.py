@@ -14,7 +14,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 # Add utils to path
 sys.path.insert(0, str(__file__).rsplit("/", 1)[0])
 
-from utils.constants import (  # noqa: E402
+from hook_utils.constants import (  # noqa: E402
     ensure_session_log_dir,
     get_session_id,
     read_hook_input,

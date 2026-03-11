@@ -15,7 +15,7 @@ from pathlib import Path
 # Add the hooks directory to sys.path so utils can be imported
 sys.path.insert(0, str(Path(__file__).parent))
 
-from utils.constants import get_data_sessions_dir, read_hook_input  # noqa: E402
+from hook_utils.constants import get_data_sessions_dir, read_hook_input  # noqa: E402
 
 # Code file extensions that warrant the SDLC reminder
 CODE_EXTENSIONS = {".py", ".js", ".ts"}

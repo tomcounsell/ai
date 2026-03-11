@@ -34,6 +34,7 @@ import logging
 import anthropic
 
 from config.models import MODEL_FAST
+from utils.api_keys import get_anthropic_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +70,7 @@ def classify_request(message: str, context: str = "") -> dict:
         Exception: If classification fails (API error, invalid response, etc.)
     """
     try:
-        from utils.api_keys import get_anthropic_api_key
+
 
         api_key = get_anthropic_api_key()
         if not api_key:
@@ -166,7 +167,7 @@ async def classify_request_async(message: str, context: str = "") -> dict:
         Exception: If classification fails (API error, invalid response, etc.)
     """
     try:
-        from utils.api_keys import get_anthropic_api_key
+
 
         api_key = get_anthropic_api_key()
         if not api_key:
@@ -311,7 +312,7 @@ def classify_message_intent(
         }
 
     try:
-        from utils.api_keys import get_anthropic_api_key
+
 
         api_key = get_anthropic_api_key()
         if not api_key:
@@ -402,7 +403,7 @@ async def classify_message_intent_async(
         }
 
     try:
-        from utils.api_keys import get_anthropic_api_key
+
 
         api_key = get_anthropic_api_key()
         if not api_key:

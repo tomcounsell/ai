@@ -426,9 +426,9 @@ class ValorAgent:
                 via CLAUDE_CODE_TASK_LIST_ID environment variable.
             max_budget_usd: Maximum budget in USD for a single agent session.
                 Defaults to SDK_MAX_BUDGET_USD env var or 5.00.
-            chat_id: Optional Telegram chat ID for job routing context.
-            project_key: Optional project key for job routing context.
-            message_id: Optional Telegram message ID for job routing context.
+            chat_id: Optional chat ID for routing context injection.
+            project_key: Optional project key for routing context injection.
+            message_id: Optional message ID for routing context injection.
         """
         self.working_dir = Path(working_dir) if working_dir else Path(__file__).parent.parent
         self.system_prompt = system_prompt or load_system_prompt()
@@ -561,15 +561,6 @@ class ValorAgent:
         # without relying on Claude Code's internal UUID matching.
         if session_id:
             env["VALOR_SESSION_ID"] = session_id
-
-        # Pass routing context so tools (e.g., job_scheduler) can determine
-        # where to route output from self-scheduled jobs.
-        if self.chat_id:
-            env["CHAT_ID"] = str(self.chat_id)
-        if self.project_key:
-            env["PROJECT_KEY"] = self.project_key
-        if self.message_id is not None:
-            env["MESSAGE_ID"] = str(self.message_id)
 
         # Build system prompt with workflow context if workflow_id is present
         system_prompt = self.system_prompt
@@ -929,8 +920,10 @@ async def get_agent_response_sdk(
     )
 
     try:
-        # Extract project_key for env var injection (job_queue sets _key on project dict)
-        _project_key = project.get("_key") if project else None
+        # Extract project_key from config for env var injection
+        _project_key = project.get("name", "valor").lower().replace(" ", "-") if project else None
+        # Extract message_id from the job context (passed through _execute_job)
+        _message_id = None  # message_id not available at this layer
 
         agent = ValorAgent(
             working_dir=working_dir,
@@ -938,6 +931,7 @@ async def get_agent_response_sdk(
             task_list_id=task_list_id,
             chat_id=chat_id,
             project_key=_project_key,
+            message_id=_message_id,
         )
         response = await agent.query(enriched_message, session_id=session_id)
 

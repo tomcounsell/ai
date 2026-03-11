@@ -15,6 +15,7 @@ from typing import Any
 from claude_agent_sdk import HookContext, PostToolUseHookInput
 
 from config.models import MODEL_FAST
+from utils.api_keys import get_anthropic_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,6 @@ Respond with ONLY a JSON object, no other text:
 
 def _get_api_key() -> str:
     """Resolve Anthropic API key from env or shared .env files."""
-    from utils.api_keys import get_anthropic_api_key
 
     return get_anthropic_api_key()
 

@@ -25,7 +25,7 @@ from pathlib import Path
 # Add hooks dir to path so utils.constants is importable when run directly
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from utils.constants import get_data_sessions_dir  # noqa: E402
+from hook_utils.constants import get_data_sessions_dir  # noqa: E402
 
 
 def get_sdlc_state_path(session_id: str) -> Path:

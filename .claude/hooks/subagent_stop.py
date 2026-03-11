@@ -7,7 +7,7 @@ import sys
 # Add utils to path
 sys.path.insert(0, str(__file__).rsplit("/", 1)[0])
 
-from utils.constants import (
+from hook_utils.constants import (
     append_to_log,
     ensure_session_log_dir,
     get_session_id,
