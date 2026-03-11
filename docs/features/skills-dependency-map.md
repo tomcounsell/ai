@@ -26,7 +26,7 @@ User request
   |       \---> direct pytest + lint  (no longer dispatches do-test)
   |
   |---> /do-docs              cascade doc updates
-  |       \---> [Task: 3 parallel explorers]
+  |       \---> [Task: 4 parallel explorers (A: change, B: inventory, C: semantic, D: issue impact)]
   |
   |---> [Task: documentarian]  write feature doc
   |---> [Task: validator]      final quality check
@@ -68,7 +68,7 @@ add-feature ....(references)...> prime, pthread, sdlc, do-pr-review
 | do-build | builder, validator, test-engineer, documentarian, + custom per plan |
 | do-test | test-engineer, validator, frontend-tester |
 | do-patch | builder |
-| do-docs | 3 unnamed parallel explorers (not agent definitions) |
+| do-docs | 4 parallel explorers: Change Explorer, Doc Inventory, Semantic Impact, Issue Impact Scanner |
 | do-docs-audit | unnamed parallel auditors (not agent definitions) |
 
 **Agents actually referenced by skills (7):** builder, validator, code-reviewer, test-engineer, documentarian, frontend-tester, plan-maker

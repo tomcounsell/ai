@@ -58,7 +58,7 @@ After work ships, `scripts/migrate_completed_plan.py` validates feature docs and
 A slash command (`.claude/commands/do-docs.md`) automates documentation updates after code changes:
 
 - **Trigger**: Invoked manually or as Step 7.6 in the build skill
-- **Phase 1 — Explore**: Two parallel agents examine recent code changes and inventory all existing docs
+- **Phase 1 — Explore**: Four parallel agents examine recent code changes, inventory all existing docs, find semantically related docs, and scan open GitHub issues for downstream impact
 - **Phase 2 — Triage**: Cross-reference changes against docs to identify what needs updates, creation, or deletion
 - **Phase 3 — Edit**: Surgical, targeted edits to affected docs only (no full rewrites)
 - **Phase 4 — Verify**: Checks for broken links, verifies feature index, runs `validate_docs_changed.py` in dry-run mode, and commits all doc changes

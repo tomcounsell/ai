@@ -33,8 +33,9 @@ The finder runs as **Agent C** in the `/do-docs` cascade skill (`.claude/skills/
 - **Agent A** (Change Explorer): Analyzes the code diff, traces data flow, identifies retired terms
 - **Agent B** (Documentation Inventory): Scans all doc locations for references
 - **Agent C** (Semantic Impact Finder): Finds conceptually related docs via embeddings
+- **Agent D** (Issue Impact Scanner): Reviews open GitHub issues for downstream effects and posts comments on affected issues
 
-All three agents run in parallel. If Agent C fails (no API key, no index), the cascade degrades gracefully to Agents A and B only.
+All four agents run in parallel. If Agent C or D fails (no API key, no matching issues), the cascade degrades gracefully to the remaining agents' output.
 
 ## Usage
 
