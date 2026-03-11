@@ -340,10 +340,7 @@ async def _pop_job(project_key: str) -> Job | None:
 
     # Filter out jobs with scheduled_after in the future
     now = time.time()
-    eligible = [
-        j for j in pending
-        if not j.scheduled_after or j.scheduled_after <= now
-    ]
+    eligible = [j for j in pending if not j.scheduled_after or j.scheduled_after <= now]
     if not eligible:
         return None
 
