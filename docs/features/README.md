@@ -70,6 +70,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Task List Isolation Experiment](task-list-isolation.md) | Experiment results validating CLAUDE_CODE_TASK_LIST_ID behavior | Archived |
 | [Telegram History & Links](telegram-history.md) | Searchable message history and link compilation from Telegram | Shipped |
 | [Telegram Messaging](telegram-messaging.md) | Unified interface for reading and sending Telegram messages via `valor-telegram` CLI | Shipped |
+| [Test Baseline Verification](test-baseline-verification.md) | Verified classification of test failures as regressions vs pre-existing by running failing tests against main | Shipped |
 | [Test Coverage Standards](test-coverage-standards.md) | Standards and tooling for preventing silent failure classes: exception swallowing, empty output loops, coupled tests, missing error rendering, silent builds | Shipped |
 | [Trace & Verify Protocol](trace-and-verify.md) | Data-driven root cause analysis replacing narrative-only 5 Whys with forward verification | Shipped |
 | [Typed Skill Outcomes](typed-skill-outcomes.md) | Structured outcome contracts for /do-* skills enabling deterministic Observer routing without LLM classification | Shipped |
