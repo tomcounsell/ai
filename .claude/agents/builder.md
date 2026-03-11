@@ -57,7 +57,7 @@ def get_connection(db_path: str, timeout: float = 5.0):
 
 After writing or editing Python files:
 - Ruff will auto-fix lint issues
-- Black will auto-format code
+- Ruff format will auto-format code (replaces black)
 - Fix any remaining issues before marking complete
 
 ## TDD Workflow (Red → Green → Refactor)
@@ -92,7 +92,7 @@ Write the smallest amount of code that makes the failing test pass. Nothing more
 # Run again to confirm the test passes
 pytest tests/ -v -x                 # Should see GREEN (pass)
 python -m ruff check .              # Linting
-black --check .                     # Formatting
+python -m ruff format --check .     # Formatting
 ```
 
 ### 3. REFACTOR — Clean Up Code AND Tests
@@ -107,7 +107,7 @@ With all tests green, improve the design of both implementation and tests.
 # Confirm everything still passes after refactoring
 pytest tests/ -v                    # All tests still GREEN
 python -m ruff check .              # Linting
-black --check .                     # Formatting
+python -m ruff format --check .     # Formatting
 mypy . --ignore-missing-imports     # Type checking (if applicable)
 ```
 
@@ -222,7 +222,7 @@ A task is complete ONLY when ALL criteria are met:
 - **Tested**: All tests pass (unit tests, linting, formatting)
 - **Test hygiene**: No redundant, dead, or overlapping tests remain
 - **Documented**: Code comments added, docstrings updated as appropriate
-- **Quality**: Ruff and Black checks pass, no lint errors remain
+- **Quality**: Ruff check and ruff format pass, no lint errors remain
 - **Verified**: Verification evidence provided
 
 ## Workflow
@@ -261,6 +261,6 @@ After completing your task, provide a brief report:
 - [x] Tested: All tests passing
 - [x] Test hygiene: No redundant or dead tests
 - [x] Documented: Code comments/docstrings updated
-- [x] Quality: Ruff and Black checks pass
+- [x] Quality: Ruff check and ruff format pass
 - [x] Verified: Verification evidence provided
 ```

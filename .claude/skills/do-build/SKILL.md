@@ -195,6 +195,15 @@ Where `$PR_URL` is the full GitHub PR URL returned by `gh pr create`.
 24. **Migrate completed plan** - Delete plan file and close tracking issue
 25. **Report completion** with PR URL when all tasks are done
 
+## Lint Discipline
+
+Lint and formatting are handled automatically -- agents should never waste iterations on lint fixes.
+
+- **Intermediate commits**: Use `--no-verify` to skip the pre-commit hook during WIP commits mid-task. This avoids unnecessary lint interruptions while the agent is still working.
+- **Final commits**: Let the pre-commit hook run (no `--no-verify`). The hook auto-fixes all fixable lint/format issues via `ruff format` + `ruff check --fix` and re-stages the changes. Only genuinely unfixable issues block the commit.
+- **Never run manual lint checks**: Do NOT instruct agents to run `ruff check .` or `ruff format --check .` as a separate step. The pre-commit hook handles this automatically on final commits.
+- **PostToolUse hook**: The `format_file.py` hook runs `ruff check --fix` + `ruff format` on individual files after every Write/Edit, so files stay clean as agents work.
+
 ## Critical Rules
 
 - **You are the orchestrator, not a builder** - Never use Write/Edit tools directly
