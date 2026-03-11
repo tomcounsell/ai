@@ -3,6 +3,7 @@
 import asyncio
 import json
 import subprocess
+import sys
 import time
 
 import pytest
@@ -313,7 +314,7 @@ class TestSelfSchedulingProtection:
         """Pushed jobs increment scheduling_depth."""
         result = subprocess.run(
             [
-                "python",
+                sys.executable,
                 "-m",
                 "tools.job_scheduler",
                 "push",
