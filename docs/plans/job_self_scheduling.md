@@ -317,3 +317,4 @@ Using: builder (2), validator (1)
 1. **Output routing**: Headless job output stays in AgentSession records and historical logs only — no Telegram delivery. Humans inspect via `/queue-status` or CLI.
 2. **Rate limiting**: 30 scheduled jobs per hour per project.
 3. **Queue manipulation**: `/queue-status` skill provides full inspection AND manipulation — bump to top, push, pop, cancel. Not just read-only.
+4. **Priority levels**: Four tiers — `urgent > high > normal > low`. Self-scheduled jobs default to `normal`. Telegram messages remain `high`. `urgent` is manual-only for emergency preemption. Sort key in `_pop_job()` updated from binary to 4-level: `{"urgent": 0, "high": 1, "normal": 2, "low": 3}`.
