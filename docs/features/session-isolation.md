@@ -141,7 +141,10 @@ See [Reaction Semantics](reaction-semantics.md) for details on the re-enqueue de
 
 ## Semantic Session Routing
 
-In addition to mechanical routing (reply-to message ID), sessions can be matched semantically. When the summarizer produces structured output, it extracts `context_summary` and `expectations` fields that describe what a session is working on and what it needs from the human. Unthreaded messages are then evaluated against active sessions with expectations, and high-confidence matches are auto-routed.
+In addition to mechanical routing (reply-to message ID), sessions can be matched semantically. When the summarizer produces structured output, it extracts `context_summary` and `expectations` fields that describe what a session is working on and what it needs from the human. Unthreaded messages are then evaluated against sessions with expectations, and high-confidence matches are routed based on session status:
+
+- **Active/running sessions**: The message is pushed to the session's steering queue (`push_steering_message`). The user gets an ack ("Noted — I'll incorporate this on my next checkpoint.") and the Observer picks it up at its next stop. No competing job is created.
+- **Dormant sessions**: The session is resumed using the matched session_id (existing behavior).
 
 This complements the isolation model: sessions remain isolated, but messages can find their way to the correct session even without explicit reply-to threading. See [Semantic Session Routing](semantic-session-routing.md) for full details.
 
