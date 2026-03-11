@@ -371,15 +371,29 @@ Closures that replicate logic already tested elsewhere (e.g., inline routing log
 
 After tests pass, scan for xfail-marked tests that are now passing (xpass). When a bug fix lands, the corresponding xfail marker should be removed and converted to a hard assertion. Stale xfails indicate the fix landed but the test wasn't updated.
 
+**Two forms of xfail exist and require different detection:**
+
+1. **Decorator form** (`@pytest.mark.xfail`): Pytest reports these as `XPASS` in test output when the test unexpectedly passes. Check the pytest output for `XPASS` entries.
+
+2. **Runtime form** (`pytest.xfail("reason")` called inside the test body): These are **invisible to XPASS detection** because the call short-circuits the test before it reaches the assertion. A test with a runtime `pytest.xfail()` will show as `xfail` even when the underlying bug is fixed — it never gets a chance to pass. **This is the more dangerous form** because it silently hides regressions.
+
 ```bash
-# Find all xfail markers in the test suite
+# Find ALL xfail markers (both decorator and runtime forms)
 grep -rn 'pytest.mark.xfail\|pytest.xfail(' tests/ --include="*.py" | head -20
 ```
 
-For each xfail found, check if pytest reports it as `XPASS` (unexpected pass) in the test output. If any xpass is detected:
-1. Flag it prominently in the quality report: "⚠️ Stale xfail: tests/foo/test_bar.py::test_baz is passing but still marked xfail"
+**For decorator xfails:** Check if pytest reports `XPASS` in the test output.
+
+**For runtime xfails:** These ALWAYS require manual review. Flag every `pytest.xfail(` call found in test bodies:
+1. If the call is guarded by a condition (e.g., `if broken: pytest.xfail(...)`), check whether the condition is still true
+2. If the call is unconditional, flag it as "runtime xfail — cannot detect if bug is fixed, must be reviewed"
+
+For each stale xfail detected (either form):
+1. Flag it prominently in the quality report: "STALE XFAIL: tests/foo/test_bar.py:LINE — [decorator|runtime] form"
 2. Include the file and line number for easy removal
 3. Suggest: "This test should have its xfail marker removed and converted to a hard assertion"
+
+**Important:** Runtime `pytest.xfail()` is a stronger smell than decorator `@pytest.mark.xfail`. If `--changed` mode is active and the changed files include a bug fix, runtime xfails in related test files should be flagged as **blockers**, not just warnings.
 
 **Skip if:** No xfail markers found in the test suite.
 

@@ -90,13 +90,17 @@ Where:
 4.5. **xfail test search** - For bug fixes, search the test suite for xfail markers related to the bug.
    These represent tests that document the bug but are marked as expected failures.
    ```bash
-   # Search for xfail markers in tests
+   # Search for xfail markers in tests (both decorator and runtime forms)
    grep -rn 'pytest.mark.xfail\|pytest.xfail(' tests/ --include="*.py" | head -20
    ```
    For each xfail found that relates to the bug being fixed:
    - Add a task to the plan's **Step by Step Tasks**: "Convert TC{N} xfail to hard assertion"
    - Document the test location in the **Success Criteria** section
    - When the fix lands, the test should pass and the xfail marker must be removed
+   **IMPORTANT:** Pay special attention to **runtime `pytest.xfail()` calls** inside test bodies.
+   Unlike `@pytest.mark.xfail` decorators, runtime xfails short-circuit the test before reaching
+   assertions — so they silently pass even after the bug is fixed. These are invisible to pytest's
+   XPASS detection and MUST be explicitly listed as conversion targets in the plan.
    **Skip if:** Not a bug fix, or no xfail tests found related to this bug.
 
 5. **Data flow trace** - For changes involving multi-component interactions, trace the data
