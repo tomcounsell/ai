@@ -28,6 +28,7 @@ from bridge.summarizer import extract_artifacts
 from config.models import SONNET
 from models.agent_session import AgentSession
 from monitoring.telemetry import record_decision, record_interjection, record_tool_use
+from utils.api_keys import get_anthropic_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -491,8 +492,6 @@ class Observer:
 
         # Phase 2: Run the Observer LLM for judgment calls
         try:
-            from utils.api_keys import get_anthropic_api_key
-
             api_key = get_anthropic_api_key()
             if not api_key:
                 logger.error(f"{self._log_prefix} No API key available, falling back to deliver")

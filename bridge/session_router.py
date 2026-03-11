@@ -17,6 +17,7 @@ import os
 import anthropic
 
 from config.models import MODEL_FAST
+from utils.api_keys import get_anthropic_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -126,8 +127,6 @@ Rules:
 - If the message could match multiple sessions, pick the best one
 - If the message is a new topic unrelated to any session, return null
 - NEVER match on vague similarity — only on clear topical relevance"""
-
-        from utils.api_keys import get_anthropic_api_key
 
         api_key = get_anthropic_api_key()
         if not api_key:

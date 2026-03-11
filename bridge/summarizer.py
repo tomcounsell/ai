@@ -31,6 +31,7 @@ import anthropic
 import httpx
 
 from config.models import MODEL_FAST, OPENROUTER_HAIKU
+from utils.api_keys import get_anthropic_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -647,8 +648,6 @@ async def classify_output(text: str) -> ClassificationResult:
 
     # Try LLM-based classification first
     try:
-        from utils.api_keys import get_anthropic_api_key
-
         api_key = get_anthropic_api_key()
         if not api_key:
             logger.warning("No API key for classification, using heuristics")
@@ -1098,8 +1097,6 @@ async def _summarize_with_haiku(prompt: str) -> StructuredSummary | None:
     empty routing fields.
     """
     try:
-        from utils.api_keys import get_anthropic_api_key
-
         api_key = get_anthropic_api_key()
         if not api_key:
             logger.warning("No Anthropic API key found for summarization")

@@ -6,6 +6,8 @@ import logging
 import re
 from pathlib import Path
 
+from utils.api_keys import get_anthropic_api_key
+
 logger = logging.getLogger(__name__)
 
 # =============================================================================
@@ -302,8 +304,6 @@ def _get_anthropic_client():
     global _anthropic_client
     if _anthropic_client is None:
         import anthropic
-
-        from utils.api_keys import get_anthropic_api_key
 
         api_key = get_anthropic_api_key()
         if not api_key:
