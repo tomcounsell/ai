@@ -1,5 +1,5 @@
 ---
-status: Shipped
+status: Planning
 type: feature
 appetite: Medium
 owner: Valor
@@ -286,8 +286,8 @@ No update system changes required -- this is a skill/agent definition change wit
 
 ## Open Questions
 
-1. **Escalation routing**: ~~The typed-skill-outcomes doc says the Observer falls through to the LLM for ambiguous statuses like `blocked`. Should we add explicit `blocked` handling to the Observer Python code, or is the LLM fallback sufficient for now?~~ **Resolved**: LLM fallback is sufficient for now -- may already work. Make escalation OUTCOME notes explicit enough (include "route to /do-plan" language) so the LLM Observer routes correctly. Verify with dry runs after implementation. No Observer Python changes.
+1. **Escalation routing**: The typed-skill-outcomes doc says the Observer falls through to the LLM for ambiguous statuses like `blocked`. Should we add explicit `blocked` handling to the Observer Python code, or is the LLM fallback sufficient for now? (The issue says "may already work" -- should we verify before building?)
 
-2. **Counter persistence mechanism**: ~~This requires the Observer to forward the previous OUTCOME context when re-invoking `/do-test`. Is this already how the Observer works?~~ **Resolved**: Claude Sonnet can read the prior `<!-- OUTCOME -->` block directly from conversation history. No explicit Observer wiring needed. Instruct do-test to scan conversation context for the most recent OUTCOME block to extract `regression_fix_attempt`.
+2. **Counter persistence mechanism**: The issue proposes passing the regression counter through OUTCOME artifacts. This requires the Observer to forward the previous OUTCOME context when re-invoking `/do-test`. Is this already how the Observer works (passing prior skill output as context), or does this need explicit wiring?
 
-3. **Worktree environment fidelity**: ~~Are there other environment/config files beyond `.env` needed?~~ **Resolved**: Copy only `.env`. SOUL.md and other identity-related configs are being moved to env config, so `.env` copy covers all runtime needs.
+3. **Worktree environment fidelity**: The plan proposes copying `.env` to the worktree. Are there other environment/config files that tests depend on (e.g., `config/projects.json`, `.claude/settings.local.json`, Redis state) that would need to be present in the worktree for accurate baseline results?

@@ -237,19 +237,6 @@ Monitor all background tasks. Set a **2-minute timeout** from dispatch.
 
 This fallback ensures test results are always collected, even when agent dispatch fails.
 
-## Regression Counter: Read Prior OUTCOME
-
-Before running tests, check if this is a re-run after a failed regression fix attempt.
-
-Scan the conversation context for the most recent `<!-- OUTCOME -->` block from a prior do-test invocation. If found, extract:
-
-```
-PRIOR_REGRESSION_FIX_ATTEMPT = outcome.artifacts.regression_fix_attempt (default: 0)
-PRIOR_REGRESSIONS = outcome.artifacts.regressions (list of test IDs, default: [])
-```
-
-Store these for use in the Circuit Breaker section below.
-
 ## Result Aggregation
 
 After all runners complete, present a summary table:
@@ -275,85 +262,6 @@ AssertionError: Expected 401, got 200
 **Final verdict:**
 - If ALL suites pass: report `ALL TESTS PASSED`
 - If ANY suite fails: report `TESTS FAILED` with failure details prominently displayed
-
-## Failure Baseline Verification
-
-When there are test failures, verify which are regressions (broken by this branch) vs pre-existing (already failing on main). This prevents regressions from being dismissed as pre-existing.
-
-**Only run if there are failures.** If all tests passed, skip this section entirely.
-
-### Step 1: Collect Failing Test IDs
-
-From the pytest output, collect the full node IDs of all failing tests:
-
-```
-FAILING_TEST_IDS = ["tests/unit/test_foo.py::test_bar", "tests/integration/test_api.py::test_auth", ...]
-```
-
-### Step 2: Dispatch Baseline Verifier
-
-Dispatch the `baseline-verifier` subagent with the failing test IDs:
-
-```
-Task({
-  description: "Verify baseline for failing tests",
-  subagent_type: "baseline-verifier",
-  prompt: "
-FAILING_TESTS: <space-separated list of failing test node IDs>
-BRANCH_NAME: <current git branch>
-  "
-})
-```
-
-Wait for the structured JSON response. If the subagent fails or times out (2 minute max), classify all failures as inconclusive and continue.
-
-### Step 3: Build Classification Table
-
-Replace the plain failure list with a verified breakdown table:
-
-```
-### Failure Classification (verified against main @ <baseline_commit>)
-
-| Test | Branch | Main | Verdict |
-|------|--------|------|---------|
-| tests/unit/test_foo.py::test_bar | FAIL | FAIL | Pre-existing ✓ |
-| tests/integration/test_api.py::test_auth | FAIL | PASS | **REGRESSION** |
-| tests/bridge/test_reconnect.py::test_conn | FAIL | ERROR | Inconclusive |
-
-**Regressions: N** (must fix before merge)
-**Pre-existing: N** (verified against main — do not block)
-**Inconclusive: N** (flag for human review)
-```
-
-### Step 4: Regression Circuit Breaker
-
-Track how many times we've tried and failed to fix the same regressions.
-
-```
-CURRENT_REGRESSIONS = result.regressions  # from baseline-verifier
-
-# Check if same regressions persist from prior attempt
-if PRIOR_REGRESSIONS is not empty and set(CURRENT_REGRESSIONS) == set(PRIOR_REGRESSIONS):
-  REGRESSION_FIX_ATTEMPT = PRIOR_REGRESSION_FIX_ATTEMPT + 1
-else:
-  REGRESSION_FIX_ATTEMPT = 1  # new set of regressions = reset counter
-  (or 0 if no regressions)
-
-MAX_REGRESSION_FIX_ATTEMPTS = 3
-```
-
-**If REGRESSION_FIX_ATTEMPT >= MAX_REGRESSION_FIX_ATTEMPTS and regressions still exist:**
-
-Emit an escalation OUTCOME (see below). Do NOT emit a regular `fail` outcome. The pipeline must route back to planning — not spin forever.
-
-### Step 5: Determine OUTCOME Status
-
-| Condition | Status |
-|-----------|--------|
-| No failures | `success` |
-| Only pre-existing failures (zero regressions) | `partial` |
-| Regressions exist, attempt < max | `fail` |
-| Regressions persist after max attempts | `blocked` |
 
 ## Frontend Testing (`frontend` target)
 
@@ -498,12 +406,11 @@ When tests complete, emit a typed `SkillOutcome` block as the **last line** of y
 | Status | Meaning |
 |--------|---------|
 | `success` | All tests passed, lint clean |
-| `fail` | Regressions exist (broken by this branch) — must fix |
-| `partial` | Only pre-existing failures (verified against main) — does not block |
+| `fail` | One or more tests failed |
+| `partial` | Some suites passed, some failed |
 | `skipped` | No tests found to run |
-| `blocked` | Same regressions persisted after 3 fix attempts — escalate to planning |
 
-### Expected Artifacts
+### Expected Artifacts (on success)
 
 | Key | Description | Example |
 |-----|-------------|---------|
@@ -512,32 +419,19 @@ When tests complete, emit a typed `SkillOutcome` block as the **last line** of y
 | `total_skipped` | Total tests skipped | `2` |
 | `suites_run` | List of suites executed | `["unit", "integration"]` |
 | `lint_clean` | Whether lint passed | `true` |
-| `baseline_commit` | Short SHA of main used for baseline | `"abc1234"` |
-| `regressions` | Test IDs that are regressions | `["tests/unit/test_foo.py::test_bar"]` |
-| `pre_existing` | Test IDs pre-existing on main | `["tests/unit/test_old.py::test_x"]` |
-| `inconclusive` | Test IDs with unclear main result | `[]` |
-| `regression_fix_attempt` | Which fix attempt this is (1-based) | `1` |
 
-### Emission Templates
+### Emission Template
 
-**All tests pass:**
+After your test results summary, emit this block (replace values):
+
 ```
-<!-- OUTCOME {"status":"success","stage":"TEST","artifacts":{"total_passed":42,"total_failed":0,"total_skipped":2,"suites_run":["unit"],"lint_clean":true,"baseline_commit":"","regressions":[],"pre_existing":[],"inconclusive":[],"regression_fix_attempt":0},"notes":"42 passed, 0 failed, 2 skipped. Lint clean.","next_skill":"/do-pr-review"} -->
+<!-- OUTCOME {"status":"success","stage":"TEST","artifacts":{"total_passed":42,"total_failed":0,"total_skipped":2,"suites_run":["unit"],"lint_clean":true},"notes":"42 passed, 0 failed, 2 skipped. Lint clean.","next_skill":"/do-pr-review"} -->
 ```
 
-**Only pre-existing failures (no regressions):**
-```
-<!-- OUTCOME {"status":"partial","stage":"TEST","artifacts":{"total_passed":38,"total_failed":2,"total_skipped":0,"suites_run":["unit","integration"],"lint_clean":true,"baseline_commit":"abc1234","regressions":[],"pre_existing":["tests/unit/test_old.py::test_x"],"inconclusive":[],"regression_fix_attempt":0},"notes":"2 pre-existing failures verified against main @ abc1234. No regressions. Does not block merge.","next_skill":"/do-pr-review"} -->
-```
+On failure:
 
-**Regressions found (attempt 1 of 3):**
 ```
-<!-- OUTCOME {"status":"fail","stage":"TEST","artifacts":{"total_passed":38,"total_failed":2,"total_skipped":0,"suites_run":["unit","integration"],"lint_clean":true,"baseline_commit":"abc1234","regressions":["tests/unit/test_foo.py::test_bar"],"pre_existing":[],"inconclusive":[],"regression_fix_attempt":1},"notes":"1 regression found (attempt 1/3). Must fix before merge.","failure_reason":"test_foo.py::test_bar regressed — passes on main, fails on branch"} -->
-```
-
-**Circuit breaker triggered (3 attempts, same regressions):**
-```
-<!-- OUTCOME {"status":"blocked","stage":"TEST","artifacts":{"total_passed":38,"total_failed":1,"total_skipped":0,"suites_run":["unit"],"lint_clean":true,"baseline_commit":"abc1234","regressions":["tests/unit/test_foo.py::test_bar"],"pre_existing":[],"inconclusive":[],"regression_fix_attempt":3,"persistent_regressions":["tests/unit/test_foo.py::test_bar"],"escalation":"regression_unfixable"},"notes":"3 regression fix attempts failed for test_foo.py::test_bar. Escalating to planning — route to /do-plan for human review of approach.","failure_reason":"Persistent regression after 3 fix attempts","next_skill":"/do-plan"} -->
+<!-- OUTCOME {"status":"fail","stage":"TEST","artifacts":{"total_passed":38,"total_failed":4,"total_skipped":0,"suites_run":["unit","integration"],"lint_clean":true},"notes":"38 passed, 4 failed","failure_reason":"4 failures in test_auth.py and test_api.py"} -->
 ```
 
 **Important**: The outcome block uses HTML comment syntax (`<!-- ... -->`) so it's invisible in rendered markdown but parseable by the pipeline. Always emit it as the very last line of output.
