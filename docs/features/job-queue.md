@@ -22,7 +22,7 @@ This is applied in three functions:
 - `_recover_interrupted_jobs()` -- running to pending (sync, startup)
 - `_reset_running_jobs()` -- running to pending (async, shutdown)
 
-The `_extract_job_fields()` helper reads all 24 non-auto fields from a AgentSession instance for recreation.
+The `_extract_job_fields()` helper reads all non-auto fields (56+) from an AgentSession instance for recreation.
 
 ## Worker Drain Guard
 
@@ -59,7 +59,22 @@ Branch existence is then verified individually in git (`git branch --list <speci
 | Revival could notify wrong chat | Revival only notifies the chat that owns the session |
 | `state.work_status` checked as fallback | Redis is the sole source of truth |
 
+## Deferred Execution (`scheduled_after`)
+
+The `AgentSession` model has a `scheduled_after` field (UTC float timestamp). `_pop_job()` skips jobs where `scheduled_after > now()`, enabling deferred execution. Jobs with `scheduled_after` in the past or `None` are eligible immediately.
+
+## Priority Model
+
+Four-tier priority system: `urgent > high > normal > low`. Default priority is `normal` for all new jobs. Within the same tier, FIFO ordering (oldest first). Recovery jobs use `high`; catchup/revival use `low`.
+
+Priority ranking constant: `PRIORITY_RANK = {"urgent": 0, "high": 1, "normal": 2, "low": 3}`
+
+## Self-Scheduling
+
+The agent can enqueue jobs mid-conversation via `tools/job_scheduler.py`. See [Job Scheduling](job-scheduling.md) for details.
+
 ## See Also
 
 - `docs/features/scale-job-queue-with-popoto-and-worktrees.md` -- Original job queue architecture
+- `docs/features/job-scheduling.md` -- Agent-initiated scheduling tool
 - `agent/job_queue.py` -- Implementation

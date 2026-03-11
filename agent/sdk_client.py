@@ -410,6 +410,9 @@ class ValorAgent:
         workflow_id: str | None = None,
         task_list_id: str | None = None,
         max_budget_usd: float | None = None,
+        chat_id: str | None = None,
+        project_key: str | None = None,
+        message_id: int | None = None,
     ):
         """
         Initialize ValorAgent.
@@ -423,6 +426,9 @@ class ValorAgent:
                 via CLAUDE_CODE_TASK_LIST_ID environment variable.
             max_budget_usd: Maximum budget in USD for a single agent session.
                 Defaults to SDK_MAX_BUDGET_USD env var or 5.00.
+            chat_id: Optional Telegram chat ID for job routing context.
+            project_key: Optional project key for job routing context.
+            message_id: Optional Telegram message ID for job routing context.
         """
         self.working_dir = Path(working_dir) if working_dir else Path(__file__).parent.parent
         self.system_prompt = system_prompt or load_system_prompt()
@@ -430,6 +436,9 @@ class ValorAgent:
         self.workflow_id = workflow_id
         self.task_list_id = task_list_id
         self.max_budget_usd = max_budget_usd or float(os.getenv("SDK_MAX_BUDGET_USD", "5.00"))
+        self.chat_id = chat_id
+        self.project_key = project_key
+        self.message_id = message_id
         self.workflow_state: WorkflowState | None = None
 
         # Load workflow state if workflow_id provided
@@ -552,6 +561,15 @@ class ValorAgent:
         # without relying on Claude Code's internal UUID matching.
         if session_id:
             env["VALOR_SESSION_ID"] = session_id
+
+        # Pass routing context so tools (e.g., job_scheduler) can determine
+        # where to route output from self-scheduled jobs.
+        if self.chat_id:
+            env["CHAT_ID"] = str(self.chat_id)
+        if self.project_key:
+            env["PROJECT_KEY"] = self.project_key
+        if self.message_id is not None:
+            env["MESSAGE_ID"] = str(self.message_id)
 
         # Build system prompt with workflow context if workflow_id is present
         system_prompt = self.system_prompt
@@ -911,8 +929,15 @@ async def get_agent_response_sdk(
     )
 
     try:
+        # Extract project_key for env var injection (job_queue sets _key on project dict)
+        _project_key = project.get("_key") if project else None
+
         agent = ValorAgent(
-            working_dir=working_dir, workflow_id=workflow_id, task_list_id=task_list_id
+            working_dir=working_dir,
+            workflow_id=workflow_id,
+            task_list_id=task_list_id,
+            chat_id=chat_id,
+            project_key=_project_key,
         )
         response = await agent.query(enriched_message, session_id=session_id)
 

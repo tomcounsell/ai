@@ -55,7 +55,9 @@ class AgentSession(Model):
     status = KeyField(default="pending")
 
     # === Queue fields (from RedisJob) ===
-    priority = Field(default="high")  # high | low
+    priority = Field(default="normal")  # urgent | high | normal | low
+    scheduled_after = Field(type=float, null=True)  # UTC timestamp; _pop_job() skips if > now()
+    scheduling_depth = Field(type=int, default=0)  # Self-scheduling chain depth (cap at 3)
     created_at = SortedField(type=float, partition_by="project_key")
     working_dir = Field()
     message_text = Field(max_length=MSG_MAX_CHARS)

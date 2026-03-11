@@ -85,6 +85,30 @@ bug_sessions = sessions_by_tag("bug")
 auto_tag_session("session-123")  # called automatically at session completion
 ```
 
+### Job Scheduler (`tools.job_scheduler`)
+
+Agent-initiated queue operations. Schedule SDLC jobs, push arbitrary messages,
+and manage queue state mid-conversation.
+
+```bash
+# Schedule SDLC work for a GitHub issue
+python -m tools.job_scheduler schedule --issue 113
+python -m tools.job_scheduler schedule --issue 113 --after "2026-03-12T02:00:00Z"
+
+# Push arbitrary job
+python -m tools.job_scheduler push --message "What is the architecture?"
+
+# Queue status
+python -m tools.job_scheduler status
+
+# Queue manipulation
+python -m tools.job_scheduler bump --job-id <JOB_ID>
+python -m tools.job_scheduler pop --project valor
+python -m tools.job_scheduler cancel --job-id <JOB_ID>
+```
+
+See `docs/features/job-scheduling.md` for full documentation.
+
 ## Image Tools
 
 Installed CLI commands via `pip install -e .`

@@ -32,6 +32,9 @@ from models.agent_session import AgentSession
 
 logger = logging.getLogger(__name__)
 
+# 4-tier priority ranking: lower number = higher priority
+PRIORITY_RANK = {"urgent": 0, "high": 1, "normal": 2, "low": 3}
+
 
 @dataclass
 class SendToChatResult:
@@ -120,7 +123,7 @@ class Job:
 
     @property
     def priority(self) -> str:
-        return self._rj.priority or "high"
+        return self._rj.priority or "normal"
 
     @property
     def revival_context(self) -> str | None:
@@ -185,6 +188,8 @@ _JOB_FIELDS = [
     "project_key",
     "status",
     "priority",
+    "scheduled_after",
+    "scheduling_depth",
     "created_at",
     "session_id",
     "working_dir",
@@ -257,7 +262,7 @@ async def _push_job(
     chat_id: str,
     message_id: int,
     chat_title: str | None = None,
-    priority: str = "high",
+    priority: str = "normal",
     revival_context: str | None = None,
     sender_id: int | None = None,
     workflow_id: str | None = None,
@@ -272,6 +277,8 @@ async def _push_job(
     classification_type: str | None = None,
     auto_continue_count: int = 0,
     correlation_id: str | None = None,
+    scheduled_after: float | None = None,
+    scheduling_depth: int = 0,
 ) -> int:
     """Create a job in Redis and return the pending queue depth for this project."""
     await AgentSession.async_create(
@@ -300,6 +307,8 @@ async def _push_job(
         classification_type=classification_type,
         auto_continue_count=auto_continue_count,
         correlation_id=correlation_id,
+        scheduled_after=scheduled_after,
+        scheduling_depth=scheduling_depth,
     )
 
     # Log lifecycle transition for newly created pending job
@@ -317,7 +326,8 @@ async def _pop_job(project_key: str) -> Job | None:
     """
     Pop the highest priority pending job for a project.
 
-    Order: high priority first, then within same priority FILO (newest first).
+    Order: urgent > high > normal > low, then within same priority FIFO (oldest first).
+    Jobs with scheduled_after in the future are skipped (deferred execution).
 
     Uses delete-and-recreate instead of field mutation to avoid KeyField
     index corruption. Popoto's KeyField.on_save() only ADDs to the new
@@ -328,13 +338,19 @@ async def _pop_job(project_key: str) -> Job | None:
     if not pending:
         return None
 
-    # Sort: high priority first, then newest first (FILO)
-    def sort_key(j):
-        prio = 0 if j.priority == "high" else 1
-        return (prio, -(j.created_at or 0))
+    # Filter out jobs with scheduled_after in the future
+    now = time.time()
+    eligible = [j for j in pending if not j.scheduled_after or j.scheduled_after <= now]
+    if not eligible:
+        return None
 
-    pending.sort(key=sort_key)
-    chosen = pending[0]
+    # Sort: highest priority first (4-tier), then oldest first (FIFO)
+    def sort_key(j):
+        prio = PRIORITY_RANK.get(j.priority, 2)  # default to normal
+        return (prio, j.created_at or 0)
+
+    eligible.sort(key=sort_key)
+    chosen = eligible[0]
 
     # Delete-and-recreate to avoid KeyField index corruption.
     # Both sides are logged so a crash between delete and create is diagnosable.
@@ -809,7 +825,7 @@ async def enqueue_job(
     chat_id: str,
     message_id: int,
     chat_title: str | None = None,
-    priority: str = "high",
+    priority: str = "normal",
     revival_context: str | None = None,
     sender_id: int | None = None,
     workflow_id: str | None = None,
@@ -824,6 +840,8 @@ async def enqueue_job(
     classification_type: str | None = None,
     auto_continue_count: int = 0,
     correlation_id: str | None = None,
+    scheduled_after: float | None = None,
+    scheduling_depth: int = 0,
 ) -> int:
     """
     Add a job to Redis and ensure worker is running.
@@ -857,6 +875,8 @@ async def enqueue_job(
         classification_type=classification_type,
         auto_continue_count=auto_continue_count,
         correlation_id=correlation_id,
+        scheduled_after=scheduled_after,
+        scheduling_depth=scheduling_depth,
     )
     _ensure_worker(project_key)
     log_prefix = f"[{correlation_id}]" if correlation_id else f"[{project_key}]"
