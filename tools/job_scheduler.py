@@ -6,7 +6,8 @@ and manage queue state mid-conversation.
 
 Usage:
     python -m tools.job_scheduler schedule --issue 113
-    python -m tools.job_scheduler schedule --issue 113 --priority high --after "2026-03-12T02:00:00Z"
+    python -m tools.job_scheduler schedule --issue 113 --priority high \
+        --after "2026-03-12T02:00:00Z"
     python -m tools.job_scheduler status
     python -m tools.job_scheduler push --message "What is the architecture?" --project valor
     python -m tools.job_scheduler bump --job-id <job_id>
@@ -68,7 +69,7 @@ def _check_rate_limit(project_key: str) -> bool:
         from models.agent_session import AgentSession
 
         cutoff = time.time() - 3600  # 1 hour ago
-        all_sessions = AgentSession.query.filter(project_key=project_key)
+        all_sessions = list(AgentSession.query.filter(project_key=project_key))
         recent_scheduled = 0
         for s in all_sessions:
             if s.scheduling_depth and int(s.scheduling_depth) > 0:
@@ -111,37 +112,48 @@ def cmd_schedule(args: argparse.Namespace) -> int:
 
     # Check depth cap
     if depth >= MAX_SCHEDULING_DEPTH:
-        _output({
-            "status": "error",
-            "message": f"Scheduling depth cap reached ({MAX_SCHEDULING_DEPTH}). "
-            "Cannot schedule further jobs from a self-scheduled job.",
-        })
+        _output(
+            {
+                "status": "error",
+                "message": f"Scheduling depth cap reached ({MAX_SCHEDULING_DEPTH}). "
+                "Cannot schedule further jobs from a self-scheduled job.",
+            }
+        )
         return 1
 
     project_key = args.project or ctx["project_key"]
 
     # Check rate limit
     if not _check_rate_limit(project_key):
-        _output({
-            "status": "error",
-            "message": f"Rate limit exceeded: max {MAX_SCHEDULED_PER_HOUR} scheduled jobs per hour per project.",
-        })
+        _output(
+            {
+                "status": "error",
+                "message": (
+                    f"Rate limit exceeded: max {MAX_SCHEDULED_PER_HOUR} "
+                    "scheduled jobs per hour per project."
+                ),
+            }
+        )
         return 1
 
     # Validate issue
     issue = _validate_issue(args.issue)
     if issue is None:
-        _output({
-            "status": "error",
-            "message": f"GitHub issue #{args.issue} not found or not accessible.",
-        })
+        _output(
+            {
+                "status": "error",
+                "message": f"GitHub issue #{args.issue} not found or not accessible.",
+            }
+        )
         return 1
 
     if issue.get("state") == "closed":
-        _output({
-            "status": "error",
-            "message": f"GitHub issue #{args.issue} is closed.",
-        })
+        _output(
+            {
+                "status": "error",
+                "message": f"GitHub issue #{args.issue} is closed.",
+            }
+        )
         return 1
 
     # Parse scheduled_after
@@ -153,10 +165,15 @@ def cmd_schedule(args: argparse.Namespace) -> int:
             if scheduled_after < time.time():
                 scheduled_after = None  # Past = immediate
         except ValueError:
-            _output({
-                "status": "error",
-                "message": f"Invalid datetime format: {args.after}. Use ISO 8601 (e.g., 2026-03-12T02:00:00Z).",
-            })
+            _output(
+                {
+                    "status": "error",
+                    "message": (
+                        f"Invalid datetime format: {args.after}. "
+                        "Use ISO 8601 (e.g., 2026-03-12T02:00:00Z)."
+                    ),
+                }
+            )
             return 1
 
     # Build message text for SDLC dispatch
@@ -199,7 +216,7 @@ def cmd_schedule(args: argparse.Namespace) -> int:
         )
 
         # Count queue position
-        pending = AgentSession.query.filter(project_key=project_key, status="pending")
+        pending = list(AgentSession.query.filter(project_key=project_key, status="pending"))
         queue_position = len(pending)
 
         scheduled_info = ""
@@ -207,24 +224,28 @@ def cmd_schedule(args: argparse.Namespace) -> int:
             dt = datetime.fromtimestamp(scheduled_after, tz=UTC)
             scheduled_info = f", scheduled_after={dt.isoformat()}"
 
-        _output({
-            "status": "queued",
-            "job_id": session.job_id,
-            "session_id": session_id,
-            "issue": args.issue,
-            "issue_title": issue_title,
-            "priority": priority,
-            "queue_position": queue_position,
-            "scheduling_depth": depth + 1,
-            "scheduled_after": scheduled_info or None,
-        })
+        _output(
+            {
+                "status": "queued",
+                "job_id": session.job_id,
+                "session_id": session_id,
+                "issue": args.issue,
+                "issue_title": issue_title,
+                "priority": priority,
+                "queue_position": queue_position,
+                "scheduling_depth": depth + 1,
+                "scheduled_after": scheduled_info or None,
+            }
+        )
         return 0
 
     except Exception as e:
-        _output({
-            "status": "error",
-            "message": f"Failed to enqueue job: {e}",
-        })
+        _output(
+            {
+                "status": "error",
+                "message": f"Failed to enqueue job: {e}",
+            }
+        )
         return 1
 
 
@@ -235,9 +256,9 @@ def cmd_status(args: argparse.Namespace) -> int:
     project_key = args.project or _get_env_context()["project_key"]
 
     try:
-        pending = AgentSession.query.filter(project_key=project_key, status="pending")
-        running = AgentSession.query.filter(project_key=project_key, status="running")
-        completed = AgentSession.query.filter(project_key=project_key, status="completed")
+        pending = list(AgentSession.query.filter(project_key=project_key, status="pending"))
+        running = list(AgentSession.query.filter(project_key=project_key, status="running"))
+        completed = list(AgentSession.query.filter(project_key=project_key, status="completed"))
 
         # Sort pending by priority then FIFO
         from agent.job_queue import PRIORITY_RANK
@@ -259,10 +280,14 @@ def cmd_status(args: argparse.Namespace) -> int:
                 "session_id": j.session_id,
                 "priority": j.priority,
                 "message_preview": (j.message_text or "")[:100],
-                "created_at": datetime.fromtimestamp(j.created_at, tz=UTC).isoformat() if j.created_at else None,
+                "created_at": datetime.fromtimestamp(j.created_at, tz=UTC).isoformat()
+                if j.created_at
+                else None,
             }
             if j.scheduled_after:
-                job_info["scheduled_after"] = datetime.fromtimestamp(j.scheduled_after, tz=UTC).isoformat()
+                job_info["scheduled_after"] = datetime.fromtimestamp(
+                    j.scheduled_after, tz=UTC
+                ).isoformat()
             if j.issue_url:
                 job_info["issue_url"] = j.issue_url
             result["pending_jobs"].append(job_info)
@@ -273,7 +298,9 @@ def cmd_status(args: argparse.Namespace) -> int:
                 "session_id": j.session_id,
                 "priority": j.priority,
                 "message_preview": (j.message_text or "")[:100],
-                "started_at": datetime.fromtimestamp(j.started_at, tz=UTC).isoformat() if j.started_at else None,
+                "started_at": datetime.fromtimestamp(j.started_at, tz=UTC).isoformat()
+                if j.started_at
+                else None,
             }
             if j.issue_url:
                 job_info["issue_url"] = j.issue_url
@@ -295,19 +322,23 @@ def cmd_push(args: argparse.Namespace) -> int:
     depth = _get_scheduling_depth()
 
     if depth >= MAX_SCHEDULING_DEPTH:
-        _output({
-            "status": "error",
-            "message": f"Scheduling depth cap reached ({MAX_SCHEDULING_DEPTH}).",
-        })
+        _output(
+            {
+                "status": "error",
+                "message": f"Scheduling depth cap reached ({MAX_SCHEDULING_DEPTH}).",
+            }
+        )
         return 1
 
     project_key = args.project or ctx["project_key"]
 
     if not _check_rate_limit(project_key):
-        _output({
-            "status": "error",
-            "message": f"Rate limit exceeded: max {MAX_SCHEDULED_PER_HOUR}/hr/project.",
-        })
+        _output(
+            {
+                "status": "error",
+                "message": f"Rate limit exceeded: max {MAX_SCHEDULED_PER_HOUR}/hr/project.",
+            }
+        )
         return 1
 
     session_id = f"push-{uuid.uuid4().hex[:8]}"
@@ -339,16 +370,18 @@ def cmd_push(args: argparse.Namespace) -> int:
             correlation_id=f"push-{uuid.uuid4().hex[:12]}",
         )
 
-        pending = AgentSession.query.filter(project_key=project_key, status="pending")
+        pending = list(AgentSession.query.filter(project_key=project_key, status="pending"))
 
-        _output({
-            "status": "queued",
-            "job_id": session.job_id,
-            "session_id": session_id,
-            "priority": priority,
-            "queue_position": len(pending),
-            "scheduling_depth": depth + 1,
-        })
+        _output(
+            {
+                "status": "queued",
+                "job_id": session.job_id,
+                "session_id": session_id,
+                "priority": priority,
+                "queue_position": len(pending),
+                "scheduling_depth": depth + 1,
+            }
+        )
         return 0
 
     except Exception as e:
@@ -362,7 +395,7 @@ def cmd_bump(args: argparse.Namespace) -> int:
 
     try:
         # Find by job_id across all projects
-        all_pending = AgentSession.query.filter(status="pending")
+        all_pending = list(AgentSession.query.filter(status="pending"))
         target = None
         for j in all_pending:
             if j.job_id == args.job_id:
@@ -370,7 +403,9 @@ def cmd_bump(args: argparse.Namespace) -> int:
                 break
 
         if not target:
-            _output({"status": "error", "message": f"Job {args.job_id} not found in pending queue."})
+            _output(
+                {"status": "error", "message": f"Job {args.job_id} not found in pending queue."}
+            )
             return 1
 
         # Use delete-and-recreate pattern for KeyField safety
@@ -382,12 +417,14 @@ def cmd_bump(args: argparse.Namespace) -> int:
         fields["created_at"] = time.time()
         new_job = AgentSession.create(**fields)
 
-        _output({
-            "status": "bumped",
-            "job_id": new_job.job_id,
-            "session_id": new_job.session_id,
-            "new_priority": "urgent",
-        })
+        _output(
+            {
+                "status": "bumped",
+                "job_id": new_job.job_id,
+                "session_id": new_job.session_id,
+                "new_priority": "urgent",
+            }
+        )
         return 0
 
     except Exception as e:
@@ -404,7 +441,7 @@ def cmd_pop(args: argparse.Namespace) -> int:
     try:
         from agent.job_queue import PRIORITY_RANK
 
-        pending = AgentSession.query.filter(project_key=project_key, status="pending")
+        pending = list(AgentSession.query.filter(project_key=project_key, status="pending"))
         if not pending:
             _output({"status": "empty", "message": "No pending jobs."})
             return 0
@@ -421,10 +458,12 @@ def cmd_pop(args: argparse.Namespace) -> int:
         }
         chosen.delete()
 
-        _output({
-            "status": "popped",
-            **info,
-        })
+        _output(
+            {
+                "status": "popped",
+                **info,
+            }
+        )
         return 0
 
     except Exception as e:
@@ -437,7 +476,7 @@ def cmd_cancel(args: argparse.Namespace) -> int:
     from models.agent_session import AgentSession
 
     try:
-        all_pending = AgentSession.query.filter(status="pending")
+        all_pending = list(AgentSession.query.filter(status="pending"))
         target = None
         for j in all_pending:
             if j.job_id == args.job_id:
@@ -445,7 +484,9 @@ def cmd_cancel(args: argparse.Namespace) -> int:
                 break
 
         if not target:
-            _output({"status": "error", "message": f"Job {args.job_id} not found in pending queue."})
+            _output(
+                {"status": "error", "message": f"Job {args.job_id} not found in pending queue."}
+            )
             return 1
 
         info = {
