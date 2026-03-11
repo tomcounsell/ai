@@ -62,12 +62,31 @@ Query AgentSession: active/dormant with non-null expectations
 Haiku classifier: "Is this message responding to a session's expectations?"
     |
     v
-confidence >= 0.80? --YES--> Route to matched session
-    |
-    NO
-    v
-Create new session (current behavior)
+confidence >= 0.80? --YES--> Check matched session status
+    |                              |
+    NO                             v
+    v                    running/active? --YES--> Push to steering queue + ack
+Create new session           |
+(current behavior)           NO (dormant/other)
+                             v
+                        Resume session (use session_id)
 ```
+
+### Phase 3: Active Session Steering (#318)
+
+When semantic routing matches an unthreaded message to a session that is currently **running or active**, the message is pushed to the session's steering queue (`agent/steering.py`) instead of creating a competing job. The Observer picks up the message at its next checkpoint.
+
+**Decision matrix:**
+
+| Session Status | Match Confidence | Action |
+|---|---|---|
+| running/active | >= 0.80 | Push to `queued_steering_messages` via `push_steering_message()`, send ack |
+| dormant | >= 0.80 | Resume session using `session_id` (existing behavior) |
+| any | < 0.80 | Create new session (existing behavior) |
+
+**User feedback:** When a message is steered into an active session, the user receives an acknowledgment: *"Noted — I'll incorporate this on my next checkpoint."* For abort keywords (`stop`, `cancel`, `abort`, `nevermind`), the ack is: *"Stopping current task."*
+
+**Implementation** (`bridge/telegram_bridge.py`): After `find_matching_session()` returns a match, the bridge loads the `AgentSession` and checks its status. Active sessions get `push_steering_message()` + early return. Dormant/other sessions fall through to existing behavior. Any failure in the active session check falls through gracefully with a warning log.
 
 ## Model Fields
 
@@ -135,8 +154,9 @@ The threshold is intentionally conservative. False positives (routing to the wro
 | `bridge/summarizer.py` | Structured `tool_use` output, `StructuredSummary` dataclass, OpenRouter fallback (replaces Ollama) |
 | `bridge/session_router.py` | New module: `find_matching_session()`, `is_semantic_routing_enabled()` |
 | `bridge/response.py` | Persist routing fields after summarization |
-| `bridge/telegram_bridge.py` | Integrate semantic router in non-reply-to message handling |
+| `bridge/telegram_bridge.py` | Integrate semantic router in non-reply-to message handling; active session steering (#318) |
 | `tests/test_summarizer.py` | Updated mocks for `StructuredSummary` returns and OpenRouter fallback |
+| `tests/test_unthreaded_routing.py` | Decision matrix tests: active steering, dormant passthrough, abort detection, FIFO ordering, missing session fallthrough |
 
 ## Configuration
 
@@ -152,3 +172,13 @@ All 120 summarizer tests pass. The semantic router is tested through the existin
 - Mock returns changed from `str` to `StructuredSummary` objects
 - Ollama fallback tests renamed to OpenRouter fallback tests
 - All `_summarize_with_ollama` patches replaced with `_summarize_with_openrouter`
+
+### Unthreaded Routing Tests (`tests/test_unthreaded_routing.py`)
+
+7 tests covering the active session steering decision matrix:
+
+- **Active session steering**: `push_steering_message()` queues message, verifiable via `pop_all_steering_messages()`
+- **Abort detection**: Abort keywords (`stop`, `cancel`, `abort`, `nevermind`) set `is_abort=True` on steered messages
+- **FIFO ordering**: Multiple unthreaded messages queue in order
+- **Dormant passthrough**: Dormant sessions do not receive steering messages (resumed via session_id instead)
+- **Missing session fallthrough**: If matched session_id no longer exists in Redis, falls through to normal routing

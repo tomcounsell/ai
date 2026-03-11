@@ -700,6 +700,58 @@ async def main():
                         project_key=project_key,
                     )
                     if matched_id:
+                        # Check if matched session is active (running/active).
+                        # If so, queue the message for the Observer instead of
+                        # creating a competing job. (#318)
+                        try:
+                            from models.agent_session import AgentSession
+
+                            matched_sessions = list(
+                                AgentSession.query.filter(session_id=matched_id)
+                            )
+                            matched_session = matched_sessions[0] if matched_sessions else None
+                            if matched_session and matched_session.status in (
+                                "running",
+                                "active",
+                            ):
+                                # Active session: queue steering message, ack, return
+                                from agent.steering import ABORT_KEYWORDS, push_steering_message
+
+                                is_abort = clean_text.strip().lower() in ABORT_KEYWORDS
+                                push_steering_message(
+                                    matched_id,
+                                    clean_text,
+                                    sender_name,
+                                    is_abort=is_abort,
+                                )
+                                ack_text = (
+                                    "Stopping current task."
+                                    if is_abort
+                                    else "Noted \u2014 I'll incorporate this on my next checkpoint."
+                                )
+                                from bridge.markdown import send_markdown
+
+                                await send_markdown(
+                                    client, event.chat_id, ack_text, reply_to=message.id
+                                )
+                                await set_reaction(
+                                    client, event.chat_id, message.id, REACTION_RECEIVED
+                                )
+                                action = "abort" if is_abort else "steer"
+                                logger.info(
+                                    f"[routing] Semantic routing: steered unthreaded message "
+                                    f"into {matched_session.status} session {matched_id} "
+                                    f"({action}, confidence: {confidence:.2f})"
+                                )
+                                return
+                        except Exception as e:
+                            # Steering into active session failed — fall through
+                            # to normal routing (use matched_id as session_id)
+                            logger.warning(
+                                f"Semantic routing active session check failed (non-fatal): {e}"
+                            )
+
+                        # Dormant or other status: use matched session as before
                         session_id = matched_id
                         logger.info(
                             f"[routing] Semantic routing: matched session {session_id} "
