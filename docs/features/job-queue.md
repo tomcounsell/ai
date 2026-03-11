@@ -22,7 +22,7 @@ This is applied in three functions:
 - `_recover_interrupted_jobs()` -- running to pending (sync, startup)
 - `_reset_running_jobs()` -- running to pending (async, shutdown)
 
-The `_extract_job_fields()` helper reads all 24 non-auto fields from a AgentSession instance for recreation.
+The `_extract_job_fields()` helper reads all non-auto fields (56+) from an AgentSession instance for recreation.
 
 ## Worker Drain Guard
 
