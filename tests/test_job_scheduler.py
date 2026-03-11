@@ -180,7 +180,7 @@ class TestJobSchedulerCLI:
             ["python", "-m", "tools.job_scheduler", "--help"],
             capture_output=True,
             text=True,
-            cwd="/Users/valorengels/src/ai/.worktrees/job_self_scheduling",
+            cwd="/Users/valorengels/src/ai",
         )
         assert result.returncode == 0
         assert "schedule" in result.stdout
@@ -192,7 +192,7 @@ class TestJobSchedulerCLI:
             ["python", "-m", "tools.job_scheduler", "status", "--project", "test-scheduler"],
             capture_output=True,
             text=True,
-            cwd="/Users/valorengels/src/ai/.worktrees/job_self_scheduling",
+            cwd="/Users/valorengels/src/ai",
         )
         assert result.returncode == 0
         data = json.loads(result.stdout)
@@ -218,7 +218,7 @@ class TestJobSchedulerCLI:
             ],
             capture_output=True,
             text=True,
-            cwd="/Users/valorengels/src/ai/.worktrees/job_self_scheduling",
+            cwd="/Users/valorengels/src/ai",
             env={**__import__("os").environ, "PROJECT_KEY": proj},
         )
         assert push_result.returncode == 0
@@ -237,7 +237,7 @@ class TestJobSchedulerCLI:
             ],
             capture_output=True,
             text=True,
-            cwd="/Users/valorengels/src/ai/.worktrees/job_self_scheduling",
+            cwd="/Users/valorengels/src/ai",
         )
         assert pop_result.returncode == 0
         pop_data = json.loads(pop_result.stdout)
@@ -259,7 +259,7 @@ class TestJobSchedulerCLI:
             ],
             capture_output=True,
             text=True,
-            cwd="/Users/valorengels/src/ai/.worktrees/job_self_scheduling",
+            cwd="/Users/valorengels/src/ai",
         )
         # Should fail (exit 1) with error JSON
         assert result.returncode == 1
@@ -279,7 +279,7 @@ class TestJobSchedulerCLI:
             ],
             capture_output=True,
             text=True,
-            cwd="/Users/valorengels/src/ai/.worktrees/job_self_scheduling",
+            cwd="/Users/valorengels/src/ai",
         )
         assert result.returncode == 1
         data = json.loads(result.stdout)
@@ -298,7 +298,7 @@ class TestJobSchedulerCLI:
             ],
             capture_output=True,
             text=True,
-            cwd="/Users/valorengels/src/ai/.worktrees/job_self_scheduling",
+            cwd="/Users/valorengels/src/ai",
         )
         assert result.returncode == 1
         data = json.loads(result.stdout)
@@ -324,7 +324,7 @@ class TestSelfSchedulingProtection:
             ],
             capture_output=True,
             text=True,
-            cwd="/Users/valorengels/src/ai/.worktrees/job_self_scheduling",
+            cwd="/Users/valorengels/src/ai",
             env={**__import__("os").environ, "PROJECT_KEY": "test-scheduler"},
         )
         assert result.returncode == 0
