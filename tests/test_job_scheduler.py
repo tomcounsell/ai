@@ -313,7 +313,7 @@ class TestSelfSchedulingProtection:
         """Pushed jobs increment scheduling_depth."""
         result = subprocess.run(
             [
-                "python",
+                "python3",
                 "-m",
                 "tools.job_scheduler",
                 "push",
