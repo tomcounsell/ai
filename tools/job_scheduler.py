@@ -69,13 +69,16 @@ def _check_rate_limit(project_key: str) -> bool:
         from models.agent_session import AgentSession
 
         cutoff = time.time() - 3600  # 1 hour ago
-        all_sessions = list(AgentSession.query.filter(project_key=project_key))
         recent_scheduled = 0
-        for s in all_sessions:
-            if s.scheduling_depth and int(s.scheduling_depth) > 0:
-                created = s.created_at or 0
-                if created > cutoff:
-                    recent_scheduled += 1
+        for status in ("pending", "running"):
+            sessions = list(
+                AgentSession.query.filter(project_key=project_key, status=status)
+            )
+            for s in sessions:
+                if s.scheduling_depth and int(s.scheduling_depth) > 0:
+                    created = s.created_at or 0
+                    if created > cutoff:
+                        recent_scheduled += 1
         return recent_scheduled < MAX_SCHEDULED_PER_HOUR
     except Exception as e:
         logger.warning(f"Rate limit check failed: {e}")
@@ -219,10 +222,9 @@ def cmd_schedule(args: argparse.Namespace) -> int:
         pending = list(AgentSession.query.filter(project_key=project_key, status="pending"))
         queue_position = len(pending)
 
-        scheduled_info = ""
+        scheduled_iso = None
         if scheduled_after:
-            dt = datetime.fromtimestamp(scheduled_after, tz=UTC)
-            scheduled_info = f", scheduled_after={dt.isoformat()}"
+            scheduled_iso = datetime.fromtimestamp(scheduled_after, tz=UTC).isoformat()
 
         _output(
             {
@@ -234,7 +236,7 @@ def cmd_schedule(args: argparse.Namespace) -> int:
                 "priority": priority,
                 "queue_position": queue_position,
                 "scheduling_depth": depth + 1,
-                "scheduled_after": scheduled_info or None,
+                "scheduled_after": scheduled_iso,
             }
         )
         return 0
