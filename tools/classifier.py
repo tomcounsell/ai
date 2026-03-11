@@ -70,8 +70,6 @@ def classify_request(message: str, context: str = "") -> dict:
         Exception: If classification fails (API error, invalid response, etc.)
     """
     try:
-
-
         api_key = get_anthropic_api_key()
         if not api_key:
             raise ValueError("No Anthropic API key found for classification")
@@ -167,8 +165,6 @@ async def classify_request_async(message: str, context: str = "") -> dict:
         Exception: If classification fails (API error, invalid response, etc.)
     """
     try:
-
-
         api_key = get_anthropic_api_key()
         if not api_key:
             raise ValueError("No Anthropic API key found for classification")
@@ -312,8 +308,6 @@ def classify_message_intent(
         }
 
     try:
-
-
         api_key = get_anthropic_api_key()
         if not api_key:
             raise ValueError("No Anthropic API key found for classification")
@@ -403,8 +397,6 @@ async def classify_message_intent_async(
         }
 
     try:
-
-
         api_key = get_anthropic_api_key()
         if not api_key:
             raise ValueError("No Anthropic API key found for classification")

@@ -57,7 +57,7 @@ def test_project_only_skills_exist():
 
 def test_project_only_skills_is_set():
     """PROJECT_ONLY_SKILLS should be a set for O(1) lookup."""
-    assert isinstance(PROJECT_ONLY_SKILLS, (set, frozenset))
+    assert isinstance(PROJECT_ONLY_SKILLS, set | frozenset)
 
 
 # ---------------------------------------------------------------------------

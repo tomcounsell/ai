@@ -106,9 +106,7 @@ def validate_command(filepath: Path) -> list[ValidationResult]:
     rel_path = str(filepath)
 
     if not filepath.exists():
-        results.append(
-            ValidationResult(rel_path, "exists", False, "File does not exist")
-        )
+        results.append(ValidationResult(rel_path, "exists", False, "File does not exist"))
         return results
 
     content = filepath.read_text(encoding="utf-8")
@@ -125,9 +123,7 @@ def validate_command(filepath: Path) -> list[ValidationResult]:
             )
         )
     else:
-        results.append(
-            ValidationResult(rel_path, "content", True, "Has substantial content")
-        )
+        results.append(ValidationResult(rel_path, "content", True, "Has substantial content"))
 
     # Check: Has a title (# heading)
     if not re.search(r"^#\s+\w+", body, re.MULTILINE):
@@ -166,9 +162,7 @@ def validate_command(filepath: Path) -> list[ValidationResult]:
             )
         else:
             results.append(
-                ValidationResult(
-                    rel_path, "frontmatter-keys", True, "Valid frontmatter keys"
-                )
+                ValidationResult(rel_path, "frontmatter-keys", True, "Valid frontmatter keys")
             )
 
         # Validate model if specified
@@ -222,9 +216,7 @@ def validate_skill(skill_dir: Path) -> list[ValidationResult]:
         )
         return results
 
-    results.append(
-        ValidationResult(rel_path, "frontmatter", True, "Has YAML frontmatter")
-    )
+    results.append(ValidationResult(rel_path, "frontmatter", True, "Has YAML frontmatter"))
 
     # Check: Required fields
     required_fields = ["name", "description"]
@@ -241,9 +233,7 @@ def validate_skill(skill_dir: Path) -> list[ValidationResult]:
             )
         else:
             results.append(
-                ValidationResult(
-                    rel_path, f"field-{field_name}", True, f"Has {field_name} field"
-                )
+                ValidationResult(rel_path, f"field-{field_name}", True, f"Has {field_name} field")
             )
 
     # Check: name matches directory
@@ -260,9 +250,7 @@ def validate_skill(skill_dir: Path) -> list[ValidationResult]:
                 )
             )
         else:
-            results.append(
-                ValidationResult(rel_path, "name-match", True, "Name matches directory")
-            )
+            results.append(ValidationResult(rel_path, "name-match", True, "Name matches directory"))
 
     # Check: description is useful
     if "description" in frontmatter:
@@ -287,9 +275,7 @@ def validate_skill(skill_dir: Path) -> list[ValidationResult]:
             )
         else:
             results.append(
-                ValidationResult(
-                    rel_path, "description-quality", True, "Good description"
-                )
+                ValidationResult(rel_path, "description-quality", True, "Good description")
             )
 
     # Check: Has content
@@ -303,9 +289,7 @@ def validate_skill(skill_dir: Path) -> list[ValidationResult]:
             )
         )
     else:
-        results.append(
-            ValidationResult(rel_path, "content", True, "Has substantial content")
-        )
+        results.append(ValidationResult(rel_path, "content", True, "Has substantial content"))
 
     return results
 
@@ -320,9 +304,7 @@ def validate_agent(filepath: Path) -> list[ValidationResult]:
         return results
 
     if not filepath.exists():
-        results.append(
-            ValidationResult(rel_path, "exists", False, "File does not exist")
-        )
+        results.append(ValidationResult(rel_path, "exists", False, "File does not exist"))
         return results
 
     content = filepath.read_text(encoding="utf-8")
@@ -341,9 +323,7 @@ def validate_agent(filepath: Path) -> list[ValidationResult]:
         )
         return results
 
-    results.append(
-        ValidationResult(rel_path, "frontmatter", True, "Has YAML frontmatter")
-    )
+    results.append(ValidationResult(rel_path, "frontmatter", True, "Has YAML frontmatter"))
 
     # Check: Required fields
     required_fields = ["name", "description"]
@@ -360,9 +340,7 @@ def validate_agent(filepath: Path) -> list[ValidationResult]:
             )
         else:
             results.append(
-                ValidationResult(
-                    rel_path, f"field-{field_name}", True, f"Has {field_name} field"
-                )
+                ValidationResult(rel_path, f"field-{field_name}", True, f"Has {field_name} field")
             )
 
     # Check: name matches filename (without .md)
@@ -379,9 +357,7 @@ def validate_agent(filepath: Path) -> list[ValidationResult]:
                 )
             )
         else:
-            results.append(
-                ValidationResult(rel_path, "name-match", True, "Name matches filename")
-            )
+            results.append(ValidationResult(rel_path, "name-match", True, "Name matches filename"))
 
     # Check: model is valid if specified
     if "model" in frontmatter:
@@ -405,9 +381,7 @@ def validate_validator(filepath: Path) -> list[ValidationResult]:
     rel_path = str(filepath)
 
     if not filepath.exists():
-        results.append(
-            ValidationResult(rel_path, "exists", False, "File does not exist")
-        )
+        results.append(ValidationResult(rel_path, "exists", False, "File does not exist"))
         return results
 
     content = filepath.read_text(encoding="utf-8")
@@ -433,9 +407,7 @@ def validate_validator(filepath: Path) -> list[ValidationResult]:
             )
         )
     else:
-        results.append(
-            ValidationResult(rel_path, "shebang", True, "Has uv run shebang")
-        )
+        results.append(ValidationResult(rel_path, "shebang", True, "Has uv run shebang"))
 
     # Check: Has inline script metadata
     if "# /// script" not in content:
@@ -449,9 +421,7 @@ def validate_validator(filepath: Path) -> list[ValidationResult]:
             )
         )
     else:
-        results.append(
-            ValidationResult(rel_path, "script-metadata", True, "Has script metadata")
-        )
+        results.append(ValidationResult(rel_path, "script-metadata", True, "Has script metadata"))
 
     # Check: Has docstring
     if '"""' not in content[:500]:
@@ -464,9 +434,7 @@ def validate_validator(filepath: Path) -> list[ValidationResult]:
             )
         )
     else:
-        results.append(
-            ValidationResult(rel_path, "docstring", True, "Has module docstring")
-        )
+        results.append(ValidationResult(rel_path, "docstring", True, "Has module docstring"))
 
     # Check: Has main function
     if "def main(" not in content:
@@ -479,9 +447,7 @@ def validate_validator(filepath: Path) -> list[ValidationResult]:
             )
         )
     else:
-        results.append(
-            ValidationResult(rel_path, "main-function", True, "Has main() function")
-        )
+        results.append(ValidationResult(rel_path, "main-function", True, "Has main() function"))
 
     # Check: Has proper exit codes
     if "sys.exit(0)" not in content or "sys.exit(2)" not in content:
@@ -494,9 +460,7 @@ def validate_validator(filepath: Path) -> list[ValidationResult]:
             )
         )
     else:
-        results.append(
-            ValidationResult(rel_path, "exit-codes", True, "Has proper exit codes")
-        )
+        results.append(ValidationResult(rel_path, "exit-codes", True, "Has proper exit codes"))
 
     # Check: Can execute (syntax check)
     try:
@@ -515,13 +479,9 @@ def validate_validator(filepath: Path) -> list[ValidationResult]:
                 )
             )
         else:
-            results.append(
-                ValidationResult(rel_path, "syntax", True, "Valid Python syntax")
-            )
+            results.append(ValidationResult(rel_path, "syntax", True, "Valid Python syntax"))
     except Exception as e:
-        results.append(
-            ValidationResult(rel_path, "syntax", False, f"Could not check syntax: {e}")
-        )
+        results.append(ValidationResult(rel_path, "syntax", False, f"Could not check syntax: {e}"))
 
     return results
 
@@ -546,9 +506,7 @@ def run_validation(
                     report.add(r)
         elif verbose:
             report.add(
-                ValidationResult(
-                    COMMANDS_DIR, "directory", False, "Commands directory not found"
-                )
+                ValidationResult(COMMANDS_DIR, "directory", False, "Commands directory not found")
             )
 
     # Validate skills
@@ -562,9 +520,7 @@ def run_validation(
                         report.add(r)
         elif verbose:
             report.add(
-                ValidationResult(
-                    SKILLS_DIR, "directory", False, "Skills directory not found"
-                )
+                ValidationResult(SKILLS_DIR, "directory", False, "Skills directory not found")
             )
 
     # Validate agents
@@ -577,9 +533,7 @@ def run_validation(
                     report.add(r)
         elif verbose:
             report.add(
-                ValidationResult(
-                    AGENTS_DIR, "directory", False, "Agents directory not found"
-                )
+                ValidationResult(AGENTS_DIR, "directory", False, "Agents directory not found")
             )
 
     # Validate validators
@@ -605,9 +559,7 @@ def run_validation(
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Validate Claude Code configuration files"
-    )
+    parser = argparse.ArgumentParser(description="Validate Claude Code configuration files")
     parser.add_argument(
         "-t",
         "--type",
@@ -647,8 +599,7 @@ def main():
             "passed": report.passed,
             "summary": report.summary(),
             "errors": [
-                {"path": r.path, "check": r.check, "message": r.message}
-                for r in report.errors
+                {"path": r.path, "check": r.check, "message": r.message} for r in report.errors
             ],
         }
         print(json.dumps(output, indent=2))

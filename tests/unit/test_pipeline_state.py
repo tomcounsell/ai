@@ -65,9 +65,7 @@ def test_exists_after_initialize():
 
 
 def test_load_after_initialize():
-    original = ps.initialize(
-        "my-feature", "session/my-feature", ".worktrees/my-feature"
-    )
+    original = ps.initialize("my-feature", "session/my-feature", ".worktrees/my-feature")
     loaded = ps.load("my-feature")
     assert loaded == original
 
@@ -167,9 +165,7 @@ def test_save_uses_tmp_then_renames(tmp_path):
 
     # After a successful save the .tmp file must NOT exist
     tmp_file = tmp_path / "atomic" / "state.json.tmp"
-    assert (
-        not tmp_file.exists()
-    ), ".json.tmp file should be removed after successful save"
+    assert not tmp_file.exists(), ".json.tmp file should be removed after successful save"
 
     # The real state file must exist and be valid JSON
     state_file = tmp_path / "atomic" / "state.json"

@@ -137,19 +137,13 @@ class TestExtractOpenQuestions:
 
     def test_open_questions_with_answered_suffix_skipped(self):
         """## Open Questions (Answered) heading is also skipped."""
-        text = (
-            "## Open Questions (Answered)\n\n"
-            "1. Already answered question.\n"
-        )
+        text = "## Open Questions (Answered)\n\n1. Already answered question.\n"
         questions = _extract_open_questions(text)
         assert questions == []
 
     def test_open_questions_with_non_resolved_suffix_matched(self):
         """## Open Questions with a non-resolved suffix IS matched."""
-        text = (
-            "## Open Questions (for discussion)\n\n"
-            "1. Should we use approach A or B?\n"
-        )
+        text = "## Open Questions (for discussion)\n\n1. Should we use approach A or B?\n"
         questions = _extract_open_questions(text)
         assert len(questions) == 1
 
@@ -383,10 +377,7 @@ class TestStageAwareOpenQuestionGate:
         when the current SDLC stage is PLAN. During BUILD/TEST/etc., open
         questions in the output are ignored (they're likely quoted content).
         """
-        plan_output_with_questions = (
-            "## Open Questions\n\n"
-            "1. Should we use approach A?\n"
-        )
+        plan_output_with_questions = "## Open Questions\n\n1. Should we use approach A?\n"
         # The extractor always finds questions
         questions = _extract_open_questions(plan_output_with_questions)
         assert len(questions) == 1

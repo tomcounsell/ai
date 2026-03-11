@@ -19,9 +19,7 @@ env_path = Path(__file__).parent.parent / ".env"
 load_dotenv(env_path)
 
 # Set up logging
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
 API_ID = int(os.getenv("TELEGRAM_API_ID"))

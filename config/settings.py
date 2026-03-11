@@ -31,17 +31,13 @@ class DatabaseSettings(BaseModel):
         default=Path("data/ai_rebuild.db"), description="Path to SQLite database file"
     )
     echo: bool = Field(default=False, description="Enable SQL query logging")
-    pool_size: int = Field(
-        default=20, description="Database connection pool size", ge=1, le=100
-    )
+    pool_size: int = Field(default=20, description="Database connection pool size", ge=1, le=100)
 
 
 class APISettings(BaseModel):
     """API service configuration settings."""
 
-    claude_api_key: str | None = Field(
-        default=None, description="Claude API key for AI services"
-    )
+    claude_api_key: str | None = Field(default=None, description="Claude API key for AI services")
     openai_api_key: str | None = Field(default=None, description="OpenAI API key")
     perplexity_api_key: str | None = Field(
         default=None, description="Perplexity API key for search"
@@ -50,9 +46,7 @@ class APISettings(BaseModel):
         default=None, description="Notion API key for workspace integration"
     )
 
-    @field_validator(
-        "claude_api_key", "openai_api_key", "perplexity_api_key", "notion_api_key"
-    )
+    @field_validator("claude_api_key", "openai_api_key", "perplexity_api_key", "notion_api_key")
     @classmethod
     def validate_api_keys(cls, v):
         """Validate API key format if provided."""
@@ -66,9 +60,7 @@ class TelegramSettings(BaseModel):
 
     api_id: int | None = Field(default=None, description="Telegram API ID", ge=1)
     api_hash: str | None = Field(default=None, description="Telegram API hash")
-    session_name: str = Field(
-        default="ai_rebuild_session", description="Telegram session name"
-    )
+    session_name: str = Field(default="ai_rebuild_session", description="Telegram session name")
 
     @field_validator("api_hash")
     @classmethod
@@ -85,9 +77,7 @@ class ServerSettings(BaseModel):
     host: str = Field(default="127.0.0.1", description="Server host address")
     port: int = Field(default=8000, description="Server port", ge=1000, le=65535)
     reload: bool = Field(default=False, description="Enable auto-reload in development")
-    workers: int = Field(
-        default=1, description="Number of worker processes", ge=1, le=16
-    )
+    workers: int = Field(default=1, description="Number of worker processes", ge=1, le=16)
 
 
 class SecuritySettings(BaseModel):
@@ -114,9 +104,7 @@ class LoggingSettings(BaseModel):
         default="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         description="Log message format",
     )
-    file_path: Path | None = Field(
-        default=Path("logs/ai_rebuild.log"), description="Log file path"
-    )
+    file_path: Path | None = Field(default=Path("logs/ai_rebuild.log"), description="Log file path")
     max_file_size: int = Field(
         default=10 * 1024 * 1024,  # 10MB
         description="Maximum log file size in bytes",
@@ -135,9 +123,7 @@ class WorkspaceSettings(BaseModel):
         description="Path to workspace configuration file",
     )
     data_dir: Path = Field(default=Path("data"), description="Data directory path")
-    temp_dir: Path = Field(
-        default=Path("temp"), description="Temporary files directory"
-    )
+    temp_dir: Path = Field(default=Path("temp"), description="Temporary files directory")
     max_file_size: int = Field(
         default=100 * 1024 * 1024,  # 100MB
         description="Maximum file size for uploads",
@@ -148,21 +134,15 @@ class WorkspaceSettings(BaseModel):
 class PerformanceSettings(BaseModel):
     """Performance and resource management settings."""
 
-    max_workers: int = Field(
-        default=4, description="Maximum number of worker threads", ge=1, le=32
-    )
-    timeout: int = Field(
-        default=30, description="Default request timeout in seconds", ge=5, le=300
-    )
+    max_workers: int = Field(default=4, description="Maximum number of worker threads", ge=1, le=32)
+    timeout: int = Field(default=30, description="Default request timeout in seconds", ge=5, le=300)
     cache_ttl: int = Field(
         default=3600,
         description="Cache time-to-live in seconds",
         ge=60,
         le=86400,  # 24 hours
     )
-    memory_limit: int = Field(
-        default=1024, description="Memory limit in MB", ge=256, le=8192
-    )
+    memory_limit: int = Field(default=1024, description="Memory limit in MB", ge=256, le=8192)
 
 
 class Settings(BaseSettings):

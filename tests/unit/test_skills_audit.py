@@ -9,13 +9,7 @@ import pytest
 
 sys.path.insert(
     0,
-    str(
-        Path(__file__).resolve().parents[2]
-        / ".claude"
-        / "skills"
-        / "do-skills-audit"
-        / "scripts"
-    ),
+    str(Path(__file__).resolve().parents[2] / ".claude" / "skills" / "do-skills-audit" / "scripts"),
 )
 
 from audit_skills import (  # noqa: E402
@@ -192,21 +186,15 @@ class TestRule03NameField:
 
 class TestRule04DescriptionTrigger:
     def test_with_use_when(self):
-        f = rule_04_description_trigger(
-            "test", {"description": "Use when testing things."}
-        )
+        f = rule_04_description_trigger("test", {"description": "Use when testing things."})
         assert f.severity == "PASS"
 
     def test_with_triggered_by(self):
-        f = rule_04_description_trigger(
-            "test", {"description": "Triggered by test requests."}
-        )
+        f = rule_04_description_trigger("test", {"description": "Triggered by test requests."})
         assert f.severity == "PASS"
 
     def test_missing_trigger(self):
-        f = rule_04_description_trigger(
-            "test", {"description": "A skill for doing things."}
-        )
+        f = rule_04_description_trigger("test", {"description": "A skill for doing things."})
         assert f.severity == "WARN"
 
     def test_missing_description(self):
@@ -401,9 +389,7 @@ class TestApplyFixes:
         skill_dir = tmp_path / "test-skill"
         skill_dir.mkdir()
         skill_md = skill_dir / "SKILL.md"
-        skill_md.write_text(
-            "---\nname: test-skill\ndescription: 'has trailing  '\n---\n\nBody."
-        )
+        skill_md.write_text("---\nname: test-skill\ndescription: 'has trailing  '\n---\n\nBody.")
 
         fm = {"name": "test-skill", "description": "has trailing  "}
         text = skill_md.read_text()

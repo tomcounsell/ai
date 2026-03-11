@@ -239,12 +239,7 @@ class TestDescribeImage:
 
             ihdr_data = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
             ihdr_crc = zlib.crc32(b"IHDR" + ihdr_data) & 0xFFFFFFFF
-            ihdr = (
-                struct.pack(">I", 13)
-                + b"IHDR"
-                + ihdr_data
-                + struct.pack(">I", ihdr_crc)
-            )
+            ihdr = struct.pack(">I", 13) + b"IHDR" + ihdr_data + struct.pack(">I", ihdr_crc)
 
             raw_data = b"\x00" * (width * 3 + 1) * height
             compressed = zlib.compress(raw_data)
@@ -286,10 +281,7 @@ class TestDescribeImage:
         compressed = zlib.compress(raw_data)
         idat_crc = zlib.crc32(b"IDAT" + compressed) & 0xFFFFFFFF
         idat = (
-            struct.pack(">I", len(compressed))
-            + b"IDAT"
-            + compressed
-            + struct.pack(">I", idat_crc)
+            struct.pack(">I", len(compressed)) + b"IDAT" + compressed + struct.pack(">I", idat_crc)
         )
 
         iend_crc = zlib.crc32(b"IEND") & 0xFFFFFFFF

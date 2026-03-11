@@ -73,12 +73,8 @@ def _load_image(image_source: str) -> tuple[str, str]:
 def analyze_image(
     image_source: str,
     analysis_types: list[str] | None = None,
-    detail_level: Literal[
-        "minimal", "standard", "detailed", "comprehensive"
-    ] = "standard",
-    output_format: Literal[
-        "structured", "narrative", "technical", "accessibility"
-    ] = "structured",
+    detail_level: Literal["minimal", "standard", "detailed", "comprehensive"] = "standard",
+    output_format: Literal["structured", "narrative", "technical", "accessibility"] = "structured",
     model: str | None = None,
 ) -> dict:
     """
@@ -202,9 +198,7 @@ def analyze_image(
                                 {"type": "text", "text": combined_prompt},
                                 {
                                     "type": "image_url",
-                                    "image_url": {
-                                        "url": f"data:{media_type};base64,{image_data}"
-                                    },
+                                    "image_url": {"url": f"data:{media_type};base64,{image_data}"},
                                 },
                             ],
                         }
@@ -331,9 +325,7 @@ def main():
         print(f"Error: {result['error']}")
         sys.exit(1)
     else:
-        print(
-            f"\nAnalysis:\n{result.get('raw_analysis', result.get('description', ''))}"
-        )
+        print(f"\nAnalysis:\n{result.get('raw_analysis', result.get('description', ''))}")
 
 
 if __name__ == "__main__":

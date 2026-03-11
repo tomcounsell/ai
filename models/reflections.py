@@ -106,9 +106,7 @@ class ReflectionIgnore(Model):
     expires_at = SortedField(type=float)  # Unix timestamp when this expires
 
     @classmethod
-    def add_ignore(
-        cls, pattern: str, reason: str = "", days: int = 14
-    ) -> "ReflectionIgnore":
+    def add_ignore(cls, pattern: str, reason: str = "", days: int = 14) -> "ReflectionIgnore":
         """Add a new ignore entry that expires after `days` days."""
         now = time.time()
         return cls.create(
@@ -143,8 +141,6 @@ class ReflectionIgnore(Model):
         pattern_lower = pattern.lower()
         for entry in cls.get_active():
             entry_pattern = (entry.pattern or "").lower()
-            if entry_pattern and (
-                entry_pattern in pattern_lower or pattern_lower in entry_pattern
-            ):
+            if entry_pattern and (entry_pattern in pattern_lower or pattern_lower in entry_pattern):
                 return True
         return False

@@ -316,9 +316,7 @@ async def test_reactions_for_real(emojis_to_test: list[str], delay: float = 0.5)
     # Clear reaction and delete test message
     print("\nCleaning up...")
     try:
-        await client(
-            SendReactionRequest(peer=TEST_CHAT_ID, msg_id=test_msg.id, reaction=[])
-        )
+        await client(SendReactionRequest(peer=TEST_CHAT_ID, msg_id=test_msg.id, reaction=[]))
         await asyncio.sleep(1)
         await test_msg.delete()
         print("Test message deleted.")

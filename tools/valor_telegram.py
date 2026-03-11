@@ -97,9 +97,7 @@ def cmd_read(args: argparse.Namespace) -> int:
                 chat_id = args.chat
             else:
                 print(f"Error: Unknown chat '{args.chat}'", file=sys.stderr)
-                print(
-                    "Use 'valor-telegram chats' to list known chats.", file=sys.stderr
-                )
+                print("Use 'valor-telegram chats' to list known chats.", file=sys.stderr)
                 return 1
 
     # Search mode
@@ -290,9 +288,7 @@ def main() -> int:
         "--limit", "-n", type=int, default=10, help="Max messages (default: 10)"
     )
     read_parser.add_argument("--search", "-s", help="Search keyword")
-    read_parser.add_argument(
-        "--since", help="Time filter, e.g. '1 hour ago', '2 days ago'"
-    )
+    read_parser.add_argument("--since", help="Time filter, e.g. '1 hour ago', '2 days ago'")
     read_parser.add_argument("--json", action="store_true", help="Output as JSON")
 
     # send subcommand

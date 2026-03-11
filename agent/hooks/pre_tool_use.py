@@ -72,9 +72,7 @@ async def pre_tool_use_hook(
     if tool_name in ("Write", "Edit"):
         file_path = tool_input.get("file_path", "")
         if _is_sensitive_path(file_path):
-            logger.warning(
-                f"[pre_tool_use] Blocked {tool_name} to sensitive path: {file_path}"
-            )
+            logger.warning(f"[pre_tool_use] Blocked {tool_name} to sensitive path: {file_path}")
             return {
                 "decision": "block",
                 "reason": (
@@ -89,9 +87,7 @@ async def pre_tool_use_hook(
         for sensitive in SENSITIVE_PATHS:
             # Redirect operators: > file, >> file, >file, >>file
             if f"> {sensitive}" in command or f">{sensitive}" in command:
-                logger.warning(
-                    f"[pre_tool_use] Blocked Bash write to sensitive file: {sensitive}"
-                )
+                logger.warning(f"[pre_tool_use] Blocked Bash write to sensitive file: {sensitive}")
                 return {
                     "decision": "block",
                     "reason": (

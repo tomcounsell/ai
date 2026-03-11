@@ -95,7 +95,7 @@ class TestClassifierEdgeCases:
         # Could be bug (something broken) or chore (optimization)
         # Just verify it's classified consistently and has high confidence
         assert result["type"] in ["bug", "feature", "chore"]
-        assert isinstance(result["confidence"], (int, float))
+        assert isinstance(result["confidence"], int | float)
         assert 0.0 <= result["confidence"] <= 1.0
 
     def test_vague_request(self):
@@ -128,7 +128,7 @@ class TestClassifierResponseStructure:
         """Test confidence is a valid number."""
         result = classify_request("Fix bug")
 
-        assert isinstance(result["confidence"], (int, float))
+        assert isinstance(result["confidence"], int | float)
         assert not isinstance(result["confidence"], bool)  # bool is subclass of int
         assert 0.0 <= result["confidence"] <= 1.0
 
@@ -164,9 +164,9 @@ def test_classifier_parametrized(message, expected_type):
         f"Expected {expected_type}, got {result['type']} for '{message}'. "
         f"Reason: {result['reason']}"
     )
-    assert (
-        result["confidence"] > 0.7
-    ), f"Low confidence ({result['confidence']}) for '{message}' classified as {result['type']}"
+    assert result["confidence"] > 0.7, (
+        f"Low confidence ({result['confidence']}) for '{message}' classified as {result['type']}"
+    )
 
 
 def test_classifier_error_handling():

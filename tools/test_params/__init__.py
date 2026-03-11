@@ -264,9 +264,7 @@ def generate_edge_cases(
 def get_param_types() -> dict:
     """Get available parameter types and their subsets."""
     return {
-        "param_types": {
-            name: list(template.keys()) for name, template in PARAM_TEMPLATES.items()
-        },
+        "param_types": {name: list(template.keys()) for name, template in PARAM_TEMPLATES.items()},
         "test_types": list(TEST_TYPES.keys()),
     }
 

@@ -2,11 +2,8 @@
 """PostToolUse hook: Auto-fix lint and format on the changed file.
 
 Reads the tool_input from stdin (Claude Code hook protocol) and runs
-ruff check --fix + ruff format on just the affected file.
-
-This replaces the old approach of running `black $CLAUDE_PROJECT_DIR`
-which spawned multiprocessing workers across ALL files, causing 10+ GB
-memory usage. Now uses ruff for both linting and formatting (replacing black).
+ruff check --fix + ruff format on just the affected file, not the
+entire project directory. Uses ruff for both linting and formatting.
 """
 
 import json
