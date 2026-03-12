@@ -131,8 +131,7 @@ class TestCreateOptionsUUID:
             options = agent._create_options(session_id=test_session_id)
             assert options.continue_conversation is True
             assert options.resume == test_uuid, (
-                f"resume should be Claude UUID '{test_uuid}', "
-                f"not Telegram ID '{test_session_id}'"
+                f"resume should be Claude UUID '{test_uuid}', not Telegram ID '{test_session_id}'"
             )
         finally:
             session.delete()
@@ -179,9 +178,7 @@ class TestWatchdogCountScoping:
         from agent.health_check import watchdog_hook
 
         source = inspect.getsource(watchdog_hook)
-        assert "VALOR_SESSION_ID" in source, (
-            "watchdog_hook should check VALOR_SESSION_ID env var"
-        )
+        assert "VALOR_SESSION_ID" in source, "watchdog_hook should check VALOR_SESSION_ID env var"
 
 
 # ============================================================================
@@ -223,10 +220,7 @@ class TestDeterministicRecordSelection:
         try:
             # Simulate the re-read logic from job_queue.py (Bug 3 fix)
             all_sessions = list(AgentSession.query.filter(session_id=test_session_id))
-            active = [
-                s for s in all_sessions
-                if s.status in ("running", "active", "pending")
-            ]
+            active = [s for s in all_sessions if s.status in ("running", "active", "pending")]
             candidates = active if active else all_sessions
             candidates.sort(key=lambda s: s.created_at or 0, reverse=True)
             selected = candidates[0]
@@ -265,10 +259,7 @@ class TestDeterministicRecordSelection:
 
         try:
             all_sessions = list(AgentSession.query.filter(session_id=test_session_id))
-            active = [
-                s for s in all_sessions
-                if s.status in ("running", "active", "pending")
-            ]
+            active = [s for s in all_sessions if s.status in ("running", "active", "pending")]
             candidates = active if active else all_sessions
             candidates.sort(key=lambda s: s.created_at or 0, reverse=True)
             selected = candidates[0]
@@ -289,9 +280,7 @@ class TestDeterministicRecordSelection:
         assert "status" in source and "running" in source, (
             "Observer._handle_update_session should filter by status"
         )
-        assert "created_at" in source, (
-            "Observer._handle_update_session should sort by created_at"
-        )
+        assert "created_at" in source, "Observer._handle_update_session should sort by created_at"
 
     def test_status_filter_in_job_queue(self):
         """job_queue send_to_chat should use status-based filtering."""
@@ -327,9 +316,7 @@ class TestIntegrationAllFixes:
         import agent.job_queue as jq
 
         source = inspect.getsource(jq._push_job)
-        assert "superseded" in source, (
-            "_push_job should mark old completed records as superseded"
-        )
+        assert "superseded" in source, "_push_job should mark old completed records as superseded"
 
     def test_session_model_fields_complete(self):
         """AgentSession should have all required fields for the fix."""

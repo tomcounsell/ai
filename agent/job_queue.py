@@ -291,8 +291,7 @@ async def _push_job(
     # Mark old completed records as superseded to prevent duplicate-record ambiguity
     try:
         old_completed = [
-            s for s in AgentSession.query.filter(session_id=session_id)
-            if s.status == "completed"
+            s for s in AgentSession.query.filter(session_id=session_id) if s.status == "completed"
         ]
         for old in old_completed:
             old.status = "superseded"
@@ -1230,14 +1229,9 @@ async def _execute_job(job: Job) -> None:
         # picking a stale completed record when duplicates exist.
         if agent_session and agent_session.session_id:
             try:
-                all_sessions = list(
-                    AgentSession.query.filter(session_id=agent_session.session_id)
-                )
+                all_sessions = list(AgentSession.query.filter(session_id=agent_session.session_id))
                 # Prefer running/active records; fall back to any record
-                active = [
-                    s for s in all_sessions
-                    if s.status in ("running", "active", "pending")
-                ]
+                active = [s for s in all_sessions if s.status in ("running", "active", "pending")]
                 candidates = active if active else all_sessions
                 if candidates:
                     candidates.sort(key=lambda s: s.created_at or 0, reverse=True)

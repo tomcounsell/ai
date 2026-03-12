@@ -28,6 +28,7 @@ CHECK_INTERVAL = 20
 # falling back to Claude Code's internal session ID. See issue #374 Bug 2.
 _tool_counts: dict[str, int] = {}
 
+
 def reset_session_count(session_id: str) -> None:
     """Reset the tool call counter for a session.
 
@@ -40,10 +41,7 @@ def reset_session_count(session_id: str) -> None:
     """
     old_count = _tool_counts.pop(session_id, 0)
     if old_count > 0:
-        logger.info(
-            f"[health_check] Reset tool count for session {session_id} "
-            f"(was {old_count})"
-        )
+        logger.info(f"[health_check] Reset tool count for session {session_id} (was {old_count})")
 
 
 JUDGE_PROMPT = """\

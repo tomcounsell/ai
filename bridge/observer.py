@@ -307,14 +307,9 @@ class Observer:
         # Bug 3 fix (issue #374): Use deterministic record selection — filter
         # by active statuses first, sort by created_at desc to pick newest.
         try:
-            all_sessions = list(
-                AgentSession.query.filter(session_id=self.session.session_id)
-            )
+            all_sessions = list(AgentSession.query.filter(session_id=self.session.session_id))
             # Prefer running/active records; fall back to any record
-            active = [
-                s for s in all_sessions
-                if s.status in ("running", "active", "pending")
-            ]
+            active = [s for s in all_sessions if s.status in ("running", "active", "pending")]
             candidates = active if active else all_sessions
             if candidates:
                 candidates.sort(key=lambda s: s.created_at or 0, reverse=True)

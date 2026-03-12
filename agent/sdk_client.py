@@ -77,9 +77,7 @@ def _get_prior_session_uuid(session_id: str) -> str | None:
         sessions.sort(key=lambda s: s.created_at or 0, reverse=True)
         uuid = getattr(sessions[0], "claude_session_uuid", None)
         if uuid:
-            logger.info(
-                f"_get_prior_session_uuid({session_id!r}): found UUID {uuid}"
-            )
+            logger.info(f"_get_prior_session_uuid({session_id!r}): found UUID {uuid}")
         return uuid
     except Exception:
         # If Redis is down or model unavailable, fail safe: don't continue
@@ -126,13 +124,9 @@ def _store_claude_session_uuid(session_id: str, claude_uuid: str) -> None:
             session = sessions[0]
             session.claude_session_uuid = claude_uuid
             session.save()
-            logger.info(
-                f"Stored Claude Code UUID {claude_uuid} on session {session_id}"
-            )
+            logger.info(f"Stored Claude Code UUID {claude_uuid} on session {session_id}")
         else:
-            logger.warning(
-                f"_store_claude_session_uuid: no session found for {session_id}"
-            )
+            logger.warning(f"_store_claude_session_uuid: no session found for {session_id}")
     except Exception:
         logger.warning(
             f"_store_claude_session_uuid({session_id!r}) failed",
