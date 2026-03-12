@@ -23,7 +23,12 @@ Typed Outcome Routing (deterministic, no LLM)
     |  if outcome.status == "success" + stages remain → STEER
     |  if outcome.status == "success" + all done → DELIVER
     |  if outcome.status == "fail" → DELIVER with failure context
-    |  if no outcome or ambiguous status → fall through to Observer
+    |  if no outcome or ambiguous status → fall through
+    v
+Stop Reason Routing (deterministic, no LLM)
+    |  if stop_reason == "budget_exceeded" → DELIVER with warning
+    |  if stop_reason == "rate_limited" → STEER with backoff
+    |  if stop_reason == "end_turn" or None → fall through to Observer
     v
 Observer Agent (Sonnet in production, configurable for testing)
     |  reads AgentSession state
@@ -137,9 +142,11 @@ These were removed from the routing path. See [Coaching Loop](coaching-loop.md) 
 | `bridge/observer.py` | Observer Agent class, system prompt, tool definitions, typed outcome routing |
 | `bridge/stage_detector.py` | Deterministic stage detection (pure function) with typed outcome cross-check |
 | `agent/skill_outcome.py` | `SkillOutcome` dataclass, `parse_outcome_from_text()`, `format_outcome()` — see [Typed Skill Outcomes](typed-skill-outcomes.md) |
-| `agent/job_queue.py` | `send_to_chat()` wiring -- invokes outcome parser, stage detector, then Observer |
+| `agent/sdk_client.py` | Captures `stop_reason` from `ResultMessage` in `_session_stop_reasons` registry |
+| `agent/job_queue.py` | `send_to_chat()` wiring -- invokes outcome parser, stage detector, then Observer; threads `stop_reason` |
 | `models/agent_session.py` | `AgentSession` with stage progress, steering queue, links |
 | `tests/test_observer.py` | 46 tests: 33 unit (stage detector, Observer tools, fallback) + 13 integration (real API with Haiku floor test) |
+| `tests/unit/test_stop_reason_observer.py` | 7 tests for stop_reason routing (budget_exceeded, rate_limited, end_turn, registry) |
 | `tests/unit/test_skill_outcome.py` | 34 unit tests for SkillOutcome parsing, serialization, and edge cases |
 
 ## Testing Strategy

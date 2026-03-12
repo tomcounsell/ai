@@ -216,6 +216,7 @@ class Observer:
         send_cb,
         enqueue_fn,
         *,
+        stop_reason: str | None = None,
         model: str | None = None,
     ):
         self.session = session
@@ -223,6 +224,7 @@ class Observer:
         self.auto_continue_count = auto_continue_count
         self.send_cb = send_cb
         self.enqueue_fn = enqueue_fn
+        self.stop_reason = stop_reason
         self.model = model or SONNET
         self._decision_made = False
         self._action_taken: str | None = None
@@ -292,6 +294,7 @@ class Observer:
             "artifacts": artifacts,
             "context_summary": self.session.context_summary,
             "expectations": self.session.expectations,
+            "stop_reason": self.stop_reason,
         }
 
     def _handle_update_session(
@@ -500,6 +503,51 @@ class Observer:
             logger.info(
                 f"{self._log_prefix} Typed outcome status={outcome.status} "
                 f"is ambiguous, falling through to LLM Observer"
+            )
+
+        # Phase 1.5: Deterministic routing based on stop_reason
+        # These short-circuit the LLM Observer when the SDK reports a known stop condition.
+        if self.stop_reason and self.stop_reason not in ("end_turn", None):
+            cid = getattr(self.session, "correlation_id", None) or "unknown"
+            if self.stop_reason == "budget_exceeded":
+                logger.warning(f"{self._log_prefix} Worker stopped: budget_exceeded — delivering")
+                record_decision(
+                    self.session.session_id,
+                    cid,
+                    "deliver",
+                    "stop_reason: budget_exceeded",
+                )
+                return {
+                    "action": "deliver",
+                    "reason": "Worker budget exceeded. Partial output delivered.",
+                    "transitions_applied": transitions_applied,
+                    "stop_reason": self.stop_reason,
+                }
+
+            if self.stop_reason == "rate_limited":
+                logger.warning(
+                    f"{self._log_prefix} Worker stopped due to rate_limited — steering with backoff"
+                )
+                record_decision(
+                    self.session.session_id,
+                    cid,
+                    "steer",
+                    "stop_reason: rate_limited",
+                )
+                return {
+                    "action": "steer",
+                    "coaching_message": (
+                        "Rate limited by the API. Wait briefly, then resume where you left off. "
+                        "Do not restart from scratch."
+                    ),
+                    "transitions_applied": transitions_applied,
+                    "stop_reason": self.stop_reason,
+                }
+
+            # Unknown stop_reason — log and fall through to LLM
+            logger.info(
+                f"{self._log_prefix} Unknown stop_reason={self.stop_reason}, "
+                f"falling through to LLM Observer"
             )
 
         # Phase 2: Run the Observer LLM for judgment calls
