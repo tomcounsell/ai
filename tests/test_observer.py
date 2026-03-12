@@ -488,25 +488,22 @@ class TestObserverFallback:
 
     @pytest.mark.asyncio
     async def test_observer_error_returns_deliver(self):
-        """When Observer errors, it returns a deliver decision."""
+        """When Observer errors, it returns a deliver decision.
+
+        Uses a non-SDLC session so the deterministic SDLC guard (Phase 1.75)
+        doesn't intercept before reaching the LLM error path we're testing.
+        """
 
         class MockSession:
             session_id = "test-fallback"
-            classification_type = "sdlc"
+            classification_type = "general"
             context_summary = None
             expectations = None
             queued_steering_messages = []
             history = []
 
             def get_stage_progress(self):
-                return {
-                    "ISSUE": "pending",
-                    "PLAN": "pending",
-                    "BUILD": "pending",
-                    "TEST": "pending",
-                    "REVIEW": "pending",
-                    "DOCS": "pending",
-                }
+                return {}
 
             def get_history_list(self):
                 return []
@@ -517,10 +514,10 @@ class TestObserverFallback:
                 return {}
 
             def is_sdlc_job(self):
-                return True
+                return False
 
             def has_remaining_stages(self):
-                return True
+                return False
 
             def has_failed_stage(self):
                 return False
@@ -1222,4 +1219,107 @@ class TestObserverSdlcSteering:
 
         assert decision["action"] == "deliver", (
             f"Observer should DELIVER when all stages complete, but got {decision['action']}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_guard_bypassed_when_stage_has_failed(self):
+        """Deterministic guard must NOT force-steer when a stage has failed.
+        Failed stages need human attention."""
+        stage_progress = {
+            "ISSUE": "completed",
+            "PLAN": "completed",
+            "BUILD": "failed",
+            "TEST": "pending",
+            "REVIEW": "pending",
+            "DOCS": "pending",
+        }
+        session = _MockSessionForSteering(stage_progress=stage_progress)
+        observer = Observer(
+            session=session,
+            worker_output="Build failed: tests are broken, cannot proceed.",
+            auto_continue_count=1,
+            send_cb=None,
+            enqueue_fn=None,
+            model=self.MODEL,
+        )
+
+        decision = await observer.run()
+
+        # Should NOT be a deterministic guard steer — must fall through to LLM
+        # which should deliver the failure to human
+        assert decision.get("deterministic_guard") is not True, (
+            "Deterministic guard should NOT fire when a stage has failed"
+        )
+
+    @pytest.mark.asyncio
+    async def test_guard_bypassed_when_stop_reason_is_fail(self):
+        """Deterministic guard must NOT force-steer when stop_reason is 'fail'."""
+        session = _MockSessionForSteering(
+            stage_progress=_STAGE_PROGRESS_FOR["BUILD"],
+        )
+        observer = Observer(
+            session=session,
+            worker_output="Worker encountered an unrecoverable error.",
+            auto_continue_count=1,
+            send_cb=None,
+            enqueue_fn=None,
+            stop_reason="fail",
+            model=self.MODEL,
+        )
+
+        decision = await observer.run()
+
+        assert decision.get("deterministic_guard") is not True, (
+            "Deterministic guard should NOT fire when stop_reason is 'fail'"
+        )
+
+    @pytest.mark.asyncio
+    async def test_guard_bypassed_when_stop_reason_is_budget_exceeded(self):
+        """Deterministic guard must NOT force-steer when stop_reason is 'budget_exceeded'.
+        budget_exceeded is caught earlier at Phase 1.5, but the guard should also
+        not fire as defense-in-depth."""
+        session = _MockSessionForSteering(
+            stage_progress=_STAGE_PROGRESS_FOR["BUILD"],
+        )
+        observer = Observer(
+            session=session,
+            worker_output="Partial work done before budget ran out.",
+            auto_continue_count=1,
+            send_cb=None,
+            enqueue_fn=None,
+            stop_reason="budget_exceeded",
+            model=self.MODEL,
+        )
+
+        decision = await observer.run()
+
+        # budget_exceeded is caught at Phase 1.5 (before Phase 1.75),
+        # so it delivers directly. Either way, the guard should not fire.
+        assert decision.get("deterministic_guard") is not True, (
+            "Deterministic guard should NOT fire when stop_reason is 'budget_exceeded'"
+        )
+
+    @pytest.mark.asyncio
+    async def test_guard_fires_on_normal_sdlc_with_remaining(self):
+        """Deterministic guard MUST fire for normal SDLC sessions with remaining
+        stages and no failures."""
+        session = _MockSessionForSteering(
+            stage_progress=_STAGE_PROGRESS_FOR["BUILD"],
+        )
+        observer = Observer(
+            session=session,
+            worker_output="Build done. Moving on.",
+            auto_continue_count=1,
+            send_cb=None,
+            enqueue_fn=None,
+            model=self.MODEL,
+        )
+
+        decision = await observer.run()
+
+        assert decision["action"] == "steer", (
+            f"Guard should steer on normal SDLC with remaining stages, got {decision['action']}"
+        )
+        assert decision.get("deterministic_guard") is True, (
+            "Decision should be marked as deterministic_guard"
         )

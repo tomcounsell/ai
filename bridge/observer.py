@@ -17,13 +17,14 @@ This ensures the pipeline never silently drops output.
 
 import json
 import logging
+import re
 from typing import Any
 
 import anthropic
 
 from agent.job_queue import MAX_AUTO_CONTINUES, MAX_AUTO_CONTINUES_SDLC
 from agent.skill_outcome import parse_outcome_from_text
-from bridge.stage_detector import apply_transitions, detect_stages
+from bridge.stage_detector import STAGE_ORDER, apply_transitions, detect_stages
 from bridge.summarizer import extract_artifacts
 from config.models import SONNET
 from models.agent_session import AgentSession
@@ -192,6 +193,55 @@ def _build_tools() -> list[dict]:
             },
         },
     ]
+
+
+# Heuristic patterns that signal the worker needs human input.
+# When detected, the deterministic SDLC guard defers to the LLM Observer
+# so it can decide whether to deliver or steer.
+_HUMAN_INPUT_PATTERNS = [
+    re.compile(r"## Open Questions", re.IGNORECASE),
+    re.compile(r"(?:Should I|Should we|Do you want|Would you prefer)", re.IGNORECASE),
+    re.compile(r"(?:FATAL|cannot proceed|nothing I can do)", re.IGNORECASE),
+    re.compile(r"(?:requires? (?:human|your|a human))", re.IGNORECASE),
+    re.compile(r"(?:I(?:'d| would) rather get your input)", re.IGNORECASE),
+]
+
+
+def _output_needs_human_input(text: str) -> bool:
+    """Check if worker output contains signals that human input is needed.
+
+    Uses lightweight regex heuristics rather than LLM calls to keep the
+    deterministic guard fast. Falls back to the LLM Observer for nuanced
+    judgment when these patterns are detected.
+    """
+    return any(p.search(text) for p in _HUMAN_INPUT_PATTERNS)
+
+
+# Maps SDLC stages to the skill that advances them
+_STAGE_TO_SKILL: dict[str, str] = {
+    "ISSUE": "/do-issue",
+    "PLAN": "/do-plan",
+    "BUILD": "/do-build",
+    "TEST": "/do-test",
+    "REVIEW": "/do-pr-review",
+    "DOCS": "/do-docs",
+}
+
+
+def _next_sdlc_skill(session) -> tuple[str, str] | None:
+    """Determine the next SDLC skill to invoke based on stage progress.
+
+    Returns:
+        Tuple of (stage_name, skill_command) for the next incomplete stage,
+        or None if all stages are complete.
+    """
+    progress = session.get_stage_progress()
+    for stage in STAGE_ORDER:
+        status = progress.get(stage, "pending")
+        if status in ("pending", "in_progress"):
+            skill = _STAGE_TO_SKILL.get(stage, f"/do-{stage.lower()}")
+            return (stage, skill)
+    return None
 
 
 class Observer:
@@ -415,9 +465,11 @@ class Observer:
         transitions = detect_stages(self.worker_output)
         transitions_applied = apply_transitions(self.session, transitions, outcome=outcome)
         if transitions_applied > 0:
+            # Refresh has_remaining after stage transitions were applied
+            has_remaining = self.session.has_remaining_stages()
             logger.info(
                 f"{self._log_prefix} Stage detector applied {transitions_applied} transitions "
-                f"for session {self.session.session_id}"
+                f"for session {self.session.session_id} (remaining_stages={has_remaining})"
             )
         if outcome is not None:
             logger.info(
@@ -548,6 +600,66 @@ class Observer:
             logger.info(
                 f"{self._log_prefix} Unknown stop_reason={self.stop_reason}, "
                 f"falling through to LLM Observer"
+            )
+
+        # Phase 1.75: Deterministic SDLC stage guard
+        # If this is an SDLC session with remaining stages, ALWAYS steer to the
+        # next stage. The LLM Observer must not override stage tracking — this was
+        # the root cause of SDLC flows stalling before reaching do-docs.
+        #
+        # Safety: Do NOT force-steer when:
+        # - stop_reason is "fail" or "budget_exceeded" (must deliver to human)
+        # - A stage has failed (has_failed_stage) — human needs to see the failure
+        # - auto_continue_count >= max_continues (cap reached, deliver to human)
+        # - Worker output signals it needs human input (questions, fatal errors)
+        has_failed = self.session.has_failed_stage()
+        stop_is_terminal = self.stop_reason in ("fail", "budget_exceeded")
+        cap_reached = self.auto_continue_count >= max_continues
+        needs_human = _output_needs_human_input(self.worker_output)
+        if (
+            is_sdlc
+            and has_remaining
+            and not has_failed
+            and not stop_is_terminal
+            and not cap_reached
+            and not needs_human
+        ):
+            next_stage_info = _next_sdlc_skill(self.session)
+            if next_stage_info:
+                stage_name, skill_cmd = next_stage_info
+                cid = getattr(self.session, "correlation_id", None) or "unknown"
+                coaching = (
+                    f"Pipeline has remaining stages. Next: {stage_name}. "
+                    f"Continue with {skill_cmd}. "
+                    f"If you encounter a critical blocker requiring human input, "
+                    f"state it clearly. Otherwise, press forward."
+                )
+                logger.info(
+                    f"{self._log_prefix} Deterministic SDLC guard: forcing steer "
+                    f"to {stage_name} ({skill_cmd}) — remaining stages exist, "
+                    f"no failures, stop_reason={self.stop_reason}"
+                )
+                record_decision(
+                    self.session.session_id,
+                    cid,
+                    "steer",
+                    f"deterministic-sdlc-guard: {stage_name} pending",
+                )
+                return {
+                    "action": "steer",
+                    "coaching_message": coaching,
+                    "transitions_applied": transitions_applied,
+                    "deterministic_guard": True,
+                }
+
+        # Log when guard was bypassed due to safety conditions
+        bypassed = has_failed or stop_is_terminal or cap_reached or needs_human
+        if is_sdlc and has_remaining and bypassed:
+            logger.info(
+                f"{self._log_prefix} Deterministic SDLC guard bypassed: "
+                f"has_failed={has_failed}, stop_reason={self.stop_reason}, "
+                f"cap_reached={cap_reached}, needs_human={needs_human} "
+                f"— falling through to LLM Observer"
             )
 
         # Phase 2: Run the Observer LLM for judgment calls
