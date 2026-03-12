@@ -24,6 +24,7 @@ import sys
 import time
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +35,7 @@ MAX_SCHEDULING_DEPTH = 3
 # Default DM chat_id for headless jobs (Tom's DM)
 DEFAULT_DM_CHAT_ID = "179144806"
 DEFAULT_PROJECT_KEY = "valor"
-DEFAULT_WORKING_DIR = "/Users/valorengels/src/ai"
+DEFAULT_WORKING_DIR = str(Path(__file__).parent.parent)
 
 
 def _get_env_context() -> dict:
