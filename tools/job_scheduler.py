@@ -264,6 +264,18 @@ def cmd_schedule(args: argparse.Namespace) -> int:
             parent_job_id=parent_job_id,
         )
 
+        # Transition parent to waiting_for_children if not already
+        if parent_session and parent_session.status != "waiting_for_children":
+            try:
+                from agent.job_queue import _transition_parent
+
+                _transition_parent(parent_session, "waiting_for_children")
+                logger.info(f"Parent {parent_job_id} transitioned to waiting_for_children")
+            except Exception as e:
+                logger.warning(
+                    f"Failed to transition parent {parent_job_id} to waiting_for_children: {e}"
+                )
+
         # Count queue position
         pending = list(AgentSession.query.filter(project_key=project_key, status="pending"))
         queue_position = len(pending)

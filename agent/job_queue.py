@@ -422,15 +422,17 @@ async def _remove_by_session(project_key: str, session_id: str) -> bool:
 async def _complete_job(job: Job) -> None:
     """Mark a running job as completed and delete it from Redis.
 
-    If this job is a child (has parent_job_id), check whether all siblings
-    are now terminal and finalize the parent if so.
+    If this job is a child (has parent_job_id), finalize the parent BEFORE
+    deleting the child. This ensures the child's terminal status is still
+    visible to _finalize_parent when it queries siblings via get_children().
     """
     parent_job_id = getattr(job._rj, "parent_job_id", None)
-    await job._rj.async_delete()
 
-    # If this was a child job, attempt to finalize the parent
+    # Finalize parent BEFORE deleting child so sibling status check is accurate
     if parent_job_id:
         await _finalize_parent(parent_job_id)
+
+    await job._rj.async_delete()
 
 
 async def _finalize_parent(parent_job_id: str) -> None:
@@ -460,7 +462,7 @@ async def _finalize_parent(parent_job_id: str) -> None:
         return
 
     # Only finalize if parent is in waiting_for_children status
-    if parent.status not in ("waiting_for_children",):
+    if parent.status != "waiting_for_children":
         logger.debug(
             f"[job-hierarchy] Parent {parent_job_id} status is "
             f"{parent.status!r}, skipping finalization"
