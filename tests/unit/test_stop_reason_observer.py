@@ -1,40 +1,16 @@
 """Tests for stop_reason plumbing from SDK to Observer routing.
 
 Covers:
-1. QueryResult class holds stop_reason alongside text
-2. Observer._handle_read_session() includes stop_reason in output
-3. Observer.run() deterministic routing for budget_exceeded -> DELIVER
-4. Observer.run() deterministic routing for rate_limited -> STEER with backoff
-5. Observer.run() passes through end_turn normally (no short-circuit)
+1. Observer._handle_read_session() includes stop_reason in output
+2. Observer.run() deterministic routing for budget_exceeded -> DELIVER
+3. Observer.run() deterministic routing for rate_limited -> STEER with backoff
+4. Observer.run() passes through end_turn normally (no short-circuit)
+5. Stop reason registry get/consume semantics
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
-from agent.sdk_client import QueryResult
-
-
-class TestQueryResult:
-    """QueryResult class holds text and stop_reason."""
-
-    def test_default_stop_reason_is_none(self):
-        result = QueryResult(text="hello")
-        assert result.text == "hello"
-        assert result.stop_reason is None
-
-    def test_explicit_stop_reason(self):
-        result = QueryResult(text="done", stop_reason="end_turn")
-        assert result.stop_reason == "end_turn"
-
-    def test_str_returns_text(self):
-        """str(QueryResult) returns the text for backward compat."""
-        result = QueryResult(text="hello world", stop_reason="end_turn")
-        assert str(result) == "hello world"
-
-    def test_len_returns_text_length(self):
-        result = QueryResult(text="abc", stop_reason="end_turn")
-        assert len(result) == 3
 
 
 class TestObserverStopReasonRouting:

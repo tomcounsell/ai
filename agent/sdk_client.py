@@ -43,29 +43,6 @@ from agent.workflow_types import WorkflowStateData
 logger = logging.getLogger(__name__)
 
 
-class QueryResult:
-    """Result from an SDK query, carrying response text and stop metadata.
-
-    Backward-compatible: str(result) returns the text, so callers that
-    treat the return value as a string continue to work.
-    """
-
-    __slots__ = ("text", "stop_reason")
-
-    def __init__(self, text: str, stop_reason: str | None = None):
-        self.text = text
-        self.stop_reason = stop_reason
-
-    def __str__(self) -> str:
-        return self.text
-
-    def __len__(self) -> int:
-        return len(self.text)
-
-    def __repr__(self) -> str:
-        return f"QueryResult(text='{self.text[:50]}...', stop_reason={self.stop_reason!r})"
-
-
 # === Client Registry ===
 # Module-level registry of active SDK clients keyed by session_id.
 # In-memory only (intentionally not persisted). On crash/reboot, the dict
@@ -783,6 +760,10 @@ class ValorAgent:
             # Always unregister client from registry
             if session_id:
                 _active_clients.pop(session_id, None)
+                # Note: _session_stop_reasons is NOT cleaned here — it's consumed
+                # by get_stop_reason() in job_queue after query returns. The pop()
+                # in get_stop_reason() handles cleanup. If the Observer never runs
+                # (crash), entries are tiny (session_id -> str) and cleared on restart.
                 logger.debug(f"Unregistered active client for session {session_id}")
 
         return "\n".join(response_parts) if response_parts else ""
