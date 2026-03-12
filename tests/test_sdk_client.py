@@ -32,9 +32,16 @@ def test_valor_agent_init():
 
 
 def test_valor_agent_custom_working_dir():
-    """Test ValorAgent with custom working directory."""
+    """Test ValorAgent with custom working directory within allowed root."""
+    agent = ValorAgent(working_dir="/Users/valorengels/src/ai")
+    assert str(agent.working_dir) == "/Users/valorengels/src/ai"
+
+
+def test_valor_agent_rejects_unsafe_working_dir():
+    """Test ValorAgent falls back to safe default for paths outside allowed root."""
     agent = ValorAgent(working_dir="/tmp")
-    assert str(agent.working_dir) == "/tmp"
+    # Safety invariant should reject /tmp and fall back to allowed root
+    assert str(agent.working_dir) == "/Users/valorengels/src"
 
 
 def test_valor_agent_custom_permission_mode():
