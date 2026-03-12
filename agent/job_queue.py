@@ -807,6 +807,83 @@ async def _job_health_check() -> None:
     )
 
 
+async def _job_hierarchy_health_check() -> None:
+    """Check for orphaned children and stuck parents in job hierarchy.
+
+    1. Orphaned children: child's parent_job_id points to a non-existent session.
+       Action: clear the parent_job_id field (child completes normally).
+    2. Stuck parents: status is waiting_for_children but all children are terminal.
+       Action: finalize the parent (transition to completed/failed).
+    """
+    orphans_fixed = 0
+    stuck_fixed = 0
+
+    # Check for orphaned children
+    try:
+        all_sessions = list(AgentSession.query.all())
+        children_with_parent = [s for s in all_sessions if s.parent_job_id]
+        parent_ids = {s.job_id for s in all_sessions}
+
+        for child in children_with_parent:
+            if child.parent_job_id not in parent_ids:
+                logger.warning(
+                    "[job-health] Orphaned child %s: parent %s no longer exists — "
+                    "clearing parent_job_id",
+                    child.job_id,
+                    child.parent_job_id,
+                )
+                # Use delete-and-recreate to safely clear the KeyField
+                fields = _extract_job_fields(child)
+                child.delete()
+                fields["parent_job_id"] = None
+                AgentSession.create(**fields)
+                orphans_fixed += 1
+    except Exception as e:
+        logger.error("[job-health] Orphan detection failed: %s", e, exc_info=True)
+
+    # Check for stuck parents
+    try:
+        waiting_parents = list(
+            AgentSession.query.filter(status="waiting_for_children")
+        )
+        for parent in waiting_parents:
+            children = parent.get_children()
+            if not children:
+                # No children but waiting — auto-complete
+                logger.warning(
+                    "[job-health] Stuck parent %s has no children — auto-completing",
+                    parent.job_id,
+                )
+                _transition_parent(parent, "completed")
+                stuck_fixed += 1
+                continue
+
+            terminal_statuses = {"completed", "failed"}
+            non_terminal = [c for c in children if c.status not in terminal_statuses]
+            if not non_terminal:
+                # All children terminal but parent still waiting
+                any_failed = any(c.status == "failed" for c in children)
+                new_status = "failed" if any_failed else "completed"
+                logger.warning(
+                    "[job-health] Stuck parent %s: all %d children terminal — "
+                    "finalizing as %s",
+                    parent.job_id,
+                    len(children),
+                    new_status,
+                )
+                _transition_parent(parent, new_status)
+                stuck_fixed += 1
+    except Exception as e:
+        logger.error("[job-health] Stuck parent detection failed: %s", e, exc_info=True)
+
+    if orphans_fixed or stuck_fixed:
+        logger.info(
+            "[job-health] Hierarchy check: %d orphan(s) fixed, %d stuck parent(s) fixed",
+            orphans_fixed,
+            stuck_fixed,
+        )
+
+
 async def _job_health_loop() -> None:
     """Periodically check running jobs for liveness and timeout."""
     logger.info(
@@ -816,6 +893,7 @@ async def _job_health_loop() -> None:
     while True:
         try:
             await _job_health_check()
+            await _job_hierarchy_health_check()
         except Exception as e:
             logger.error("[job-health] Error in health check: %s", e, exc_info=True)
         await asyncio.sleep(JOB_HEALTH_CHECK_INTERVAL)
