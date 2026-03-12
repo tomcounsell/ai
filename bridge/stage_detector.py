@@ -195,14 +195,23 @@ def apply_transitions(
     if not session:
         return 0
 
-    # Cross-check: if typed outcome exists, verify consistency with regex detections
+    # Cross-check: if typed outcome exists, verify consistency with regex detections.
+    # When a typed outcome reports success but regex missed it, merge the stage
+    # into transitions so it gets recorded in session history. This fixes the bug
+    # where completed stages render as unchecked in Telegram progress displays.
     if outcome is not None:
         regex_stages = {t["stage"] for t in transitions}
-        if outcome.status == "success" and outcome.stage not in regex_stages:
-            logger.warning(
-                f"[stage-detector] Cross-check mismatch: typed outcome says "
-                f"{outcome.stage} succeeded but regex did not detect it. "
-                f"Regex detected: {regex_stages or 'none'}"
+        if outcome.status == "success" and outcome.stage and outcome.stage not in regex_stages:
+            logger.info(
+                f"[stage-detector] Stage {outcome.stage} merged from typed outcome "
+                f"(regex missed). Regex detected: {regex_stages or 'none'}"
+            )
+            transitions.append(
+                {
+                    "stage": outcome.stage,
+                    "status": "completed",
+                    "reason": f"Typed outcome: {outcome.stage} succeeded (regex missed)",
+                }
             )
         elif outcome.status == "fail" and outcome.stage in regex_stages:
             # Outcome says fail but regex detected completion — outcome takes priority
