@@ -30,6 +30,7 @@ dependencies = [
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
+    "pytest-xdist>=3.5.0",
     "ruff>=0.4.0",
     "mypy>=1.10.0",
 ]
@@ -73,3 +74,9 @@ python_functions = ["test_*"]
 # psycopg/libpq is not installed (see issue #265)
 addopts = "-v --tb=short -p no:postgresql"
 asyncio_mode = "auto"
+markers = [
+    "unit: Pure logic tests, no external dependencies",
+    "integration: Tests requiring Redis or network",
+    "e2e: Full stack end-to-end tests",
+    "slow: Long-running benchmarks and endurance tests",
+]
