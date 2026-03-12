@@ -18,6 +18,7 @@ A long-running process that performs daily self-directed maintenance tasks:
 13. Redis data quality checks (unsummarized links, dead channels)
 14. Branch and plan cleanup (stale branches, orphaned/completed/duplicate plans)
 15. Feature docs audit (stale refs, README.md accuracy, plan-masquerading-as-feature)
+16. Disk space check (project volume free space, finding if <10GB)
 
 All persistence is Redis-backed via Popoto models (see models/ directory).
 State: ReflectionRun | Ignore patterns: ReflectionIgnore
@@ -32,6 +33,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timedelta
@@ -467,6 +469,7 @@ class ReflectionRunner:
             (13, "Redis Data Quality", self.step_redis_data_quality),
             (14, "Branch and Plan Cleanup", self.step_branch_plan_cleanup),
             (15, "Feature Docs Audit", self.step_feature_docs_audit),
+            (16, "Disk Space Check", self.step_disk_space_check),
         ]
 
     def _load_state(self) -> ReflectionsState:
@@ -1672,6 +1675,47 @@ class ReflectionRunner:
 
         self.state.step_progress["feature_docs_audit"] = {
             **stats,
+            "findings": len(findings),
+        }
+
+    async def step_disk_space_check(self) -> None:
+        """Step 16: Check available disk space on the project volume.
+
+        This is the canonical template step — use it as a reference when adding
+        new reflection steps. It demonstrates:
+
+        1. Method signature: ``async def step_<key>(self) -> None``
+        2. Local ``findings: list[str]`` for collecting issues
+        3. ``self.state.add_finding("<key>", text)`` to persist each finding
+        4. ``self.state.step_progress["<key>"] = {...}`` for metrics
+        5. Top-level try/except so a single step failure never halts the run
+
+        The check uses :func:`shutil.disk_usage` on ``PROJECT_ROOT`` and records
+        a finding when free space drops below 10 GB.
+        """
+        findings: list[str] = []
+
+        try:
+            usage = shutil.disk_usage(PROJECT_ROOT)
+            free_gb = usage.free / (1024**3)
+            total_gb = usage.total / (1024**3)
+
+            if free_gb < 10:
+                finding = (
+                    f"Low disk space: {free_gb:.1f} GB free "
+                    f"of {total_gb:.1f} GB total on project volume"
+                )
+                findings.append(finding)
+                self.state.add_finding("disk_space_check", finding)
+                logger.warning(finding)
+            else:
+                logger.info(
+                    f"Disk space OK: {free_gb:.1f} GB free of {total_gb:.1f} GB total"
+                )
+        except Exception:
+            logger.exception("Failed to check disk space")
+
+        self.state.step_progress["disk_space_check"] = {
             "findings": len(findings),
         }
 
