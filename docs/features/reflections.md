@@ -1,12 +1,12 @@
 # Reflections: Autonomous Maintenance System
 
-The reflections system is an autonomous daily maintenance and self-reflection process. It runs every morning at 6 AM Pacific via macOS launchd, performing cleanup, analysis, reflection, and reporting through 14 sequential steps. All persistence is Redis-backed via Popoto models.
+The reflections system is an autonomous daily maintenance and self-reflection process. It runs every morning at 6 AM Pacific via macOS launchd, performing cleanup, analysis, reflection, and reporting through 16 sequential steps. All persistence is Redis-backed via Popoto models.
 
 ## How It Works
 
 The runner (`scripts/reflections.py`) loads state from Redis, executes each step in order, and checkpoints after every step. If interrupted, the next run resumes from where it left off. Each step is independently failable — a crash in one step does not block the rest.
 
-### 14-Step Pipeline
+### 16-Step Pipeline
 
 | Step | Name | Description | Scope | Failure Mode |
 |------|------|-------------|-------|--------------|
@@ -24,6 +24,8 @@ The runner (`scripts/reflections.py`) loads state from Redis, executes each step
 | 12 | Redis TTL Cleanup | Prunes expired records across all Redis models | AI repo only | Non-blocking |
 | 13 | Redis Data Quality | Surfaces data quality issues: unsummarized links, dead channels, error patterns | AI repo only | Non-blocking |
 | 14 | Branch and Plan Cleanup | Deletes merged branches; ensures plans have open issues; flags completed plans for docs migration | AI repo only | Non-blocking, requires `gh` auth |
+| 15 | Feature Docs Audit | Checks for stale references, README accuracy, plan-masquerading-as-feature, stub docs | AI repo only | Non-blocking |
+| 16 | Disk Space Check | Checks free disk space on project volume; finding if below 10 GB (see [Adding Reflection Tasks](adding-reflection-tasks.md)) | AI repo only | Non-blocking |
 
 ## State & Persistence
 
@@ -36,7 +38,7 @@ One record per calendar date. Acts as the primary state checkpoint for resumabil
 | Field | Type | Purpose |
 |-------|------|---------|
 | `date` | UniqueKeyField | YYYY-MM-DD, one run per day |
-| `current_step` | IntField | Next step to execute (1-14) |
+| `current_step` | IntField | Next step to execute (1-16) |
 | `completed_steps` | ListField | Steps already finished, e.g. `[1, 2, 3]` |
 | `daily_report` | ListField | Human-readable log lines per step |
 | `findings` | DictField | `{category: [finding_strings]}` |
