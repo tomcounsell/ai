@@ -515,8 +515,7 @@ def _transition_parent(parent: AgentSession, new_status: str) -> None:
     fields["completed_at"] = time.time()
     new_parent = AgentSession.create(**fields)
     logger.info(
-        f"[job-hierarchy] Parent {parent.job_id} -> {new_parent.job_id} "
-        f"(status={new_status})"
+        f"[job-hierarchy] Parent {parent.job_id} -> {new_parent.job_id} (status={new_status})"
     )
 
 
@@ -843,9 +842,7 @@ async def _job_hierarchy_health_check() -> None:
 
     # Check for stuck parents
     try:
-        waiting_parents = list(
-            AgentSession.query.filter(status="waiting_for_children")
-        )
+        waiting_parents = list(AgentSession.query.filter(status="waiting_for_children"))
         for parent in waiting_parents:
             children = parent.get_children()
             if not children:
@@ -865,8 +862,7 @@ async def _job_hierarchy_health_check() -> None:
                 any_failed = any(c.status == "failed" for c in children)
                 new_status = "failed" if any_failed else "completed"
                 logger.warning(
-                    "[job-health] Stuck parent %s: all %d children terminal — "
-                    "finalizing as %s",
+                    "[job-health] Stuck parent %s: all %d children terminal — finalizing as %s",
                     parent.job_id,
                     len(children),
                     new_status,

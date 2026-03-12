@@ -375,9 +375,7 @@ class AgentSession(Model):
             parent = AgentSession.query.get(self.parent_job_id)
             return parent
         except Exception:
-            logger.warning(
-                f"Parent job {self.parent_job_id} not found for child {self.job_id}"
-            )
+            logger.warning(f"Parent job {self.parent_job_id} not found for child {self.job_id}")
             return None
 
     def get_children(self) -> list["AgentSession"]:

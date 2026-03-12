@@ -313,9 +313,7 @@ def _format_job_info(j, include_children: bool = False) -> dict:
     if j.started_at:
         job_info["started_at"] = datetime.fromtimestamp(j.started_at, tz=UTC).isoformat()
     if j.scheduled_after:
-        job_info["scheduled_after"] = datetime.fromtimestamp(
-            j.scheduled_after, tz=UTC
-        ).isoformat()
+        job_info["scheduled_after"] = datetime.fromtimestamp(j.scheduled_after, tz=UTC).isoformat()
     if j.issue_url:
         job_info["issue_url"] = j.issue_url
     if j.parent_job_id:
@@ -353,9 +351,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         running = list(AgentSession.query.filter(project_key=project_key, status="running"))
         completed = list(AgentSession.query.filter(project_key=project_key, status="completed"))
         waiting = list(
-            AgentSession.query.filter(
-                project_key=project_key, status="waiting_for_children"
-            )
+            AgentSession.query.filter(project_key=project_key, status="waiting_for_children")
         )
 
         # Sort pending by priority then FIFO
@@ -557,9 +553,7 @@ def cmd_children(args: argparse.Namespace) -> int:
     try:
         parent = AgentSession.query.get(args.job_id)
         if parent is None:
-            _output(
-                {"status": "error", "message": f"Job {args.job_id} not found."}
-            )
+            _output({"status": "error", "message": f"Job {args.job_id} not found."})
             return 1
 
         children = parent.get_children()
@@ -585,9 +579,7 @@ def cmd_children(args: argparse.Namespace) -> int:
                 "message_preview": (c.message_text or "")[:100],
             }
             if c.created_at:
-                child_info["created_at"] = datetime.fromtimestamp(
-                    c.created_at, tz=UTC
-                ).isoformat()
+                child_info["created_at"] = datetime.fromtimestamp(c.created_at, tz=UTC).isoformat()
             if c.issue_url:
                 child_info["issue_url"] = c.issue_url
             result["children"].append(child_info)
