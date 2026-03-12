@@ -44,6 +44,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Operational Logging](operational-logging.md) | Consistent INFO-level prefix-tagged logging at every decision point for end-to-end message tracing | Shipped |
 | [Plan Prerequisites Validation](plan-prerequisites.md) | Declare and validate environment requirements before plan execution | Shipped |
 | [Popoto Redis Expansion](popoto-redis-expansion.md) | Migration from JSONL/JSON file state to Redis for atomicity and queries | Shipped |
+| [Principal Context](principal-context.md) | Strategic supervisor context injection into worker/Observer prompts for autonomous prioritization | Shipped |
 | [Race Condition Analysis](race-condition-analysis.md) | Structured concurrency analysis section in plan template with soft validator for async code | Shipped |
 | [Reaction Semantics](reaction-semantics.md) | Emoji reaction protocol for message delivery feedback and silent loss prevention | Shipped |
 | [Reflections](reflections.md) | Autonomous 14-step daily maintenance: cleanup, log analysis, session quality, LLM reflection, auto-fix PRs, multi-repo support, institutional memory, Telegram notifications | Shipped |
