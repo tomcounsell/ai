@@ -107,6 +107,45 @@ No prerequisites — all fixes modify existing code using existing config infras
 
 - **Bug 3**: In `apply_transitions()`, after the cross-check warning at line 201-206, add the typed outcome's stage to the transitions list. This is a 6-line fix.
 
+## Regression Test Cases
+
+These tests prevent the three bugs from recurring. Add to existing test files.
+
+### In `tests/test_observer.py` — new class `TestApplyTransitionsTypedOutcomeMerge`
+
+| Test Name | Scenario | Assert |
+|-----------|----------|--------|
+| `test_typed_outcome_merged_when_regex_misses` | `transitions=[]`, `outcome=SkillOutcome(status="success", stage="DOCS")` | `apply_transitions()` returns 1, session history contains `"DOCS COMPLETED"` |
+| `test_typed_outcome_not_merged_on_failure` | `transitions=[]`, `outcome=SkillOutcome(status="fail", stage="DOCS")` | returns 0, no DOCS entry in history |
+| `test_typed_outcome_skipped_when_regex_already_detected` | `transitions=[{stage: "DOCS", status: "completed"}]`, same outcome | returns 1 (from regex), no duplicate DOCS entry |
+| `test_typed_outcome_skipped_when_stage_already_completed` | Session already has `"DOCS COMPLETED"` in history, `outcome=SkillOutcome(status="success", stage="DOCS")` | returns 0, no duplicate |
+| `test_typed_outcome_none_stage_no_crash` | `outcome=SkillOutcome(status="success", stage=None)` | returns 0, no crash |
+| `test_typed_outcome_with_regex_transitions_both_recorded` | `transitions=[{stage: "BUILD", status: "completed"}]`, `outcome=SkillOutcome(status="success", stage="DOCS")` | returns 2, both BUILD and DOCS in history |
+
+### In `tests/test_stage_aware_auto_continue.py` — new class `TestClassificationInheritance`
+
+| Test Name | Scenario | Assert |
+|-----------|----------|--------|
+| `test_reply_to_resume_inherits_sdlc_classification` | Create session with `classification_type="sdlc"`, simulate reply-to-resume with empty `classification_result` | Enqueued job has `classification_type="sdlc"` |
+| `test_reply_to_resume_async_classifier_overrides_inheritance` | Create session with `classification_type="sdlc"`, simulate reply where async classifier completes with `type="question"` before enqueue | Enqueued job has `classification_type="question"` |
+| `test_reply_to_resume_missing_session_falls_through` | No existing session in Redis, reply-to-resume with empty `classification_result` | Enqueued job has `classification_type=None` (no crash) |
+| `test_fresh_message_no_inheritance` | Existing session exists, but message is NOT a reply | Enqueued job uses async classifier result, not inherited |
+
+### In `tests/test_observer.py` — new class `TestCrossRepoGhResolution`
+
+| Test Name | Scenario | Assert |
+|-----------|----------|--------|
+| `test_sdlc_skill_contains_repo_flag_instructions` | Read `.claude/skills/sdlc/SKILL.md` | Contains `--repo` in `gh issue view` and `gh pr list` examples |
+| `test_enriched_message_includes_github_line` | Call SDK client prompt builder with popoto project config | Enriched message contains `GITHUB: tomcounsell/popoto` |
+| `test_all_do_skills_reference_github_context` | Read all `/do-*` skill SKILL.md files that contain `gh ` commands | Each file references `GITHUB:` context line or `--repo` |
+
+### In `tests/test_observer.py` — new class `TestObserverSdlcSteering`
+
+| Test Name | Scenario | Assert |
+|-----------|----------|--------|
+| `test_observer_steers_when_is_sdlc_and_remaining_stages` | Session with `classification_type="sdlc"`, stages pending | Observer decision is `steer`, not `deliver` |
+| `test_observer_delivers_when_all_stages_complete` | Session with all stages completed | Observer decision is `deliver` |
+
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
@@ -241,7 +280,7 @@ The bridge restart after code changes is already part of the standard workflow. 
   - If this is a reply-to continuation (`is_reply_to_valor and message.reply_to_msg_id`), look up the existing `AgentSession` by `session_id`
   - If found and it has `classification_type`, store it in `classification_result` as a fallback
   - The async classifier can still override it if it completes before enqueue
-- Add test in `tests/` verifying that reply-to-resume inherits classification_type
+- Add `TestClassificationInheritance` class in `tests/test_stage_aware_auto_continue.py` with all 4 regression tests from the plan
 
 ### 4. Fix stage detector typed outcome merge
 - **Task ID**: build-stage-detector-fix
@@ -253,11 +292,20 @@ The bridge restart after code changes is already part of the standard workflow. 
   - When `outcome.status == "success"` and `outcome.stage not in regex_stages`, append a transition: `{"stage": outcome.stage, "status": "completed", "reason": f"Typed outcome: {outcome.stage} succeeded (regex missed)"}`
   - Log at INFO level: `"Stage {stage} merged from typed outcome (regex missed)"`
 - Remove the early return at line 215-216 (`if not transitions: return 0`) — it should come AFTER the typed outcome merge
-- Add test in `tests/` verifying that typed outcome merge produces a transition when regex misses
+- Add `TestApplyTransitionsTypedOutcomeMerge` class in `tests/test_observer.py` with all 6 regression tests from the plan
 
-### 5. Validate all fixes
+### 5. Add cross-repo skill validation tests
+- **Task ID**: build-cross-repo-tests
+- **Depends On**: build-sdlc-skill, build-do-skills
+- **Assigned To**: bridge-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- Add `TestCrossRepoGhResolution` class in `tests/test_observer.py` with all 3 regression tests from the plan
+- Add `TestObserverSdlcSteering` class in `tests/test_observer.py` with 2 tests from the plan
+
+### 6. Validate all fixes
 - **Task ID**: validate-all
-- **Depends On**: build-sdlc-skill, build-do-skills, build-classification-fix, build-stage-detector-fix
+- **Depends On**: build-sdlc-skill, build-do-skills, build-classification-fix, build-stage-detector-fix, build-cross-repo-tests
 - **Assigned To**: integration-validator
 - **Agent Type**: validator
 - **Parallel**: false
@@ -268,7 +316,7 @@ The bridge restart after code changes is already part of the standard workflow. 
 - Verify classification inheritance code exists in `telegram_bridge.py`
 - Verify all `/do-*` skills reference `GITHUB:` context line
 
-### 6. Documentation
+### 7. Documentation
 - **Task ID**: document-feature
 - **Depends On**: validate-all
 - **Assigned To**: documentarian
