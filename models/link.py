@@ -19,6 +19,7 @@ class Link(Model):
     link_id = AutoKeyField()
     url = KeyField()
     chat_id = KeyField()
+    project_key = KeyField(null=True)
     message_id = Field(type=int, null=True)
     domain = KeyField(null=True)
     sender = KeyField(null=True)

@@ -7,6 +7,10 @@ Queue-phase fields: priority, message_text, auto_continue_count, etc.
 Session-phase fields: turn_count, tool_call_count, log_path, summary, tags
 New fields: history (lifecycle events), issue_url, plan_url, pr_url
 
+Cross-references TelegramMessage via trigger_message_id. Message metadata
+(media, URLs, classification) lives on TelegramMessage; this model references
+it for enrichment during job execution.
+
 Status lifecycle: pending -> running -> active -> dormant -> completed | failed
 """
 
@@ -39,6 +43,10 @@ class AgentSession(Model):
     (models/session_log.py). All fields from both models are carried
     forward, plus new history and link tracking fields.
 
+    References TelegramMessage via trigger_message_id for message
+    metadata (media, URLs, classification). The job worker resolves
+    this reference to get enrichment parameters.
+
     Status values:
         pending  - Queued, waiting for worker
         running  - Worker picked up, agent executing
@@ -50,7 +58,8 @@ class AgentSession(Model):
 
     # === Identity ===
     job_id = AutoKeyField()
-    session_id = Field()
+    session_id = Field()  # Telegram-derived session identifier (e.g., tg_project_chatid_msgid)
+    claude_code_session_id = Field(null=True)  # Claude Code's session identifier (renamed from session_id overlap)
     project_key = KeyField()
     status = KeyField(default="pending")
 
@@ -70,6 +79,9 @@ class AgentSession(Model):
     workflow_id = Field(null=True)
     work_item_slug = Field(null=True)
     task_list_id = Field(null=True)
+    # === Message metadata (deprecated - now lives on TelegramMessage) ===
+    # These fields are retained for backward compatibility during migration.
+    # New code should read from TelegramMessage via trigger_message_id.
     has_media = Field(type=bool, default=False)
     media_type = Field(null=True)
     youtube_urls = Field(null=True)
@@ -78,12 +90,15 @@ class AgentSession(Model):
     chat_id_for_enrichment = Field(null=True)
     classification_type = Field(null=True)
     auto_continue_count = Field(type=int, default=0)
-    started_at = Field(type=float, null=True)
+    started_at = SortedField(type=float, partition_by="project_key", null=True)
+
+    # === Cross-reference to TelegramMessage ===
+    trigger_message_id = Field(null=True)  # msg_id of the TelegramMessage that triggered this session
 
     # === Session fields (from SessionLog) ===
     last_activity = Field(type=float, null=True)
     completed_at = Field(type=float, null=True)
-    last_transition_at = Field(type=float, null=True)
+    last_transition_at = Field(type=float, null=True)  # Deprecated: derive from history instead
     turn_count = IntField(default=0)
     tool_call_count = IntField(default=0)
     log_path = Field(null=True, max_length=1000)
