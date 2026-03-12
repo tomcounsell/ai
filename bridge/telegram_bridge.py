@@ -1474,15 +1474,24 @@ async def main():
     except Exception as e:
         logger.error(f"Failed to start session watchdog: {e}")
 
-    # Start job health monitor (detects stuck running jobs)
+    # Start unified reflection scheduler (subsumes job health monitor and all recurring tasks)
     if USE_CLAUDE_SDK:
         try:
-            from agent.job_queue import _job_health_loop
+            from agent.reflection_scheduler import ReflectionScheduler
 
-            asyncio.create_task(_job_health_loop())
-            logger.info("Job health monitor started")
+            _reflection_scheduler = ReflectionScheduler()
+            asyncio.create_task(_reflection_scheduler.start())
+            logger.info("Reflection scheduler started (replaces standalone health monitor)")
         except Exception as e:
-            logger.error(f"Failed to start job health monitor: {e}")
+            logger.error(f"Failed to start reflection scheduler: {e}")
+            # Fall back to standalone health monitor
+            try:
+                from agent.job_queue import _job_health_loop
+
+                asyncio.create_task(_job_health_loop())
+                logger.info("Fell back to standalone job health monitor")
+            except Exception as e2:
+                logger.error(f"Failed to start fallback health monitor: {e2}")
 
     # Start message query polling loop
     async def message_query_loop():

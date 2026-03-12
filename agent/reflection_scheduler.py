@@ -18,7 +18,7 @@ import importlib
 import inspect
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -243,32 +243,41 @@ async def run_reflection(entry: ReflectionEntry, state: Reflection) -> None:
 
 
 async def _enqueue_agent_reflection(entry: ReflectionEntry) -> None:
-    """Enqueue an agent-type reflection as a job in the job queue.
+    """Execute an agent-type reflection by running its command as a subprocess.
 
-    Creates an AgentSession with classification_type="reflection" and
-    enqueues it for the worker to pick up.
+    Agent-type reflections run shell commands (e.g., scripts that need a full
+    Claude session). They run in a subprocess to avoid blocking the scheduler.
 
     Args:
         entry: The registry entry with the command to run.
     """
-    from agent.job_queue import enqueue_job
-    from config.settings import PROJECTS
+    import subprocess
+    from pathlib import Path
 
-    # Use the first project's working directory as the execution context
-    if not PROJECTS:
-        logger.warning("[reflection] No projects configured, skipping agent reflection: %s", entry.name)
+    if not entry.command:
+        logger.error("[reflection] Agent reflection '%s' has no command", entry.name)
         return
 
-    project = PROJECTS[0]
-    working_dir = project.get("working_dir", ".")
+    # Run from the project root
+    project_root = Path(__file__).parent.parent
 
-    await enqueue_job(
-        project_key=project.get("key", "default"),
-        message_text=entry.command or f"Run reflection: {entry.name}",
-        working_dir=working_dir,
-        priority=entry.priority,
-        classification_type="reflection",
-    )
+    try:
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(
+                entry.command,
+                shell=True,
+                cwd=project_root,
+                capture_output=True,
+                text=True,
+                timeout=3600,  # 1 hour max for agent reflections
+            ),
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"Command exited {result.returncode}: {result.stderr[:500]}")
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"Agent reflection '{entry.name}' timed out after 1 hour")
 
 
 class ReflectionScheduler:

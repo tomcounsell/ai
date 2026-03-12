@@ -1783,6 +1783,50 @@ async def cleanup_stale_branches(working_dir: str, max_age_hours: float = 72) ->
     return cleaned
 
 
+# === Reflection-callable wrappers ===
+# These are called by the reflection scheduler (agent/reflection_scheduler.py)
+# and iterate all registered projects, so they don't need a project_key argument.
+
+
+def recover_orphaned_jobs_all_projects() -> int:
+    """Recover orphaned jobs across all registered projects.
+
+    Called by the reflection scheduler as the 'orphan-recovery' reflection.
+    Returns total number of recovered jobs.
+    """
+    total = 0
+    for project_key in list(_project_configs.keys()):
+        try:
+            recovered = _recover_orphaned_jobs(project_key)
+            total += recovered
+        except Exception as e:
+            logger.error("[reflection] Orphan recovery failed for %s: %s", project_key, e)
+    if not _project_configs:
+        logger.debug("[reflection] No projects registered, skipping orphan recovery")
+    return total
+
+
+async def cleanup_stale_branches_all_projects() -> list[str]:
+    """Clean up stale session branches across all registered projects.
+
+    Called by the reflection scheduler as the 'stale-branch-cleanup' reflection.
+    Returns list of all cleaned branch names.
+    """
+    all_cleaned = []
+    for project_key, config in list(_project_configs.items()):
+        working_dir = config.get("working_dir", "")
+        if not working_dir:
+            continue
+        try:
+            cleaned = await cleanup_stale_branches(working_dir)
+            all_cleaned.extend(cleaned)
+        except Exception as e:
+            logger.error("[reflection] Branch cleanup failed for %s: %s", project_key, e)
+    if not _project_configs:
+        logger.debug("[reflection] No projects registered, skipping branch cleanup")
+    return all_cleaned
+
+
 # === CLI Entry Point ===
 
 
