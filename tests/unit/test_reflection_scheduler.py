@@ -11,10 +11,9 @@ Tests cover:
 
 from __future__ import annotations
 
-import asyncio
 import time
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
@@ -26,7 +25,6 @@ from agent.reflection_scheduler import (
     is_reflection_running,
     load_registry,
 )
-
 
 # === Registry Loading Tests ===
 
