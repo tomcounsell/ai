@@ -137,6 +137,16 @@ class AgentSession(Model):
     # === Compatibility ===
 
     @property
+    def id(self) -> str | None:
+        """Alias for job_id. Provides a cleaner name for the primary key.
+
+        Cannot rename job_id directly because AutoKeyField generates Redis
+        keys from the field name -- renaming would make existing records
+        inaccessible.
+        """
+        return self.job_id
+
+    @property
     def sender(self) -> str | None:
         """Alias for sender_name (SessionLog used 'sender')."""
         return self.sender_name
