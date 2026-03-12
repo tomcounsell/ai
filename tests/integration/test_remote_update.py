@@ -35,6 +35,9 @@ class TestRemoteUpdateScript:
 
     def test_already_up_to_date(self):
         """When HEAD matches remote, script exits 0 with 'Already up to date'."""
+        venv_dir = PROJECT_DIR / ".venv"
+        if not venv_dir.exists():
+            pytest.skip("No .venv in project dir (e.g. running in worktree)")
         # Clean up any stale lock file from previous runs
         lock_dir = PROJECT_DIR / "data" / "update.lock"
         if lock_dir.is_dir():
@@ -57,6 +60,9 @@ class TestRemoteUpdateScript:
 
     def test_no_restart_flag_when_up_to_date(self):
         """When already up to date, no restart flag should be written."""
+        venv_dir = PROJECT_DIR / ".venv"
+        if not venv_dir.exists():
+            pytest.skip("No .venv in project dir (e.g. running in worktree)")
         flag = PROJECT_DIR / "data" / "restart-requested"
         # Remove any existing flag
         flag.unlink(missing_ok=True)
