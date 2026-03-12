@@ -32,7 +32,7 @@ class TestCaptureGitBaselineWarning:
     def test_warning_on_subprocess_failure(self, tmp_path, hook_input, capsys):
         """When git subprocess fails, a HOOK WARNING is printed to stderr."""
         # Import the hook by adding its directory to sys.path
-        hooks_dir = str(Path(__file__).parent.parent / ".claude" / "hooks")
+        hooks_dir = str(Path(__file__).parent.parent.parent / ".claude" / "hooks")
         if hooks_dir not in sys.path:
             sys.path.insert(0, hooks_dir)
 
@@ -55,7 +55,7 @@ class TestCaptureGitBaselineWarning:
 
     def test_warning_on_json_write_failure(self, tmp_path, hook_input, capsys):
         """When JSON write fails, a HOOK WARNING is printed to stderr."""
-        hooks_dir = str(Path(__file__).parent.parent / ".claude" / "hooks")
+        hooks_dir = str(Path(__file__).parent.parent.parent / ".claude" / "hooks")
         if hooks_dir not in sys.path:
             sys.path.insert(0, hooks_dir)
 
@@ -76,7 +76,7 @@ class TestCaptureGitBaselineWarning:
 
     def test_no_crash_on_exception(self, tmp_path, hook_input):
         """Function does not raise even when an exception occurs (fire-and-forget)."""
-        hooks_dir = str(Path(__file__).parent.parent / ".claude" / "hooks")
+        hooks_dir = str(Path(__file__).parent.parent.parent / ".claude" / "hooks")
         if hooks_dir not in sys.path:
             sys.path.insert(0, hooks_dir)
 
@@ -92,7 +92,7 @@ class TestCaptureGitBaselineWarning:
 
     def test_no_warning_on_success(self, tmp_path, hook_input, capsys):
         """When baseline capture succeeds, no warning is printed."""
-        hooks_dir = str(Path(__file__).parent.parent / ".claude" / "hooks")
+        hooks_dir = str(Path(__file__).parent.parent.parent / ".claude" / "hooks")
         if hooks_dir not in sys.path:
             sys.path.insert(0, hooks_dir)
 
@@ -115,7 +115,7 @@ class TestCaptureGitBaselineWarning:
 
     def test_skips_when_no_session_id(self, tmp_path, capsys):
         """When session_id is empty, function returns early without warning."""
-        hooks_dir = str(Path(__file__).parent.parent / ".claude" / "hooks")
+        hooks_dir = str(Path(__file__).parent.parent.parent / ".claude" / "hooks")
         if hooks_dir not in sys.path:
             sys.path.insert(0, hooks_dir)
 
@@ -128,7 +128,7 @@ class TestCaptureGitBaselineWarning:
 
     def test_skips_when_baseline_already_exists(self, tmp_path, hook_input, capsys):
         """When baseline already exists, function returns early."""
-        hooks_dir = str(Path(__file__).parent.parent / ".claude" / "hooks")
+        hooks_dir = str(Path(__file__).parent.parent.parent / ".claude" / "hooks")
         if hooks_dir not in sys.path:
             sys.path.insert(0, hooks_dir)
 

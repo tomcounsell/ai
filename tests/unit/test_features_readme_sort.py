@@ -16,7 +16,7 @@ from textwrap import dedent
 # Import the validator module directly
 sys.path.insert(
     0,
-    str(Path(__file__).parent.parent / ".claude" / "hooks" / "validators"),
+    str(Path(__file__).parent.parent.parent / ".claude" / "hooks" / "validators"),
 )
 from validate_features_readme_sort import (
     check_sort_order,
@@ -26,7 +26,7 @@ from validate_features_readme_sort import (
 )
 
 VALIDATOR_SCRIPT = str(
-    Path(__file__).parent.parent
+    Path(__file__).parent.parent.parent
     / ".claude"
     / "hooks"
     / "validators"
