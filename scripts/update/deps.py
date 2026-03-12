@@ -331,11 +331,11 @@ def bump_pin_in_pyproject(project_dir: Path, package: str, new_version: str) -> 
         return False
 
     content = pyproject.read_text()
-    # Match: "package==VERSION" with optional trailing content
+    # Match: "package==VERSION" — capture the full quoted string
     pattern = re.compile(
-        rf'("{re.escape(package)})==([^"]+)"',
+        rf'"{re.escape(package)}==[^"]*"',
     )
-    new_content, count = pattern.subn(rf'"\1=={new_version}"', content)
+    new_content, count = pattern.subn(f'"{package}=={new_version}"', content)
     if count == 0:
         return False
 
