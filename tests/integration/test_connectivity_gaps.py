@@ -273,7 +273,7 @@ class TestSdkClientEnvVar:
         """sdk_client.py contains the VALOR_SESSION_ID env var injection code."""
         from pathlib import Path
 
-        sdk_client_path = Path(__file__).parent.parent / "agent" / "sdk_client.py"
+        sdk_client_path = Path(__file__).parent.parent.parent / "agent" / "sdk_client.py"
         source = sdk_client_path.read_text()
 
         # Verify the env var injection code exists
@@ -284,7 +284,7 @@ class TestSdkClientEnvVar:
         """VALOR_SESSION_ID is only set when session_id is provided (not None)."""
         from pathlib import Path
 
-        sdk_client_path = Path(__file__).parent.parent / "agent" / "sdk_client.py"
+        sdk_client_path = Path(__file__).parent.parent.parent / "agent" / "sdk_client.py"
         source = sdk_client_path.read_text()
 
         # The env var should be inside an `if session_id:` block

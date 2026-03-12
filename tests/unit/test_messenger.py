@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 # Direct import of messenger module to avoid sdk_client dependency
-messenger_path = Path(__file__).parent.parent / "agent" / "messenger.py"
+messenger_path = Path(__file__).parent.parent.parent / "agent" / "messenger.py"
 spec = importlib.util.spec_from_file_location("messenger", messenger_path)
 messenger_module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(messenger_module)

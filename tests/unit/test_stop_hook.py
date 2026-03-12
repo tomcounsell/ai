@@ -167,25 +167,25 @@ class TestStopHookScript:
 
     def test_stop_hook_exists(self):
         """The stop hook file exists."""
-        hook = Path(__file__).parent.parent / ".claude" / "hooks" / "stop.py"
+        hook = Path(__file__).parent.parent.parent / ".claude" / "hooks" / "stop.py"
         assert hook.exists()
 
     def test_stop_hook_references_transcript_jsonl(self):
         """stop.py writes to transcript.jsonl, not chat.json."""
-        hook = Path(__file__).parent.parent / ".claude" / "hooks" / "stop.py"
+        hook = Path(__file__).parent.parent.parent / ".claude" / "hooks" / "stop.py"
         content = hook.read_text()
         assert "transcript.jsonl" in content
         assert "chat.json" not in content
 
     def test_stop_hook_updates_agent_session(self):
         """stop.py calls _update_agent_session_log_path."""
-        hook = Path(__file__).parent.parent / ".claude" / "hooks" / "stop.py"
+        hook = Path(__file__).parent.parent.parent / ".claude" / "hooks" / "stop.py"
         content = hook.read_text()
         assert "_update_agent_session_log_path" in content
 
     def test_stop_hook_always_copies(self):
         """stop.py copies transcript unconditionally (not gated by --chat)."""
-        hook = Path(__file__).parent.parent / ".claude" / "hooks" / "stop.py"
+        hook = Path(__file__).parent.parent.parent / ".claude" / "hooks" / "stop.py"
         content = hook.read_text()
         # The copy logic should NOT be inside "if args.chat:"
         # It should be at the same indentation as the metadata save
