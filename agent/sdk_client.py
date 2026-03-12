@@ -714,19 +714,17 @@ class ValorAgent:
                                 if isinstance(block, TextBlock):
                                     response_parts.append(block.text)
                         elif isinstance(msg, ResultMessage):
-<<<<<<< session/observer_early_return
                             # Bug 1 fix (issue #374): Store Claude Code session UUID
                             # so continuation sessions resume the correct transcript.
                             if msg.session_id and session_id:
                                 _store_claude_session_uuid(session_id, msg.session_id)
-=======
                             # Capture stop_reason for Observer routing decisions
                             if msg.stop_reason and session_id:
                                 _session_stop_reasons[session_id] = msg.stop_reason
                                 logger.info(
                                     f"SDK stop_reason={msg.stop_reason} for session {session_id}"
                                 )
->>>>>>> main
+
                             if msg.total_cost_usd is not None:
                                 cost = msg.total_cost_usd
                                 turns = msg.num_turns
