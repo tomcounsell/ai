@@ -380,7 +380,7 @@ async def send_response_with_files(
 
     # Summarize SDK agent responses for consistent PM-quality output.
     # SDLC sessions: always summarize (need stage lines + link footers).
-    # Non-SDLC short responses (< 500 chars): skip — these are typically
+    # Non-SDLC short responses (< 200 chars): skip — these are typically
     # programmatic skill output (e.g., /update) that's already formatted.
     # Re-read session from Redis for fresh stage/link data written during execution
     if session and hasattr(session, "session_id") and session.session_id:

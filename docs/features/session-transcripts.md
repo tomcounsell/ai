@@ -31,6 +31,20 @@ Format (one line per event):
 
 Tool results are truncated to 2000 characters in the transcript to keep file sizes manageable.
 
+### JSONL Transcript Backup
+
+Claude Code stores full session transcripts as JSONL files in `~/.claude/projects/-Users-valorengels-src-ai/{uuid}.jsonl`. These contain complete conversation data (`user`, `assistant`, `system`, `progress`, `file-history-snapshot` messages) and are the lossless source of truth — unlike the custom `transcript.txt` format which truncates tool results.
+
+The stop hook (`.claude/hooks/stop.py`) automatically backs up the JSONL transcript on every session stop:
+
+1. Reads `transcript_path` from the hook input (provided by Claude Code)
+2. Copies the JSONL file to `logs/sessions/{session_id}/transcript.jsonl`
+3. Stores the backup path in `AgentSession.log_path` for later retrieval
+
+This runs unconditionally — the legacy `--chat` flag is accepted but ignored since backup is now always-on. The backup is non-fatal: Redis or model errors are silently caught to avoid breaking the stop hook.
+
+**Why both formats?** The `transcript.txt` is human-readable and written incrementally during the session. The `transcript.jsonl` is a post-session backup of Claude Code's internal format — structured, lossless, and suitable for tooling like [cctrace](https://github.com/jimmc414/cctrace) or [ccexport](https://github.com/marcheiligers/ccexport) for markdown/HTML export.
+
 ### AgentSession Model
 
 `models/agent_session.py` — Unified model that replaced both `RedisJob` and `SessionLog`.
