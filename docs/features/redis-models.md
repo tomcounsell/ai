@@ -55,7 +55,7 @@ This bidirectional link enables:
 
 ### Fallback Path
 
-For sessions created before the migration (no `trigger_message_id`), the job worker falls back to reading enrichment fields directly from AgentSession. These deprecated fields are retained for backward compatibility.
+For sessions created before the migration (no `trigger_message_id`), the job worker falls back to reading enrichment fields directly from AgentSession. These fields are retained on AgentSession for backward compatibility with pre-existing records.
 
 ## project_key
 
@@ -72,9 +72,9 @@ Models with project_key:
 
 ## Field Ownership
 
-Message metadata (media, URLs, classification) is owned by **TelegramMessage**, not AgentSession. The fields exist on both models during the migration period, but new code should always read from TelegramMessage via `trigger_message_id`.
+Message metadata (media, URLs, classification) is owned by **TelegramMessage**, not AgentSession. The fields exist on both models for backward compatibility, but new code should always read from TelegramMessage via `trigger_message_id`.
 
-| Field | Owner | Deprecated Location |
+| Field | Owner | Also On |
 |-------|-------|-------------------|
 | has_media | TelegramMessage | AgentSession |
 | media_type | TelegramMessage | AgentSession |
