@@ -10,12 +10,32 @@ This skill is a **router**, not an orchestrator. It assesses where work stands, 
 
 You MUST NOT write code, run tests, or create plans directly -- delegate everything to sub-skills.
 
+## Cross-Repo Resolution
+
+When working on a non-ai project (e.g., popoto), the worker runs with `cwd=ai/` but the target repo is different. To ensure `gh` commands resolve against the correct repo, extract the `GITHUB:` line from the prompt context injected by `sdk_client.py`.
+
+```bash
+# Extract the target repo from prompt context (e.g., "GITHUB: tomcounsell/popoto")
+# Look for a line like "GITHUB: org/repo" in the enriched message you received.
+# If found, use --repo for ALL gh commands in this skill.
+# If not found (local ai repo work), omit --repo (defaults to cwd repo).
+REPO_FLAG=""
+# Example: GITHUB_REPO="tomcounsell/popoto" extracted from context
+if [ -n "$GITHUB_REPO" ]; then
+  REPO_FLAG="--repo $GITHUB_REPO"
+fi
+```
+
+**CRITICAL**: Always use `$REPO_FLAG` with every `gh` command below. Without it, cross-project SDLC work silently resolves issues and PRs against the wrong repository.
+
 ## Step 1: Resolve the Issue
 
 If an issue number was provided, fetch it:
 ```bash
-gh issue view {number}
+gh issue view {number} $REPO_FLAG
 ```
+
+After fetching, **verify the issue belongs to the target project**: check that the issue URL contains the expected org/repo. If it resolves to a different repo, you have a cross-repo mismatch -- stop and report the error.
 
 If NO issue number was provided (just a feature description), invoke `/do-issue` to create a quality issue. Do not proceed without an issue number.
 
@@ -31,7 +51,7 @@ grep -r "#{issue_number}" docs/plans/ 2>/dev/null
 git branch -a | grep session/
 
 # Check if a PR already exists
-gh pr list --search "#{issue_number}" --state open
+gh pr list --search "#{issue_number}" --state open $REPO_FLAG
 
 # Check test status (if branch/PR exists)
 # Check review status (if PR exists)
