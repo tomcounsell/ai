@@ -1,240 +1,199 @@
 ---
 status: Planning
-type: feature
-appetite: Large
+type: bug
+appetite: Medium
 owner: Valor
 created: 2026-03-11
 tracking: https://github.com/tomcounsell/ai/issues/360
 last_comment_id:
 ---
 
-# Health Check Reflection: Self-Healing Job Monitor
+# Smart Stall Detection via Transcript Mtime
 
 ## Problem
 
-The current job health check (`_job_health_check` in `agent/job_queue.py`) detects stuck jobs and recovers them by re-queuing as pending. But it operates mechanically -- it has no understanding of **why** a job stalled and no ability to fix the underlying cause.
+The session watchdog detects stalled sessions but can't distinguish **productive silence** (deep sub-agent work) from **real stalls** (stuck, crashed, looping). This causes two failure modes:
+
+1. **False positives**: A builder spawning test agents 3 levels deep shows no `last_activity` updates for 20+ minutes. The watchdog sees "silent for 20 min" and kills productive work.
+2. **20-minute dead zone**: Silence is detected at 10 min (`SILENCE_THRESHOLD`) but kill+re-enqueue doesn't happen until 30 min (`ABANDON_THRESHOLD`). Stalled jobs sit idle for 20 minutes before recovery.
+3. **Re-enqueue into blocked workers**: After killing, the re-enqueued job goes `pending` behind the same single-project worker. After 3 retries it's abandoned.
 
 **Current behavior:**
-- Health check runs every 5 minutes, scans running jobs for dead workers or timeouts
-- Dead/timed-out jobs get delete-and-recreated as pending with high priority
-- The same bug that stalled the first job stalls the retry, creating an infinite stall-recover-stall loop
-- No log inspection, no diagnosis, no self-repair
+- `last_activity` only updates at session start and end — blind to sub-agent progress
+- 10-min detection but 30-min action threshold creates a dead zone
+- 5 work items stalled in Dev: Valor chat (PRs #370, #367; issues #360, #363, #364) because the watchdog couldn't tell productive sessions from stuck ones
 
 **Desired outcome:**
-- Health check inspects logs and session history to classify failures
-- Transient failures get retried (as today)
-- Code bugs get diagnosed, an issue gets filed, SDLC runs autonomously to fix the bug, the bridge restarts with the fix, and the original job retries
-- Infrastructure issues generate an alert to the human
-- The system is demonstrably self-policing for scheduling and agent bugs
+- Observer checks every 5 min and **accurately** identifies stalls using transcript file mtime
+- Truly stalled sessions are killed and re-enqueued immediately on detection
+- Productive sessions with active sub-agents are left alone
+- Timeout stays as a last-resort safety net that should almost never fire
 
 ## Prior Art
 
-- **Issue #127** (closed): Job queue stuck job detection and recovery. Implemented the current `_job_health_check()` with periodic scanning, timeout enforcement, and CLI tools (`--flush-stuck`, `--flush-job`). This established the mechanical recovery layer that this feature builds on.
-- **Issue #216** (closed): Agent session stall detection and lifecycle diagnostics. Added structured lifecycle logging (`log_lifecycle_transition`), stall detection via `retry_count`/`last_stall_reason` fields on AgentSession, and health check integration. This provides the diagnostic data this feature needs to classify failures.
-- **Issue #258** (closed): Job self-scheduling, batch dispatch, deferred execution. Added the `schedule_job` MCP tool and `scheduled_after` field. The self-scheduling capability is a prerequisite for health check reflection to spawn SDLC jobs for bugfixes.
-- **Issue #361** (open): Reflections as first-class objects. Sibling issue that proposes a unified model for recurring non-issue work. The health check reflection is a specific instance of this pattern -- it's a recurring job that should be modeled as a first-class reflection.
+- **PR #217** (merged 2026-02-27): Added session lifecycle diagnostics and stall detection. Introduced `retry_count`/`last_stall_reason` fields and `log_lifecycle_transition()`. Established the diagnostic data model this feature builds on.
+- **PR #316** (merged 2026-03-09): Stall detection and automatic retry for agent sessions. Implemented `_kill_stalled_worker()`, `_enqueue_stall_retry()`, and exponential backoff. This is the mechanical recovery layer — works correctly but uses the wrong signal (`last_activity` instead of transcript mtime).
+- **PR #344** (merged 2026-03-10): Fix session stuck in pending after BUILD COMPLETED. Addressed a specific race condition but didn't fix the fundamental detection problem.
+
+## Why Previous Fixes Failed
+
+| Prior Fix | What It Did | Why It Failed / Was Incomplete |
+|-----------|-------------|-------------------------------|
+| PR #316 | Added stall retry with `_kill_stalled_worker()` | Uses `last_activity` which only updates at session start/end — can't see sub-agent progress |
+| PR #344 | Fixed pending→running race | Addressed one specific race but the general "is this session making progress?" question remained unanswered |
+
+**Root cause pattern:** All prior fixes relied on `last_activity` timestamps in Redis, which require explicit updates from the top-level session. Sub-agents (builder → test-runner → baseline-verifier) don't update this field. The system needs a **process-level signal** that reflects actual I/O, not application-level bookkeeping.
 
 ## Data Flow
 
-1. **Entry point**: `_job_health_loop()` runs every 5 minutes in the bridge event loop
-2. **Detection**: `_job_health_check()` scans all `status="running"` AgentSessions, checks worker liveness and timeout
-3. **Current recovery**: Dead/timed-out jobs get delete-and-recreated as `status="pending"`, `priority="high"`
-4. **Proposed extension**: Before recovery, the health check reflection runs a diagnostic pipeline:
-   a. Reads recent `logs/bridge.log` entries around the stall timestamp
-   b. Reads the AgentSession's `history`, `last_stall_reason`, `retry_count`
-   c. Calls Claude Haiku to classify failure: `transient | code_bug | infrastructure | unknown`
-   d. For `code_bug`: creates a GitHub issue, enqueues an SDLC job at `high` priority
-   e. For `infrastructure`: sends Telegram alert via existing watchdog mechanism
-   f. For `transient`/`unknown`: retries as today (delete-and-recreate as pending)
-5. **Fix deployment**: SDLC job runs, creates PR, auto-merges (auto_merge=true for valor project), bridge restarts via `data/restart-requested` flag
-6. **Retry**: Original job is re-enqueued only after the fix is deployed (tracked via a `blocked_by_fix` field on the job or a simple deferred scheduling with `scheduled_after`)
+1. **Entry point**: `_session_health_loop()` runs every 5 min in the bridge event loop
+2. **Detection**: For each `status="active"` session, check transcript file mtime at `logs/sessions/{session_id}/transcript.txt`
+3. **Classification**: Compare `now - mtime` against threshold. Fresh mtime = healthy (sub-agents writing). Stale mtime = truly stalled.
+4. **Recovery**: If stale >15 min → `_kill_stalled_worker()` → `_enqueue_stall_retry()` → `_ensure_worker()`
+5. **Fallback**: If transcript file doesn't exist, fall back to current `last_activity` heuristic
 
 ## Architectural Impact
 
-- **New dependencies**: None new. Uses existing Claude API (Haiku), `gh` CLI, `_push_job()`, and `enqueue_job()`.
-- **Interface changes**: `_job_health_check()` gains a diagnostic sub-pipeline. New function `_diagnose_stalled_job(job, logs)` returns a classification enum.
-- **Coupling**: Increases coupling between `agent/job_queue.py` and `scripts/reflections.py` patterns. The diagnostic LLM call pattern mirrors `run_llm_reflection()` in reflections.py.
-- **Data ownership**: AgentSession gains new fields (`last_diagnosis`, `blocked_by_issue`) to track diagnostic state.
-- **Reversibility**: High. The diagnostic pipeline is additive -- current mechanical recovery remains the fallback if diagnosis fails or is disabled.
+- **New dependencies**: None. Uses `os.path.getmtime()` and `pathlib.Path` (stdlib).
+- **Interface changes**: `_handle_unhealthy_session()` gains transcript mtime check before acting. New `_check_transcript_liveness()` function.
+- **Coupling**: No new coupling. Reads transcript files that `bridge/session_transcript.py` already writes.
+- **Data ownership**: No change. Transcript files are owned by the SDK subprocess; watchdog only reads mtime.
+- **Reversibility**: High. The transcript check is additive — remove it and behavior reverts to current `last_activity` logic.
 
 ## Appetite
 
-**Size:** Large
+**Size:** Medium
 
-**Team:** Solo dev, PM
+**Team:** Solo dev
 
 **Interactions:**
-- PM check-ins: 1-2 (scope alignment on blast radius limits, auto-merge safety)
-- Review rounds: 2+ (security review for autonomous code changes, correctness review)
+- PM check-ins: 0 (scope is clear from this conversation)
+- Review rounds: 1
 
 ## Prerequisites
 
-| Requirement | Check Command | Purpose |
-|-------------|---------------|---------|
-| `ANTHROPIC_API_KEY` | `python -c "from dotenv import dotenv_values; assert dotenv_values('.env').get('ANTHROPIC_API_KEY')"` | Claude API for LLM diagnosis |
-| `gh` CLI authenticated | `gh auth status` | GitHub issue creation and SDLC |
-| Job self-scheduling (#258) | `python -c "from agent.job_queue import enqueue_job; print('ok')"` | Spawn SDLC jobs from health check |
-| Bridge auto-merge enabled | `python -c "import json; c=json.load(open('config/projects.json')); assert c['projects']['valor']['auto_merge']"` | Merge fixes without human |
+No prerequisites — uses only stdlib (`os.path.getmtime`, `pathlib.Path`) and existing transcript files.
 
 ## Solution
 
 ### Key Elements
 
-- **Failure Classifier**: LLM-powered (Haiku) classifier that reads logs and session state to categorize failures as transient, code bug, infrastructure, or unknown
-- **SDLC Spawner**: Enqueues a high-priority SDLC job when a code bug is diagnosed, targeting the specific file and error pattern
-- **Fix-Then-Retry Gate**: Holds the original failed job in a deferred state until the fix PR is merged and bridge restarts
-- **Dedup Guard**: Prevents filing duplicate issues for the same bug pattern (reuses `has_existing_github_work()` from reflections)
-- **Blast Radius Limiter**: Auto-fix is allowed for anything EXCEPT fundamental architecture (bridge core, core agent loop). Specifically, `bridge/telegram_bridge.py`, `agent/sdk_client.py`, and `agent/observer.py` are protected from auto-fix. Everything else in `agent/`, `bridge/`, `models/`, `tools/`, `mcp_servers/`, `scripts/`, `monitoring/` is fair game. Changes to protected files get an issue filed but no auto-fix.
-- **Fuzzy Cache for Haiku Requests**: Cache recent diagnosis prompts and responses with fuzzy matching (embedding similarity or normalized prompt hash) to detect and prevent: (a) race conditions where multiple health check cycles diagnose the same failure, (b) infinite loops where the same error pattern triggers repeated diagnosis, and (c) unnecessary API spend on duplicate classifications.
-
-### Two-Tier Health Check
-
-**Quick check (every 5 min):** Lightweight, no LLM calls. Detects stuck jobs, captures stall metadata (timestamp, log excerpt hash, retry count). If a stall is detected for the first time, records it and moves on. If a stall persists across 2+ cycles, flags it for full diagnosis.
-
-**Full diagnosis (scheduled as low-priority job):** LLM-powered classification. Created by the quick check when a persistent stall is detected. Runs as a regular job in the queue (not in the health check loop), so it doesn't block the health check timer. Expected volume: a few per day at most.
+- **Transcript liveness check**: `os.path.getmtime()` on `logs/sessions/{session_id}/transcript.txt` — the cheapest reliable signal for sub-agent activity
+- **Single threshold**: If transcript stale >15 min, session is truly stalled. No more dual-threshold dead zone.
+- **Smart retry reset**: If transcript grew between retries, reset `retry_count` (session made progress before re-stalling, not a persistent failure)
 
 ### Flow
 
-**Quick check** -> Stall detected (first time) -> Record stall metadata, skip diagnosis
-
-**Quick check** -> Stall persists (2+ cycles) -> Schedule full diagnosis job (low priority)
-
-**Full diagnosis job** -> Classify failure (LLM, with fuzzy cache check) -> *If code bug:* Create issue + Spawn SDLC job -> *Fix merged + bridge restarted* -> Schedule post-fix retry via `scheduled_after` (bridge restart + 10 min)
-
-**Full diagnosis job** -> Classify failure (LLM) -> *If transient:* Re-enqueue as pending (existing behavior)
-
-**Full diagnosis job** -> Classify failure (LLM) -> *If infrastructure:* Alert human via Telegram
-
-### Post-Fix Validation
-
-After a bugfix PR merges and the bridge restarts, the original failed job is not retried immediately. Instead, it's scheduled via `scheduled_after = now + 600` (10 minutes after bridge restart). This gives the system time to stabilize and confirms the bridge is healthy before retrying the job that originally failed.
+**Watchdog tick (every 5 min)** → Check each active session → Read transcript mtime → *If fresh (<15 min):* healthy, skip → *If stale (>15 min):* kill worker + re-enqueue → *If no transcript:* fall back to `last_activity` check
 
 ### Technical Approach
 
-**Quick check (in `_job_health_check()`):**
-- Existing stall detection logic unchanged
-- New: on first stall detection, record `stall_first_seen` timestamp and `stall_log_hash` on the AgentSession
-- New: if `stall_first_seen` is already set and stall persists across 2+ cycles (10+ min), schedule a full diagnosis job via `enqueue_job()` with `priority="low"` and `classification_type="diagnosis"`
-- Gate behind `HEALTH_CHECK_DIAGNOSIS_ENABLED` env var (default: true)
+**New function `_check_transcript_liveness(session) -> tuple[bool, float]`:**
+- Builds path: `logs/sessions/{session.session_id}/transcript.txt`
+- Returns `(is_alive, stale_seconds)` where `is_alive = stale_seconds < TRANSCRIPT_STALE_THRESHOLD`
+- Falls back to `(None, 0)` if file doesn't exist (caller uses legacy check)
+- Configurable via `TRANSCRIPT_STALE_THRESHOLD` env var (default: 900s / 15 min)
 
-**Full diagnosis (as a scheduled job):**
-- New `_diagnose_stalled_job()` function in `agent/job_queue.py` — accepts a stalled AgentSession and recent log lines, calls Haiku for classification
-- **Fuzzy cache**: Before calling Haiku, hash the normalized prompt (error pattern + log excerpt) and check `data/diagnosis_cache.json`. If a matching hash exists with a result from the last 30 min, reuse it. This prevents race conditions (multiple cycles diagnosing the same failure) and infinite loops.
-- For code bugs: call `enqueue_job()` with `classification_type="sdlc"` and a message that invokes `/sdlc issue {new_issue_number}`
-- Track pending fix with `blocked_by_issue` field on the stalled job
-- After SDLC fix merges and bridge restarts, the original job is re-enqueued with `scheduled_after = time.time() + 600` (10 min after restart for stabilization)
-- `retry_count` ceiling (3) prevents infinite diagnosis-retry loops
+**Modified `_handle_unhealthy_session()`:**
+- Before checking silence duration, call `_check_transcript_liveness()`
+- If transcript is alive → return False (session is healthy, don't act)
+- If transcript is stale → proceed with kill + re-enqueue (existing `_kill_stalled_worker()` + `_enqueue_stall_retry()`)
+- If no transcript → fall back to current `last_activity` logic unchanged
 
-**Graduated auto-merge trust scoring:**
-- Implemented as a `_compute_merge_confidence()` function that evaluates red flags
-- Returns a score 0.0-1.0; auto-merge only if score >= 0.7
-- Red flags: lines changed > 20 (penalty), add/remove ratio > 3:1 (penalty), any test failure (hard block), PR review issues > 2 (hard block), files touched > 3 (penalty)
-- Threshold can be adjusted over time as trust builds
+**Modified `_enqueue_stall_retry()`:**
+- Before incrementing `retry_count`, check if transcript file size grew since last retry
+- If transcript grew → reset `retry_count` to 0 (session made progress, this is a new stall, not a persistent failure)
+- Store `last_transcript_size` on AgentSession for comparison
+
+**Threshold consolidation:**
+- `TRANSCRIPT_STALE_THRESHOLD = 900` (15 min) replaces both `SILENCE_THRESHOLD` (10 min) and `ABANDON_THRESHOLD` (30 min)
+- `DURATION_THRESHOLD = 7200` (2 hours) stays as safety net — should almost never fire
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `_diagnose_stalled_job()` wraps the LLM call in try/except -- if diagnosis fails, fall back to mechanical recovery (current behavior)
-- [ ] `_job_health_check()` already has a top-level try/except in `_job_health_loop()` -- verify it catches diagnosis errors
+- [ ] `_check_transcript_liveness()` wraps `os.path.getmtime()` in try/except for missing files, permission errors — returns `(None, 0)` on failure
+- [ ] Existing `_handle_unhealthy_session()` try/except covers the new transcript check path
 
 ### Empty/Invalid Input Handling
-- [ ] Test with empty log content (no bridge.log entries around stall time)
-- [ ] Test with AgentSession missing `history` or `last_stall_reason` fields
-- [ ] Test with Haiku returning malformed JSON or unrecognized category
+- [ ] Session with no `session_id` — `_check_transcript_liveness()` returns `(None, 0)`, falls back to legacy
+- [ ] Transcript file exists but is empty (0 bytes) — mtime still valid, treated normally
+- [ ] Transcript path with special characters — `Path` handles this safely
 
 ### Error State Rendering
-- [ ] When diagnosis returns `infrastructure`, verify the Telegram alert includes actionable diagnostics
-- [ ] When diagnosis fails (LLM error), verify the user is not bothered -- silent fallback to mechanical recovery
+- [ ] When transcript-based stall is detected, the stall reason includes mtime age and transcript size for diagnostics
+- [ ] Stall retry notification to Telegram includes "transcript stale for Xm" in the message
 
 ## Rabbit Holes
 
-- **Full root cause analysis with code context**: It's tempting to feed the LLM the actual source code of the failing function for root cause analysis. This balloons token usage and complexity. The SDLC job handles the actual fix -- diagnosis just needs enough signal to file a good issue.
-- **Cross-project health check reflection**: The health check currently operates on the `valor` project. Extending to all projects in `projects.json` is a separate scope item -- each project has different auto_merge policies and SDLC capabilities.
-- **Real-time process monitoring**: Monitoring CPU/memory of Claude Code subprocesses per job. The existing timeout mechanism is sufficient; process-level monitoring is a different problem.
-- **Custom LLM fine-tuning for failure classification**: Haiku with a well-crafted prompt is sufficient. Fine-tuning is premature optimization.
+- **Reading transcript content for diagnosis**: Tempting to parse the transcript to classify why a session stalled (loops, errors, etc). Save for Phase 2. Mtime alone is sufficient for detection.
+- **Process tree monitoring via psutil**: More complex, platform-dependent, and the transcript mtime gives the same signal with less code.
+- **Updating `last_activity` from sub-agents**: Would require instrumentation in the SDK subprocess. The whole point is to avoid instrumenting the process — just check the file it already writes.
+- **Multiple workers per project**: Architectural change that would help with re-enqueue-into-blocked-worker, but orthogonal to detection accuracy.
 
 ## Risks
 
-### Risk 1: Infinite diagnosis-retry loops
-**Impact:** A code bug that the SDLC can't fix leads to: diagnose -> file issue -> SDLC fails -> retry original job -> stall -> diagnose -> file duplicate issue -> loop forever
-**Mitigation:** Dedup guard (`has_existing_github_work()`) prevents duplicate issues. `retry_count` ceiling (3) on the original job prevents infinite retries. After 3 retries with the same diagnosis, the job is marked `failed` and the human is alerted.
+### Risk 1: Transcript file not written frequently enough
+**Impact:** Sub-agents might batch writes, making mtime less granular than expected. A session could look stale despite being active.
+**Mitigation:** Claude Code writes to transcript on every tool call and result. Even a 5-minute gap between tool calls is normal (thinking time). The 15-min threshold provides generous headroom.
 
-### Risk 2: SDLC fix introduces new bugs
-**Impact:** The autonomous fix for a scheduling bug could break something else, causing a cascade of new stalls.
-**Mitigation:** Graduated trust scoring for auto-merge. Instead of a single line-count threshold, evaluate multiple red flags:
-- **Lines changed**: More lines = higher risk. Soft limit at 20 lines, hard limit at 50.
-- **Add/remove ratio**: Heavily skewed ratios (all adds or all deletes) are riskier than balanced refactors.
-- **Test failures in first round**: Any test failures block auto-merge entirely.
-- **PR review issue count**: More than 2 review issues flagged = block auto-merge, alert human.
-- **Files touched**: Changes spanning 3+ files get extra scrutiny.
-The trust threshold starts conservative and can be relaxed over time as the system proves reliable. The bridge watchdog (level 4: auto-revert) catches crashes caused by bad commits.
-
-### Risk 3: High API cost from frequent LLM diagnosis calls
-**Impact:** If many jobs stall simultaneously, each triggers a Haiku call for diagnosis.
-**Mitigation:** Rate limit diagnosis to 1 call per 5-minute health check cycle (already natural since health check runs every 5 min). Cache recent diagnoses by error pattern hash to avoid re-diagnosing the same failure.
+### Risk 2: Transcript file from a previous session
+**Impact:** If session IDs are reused or a stale transcript exists from a crashed session, mtime could incorrectly indicate liveness.
+**Mitigation:** `start_transcript()` creates a fresh file at session start. The mtime reflects writes from the current session. Stale files from previous sessions will have old mtimes and correctly indicate staleness.
 
 ## Race Conditions
 
-### Race 1: Health check diagnoses while SDLC fix is in progress
-**Location:** `agent/job_queue.py` `_job_health_check()`, concurrent with SDLC worker
-**Trigger:** Health check runs, finds the same stalled job, diagnoses again while a fix SDLC job is already running
-**Data prerequisite:** The diagnosis result (issue URL) must be recorded on the stalled job before the next health check cycle
-**State prerequisite:** The SDLC job must be visible in the queue before the health check re-scans
-**Mitigation:** After filing an issue and spawning SDLC, set `blocked_by_issue` on the stalled job's AgentSession. Health check skips jobs with `blocked_by_issue` set. Clear it after SDLC completes or after timeout.
+### Race 1: Watchdog checks mtime while transcript is being written
+**Location:** `monitoring/session_watchdog.py` `_check_transcript_liveness()`, concurrent with SDK subprocess writes
+**Trigger:** Watchdog reads mtime at the exact moment the SDK subprocess is writing
+**Data prerequisite:** File must exist
+**State prerequisite:** None — `os.path.getmtime()` is atomic on POSIX
+**Mitigation:** No mitigation needed. `getmtime()` returns the last completed write's timestamp. Partial writes don't affect mtime reads.
 
-### Race 2: Bridge restart during SDLC fix execution
-**Location:** `data/restart-requested` flag, checked in `_worker_loop()` after each job
-**Trigger:** The SDLC fix merges and triggers restart while the SDLC job itself is still cleaning up
-**Data prerequisite:** SDLC job must complete its final commit and push before restart
-**State prerequisite:** `restart-requested` flag must not be set until after the fix PR merges
-**Mitigation:** The existing `_check_restart_flag()` already waits for no running jobs. The SDLC job's completion naturally precedes the restart. No additional mitigation needed.
+### Race 2: Session killed between transcript check and re-enqueue
+**Location:** `_handle_unhealthy_session()` → `_kill_stalled_worker()` → `_enqueue_stall_retry()`
+**Trigger:** Session completes naturally between the mtime check and the kill call
+**Data prerequisite:** AgentSession must still exist in Redis
+**State prerequisite:** Session must still be in `active` status
+**Mitigation:** `_kill_stalled_worker()` handles already-dead workers gracefully (returns False). `_enqueue_stall_retry()` handles deleted sessions via try/except. Both are already robust to this race.
 
 ## No-Gos (Out of Scope)
 
-- **Fixing fundamental architecture files**: `bridge/telegram_bridge.py`, `agent/sdk_client.py`, `agent/observer.py` are protected from auto-fix. Issues in these files get filed but require human review.
-- **Multi-project health check reflection**: This feature targets the `valor` project only. Extending to other projects requires per-project SDLC capability validation.
-- **Replacing the bridge watchdog**: The watchdog (level 1-5 escalation) handles bridge-level crashes. This feature handles job-level stalls. They are complementary, not replacements.
-- **Fixing non-code issues**: If the diagnosis says "infrastructure" (e.g., Redis down, API rate limited), the system alerts but does not attempt repair.
-- **Human-in-the-loop approval for fixes**: Auto-merge is already enabled for the valor project. Adding an approval gate would defeat the purpose of autonomous self-healing.
-- **Dependency on #361**: Reflections as first-class objects is NOT a blocker. This feature is implemented independently and can be migrated to the unified model when #361 ships.
+- **LLM-powered failure diagnosis**: Classifying stalls as transient vs. code bug vs. infrastructure is valuable but separate. This plan only improves detection accuracy. Diagnosis is Phase 2 (future issue).
+- **SDLC-powered self-healing**: Auto-filing issues and spawning SDLC fix jobs. Depends on accurate detection landing first. Future scope.
+- **Multi-project health check**: This targets the `valor` project only.
+- **Replacing the bridge watchdog**: Bridge-level crash recovery and session-level stall detection are complementary.
+- **Multiple workers per project**: Would help with re-enqueue quality but is an architectural change, not a detection fix.
 
 ## Update System
 
-No update system changes required. The health check reflection runs inside the bridge process, which is already managed by launchd. New fields on AgentSession are backward-compatible (default to None). The `HEALTH_CHECK_DIAGNOSIS_ENABLED` env var defaults to true but can be disabled on machines where autonomous fixes are not desired.
+No update system changes required. The transcript mtime check uses stdlib only (`os.path.getmtime`). No new dependencies, no new config files. The `TRANSCRIPT_STALE_THRESHOLD` env var defaults to 900s and doesn't need to be set on existing installations.
 
 ## Agent Integration
 
-No new MCP server needed. The health check reflection runs inside the bridge's event loop, not as an agent tool. It uses existing infrastructure:
-- `enqueue_job()` to spawn SDLC jobs (already exposed)
-- `gh` CLI for issue creation (subprocess call, same pattern as reflections.py)
-- Claude API (Haiku) for diagnosis (direct API call, same pattern as reflections.py)
-
-The bridge (`bridge/telegram_bridge.py`) does not need modification -- `_job_health_loop()` already runs as an asyncio task in the bridge. The changes are entirely within `agent/job_queue.py`.
-
-Integration test: verify that `_diagnose_stalled_job()` returns a valid classification and that `enqueue_job()` is called with correct parameters for SDLC jobs.
+No agent integration required — this is a bridge-internal change. The watchdog runs inside the bridge's event loop and reads local transcript files. No MCP server, no tool exposure, no bridge import changes needed.
 
 ## Documentation
 
 ### Feature Documentation
-- [ ] Create `docs/features/health-check-reflection.md` describing the self-healing pipeline
-- [ ] Add entry to `docs/features/README.md` index table
-- [ ] Update `docs/features/bridge-self-healing.md` to reference the new diagnostic layer
+- [ ] Update `docs/features/stall-retry.md` to describe transcript mtime detection replacing `last_activity` heuristic
+- [ ] Update `docs/features/session-watchdog.md` to document new detection mechanism and threshold consolidation
+- [ ] Add entry to `docs/features/README.md` index table if not already present
 
 ### Inline Documentation
-- [ ] Docstrings on `_diagnose_stalled_job()`, `_classify_failure()`, and modified `_job_health_check()`
-- [ ] Update module docstring in `agent/job_queue.py` to mention diagnostic capability
+- [ ] Docstring on `_check_transcript_liveness()`
+- [ ] Update module docstring in `monitoring/session_watchdog.py` to mention transcript mtime
 
 ## Success Criteria
 
-- [ ] `_diagnose_stalled_job()` correctly classifies test fixtures: transient failure, code bug, infrastructure issue
-- [ ] Code bug diagnosis creates a GitHub issue with the error pattern and affected file
-- [ ] SDLC job is enqueued at `high` priority after code bug diagnosis
-- [ ] Original stalled job is deferred (not retried immediately) when a fix is in progress
-- [ ] Dedup guard prevents duplicate issues for the same bug pattern
-- [ ] Retry ceiling (3) prevents infinite diagnosis loops
-- [ ] Blast radius limiter restricts auto-fixes to `agent/`, `bridge/`, `models/`
-- [ ] Feature is gated behind `HEALTH_CHECK_DIAGNOSIS_ENABLED` env var
-- [ ] Graceful degradation: if LLM diagnosis fails, falls back to current mechanical recovery
+- [ ] `_check_transcript_liveness()` returns `(True, _)` for sessions with recently-modified transcripts
+- [ ] `_check_transcript_liveness()` returns `(False, stale_seconds)` for sessions with stale transcripts
+- [ ] `_check_transcript_liveness()` returns `(None, 0)` when transcript file doesn't exist
+- [ ] Active sessions with fresh transcripts are NOT killed (no false positives on sub-agent work)
+- [ ] Active sessions with stale transcripts (>15 min) ARE killed and re-enqueued
+- [ ] `retry_count` resets when transcript grew between retries
+- [ ] Fallback to `last_activity` works when no transcript file exists
+- [ ] `TRANSCRIPT_STALE_THRESHOLD` env var overrides the default
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 
@@ -242,114 +201,91 @@ Integration test: verify that `_diagnose_stalled_job()` returns a valid classifi
 
 ### Team Members
 
-- **Builder (health-check-diagnosis)**
-  - Name: diagnosis-builder
-  - Role: Implement failure classifier and diagnostic pipeline
+- **Builder (transcript-detection)**
+  - Name: detection-builder
+  - Role: Implement `_check_transcript_liveness()` and wire into watchdog
   - Agent Type: builder
   - Resume: true
 
-- **Builder (sdlc-spawner)**
-  - Name: sdlc-spawner-builder
-  - Role: Implement SDLC job spawning and fix-then-retry gate
-  - Agent Type: builder
-  - Resume: true
-
-- **Validator (health-check)**
-  - Name: health-check-validator
-  - Role: Verify diagnostic pipeline produces correct classifications
+- **Validator (stall-detection)**
+  - Name: detection-validator
+  - Role: Verify transcript mtime detection accuracy and no false positives
   - Agent Type: validator
   - Resume: true
 
 - **Test Engineer**
-  - Name: health-check-tester
-  - Role: Write tests for classification, dedup, retry ceiling, blast radius
+  - Name: detection-tester
+  - Role: Write tests for transcript liveness, threshold behavior, retry reset
   - Agent Type: test-engineer
   - Resume: true
 
 - **Documentarian**
   - Name: docs-writer
-  - Role: Create feature docs and update existing self-healing docs
+  - Role: Update stall-retry and session-watchdog docs
   - Agent Type: documentarian
   - Resume: true
 
 ## Step by Step Tasks
 
-### 1. Implement two-tier health check and failure classifier
-- **Task ID**: build-classifier
+### 1. Implement transcript liveness check
+- **Task ID**: build-liveness
 - **Depends On**: none
-- **Assigned To**: diagnosis-builder
+- **Assigned To**: detection-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Extend `_job_health_check()` with stall tracking: add `stall_first_seen` and `stall_log_hash` to AgentSession
-- Add `_diagnose_stalled_job(job: AgentSession, log_lines: list[str]) -> dict` to `agent/job_queue.py`
-- Add `_extract_log_context(job: AgentSession) -> list[str]` to read relevant log lines around stall time
-- Haiku prompt classifies failure as: `transient`, `code_bug`, `infrastructure`, `unknown`
-- Return classification with confidence score and relevant log excerpt
-- Schedule full diagnosis as low-priority job (not inline in health check loop)
+- Add `_check_transcript_liveness(session) -> tuple[bool | None, float]` to `monitoring/session_watchdog.py`
+- Add `TRANSCRIPT_STALE_THRESHOLD` constant (default 900s, env var override)
+- Wire into `_handle_unhealthy_session()`: check transcript before acting, skip if alive
+- Consolidate thresholds: transcript mtime replaces `SILENCE_THRESHOLD`/`ABANDON_THRESHOLD` dual check
+- Add `last_transcript_size` field to AgentSession for retry reset logic
 
-### 2. Implement fuzzy cache for diagnosis dedup
-- **Task ID**: build-fuzzy-cache
+### 2. Implement smart retry reset
+- **Task ID**: build-retry-reset
 - **Depends On**: none
-- **Assigned To**: diagnosis-builder
+- **Assigned To**: detection-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Create `agent/diagnosis_cache.py` with `DiagnosisCache` class
-- Hash normalized prompt (error pattern + log excerpt fingerprint) for cache key
-- Store results in `data/diagnosis_cache.json` with TTL (30 min)
-- Before calling Haiku, check cache — reuse if matching hash found within TTL
-- Prevents race conditions (multiple cycles diagnosing same failure) and infinite loops
-- Clean up expired entries on each cache check
+- In `_enqueue_stall_retry()`, check transcript file size vs `last_transcript_size`
+- If transcript grew since last retry, reset `retry_count` to 0
+- Update `last_transcript_size` on re-enqueue
+- Log transcript growth in stall reason for diagnostics
 
-### 3. Implement SDLC spawner, trust scoring, and fix-then-retry gate
-- **Task ID**: build-spawner
-- **Depends On**: none
-- **Assigned To**: sdlc-spawner-builder
-- **Agent Type**: builder
-- **Parallel**: true
-- Add `_spawn_bugfix_sdlc(job: AgentSession, diagnosis: dict) -> str` that creates a GitHub issue and enqueues SDLC
-- Add `blocked_by_issue` and `stall_first_seen` fields to AgentSession model
-- Implement `_compute_merge_confidence()` with graduated red flag scoring (lines changed, add/remove ratio, test failures, review issues, files touched)
-- Implement retry ceiling check (skip diagnosis if `retry_count >= 3`)
-- Post-fix: re-enqueue original job with `scheduled_after = time.time() + 600`
-- Gate behind `HEALTH_CHECK_DIAGNOSIS_ENABLED` env var
-- Blast radius: protect `bridge/telegram_bridge.py`, `agent/sdk_client.py`, `agent/observer.py` from auto-fix
-
-### 4. Validate diagnostic pipeline
-- **Task ID**: validate-diagnosis
-- **Depends On**: build-classifier, build-fuzzy-cache, build-spawner
-- **Assigned To**: health-check-validator
+### 3. Validate detection accuracy
+- **Task ID**: validate-detection
+- **Depends On**: build-liveness, build-retry-reset
+- **Assigned To**: detection-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Verify classification returns valid enum values for test fixtures
-- Verify dedup guard prevents duplicate issues
-- Verify blast radius limiter rejects fixes outside scope
-- Verify retry ceiling triggers after 3 attempts
+- Verify fresh transcript → session not killed
+- Verify stale transcript → session killed and re-enqueued
+- Verify missing transcript → falls back to legacy `last_activity`
+- Verify retry reset when transcript grew
 
-### 5. Write tests
-- **Task ID**: test-health-check
-- **Depends On**: validate-diagnosis
-- **Assigned To**: health-check-tester
+### 4. Write tests
+- **Task ID**: test-detection
+- **Depends On**: validate-detection
+- **Assigned To**: detection-tester
 - **Agent Type**: test-engineer
 - **Parallel**: false
-- Unit tests for `_diagnose_stalled_job()` with mocked Haiku responses
-- Unit tests for `_spawn_bugfix_sdlc()` with mocked `gh` CLI
-- Integration test: stall a job, verify diagnosis runs, verify SDLC job is enqueued
-- Edge cases: empty logs, missing session fields, LLM errors
+- Unit tests for `_check_transcript_liveness()` with mock transcript files (fresh, stale, missing)
+- Unit tests for retry reset logic (transcript grew vs. didn't grow)
+- Integration test: create a session with a transcript, verify watchdog classifies correctly
+- Edge cases: empty transcript, permission errors, session without session_id
 
-### 6. Documentation
+### 5. Documentation
 - **Task ID**: document-feature
-- **Depends On**: test-health-check
+- **Depends On**: test-detection
 - **Assigned To**: docs-writer
 - **Agent Type**: documentarian
 - **Parallel**: false
-- Create `docs/features/health-check-reflection.md`
+- Update `docs/features/stall-retry.md`
+- Update `docs/features/session-watchdog.md`
 - Update `docs/features/README.md` index
-- Update `docs/features/bridge-self-healing.md`
 
-### 7. Final Validation
+### 6. Final Validation
 - **Task ID**: validate-all
 - **Depends On**: document-feature
-- **Assigned To**: health-check-validator
+- **Assigned To**: detection-validator
 - **Agent Type**: validator
 - **Parallel**: false
 - Run all validation commands
@@ -363,19 +299,5 @@ Integration test: verify that `_diagnose_stalled_job()` returns a valid classifi
 | Tests pass | `pytest tests/ -x -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| Classifier importable | `python -c "from agent.job_queue import _diagnose_stalled_job"` | exit code 0 |
-| Feature doc exists | `test -f docs/features/health-check-reflection.md` | exit code 0 |
-
----
-
-## Resolved Questions
-
-1. **Blast radius scope**: ✅ Auto-fix allowed for everything EXCEPT fundamental architecture (`bridge/telegram_bridge.py`, `agent/sdk_client.py`, `agent/observer.py`). All other code is fair game.
-
-2. **Auto-merge trust model**: ✅ Graduated trust scoring with multiple red flags (lines changed, add/remove ratio, test failures, review issues, files touched) rather than a single threshold. Starts conservative, relaxed over time.
-
-3. **Dependency on #361**: ✅ Not a blocker. Build independently, migrate to unified reflection model when #361 ships.
-
-4. **Diagnosis frequency**: ✅ Two-tier: quick check every 5 min (no LLM, just capture metadata). Full diagnosis only for persistent stalls (2+ cycles), scheduled as a low-priority job.
-
-5. **Post-fix validation**: ✅ Use `scheduled_after` to defer retry by 10 min after bridge restart. This gives the system time to stabilize before retrying the original failed job.
+| Liveness function importable | `python -c "from monitoring.session_watchdog import _check_transcript_liveness"` | exit code 0 |
+| Stall-retry docs updated | `grep -q 'transcript' docs/features/stall-retry.md` | exit code 0 |
