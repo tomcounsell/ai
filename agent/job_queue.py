@@ -1279,6 +1279,7 @@ async def _execute_job(job: Job) -> None:
             send_cb=send_cb,
             enqueue_fn=_enqueue_continuation,
             stop_reason=stop_reason,
+            project_config=get_project_config(job.project_key),
         )
 
         try:

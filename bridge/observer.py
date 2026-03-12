@@ -17,6 +17,7 @@ This ensures the pipeline never silently drops output.
 
 import json
 import logging
+import re
 from typing import Any
 
 import anthropic
@@ -194,6 +195,80 @@ def _build_tools() -> list[dict]:
     ]
 
 
+# Mapping from SDLC stage to the /do-* skill that executes it
+_STAGE_TO_SKILL = {
+    "ISSUE": "/do-issue",
+    "PLAN": "/do-plan",
+    "BUILD": "/do-build",
+    "TEST": "/do-test",
+    "REVIEW": "/do-pr-review",
+    "DOCS": "/do-docs",
+}
+
+# Pipeline order for determining "next" stage
+_PIPELINE_ORDER = ["ISSUE", "PLAN", "BUILD", "TEST", "REVIEW", "DOCS"]
+
+
+# Patterns that signal the worker output needs human attention.
+# When any of these match, the deterministic guard steps aside and
+# lets the LLM Observer make the routing decision.
+_BLOCKER_PATTERNS = [
+    re.compile(r"##\s*Open\s+Questions", re.IGNORECASE),
+    re.compile(
+        r"(?:question|decision|input)\s+(?:for|from)\s+"
+        r"(?:tom|the\s+(?:pm|architect|human))",
+        re.IGNORECASE,
+    ),
+    re.compile(r"(?:should\s+I|your\s+(?:call|input|decision))", re.IGNORECASE),
+    re.compile(r"(?:FATAL|unrecoverable|cannot\s+proceed)", re.IGNORECASE),
+    re.compile(r"(?:API\s+key\s+has\s+been\s+(?:revoked|disabled|expired))", re.IGNORECASE),
+    re.compile(r"(?:nothing\s+I\s+can\s+do|requires?\s+(?:a\s+)?human)", re.IGNORECASE),
+    re.compile(r"(?:Option\s+[A-C]\))", re.IGNORECASE),  # Multiple choice for human
+]
+
+
+def _output_has_blocker_signal(output: str) -> bool:
+    """Check if worker output contains signals requiring human attention.
+
+    Scans for patterns like open questions, explicit asks for human input,
+    or unrecoverable errors. When detected, the deterministic guard defers
+    to the LLM Observer for nuanced routing.
+
+    Args:
+        output: The worker agent's output text.
+
+    Returns:
+        True if blocker signals are detected.
+    """
+    if not output:
+        return False
+    for pattern in _BLOCKER_PATTERNS:
+        if pattern.search(output):
+            return True
+    return False
+
+
+def _next_sdlc_skill(session: AgentSession) -> tuple[str, str] | None:
+    """Determine the next SDLC stage and its /do-* skill command.
+
+    Examines the session's stage progress and returns the first stage
+    that is pending or in_progress, along with its corresponding skill.
+
+    Args:
+        session: The AgentSession with stage progress data.
+
+    Returns:
+        Tuple of (stage_name, skill_command) or None if all stages are done.
+    """
+    progress = session.get_stage_progress()
+    for stage in _PIPELINE_ORDER:
+        status = progress.get(stage, "pending")
+        if status in ("pending", "in_progress"):
+            skill = _STAGE_TO_SKILL.get(stage, f"/do-{stage.lower()}")
+            return (stage, skill)
+    return None
+
+
 class Observer:
     """Observer Agent that makes routing decisions with full session context.
 
@@ -218,6 +293,7 @@ class Observer:
         *,
         stop_reason: str | None = None,
         model: str | None = None,
+        project_config: dict | None = None,
     ):
         self.session = session
         self.worker_output = worker_output
@@ -226,6 +302,7 @@ class Observer:
         self.enqueue_fn = enqueue_fn
         self.stop_reason = stop_reason
         self.model = model or SONNET
+        self.project_config = project_config or {}
         self._decision_made = False
         self._action_taken: str | None = None
         self._log_prefix = (
@@ -233,6 +310,22 @@ class Observer:
             if getattr(session, "correlation_id", None)
             else "[observer]"
         )
+
+    def _build_system_prompt(self) -> str:
+        """Build system prompt with project-specific context injected."""
+        github = self.project_config.get("github", {})
+        org = github.get("org", "")
+        repo = github.get("repo", "")
+        if org and repo:
+            repo_context = (
+                f"\n\n## Project Context\n"
+                f"Repository: {org}/{repo}\n"
+                f"When referencing GitHub URLs (issues, PRs), always use "
+                f"https://github.com/{org}/{repo} as the base. "
+                f"NEVER guess or hallucinate repository names."
+            )
+            return OBSERVER_SYSTEM_PROMPT + repo_context
+        return OBSERVER_SYSTEM_PROMPT
 
     def _handle_read_session(self) -> dict[str, Any]:
         """Tool handler: read the current session state."""
@@ -346,12 +439,30 @@ class Observer:
         if expectations is not None:
             self.session.expectations = expectations
             updated.append("expectations")
+        # Validate URLs against project config to prevent hallucinated repo names
+        github = self.project_config.get("github", {})
+        expected_base = ""
+        if github.get("org") and github.get("repo"):
+            expected_base = f"https://github.com/{github['org']}/{github['repo']}"
+
         if issue_url is not None:
-            self.session.issue_url = issue_url
-            updated.append("issue_url")
+            if expected_base and not issue_url.startswith(expected_base):
+                logger.warning(
+                    f"{self._log_prefix} Rejected hallucinated issue_url: {issue_url} "
+                    f"(expected {expected_base})"
+                )
+            else:
+                self.session.issue_url = issue_url
+                updated.append("issue_url")
         if pr_url is not None:
-            self.session.pr_url = pr_url
-            updated.append("pr_url")
+            if expected_base and not pr_url.startswith(expected_base):
+                logger.warning(
+                    f"{self._log_prefix} Rejected hallucinated pr_url: {pr_url} "
+                    f"(expected {expected_base})"
+                )
+            else:
+                self.session.pr_url = pr_url
+                updated.append("pr_url")
 
         if updated or cleared_messages:
             try:
@@ -550,6 +661,69 @@ class Observer:
                 f"falling through to LLM Observer"
             )
 
+        # Recalculate has_remaining after transitions may have advanced stages
+        has_remaining = self.session.has_remaining_stages()
+
+        # Phase 1.75: Deterministic SDLC stage guard
+        # If this is an SDLC session with remaining stages, ALWAYS steer to the
+        # next stage. The LLM Observer must not override stage tracking — this was
+        # the root cause of SDLC flows stalling before reaching do-docs.
+        #
+        # Safety: Do NOT force-steer when:
+        # - stop_reason is "fail" or "budget_exceeded" (must deliver to human)
+        # - A stage has failed (has_failed_stage) — human needs to see the failure
+        # - Auto-continue cap reached (safety valve against infinite loops)
+        # - Worker output contains blocker signals (questions, errors needing human)
+        has_failed = self.session.has_failed_stage()
+        stop_is_terminal = self.stop_reason in ("fail", "budget_exceeded")
+        at_cap = self.auto_continue_count >= max_continues
+        has_blocker = _output_has_blocker_signal(self.worker_output)
+        guard_eligible = (
+            is_sdlc
+            and has_remaining
+            and not has_failed
+            and not stop_is_terminal
+            and not at_cap
+            and not has_blocker
+        )
+        if guard_eligible:
+            next_stage_info = _next_sdlc_skill(self.session)
+            if next_stage_info:
+                stage_name, skill_cmd = next_stage_info
+                cid = getattr(self.session, "correlation_id", None) or "unknown"
+                coaching = (
+                    f"Pipeline has remaining stages. Next: {stage_name}. "
+                    f"Continue with {skill_cmd}. "
+                    f"If you encounter a critical blocker requiring human input, "
+                    f"state it clearly. Otherwise, press forward."
+                )
+                logger.info(
+                    f"{self._log_prefix} Deterministic SDLC guard: forcing steer "
+                    f"to {stage_name} ({skill_cmd}) — remaining stages exist, "
+                    f"no failures, stop_reason={self.stop_reason}"
+                )
+                record_decision(
+                    self.session.session_id,
+                    cid,
+                    "steer",
+                    f"deterministic-sdlc-guard: {stage_name} pending",
+                )
+                return {
+                    "action": "steer",
+                    "coaching_message": coaching,
+                    "transitions_applied": transitions_applied,
+                    "deterministic_guard": True,
+                }
+
+        # Log when guard was bypassed due to safety conditions
+        if is_sdlc and has_remaining and not guard_eligible:
+            logger.info(
+                f"{self._log_prefix} Deterministic SDLC guard bypassed: "
+                f"has_failed={has_failed}, stop_reason={self.stop_reason}, "
+                f"at_cap={at_cap}, has_blocker={has_blocker} "
+                f"— falling through to LLM Observer"
+            )
+
         # Phase 2: Run the Observer LLM for judgment calls
         try:
             api_key = get_anthropic_api_key()
@@ -583,7 +757,7 @@ class Observer:
                 response = client.messages.create(
                     model=self.model,
                     max_tokens=1024,
-                    system=OBSERVER_SYSTEM_PROMPT,
+                    system=self._build_system_prompt(),
                     messages=messages,
                     tools=tools,
                 )
