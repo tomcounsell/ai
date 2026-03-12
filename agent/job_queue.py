@@ -174,6 +174,10 @@ class Job:
         return self._rj.classification_type
 
     @property
+    def trigger_message_id(self) -> str | None:
+        return self._rj.trigger_message_id
+
+    @property
     def auto_continue_count(self) -> int:
         return self._rj.auto_continue_count or 0
 
@@ -212,6 +216,8 @@ _JOB_FIELDS = [
     "classification_type",
     "auto_continue_count",
     "started_at",
+    "trigger_message_id",
+    "claude_code_session_id",
     # Session-phase fields preserved across delete-and-recreate
     "last_activity",
     "completed_at",
@@ -281,6 +287,7 @@ async def _push_job(
     correlation_id: str | None = None,
     scheduled_after: float | None = None,
     scheduling_depth: int = 0,
+    trigger_message_id: str | None = None,
 ) -> int:
     """Create a job in Redis and return the pending queue depth for this project.
 
@@ -331,6 +338,7 @@ async def _push_job(
         correlation_id=correlation_id,
         scheduled_after=scheduled_after,
         scheduling_depth=scheduling_depth,
+        trigger_message_id=trigger_message_id,
     )
 
     # Log lifecycle transition for newly created pending job
@@ -864,6 +872,7 @@ async def enqueue_job(
     correlation_id: str | None = None,
     scheduled_after: float | None = None,
     scheduling_depth: int = 0,
+    trigger_message_id: str | None = None,
 ) -> int:
     """
     Add a job to Redis and ensure worker is running.
@@ -899,6 +908,7 @@ async def enqueue_job(
         correlation_id=correlation_id,
         scheduled_after=scheduled_after,
         scheduling_depth=scheduling_depth,
+        trigger_message_id=trigger_message_id,
     )
     _ensure_worker(project_key)
     log_prefix = f"[{correlation_id}]" if correlation_id else f"[{project_key}]"
