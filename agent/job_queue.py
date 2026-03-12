@@ -239,6 +239,8 @@ _JOB_FIELDS = [
     "correlation_id",
     # Claude Code identity mapping — must be preserved across delete-and-recreate
     "claude_session_uuid",
+    # Job hierarchy fields — must be preserved across delete-and-recreate
+    "parent_job_id",
 ]
 
 # Backward compat alias
@@ -281,6 +283,7 @@ async def _push_job(
     correlation_id: str | None = None,
     scheduled_after: float | None = None,
     scheduling_depth: int = 0,
+    parent_job_id: str | None = None,
 ) -> int:
     """Create a job in Redis and return the pending queue depth for this project.
 
@@ -331,6 +334,7 @@ async def _push_job(
         correlation_id=correlation_id,
         scheduled_after=scheduled_after,
         scheduling_depth=scheduling_depth,
+        parent_job_id=parent_job_id,
     )
 
     # Log lifecycle transition for newly created pending job
@@ -416,8 +420,104 @@ async def _remove_by_session(project_key: str, session_id: str) -> bool:
 
 
 async def _complete_job(job: Job) -> None:
-    """Mark a running job as completed and delete it from Redis."""
+    """Mark a running job as completed and delete it from Redis.
+
+    If this job is a child (has parent_job_id), check whether all siblings
+    are now terminal and finalize the parent if so.
+    """
+    parent_job_id = getattr(job._rj, "parent_job_id", None)
     await job._rj.async_delete()
+
+    # If this was a child job, attempt to finalize the parent
+    if parent_job_id:
+        await _finalize_parent(parent_job_id)
+
+
+async def _finalize_parent(parent_job_id: str) -> None:
+    """Check if all children of a parent are terminal; if so, finalize the parent.
+
+    Transitions parent from waiting_for_children to completed (all children
+    succeeded) or failed (any child failed). Idempotent: no-op if parent is
+    already in a terminal state or no longer exists.
+
+    Args:
+        parent_job_id: The job_id of the parent AgentSession.
+    """
+    try:
+        parent = AgentSession.query.get(parent_job_id)
+    except Exception:
+        logger.warning(
+            f"[job-hierarchy] Parent job {parent_job_id} not found during "
+            f"finalization — orphaned child completed"
+        )
+        return
+
+    if parent is None:
+        logger.warning(
+            f"[job-hierarchy] Parent job {parent_job_id} not found during "
+            f"finalization — orphaned child completed"
+        )
+        return
+
+    # Only finalize if parent is in waiting_for_children status
+    if parent.status not in ("waiting_for_children",):
+        logger.debug(
+            f"[job-hierarchy] Parent {parent_job_id} status is "
+            f"{parent.status!r}, skipping finalization"
+        )
+        return
+
+    # Check all children
+    children = parent.get_children()
+    if not children:
+        # Edge case: parent has no children but is waiting_for_children.
+        # Transition to completed as a safety guard.
+        logger.warning(
+            f"[job-hierarchy] Parent {parent_job_id} has no children but "
+            f"status is waiting_for_children — auto-completing"
+        )
+        _transition_parent(parent, "completed")
+        return
+
+    terminal_statuses = {"completed", "failed"}
+    non_terminal = [c for c in children if c.status not in terminal_statuses]
+
+    if non_terminal:
+        # Some children still running/pending — not ready to finalize
+        logger.debug(
+            f"[job-hierarchy] Parent {parent_job_id} has "
+            f"{len(non_terminal)} non-terminal children — waiting"
+        )
+        return
+
+    # All children are terminal — determine final parent status
+    any_failed = any(c.status == "failed" for c in children)
+    new_status = "failed" if any_failed else "completed"
+
+    completed_count = sum(1 for c in children if c.status == "completed")
+    failed_count = sum(1 for c in children if c.status == "failed")
+    logger.info(
+        f"[job-hierarchy] Finalizing parent {parent_job_id}: "
+        f"{completed_count} completed, {failed_count} failed -> {new_status}"
+    )
+
+    _transition_parent(parent, new_status)
+
+
+def _transition_parent(parent: AgentSession, new_status: str) -> None:
+    """Transition a parent job to a new status using delete-and-recreate.
+
+    Uses the same pattern as _pop_job() to avoid KeyField index corruption.
+    """
+    fields = _extract_job_fields(parent)
+    parent.delete()
+    fields["status"] = new_status
+    fields["completed_at"] = time.time()
+    new_parent = AgentSession.create(**fields)
+    logger.info(
+        f"[job-hierarchy] Parent {parent.job_id} -> {new_parent.job_id} "
+        f"(status={new_status})"
+    )
 
 
 def _get_pending_jobs_sync(project_key: str) -> list[AgentSession]:
@@ -864,6 +964,7 @@ async def enqueue_job(
     correlation_id: str | None = None,
     scheduled_after: float | None = None,
     scheduling_depth: int = 0,
+    parent_job_id: str | None = None,
 ) -> int:
     """
     Add a job to Redis and ensure worker is running.
@@ -899,6 +1000,7 @@ async def enqueue_job(
         correlation_id=correlation_id,
         scheduled_after=scheduled_after,
         scheduling_depth=scheduling_depth,
+        parent_job_id=parent_job_id,
     )
     _ensure_worker(project_key)
     log_prefix = f"[{correlation_id}]" if correlation_id else f"[{project_key}]"
