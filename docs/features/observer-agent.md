@@ -48,7 +48,7 @@ The stage detector (`bridge/stage_detector.py`) is a pure function with no side 
 
 2. **Completion markers** (secondary signal): Regex matches for stage-specific evidence (e.g., `github.com/.../issues/123` for ISSUE, `42 passed` for TEST).
 
-3. **Typed outcome cross-check** (validation signal): When a `SkillOutcome` is available (see [Typed Skill Outcomes](typed-skill-outcomes.md)), `apply_transitions()` cross-checks it against regex detections. If the outcome says "success" but regex didn't detect completion, a warning is logged. If the outcome says "fail" but regex detected completion, the typed outcome takes priority.
+3. **Typed outcome cross-check** (validation signal): When a `SkillOutcome` is available (see [Typed Skill Outcomes](typed-skill-outcomes.md)), `apply_transitions()` cross-checks it against regex detections. If the outcome says "success" but regex didn't detect completion, the outcome's transition is merged into the transitions list so the stage is still recorded. If the outcome says "fail" but regex detected completion, the typed outcome takes priority.
 
 ### Pipeline Order
 
@@ -61,7 +61,7 @@ ISSUE -> PLAN -> BUILD -> TEST -> REVIEW -> DOCS
 | Function | Purpose |
 |----------|---------|
 | `detect_stages(transcript)` | Pure function: returns list of `{stage, status, reason}` transitions |
-| `apply_transitions(session, transitions, outcome=None)` | Writes transitions to `AgentSession.history` entries, skipping duplicates. When a `SkillOutcome` is provided, cross-checks it against regex detections and logs warnings on mismatches. |
+| `apply_transitions(session, transitions, outcome=None)` | Writes transitions to `AgentSession.history` entries, skipping duplicates. When a `SkillOutcome` is provided, cross-checks it against regex detections — merging missed successful stages into the transitions list and logging warnings on fail/detect mismatches. |
 
 ## Observer Decision Framework
 

@@ -37,7 +37,7 @@ Based on classification result:
 | `sdlc` | `ai/` repo root | Full SDLC pipeline access, TARGET_REPO context injected |
 | `question` | Target project dir | Direct project context, no SDLC overhead |
 
-For SDLC-routed requests, a `TARGET_REPO` context block is injected into the system prompt so the agent knows which project to dispatch workers to.
+For SDLC-routed requests, a `TARGET_REPO` context block is injected into the system prompt so the agent knows which project to dispatch workers to. Skills also receive a `GITHUB: org/repo` line in their prompt context, which they parse to construct `--repo` flags for `gh` commands — ensuring GitHub CLI operations resolve against the correct repository rather than the CWD's repo.
 
 ### System Prompt Ordering
 
