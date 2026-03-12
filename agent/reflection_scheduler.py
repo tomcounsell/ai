@@ -345,7 +345,9 @@ class ReflectionScheduler:
                     )
                     self._running_tasks[entry.name] = task
                     # Clean up completed tasks
-                    task.add_done_callback(lambda t, name=entry.name: self._running_tasks.pop(name, None))
+                    task.add_done_callback(
+                        lambda t, name=entry.name: self._running_tasks.pop(name, None)
+                    )
                 else:
                     # Agent-type reflections are enqueued to job queue
                     await run_reflection(entry, state)

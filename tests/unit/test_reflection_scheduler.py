@@ -49,10 +49,33 @@ class TestRegistryLoading:
             yaml.dump(
                 {
                     "reflections": [
-                        {"name": "valid", "interval": 300, "priority": "high", "execution_type": "function", "callable": "some.func"},
-                        {"name": "", "interval": 300, "priority": "high", "execution_type": "function", "callable": "some.func"},
-                        {"name": "bad-priority", "interval": 300, "priority": "invalid", "execution_type": "function", "callable": "some.func"},
-                        {"name": "missing-callable", "interval": 300, "priority": "low", "execution_type": "function"},
+                        {
+                            "name": "valid",
+                            "interval": 300,
+                            "priority": "high",
+                            "execution_type": "function",
+                            "callable": "some.func",
+                        },
+                        {
+                            "name": "",
+                            "interval": 300,
+                            "priority": "high",
+                            "execution_type": "function",
+                            "callable": "some.func",
+                        },
+                        {
+                            "name": "bad-priority",
+                            "interval": 300,
+                            "priority": "invalid",
+                            "execution_type": "function",
+                            "callable": "some.func",
+                        },
+                        {
+                            "name": "missing-callable",
+                            "interval": 300,
+                            "priority": "low",
+                            "execution_type": "function",
+                        },
                     ]
                 }
             )
@@ -82,8 +105,22 @@ class TestRegistryLoading:
             yaml.dump(
                 {
                     "reflections": [
-                        {"name": "active", "interval": 300, "priority": "low", "execution_type": "function", "callable": "some.func", "enabled": True},
-                        {"name": "disabled", "interval": 300, "priority": "low", "execution_type": "function", "callable": "some.func", "enabled": False},
+                        {
+                            "name": "active",
+                            "interval": 300,
+                            "priority": "low",
+                            "execution_type": "function",
+                            "callable": "some.func",
+                            "enabled": True,
+                        },
+                        {
+                            "name": "disabled",
+                            "interval": 300,
+                            "priority": "low",
+                            "execution_type": "function",
+                            "callable": "some.func",
+                            "enabled": False,
+                        },
                     ]
                 }
             )
@@ -190,7 +227,12 @@ class TestScheduleEvaluation:
     def test_never_run_is_due(self):
         """A reflection that has never run should be due."""
         entry = ReflectionEntry(
-            name="test", description="", interval=300, priority="low", execution_type="function", callable="f"
+            name="test",
+            description="",
+            interval=300,
+            priority="low",
+            execution_type="function",
+            callable="f",
         )
         state = MagicMock()
         state.last_run = None
@@ -199,7 +241,12 @@ class TestScheduleEvaluation:
     def test_recently_run_not_due(self):
         """A reflection that ran recently should not be due."""
         entry = ReflectionEntry(
-            name="test", description="", interval=300, priority="low", execution_type="function", callable="f"
+            name="test",
+            description="",
+            interval=300,
+            priority="low",
+            execution_type="function",
+            callable="f",
         )
         state = MagicMock()
         state.last_run = time.time() - 100  # Ran 100s ago, interval is 300s
@@ -208,7 +255,12 @@ class TestScheduleEvaluation:
     def test_past_interval_is_due(self):
         """A reflection past its interval should be due."""
         entry = ReflectionEntry(
-            name="test", description="", interval=300, priority="low", execution_type="function", callable="f"
+            name="test",
+            description="",
+            interval=300,
+            priority="low",
+            execution_type="function",
+            callable="f",
         )
         state = MagicMock()
         state.last_run = time.time() - 400  # Ran 400s ago, interval is 300s
@@ -218,7 +270,12 @@ class TestScheduleEvaluation:
         """A reflection exactly at its interval should be due."""
         now = time.time()
         entry = ReflectionEntry(
-            name="test", description="", interval=300, priority="low", execution_type="function", callable="f"
+            name="test",
+            description="",
+            interval=300,
+            priority="low",
+            execution_type="function",
+            callable="f",
         )
         state = MagicMock()
         state.last_run = now - 300
