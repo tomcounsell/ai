@@ -7,6 +7,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | Feature | Description | Status |
 |---------|-------------|--------|
 | [Agent Session Model](agent-session-model.md) | Unified lifecycle model merging RedisJob + SessionLog for agent work tracking | Shipped |
+| [Behavioral Episode Memory](behavioral-episode-memory.md) | Structural memory for SDLC cycles: episode recording, fingerprint classification, pattern crystallization, cross-machine sync | Shipped |
 | [Bridge Message Query](bridge-message-query.md) | CLI tool to fetch Telegram message history via file-based IPC with running bridge | Shipped |
 | [Bridge Module Architecture](bridge-module-architecture.md) | Sub-module organization of the Telegram bridge for maintainability | Shipped |
 | [Bridge Response Improvements](bridge-response-improvements.md) | Enhancements to how the Telegram bridge formats and delivers responses | Shipped |
@@ -22,8 +23,8 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Context Fidelity Modes](context-fidelity-modes.md) | Right-sized context compression (full/compact/minimal/steering) for sub-agent dispatch | Shipped |
 | [Correlation IDs](correlation-ids.md) | End-to-end request tracing with shared correlation_id from Telegram receipt to response delivery | Shipped |
 | [Deep Plan Analysis](deep-plan-analysis.md) | Prior Art, Data Flow, Failure Analysis, and Architectural Impact investigation sections in /do-plan | Shipped |
-| [Deterministic SDLC Guard](deterministic-sdlc-guard.md) | Phase 1.75 guard in Observer that force-steers SDLC sessions to next pipeline stage without LLM, preventing stalls before later stages | Shipped |
 | [Design Review](do-design-review.md) | Review web UI against 10 premium design criteria with severity ratings | Shipped |
+| [Deterministic SDLC Guard](deterministic-sdlc-guard.md) | Phase 1.75 guard in Observer that force-steers SDLC sessions to next pipeline stage without LLM, preventing stalls before later stages | Shipped |
 | [Do Test](do-test.md) | Intelligent test orchestration with parallel dispatch, changed-file detection, structured reporting, and pytest plugin configuration | Shipped |
 | [do-patch Skill](do-patch-skill.md) | Targeted fix skill for test failures and review blockers; called automatically by do-build | Shipped |
 | [Documentation Audit](documentation-audit.md) | Weekly LLM-powered audit of docs/ accuracy against codebase; KEEP / UPDATE / DELETE verdicts, directory and filename enforcement | Shipped |
@@ -77,8 +78,8 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Test Coverage Standards](test-coverage-standards.md) | Standards and tooling for preventing silent failure classes: exception swallowing, empty output loops, coupled tests, missing error rendering, silent builds | Shipped |
 | [Trace & Verify Protocol](trace-and-verify.md) | Data-driven root cause analysis replacing narrative-only 5 Whys with forward verification | Shipped |
 | [Typed Skill Outcomes](typed-skill-outcomes.md) | Structured outcome contracts for /do-* skills enabling deterministic Observer routing without LLM classification | Shipped |
-| [Worktree SDK Compatibility Experiment](worktree-sdk-compatibility.md) | Experiment results for Claude Agent SDK compatibility with git worktrees | Archived |
 | [Workspace Safety Invariants](workspace-safety-invariants.md) | Pre-launch validation of agent working directories with CWD existence, path containment, and slug sanitization | Shipped |
+| [Worktree SDK Compatibility Experiment](worktree-sdk-compatibility.md) | Experiment results for Claude Agent SDK compatibility with git worktrees | Archived |
 | [xfail Hygiene](xfail-hygiene.md) | Three-layer xfail hygiene system preventing stale test markers after bug fixes land | Shipped |
 | [YouTube Transcription](youtube-transcription.md) | Auto-transcribe YouTube videos shared in messages for Claude context | Shipped |
 
