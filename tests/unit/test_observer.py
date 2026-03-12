@@ -1125,7 +1125,8 @@ class TestCrossRepoGhResolution:
         """SDLC skill should contain --repo in gh issue view and gh pr list examples."""
         from pathlib import Path
 
-        skill_path = Path(__file__).parent.parent.parent / ".claude" / "skills" / "sdlc" / "SKILL.md"
+        repo_root = Path(__file__).parent.parent.parent
+        skill_path = repo_root / ".claude" / "skills" / "sdlc" / "SKILL.md"
         content = skill_path.read_text()
         assert "--repo" in content, "SDLC skill must contain --repo instructions"
         assert "REPO_FLAG" in content or "GITHUB_REPO" in content, (
