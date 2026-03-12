@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-"""PostToolUse hook: Format only the changed file with black and ruff.
+"""PostToolUse hook: Auto-fix lint and format on the changed file.
 
 Reads the tool_input from stdin (Claude Code hook protocol) and runs
-formatters on just the affected file, not the entire project directory.
-
-This replaces the old approach of running `black $CLAUDE_PROJECT_DIR`
-which spawned multiprocessing workers across ALL files, causing 10+ GB
-memory usage.
+ruff check --fix + ruff format on just the affected file, not the
+entire project directory. Uses ruff for both linting and formatting.
 """
 
 import json
@@ -30,14 +27,14 @@ def main():
     if not Path(file_path).exists():
         return
 
-    # Run ruff fix then black on just this file
+    # Run ruff check --fix then ruff format on just this file
     subprocess.run(
-        [sys.executable, "-m", "ruff", "check", "--fix", file_path],
+        [sys.executable, "-m", "ruff", "check", "--fix", "--quiet", file_path],
         capture_output=True,
         timeout=30,
     )
     subprocess.run(
-        [sys.executable, "-m", "black", "--quiet", file_path],
+        [sys.executable, "-m", "ruff", "format", "--quiet", file_path],
         capture_output=True,
         timeout=30,
     )

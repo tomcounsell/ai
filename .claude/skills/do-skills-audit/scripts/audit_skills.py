@@ -25,9 +25,7 @@ import yaml
 # Constants
 # ---------------------------------------------------------------------------
 
-REPO_ROOT = (
-    Path(__file__).resolve().parents[4]
-)  # .claude/skills/do-skills-audit/scripts -> repo
+REPO_ROOT = Path(__file__).resolve().parents[4]  # .claude/skills/do-skills-audit/scripts -> repo
 SKILLS_DIR = REPO_ROOT / ".claude" / "skills"
 MAX_LINES = 500
 MAX_DESC_LEN = 1024
@@ -49,9 +47,7 @@ KNOWN_FIELDS = frozenset(
 )
 
 # Classification lists — which skills should have specific frontmatter flags.
-INFRA_SKILLS = frozenset(
-    {"update", "setup", "reclassify", "new-skill", "new-valor-skill", "prime"}
-)
+INFRA_SKILLS = frozenset({"update", "setup", "reclassify", "new-skill", "new-valor-skill", "prime"})
 BACKGROUND_SKILLS = frozenset(
     {
         "agent-browser",
@@ -89,9 +85,7 @@ class Finding:
 class AuditReport:
     skills_audited: int = 0
     results: list[Finding] = field(default_factory=list)
-    summary: dict[str, int] = field(
-        default_factory=lambda: {"pass": 0, "warn": 0, "fail": 0}
-    )
+    summary: dict[str, int] = field(default_factory=lambda: {"pass": 0, "warn": 0, "fail": 0})
 
     def add(self, finding: Finding) -> None:
         self.results.append(finding)
@@ -146,9 +140,7 @@ def rule_03_name_field(skill_name: str, fm: dict, dir_name: str) -> Finding:
         return Finding(skill_name, 3, "FAIL", "Missing 'name' field")
     name = str(name)
     if len(name) > MAX_NAME_LEN:
-        return Finding(
-            skill_name, 3, "FAIL", f"Name '{name}' exceeds {MAX_NAME_LEN} chars"
-        )
+        return Finding(skill_name, 3, "FAIL", f"Name '{name}' exceeds {MAX_NAME_LEN} chars")
     if not re.match(r"^[a-z0-9][a-z0-9-]*$", name):
         return Finding(
             skill_name,
@@ -187,9 +179,7 @@ def rule_05_description_length(skill_name: str, fm: dict) -> Finding:
     desc = fm.get("description", "")
     length = len(str(desc))
     if length > MAX_DESC_LEN:
-        return Finding(
-            skill_name, 5, "WARN", f"Description length {length} exceeds {MAX_DESC_LEN}"
-        )
+        return Finding(skill_name, 5, "WARN", f"Description length {length} exceeds {MAX_DESC_LEN}")
     return Finding(skill_name, 5, "PASS", f"Description length ({length} chars)")
 
 
@@ -366,9 +356,7 @@ def discover_skills(skills_dir: Path, single: str | None = None) -> list[Path]:
     return sorted(skills_dir.glob("*/SKILL.md"))
 
 
-def audit_skill(
-    skill_path: Path, report: AuditReport, do_fix: bool = False
-) -> dict[str, str]:
+def audit_skill(skill_path: Path, report: AuditReport, do_fix: bool = False) -> dict[str, str]:
     """Audit a single skill. Returns {skill_name: description} for dedup check."""
     skill_dir = skill_path.parent
     dir_name = skill_dir.name
@@ -493,12 +481,8 @@ def main() -> int:
     parser.add_argument("--fix", action="store_true", help="Auto-fix trivial issues")
     parser.add_argument("--json", action="store_true", help="JSON output only")
     parser.add_argument("--skill", type=str, help="Audit a single skill by name")
-    parser.add_argument(
-        "--no-sync", action="store_true", help="Skip best practices sync"
-    )
-    parser.add_argument(
-        "--apply", action="store_true", help="Apply best practices updates"
-    )
+    parser.add_argument("--no-sync", action="store_true", help="Skip best practices sync")
+    parser.add_argument("--apply", action="store_true", help="Apply best practices updates")
     parser.add_argument(
         "--update-skills",
         action="store_true",

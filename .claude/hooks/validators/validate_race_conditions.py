@@ -31,27 +31,27 @@ from pathlib import Path
 # These are checked in code-context sections (Solution, Technical Approach, etc.)
 # to avoid false positives from prose mentioning these terms casually.
 ASYNC_CODE_PATTERNS = [
-    r"`bridge/",          # backtick-quoted file paths
-    r"`agent/",           # backtick-quoted file paths
-    r"bridge/\w+\.py",    # file path references like bridge/telegram_bridge.py
-    r"agent/\w+\.py",     # file path references like agent/job_queue.py
-    r"`asyncio",          # backtick-quoted module references
-    r"async\s+def\s",     # async function definitions
-    r"create_task\(",     # asyncio.create_task() calls
-    r"await\s+\w",        # await expressions
-    r"`aiohttp",          # backtick-quoted library references
-    r"asyncio\.\w+",      # asyncio.Lock, asyncio.Event, etc.
-    r"concurrent\.\w+",   # concurrent.futures references
-    r"threading\.\w+",    # threading module references
-    r"multiprocessing\.", # multiprocessing module references
+    r"`bridge/",  # backtick-quoted file paths
+    r"`agent/",  # backtick-quoted file paths
+    r"bridge/\w+\.py",  # file path references like bridge/telegram_bridge.py
+    r"agent/\w+\.py",  # file path references like agent/job_queue.py
+    r"`asyncio",  # backtick-quoted module references
+    r"async\s+def\s",  # async function definitions
+    r"create_task\(",  # asyncio.create_task() calls
+    r"await\s+\w",  # await expressions
+    r"`aiohttp",  # backtick-quoted library references
+    r"asyncio\.\w+",  # asyncio.Lock, asyncio.Event, etc.
+    r"concurrent\.\w+",  # concurrent.futures references
+    r"threading\.\w+",  # threading module references
+    r"multiprocessing\.",  # multiprocessing module references
 ]
 
 # Broader patterns checked without case sensitivity for section headers
 # and explicit mentions in Solution/Technical sections
 ASYNC_SECTION_INDICATORS = [
-    r"##.*async",         # section headers mentioning async
-    r"##.*concurren",     # section headers mentioning concurrency
-    r"##.*race\s+condition", # section headers mentioning race conditions
+    r"##.*async",  # section headers mentioning async
+    r"##.*concurren",  # section headers mentioning concurrency
+    r"##.*race\s+condition",  # section headers mentioning race conditions
 ]
 
 WARNING_MESSAGE = """

@@ -28,9 +28,7 @@ def run_browser_cmd(
     )
 
 
-def run_browser_cmd_json(
-    *args: str, session: str | None = None, timeout: int = 30
-) -> dict:
+def run_browser_cmd_json(*args: str, session: str | None = None, timeout: int = 30) -> dict:
     """Run an agent-browser command with --json flag and parse output."""
     result = run_browser_cmd(*args, "--json", session=session, timeout=timeout)
     if result.returncode != 0:
@@ -118,7 +116,7 @@ class TestSnapshot:
     def test_snapshot_json(self, session_id):
         """Should return JSON with --json flag."""
         data = run_browser_cmd_json("snapshot", "-i", session=session_id)
-        assert isinstance(data, (dict, list))
+        assert isinstance(data, dict | list)
 
 
 class TestInteractions:
@@ -192,9 +190,7 @@ class TestScreenshots:
         """Should save screenshot to file."""
         screenshot_path = tmp_path / "test.png"
         run_browser_cmd("open", "https://example.com", session=session_id)
-        result = run_browser_cmd(
-            "screenshot", str(screenshot_path), session=session_id, timeout=60
-        )
+        result = run_browser_cmd("screenshot", str(screenshot_path), session=session_id, timeout=60)
         assert result.returncode == 0
         assert screenshot_path.exists()
         assert screenshot_path.stat().st_size > 0
@@ -266,9 +262,7 @@ class TestErrorHandling:
     def test_nonexistent_element(self, session_id):
         """Should handle missing element."""
         run_browser_cmd("open", "https://example.com", session=session_id)
-        result = run_browser_cmd(
-            "click", "@e999", session=session_id
-        )  # Nonexistent ref
+        result = run_browser_cmd("click", "@e999", session=session_id)  # Nonexistent ref
         # Should return error
         assert result.returncode != 0 or "error" in result.stderr.lower()
 

@@ -246,9 +246,7 @@ def get_media_type(message) -> str | None:
 # =============================================================================
 
 
-async def download_media(
-    client: TelegramClient, message, prefix: str = "media"
-) -> Path | None:
+async def download_media(client: TelegramClient, message, prefix: str = "media") -> Path | None:
     """
     Download media from a Telegram message.
 
@@ -322,9 +320,7 @@ async def transcribe_voice(filepath: Path) -> str | None:
                     result = response.json()
                     return result.get("text", "").strip()
                 else:
-                    logger.error(
-                        f"Whisper API error: {response.status_code} - {response.text}"
-                    )
+                    logger.error(f"Whisper API error: {response.status_code} - {response.text}")
                     return None
 
     except Exception as e:
@@ -375,9 +371,7 @@ async def describe_image(filepath: Path) -> str | None:
 # =============================================================================
 
 
-async def process_incoming_media(
-    client: TelegramClient, message
-) -> tuple[str, list[Path]]:
+async def process_incoming_media(client: TelegramClient, message) -> tuple[str, list[Path]]:
     """
     Process media in an incoming message.
 
@@ -400,9 +394,7 @@ async def process_incoming_media(
     # Validate the downloaded file
     is_valid, validation_error = validate_media_file(downloaded)
     if not is_valid:
-        logger.warning(
-            f"Invalid {media_type} file {downloaded.name}: {validation_error}"
-        )
+        logger.warning(f"Invalid {media_type} file {downloaded.name}: {validation_error}")
         # Try to extract text content even from invalid files (best effort)
         extracted = extract_document_text(downloaded)
         if extracted:
@@ -430,9 +422,7 @@ async def process_incoming_media(
         # Use Ollama LLaVA to describe the image
         image_description = await describe_image(downloaded)
         if image_description:
-            description = (
-                f"[User sent an image]\nImage description: {image_description}"
-            )
+            description = f"[User sent an image]\nImage description: {image_description}"
         else:
             # Fallback if vision model is not available
             description = f"[User sent an image - saved to {downloaded.name}]"
@@ -450,8 +440,7 @@ async def process_incoming_media(
         extracted = extract_document_text(downloaded)
         if extracted:
             description = (
-                f"[User sent a document: {downloaded.name}]"
-                f"\n\nDocument content:\n{extracted}"
+                f"[User sent a document: {downloaded.name}]\n\nDocument content:\n{extracted}"
             )
         else:
             description = f"[User sent a document - saved to {downloaded.name}]"

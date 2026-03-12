@@ -98,17 +98,13 @@ async def scan_for_missed_messages(
 
                 # Skip outgoing messages (our own)
                 if message.out:
-                    logger.debug(
-                        f"[catchup] {chat_title}: msg {message.id} is outgoing - skip"
-                    )
+                    logger.debug(f"[catchup] {chat_title}: msg {message.id} is outgoing - skip")
                     continue
 
                 # Skip messages without text
                 text = message.text or ""
                 if not text.strip():
-                    logger.debug(
-                        f"[catchup] {chat_title}: msg {message.id} has no text - skip"
-                    )
+                    logger.debug(f"[catchup] {chat_title}: msg {message.id} has no text - skip")
                     continue
 
                 # Skip messages already processed (Redis dedup)
@@ -133,13 +129,9 @@ async def scan_for_missed_messages(
                 )
 
                 # Check if we already responded (look for our reply)
-                already_handled = await _check_if_handled(
-                    client, dialog.entity, message
-                )
+                already_handled = await _check_if_handled(client, dialog.entity, message)
                 if already_handled:
-                    logger.info(
-                        f"[catchup] {chat_title}: msg {message.id} already handled - skip"
-                    )
+                    logger.info(f"[catchup] {chat_title}: msg {message.id} already handled - skip")
                     continue
 
                 # Check if we should respond to this message

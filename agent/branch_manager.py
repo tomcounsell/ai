@@ -281,9 +281,7 @@ def commit_plan_document(working_dir: Path, plan_file: Path, branch_name: str) -
         )
 
         # Commit
-        commit_message = (
-            f"Plan: {branch_name}\n\nInitial work plan and success criteria."
-        )
+        commit_message = f"Plan: {branch_name}\n\nInitial work plan and success criteria."
         subprocess.run(
             ["git", "commit", "-m", commit_message],
             cwd=working_dir,
@@ -341,9 +339,7 @@ def should_create_branch(user_request: str) -> bool:
     ]
 
     # Count indicators
-    indicator_count = sum(
-        1 for indicator in multi_step_indicators if indicator in request_lower
-    )
+    indicator_count = sum(1 for indicator in multi_step_indicators if indicator in request_lower)
 
     # Branch if:
     # - Multiple indicators (suggests complexity)
@@ -409,15 +405,11 @@ def mark_work_done(working_dir: Path, branch_name: str) -> bool:
 
         if active_plans:
             active_plan = active_plans[0]
-            completed_plan = plans_dir / active_plan.name.replace(
-                "ACTIVE-", "COMPLETED-"
-            )
+            completed_plan = plans_dir / active_plan.name.replace("ACTIVE-", "COMPLETED-")
 
             # Update status in plan file
             content = active_plan.read_text()
-            content = content.replace(
-                "**Status**: IN_PROGRESS", "**Status**: COMPLETED"
-            )
+            content = content.replace("**Status**: IN_PROGRESS", "**Status**: COMPLETED")
             completed_plan.write_text(content)
 
             # Remove active plan
@@ -518,9 +510,7 @@ def get_plan_context(plan_file: Path) -> str:
         content = plan_file.read_text()
 
         # Extract original request
-        request_match = re.search(
-            r"## Original Request\n\n(.*?)\n\n##", content, re.DOTALL
-        )
+        request_match = re.search(r"## Original Request\n\n(.*?)\n\n##", content, re.DOTALL)
         if request_match:
             return request_match.group(1).strip()
 
@@ -569,9 +559,7 @@ def format_branch_state_message(state: BranchState, revival_mode: bool = False) 
                 msg += "- Reply 'continue' to resume this work\n"
                 msg += "- Send a new request to start fresh (will switch to main)\n"
             else:
-                msg += (
-                    "\nNo active plan found. You may want to commit or stash changes."
-                )
+                msg += "\nNo active plan found. You may want to commit or stash changes."
 
             return msg
 

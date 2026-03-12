@@ -81,9 +81,7 @@ def sync_claude_dirs(project_dir: Path) -> HardlinkSyncResult:
 
     # Sync commands: each is a .md file.
     # Commands are slash-command aliases — always shared.
-    _sync_commands(
-        project_dir / ".claude" / "commands", user_claude / "commands", result
-    )
+    _sync_commands(project_dir / ".claude" / "commands", user_claude / "commands", result)
 
     # Sync agents: each is a .md file.
     # Agents defined here are general-purpose subagents used across all projects
@@ -97,15 +95,9 @@ def sync_claude_dirs(project_dir: Path) -> HardlinkSyncResult:
     _cleanup_renamed(user_claude, result)
 
     # Clean up stale hardlinks that no longer have a source
-    _cleanup_stale_commands(
-        project_dir / ".claude" / "commands", user_claude / "commands", result
-    )
-    _cleanup_stale_skills(
-        project_dir / ".claude" / "skills", user_claude / "skills", result
-    )
-    _cleanup_stale_commands(
-        project_dir / ".claude" / "agents", user_claude / "agents", result
-    )
+    _cleanup_stale_commands(project_dir / ".claude" / "commands", user_claude / "commands", result)
+    _cleanup_stale_skills(project_dir / ".claude" / "skills", user_claude / "skills", result)
+    _cleanup_stale_commands(project_dir / ".claude" / "agents", user_claude / "agents", result)
 
     # Sync SDLC enforcement hooks to user level
     hook_result = sync_user_hooks(project_dir)
@@ -177,9 +169,7 @@ def _sync_commands(src_dir: Path, dst_dir: Path, result: HardlinkSyncResult) -> 
         _ensure_hardlink(cmd_file, dst_file, dst_dir, result)
 
 
-def _ensure_hardlink(
-    src: Path, dst: Path, dst_parent: Path, result: HardlinkSyncResult
-) -> None:
+def _ensure_hardlink(src: Path, dst: Path, dst_parent: Path, result: HardlinkSyncResult) -> None:
     """Ensure dst is a hardlink to src. Create if missing or stale."""
     rel_src = str(src).replace(str(Path.home()), "~")
     rel_dst = str(dst).replace(str(Path.home()), "~")
@@ -246,9 +236,7 @@ def _cleanup_renamed(user_claude: Path, result: HardlinkSyncResult) -> None:
             result.errors += 1
 
 
-def _cleanup_stale_commands(
-    src_dir: Path, dst_dir: Path, result: HardlinkSyncResult
-) -> None:
+def _cleanup_stale_commands(src_dir: Path, dst_dir: Path, result: HardlinkSyncResult) -> None:
     """Remove command files in dst_dir that were hardlinked from old source names.
 
     Only removes files that share an inode with a file in src_dir (proving
@@ -292,9 +280,7 @@ def _cleanup_stale_commands(
             result.errors += 1
 
 
-def _cleanup_stale_skills(
-    src_dir: Path, dst_dir: Path, result: HardlinkSyncResult
-) -> None:
+def _cleanup_stale_skills(src_dir: Path, dst_dir: Path, result: HardlinkSyncResult) -> None:
     """Remove skill directories in dst_dir that were hardlinked from old source names.
 
     Only removes directories whose SKILL.md shares an inode with a file in
@@ -385,9 +371,7 @@ _SDLC_HOOK_DEFS: list[tuple[str, str, str, int]] = [
 ]
 
 
-def _merge_hook_settings(
-    settings_path: Path, hooks_dir: Path, result: HardlinkSyncResult
-) -> None:
+def _merge_hook_settings(settings_path: Path, hooks_dir: Path, result: HardlinkSyncResult) -> None:
     """Merge SDLC hook entries into ~/.claude/settings.json.
 
     Reads existing settings, adds SDLC hook entries if not already present
@@ -404,9 +388,7 @@ def _merge_hook_settings(
         else:
             settings = {}
     except (json.JSONDecodeError, OSError) as e:
-        result.actions.append(
-            LinkAction("", rel_path, "error", f"Failed to read settings: {e}")
-        )
+        result.actions.append(LinkAction("", rel_path, "error", f"Failed to read settings: {e}"))
         result.errors += 1
         return
 

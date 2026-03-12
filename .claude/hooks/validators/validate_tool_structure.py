@@ -115,9 +115,7 @@ def find_tool_name(tools_dir: str, name: str | None, max_age: int) -> str | None
     return None
 
 
-def validate_tool(
-    tools_dir: str, name: str, require_manifest: bool = False
-) -> tuple[bool, str]:
+def validate_tool(tools_dir: str, name: str, require_manifest: bool = False) -> tuple[bool, str]:
     """Validate tool has required structure."""
     tool_path = Path(tools_dir) / name
 

@@ -85,9 +85,7 @@ def judge_test_result(
     intro = "You are a test evaluator. Judge whether this test output meets the specified criteria."
     criteria_list = chr(10).join(f"- {c}" for c in expected_criteria)
     context_section = f"## Context\n{context}" if context else ""
-    strictness_text = strictness_instructions.get(
-        strictness, strictness_instructions["standard"]
-    )
+    strictness_text = strictness_instructions.get(strictness, strictness_instructions["standard"])
     prompt = f"""{intro}
 
 ## Test Output
@@ -143,9 +141,7 @@ Only output valid JSON, nothing else."""
             )
             raw_response.raise_for_status()
             result = raw_response.json()
-            content = (
-                result.get("choices", [{}])[0].get("message", {}).get("content", "")
-            )
+            content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
 
         if not content:
             return {"error": "No response from AI"}

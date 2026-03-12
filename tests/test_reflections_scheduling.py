@@ -118,9 +118,7 @@ class TestInstallMechanism:
         script = PROJECT_ROOT / "scripts" / "install_reflections.sh"
         content = script.read_text()
         assert "launchctl bootout" in content, "Must use launchctl bootout"
-        assert (
-            "launchctl unload" not in content
-        ), "Must not use deprecated launchctl unload"
+        assert "launchctl unload" not in content, "Must not use deprecated launchctl unload"
 
     def test_remote_update_uses_bootstrap(self):
         """remote-update.sh must use launchctl bootstrap, not load."""
@@ -134,9 +132,7 @@ class TestInstallMechanism:
         script = PROJECT_ROOT / "scripts" / "remote-update.sh"
         content = script.read_text()
         assert "launchctl bootout" in content, "Must use launchctl bootout"
-        assert (
-            "launchctl unload" not in content
-        ), "Must not use deprecated launchctl unload"
+        assert "launchctl unload" not in content, "Must not use deprecated launchctl unload"
 
     def test_remote_update_no_silent_failures(self):
         """remote-update.sh must not use || true on launchctl calls."""
@@ -148,9 +144,9 @@ class TestInstallMechanism:
                 # The old daydream bootout is allowed to have || true (migration guard)
                 if "com.valor.daydream" in line:
                     continue
-                assert (
-                    "|| true" not in line
-                ), f"launchctl call should not swallow errors with || true: {line}"
+                assert "|| true" not in line, (
+                    f"launchctl call should not swallow errors with || true: {line}"
+                )
 
     def test_service_install_reflections_uses_bootstrap(self):
         """service.py install_reflections() must use bootstrap/bootout."""
@@ -160,9 +156,7 @@ class TestInstallMechanism:
         func_start = content.index("def install_reflections(")
         # Find the next def or end of file
         next_def = content.find("\ndef ", func_start + 1)
-        func_body = (
-            content[func_start:next_def] if next_def != -1 else content[func_start:]
-        )
+        func_body = content[func_start:next_def] if next_def != -1 else content[func_start:]
 
         assert "bootout" in func_body, "install_reflections must use bootout"
         assert "bootstrap" in func_body, "install_reflections must use bootstrap"
@@ -176,9 +170,7 @@ class TestInstallMechanism:
         # Extract the install_caffeinate function body
         func_start = content.index("def install_caffeinate(")
         next_def = content.find("\ndef ", func_start + 1)
-        func_body = (
-            content[func_start:next_def] if next_def != -1 else content[func_start:]
-        )
+        func_body = content[func_start:next_def] if next_def != -1 else content[func_start:]
 
         assert "bootstrap" in func_body, "install_caffeinate must use bootstrap"
         assert '"load"' not in func_body, "install_caffeinate must not use load"

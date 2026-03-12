@@ -376,9 +376,7 @@ class TestNoDuplicateRecords:
             output_msg="msg",
         )
 
-        all_sessions = list(
-            AgentSession.query.filter(session_id=session.session_id)
-        )
+        all_sessions = list(AgentSession.query.filter(session_id=session.session_id))
         assert len(all_sessions) == 1
 
     @pytest.mark.asyncio
@@ -399,9 +397,7 @@ class TestNoDuplicateRecords:
                 output_msg=f"msg {i}",
             )
 
-        all_sessions = list(
-            AgentSession.query.filter(session_id=session.session_id)
-        )
+        all_sessions = list(AgentSession.query.filter(session_id=session.session_id))
         assert len(all_sessions) == 1
         assert all_sessions[0].auto_continue_count == 5
 

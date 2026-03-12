@@ -42,9 +42,7 @@ class TestStartedAtField:
 
     def test_started_at_field_exists(self):
         """AgentSession should have a started_at field."""
-        assert hasattr(
-            AgentSession, "started_at"
-        ), "AgentSession missing started_at field"
+        assert hasattr(AgentSession, "started_at"), "AgentSession missing started_at field"
 
     def test_started_at_defaults_to_none(self):
         """A newly created AgentSession should have started_at=None."""

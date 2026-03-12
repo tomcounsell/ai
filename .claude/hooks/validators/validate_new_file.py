@@ -84,9 +84,7 @@ def get_recent_files(directory: str, extension: str, max_age_minutes: int) -> li
     return recent
 
 
-def get_git_committed_files(
-    directory: str, extension: str, max_age_minutes: int
-) -> list[str]:
+def get_git_committed_files(directory: str, extension: str, max_age_minutes: int) -> list[str]:
     """Check git log for recently committed files in directory (even if later deleted)."""
     try:
         result = subprocess.run(
@@ -128,19 +126,13 @@ def validate(directory: str, extension: str, max_age_minutes: int) -> tuple[bool
     if committed:
         return True, f"File(s) committed in recent history: {', '.join(committed)}"
 
-    return False, NO_FILE_ERROR.format(
-        pattern=pattern, directory=directory, extension=extension
-    )
+    return False, NO_FILE_ERROR.format(pattern=pattern, directory=directory, extension=extension)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Validate new file creation")
-    parser.add_argument(
-        "-d", "--directory", default=DEFAULT_DIRECTORY, help="Directory to check"
-    )
-    parser.add_argument(
-        "-e", "--extension", default=DEFAULT_EXTENSION, help="File extension"
-    )
+    parser.add_argument("-d", "--directory", default=DEFAULT_DIRECTORY, help="Directory to check")
+    parser.add_argument("-e", "--extension", default=DEFAULT_EXTENSION, help="File extension")
     parser.add_argument(
         "--max-age",
         type=int,

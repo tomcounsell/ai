@@ -105,10 +105,7 @@ def pull_ff_only(project_dir: Path) -> tuple[bool, str]:
         return True, output.strip()
 
     # If ff-only failed due to divergence, try rebase
-    if (
-        "diverging" in output.lower()
-        or "not possible to fast-forward" in output.lower()
-    ):
+    if "diverging" in output.lower() or "not possible to fast-forward" in output.lower():
         result = run_cmd(
             ["git", "pull", "--rebase"],
             cwd=project_dir,
@@ -149,9 +146,7 @@ def check_critical_dep_changes(project_dir: Path, before: str, after: str) -> li
     for line in result.stdout.split("\n"):
         # Look for added lines with pinned critical deps
         if line.startswith("+") and "==" in line:
-            if any(
-                dep in line for dep in ["telethon", "anthropic", "claude-agent-sdk"]
-            ):
+            if any(dep in line for dep in ["telethon", "anthropic", "claude-agent-sdk"]):
                 changes.append(line.strip())
 
     return changes
@@ -168,9 +163,7 @@ def git_pull(project_dir: Path) -> GitPullResult:
     stash_restored = False
 
     # Ensure pre-commit secret scanning hook is active
-    run_cmd(
-        ["git", "config", "core.hooksPath", ".githooks"], cwd=project_dir, check=False
-    )
+    run_cmd(["git", "config", "core.hooksPath", ".githooks"], cwd=project_dir, check=False)
 
     # Check for dirty working tree
     if is_dirty(project_dir):

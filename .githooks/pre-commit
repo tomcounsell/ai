@@ -1,8 +1,44 @@
 #!/usr/bin/env bash
-# Pre-commit hook: scan staged files for leaked secrets
+# Pre-commit hook: auto-fix lint + scan for leaked secrets
 # Install: git config core.hooksPath .githooks
+#
+# This hook runs two phases:
+# 1. Auto-fix: ruff format + ruff check --fix on all staged Python files,
+#    then re-stage the fixes. Only genuinely unfixable issues block the commit.
+# 2. Secret scan: scan staged files for leaked secrets.
+#
+# Agents should use --no-verify for intermediate WIP commits and let this
+# hook run on final commits to ensure clean code.
+
+set -e
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
+
+# ── Phase 1: Auto-fix lint on staged Python files ──────────────────────
+# Get list of staged Python files (Added, Copied, Modified)
+STAGED_PY_FILES=$(git diff --cached --name-only --diff-filter=ACM -- '*.py' | tr '\n' ' ')
+
+if [ -n "$STAGED_PY_FILES" ]; then
+    # Auto-format staged Python files
+    python3 -m ruff format --quiet $STAGED_PY_FILES 2>/dev/null || true
+
+    # Auto-fix lint issues (fixable ones only)
+    python3 -m ruff check --fix --quiet $STAGED_PY_FILES 2>/dev/null || true
+
+    # Re-stage the auto-fixed files
+    git add $STAGED_PY_FILES
+
+    # Now check if any unfixable issues remain
+    if ! python3 -m ruff check --quiet $STAGED_PY_FILES 2>/dev/null; then
+        echo ""
+        echo "COMMIT BLOCKED: Unfixable lint issues detected."
+        echo "Fix the issues above and try again."
+        echo ""
+        exit 1
+    fi
+fi
+
+# ── Phase 2: Secret scan ──────────────────────────────────────────────
 SCRIPT="$REPO_ROOT/scripts/scan_secrets.py"
 
 if [ ! -f "$SCRIPT" ]; then

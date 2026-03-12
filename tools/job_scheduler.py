@@ -71,9 +71,7 @@ def _check_rate_limit(project_key: str) -> bool:
         cutoff = time.time() - 3600  # 1 hour ago
         recent_scheduled = 0
         for status in ("pending", "running"):
-            sessions = list(
-                AgentSession.query.filter(project_key=project_key, status=status)
-            )
+            sessions = list(AgentSession.query.filter(project_key=project_key, status=status))
             for s in sessions:
                 if s.scheduling_depth and int(s.scheduling_depth) > 0:
                     created = s.created_at or 0
