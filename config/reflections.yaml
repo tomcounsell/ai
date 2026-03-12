@@ -1,0 +1,59 @@
+# Reflections Registry
+#
+# All recurring non-issue work is declared here. The reflection scheduler
+# (agent/reflection_scheduler.py) reads this file and enqueues reflections
+# when they're due.
+#
+# Fields:
+#   name:           Unique identifier (used as Redis key)
+#   interval:       How often to run (seconds). Use constants below for readability.
+#   priority:       Job queue priority: urgent | high | normal | low
+#   execution_type: "function" (direct Python callable) or "agent" (full Claude session)
+#   callable:       Python dotted path to the function (for execution_type: function)
+#   command:        Shell command to run (for execution_type: agent)
+#   description:    Human-readable description
+#   enabled:        Whether this reflection is active (default: true)
+#
+# Interval reference:
+#   300    = 5 minutes
+#   1800   = 30 minutes
+#   3600   = 1 hour
+#   86400  = 24 hours
+#
+# NOTE: Bridge watchdog is intentionally NOT in this registry.
+# It must run as an external launchd service (com.valor.bridge-watchdog)
+# because it monitors the bridge process itself -- it cannot run inside
+# the process it monitors.
+
+reflections:
+  - name: health-check
+    description: "Check running jobs for liveness and timeout, recover stuck ones"
+    interval: 300  # 5 minutes
+    priority: high
+    execution_type: function
+    callable: "agent.job_queue._job_health_check"
+    enabled: true
+
+  - name: orphan-recovery
+    description: "Recover AgentSession objects stranded by index corruption"
+    interval: 1800  # 30 minutes
+    priority: normal
+    execution_type: function
+    callable: "agent.job_queue.recover_orphaned_jobs_all_projects"
+    enabled: true
+
+  - name: stale-branch-cleanup
+    description: "Clean up session branches older than 72 hours"
+    interval: 86400  # daily
+    priority: low
+    execution_type: function
+    callable: "agent.job_queue.cleanup_stale_branches_all_projects"
+    enabled: true
+
+  - name: daily-maintenance
+    description: "Full 15-step daily maintenance pipeline (formerly scripts/reflections.py)"
+    interval: 86400  # daily
+    priority: low
+    execution_type: function
+    callable: "scripts.reflections.run_reflections_async"
+    enabled: true
