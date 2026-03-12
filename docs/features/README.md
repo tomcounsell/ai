@@ -22,6 +22,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Context Fidelity Modes](context-fidelity-modes.md) | Right-sized context compression (full/compact/minimal/steering) for sub-agent dispatch | Shipped |
 | [Correlation IDs](correlation-ids.md) | End-to-end request tracing with shared correlation_id from Telegram receipt to response delivery | Shipped |
 | [Deep Plan Analysis](deep-plan-analysis.md) | Prior Art, Data Flow, Failure Analysis, and Architectural Impact investigation sections in /do-plan | Shipped |
+| [Deterministic SDLC Guard](deterministic-sdlc-guard.md) | Phase 1.75 guard in Observer that force-steers SDLC sessions to next pipeline stage without LLM, preventing stalls before later stages | Shipped |
 | [Design Review](do-design-review.md) | Review web UI against 10 premium design criteria with severity ratings | Shipped |
 | [Do Test](do-test.md) | Intelligent test orchestration with parallel dispatch, changed-file detection, structured reporting, and pytest plugin configuration | Shipped |
 | [do-patch Skill](do-patch-skill.md) | Targeted fix skill for test failures and review blockers; called automatically by do-build | Shipped |
