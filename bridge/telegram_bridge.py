@@ -1118,6 +1118,36 @@ async def main():
                 f"in {chat_title or 'DM'} (session={session_id})"
             )
 
+            # Classification inheritance: if this is a reply-to continuation and
+            # the async classifier hasn't completed yet, inherit classification_type
+            # from the original session. This prevents the race condition where
+            # enqueue_job gets classification_type=None because the async task
+            # hasn't finished. See issue #375 Bug 2.
+            if (
+                is_reply_to_valor
+                and message.reply_to_msg_id
+                and not classification_result.get("type")
+            ):
+                try:
+                    from models.agent_session import AgentSession
+
+                    existing_sessions = list(
+                        AgentSession.query.filter(session_id=session_id)
+                    )
+                    if existing_sessions and existing_sessions[0].classification_type:
+                        classification_result["type"] = (
+                            existing_sessions[0].classification_type
+                        )
+                        logger.info(
+                            f"[routing] Inherited classification_type="
+                            f"{classification_result['type']} from existing session "
+                            f"{session_id}"
+                        )
+                except Exception as e:
+                    logger.debug(
+                        f"Classification inheritance lookup failed (non-fatal): {e}"
+                    )
+
             # Build and enqueue the job (normal priority — FIFO within tier)
             depth = await enqueue_job(
                 project_key=project_key,
