@@ -7,6 +7,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from scripts.update.deps import (
+    auto_bump_deps,
+    bump_pin_in_pyproject,
+    get_pinned_version,
+    get_pypi_latest,
+)
+
 # Project root
 PROJECT_DIR = Path(__file__).parent.parent
 
@@ -330,3 +337,109 @@ class TestServiceManager:
         source = Path(self.SERVICE_SCRIPT).read_text()
         assert "<integer>6</integer>" in source
         assert "<integer>18</integer>" in source
+
+
+# =============================================================================
+# Auto-Bump Deps Tests
+# =============================================================================
+
+
+class TestGetPypiLatest:
+    def test_fetches_known_package(self):
+        """Should return a version string for a known package."""
+        version = get_pypi_latest("anthropic")
+        assert version is not None
+        assert "." in version  # version like "0.84.0"
+
+    def test_returns_none_for_nonexistent_package(self):
+        version = get_pypi_latest("this-package-definitely-does-not-exist-12345")
+        assert version is None
+
+
+class TestBumpPinInPyproject:
+    def test_bumps_existing_pin(self, tmp_path: Path):
+        pyproject = tmp_path / "pyproject.toml"
+        pyproject.write_text(
+            "[project]\ndependencies = [\n"
+            '    "anthropic==0.62.0",  # CRITICAL\n'
+            '    "claude-agent-sdk==0.1.35",  # CRITICAL\n'
+            "]\n"
+        )
+        assert bump_pin_in_pyproject(tmp_path, "anthropic", "0.84.0")
+        content = pyproject.read_text()
+        assert '"anthropic==0.84.0"' in content
+        # Other pins untouched
+        assert '"claude-agent-sdk==0.1.35"' in content
+
+    def test_preserves_comments(self, tmp_path: Path):
+        pyproject = tmp_path / "pyproject.toml"
+        pyproject.write_text('    "anthropic==0.62.0", # CRITICAL — pin exact\n')
+        bump_pin_in_pyproject(tmp_path, "anthropic", "0.99.0")
+        content = pyproject.read_text()
+        assert "# CRITICAL" in content
+        assert '"anthropic==0.99.0"' in content
+
+    def test_returns_false_for_missing_package(self, tmp_path: Path):
+        pyproject = tmp_path / "pyproject.toml"
+        pyproject.write_text("[project]\ndependencies = []\n")
+        assert bump_pin_in_pyproject(tmp_path, "nonexistent", "1.0.0") is False
+
+
+class TestGetPinnedVersion:
+    def test_reads_pinned_version(self, tmp_path: Path):
+        pyproject = tmp_path / "pyproject.toml"
+        pyproject.write_text('    "anthropic==0.62.0",  # CRITICAL\n')
+        assert get_pinned_version(tmp_path, "anthropic") == "0.62.0"
+
+
+class TestAutoBumpDeps:
+    def test_no_bump_when_already_latest(self, tmp_path: Path):
+        """When all packages are at latest, nothing should be bumped."""
+        pyproject = tmp_path / "pyproject.toml"
+        pyproject.write_text(
+            "[project]\ndependencies = [\n"
+            '    "anthropic==999.0.0",\n'
+            '    "claude-agent-sdk==999.0.0",\n'
+            "]\n"
+        )
+        # Mock PyPI to return the same versions
+        with patch(
+            "scripts.update.deps.get_pypi_latest",
+            return_value="999.0.0",
+        ):
+            result = auto_bump_deps(tmp_path)
+        assert not result.any_bumped
+        assert not result.rolled_back
+
+    def test_rollback_on_smoke_failure(self, tmp_path: Path):
+        """If smoke test fails, pyproject.toml should be rolled back."""
+        pyproject = tmp_path / "pyproject.toml"
+        original = (
+            "[project]\ndependencies = [\n"
+            '    "anthropic==0.62.0",\n'
+            '    "claude-agent-sdk==0.1.35",\n'
+            "]\n"
+        )
+        pyproject.write_text(original)
+
+        with (
+            patch(
+                "scripts.update.deps.get_pypi_latest",
+                return_value="99.0.0",
+            ),
+            patch(
+                "scripts.update.deps.sync_dependencies",
+                return_value=MagicMock(success=True),
+            ),
+            patch(
+                "scripts.update.deps.run_smoke_test",
+                return_value=(False, "ImportError"),
+            ),
+        ):
+            result = auto_bump_deps(tmp_path)
+
+        assert result.any_bumped
+        assert result.rolled_back
+        assert not result.smoke_passed
+        # pyproject.toml should be restored
+        assert pyproject.read_text() == original

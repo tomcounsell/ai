@@ -39,6 +39,7 @@ class UpdateConfig:
     # What to run
     do_git_pull: bool = True
     do_dep_sync: bool = True
+    do_auto_bump: bool = True  # Auto-bump critical deps from PyPI
     do_service_restart: bool = True
     do_verify: bool = True
     do_calendar: bool = False  # Only in full mode
@@ -100,6 +101,7 @@ class UpdateResult:
     success: bool = True
     git_result: git.GitPullResult | None = None
     dep_result: deps.DepSyncResult | None = None
+    auto_bump_result: deps.AutoBumpResult | None = None
     version_info: list[deps.VersionInfo] | None = None
     verification: verify.VerificationResult | None = None
     calendar_hook: cal_integration.CalendarHookResult | None = None
@@ -255,6 +257,56 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                     result.warnings.append(f"{vi.package} version mismatch")
         else:
             log("No dependency changes, skipping sync", v)
+
+    # Step 3.5: Auto-bump critical deps from PyPI
+    if config.do_auto_bump:
+        log("Checking PyPI for newer critical deps...", v)
+        result.auto_bump_result = deps.auto_bump_deps(project_dir)
+        bump = result.auto_bump_result
+
+        for b in bump.bumps:
+            if b.bumped:
+                log(f"  {b.package}: {b.old_version} -> {b.new_version}", v, always=True)
+            elif b.error:
+                log(f"  {b.package}: skip ({b.error})", v)
+            else:
+                log(f"  {b.package}: {b.old_version} (up to date)", v)
+
+        if bump.any_bumped:
+            if bump.rolled_back:
+                log(
+                    "WARN: Auto-bump rolled back (smoke test or sync failed)",
+                    v,
+                    always=True,
+                )
+                log(f"  Detail: {bump.smoke_output or bump.sync_error}", v)
+                result.warnings.append("Auto-bump rolled back after test failure")
+            elif bump.smoke_passed:
+                log("Smoke test passed after bump", v, always=True)
+                # Commit the pyproject.toml change
+                try:
+                    bumped_pkgs = [
+                        f"{b.package} {b.old_version}->{b.new_version}"
+                        for b in bump.bumps
+                        if b.bumped
+                    ]
+                    msg = f"Bump deps: {', '.join(bumped_pkgs)}"
+                    deps.run_cmd(
+                        ["git", "add", "pyproject.toml"],
+                        cwd=project_dir,
+                    )
+                    deps.run_cmd(
+                        ["git", "commit", "-m", msg],
+                        cwd=project_dir,
+                    )
+                    deps.run_cmd(
+                        ["git", "push"],
+                        cwd=project_dir,
+                    )
+                    log(f"Committed and pushed: {msg}", v, always=True)
+                except Exception as e:
+                    log(f"WARN: Failed to commit bump: {e}", v)
+                    result.warnings.append("Dep bump succeeded but commit/push failed")
 
     # Step 4: Ollama model (full mode only)
     if config.do_ollama:
