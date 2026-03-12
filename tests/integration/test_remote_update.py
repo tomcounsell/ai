@@ -15,7 +15,7 @@ from scripts.update.deps import (
 )
 
 # Project root
-PROJECT_DIR = Path(__file__).parent.parent
+PROJECT_DIR = Path(__file__).parent.parent.parent
 
 
 # =============================================================================
@@ -35,6 +35,10 @@ class TestRemoteUpdateScript:
 
     def test_already_up_to_date(self):
         """When HEAD matches remote, script exits 0 with 'Already up to date'."""
+        # Clean up any stale lock file from previous runs
+        lock_dir = PROJECT_DIR / "data" / "update.lock"
+        if lock_dir.is_dir():
+            lock_dir.rmdir()
         # Ensure we're on main and up to date
         result = subprocess.run(
             ["bash", self.SCRIPT],
