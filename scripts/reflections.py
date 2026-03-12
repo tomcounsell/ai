@@ -467,6 +467,8 @@ class ReflectionRunner:
             (13, "Redis Data Quality", self.step_redis_data_quality),
             (14, "Branch and Plan Cleanup", self.step_branch_plan_cleanup),
             (15, "Feature Docs Audit", self.step_feature_docs_audit),
+            (16, "Episode Cycle-Close", self.step_episode_cycle_close),
+            (17, "Pattern Crystallization", self.step_pattern_crystallization),
         ]
 
     def _load_state(self) -> ReflectionsState:
@@ -1166,6 +1168,9 @@ class ReflectionRunner:
             )
             from models.telegram import TelegramMessage
 
+            from models.cyclic_episode import CyclicEpisode
+            from models.procedural_pattern import ProceduralPattern
+
             msg_deleted = TelegramMessage.cleanup_expired(max_age_days=90)
             link_deleted = Link.cleanup_expired(max_age_days=90)
             chat_deleted = Chat.cleanup_expired(max_age_days=90)
@@ -1173,6 +1178,8 @@ class ReflectionRunner:
             event_deleted = BridgeEvent.cleanup_old(max_age_seconds=7 * 86400)
             run_deleted = ReflectionRun.cleanup_expired(max_age_days=30)
             ignore_deleted = ReflectionIgnore.cleanup_expired()
+            episode_deleted = CyclicEpisode.cleanup_expired(max_age_days=180)
+            pattern_deleted = ProceduralPattern.cleanup_expired(max_age_days=365)
 
             total = (
                 msg_deleted
@@ -1182,13 +1189,16 @@ class ReflectionRunner:
                 + event_deleted
                 + run_deleted
                 + ignore_deleted
+                + episode_deleted
+                + pattern_deleted
             )
             logger.info(
                 f"Redis TTL cleanup: {total} records deleted "
                 f"(msgs={msg_deleted}, links={link_deleted}, "
                 f"chats={chat_deleted}, sessions={session_deleted}, "
                 f"events={event_deleted}, runs={run_deleted}, "
-                f"ignores={ignore_deleted})"
+                f"ignores={ignore_deleted}, "
+                f"episodes={episode_deleted}, patterns={pattern_deleted})"
             )
             self.state.daily_report.append(f"Redis cleanup: {total} expired records removed")
         except Exception as e:
@@ -1674,6 +1684,251 @@ class ReflectionRunner:
             **stats,
             "findings": len(findings),
         }
+
+    async def step_episode_cycle_close(self) -> None:
+        """Step 16: Create CyclicEpisode records for completed SDLC sessions.
+
+        Reads completed SDLC sessions from the past 24 hours, classifies
+        their fingerprints via the fingerprint classifier, and writes
+        CyclicEpisode records. Skips non-SDLC sessions and sessions that
+        already have linked episodes (idempotent).
+        """
+        import time as _time
+
+        from models.agent_session import AgentSession
+        from models.cyclic_episode import CyclicEpisode
+        from scripts.fingerprint_classifier import classify_session
+
+        cutoff = _time.time() - 86400  # past 24 hours
+        episodes_created = 0
+        sessions_skipped = 0
+
+        try:
+            all_sessions = AgentSession.query.all()
+        except Exception as e:
+            logger.warning(f"Episode cycle-close: failed to query sessions: {e}")
+            self.state.step_progress["episode_cycle_close"] = {
+                "error": str(e),
+            }
+            return
+
+        for session in all_sessions:
+            # Skip sessions not completed in the past 24h
+            completed_at = session.completed_at or 0
+            if completed_at < cutoff:
+                continue
+
+            # Skip non-SDLC sessions
+            if not session.is_sdlc_job():
+                sessions_skipped += 1
+                continue
+
+            # Skip if status is not completed
+            if session.status != "completed":
+                sessions_skipped += 1
+                continue
+
+            # Check if episode already exists for this session (idempotent)
+            existing = CyclicEpisode.query.filter(raw_ref=session.job_id)
+            if existing:
+                sessions_skipped += 1
+                continue
+
+            # Classify fingerprint
+            try:
+                fingerprint = classify_session(session)
+            except Exception as e:
+                logger.warning(f"Fingerprint classification failed for {session.job_id}: {e}")
+                fingerprint = {
+                    "problem_topology": "ambiguous",
+                    "affected_layer": "unknown",
+                    "ambiguity_at_intake": 0.5,
+                    "acceptance_criterion_defined": False,
+                }
+
+            # Determine vault from project_key
+            vault = f"mem:{session.project_key}" if session.project_key else "mem:default"
+
+            # Compute stage durations from history
+            stage_durations = {}
+
+            # Create episode
+            try:
+                CyclicEpisode.create(
+                    vault=vault,
+                    raw_ref=session.job_id,
+                    created_at=_time.time(),
+                    problem_topology=fingerprint["problem_topology"],
+                    affected_layer=fingerprint["affected_layer"],
+                    ambiguity_at_intake=fingerprint["ambiguity_at_intake"],
+                    acceptance_criterion_defined=fingerprint["acceptance_criterion_defined"],
+                    tool_sequence=session.tool_sequence
+                    if isinstance(session.tool_sequence, list)
+                    else [],
+                    friction_events=session.friction_events
+                    if isinstance(session.friction_events, list)
+                    else [],
+                    stage_durations=stage_durations,
+                    deviation_count=0,
+                    resolution_type="clean_merge"
+                    if not session.has_failed_stage()
+                    else "patch_required",
+                    intent_satisfied=session.status == "completed",
+                    review_round_count=0,
+                    surprise_delta=0.0,
+                    issue_url=session.issue_url,
+                    branch_name=session.branch_name,
+                    session_summary=session.summary[:1000] if session.summary else None,
+                )
+                episodes_created += 1
+                logger.info(
+                    f"Created CyclicEpisode for session {session.job_id}: "
+                    f"topology={fingerprint['problem_topology']}, "
+                    f"layer={fingerprint['affected_layer']}"
+                )
+            except Exception as e:
+                logger.warning(f"Failed to create episode for session {session.job_id}: {e}")
+
+        self.state.step_progress["episode_cycle_close"] = {
+            "episodes_created": episodes_created,
+            "sessions_skipped": sessions_skipped,
+        }
+        if episodes_created:
+            self.state.add_finding(
+                "episode_cycle_close",
+                f"Created {episodes_created} behavioral episodes from completed SDLC sessions",
+            )
+        logger.info(f"Episode cycle-close: created={episodes_created}, skipped={sessions_skipped}")
+
+    async def step_pattern_crystallization(self) -> None:
+        """Step 17: Crystallize ProceduralPatterns from episode clusters.
+
+        Scans CyclicEpisodes for fingerprint clusters (same problem_topology +
+        affected_layer) with 3+ episodes and consistent outcomes. Creates or
+        reinforces ProceduralPatterns for qualifying clusters.
+
+        Content is stripped from patterns before writing -- they contain only
+        structural abstractions safe for cross-machine sync.
+        """
+        import time as _time
+        from collections import Counter, defaultdict
+
+        from models.cyclic_episode import CyclicEpisode
+        from models.procedural_pattern import ProceduralPattern
+
+        CRYSTALLIZATION_THRESHOLD = 3  # minimum episodes to form a pattern
+
+        try:
+            all_episodes = CyclicEpisode.query.all()
+        except Exception as e:
+            logger.warning(f"Pattern crystallization: failed to query episodes: {e}")
+            self.state.step_progress["pattern_crystallization"] = {
+                "error": str(e),
+            }
+            return
+
+        # Group episodes by fingerprint cluster
+        clusters: dict[tuple[str, str], list] = defaultdict(list)
+        for episode in all_episodes:
+            key = (episode.problem_topology or "ambiguous", episode.affected_layer or "unknown")
+            clusters[key].append(episode)
+
+        patterns_created = 0
+        patterns_reinforced = 0
+
+        for (topology, layer), episodes in clusters.items():
+            if len(episodes) < CRYSTALLIZATION_THRESHOLD:
+                continue
+
+            # Compute cluster stats
+            successes = sum(1 for e in episodes if e.intent_satisfied)
+            success_rate = successes / len(episodes)
+
+            # Skip clusters with 0% success rate -- no useful pattern
+            if success_rate == 0.0:
+                continue
+
+            # Find canonical tool sequence (most common)
+            tool_seqs = [
+                tuple(e.tool_sequence)
+                for e in episodes
+                if isinstance(e.tool_sequence, list) and e.tool_sequence
+            ]
+            canonical = list(Counter(tool_seqs).most_common(1)[0][0]) if tool_seqs else []
+
+            # Generate warnings from friction events
+            warnings = []
+            friction_counts: dict[str, int] = defaultdict(int)
+            for episode in episodes:
+                if isinstance(episode.friction_events, list):
+                    for fe in episode.friction_events:
+                        parts = fe.split("|") if isinstance(fe, str) else []
+                        if len(parts) >= 2:
+                            friction_counts[f"{parts[0]}:{parts[1]}"] += 1
+            # Warn about friction that occurs in >50% of episodes
+            for friction_key, count in friction_counts.items():
+                if count > len(episodes) / 2:
+                    warnings.append(
+                        f"Frequent friction in {topology}/{layer}: {friction_key} "
+                        f"({count}/{len(episodes)} episodes)"
+                    )
+
+            # Check if pattern already exists
+            existing = ProceduralPattern.query.filter(
+                problem_topology=topology,
+                affected_layer=layer,
+            )
+
+            episode_ids = [e.episode_id for e in episodes if e.episode_id]
+
+            if existing:
+                pattern = existing[0]
+                pattern.reinforce(success_rate > 0.5)
+                # Update canonical tool sequence and warnings
+                pattern.canonical_tool_sequence = canonical
+                pattern.warnings = warnings
+                pattern.source_episode_ids = episode_ids
+                pattern.save()
+                patterns_reinforced += 1
+            else:
+                # Create new pattern
+                now = _time.time()
+                ProceduralPattern.create(
+                    vault="shared",
+                    problem_topology=topology,
+                    affected_layer=layer,
+                    canonical_tool_sequence=canonical,
+                    warnings=warnings,
+                    shortcuts=[],
+                    success_rate=success_rate,
+                    sample_count=len(episodes),
+                    success_count=successes,
+                    confidence=success_rate * min(len(episodes) / 10.0, 1.0),
+                    last_reinforced=now,
+                    created_at=now,
+                    source_episode_ids=episode_ids,
+                )
+                patterns_created += 1
+                logger.info(
+                    f"Crystallized pattern: {topology}/{layer} "
+                    f"(success_rate={success_rate:.2f}, samples={len(episodes)})"
+                )
+
+        self.state.step_progress["pattern_crystallization"] = {
+            "patterns_created": patterns_created,
+            "patterns_reinforced": patterns_reinforced,
+            "clusters_evaluated": len(clusters),
+        }
+        if patterns_created or patterns_reinforced:
+            self.state.add_finding(
+                "pattern_crystallization",
+                f"Crystallized {patterns_created} new patterns, "
+                f"reinforced {patterns_reinforced} existing patterns",
+            )
+        logger.info(
+            f"Pattern crystallization: created={patterns_created}, "
+            f"reinforced={patterns_reinforced}, clusters={len(clusters)}"
+        )
 
     async def step_post_to_telegram(self, project: dict, issue_url: str = "") -> None:
         """Post reflections summary to project's Telegram chat.

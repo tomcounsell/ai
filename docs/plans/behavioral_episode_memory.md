@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Building
 type: feature
 appetite: Large
 owner: Valor
@@ -59,9 +59,9 @@ This is a 4-phase feature with external prerequisites (Popoto extensions). Each 
 
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
-| Popoto `Meta.namespace` | `.venv/bin/python -c "from popoto import Model; assert hasattr(Model.Meta, 'namespace')"` | Vault isolation for project-scoped episodes |
-| Popoto `ListField(max_length=N)` | `.venv/bin/python -c "from popoto import ListField; lf = ListField(max_length=50)"` | Capped tool sequence and friction event lists |
-| Popoto `atomic_increment` | `.venv/bin/python -c "from popoto import Model; assert hasattr(Model, 'atomic_increment')"` | Efficient counter updates on pattern reinforcement |
+| Popoto `Meta.namespace` | *Workaround: manual key prefixing via `vault` KeyField* | Vault isolation for project-scoped episodes |
+| Popoto `ListField(max_length=N)` | *Workaround: manual truncation in append helpers* | Capped tool sequence and friction event lists |
+| Popoto `atomic_increment` | *Workaround: read-modify-write in `reinforce()` method* | Efficient counter updates on pattern reinforcement |
 | Redis running | `.venv/bin/python -c "import redis; redis.Redis().ping()"` | Storage backend |
 | ANTHROPIC_API_KEY set | `.venv/bin/python -c "from dotenv import dotenv_values; assert dotenv_values('.env').get('ANTHROPIC_API_KEY')"` | Fingerprint classifier LLM call |
 
