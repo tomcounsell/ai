@@ -15,13 +15,14 @@ These patterns are recognized by the bridge routing system and fast-pathed to th
 | `pr N` | `pr 363` | Fetches PR #363, checks review/CI state, resumes pipeline from current stage |
 | `PR N` | `PR 363` | Case-insensitive -- same as `pr N` |
 | `pr #N` | `pr #363` | Same as above (optional `#` prefix on the number) |
+| `pull request N` | `pull request 363` | Long-form variant of `pr N` -- same behavior |
+| `pull request #N` | `pull request #363` | Same as above (optional `#` prefix on the number) |
 
 ### Patterns That Do NOT Work
 
 | Pattern | Why |
 |---------|-----|
 | `#363` | Telegram consumes `#` as a hashtag/topic marker -- the bot never receives it |
-| `pull request 363` | Not matched by the fast path; falls through to LLM classification (may still work but is slower) |
 
 ### Slash Commands
 
