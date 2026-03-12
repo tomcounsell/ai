@@ -157,7 +157,7 @@ After PR is successfully created and documentation cascade completes, clean up t
 cd $(git rev-parse --show-toplevel) && python scripts/migrate_completed_plan.py {PLAN_PATH}
 ```
 
-This deletes the plan document and closes the tracking issue, completing the lifecycle.
+This deletes the plan document. The tracking issue closes automatically when the PR merges (via `Closes #N` in the PR body).
 
 ## Step 9: Report PR Link
 

@@ -315,5 +315,4 @@ Update status as work progresses. Keep all tracking in the plan document itself.
 
 **Tracking issue lifecycle:**
 - When plan status changes to `Ready` or `In Progress`, update the GitHub issue / Notion task status accordingly
-- When plan status changes to `Complete`, close the GitHub issue (`gh issue close`) or mark the Notion task as done
-- When plan status changes to `Cancelled`, close the issue with a comment explaining why
+- Issues are closed automatically when the PR merges (via `Closes #N` in PR body) — do NOT close issues manually

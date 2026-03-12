@@ -175,11 +175,10 @@ def main() -> int:
         print("  - Feature doc exists at path specified in plan")
         print("  - Feature doc contains minimum sections (title + content)")
         print("  - Feature is indexed in docs/features/README.md")
-        print("  - Tracking issue can be closed")
+        print("  - Tracking issue exists (closed on PR merge, not here)")
         print()
         print("On success:")
         print("  - Deletes the plan file")
-        print("  - Closes tracking issue with comment")
         print()
         print("Options:")
         print("  --dry-run  Validate only, do not delete plan or close issue")
@@ -233,18 +232,10 @@ def main() -> int:
         return 1
     print("  PASS: Feature indexed in docs/features/README.md")
 
-    # Extract tracking issue
+    # Note: Issues are closed automatically when the PR merges (via `Closes #N` in PR body)
     tracking_issue = extract_tracking_issue(plan_text)
     if tracking_issue:
-        print(f"Tracking issue: {tracking_issue}")
-
-        # Close tracking issue
-        success, error = close_tracking_issue(tracking_issue, dry_run)
-        if not success:
-            print(f"Error: {error}")
-            return 1
-        if not dry_run:
-            print("  PASS: Tracking issue closed")
+        print(f"Tracking issue: {tracking_issue} (will close on PR merge)")
     else:
         print("Warning: No tracking issue found in plan frontmatter")
 

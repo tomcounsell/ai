@@ -192,7 +192,7 @@ Where `$PR_URL` is the full GitHub PR URL returned by `gh pr create`.
 21. **Verify commits exist before PR** - Run `git -C $TARGET_REPO/.worktrees/{slug} log --oneline main..HEAD` and count the output lines. If zero commits exist on the session branch, **ABORT with error**: "BUILD FAILED: No commits on session/{slug}. Builder agents produced no code changes." Do NOT proceed to push or PR creation.
 22. **Push and open a PR** - `git -C $TARGET_REPO/.worktrees/{slug} push -u origin session/{slug}` then `gh pr create --repo $TARGET_GH_REPO` (use `--repo` only for cross-repo builds)
 23. **Run documentation cascade** - Invoke `/do-docs {PR-number}` to surgically update affected docs
-24. **Migrate completed plan** - Delete plan file and close tracking issue
+24. **Migrate completed plan** - Delete plan file (issue closes automatically on PR merge via `Closes #N`)
 25. **Report completion** with PR URL when all tasks are done
 
 ## Lint Discipline
