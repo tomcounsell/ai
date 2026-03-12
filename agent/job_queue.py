@@ -1230,7 +1230,11 @@ async def _execute_job(job: Job) -> None:
             chat_state.completion_sent = True
             return
 
+        from agent.sdk_client import get_stop_reason
         from bridge.observer import Observer
+
+        # Retrieve stop_reason captured during SDK query for this session
+        stop_reason = get_stop_reason(job.session_id) if job.session_id else None
 
         observer = Observer(
             session=agent_session,
@@ -1238,6 +1242,7 @@ async def _execute_job(job: Job) -> None:
             auto_continue_count=chat_state.auto_continue_count,
             send_cb=send_cb,
             enqueue_fn=_enqueue_continuation,
+            stop_reason=stop_reason,
         )
 
         try:

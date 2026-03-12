@@ -42,12 +42,24 @@ from agent.workflow_types import WorkflowStateData
 
 logger = logging.getLogger(__name__)
 
+
 # === Client Registry ===
 # Module-level registry of active SDK clients keyed by session_id.
 # In-memory only (intentionally not persisted). On crash/reboot, the dict
 # is empty and recovered jobs create fresh clients. See plan doc for
 # crash safety analysis.
 _active_clients: dict[str, "ClaudeSDKClient"] = {}
+
+# === Stop Reason Registry ===
+# Stores the stop_reason from the most recent ResultMessage for each session.
+# Populated by ValorAgent.query(), consumed by job_queue after query completes.
+# In-memory only — cleared when the session finishes.
+_session_stop_reasons: dict[str, str] = {}
+
+
+def get_stop_reason(session_id: str) -> str | None:
+    """Get and consume the stop_reason for a completed session query."""
+    return _session_stop_reasons.pop(session_id, None)
 
 
 def _has_prior_session(session_id: str) -> bool:
@@ -633,6 +645,12 @@ class ValorAgent:
                                 if isinstance(block, TextBlock):
                                     response_parts.append(block.text)
                         elif isinstance(msg, ResultMessage):
+                            # Capture stop_reason for Observer routing decisions
+                            if msg.stop_reason and session_id:
+                                _session_stop_reasons[session_id] = msg.stop_reason
+                                logger.info(
+                                    f"SDK stop_reason={msg.stop_reason} for session {session_id}"
+                                )
                             if msg.total_cost_usd is not None:
                                 cost = msg.total_cost_usd
                                 turns = msg.num_turns
@@ -742,6 +760,10 @@ class ValorAgent:
             # Always unregister client from registry
             if session_id:
                 _active_clients.pop(session_id, None)
+                # Note: _session_stop_reasons is NOT cleaned here — it's consumed
+                # by get_stop_reason() in job_queue after query returns. The pop()
+                # in get_stop_reason() handles cleanup. If the Observer never runs
+                # (crash), entries are tiny (session_id -> str) and cleared on restart.
                 logger.debug(f"Unregistered active client for session {session_id}")
 
         return "\n".join(response_parts) if response_parts else ""
