@@ -58,6 +58,12 @@ _PROCESS_NARRATION_PATTERNS = [
     re.compile(r"^Alright,? (let me|I'll)"),
     re.compile(r"^Sure,? (let me|I'll)"),
     re.compile(r"^OK,? (let me|I'll)"),
+    # Plan-sharing and approach narration — PM wants results, not plans
+    re.compile(r"^Here'?s? (my |the )?(plan|approach|strategy)", re.IGNORECASE),
+    re.compile(r"^My (plan|approach|strategy) (is|will be|would be)", re.IGNORECASE),
+    re.compile(r"^I('ll| will| am going to| plan to) (approach|tackle|handle|address) "),
+    re.compile(r"^(Step|Phase) \d+[.:] ", re.IGNORECASE),
+    re.compile(r"^\d+\.\s+(First|Then|Next|Finally|After that)", re.IGNORECASE),
 ]
 
 
@@ -1067,6 +1073,8 @@ FORMAT RULES for the **response** field (adaptive based on content type):
 5. STATUS UPDATES / WORK WITH CONTEXT: 2-4 bullet points starting with "• "
 
 GENERAL RULES:
+- NEVER include the agent's plan, approach, or strategy. The PM wants RESULTS, not plans.
+  If work is in progress, report what has been DONE so far, not what will be done next.
 - Lead with the outcome, not the process
 - Preserve commit hashes inline (e.g., `abc1234`)
 - Flag with ⚠️ ONLY for genuinely external blockers (missing credentials, need third-party \
@@ -1077,8 +1085,10 @@ the agent could resolve with its tools
 - OMIT obvious process bullets that describe routine agent activity rather than outcomes. \
 Examples of what to OMIT: "Analyzed the codebase", "Read through the plan", \
 "Created execution plan", "Examined the existing code", "Reviewed the implementation", \
-"Investigated the issue". These are process noise — the PM only cares about WHAT was \
-accomplished, not THAT you read files or analyzed code."""
+"Investigated the issue", "Here's my approach", "I'll tackle this by", \
+"My plan is to", "Step 1: ...", "The strategy is". \
+These are process noise — the PM only cares about WHAT was \
+accomplished, not THAT you read files or analyzed code or what you plan to do next."""
 
 # Blocker flag logic explained:
 # The ⚠️ flag is meant to alert the PM only when human intervention is truly required.
