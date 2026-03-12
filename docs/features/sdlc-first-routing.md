@@ -53,6 +53,36 @@ This ensures the agent defaults to SDLC pipeline behavior for work requests rath
 
 The Anthropic client used for Haiku fallback classification is instantiated lazily via `_get_anthropic_client()` to avoid per-call overhead. The classify function itself is imported lazily inside `get_agent_response_sdk()` to prevent circular imports between `agent/` and `bridge/` modules.
 
+## Cross-Repo `gh` Resolution
+
+When SDLC is invoked for a non-ai project (e.g., popoto), the worker runs with `cwd=ai/` (the orchestrator repo). All `gh` commands (issue view, pr list, etc.) resolve against the cwd repo by default, which causes cross-project SDLC work to silently target the wrong repository.
+
+### The `GITHUB:` Context Line
+
+The SDK client (`agent/sdk_client.py`) already injects a `GITHUB: org/repo` line into the enriched prompt for cross-project requests, sourced from `config/projects.json`. Skills extract this line and pass `--repo org/repo` to every `gh` command.
+
+```bash
+# Extract repo from context
+GITHUB_REPO="tomcounsell/popoto"  # parsed from "GITHUB: tomcounsell/popoto" in prompt
+
+# Use --repo to target the correct repository
+gh issue view 179 --repo "$GITHUB_REPO"
+gh pr list --search "#179" --state open --repo "$GITHUB_REPO"
+```
+
+### Updated Skills
+
+All `/do-*` skills and the `/sdlc` router include a **Cross-Repo Resolution** section with instructions to:
+1. Extract the `GITHUB:` line from the prompt context
+2. Set `REPO_FLAG="--repo $GITHUB_REPO"` if present
+3. Append `$REPO_FLAG` to every `gh` command
+
+Skills that received this update: `/sdlc`, `/do-issue`, `/do-plan`, `/do-pr-review`, `/do-docs`, `/do-patch`.
+
+### Verification
+
+After fetching an issue, the SDLC skill verifies the issue URL matches the expected project. This catches misconfiguration early rather than silently operating on the wrong issue.
+
 ## Files
 
 | File | Purpose |
