@@ -237,6 +237,8 @@ _JOB_FIELDS = [
     "queued_steering_messages",
     # Tracing fields — must be preserved across delete-and-recreate
     "correlation_id",
+    # Claude Code identity mapping — must be preserved across delete-and-recreate
+    "claude_session_uuid",
 ]
 
 # Backward compat alias
@@ -280,7 +282,27 @@ async def _push_job(
     scheduled_after: float | None = None,
     scheduling_depth: int = 0,
 ) -> int:
-    """Create a job in Redis and return the pending queue depth for this project."""
+    """Create a job in Redis and return the pending queue depth for this project.
+
+    Bug 3 fix (issue #374): When creating a new record for a continuation
+    (reply-to-resume), mark old completed records with the same session_id
+    as 'superseded' to prevent ambiguity in later record selection.
+    """
+    # Mark old completed records as superseded to prevent duplicate-record ambiguity
+    try:
+        old_completed = [
+            s for s in AgentSession.query.filter(session_id=session_id) if s.status == "completed"
+        ]
+        for old in old_completed:
+            old.status = "superseded"
+            old.save()
+            logger.info(
+                f"Marked old completed session {old.job_id} as superseded "
+                f"for session_id={session_id}"
+            )
+    except Exception as e:
+        logger.warning(f"Failed to mark old sessions as superseded for {session_id}: {e}")
+
     await AgentSession.async_create(
         project_key=project_key,
         status="pending",
@@ -1201,11 +1223,25 @@ async def _execute_job(job: Job) -> None:
         # See bridge/observer.py and docs/plans/observer_agent.md for design.
 
         # Re-read session from Redis for fresh stage data.
+        # Bug 3 fix (issue #374): Use deterministic record selection — filter
+        # by active statuses first, fall back to broader filter, sort by
+        # created_at desc to always pick the newest record. This prevents
+        # picking a stale completed record when duplicates exist.
         if agent_session and agent_session.session_id:
             try:
-                fresh = list(AgentSession.query.filter(session_id=agent_session.session_id))
-                if fresh:
-                    agent_session = fresh[0]
+                all_sessions = list(AgentSession.query.filter(session_id=agent_session.session_id))
+                # Prefer running/active records; fall back to any record
+                active = [s for s in all_sessions if s.status in ("running", "active", "pending")]
+                candidates = active if active else all_sessions
+                if candidates:
+                    candidates.sort(key=lambda s: s.created_at or 0, reverse=True)
+                    agent_session = candidates[0]
+                    if len(all_sessions) > 1:
+                        logger.info(
+                            f"[{job.project_key}] Re-read session: selected "
+                            f"status={agent_session.status} from {len(all_sessions)} "
+                            f"records for {agent_session.session_id}"
+                        )
             except Exception as e:
                 logger.warning(f"Failed to re-read session {agent_session.session_id}: {e}")
 

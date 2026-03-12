@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -22,8 +23,26 @@ logger = logging.getLogger(__name__)
 # Health check fires every N tool uses
 CHECK_INTERVAL = 20
 
-# Track tool call count per session (in-memory, resets with process)
+# Track tool call count per session (in-memory, resets with process).
+# Keyed by bridge session ID (VALOR_SESSION_ID env var) when available,
+# falling back to Claude Code's internal session ID. See issue #374 Bug 2.
 _tool_counts: dict[str, int] = {}
+
+
+def reset_session_count(session_id: str) -> None:
+    """Reset the tool call counter for a session.
+
+    Called from sdk_client.py at query start to ensure continuation sessions
+    start with a fresh count instead of inheriting stale counts from a
+    prior (possibly unrelated) Claude Code session. See issue #374 Bug 2.
+
+    Args:
+        session_id: The bridge session ID (VALOR_SESSION_ID) to reset.
+    """
+    old_count = _tool_counts.pop(session_id, 0)
+    if old_count > 0:
+        logger.info(f"[health_check] Reset tool count for session {session_id} (was {old_count})")
+
 
 JUDGE_PROMPT = """\
 You are a watchdog monitoring an AI coding agent session. Based on the recent \
@@ -230,7 +249,12 @@ async def watchdog_hook(
     2. Update session tracking in Redis (every call)
     3. Run health check via Haiku judge (every CHECK_INTERVAL calls)
     """
-    session_id = input_data.get("session_id", "unknown")
+    # Bug 2 fix (issue #374): Use VALOR_SESSION_ID (bridge session ID) for
+    # count tracking instead of Claude Code's internal session ID. This prevents
+    # stale counts from a prior unrelated session from triggering the watchdog
+    # prematurely on continuation sessions.
+    valor_session_id = os.environ.get("VALOR_SESSION_ID")
+    session_id = valor_session_id or input_data.get("session_id", "unknown")
     transcript_path = input_data.get("transcript_path", "")
 
     # === STEERING CHECK (every tool call) ===

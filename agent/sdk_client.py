@@ -62,6 +62,44 @@ def get_stop_reason(session_id: str) -> str | None:
     return _session_stop_reasons.pop(session_id, None)
 
 
+def _get_prior_session_uuid(session_id: str) -> str | None:
+    """Look up the stored Claude Code UUID for a prior session.
+
+    Returns the claude_session_uuid if a prior AgentSession exists with this
+    session_id and has a stored UUID. Returns None if no prior session exists
+    or no UUID was stored (first message in session).
+
+    Used by _create_options() to resume the correct Claude Code transcript
+    instead of falling back to the most recent session file on disk.
+
+    See issue #232 for the original cross-wire bug, and issue #374 Bug 1
+    for the UUID mapping fix.
+    """
+    try:
+        from models.agent_session import AgentSession
+
+        sessions = [
+            s
+            for s in AgentSession.query.filter(session_id=session_id)
+            if s.status in ("completed", "running", "active", "dormant")
+        ]
+        if not sessions:
+            return None
+        # Sort by created_at desc to get the newest record
+        sessions.sort(key=lambda s: s.created_at or 0, reverse=True)
+        uuid = getattr(sessions[0], "claude_session_uuid", None)
+        if uuid:
+            logger.info(f"_get_prior_session_uuid({session_id!r}): found UUID {uuid}")
+        return uuid
+    except Exception:
+        # If Redis is down or model unavailable, fail safe: don't continue
+        logger.warning(
+            f"_get_prior_session_uuid({session_id!r}) failed, defaulting to None",
+            exc_info=True,
+        )
+        return None
+
+
 def _has_prior_session(session_id: str) -> bool:
     """Check if a prior AgentSession exists for this session_id.
 
@@ -72,22 +110,40 @@ def _has_prior_session(session_id: str) -> bool:
 
     See issue #232 for the cross-wire bug this fixes.
     """
+    return _get_prior_session_uuid(session_id) is not None
+
+
+def _store_claude_session_uuid(session_id: str, claude_uuid: str) -> None:
+    """Store the Claude Code session UUID on the AgentSession.
+
+    Called after SDK query completes to persist the mapping between the
+    Telegram session ID and the Claude Code transcript UUID. This enables
+    continuation sessions to resume the correct transcript.
+
+    See issue #374 Bug 1 for the session cross-wire bug this fixes.
+
+    Args:
+        session_id: The bridge/Telegram session ID.
+        claude_uuid: The Claude Code session UUID from ResultMessage.session_id.
+    """
     try:
         from models.agent_session import AgentSession
 
-        sessions = [
-            s
-            for s in AgentSession.query.filter(session_id=session_id)
-            if s.status in ("completed", "running", "active", "dormant")
-        ]
-        return len(sessions) > 0
+        sessions = list(AgentSession.query.filter(session_id=session_id))
+        if sessions:
+            # Sort by created_at desc, update the newest record
+            sessions.sort(key=lambda s: s.created_at or 0, reverse=True)
+            session = sessions[0]
+            session.claude_session_uuid = claude_uuid
+            session.save()
+            logger.info(f"Stored Claude Code UUID {claude_uuid} on session {session_id}")
+        else:
+            logger.warning(f"_store_claude_session_uuid: no session found for {session_id}")
     except Exception:
-        # If Redis is down or model unavailable, fail safe: don't continue
         logger.warning(
-            f"_has_prior_session({session_id!r}) failed, defaulting to False",
+            f"_store_claude_session_uuid({session_id!r}) failed",
             exc_info=True,
         )
-        return False
 
 
 def get_active_client(session_id: str) -> ClaudeSDKClient | None:
@@ -585,14 +641,20 @@ class ValorAgent:
         # Without this check, fresh sessions set continue_conversation=True which
         # can cause Claude Code to reuse the most recent session file on disk,
         # leaking context between unrelated conversations (see issue #232).
-        should_continue = session_id is not None and _has_prior_session(session_id)
+        #
+        # Bug 1 fix (issue #374): Use the stored Claude Code UUID for the resume
+        # parameter instead of the Telegram session ID. The Telegram ID doesn't
+        # match any .jsonl transcript file, causing Claude Code to fall back to
+        # the most recent session on disk (wrong session).
+        prior_uuid = _get_prior_session_uuid(session_id) if session_id else None
+        should_continue = prior_uuid is not None
 
         return ClaudeAgentOptions(
             system_prompt=system_prompt,
             cwd=str(self.working_dir),
             permission_mode=self.permission_mode,  # type: ignore[arg-type]
             continue_conversation=should_continue,
-            resume=session_id if should_continue else None,
+            resume=prior_uuid if should_continue else None,
             setting_sources=["user", "local", "project"],
             env=env,
             hooks=build_hooks_config(),
@@ -620,6 +682,13 @@ class ValorAgent:
         response_parts: list[str] = []
         retries = 0
 
+        # Bug 2 fix (issue #374): Reset watchdog tool counts at query start
+        # so continuation sessions don't inherit inflated counts from prior runs.
+        if session_id:
+            from agent.health_check import reset_session_count
+
+            reset_session_count(session_id)
+
         # Log resources before SDK initialization
         init_start = time.time()
         logger.info(f"[SDK-init] Starting SDK initialization for session {session_id}")
@@ -645,12 +714,19 @@ class ValorAgent:
                                 if isinstance(block, TextBlock):
                                     response_parts.append(block.text)
                         elif isinstance(msg, ResultMessage):
+<<<<<<< session/observer_early_return
+                            # Bug 1 fix (issue #374): Store Claude Code session UUID
+                            # so continuation sessions resume the correct transcript.
+                            if msg.session_id and session_id:
+                                _store_claude_session_uuid(session_id, msg.session_id)
+=======
                             # Capture stop_reason for Observer routing decisions
                             if msg.stop_reason and session_id:
                                 _session_stop_reasons[session_id] = msg.stop_reason
                                 logger.info(
                                     f"SDK stop_reason={msg.stop_reason} for session {session_id}"
                                 )
+>>>>>>> main
                             if msg.total_cost_usd is not None:
                                 cost = msg.total_cost_usd
                                 turns = msg.num_turns

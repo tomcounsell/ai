@@ -117,6 +117,18 @@ Now, `_has_prior_session(session_id)` queries the AgentSession Redis model to ch
 
 The check fails safe: if Redis is unavailable, `_has_prior_session()` returns False (don't continue), ensuring fresh sessions never accidentally inherit stale context.
 
+### Claude Code UUID Mapping (Issue #374)
+
+The session continuation gate was extended to fix three compounding bugs that caused the Observer to prematurely deliver output on continuation sessions:
+
+1. **Session identity mapping**: `AgentSession` now has a `claude_session_uuid` field that stores the Claude Code transcript UUID (from `ResultMessage.session_id`). The `resume` parameter in `_create_options()` uses this stored UUID instead of the Telegram session ID. This prevents Claude Code from falling back to the most recent unrelated session file on disk. The function `_get_prior_session_uuid()` replaces the boolean `_has_prior_session()` check with a UUID lookup, and `_store_claude_session_uuid()` persists the mapping after each query.
+
+2. **Watchdog count scoping**: The health check hook (`agent/health_check.py`) now uses the `VALOR_SESSION_ID` environment variable for tool count tracking instead of Claude Code's internal session ID. A `reset_session_count()` function is called at the start of each SDK query to clear stale counts from prior runs. This prevents continuation sessions from inheriting inflated tool counts that trigger premature health check kills.
+
+3. **Deterministic record selection**: When re-reading `AgentSession` records (in both `job_queue.py` and `bridge/observer.py`), the code now filters by active statuses (`running`, `active`, `pending`) first, then falls back to all records, sorted by `created_at` descending. This ensures the newest relevant record is always selected when duplicates exist. Additionally, `_push_job()` marks old completed records as `superseded` to prevent ambiguity.
+
+The `claude_session_uuid` field is included in `_JOB_FIELDS` so it is preserved across the delete-and-recreate pattern used by `_enqueue_continuation()`.
+
 ## History Truncation Warning
 
 Session history is capped at `HISTORY_MAX_ENTRIES` (currently 20) entries via `AgentSession.append_history()`. When a session exceeds this cap, the oldest entries are silently dropped to stay within the limit. A `WARNING`-level log message is emitted each time truncation occurs, including the original length and number of entries lost:
