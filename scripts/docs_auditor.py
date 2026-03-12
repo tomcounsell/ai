@@ -306,22 +306,45 @@ class DocsAuditor:
     # Public API
     # ------------------------------------------------------------------
 
-    def enumerate_docs(self) -> list[Path]:
+    def enumerate_docs(self, include_project_docs: bool = False) -> list[Path]:
         """Find all .md files in docs/ except docs/plans/.
+
+        Args:
+            include_project_docs: When True, also include root ``*.md`` files
+                (e.g. ``CLAUDE.md``, ``README.md``), ``.claude/skills/*/SKILL.md``,
+                and ``.claude/commands/*.md``.  These extra files are audited for
+                stale references but NOT relocated.
 
         Returns paths relative to repo_root.
         """
         docs_dir = self.repo_root / "docs"
-        if not docs_dir.exists():
-            return []
-
         result: list[Path] = []
-        for md_file in sorted(docs_dir.rglob("*.md")):
-            rel = md_file.relative_to(self.repo_root)
-            # Exclude docs/plans/
-            if str(rel).startswith("docs/plans/"):
-                continue
-            result.append(rel)
+
+        if docs_dir.exists():
+            for md_file in sorted(docs_dir.rglob("*.md")):
+                rel = md_file.relative_to(self.repo_root)
+                # Exclude docs/plans/
+                if str(rel).startswith("docs/plans/"):
+                    continue
+                result.append(rel)
+
+        if include_project_docs:
+            # Root markdown files
+            for md_file in sorted(self.repo_root.glob("*.md")):
+                result.append(md_file.relative_to(self.repo_root))
+
+            # Skill files
+            skills_dir = self.repo_root / ".claude" / "skills"
+            if skills_dir.exists():
+                for skill_md in sorted(skills_dir.rglob("SKILL.md")):
+                    result.append(skill_md.relative_to(self.repo_root))
+
+            # Command files
+            commands_dir = self.repo_root / ".claude" / "commands"
+            if commands_dir.exists():
+                for cmd_md in sorted(commands_dir.glob("*.md")):
+                    result.append(cmd_md.relative_to(self.repo_root))
+
         return result
 
     def analyze_doc(self, path: Path) -> Verdict:
@@ -688,27 +711,25 @@ CORRECTIONS:
     # ------------------------------------------------------------------
 
     #: Subdirectories that are canonical; anything else is non-standard.
-    CANONICAL_SUBDIRS = frozenset(
-        {"plans", "features", "guides", "testing", "references", "operations"}
-    )
+    CANONICAL_SUBDIRS = frozenset({"plans", "features", "guides", "designs", "media"})
 
     def _check_doc_location(self, path: Path) -> Path | None:
-        """Return the correct canonical path if the doc is in a non-canonical subdir.
+        """Return the correct canonical path if the doc is misplaced.
 
         Args:
             path: Path relative to repo_root (e.g. ``docs/architecture/foo.md``).
 
         Returns:
-            ``None`` if the doc is already in a canonical location or flat under
-            ``docs/``.  Returns the suggested canonical path (also relative to
-            repo_root) if the doc lives in a non-standard subdirectory.
+            ``None`` if the doc is already in a canonical location.
+            Returns the suggested canonical path (also relative to repo_root)
+            if the doc lives in a non-standard subdirectory or is flat under
+            ``docs/`` (only ``docs/README.md`` is allowed flat).
 
         Classification heuristic (no LLM, pure content-based):
-        - how-to / step-by-step / getting-started language  → ``docs/guides/``
-        - testing patterns / test strategies                 → ``docs/testing/``
-        - heavy external URL / package references            → ``docs/references/``
+        - how-to / step-by-step / tutorial / external refs   → ``docs/guides/``
+        - design / mockup / wireframe / UI/UX                → ``docs/designs/``
         - code class/function references or code blocks      → ``docs/features/``
-        - otherwise                                          → flat ``docs/``
+        - default fallback                                   → ``docs/guides/``
 
         ``docs/plans/`` is never touched.
         """
@@ -720,9 +741,20 @@ CORRECTIONS:
             return None
 
         parts = rel_to_docs.parts
-        # Flat doc directly under docs/ → OK
+
+        # Flat doc directly under docs/
         if len(parts) == 1:
-            return None
+            # Only docs/README.md is allowed flat
+            if path.name == "README.md":
+                return None
+            # All other flat docs need relocation
+            full_path = self.repo_root / path
+            try:
+                content = full_path.read_text(encoding="utf-8", errors="replace").lower()
+            except Exception:
+                content = ""
+            suggested_subdir = self._classify_doc_content(content)
+            return Path("docs") / suggested_subdir / path.name
 
         subdir = parts[0]
 
@@ -739,11 +771,7 @@ CORRECTIONS:
 
         filename = path.name
         suggested_subdir = self._classify_doc_content(content)
-        return (
-            Path("docs") / suggested_subdir / filename
-            if suggested_subdir
-            else Path("docs") / filename
-        )
+        return Path("docs") / suggested_subdir / filename
 
     # ------------------------------------------------------------------
     # Filename normalization
@@ -819,51 +847,25 @@ CORRECTIONS:
             logger.error("git mv failed for %s → %s: %s", path, normalized, e)
             return False
 
-    def _classify_doc_content(self, content_lower: str) -> str | None:
+    def _classify_doc_content(self, content_lower: str) -> str:
         """Classify document content into a canonical subdir name.
 
-        Returns the subdir name (e.g. ``'guides'``) or ``None`` for flat ``docs/``.
+        Returns the subdir name (e.g. ``'guides'``).  Default fallback is
+        ``'guides'`` — flat ``docs/`` placement is no longer allowed (except
+        ``docs/README.md`` which is handled by the caller).
         """
-        # Guide signals: how-to, step-by-step, getting started, tutorial
-        guide_signals = [
-            "how to",
-            "how-to",
-            "step by step",
-            "step-by-step",
-            "getting started",
-            "tutorial",
-            "walkthrough",
-            "instructions for",
+        # Design signals: mockup, wireframe, UI/UX, .pen files, prototype
+        design_signals = [
+            "design",
+            "mockup",
+            "wireframe",
+            ".pen",
+            "component",
+            "ui/ux",
+            "prototype",
         ]
-        if any(signal in content_lower for signal in guide_signals):
-            return "guides"
-
-        # Testing signals
-        testing_signals = [
-            "test pattern",
-            "test strategy",
-            "testing approach",
-            "testing pattern",
-            "test suite",
-            "pytest",
-            "unit test",
-            "integration test",
-        ]
-        if any(signal in content_lower for signal in testing_signals):
-            return "testing"
-
-        # Reference signals: heavy external URLs, external package docs
-        reference_signals = [
-            "https://docs.",
-            "https://api.",
-            "official documentation",
-            "third-party",
-            "external api",
-            "api reference",
-        ]
-        reference_count = sum(1 for s in reference_signals if s in content_lower)
-        if reference_count >= 2:
-            return "references"
+        if any(signal in content_lower for signal in design_signals):
+            return "designs"
 
         # Feature signals: code class/function references or code blocks.
         # Use specific Python/shell patterns to avoid false positives from
@@ -876,12 +878,42 @@ CORRECTIONS:
             "def ",
             ".py`",
             ".py:",
+            "test pattern",
+            "test strategy",
+            "testing approach",
+            "testing pattern",
+            "test suite",
+            "pytest",
+            "unit test",
+            "integration test",
         ]
         if any(signal in content_lower for signal in code_indicators):
             return "features"
 
-        # Default: stay flat under docs/
-        return None
+        # Guide signals: how-to, step-by-step, tutorial, external refs, audit
+        guide_signals = [
+            "how to",
+            "how-to",
+            "step by step",
+            "step-by-step",
+            "getting started",
+            "tutorial",
+            "walkthrough",
+            "instructions for",
+            "official documentation",
+            "third-party",
+            "https://docs.",
+            "https://api.",
+            "external api",
+            "api reference",
+            "audit",
+            "setup",
+        ]
+        if any(signal in content_lower for signal in guide_signals):
+            return "guides"
+
+        # Default fallback: guides (flat docs/ is no longer allowed)
+        return "guides"
 
     def _should_skip(self) -> bool:
         """Return True if the audit was run within the last 7 days."""

@@ -342,26 +342,33 @@ class TestCheckDocLocation:
         path = Path("docs/guides/how-to-deploy.md")
         assert auditor._check_doc_location(path) is None
 
-    def test_canonical_testing_returns_none(self, auditor: DocsAuditor) -> None:
-        path = Path("docs/testing/test-patterns.md")
+    def test_canonical_designs_returns_none(self, auditor: DocsAuditor) -> None:
+        path = Path("docs/designs/mockup.md")
         assert auditor._check_doc_location(path) is None
 
-    def test_canonical_references_returns_none(self, auditor: DocsAuditor) -> None:
-        path = Path("docs/references/anthropic-api.md")
-        assert auditor._check_doc_location(path) is None
-
-    def test_canonical_operations_returns_none(self, auditor: DocsAuditor) -> None:
-        path = Path("docs/operations/runbook.md")
+    def test_canonical_media_returns_none(self, auditor: DocsAuditor) -> None:
+        path = Path("docs/media/screenshots.md")
         assert auditor._check_doc_location(path) is None
 
     def test_canonical_plans_returns_none(self, auditor: DocsAuditor) -> None:
         path = Path("docs/plans/my-plan.md")
         assert auditor._check_doc_location(path) is None
 
-    def test_flat_doc_returns_none(self, auditor: DocsAuditor) -> None:
-        """A doc directly in docs/ (no subdir) should return None."""
-        path = Path("docs/cursor-lessons.md")
+    def test_flat_readme_returns_none(self, auditor: DocsAuditor) -> None:
+        """docs/README.md is the only file allowed flat under docs/."""
+        path = Path("docs/README.md")
         assert auditor._check_doc_location(path) is None
+
+    def test_flat_doc_gets_relocation_suggestion(self, repo: Path, auditor: DocsAuditor) -> None:
+        """A non-README doc directly in docs/ should get a relocation suggestion."""
+        (repo / "docs" / "cursor-lessons.md").write_text(
+            "# Cursor Lessons\n\nGeneral lessons from experiments.\n"
+        )
+        path = Path("docs/cursor-lessons.md")
+        result = auditor._check_doc_location(path)
+        assert result is not None
+        # Should be relocated to a canonical subdir (default: guides)
+        assert str(result).startswith("docs/guides/") or str(result).startswith("docs/features/")
 
     def test_noncanonical_architecture_returns_suggested_path(
         self, repo: Path, auditor: DocsAuditor
@@ -407,10 +414,10 @@ class TestCheckDocLocation:
         assert result is not None
         assert "guides" in str(result)
 
-    def test_noncanonical_improvements_flat_doc_suggests_flat(
+    def test_noncanonical_improvements_suggests_guides_fallback(
         self, repo: Path, auditor: DocsAuditor
     ) -> None:
-        """A doc in docs/improvements/ without strong classification should suggest flat docs/."""
+        """A doc without strong classification should suggest guides/."""
         (repo / "docs" / "improvements").mkdir(parents=True, exist_ok=True)
         (repo / "docs" / "improvements" / "lessons.md").write_text(
             "# Lessons Learned\n\nGeneral lessons from experiments.\n"
@@ -419,8 +426,86 @@ class TestCheckDocLocation:
         path = Path("docs/improvements/lessons.md")
         result = auditor._check_doc_location(path)
         assert result is not None
-        # Should suggest flat docs/ (no subdir) since content doesn't match other categories
-        assert str(result) == "docs/lessons.md"
+        assert str(result) == "docs/guides/lessons.md"
+
+
+# ---------------------------------------------------------------------------
+# _classify_doc_content
+# ---------------------------------------------------------------------------
+
+
+class TestClassifyDocContent:
+    def test_reference_heavy_content_classifies_as_guides(self, auditor: DocsAuditor) -> None:
+        content = (
+            "see https://docs.example.com for the official documentation"
+            " and third-party api reference"
+        )
+        assert auditor._classify_doc_content(content) == "guides"
+
+    def test_testing_content_classifies_as_features(self, auditor: DocsAuditor) -> None:
+        content = (
+            "this documents our test strategy and pytest fixtures for integration test coverage"
+        )
+        assert auditor._classify_doc_content(content) == "features"
+
+    def test_design_content_classifies_as_designs(self, auditor: DocsAuditor) -> None:
+        content = "this is a wireframe for the new ui/ux design of the dashboard component"
+        assert auditor._classify_doc_content(content) == "designs"
+
+    def test_generic_content_classifies_as_guides(self, auditor: DocsAuditor) -> None:
+        """Generic content with no strong signals should fallback to guides."""
+        content = "some general notes about the project and random observations"
+        assert auditor._classify_doc_content(content) == "guides"
+
+    def test_code_content_classifies_as_features(self, auditor: DocsAuditor) -> None:
+        content = (
+            "the ```python\nclass MyHandler:\n"
+            "    def process(self):\n        pass\n``` handles requests"
+        )
+        assert auditor._classify_doc_content(content) == "features"
+
+    def test_howto_content_classifies_as_guides(self, auditor: DocsAuditor) -> None:
+        content = "this is a step-by-step tutorial for getting started with the system"
+        assert auditor._classify_doc_content(content) == "guides"
+
+
+# ---------------------------------------------------------------------------
+# enumerate_docs with include_project_docs
+# ---------------------------------------------------------------------------
+
+
+class TestEnumerateDocsProjectDocs:
+    def test_include_project_docs_adds_root_markdown(
+        self, repo: Path, auditor: DocsAuditor
+    ) -> None:
+        (repo / "CLAUDE.md").write_text("# Claude")
+        (repo / "README.md").write_text("# Readme")
+        docs = auditor.enumerate_docs(include_project_docs=True)
+        names = [d.name for d in docs]
+        assert "CLAUDE.md" in names
+        assert "README.md" in names
+
+    def test_include_project_docs_adds_skill_files(self, repo: Path, auditor: DocsAuditor) -> None:
+        skill_dir = repo / ".claude" / "skills" / "my-skill"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("# Skill")
+        docs = auditor.enumerate_docs(include_project_docs=True)
+        assert any("SKILL.md" in str(d) for d in docs)
+
+    def test_include_project_docs_adds_command_files(
+        self, repo: Path, auditor: DocsAuditor
+    ) -> None:
+        cmd_dir = repo / ".claude" / "commands"
+        cmd_dir.mkdir(parents=True)
+        (cmd_dir / "deploy.md").write_text("# Deploy")
+        docs = auditor.enumerate_docs(include_project_docs=True)
+        assert any("deploy.md" in str(d) for d in docs)
+
+    def test_default_does_not_include_project_docs(self, repo: Path, auditor: DocsAuditor) -> None:
+        (repo / "CLAUDE.md").write_text("# Claude")
+        docs = auditor.enumerate_docs()
+        names = [d.name for d in docs]
+        assert "CLAUDE.md" not in names
 
 
 # ---------------------------------------------------------------------------

@@ -7,7 +7,7 @@ context: fork
 
 # Documentation Audit Skill
 
-Systematically audits every documentation file in `docs/` against the actual codebase. Verifies concrete references (file paths, class names, function names, CLI commands, env vars, packages) exist in the codebase. Issues verdicts of KEEP, UPDATE, or DELETE for each file, applies the changes, sweeps index files for broken links, enforces canonical directory structure, then commits with a detailed summary.
+Systematically audits every documentation file in `docs/` against the actual codebase. Works on any repository. Verifies concrete references (file paths, class names, function names, CLI commands, env vars, packages) exist in the codebase. Issues verdicts of KEEP, UPDATE, or DELETE for each file, applies the changes, sweeps index files for broken links, enforces canonical directory structure, then commits with a detailed summary.
 
 ## When to Use
 
@@ -19,11 +19,12 @@ Systematically audits every documentation file in `docs/` against the actual cod
 ## Invocation
 
 ```
-/do-docs-audit [directory]
+/do-docs-audit [directory] [--full]
 ```
 
 - Default directory: `docs/`
 - Excludes: `docs/plans/` (plans are intentionally forward-looking)
+- `--full`: Also audit root markdown files (`CLAUDE.md`, `README.md`), `.claude/skills/*/SKILL.md`, and `.claude/commands/*.md` for stale references (these extra files are NOT relocated)
 - Index-only from `docs/features/README.md` (audits the index links, not every feature doc unless you pass `docs/features/` explicitly)
 
 ---
@@ -176,29 +177,28 @@ grep -l "{deleted_filename}" docs/README.md docs/features/README.md CLAUDE.md 2>
 
 After executing all verdicts and sweeping index files, check that every surviving doc lives in a canonical subdirectory.
 
-### Canonical subdirectories
+### Canonical subdirectories (universal 5-subdir taxonomy)
 
 | Subdir | Purpose |
 |--------|---------|
-| `docs/features/` | Deep feature docs with code references |
-| `docs/guides/` | How-to guides and tutorials |
-| `docs/testing/` | Testing patterns and practices |
-| `docs/references/` | Thin copies of 3rd-party docs, just links |
-| `docs/operations/` | Operational runbooks |
-| `docs/plans/` | Plans — **never move anything here** |
-| `docs/` (flat) | Patterns, best practices, and extras |
+| `docs/features/` | Shipped feature docs, technical descriptions, test strategies, script docs |
+| `docs/guides/` | How-to guides, tutorials, external references, third-party docs, audits, walkthroughs |
+| `docs/designs/` | .pen files, design components, UI mockups, wireframes |
+| `docs/media/` | Screenshots, static files, visual assets |
+| `docs/plans/` | Forward-looking plans — **never audited or moved** |
 
-**Non-canonical subdirs** (anything not in the list above, e.g. `docs/architecture/`, `docs/experiments/`, `docs/improvements/`, `docs/tools/`) should have their docs relocated.
+Only `docs/README.md` is allowed flat under `docs/`. All other docs must be in a canonical subdir.
+
+**Non-canonical subdirs** (anything not in the list above, e.g. `docs/architecture/`, `docs/testing/`, `docs/references/`, `docs/operations/`) should have their docs relocated.
 
 ### Classification heuristic
 
-For a doc in a non-canonical subdir, classify by content:
+For a doc that needs relocation (non-canonical subdir or flat), classify by content:
 
-1. Content contains "how to", "step by step", "getting started" → `docs/guides/`
-2. Content contains test patterns, testing strategy, pytest → `docs/testing/`
-3. Content has 2+ external reference signals (e.g. `https://docs.`, "official documentation") → `docs/references/`
-4. Content contains code blocks (` ```python `, ` ```bash `), `class `, `def `, `.py`` → `docs/features/`
-5. Otherwise → stays flat in `docs/`
+1. Content contains design/mockup/wireframe/UI/UX/prototype/.pen → `docs/designs/`
+2. Content contains code blocks, class/def references, .py refs, test patterns → `docs/features/`
+3. Content contains how-to, tutorial, walkthrough, external URLs, "official documentation", third-party, audit, setup → `docs/guides/`
+4. Default fallback → `docs/guides/`
 
 ### Relocation steps
 
