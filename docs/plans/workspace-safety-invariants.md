@@ -1,5 +1,5 @@
 ---
-status: Review
+status: Docs
 type: feature
 appetite: Small
 owner: Valor
