@@ -997,3 +997,235 @@ class TestObserverSteersStatusUpdates:
             f"but got {decision['action']}: "
             f"{decision.get('coaching_message', '')}"
         )
+
+
+# ============================================================================
+# Typed Outcome Merge Tests (Bug 3 regression tests)
+# ============================================================================
+
+
+class TestApplyTransitionsTypedOutcomeMerge:
+    """Test that apply_transitions merges typed outcomes when regex misses stages.
+
+    Regression tests for issue #375 Bug 3: when a typed SkillOutcome reports
+    success but the regex didn't detect the stage completion, the stage should
+    be recorded in session history (not just warned about).
+    """
+
+    def _make_mock_session(self, history=None):
+        """Create a mock session that tracks history appends."""
+
+        class MockSession:
+            def __init__(self):
+                self.history = history or []
+                self._appended = []
+
+            def get_stage_progress(self):
+                progress = {stage: "pending" for stage in SDLC_STAGES}
+                for entry in self.history:
+                    if not isinstance(entry, str) or "[stage]" not in entry.lower():
+                        continue
+                    entry_upper = entry.upper()
+                    for stage in SDLC_STAGES:
+                        if stage in entry_upper:
+                            if "COMPLETED" in entry_upper:
+                                progress[stage] = "completed"
+                            elif "IN_PROGRESS" in entry_upper:
+                                progress[stage] = "in_progress"
+                return progress
+
+            def append_history(self, role, text):
+                entry = f"[{role}] {text}"
+                self.history.append(entry)
+                self._appended.append((role, text))
+
+        return MockSession()
+
+    def _make_outcome(self, status="success", stage="DOCS"):
+        """Create a SkillOutcome for testing."""
+        from agent.skill_outcome import SkillOutcome
+
+        return SkillOutcome(status=status, stage=stage)
+
+    def test_typed_outcome_merged_when_regex_misses(self):
+        """When regex detects nothing but typed outcome says DOCS succeeded,
+        apply_transitions should record DOCS COMPLETED in session history."""
+        session = self._make_mock_session()
+        outcome = self._make_outcome(status="success", stage="DOCS")
+        result = apply_transitions(session, [], outcome=outcome)
+        assert result == 1
+        assert any("DOCS COMPLETED" in entry for entry in session.history)
+
+    def test_typed_outcome_not_merged_on_failure(self):
+        """When typed outcome says stage failed, it should NOT be merged."""
+        session = self._make_mock_session()
+        outcome = self._make_outcome(status="fail", stage="DOCS")
+        result = apply_transitions(session, [], outcome=outcome)
+        assert result == 0
+        assert not any("DOCS COMPLETED" in entry for entry in session.history)
+
+    def test_typed_outcome_skipped_when_regex_already_detected(self):
+        """When regex already detected the stage, typed outcome should not
+        create a duplicate entry."""
+        session = self._make_mock_session()
+        transitions = [
+            {"stage": "DOCS", "status": "completed", "reason": "Regex detected"},
+        ]
+        outcome = self._make_outcome(status="success", stage="DOCS")
+        result = apply_transitions(session, transitions, outcome=outcome)
+        assert result == 1  # Only the regex transition should be applied
+        docs_entries = [e for e in session._appended if "DOCS" in e[1]]
+        assert len(docs_entries) == 1  # No duplicate
+
+    def test_typed_outcome_skipped_when_stage_already_completed(self):
+        """When the stage is already completed in session history, typed outcome
+        should not re-record it."""
+        session = self._make_mock_session(
+            history=["[stage] DOCS COMPLETED"]
+        )
+        outcome = self._make_outcome(status="success", stage="DOCS")
+        result = apply_transitions(session, [], outcome=outcome)
+        assert result == 0  # Already completed, skip
+        assert len(session._appended) == 0
+
+    def test_typed_outcome_none_stage_no_crash(self):
+        """When typed outcome has stage=None, apply_transitions should not crash."""
+        session = self._make_mock_session()
+        from agent.skill_outcome import SkillOutcome
+
+        outcome = SkillOutcome(status="success", stage=None)
+        result = apply_transitions(session, [], outcome=outcome)
+        assert result == 0
+
+    def test_typed_outcome_with_regex_transitions_both_recorded(self):
+        """When regex detects BUILD and typed outcome reports DOCS, both should
+        be recorded in session history."""
+        session = self._make_mock_session()
+        transitions = [
+            {"stage": "BUILD", "status": "completed", "reason": "PR created"},
+        ]
+        outcome = self._make_outcome(status="success", stage="DOCS")
+        result = apply_transitions(session, transitions, outcome=outcome)
+        assert result == 2
+        assert any("BUILD COMPLETED" in entry for entry in session.history)
+        assert any("DOCS COMPLETED" in entry for entry in session.history)
+
+
+# ============================================================================
+# Cross-Repo gh Resolution Tests (Bug 1 regression tests)
+# ============================================================================
+
+
+class TestCrossRepoGhResolution:
+    """Test that skills include --repo instructions for cross-project builds.
+
+    Regression tests for issue #375 Bug 1: when SDLC is invoked for a non-ai
+    project, gh commands must use --repo to target the correct repository.
+    """
+
+    def test_sdlc_skill_contains_repo_flag_instructions(self):
+        """SDLC skill should contain --repo in gh issue view and gh pr list examples."""
+        from pathlib import Path
+
+        skill_path = Path(__file__).parent.parent / ".claude" / "skills" / "sdlc" / "SKILL.md"
+        content = skill_path.read_text()
+        assert "--repo" in content, "SDLC skill must contain --repo instructions"
+        assert "REPO_FLAG" in content or "GITHUB_REPO" in content, (
+            "SDLC skill must reference GITHUB: context line for repo resolution"
+        )
+
+    def test_all_do_skills_reference_github_context(self):
+        """All /do-* skills that contain 'gh ' commands should reference
+        GITHUB: context line or --repo."""
+        from pathlib import Path
+
+        skills_dir = Path(__file__).parent.parent / ".claude" / "skills"
+        do_skills = list(skills_dir.glob("do-*/SKILL.md"))
+        assert len(do_skills) > 0, "Should find at least one /do-* skill"
+
+        skills_with_gh = []
+        skills_missing_repo = []
+
+        for skill_path in do_skills:
+            content = skill_path.read_text()
+            if "gh " in content and (
+                "gh issue" in content
+                or "gh pr" in content
+                or "gh api" in content
+            ):
+                skills_with_gh.append(skill_path.name)
+                if "REPO_FLAG" not in content and "--repo" not in content and "GITHUB" not in content:
+                    skills_missing_repo.append(str(skill_path))
+
+        assert len(skills_with_gh) > 0, "Should find skills with gh commands"
+        assert len(skills_missing_repo) == 0, (
+            f"These skills use gh commands but lack --repo/GITHUB references: "
+            f"{skills_missing_repo}"
+        )
+
+
+# ============================================================================
+# Observer SDLC Steering Tests
+# ============================================================================
+
+
+class TestObserverSdlcSteering:
+    """Test Observer steering decisions for SDLC sessions."""
+
+    MODEL = HAIKU
+
+    @pytest.mark.asyncio
+    async def test_observer_steers_when_is_sdlc_and_remaining_stages(self):
+        """When session is SDLC with remaining stages, Observer should steer
+        (continue) rather than deliver."""
+        session = _MockSessionForSteering(
+            stage_progress=_STAGE_PROGRESS_FOR["BUILD"],
+        )
+        observer = Observer(
+            session=session,
+            worker_output=(
+                "Build completed successfully. PR created at "
+                "https://github.com/tomcounsell/ai/pull/42\n\n"
+                "All implementation tasks done. Ready for next stage."
+            ),
+            auto_continue_count=1,
+            send_cb=None,
+            enqueue_fn=None,
+            model=self.MODEL,
+        )
+
+        decision = await observer.run()
+
+        assert decision["action"] == "steer", (
+            f"Observer should STEER when SDLC has remaining stages, "
+            f"but got {decision['action']}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_observer_delivers_when_all_stages_complete(self):
+        """When all SDLC stages are complete, Observer should deliver."""
+        session = _MockSessionForSteering(
+            stage_progress={s: "completed" for s in SDLC_STAGES},
+        )
+        observer = Observer(
+            session=session,
+            worker_output=(
+                "All stages complete. PR merged successfully.\n\n"
+                "Summary of work:\n"
+                "- Issue: #375\n"
+                "- PR: https://github.com/tomcounsell/ai/pull/380\n"
+                "- All tests passing\n"
+                "- Documentation updated"
+            ),
+            auto_continue_count=5,
+            send_cb=None,
+            enqueue_fn=None,
+            model=self.MODEL,
+        )
+
+        decision = await observer.run()
+
+        assert decision["action"] == "deliver", (
+            f"Observer should DELIVER when all stages complete, "
+            f"but got {decision['action']}"
+        )

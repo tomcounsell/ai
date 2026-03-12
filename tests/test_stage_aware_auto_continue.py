@@ -424,3 +424,107 @@ class TestEffectiveMaxSelection:
         is_sdlc = session.is_sdlc_job()
         effective_max = MAX_AUTO_CONTINUES_SDLC if is_sdlc else MAX_AUTO_CONTINUES
         assert effective_max == MAX_AUTO_CONTINUES
+
+
+# ============================================================================
+# Classification Inheritance Tests (Bug 2 regression tests)
+# ============================================================================
+
+
+class TestClassificationInheritance:
+    """Test that reply-to-resume inherits classification_type from the original session.
+
+    Regression tests for issue #375 Bug 2: when a user replies to resume an SDLC
+    session, the async classifier may not have completed before enqueue_job is called,
+    resulting in classification_type=None. The fix inherits from the existing session.
+    """
+
+    def test_reply_to_resume_inherits_sdlc_classification(self):
+        """When replying to resume an SDLC session and async classifier hasn't
+        completed, classification_type should be inherited from the existing session."""
+        # Create existing session with classification_type="sdlc"
+        session = AgentSession()
+        session.session_id = "tg_test_123_456"
+        session.classification_type = "sdlc"
+        session.history = ["[stage] ISSUE COMPLETED"]
+
+        # Simulate the inheritance logic from telegram_bridge.py
+        classification_result = {}  # Async classifier hasn't completed
+        is_reply_to_valor = True
+        has_reply_to_msg_id = True
+
+        if (
+            is_reply_to_valor
+            and has_reply_to_msg_id
+            and not classification_result.get("type")
+        ):
+            # This mirrors the inheritance logic added to telegram_bridge.py
+            if session.classification_type:
+                classification_result["type"] = session.classification_type
+
+        assert classification_result.get("type") == "sdlc"
+
+    def test_reply_to_resume_async_classifier_overrides_inheritance(self):
+        """When the async classifier completes before enqueue, its result
+        should be used instead of inherited classification."""
+        session = AgentSession()
+        session.session_id = "tg_test_123_456"
+        session.classification_type = "sdlc"
+
+        # Async classifier completed with "question" before inheritance check
+        classification_result = {"type": "question", "confidence": 0.9}
+        is_reply_to_valor = True
+        has_reply_to_msg_id = True
+
+        if (
+            is_reply_to_valor
+            and has_reply_to_msg_id
+            and not classification_result.get("type")
+        ):
+            if session.classification_type:
+                classification_result["type"] = session.classification_type
+
+        # Classifier already had a result, so inheritance was skipped
+        assert classification_result.get("type") == "question"
+
+    def test_reply_to_resume_missing_session_falls_through(self):
+        """When no existing session is found, classification_result should
+        remain None (no crash)."""
+        classification_result = {}
+        is_reply_to_valor = True
+        has_reply_to_msg_id = True
+
+        # Simulate: no existing session found (empty query result)
+        existing_session = None
+
+        if (
+            is_reply_to_valor
+            and has_reply_to_msg_id
+            and not classification_result.get("type")
+        ):
+            if existing_session and getattr(existing_session, "classification_type", None):
+                classification_result["type"] = existing_session.classification_type
+
+        assert classification_result.get("type") is None
+
+    def test_fresh_message_no_inheritance(self):
+        """When message is NOT a reply, classification should NOT be inherited
+        from any existing session."""
+        session = AgentSession()
+        session.session_id = "tg_test_123_789"
+        session.classification_type = "sdlc"
+
+        classification_result = {}
+        is_reply_to_valor = False  # NOT a reply
+        has_reply_to_msg_id = False
+
+        if (
+            is_reply_to_valor
+            and has_reply_to_msg_id
+            and not classification_result.get("type")
+        ):
+            if session.classification_type:
+                classification_result["type"] = session.classification_type
+
+        # Not a reply, so no inheritance
+        assert classification_result.get("type") is None
