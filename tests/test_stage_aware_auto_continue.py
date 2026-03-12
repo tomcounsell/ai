@@ -453,11 +453,7 @@ class TestClassificationInheritance:
         is_reply_to_valor = True
         has_reply_to_msg_id = True
 
-        if (
-            is_reply_to_valor
-            and has_reply_to_msg_id
-            and not classification_result.get("type")
-        ):
+        if is_reply_to_valor and has_reply_to_msg_id and not classification_result.get("type"):
             # This mirrors the inheritance logic added to telegram_bridge.py
             if session.classification_type:
                 classification_result["type"] = session.classification_type
@@ -476,11 +472,7 @@ class TestClassificationInheritance:
         is_reply_to_valor = True
         has_reply_to_msg_id = True
 
-        if (
-            is_reply_to_valor
-            and has_reply_to_msg_id
-            and not classification_result.get("type")
-        ):
+        if is_reply_to_valor and has_reply_to_msg_id and not classification_result.get("type"):
             if session.classification_type:
                 classification_result["type"] = session.classification_type
 
@@ -497,11 +489,7 @@ class TestClassificationInheritance:
         # Simulate: no existing session found (empty query result)
         existing_session = None
 
-        if (
-            is_reply_to_valor
-            and has_reply_to_msg_id
-            and not classification_result.get("type")
-        ):
+        if is_reply_to_valor and has_reply_to_msg_id and not classification_result.get("type"):
             if existing_session and getattr(existing_session, "classification_type", None):
                 classification_result["type"] = existing_session.classification_type
 
@@ -518,11 +506,7 @@ class TestClassificationInheritance:
         is_reply_to_valor = False  # NOT a reply
         has_reply_to_msg_id = False
 
-        if (
-            is_reply_to_valor
-            and has_reply_to_msg_id
-            and not classification_result.get("type")
-        ):
+        if is_reply_to_valor and has_reply_to_msg_id and not classification_result.get("type"):
             if session.classification_type:
                 classification_result["type"] = session.classification_type
 

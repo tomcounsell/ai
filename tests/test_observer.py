@@ -1080,9 +1080,7 @@ class TestApplyTransitionsTypedOutcomeMerge:
     def test_typed_outcome_skipped_when_stage_already_completed(self):
         """When the stage is already completed in session history, typed outcome
         should not re-record it."""
-        session = self._make_mock_session(
-            history=["[stage] DOCS COMPLETED"]
-        )
+        session = self._make_mock_session(history=["[stage] DOCS COMPLETED"])
         outcome = self._make_outcome(status="success", stage="DOCS")
         result = apply_transitions(session, [], outcome=outcome)
         assert result == 0  # Already completed, skip
@@ -1149,18 +1147,16 @@ class TestCrossRepoGhResolution:
         for skill_path in do_skills:
             content = skill_path.read_text()
             if "gh " in content and (
-                "gh issue" in content
-                or "gh pr" in content
-                or "gh api" in content
+                "gh issue" in content or "gh pr" in content or "gh api" in content
             ):
                 skills_with_gh.append(skill_path.name)
-                if "REPO_FLAG" not in content and "--repo" not in content and "GITHUB" not in content:
+                has_repo_ref = "REPO_FLAG" in content or "--repo" in content or "GITHUB" in content
+                if not has_repo_ref:
                     skills_missing_repo.append(str(skill_path))
 
         assert len(skills_with_gh) > 0, "Should find skills with gh commands"
         assert len(skills_missing_repo) == 0, (
-            f"These skills use gh commands but lack --repo/GITHUB references: "
-            f"{skills_missing_repo}"
+            f"These skills use gh commands but lack --repo/GITHUB references: {skills_missing_repo}"
         )
 
 
@@ -1197,8 +1193,7 @@ class TestObserverSdlcSteering:
         decision = await observer.run()
 
         assert decision["action"] == "steer", (
-            f"Observer should STEER when SDLC has remaining stages, "
-            f"but got {decision['action']}"
+            f"Observer should STEER when SDLC has remaining stages, but got {decision['action']}"
         )
 
     @pytest.mark.asyncio
@@ -1226,6 +1221,5 @@ class TestObserverSdlcSteering:
         decision = await observer.run()
 
         assert decision["action"] == "deliver", (
-            f"Observer should DELIVER when all stages complete, "
-            f"but got {decision['action']}"
+            f"Observer should DELIVER when all stages complete, but got {decision['action']}"
         )

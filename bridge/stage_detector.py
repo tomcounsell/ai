@@ -179,8 +179,9 @@ def apply_transitions(
 
     When a typed SkillOutcome is provided, cross-checks it against
     regex-detected transitions. If the outcome says "success" but
-    regex didn't detect completion for that stage, a warning is logged.
-    The outcome's artifacts are preferred over regex-extracted ones.
+    regex didn't detect completion for that stage, the outcome's transition
+    is merged into the transitions list. The outcome's artifacts are preferred
+    over regex-extracted ones.
 
     Args:
         session: AgentSession instance (must have append_history method)
