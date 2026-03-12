@@ -1615,6 +1615,7 @@ async def _execute_job(job: Job) -> None:
             job.workflow_id,
             task_list_id,
             cid,
+            job.job_id,
         )
 
     task = BackgroundTask(messenger=messenger)
