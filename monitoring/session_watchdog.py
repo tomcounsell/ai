@@ -58,6 +58,53 @@ STALL_BACKOFF_BASE = int(os.environ.get("STALL_BACKOFF_BASE_SECONDS", 10))
 # STALL_BACKOFF_MAX_SECONDS: ceiling on backoff delay to prevent unreasonable waits
 STALL_BACKOFF_MAX = int(os.environ.get("STALL_BACKOFF_MAX_SECONDS", 300))
 
+# Transcript liveness: if transcript.txt was modified within this many minutes,
+# the session is considered alive (doing sub-agent work) even if last_activity
+# in Redis is stale. See issue #360.
+TRANSCRIPT_STALE_THRESHOLD_MIN = 15
+
+# Default logs/sessions directory for transcript liveness checks
+_PROJECT_DIR = Path(__file__).parent.parent
+_DEFAULT_LOGS_DIR = _PROJECT_DIR / "logs" / "sessions"
+
+
+def _check_transcript_liveness(
+    session_id: str,
+    logs_dir: Path | None = None,
+) -> tuple[bool, float]:
+    """Check if a session's transcript file has been recently modified.
+
+    Uses os.path.getmtime() on logs/sessions/{session_id}/transcript.txt
+    to determine if the session is actively doing work (e.g., sub-agent calls)
+    even when the Redis last_activity field hasn't been updated.
+
+    Args:
+        session_id: The session ID to check.
+        logs_dir: Override for the logs/sessions directory (used in tests).
+
+    Returns:
+        Tuple of (is_stale, stale_minutes):
+        - is_stale: True if transcript is older than TRANSCRIPT_STALE_THRESHOLD_MIN
+          or doesn't exist.
+        - stale_minutes: How many minutes since the transcript was last modified.
+          Returns float('inf') if the file doesn't exist.
+    """
+    base_dir = logs_dir if logs_dir is not None else _DEFAULT_LOGS_DIR
+    transcript_path = base_dir / session_id / "transcript.txt"
+
+    if not transcript_path.exists():
+        return (True, float("inf"))
+
+    try:
+        mtime = os.path.getmtime(transcript_path)
+        age_seconds = time.time() - mtime
+        stale_minutes = age_seconds / 60.0
+        is_stale = stale_minutes >= TRANSCRIPT_STALE_THRESHOLD_MIN
+        return (is_stale, stale_minutes)
+    except OSError:
+        # File disappeared between exists() check and getmtime()
+        return (True, float("inf"))
+
 
 async def watchdog_loop(telegram_client=None) -> None:
     """Run the watchdog monitoring loop indefinitely.
@@ -214,6 +261,19 @@ def check_stalled_sessions() -> list[dict]:
                             continue
                         # Use last_activity as the reference for duration
                         ref_time = last_activity
+
+                    # Transcript liveness check (issue #360): even if last_activity
+                    # is stale, the session may be alive doing sub-agent work.
+                    # Check transcript.txt mtime before declaring stalled.
+                    transcript_stale, transcript_age_min = _check_transcript_liveness(session_id)
+                    if not transcript_stale:
+                        logger.debug(
+                            "[watchdog] Session %s has fresh transcript "
+                            "(%.1f min old), skipping stall detection",
+                            session_id,
+                            transcript_age_min,
+                        )
+                        continue
 
                 duration = now - ref_time
 

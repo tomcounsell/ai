@@ -36,6 +36,15 @@ Fires when `time.time() - session.last_activity > SILENCE_THRESHOLD`. Indicates 
 | Threshold | 600s (10 minutes) |
 | Severity | warning |
 
+### Transcript Liveness Check (Smart Stall Detection)
+Before killing an active session for silence, the watchdog checks the transcript file's mtime (`logs/sessions/{session_id}/transcript.txt`). Sub-agents continuously write to this file even when `last_activity` isn't updated. If the transcript was modified within the threshold, the session is left alone — it's doing productive sub-agent work.
+
+| Setting | Value |
+|---------|-------|
+| Constant | `TRANSCRIPT_STALE_THRESHOLD_MIN` |
+| Default | 15 minutes |
+| Fallback | If transcript file is missing, assumes stale (existing logic proceeds) |
+
 ### Loop Detection
 Examines recent tool use events. Creates fingerprints from `(tool_name, sorted(tool_input.items()))` and counts consecutive identical fingerprints from the end. If 5+ match, the agent is stuck.
 
@@ -90,6 +99,7 @@ All thresholds are module-level constants in `monitoring/session_watchdog.py`:
 | `ERROR_CASCADE_WINDOW` | 20 | Number of recent calls to examine |
 | `DURATION_THRESHOLD` | 7200 (2 hr) | Session age before duration alert |
 | `ALERT_COOLDOWN` | 1800 (30 min) | Minimum gap between alerts per session |
+| `TRANSCRIPT_STALE_THRESHOLD_MIN` | 15 | Minutes before transcript is considered stale |
 
 No runtime configuration — edit constants directly. Intentionally static to keep the watchdog simple.
 
@@ -116,4 +126,5 @@ Runs for the lifetime of the bridge process. No separate service or process mana
 | `monitoring/__init__.py` | Module exports |
 | `bridge/telegram_bridge.py` | Integration point (launches watchdog task) |
 | `tests/unit/test_session_watchdog.py` | 30 unit tests |
+| `tests/unit/test_transcript_liveness.py` | 12 unit tests for transcript mtime check |
 | `docs/plans/session-watchdog.md` | Original plan document |
