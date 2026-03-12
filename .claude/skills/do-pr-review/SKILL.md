@@ -8,6 +8,10 @@ context: fork
 
 Review a pull request by analyzing its changes against the plan, checking code quality, validating tests, and capturing screenshots of UI changes.
 
+## Cross-Repo Resolution
+
+When invoked for a non-ai project, extract the `GITHUB:` line from the prompt context (e.g., `GITHUB: tomcounsell/popoto`). If present, use `--repo $GITHUB_REPO` with all `gh` commands below. If not present, omit `--repo` (defaults to cwd repo).
+
 ## When to Use
 
 - After `/do-build` creates a PR
@@ -63,23 +67,23 @@ Follow this review process to validate a pull request:
 
 ### 1. PR Context Gathering
 
-**Fetch PR details:**
+**Fetch PR details** (use `--repo` if `GITHUB:` context line is present):
 ```bash
-gh pr view {pr_number} --json title,body,headRefName,baseRefName,files,additions,deletions
+gh pr view {pr_number} --json title,body,headRefName,baseRefName,files,additions,deletions $REPO_FLAG
 ```
 
 **Get the full diff:**
 ```bash
-gh pr diff {pr_number}
+gh pr diff {pr_number} $REPO_FLAG
 ```
 
 **Get changed files:**
 ```bash
-gh pr diff {pr_number} --name-only
+gh pr diff {pr_number} --name-only $REPO_FLAG
 ```
 
 **Find and read the associated plan and issue:**
-- Check PR body for `Closes #N` — run `gh issue view N` to get the tracking issue context
+- Check PR body for `Closes #N` — run `gh issue view N $REPO_FLAG` to get the tracking issue context
 - Extract slug from the head branch name and read `docs/plans/{slug}.md`
 - The plan contains acceptance criteria, no-gos, and requirements to validate against
 - Keep the plan summary in mind throughout the entire review
@@ -244,9 +248,9 @@ EOF
 )"
 
 if [ "$SELF_AUTHORED" = "true" ]; then
-  gh pr comment {pr_number} --body "$REVIEW_BODY"
+  gh pr comment {pr_number} $REPO_FLAG --body "$REVIEW_BODY"
 else
-  gh pr review {pr_number} --request-changes --body "$REVIEW_BODY"
+  gh pr review {pr_number} $REPO_FLAG --request-changes --body "$REVIEW_BODY"
 fi
 ```
 
@@ -272,9 +276,9 @@ EOF
 )"
 
 if [ "$SELF_AUTHORED" = "true" ]; then
-  gh pr comment {pr_number} --body "$REVIEW_BODY"
+  gh pr comment {pr_number} $REPO_FLAG --body "$REVIEW_BODY"
 else
-  gh pr review {pr_number} --approve --body "$REVIEW_BODY"
+  gh pr review {pr_number} $REPO_FLAG --approve --body "$REVIEW_BODY"
 fi
 ```
 

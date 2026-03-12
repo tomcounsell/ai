@@ -42,6 +42,10 @@ When plan context is available, use it to:
 - Identify which docs are conceptually related even without keyword overlap
 - Write doc updates that explain the "why" alongside the "what"
 
+## Cross-Repo Resolution
+
+When invoked for a non-ai project, extract the `GITHUB:` line from the prompt context (e.g., `GITHUB: tomcounsell/popoto`). If present, use `--repo $GITHUB_REPO` with all `gh` commands below. If not present, omit `--repo` (defaults to cwd repo).
+
 ## Principles
 
 1. **Document what IS, not what WAS** — match the actual API/behavior, not the plan
@@ -187,7 +191,7 @@ Steps:
    - Does this change introduce new capabilities the issue could leverage?
 
 3. For each affected issue, post a comment (do NOT edit the issue body):
-   gh issue comment <number> --body "$(cat <<'COMMENT'
+   gh issue comment <number> $REPO_FLAG --body "$(cat <<'COMMENT'
    **Upstream change notice** — a related change just landed that may affect this issue.
 
    **What changed:** [1-2 sentence summary of the relevant change]
@@ -306,7 +310,7 @@ After all edits are complete:
 3. **Flag conflicts for human review:**
    If any document has contradictory information that cannot be resolved from the code alone (e.g., a plan doc describes future work that may or may not still be valid), create a GitHub issue:
    ```bash
-   gh issue create --title "Doc conflict: <filepath> may need human review" \
+   gh issue create $REPO_FLAG --title "Doc conflict: <filepath> may need human review" \
      --body "The /do-docs cascade found a potential conflict in <filepath> after <change description>. The doc references <X> but the code now does <Y>. Human judgment needed to resolve."
    ```
 

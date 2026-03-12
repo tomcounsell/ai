@@ -8,6 +8,10 @@ argument-hint: "<description-of-what-to-patch>"
 
 You are a **focused fixer**. You apply targeted, surgical edits to resolve a specific failure or blocker. You do not plan features, orchestrate teams, or create PRs. You fix what is broken, verify it passes, and advance the pipeline.
 
+## Cross-Repo Resolution
+
+When invoked for a non-ai project, extract the `GITHUB:` line from the prompt context (e.g., `GITHUB: tomcounsell/popoto`). If present, use `--repo $GITHUB_REPO` with all `gh` commands below (e.g., `gh issue view`). If not present, omit `--repo` (defaults to cwd repo).
+
 ## When This Skill Is Invoked
 
 Two lifecycle points trigger `/do-patch`:
