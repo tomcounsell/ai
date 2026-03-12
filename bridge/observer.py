@@ -17,6 +17,7 @@ This ensures the pipeline never silently drops output.
 
 import json
 import logging
+import re
 from typing import Any
 
 import anthropic
@@ -192,6 +193,83 @@ def _build_tools() -> list[dict]:
             },
         },
     ]
+
+
+# Patterns that signal the worker output needs human attention.
+# When any of these match, the deterministic guard steps aside and
+# lets the LLM Observer make the routing decision.
+_BLOCKER_PATTERNS = [
+    re.compile(r"##\s*Open\s+Questions", re.IGNORECASE),
+    re.compile(
+        r"(?:question|decision|input)\s+(?:for|from)\s+"
+        r"(?:tom|the\s+(?:pm|architect|human))",
+        re.IGNORECASE,
+    ),
+    re.compile(r"(?:should\s+I|your\s+(?:call|input|decision))", re.IGNORECASE),
+    re.compile(r"(?:FATAL|unrecoverable|cannot\s+proceed)", re.IGNORECASE),
+    re.compile(
+        r"(?:API\s+key\s+has\s+been\s+(?:revoked|disabled|expired))",
+        re.IGNORECASE,
+    ),
+    re.compile(r"(?:nothing\s+I\s+can\s+do|requires?\s+(?:a\s+)?human)", re.IGNORECASE),
+    re.compile(r"(?:Option\s+[A-C]\))", re.IGNORECASE),
+]
+
+
+def _output_has_blocker_signal(output: str) -> bool:
+    """Check if worker output contains signals requiring human attention.
+
+    Scans for patterns like open questions, explicit asks for human input,
+    or unrecoverable errors. When detected, the deterministic guard defers
+    to the LLM Observer for nuanced routing.
+
+    Args:
+        output: The worker agent's output text.
+
+    Returns:
+        True if blocker signals are detected.
+    """
+    if not output:
+        return False
+    for pattern in _BLOCKER_PATTERNS:
+        if pattern.search(output):
+            return True
+    return False
+
+
+# Mapping from SDLC stage to the /do-* skill that executes it
+_STAGE_TO_SKILL = {
+    "ISSUE": "/do-issue",
+    "PLAN": "/do-plan",
+    "BUILD": "/do-build",
+    "TEST": "/do-test",
+    "REVIEW": "/do-pr-review",
+    "DOCS": "/do-docs",
+}
+
+# Pipeline order for determining "next" stage
+_PIPELINE_ORDER = ["ISSUE", "PLAN", "BUILD", "TEST", "REVIEW", "DOCS"]
+
+
+def _next_sdlc_skill(session: AgentSession) -> tuple[str, str] | None:
+    """Determine the next SDLC stage and its /do-* skill command.
+
+    Examines the session's stage progress and returns the first stage
+    that is pending or in_progress, along with its corresponding skill.
+
+    Args:
+        session: The AgentSession with stage progress data.
+
+    Returns:
+        Tuple of (stage_name, skill_command) or None if all stages are done.
+    """
+    progress = session.get_stage_progress()
+    for stage in _PIPELINE_ORDER:
+        status = progress.get(stage, "pending")
+        if status in ("pending", "in_progress"):
+            skill = _STAGE_TO_SKILL.get(stage, f"/do-{stage.lower()}")
+            return (stage, skill)
+    return None
 
 
 class Observer:
@@ -548,6 +626,69 @@ class Observer:
             logger.info(
                 f"{self._log_prefix} Unknown stop_reason={self.stop_reason}, "
                 f"falling through to LLM Observer"
+            )
+
+        # Recalculate has_remaining after transitions may have advanced stages
+        has_remaining = self.session.has_remaining_stages()
+
+        # Phase 1.75: Deterministic SDLC stage guard
+        # If this is an SDLC session with remaining stages, ALWAYS steer to the
+        # next stage. The LLM Observer must not override stage tracking — this was
+        # the root cause of SDLC flows stalling before reaching do-docs.
+        #
+        # Safety: Do NOT force-steer when:
+        # - stop_reason is "fail" or "budget_exceeded" (must deliver to human)
+        # - A stage has failed (has_failed_stage) — human needs to see the failure
+        # - Auto-continue cap reached (safety valve against infinite loops)
+        # - Worker output contains blocker signals (questions, errors needing human)
+        has_failed = self.session.has_failed_stage()
+        stop_is_terminal = self.stop_reason in ("fail", "budget_exceeded")
+        at_cap = self.auto_continue_count >= max_continues
+        has_blocker = _output_has_blocker_signal(self.worker_output)
+        guard_eligible = (
+            is_sdlc
+            and has_remaining
+            and not has_failed
+            and not stop_is_terminal
+            and not at_cap
+            and not has_blocker
+        )
+        if guard_eligible:
+            next_stage_info = _next_sdlc_skill(self.session)
+            if next_stage_info:
+                stage_name, skill_cmd = next_stage_info
+                cid = getattr(self.session, "correlation_id", None) or "unknown"
+                coaching = (
+                    f"Pipeline has remaining stages. Next: {stage_name}. "
+                    f"Continue with {skill_cmd}. "
+                    f"If you encounter a critical blocker requiring human input, "
+                    f"state it clearly. Otherwise, press forward."
+                )
+                logger.info(
+                    f"{self._log_prefix} Deterministic SDLC guard: forcing steer "
+                    f"to {stage_name} ({skill_cmd}) — remaining stages exist, "
+                    f"no failures, stop_reason={self.stop_reason}"
+                )
+                record_decision(
+                    self.session.session_id,
+                    cid,
+                    "steer",
+                    f"deterministic-sdlc-guard: {stage_name} pending",
+                )
+                return {
+                    "action": "steer",
+                    "coaching_message": coaching,
+                    "transitions_applied": transitions_applied,
+                    "deterministic_guard": True,
+                }
+
+        # Log when guard was bypassed due to safety conditions
+        if is_sdlc and has_remaining and not guard_eligible:
+            logger.info(
+                f"{self._log_prefix} Deterministic SDLC guard bypassed: "
+                f"has_failed={has_failed}, stop_reason={self.stop_reason}, "
+                f"at_cap={at_cap}, has_blocker={has_blocker} "
+                f"— falling through to LLM Observer"
             )
 
         # Phase 2: Run the Observer LLM for judgment calls
