@@ -17,13 +17,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-# claude_agent_sdk mock is centralized in tests/conftest.py
-from agent.sdk_client import (
-    WORKER_RULES,
+from agent.sdk_client import (  # noqa: E402
     load_pm_system_prompt,
     load_system_prompt,
 )
-
 
 # ---------------------------------------------------------------------------
 # load_pm_system_prompt() tests
@@ -90,14 +87,14 @@ class TestPmModeClassificationBypass:
         }
 
         with (
-            patch("agent.sdk_client.ValorAgent") as MockAgent,
+            patch("agent.sdk_client.ValorAgent") as mock_agent_cls,
             patch("bridge.routing.classify_work_request") as mock_classify,
             patch("bridge.context.build_context_prefix", return_value=""),
             patch("agent.sdk_client.load_pm_system_prompt", return_value="PM prompt"),
         ):
             mock_agent_instance = MagicMock()
             mock_agent_instance.query = AsyncMock(return_value="response")
-            MockAgent.return_value = mock_agent_instance
+            mock_agent_cls.return_value = mock_agent_instance
 
             from agent.sdk_client import get_agent_response_sdk
 
@@ -121,13 +118,13 @@ class TestPmModeClassificationBypass:
         }
 
         with (
-            patch("agent.sdk_client.ValorAgent") as MockAgent,
+            patch("agent.sdk_client.ValorAgent") as mock_agent_cls,
             patch("bridge.routing.classify_work_request", return_value="question") as mock_classify,
             patch("bridge.context.build_context_prefix", return_value=""),
         ):
             mock_agent_instance = MagicMock()
             mock_agent_instance.query = AsyncMock(return_value="response")
-            MockAgent.return_value = mock_agent_instance
+            mock_agent_cls.return_value = mock_agent_instance
 
             from agent.sdk_client import get_agent_response_sdk
 
@@ -152,7 +149,7 @@ class TestPmModeClassificationBypass:
         }
 
         with (
-            patch("agent.sdk_client.ValorAgent") as MockAgent,
+            patch("agent.sdk_client.ValorAgent") as mock_agent_cls,
             patch("bridge.context.build_context_prefix", return_value=""),
             patch(
                 "agent.sdk_client.load_pm_system_prompt",
@@ -161,7 +158,7 @@ class TestPmModeClassificationBypass:
         ):
             mock_agent_instance = MagicMock()
             mock_agent_instance.query = AsyncMock(return_value="response")
-            MockAgent.return_value = mock_agent_instance
+            mock_agent_cls.return_value = mock_agent_instance
 
             from agent.sdk_client import get_agent_response_sdk
 
@@ -177,7 +174,7 @@ class TestPmModeClassificationBypass:
             mock_pm_prompt.assert_called_once()
 
             # ValorAgent should have received the PM system prompt
-            call_kwargs = MockAgent.call_args
+            call_kwargs = mock_agent_cls.call_args
             assert call_kwargs.kwargs.get("system_prompt") == "PM system prompt"
 
 
@@ -227,7 +224,7 @@ class TestPmProjectRouting:
 
     def test_pm_channel_matches_project(self):
         """PM: Cuttlefish chat title should match the pm-cuttlefish project."""
-        from bridge.routing import find_project_for_chat, GROUP_TO_PROJECT
+        from bridge.routing import GROUP_TO_PROJECT, find_project_for_chat
 
         # Save and restore original
         original = dict(GROUP_TO_PROJECT)
@@ -248,7 +245,7 @@ class TestPmProjectRouting:
 
     def test_dev_channel_not_matched_as_pm(self):
         """Dev: Cuttlefish should NOT match PM project."""
-        from bridge.routing import find_project_for_chat, GROUP_TO_PROJECT
+        from bridge.routing import GROUP_TO_PROJECT, find_project_for_chat
 
         original = dict(GROUP_TO_PROJECT)
         try:

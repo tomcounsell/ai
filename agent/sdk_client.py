@@ -326,9 +326,7 @@ def load_pm_system_prompt(working_directory: str) -> str:
         logger.info(f"Loaded PM instructions from {project_claude_path}")
         return f"{soul_prompt}\n\n---\n\n{project_instructions}"
 
-    logger.info(
-        f"No CLAUDE.md found at {project_claude_path}, using SOUL.md only for PM mode"
-    )
+    logger.info(f"No CLAUDE.md found at {project_claude_path}, using SOUL.md only for PM mode")
     return soul_prompt
 
 
@@ -995,18 +993,14 @@ async def get_agent_response_sdk(
     project_mode = project.get("mode", "dev") if project else "dev"
     # Treat any unrecognized mode as "dev" (safe default)
     if project_mode not in ("dev", "pm"):
-        logger.warning(
-            f"[{request_id}] Unknown project mode '{project_mode}', treating as 'dev'"
-        )
+        logger.warning(f"[{request_id}] Unknown project mode '{project_mode}', treating as 'dev'")
         project_mode = "dev"
 
     if project_mode == "pm":
         # PM mode: skip classification, always use "question", work in project dir
         classification = "question"
         working_dir = project_working_dir
-        logger.info(
-            f"[{request_id}] PM mode: cwd={working_dir}, skipping SDLC classification"
-        )
+        logger.info(f"[{request_id}] PM mode: cwd={working_dir}, skipping SDLC classification")
     else:
         # Dev mode: classify and route as before
         from bridge.routing import classify_work_request
@@ -1066,8 +1060,9 @@ async def get_agent_response_sdk(
         f"classification={classification}, has_workflow={has_workflow}, "
         f"task_list={task_list_id or 'none'}, mode={project_mode}"
     )
+    wr_label = "yes" if has_worker_rules else "no (pm mode)"
     logger.info(
-        f"[{request_id}] Context: soul=yes, worker_rules={'yes' if has_worker_rules else 'no (pm mode)'}, "
+        f"[{request_id}] Context: soul=yes, worker_rules={wr_label}, "
         f"workflow_context={'yes' if has_workflow else 'no'}, "
         f"session_id={session_id}"
     )
