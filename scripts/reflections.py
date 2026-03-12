@@ -1709,9 +1709,7 @@ class ReflectionRunner:
                 self.state.add_finding("disk_space_check", finding)
                 logger.warning(finding)
             else:
-                logger.info(
-                    f"Disk space OK: {free_gb:.1f} GB free of {total_gb:.1f} GB total"
-                )
+                logger.info(f"Disk space OK: {free_gb:.1f} GB free of {total_gb:.1f} GB total")
         except Exception:
             logger.exception("Failed to check disk space")
 
