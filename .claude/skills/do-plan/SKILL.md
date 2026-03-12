@@ -129,7 +129,10 @@ Where:
    in the plan if prior failed fixes exist).
    **Skip if:** No prior fixes found, or this is greenfield work.
 
-7. **Set appetite** - Small / Medium / Large (see `SCOPING.md` for sizing guidance)
+7. **Set appetite** - Small / Medium / Large (see `SCOPING.md` for sizing guidance).
+   Consult `config/PRINCIPAL.md` for the supervisor's project priorities and strategic
+   context — use it to calibrate appetite and decide how much investment is warranted
+   relative to the project's priority in the portfolio.
 8. **Rough out solution** - Key components and flow, stay abstract
 9. **Race condition analysis** - If the solution involves async operations, shared mutable state,
    or cross-process data flows, identify timing hazards. For each: specify what data/state must

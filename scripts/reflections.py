@@ -467,6 +467,7 @@ class ReflectionRunner:
             (13, "Redis Data Quality", self.step_redis_data_quality),
             (14, "Branch and Plan Cleanup", self.step_branch_plan_cleanup),
             (15, "Feature Docs Audit", self.step_feature_docs_audit),
+            (16, "Principal Context Staleness", self.step_principal_staleness),
         ]
 
     def _load_state(self) -> ReflectionsState:
@@ -1673,6 +1674,49 @@ class ReflectionRunner:
         self.state.step_progress["feature_docs_audit"] = {
             **stats,
             "findings": len(findings),
+        }
+
+    async def step_principal_staleness(self) -> None:
+        """Step 16: Check if PRINCIPAL.md is stale (>90 days since last modification).
+
+        PRINCIPAL.md encodes the supervisor's strategic context. If it hasn't
+        been updated in 90+ days, the agent's prioritization decisions may be
+        based on outdated information.
+        """
+        principal_path = PROJECT_ROOT / "config" / "PRINCIPAL.md"
+
+        if not principal_path.exists():
+            self.state.add_finding(
+                "principal_context",
+                "config/PRINCIPAL.md does not exist — principal context is unavailable",
+            )
+            self.state.step_progress["principal_staleness"] = {"status": "missing"}
+            return
+
+        mod_time = datetime.fromtimestamp(principal_path.stat().st_mtime)
+        age_days = (datetime.now() - mod_time).days
+        staleness_threshold = 90
+
+        if age_days > staleness_threshold:
+            self.state.add_finding(
+                "principal_context",
+                f"config/PRINCIPAL.md is {age_days} days old (threshold: {staleness_threshold}). "
+                f"Consider reviewing and updating the supervisor's strategic context.",
+            )
+            logger.warning(
+                f"PRINCIPAL.md is stale: last modified {age_days} days ago "
+                f"(threshold: {staleness_threshold} days)"
+            )
+        else:
+            logger.info(
+                f"PRINCIPAL.md is fresh: last modified {age_days} days ago "
+                f"(threshold: {staleness_threshold} days)"
+            )
+
+        self.state.step_progress["principal_staleness"] = {
+            "age_days": age_days,
+            "threshold": staleness_threshold,
+            "stale": age_days > staleness_threshold,
         }
 
     async def step_post_to_telegram(self, project: dict, issue_url: str = "") -> None:
