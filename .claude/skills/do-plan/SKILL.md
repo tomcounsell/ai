@@ -23,6 +23,10 @@ Creates structured feature plans in `docs/plans/` following Shape Up principles:
 | `SCOPING.md` | The request is vague, a grab-bag, or needs narrowing before planning |
 | `EXAMPLES.md` | Deciding how to respond to a user request (vague vs. grab-bag vs. good) |
 
+## Cross-Repo Resolution
+
+When invoked for a non-ai project, extract the `GITHUB:` line from the prompt context (e.g., `GITHUB: tomcounsell/popoto`). If present, use `--repo $GITHUB_REPO` with all `gh` commands below. If not present, omit `--repo` (defaults to cwd repo).
+
 ## When to Use
 
 - Planning a new feature
@@ -78,10 +82,10 @@ Where:
    proposing solutions that have already been tried (and failed) or re-solving problems that
    already have working implementations.
    ```bash
-   # Search closed issues for related keywords
-   gh issue list --state closed --search "KEYWORDS_HERE" --limit 10 --json number,title,closedAt,url
+   # Search closed issues for related keywords (use --repo if GITHUB: context line is present)
+   gh issue list --state closed --search "KEYWORDS_HERE" --limit 10 --json number,title,closedAt,url $REPO_FLAG
    # Search merged PRs for related work
-   gh pr list --state merged --search "KEYWORDS_HERE" --limit 10 --json number,title,mergedAt,url
+   gh pr list --state merged --search "KEYWORDS_HERE" --limit 10 --json number,title,mergedAt,url $REPO_FLAG
    ```
    Use results to fill the **Prior Art** section in the plan. If multiple prior attempts
    addressed the same problem, also fill the **Why Previous Fixes Failed** section.
@@ -159,10 +163,10 @@ git add docs/plans/{slug}.md && git commit -m "Plan: {Feature Name}" && git push
 
 ```bash
 EXISTING_ISSUE=42
-gh issue edit $EXISTING_ISSUE --add-label "plan"
-EXISTING_BODY=$(gh issue view $EXISTING_ISSUE --json body -q .body)
+gh issue edit $EXISTING_ISSUE --add-label "plan" $REPO_FLAG
+EXISTING_BODY=$(gh issue view $EXISTING_ISSUE --json body -q .body $REPO_FLAG)
 PLAN_LINK="https://github.com/${REPO}/blob/main/docs/plans/{slug}.md"
-gh issue edit $EXISTING_ISSUE --body "**Plan:** ${PLAN_LINK}
+gh issue edit $EXISTING_ISSUE $REPO_FLAG --body "**Plan:** ${PLAN_LINK}
 
 ${EXISTING_BODY}"
 ```
@@ -182,6 +186,9 @@ if [ -z "$TYPE" ]; then
   echo "ERROR: Plan must have a 'type:' field in frontmatter (bug, feature, or chore)"
   exit 1
 fi
+
+# Use GITHUB_REPO from context if available, otherwise resolve from git
+REPO="${GITHUB_REPO:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
 
 gh issue create \
   --repo ${REPO} \

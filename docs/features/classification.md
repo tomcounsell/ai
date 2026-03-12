@@ -19,6 +19,16 @@ The work type result is stored in a mutable dict and passed to `enqueue_job()` a
 
 If classification fails, the field stays `null` and the user specifies the type manually during planning.
 
+### Classification Inheritance on Reply-to-Resume
+
+When a user resumes a session by replying to a previous message (`is_reply_to_valor`), the async classifier may not have completed before `enqueue_job()` is called, leaving `classification_type` as `None`. To prevent this race condition, the bridge inherits the classification from the original session:
+
+1. If `is_reply_to_valor` and `classification_result` has no `type` yet, the bridge queries the existing `AgentSession` by `session_id`
+2. If found, the original session's `classification_type` is copied into the mutable `classification_result` dict
+3. If the async classifier completes first (populating `classification_result` before the inheritance check), the inherited value is never set
+
+This ensures reply-to-resume messages always carry the correct classification, preventing misrouting of SDLC sessions.
+
 ### Session Metadata Fields
 
 **AgentSession** (`models/agent_session.py`):
@@ -65,6 +75,8 @@ Telegram message
   -> classify_and_update_reaction() [asyncio.create_task]
      -> classify_request_async(clean_text)  [Haiku API]
      -> store in classification_result dict
+  -> if reply-to-resume and classification_result empty:
+     -> inherit classification_type from existing AgentSession
   -> enqueue_job(classification_type=...)
   -> _execute_job() stores on AgentSession
   -> /do-plan reads classification_type from session context

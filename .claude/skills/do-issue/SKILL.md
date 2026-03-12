@@ -25,6 +25,10 @@ This isn't optional politeness — it's functional. The `/do-plan` skill reads t
 | `ISSUE_TEMPLATE.md` | Writing the issue body (use as the structural skeleton) |
 | `CHECKLIST.md` | Before publishing — run every check, fix failures |
 
+## Cross-Repo Resolution
+
+When invoked for a non-ai project, extract the `GITHUB:` line from the prompt context (e.g., `GITHUB: tomcounsell/popoto`). If present, use `--repo $GITHUB_REPO` with all `gh` commands below. If not present, omit `--repo` (defaults to cwd repo).
+
 ## When to Use
 
 - Creating any new GitHub issue (feature, bug, or chore)
@@ -45,11 +49,11 @@ Read the user's description. Identify:
 Before writing, gather context so the issue is grounded in reality:
 
 ```bash
-# Search for related closed issues
-gh issue list --state closed --search "KEYWORDS" --limit 5 --json number,title,url
+# Search for related closed issues (use --repo if GITHUB: context line is present)
+gh issue list --state closed --search "KEYWORDS" --limit 5 --json number,title,url $REPO_FLAG
 
 # Search for related merged PRs
-gh pr list --state merged --search "KEYWORDS" --limit 5 --json number,title,url
+gh pr list --state merged --search "KEYWORDS" --limit 5 --json number,title,url $REPO_FLAG
 
 # Check if relevant docs exist
 grep -rl "KEYWORD" docs/features/ docs/plans/ 2>/dev/null | head -5
@@ -78,6 +82,9 @@ Load `CHECKLIST.md` and verify every item before creating the issue.
 ```bash
 REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
 TYPE="feature"  # or "bug" or "chore"
+
+# Use GITHUB_REPO from context if available, otherwise resolve from git
+REPO="${GITHUB_REPO:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
 
 gh issue create \
   --repo "$REPO" \

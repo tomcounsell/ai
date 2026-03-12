@@ -56,9 +56,9 @@ The Observer (`bridge/observer.py`) now checks for a typed outcome before callin
 
 The stage detector (`bridge/stage_detector.py`) accepts an optional `SkillOutcome` parameter in `apply_transitions()`:
 
-- If the typed outcome says "success" but regex did not detect completion for that stage, a warning is logged
+- If the typed outcome says "success" but regex did not detect completion for that stage, the outcome's transition is merged into the transitions list so the stage is still recorded in session history
 - If the typed outcome says "fail" but regex detected completion, a warning is logged (outcome takes priority)
-- This cross-check catches drift between skill output format and detection patterns
+- This cross-check catches drift between skill output format and detection patterns, and the merge behavior ensures stages are never silently dropped
 
 ## Outcome Contracts in SKILL.md
 
