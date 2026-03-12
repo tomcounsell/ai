@@ -1,5 +1,5 @@
 ---
-status: Docs
+status: Merge
 type: feature
 appetite: Small
 owner: Valor
@@ -138,9 +138,9 @@ No agent integration required — this is internal infrastructure that runs befo
 
 ## Documentation
 
-- [ ] Create `docs/features/workspace-safety-invariants.md` describing the three invariants
-- [ ] Add entry to `docs/features/README.md` index table
-- [ ] Code comments on `validate_workspace()` explaining each check
+- [x] Create `docs/features/workspace-safety-invariants.md` describing the three invariants
+- [x] Add entry to `docs/features/README.md` index table
+- [x] Code comments on `validate_workspace()` explaining each check
 
 ## Success Criteria
 
