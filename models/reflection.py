@@ -15,7 +15,6 @@ from popoto import (
     IntField,
     KeyField,
     Model,
-    SortedField,
 )
 
 
@@ -38,7 +37,7 @@ class Reflection(Model):
 
     reflection_id = AutoKeyField()
     name = KeyField()
-    last_run = SortedField(type=float, null=True)
+    last_run = Field(type=float, null=True)
     next_due = Field(type=float, null=True)
     run_count = IntField(default=0)
     last_status = Field(default="pending")  # pending | running | success | error | skipped
