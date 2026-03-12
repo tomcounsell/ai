@@ -303,11 +303,28 @@ class Observer:
     ) -> dict[str, str]:
         """Tool handler: update session with extracted data."""
         # Re-read session from Redis before writing to avoid clobbering
-        # concurrent writes (e.g., queued_steering_messages appended by bridge)
+        # concurrent writes (e.g., queued_steering_messages appended by bridge).
+        # Bug 3 fix (issue #374): Use deterministic record selection — filter
+        # by active statuses first, sort by created_at desc to pick newest.
         try:
-            fresh = list(AgentSession.query.filter(session_id=self.session.session_id))
-            if fresh:
-                self.session = fresh[0]
+            all_sessions = list(
+                AgentSession.query.filter(session_id=self.session.session_id)
+            )
+            # Prefer running/active records; fall back to any record
+            active = [
+                s for s in all_sessions
+                if s.status in ("running", "active", "pending")
+            ]
+            candidates = active if active else all_sessions
+            if candidates:
+                candidates.sort(key=lambda s: s.created_at or 0, reverse=True)
+                self.session = candidates[0]
+                if len(all_sessions) > 1:
+                    logger.info(
+                        f"{self._log_prefix} Re-read session: selected "
+                        f"status={self.session.status} from {len(all_sessions)} "
+                        f"records for {self.session.session_id}"
+                    )
         except Exception as e:
             logger.warning(f"{self._log_prefix} Failed to re-read session before update: {e}")
 

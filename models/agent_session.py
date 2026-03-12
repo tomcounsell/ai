@@ -98,6 +98,12 @@ class AgentSession(Model):
     plan_url = Field(null=True)
     pr_url = Field(null=True)
 
+    # === Claude Code identity mapping ===
+    # Stores the Claude Code session UUID (from transcript filename) so that
+    # continuation sessions can resume the correct transcript instead of falling
+    # back to the most recent session file on disk. See issue #374 Bug 1.
+    claude_session_uuid = Field(null=True)
+
     # === Tracing ===
     correlation_id = Field(null=True)  # End-to-end request tracing ID
 
