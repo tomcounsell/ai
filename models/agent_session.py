@@ -90,7 +90,7 @@ class AgentSession(Model):
     chat_id_for_enrichment = Field(null=True)
     classification_type = Field(null=True)
     auto_continue_count = Field(type=int, default=0)
-    started_at = SortedField(type=float, partition_by="project_key", null=True)
+    started_at = Field(type=float, null=True)  # Cannot be SortedField because it starts as None
 
     # === Cross-reference to TelegramMessage ===
     trigger_message_id = Field(null=True)  # msg_id of the TelegramMessage that triggered this session
