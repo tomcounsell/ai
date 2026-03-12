@@ -12,9 +12,9 @@ Usage:
     valor-history stats [--group "Dev: Valor"]
 
 Install:
-    pip install -e /Users/valorengels/src/ai
+    pip install -e .  # from repo root
     # or add to PATH:
-    ln -s /Users/valorengels/src/ai/tools/telegram_history/cli.py ~/.local/bin/valor-history
+    ln -s $(pwd)/tools/telegram_history/cli.py ~/.local/bin/valor-history
 """
 
 import argparse
