@@ -13,10 +13,8 @@ See docs/features/issue-poller.md for full documentation.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
-import os
 import subprocess
 import sys
 import time
@@ -32,7 +30,7 @@ try:
 except ImportError:
     redis = None  # type: ignore[assignment]
 
-from scripts.issue_dedup import classify_similarity, compare_issues
+from scripts.issue_dedup import compare_issues  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -174,11 +172,7 @@ def get_latest_comment_id(org: str, repo: str, issue_number: int) -> str | None:
 
         comments = json.loads(result.stdout)
         # Filter out Agent D automated comments
-        human_comments = [
-            c
-            for c in comments
-            if AGENT_D_SIGNATURE not in c.get("body", "")
-        ]
+        human_comments = [c for c in comments if AGENT_D_SIGNATURE not in c.get("body", "")]
         if human_comments:
             return str(human_comments[-1]["id"])
         return None
@@ -187,15 +181,9 @@ def get_latest_comment_id(org: str, repo: str, issue_number: int) -> str | None:
         return None
 
 
-def filter_new_issues(
-    r: redis.Redis, org: str, repo: str, issues: list[dict]
-) -> list[dict]:
+def filter_new_issues(r: redis.Redis, org: str, repo: str, issues: list[dict]) -> list[dict]:
     """Filter out already-seen issues."""
-    return [
-        issue
-        for issue in issues
-        if not is_seen(r, org, repo, issue["number"])
-    ]
+    return [issue for issue in issues if not is_seen(r, org, repo, issue["number"])]
 
 
 def has_sufficient_context(issue: dict) -> bool:
@@ -298,14 +286,10 @@ def dispatch_plan_creation(
         f"Use /do-plan to create a draft plan."
     )
     if last_comment_id:
-        prompt += (
-            f" Initialize last_comment_id in the plan frontmatter to {last_comment_id}."
-        )
+        prompt += f" Initialize last_comment_id in the plan frontmatter to {last_comment_id}."
 
     try:
-        logger.info(
-            f"Dispatching plan creation for {org}/{repo}#{issue_number}"
-        )
+        logger.info(f"Dispatching plan creation for {org}/{repo}#{issue_number}")
         result = subprocess.run(
             [
                 "claude",
@@ -321,16 +305,13 @@ def dispatch_plan_creation(
         )
         if result.returncode != 0:
             logger.warning(
-                f"Plan creation failed for {org}/{repo}#{issue_number}: "
-                f"{result.stderr[:200]}"
+                f"Plan creation failed for {org}/{repo}#{issue_number}: {result.stderr[:200]}"
             )
             return False
         return True
 
     except subprocess.TimeoutExpired:
-        logger.warning(
-            f"Plan creation timed out for {org}/{repo}#{issue_number}"
-        )
+        logger.warning(f"Plan creation timed out for {org}/{repo}#{issue_number}")
         return False
     except FileNotFoundError:
         logger.error("claude CLI not found")
@@ -420,8 +401,7 @@ def process_issue(
         dup_number = dedup_result.get("match_number")
         score = dedup_result.get("score", 0)
         logger.info(
-            f"Duplicate detected: {org}/{repo}#{number} matches #{dup_number} "
-            f"(score: {score:.2f})"
+            f"Duplicate detected: {org}/{repo}#{number} matches #{dup_number} (score: {score:.2f})"
         )
         apply_label(org, repo, number, "possible-duplicate")
         add_comment(
@@ -456,9 +436,7 @@ def process_issue(
         # Note related issues in plan if any
         if dedup_result and dedup_result.get("classification") == "related":
             related_number = dedup_result.get("match_number")
-            logger.info(
-                f"Related issue noted: {org}/{repo}#{number} related to #{related_number}"
-            )
+            logger.info(f"Related issue noted: {org}/{repo}#{number} related to #{related_number}")
 
         return "planned"
 
@@ -538,10 +516,7 @@ def run_polling_cycle() -> dict:
                 summary[key] = {"error": str(e)}
 
         # Track consecutive failures for alerting
-        has_errors = any(
-            isinstance(v, dict) and v.get("error")
-            for v in summary.values()
-        )
+        has_errors = any(isinstance(v, dict) and v.get("error") for v in summary.values())
         if has_errors:
             failures = r.incr(FAILURE_COUNT_KEY)
             r.expire(FAILURE_COUNT_KEY, 3600)  # Reset after 1 hour
