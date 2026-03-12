@@ -39,6 +39,7 @@ from agent.agent_definitions import get_agent_definitions
 from agent.hooks import build_hooks_config
 from agent.workflow_state import WorkflowState
 from agent.workflow_types import WorkflowStateData
+from agent.worktree_manager import WORKTREES_DIR, validate_workspace
 
 logger = logging.getLogger(__name__)
 
@@ -498,7 +499,11 @@ class ValorAgent:
             project_key: Optional project key for routing context injection.
             message_id: Optional message ID for routing context injection.
         """
-        self.working_dir = Path(working_dir) if working_dir else Path(__file__).parent.parent
+        default_dir = Path(__file__).parent.parent
+        allowed_root = Path("/Users/valorengels/src")
+        raw_path = Path(working_dir) if working_dir else default_dir
+        is_wt = WORKTREES_DIR in str(raw_path)
+        self.working_dir = validate_workspace(raw_path, allowed_root, is_worktree=is_wt)
         self.system_prompt = system_prompt or load_system_prompt()
         self.permission_mode = permission_mode
         self.workflow_id = workflow_id
