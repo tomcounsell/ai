@@ -26,6 +26,7 @@ from agent.branch_manager import (
     get_plan_context,
     sanitize_branch_name,
 )
+from agent.worktree_manager import WORKTREES_DIR, validate_workspace
 from bridge.response import REACTION_COMPLETE, REACTION_ERROR, REACTION_SUCCESS
 from bridge.session_logs import save_session_snapshot
 from models.agent_session import AgentSession
@@ -1356,6 +1357,9 @@ async def _execute_job(job: Job) -> None:
     from agent import BackgroundTask, BossMessenger, get_agent_response_sdk
 
     working_dir = Path(job.working_dir)
+    allowed_root = Path("/Users/valorengels/src")
+    is_wt = WORKTREES_DIR in str(working_dir)
+    working_dir = validate_workspace(working_dir, allowed_root, is_worktree=is_wt)
     branch_name = _session_branch_name(job.session_id)
 
     # Compute task list ID for sub-agent task isolation
