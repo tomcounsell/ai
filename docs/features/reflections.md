@@ -81,7 +81,7 @@ The bridge watchdog (`com.valor.bridge-watchdog`) is intentionally NOT in the re
 
 The `daily-maintenance` reflection runs the full pipeline from `scripts/reflections.py`. The runner loads state from Redis, executes each step in order, and checkpoints after every step. If interrupted, the next run resumes from where it left off. Each step is independently failable — a crash in one step does not block the rest.
 
-### 14-Step Pipeline
+### 15-Step Pipeline
 
 | Step | Name | Description | Scope | Failure Mode |
 |------|------|-------------|-------|--------------|
