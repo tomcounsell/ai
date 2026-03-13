@@ -11,7 +11,7 @@ Cross-references TelegramMessage via trigger_message_id. Message metadata
 (media, URLs, classification) lives on TelegramMessage; this model references
 it for enrichment during job execution.
 
-Status lifecycle: pending -> running -> active -> dormant -> completed | failed
+Status lifecycle: pending -> running -> active -> dormant -> completed | failed | waiting_for_children
 """
 
 import logging
@@ -52,6 +52,7 @@ class AgentSession(Model):
         running  - Worker picked up, agent executing
         active   - Session in progress (transcript tracking)
         dormant  - Paused on open question
+        waiting_for_children - Parent job waiting for child jobs to complete
         completed - Work finished successfully
         failed   - Work failed
     """
@@ -59,7 +60,9 @@ class AgentSession(Model):
     # === Identity ===
     job_id = AutoKeyField()
     session_id = Field()  # Telegram-derived session identifier (e.g., tg_project_chatid_msgid)
-    claude_code_session_id = Field(null=True)  # Claude Code's session identifier (renamed from session_id overlap)
+    claude_code_session_id = Field(
+        null=True
+    )  # Claude Code's session identifier (renamed from session_id overlap)
     project_key = KeyField()
     status = KeyField(default="pending")
 
@@ -93,7 +96,9 @@ class AgentSession(Model):
     started_at = Field(type=float, null=True)  # Cannot be SortedField because it starts as None
 
     # === Cross-reference to TelegramMessage ===
-    trigger_message_id = Field(null=True)  # msg_id of the TelegramMessage that triggered this session
+    trigger_message_id = Field(
+        null=True
+    )  # msg_id of the TelegramMessage that triggered this session
 
     # === Session fields (from SessionLog) ===
     last_activity = Field(type=float, null=True)
@@ -133,6 +138,12 @@ class AgentSession(Model):
     # === Observer fields ===
     # Buffered human replies during active pipelines
     queued_steering_messages = ListField(null=True)
+
+    # === Job hierarchy fields ===
+    # Links child jobs to their parent for job decomposition (issue #359).
+    # When set, this job is a child of the referenced parent job.
+    # Parent tracks aggregate progress via get_children() / get_completion_progress().
+    parent_job_id = KeyField(null=True)
 
     # === Compatibility ===
 
@@ -379,6 +390,46 @@ class AgentSession(Model):
         except Exception as e:
             logger.warning(f"Failed to clear steering messages for session {self.session_id}: {e}")
         return messages
+
+    # === Job hierarchy helpers ===
+
+    def get_parent(self) -> "AgentSession | None":
+        """Return the parent AgentSession if this is a child job.
+
+        Returns None if parent_job_id is not set or parent not found.
+        """
+        if not self.parent_job_id:
+            return None
+        try:
+            parent = AgentSession.query.get(self.parent_job_id)
+            return parent
+        except Exception:
+            logger.warning(f"Parent job {self.parent_job_id} not found for child {self.job_id}")
+            return None
+
+    def get_children(self) -> list["AgentSession"]:
+        """Return all child AgentSessions linked to this job via parent_job_id.
+
+        Returns an empty list if no children exist.
+        """
+        try:
+            return list(AgentSession.query.filter(parent_job_id=self.job_id))
+        except Exception as e:
+            logger.warning(f"Failed to query children for job {self.job_id}: {e}")
+            return []
+
+    def get_completion_progress(self) -> tuple[int, int, int]:
+        """Compute aggregate completion status of child jobs.
+
+        Returns:
+            (completed_count, total_count, failed_count) tuple.
+            All zeros if no children exist.
+        """
+        children = self.get_children()
+        total = len(children)
+        completed = sum(1 for c in children if c.status == "completed")
+        failed = sum(1 for c in children if c.status == "failed")
+        return completed, total, failed
 
     # === Cleanup ===
 

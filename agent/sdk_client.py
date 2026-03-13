@@ -518,6 +518,7 @@ class ValorAgent:
         chat_id: str | None = None,
         project_key: str | None = None,
         message_id: int | None = None,
+        job_id: str | None = None,
     ):
         """
         Initialize ValorAgent.
@@ -534,6 +535,7 @@ class ValorAgent:
             chat_id: Optional chat ID for routing context injection.
             project_key: Optional project key for routing context injection.
             message_id: Optional message ID for routing context injection.
+            job_id: Optional job ID injected as JOB_ID env var for child job spawning.
         """
         self.working_dir = Path(working_dir) if working_dir else Path(__file__).parent.parent
         self.system_prompt = system_prompt or load_system_prompt()
@@ -544,6 +546,7 @@ class ValorAgent:
         self.chat_id = chat_id
         self.project_key = project_key
         self.message_id = message_id
+        self.job_id = job_id
         self.workflow_state: WorkflowState | None = None
 
         # Load workflow state if workflow_id provided
@@ -666,6 +669,11 @@ class ValorAgent:
         # without relying on Claude Code's internal UUID matching.
         if session_id:
             env["VALOR_SESSION_ID"] = session_id
+
+        # Pass job_id so the agent can reference its own job when spawning children
+        # via `schedule_job --parent-job $JOB_ID` (issue #359)
+        if self.job_id:
+            env["JOB_ID"] = self.job_id
 
         # Build system prompt with workflow context if workflow_id is present
         system_prompt = self.system_prompt
@@ -952,6 +960,7 @@ async def get_agent_response_sdk(
     workflow_id: str | None = None,
     task_list_id: str | None = None,
     correlation_id: str | None = None,
+    job_id: str | None = None,
 ) -> str:
     """
     Get agent response using Claude Agent SDK.
@@ -970,6 +979,7 @@ async def get_agent_response_sdk(
         workflow_id: Optional 8-char workflow identifier for tracked work
         task_list_id: Optional task list ID to scope sub-agent Task storage
         correlation_id: Optional end-to-end tracing ID from the bridge
+        job_id: Optional job ID for child job spawning (issue #359)
 
     Returns:
         The assistant's response text
@@ -1086,6 +1096,7 @@ async def get_agent_response_sdk(
             chat_id=chat_id,
             project_key=_project_key,
             message_id=_message_id,
+            job_id=job_id,
         )
         response = await agent.query(enriched_message, session_id=session_id)
 

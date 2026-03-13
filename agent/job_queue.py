@@ -245,6 +245,8 @@ _JOB_FIELDS = [
     "correlation_id",
     # Claude Code identity mapping — must be preserved across delete-and-recreate
     "claude_session_uuid",
+    # Job hierarchy fields — must be preserved across delete-and-recreate
+    "parent_job_id",
 ]
 
 # Backward compat alias
@@ -287,6 +289,7 @@ async def _push_job(
     correlation_id: str | None = None,
     scheduled_after: float | None = None,
     scheduling_depth: int = 0,
+    parent_job_id: str | None = None,
     trigger_message_id: str | None = None,
 ) -> int:
     """Create a job in Redis and return the pending queue depth for this project.
@@ -338,6 +341,7 @@ async def _push_job(
         correlation_id=correlation_id,
         scheduled_after=scheduled_after,
         scheduling_depth=scheduling_depth,
+        parent_job_id=parent_job_id,
         trigger_message_id=trigger_message_id,
     )
 
@@ -423,9 +427,169 @@ async def _remove_by_session(project_key: str, session_id: str) -> bool:
     return removed
 
 
-async def _complete_job(job: Job) -> None:
-    """Mark a running job as completed and delete it from Redis."""
+async def _complete_job(job: Job, *, failed: bool = False) -> None:
+    """Mark a running job as completed and delete it from Redis.
+
+    If this job is a child (has parent_job_id), finalize the parent BEFORE
+    deleting the child. The completing child's intended terminal status is
+    passed to _finalize_parent so it can correctly count terminal children
+    even though the child's Redis status hasn't been updated yet.
+
+    Args:
+        job: The job to complete.
+        failed: If True, this job failed (used for parent finalization).
+    """
+    parent_job_id = getattr(job._rj, "parent_job_id", None)
+
+    # Finalize parent BEFORE deleting child, passing the completing child's
+    # intended status so _finalize_parent can treat it as terminal
+    if parent_job_id:
+        child_status = "failed" if failed else "completed"
+        await _finalize_parent(
+            parent_job_id,
+            completing_child_id=job.job_id,
+            completing_child_status=child_status,
+        )
+
     await job._rj.async_delete()
+
+
+async def _finalize_parent(
+    parent_job_id: str,
+    completing_child_id: str | None = None,
+    completing_child_status: str | None = None,
+) -> None:
+    """Check if all children of a parent are terminal; if so, finalize the parent.
+
+    Transitions parent from waiting_for_children to completed (all children
+    succeeded) or failed (any child failed). Idempotent: no-op if parent is
+    already in a terminal state or no longer exists.
+
+    Args:
+        parent_job_id: The job_id of the parent AgentSession.
+        completing_child_id: If provided, the job_id of the child that is
+            currently completing. Its Redis status may still be "running",
+            so completing_child_status overrides it.
+        completing_child_status: The intended terminal status ("completed"
+            or "failed") of the completing child.
+    """
+    # NOTE: This function is async def but uses synchronous Redis operations
+    # (AgentSession.query.get, _transition_parent with sync delete/create).
+    # This is consistent with the existing codebase patterns — popoto's Redis
+    # operations are synchronous under the hood. If the codebase ever moves to
+    # true async Redis, these will need updating.
+    try:
+        parent = AgentSession.query.get(parent_job_id)
+    except Exception:
+        logger.warning(
+            f"[job-hierarchy] Parent job {parent_job_id} lookup raised "
+            f"exception during finalization — treating child as orphaned"
+        )
+        return
+
+    if parent is None:
+        logger.warning(
+            f"[job-hierarchy] Parent job {parent_job_id} not found during "
+            f"finalization — parent may have been deleted or already finalized"
+        )
+        return
+
+    # Only finalize if parent is in waiting_for_children status
+    if parent.status != "waiting_for_children":
+        logger.debug(
+            f"[job-hierarchy] Parent {parent_job_id} status is "
+            f"{parent.status!r}, skipping finalization"
+        )
+        return
+
+    # Check all children
+    children = parent.get_children()
+    if not children:
+        # Edge case: parent has no children but is waiting_for_children.
+        # Transition to completed as a safety guard.
+        logger.warning(
+            f"[job-hierarchy] Parent {parent_job_id} has no children but "
+            f"status is waiting_for_children — auto-completing"
+        )
+        _transition_parent(parent, "completed")
+        return
+
+    # Build effective status map: override the completing child's status
+    # since its Redis status hasn't been updated yet
+    terminal_statuses = {"completed", "failed"}
+
+    def effective_status(child: AgentSession) -> str:
+        if completing_child_id and child.job_id == completing_child_id:
+            return completing_child_status or "completed"
+        return child.status
+
+    child_statuses = [effective_status(c) for c in children]
+    non_terminal = [s for s in child_statuses if s not in terminal_statuses]
+
+    if non_terminal:
+        # Some children still running/pending — not ready to finalize
+        logger.debug(
+            f"[job-hierarchy] Parent {parent_job_id} has "
+            f"{len(non_terminal)} non-terminal children — waiting"
+        )
+        return
+
+    # All children are terminal — determine final parent status
+    any_failed = any(s == "failed" for s in child_statuses)
+    new_status = "failed" if any_failed else "completed"
+
+    completed_count = sum(1 for s in child_statuses if s == "completed")
+    failed_count = sum(1 for s in child_statuses if s == "failed")
+    logger.info(
+        f"[job-hierarchy] Finalizing parent {parent_job_id}: "
+        f"{completed_count} completed, {failed_count} failed -> {new_status}"
+    )
+
+    _transition_parent(parent, new_status)
+
+
+def _transition_parent(parent: AgentSession, new_status: str) -> None:
+    """Transition a parent job to a new status using delete-and-recreate.
+
+    Uses the same pattern as _pop_job() to avoid KeyField index corruption.
+    After creating the new parent, updates all children's parent_job_id
+    references to point to the new job_id (since delete-and-recreate
+    generates a new job_id).
+
+    Note: This is a sync function called from both sync (cmd_schedule) and
+    async (_finalize_parent) contexts. The delete-and-recreate generates a
+    new job_id for the parent. Currently safe because workers are per-project
+    and sequential, so concurrent _finalize_parent calls for the same parent
+    cannot occur. If concurrency changes, consider propagating new job_id
+    to children defensively or using a stable identifier.
+    """
+    old_job_id = parent.job_id
+    children = parent.get_children()
+    fields = _extract_job_fields(parent)
+    parent.delete()
+    fields["status"] = new_status
+    # Only set completed_at for terminal statuses, not for waiting_for_children
+    if new_status in ("completed", "failed"):
+        fields["completed_at"] = time.time()
+    new_parent = AgentSession.create(**fields)
+
+    # Update children's parent_job_id to point to the new parent.
+    # parent_job_id is a KeyField, so we must use delete-and-recreate
+    # to avoid index corruption (same pattern as _pop_job).
+    if new_parent.job_id != old_job_id and children:
+        for child in children:
+            try:
+                child_fields = _extract_job_fields(child)
+                child.delete()
+                child_fields["parent_job_id"] = new_parent.job_id
+                AgentSession.create(**child_fields)
+            except Exception as e:
+                logger.warning(
+                    f"[job-hierarchy] Failed to update child {child.job_id} "
+                    f"parent_job_id to {new_parent.job_id}: {e}"
+                )
+
+    logger.info(f"[job-hierarchy] Parent {old_job_id} -> {new_parent.job_id} (status={new_status})")
 
 
 def _get_pending_jobs_sync(project_key: str) -> list[AgentSession]:
@@ -521,7 +685,7 @@ def _recover_orphaned_jobs(project_key: str) -> int:
     # Get all keys in status index sets
     # KeyField index pattern: $KeyF:AgentSession:status:{value}
     indexed_keys: set[bytes] = set()
-    for status in ["pending", "running", "completed", "failed"]:
+    for status in ["pending", "running", "completed", "failed", "waiting_for_children"]:
         index_key = DB_key(
             AgentSession._meta.fields["status"].get_special_use_field_db_key(
                 AgentSession, "status"
@@ -715,6 +879,80 @@ async def _job_health_check() -> None:
     )
 
 
+async def _job_hierarchy_health_check() -> None:
+    """Check for orphaned children and stuck parents in job hierarchy.
+
+    1. Orphaned children: child's parent_job_id points to a non-existent session.
+       Action: clear the parent_job_id field (child completes normally).
+    2. Stuck parents: status is waiting_for_children but all children are terminal.
+       Action: finalize the parent (transition to completed/failed).
+    """
+    orphans_fixed = 0
+    stuck_fixed = 0
+
+    # Check for orphaned children
+    try:
+        all_sessions = list(AgentSession.query.all())
+        children_with_parent = [s for s in all_sessions if s.parent_job_id]
+        parent_ids = {s.job_id for s in all_sessions}
+
+        for child in children_with_parent:
+            if child.parent_job_id not in parent_ids:
+                logger.warning(
+                    "[job-health] Orphaned child %s: parent %s no longer exists — "
+                    "clearing parent_job_id",
+                    child.job_id,
+                    child.parent_job_id,
+                )
+                # Use delete-and-recreate to safely clear the KeyField
+                fields = _extract_job_fields(child)
+                child.delete()
+                fields["parent_job_id"] = None
+                AgentSession.create(**fields)
+                orphans_fixed += 1
+    except Exception as e:
+        logger.error("[job-health] Orphan detection failed: %s", e, exc_info=True)
+
+    # Check for stuck parents
+    try:
+        waiting_parents = list(AgentSession.query.filter(status="waiting_for_children"))
+        for parent in waiting_parents:
+            children = parent.get_children()
+            if not children:
+                # No children but waiting — auto-complete
+                logger.warning(
+                    "[job-health] Stuck parent %s has no children — auto-completing",
+                    parent.job_id,
+                )
+                _transition_parent(parent, "completed")
+                stuck_fixed += 1
+                continue
+
+            terminal_statuses = {"completed", "failed"}
+            non_terminal = [c for c in children if c.status not in terminal_statuses]
+            if not non_terminal:
+                # All children terminal but parent still waiting
+                any_failed = any(c.status == "failed" for c in children)
+                new_status = "failed" if any_failed else "completed"
+                logger.warning(
+                    "[job-health] Stuck parent %s: all %d children terminal — finalizing as %s",
+                    parent.job_id,
+                    len(children),
+                    new_status,
+                )
+                _transition_parent(parent, new_status)
+                stuck_fixed += 1
+    except Exception as e:
+        logger.error("[job-health] Stuck parent detection failed: %s", e, exc_info=True)
+
+    if orphans_fixed or stuck_fixed:
+        logger.info(
+            "[job-health] Hierarchy check: %d orphan(s) fixed, %d stuck parent(s) fixed",
+            orphans_fixed,
+            stuck_fixed,
+        )
+
+
 async def _job_health_loop() -> None:
     """Periodically check running jobs for liveness and timeout."""
     logger.info(
@@ -724,6 +962,7 @@ async def _job_health_loop() -> None:
     while True:
         try:
             await _job_health_check()
+            await _job_hierarchy_health_check()
         except Exception as e:
             logger.error("[job-health] Error in health check: %s", e, exc_info=True)
         await asyncio.sleep(JOB_HEALTH_CHECK_INTERVAL)
@@ -872,6 +1111,7 @@ async def enqueue_job(
     correlation_id: str | None = None,
     scheduled_after: float | None = None,
     scheduling_depth: int = 0,
+    parent_job_id: str | None = None,
     trigger_message_id: str | None = None,
 ) -> int:
     """
@@ -908,6 +1148,7 @@ async def enqueue_job(
         correlation_id=correlation_id,
         scheduled_after=scheduled_after,
         scheduling_depth=scheduling_depth,
+        parent_job_id=parent_job_id,
         trigger_message_id=trigger_message_id,
     )
     _ensure_worker(project_key)
@@ -950,12 +1191,14 @@ async def _worker_loop(project_key: str) -> None:
                     break
                 logger.info(f"[{project_key}] Drain guard caught job that would have been lost")
 
+            job_failed = False
             try:
                 await _execute_job(job)
             except Exception as e:
                 logger.error(f"[{project_key}] Job {job.job_id} failed: {e}")
+                job_failed = True
             finally:
-                await _complete_job(job)
+                await _complete_job(job, failed=job_failed)
 
             # Check restart flag after each completed job
             if _check_restart_flag():
@@ -1489,6 +1732,7 @@ async def _execute_job(job: Job) -> None:
             job.workflow_id,
             task_list_id,
             cid,
+            job.job_id,
         )
 
     task = BackgroundTask(messenger=messenger)

@@ -73,6 +73,37 @@ Priority ranking constant: `PRIORITY_RANK = {"urgent": 0, "high": 1, "normal": 2
 
 The agent can enqueue jobs mid-conversation via `tools/job_scheduler.py`. See [Job Scheduling](job-scheduling.md) for details.
 
+## Parent-Child Job Hierarchy
+
+Jobs support parent-child decomposition via the `parent_job_id` field on `AgentSession`.
+
+### New Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `parent_job_id` | `KeyField(null=True)` | Links child to parent job. Indexed for efficient queries. |
+
+### New Status Value
+
+| Status | Description |
+|--------|-------------|
+| `waiting_for_children` | Parent has spawned children and is waiting for them to complete |
+
+### Completion Propagation
+
+When a child job completes, `_complete_job()` calls `_finalize_parent()` **before** deleting the child from Redis. The completing child's intended terminal status is passed as a parameter (since its Redis status is still "running" at that point). `_finalize_parent()` queries all siblings and uses the override status for the completing child. When all siblings are terminal (`completed` or `failed`), the parent transitions to `completed` (all succeeded) or `failed` (any failed). Only after finalization does `_complete_job()` delete the child.
+
+The transition uses the same delete-and-recreate pattern as `_pop_job()` to avoid KeyField index corruption.
+
+### Health Monitor Extensions
+
+The periodic health check (`_job_hierarchy_health_check()`) detects and self-heals:
+
+- **Orphaned children**: `parent_job_id` points to non-existent session -- cleared
+- **Stuck parents**: `waiting_for_children` with all children terminal -- auto-finalized
+
+See [Job Scheduling](job-scheduling.md) for usage details and CLI commands.
+
 ## See Also
 
 - `docs/features/scale-job-queue-with-popoto-and-worktrees.md` -- Original job queue architecture
