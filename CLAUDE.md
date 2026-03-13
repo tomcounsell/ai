@@ -47,6 +47,9 @@ gws sheets spreadsheets values get --params '{"spreadsheetId": "ID", "range": "S
 | `python scripts/reflections.py --ignore "pattern"` | Silence a bug pattern for 14 days |
 | `./scripts/install_reflections.sh` | Install reflections launchd schedule |
 | `tail -f logs/reflections.log` | Stream reflections logs |
+| `python scripts/issue_poller.py` | Run issue poller manually (polls GitHub for new issues) |
+| `./scripts/install_issue_poller.sh` | Install issue poller launchd schedule (5-min interval) |
+| `tail -f logs/issue_poller.log` | Stream issue poller logs |
 
 ## Development Principles
 
