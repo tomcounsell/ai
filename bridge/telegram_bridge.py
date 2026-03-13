@@ -573,6 +573,8 @@ async def main():
         sender_id = getattr(sender, "id", None)
 
         # Store ALL incoming messages for history (regardless of whether we respond)
+        _early_project_key = project.get("_key", "dm") if project else "dm"
+        stored_msg_id = None  # Track for trigger_message_id cross-reference
         try:
             store_result = store_message(
                 chat_id=str(event.chat_id),
@@ -581,8 +583,13 @@ async def main():
                 message_id=message.id,
                 timestamp=message.date,
                 message_type=("text" if not message.media else get_media_type(message) or "media"),
+                project_key=_early_project_key,
+                has_media=bool(message.media),
+                media_type=get_media_type(message) if message.media else None,
+                reply_to_msg_id=message.reply_to_msg_id,
             )
             if store_result.get("stored"):
+                stored_msg_id = store_result.get("id")
                 logger.debug(f"Stored message {message.id} from {sender_name}")
                 # Register chat mapping for CLI lookup
                 if chat_title:
@@ -591,6 +598,7 @@ async def main():
                         chat_id=str(event.chat_id),
                         chat_name=chat_title,
                         chat_type=chat_type,
+                        project_key=_early_project_key,
                     )
             elif store_result.get("error"):
                 logger.warning(f"Failed to store message: {store_result['error']}")
@@ -608,6 +616,7 @@ async def main():
                         chat_id=str(event.chat_id),
                         message_id=message.id,
                         timestamp=message.date,
+                        project_key=_early_project_key,
                     )
                     if link_result.get("stored"):
                         logger.info(f"Stored link from {sender_name}: {url[:50]}...")
@@ -1111,6 +1120,23 @@ async def main():
             yt_urls_json = json.dumps(youtube_urls) if youtube_urls else None
             non_yt_urls_json = json.dumps(non_youtube_urls) if non_youtube_urls else None
 
+            # Update TelegramMessage with URL/classification metadata
+            # (has_media, media_type, reply_to_msg_id were set at store_message time)
+            if stored_msg_id and (yt_urls_json or non_yt_urls_json):
+                try:
+                    from models.telegram import TelegramMessage
+
+                    stored_msgs = list(TelegramMessage.query.filter(msg_id=stored_msg_id))
+                    if stored_msgs:
+                        tm = stored_msgs[0]
+                        if yt_urls_json:
+                            tm.youtube_urls = yt_urls_json
+                        if non_yt_urls_json:
+                            tm.non_youtube_urls = non_yt_urls_json
+                        tm.save()
+                except Exception as e:
+                    logger.debug(f"Failed to update TelegramMessage with URL metadata: {e}")
+
             # Generate correlation ID for end-to-end request tracing
             correlation_id = uuid.uuid4().hex[:12]
             logger.info(
@@ -1163,6 +1189,7 @@ async def main():
                 chat_id_for_enrichment=telegram_chat_id,
                 classification_type=classification_result.get("type"),
                 correlation_id=correlation_id,
+                trigger_message_id=stored_msg_id,
             )
             if depth > 1:
                 from bridge.markdown import send_markdown

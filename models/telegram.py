@@ -1,4 +1,8 @@
-"""TelegramMessage model - source of truth for Telegram message traffic."""
+"""TelegramMessage model - source of truth for Telegram message traffic.
+
+Stores all message metadata including media, URL, and classification data.
+Cross-references AgentSession via agent_session_id for lifecycle tracking.
+"""
 
 import time
 
@@ -12,6 +16,10 @@ class TelegramMessage(Model):
 
     Replaces the SQLite messages table. SortedField on timestamp partitioned
     by chat_id enables efficient time-range queries per chat via ZRANGEBYSCORE.
+
+    Carries all message metadata (media, URLs, classification) that was
+    previously stored on AgentSession. AgentSession now references this
+    model via trigger_message_id.
     """
 
     msg_id = AutoKeyField()
@@ -23,6 +31,21 @@ class TelegramMessage(Model):
     timestamp = SortedField(type=float, partition_by="chat_id")
     message_type = KeyField(default="text")  # text, media, response, acknowledgment
     session_id = Field(null=True)
+
+    # === Project association ===
+    project_key = KeyField(null=True)
+
+    # === Media and enrichment metadata ===
+    has_media = Field(type=bool, default=False)
+    media_type = Field(null=True)
+    youtube_urls = Field(null=True)  # JSON-encoded list of (url, video_id) tuples
+    non_youtube_urls = Field(null=True)  # JSON-encoded list of URL strings
+    reply_to_msg_id = Field(type=int, null=True)
+    classification_type = Field(null=True)
+    classification_confidence = Field(type=float, null=True)
+
+    # === Cross-reference to AgentSession ===
+    agent_session_id = Field(null=True)  # job_id of the AgentSession that processed this message
 
     @classmethod
     def cleanup_expired(cls, max_age_days: int = 90) -> int:

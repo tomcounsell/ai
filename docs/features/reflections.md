@@ -49,7 +49,7 @@ reflections:
 | `health-check` | 5 min | high | function | Check running jobs for liveness, recover stuck ones |
 | `orphan-recovery` | 30 min | normal | function | Recover stranded AgentSession objects |
 | `stale-branch-cleanup` | daily | low | function | Clean up session branches older than 72 hours |
-| `daily-maintenance` | daily | low | function | Full 15-step maintenance pipeline |
+| `daily-maintenance` | daily | low | function | Full 16-step maintenance pipeline |
 
 ### State Model (`models/reflection.py`)
 
@@ -77,11 +77,11 @@ Reflection status is available via `ReflectionScheduler.format_status()`, showin
 
 The bridge watchdog (`com.valor.bridge-watchdog`) is intentionally NOT in the reflection registry. It must run as an external launchd service because it monitors the bridge process itself -- running it inside the process it monitors defeats its purpose.
 
-## Daily Maintenance Pipeline (15-Step)
+## Daily Maintenance Pipeline (16-Step)
 
 The `daily-maintenance` reflection runs the full pipeline from `scripts/reflections.py`. The runner loads state from Redis, executes each step in order, and checkpoints after every step. If interrupted, the next run resumes from where it left off. Each step is independently failable — a crash in one step does not block the rest.
 
-### 15-Step Pipeline
+### 16-Step Pipeline
 
 | Step | Name | Description | Scope | Failure Mode |
 |------|------|-------------|-------|--------------|
@@ -99,6 +99,8 @@ The `daily-maintenance` reflection runs the full pipeline from `scripts/reflecti
 | 12 | Redis TTL Cleanup | Prunes expired records across all Redis models | AI repo only | Non-blocking |
 | 13 | Redis Data Quality | Surfaces data quality issues: unsummarized links, dead channels, error patterns | AI repo only | Non-blocking |
 | 14 | Branch and Plan Cleanup | Deletes merged branches; ensures plans have open issues; flags completed plans for docs migration | AI repo only | Non-blocking, requires `gh` auth |
+| 15 | Feature Docs Audit | Checks for stale references, README accuracy, plan-masquerading-as-feature, stub docs | AI repo only | Non-blocking |
+| 16 | Disk Space Check | Checks free disk space on project volume; finding if below 10 GB (see [Adding Reflection Tasks](adding-reflection-tasks.md)) | AI repo only | Non-blocking |
 
 ## State & Persistence
 
@@ -111,7 +113,7 @@ One record per calendar date. Acts as the primary state checkpoint for resumabil
 | Field | Type | Purpose |
 |-------|------|---------|
 | `date` | UniqueKeyField | YYYY-MM-DD, one run per day |
-| `current_step` | IntField | Next step to execute (1-14) |
+| `current_step` | IntField | Next step to execute (1-16) |
 | `completed_steps` | ListField | Steps already finished, e.g. `[1, 2, 3]` |
 | `daily_report` | ListField | Human-readable log lines per step |
 | `findings` | DictField | `{category: [finding_strings]}` |

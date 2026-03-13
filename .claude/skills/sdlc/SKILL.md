@@ -28,16 +28,26 @@ fi
 
 **CRITICAL**: Always use `$REPO_FLAG` with every `gh` command below. Without it, cross-project SDLC work silently resolves issues and PRs against the wrong repository.
 
-## Step 1: Resolve the Issue
+## Step 1: Resolve the Issue or PR
 
-If an issue number was provided, fetch it:
+Determine whether the input is an issue reference or a PR reference:
+
+- **Issue reference** (e.g., `issue 123`, `issue #123`): Fetch with `gh issue view {number} $REPO_FLAG`
+- **PR reference** (e.g., `PR 363`, `pr #363`): Fetch with `gh pr view {number} $REPO_FLAG` to get the branch name, review state, and check status. Then extract the linked issue number from the PR body (look for `Closes #N` or `Fixes #N`).
+
 ```bash
+# For issue references:
 gh issue view {number} $REPO_FLAG
+
+# For PR references — get structured state for assessment:
+gh pr view {number} $REPO_FLAG --json number,title,state,headRefName,reviewDecision,statusCheckRollup,body
 ```
 
-After fetching, **verify the issue belongs to the target project**: check that the issue URL contains the expected org/repo. If it resolves to a different repo, you have a cross-repo mismatch -- stop and report the error.
+After fetching, **verify the reference belongs to the target project**: check that the URL contains the expected org/repo. If it resolves to a different repo, you have a cross-repo mismatch -- stop and report the error.
 
-If NO issue number was provided (just a feature description), invoke `/do-issue` to create a quality issue. Do not proceed without an issue number.
+**PR state informs Step 2 assessment**: When a PR is provided, its current state (checks passing/failing, review approved/changes-requested, etc.) tells you which pipeline stage to resume from. Skip stages that are already complete -- do not restart from scratch.
+
+If NO issue or PR number was provided (just a feature description), invoke `/do-issue` to create a quality issue. Do not proceed without an issue number.
 
 ## Step 2: Assess Current State
 

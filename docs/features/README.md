@@ -6,6 +6,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 
 | Feature | Description | Status |
 |---------|-------------|--------|
+| [Adding Reflection Tasks](adding-reflection-tasks.md) | Developer guide with copy-paste template for adding new reflection steps | Shipped |
 | [Agent Session Model](agent-session-model.md) | Unified lifecycle model merging RedisJob + SessionLog for agent work tracking | Shipped |
 | [Bridge Message Query](bridge-message-query.md) | CLI tool to fetch Telegram message history via file-based IPC with running bridge | Shipped |
 | [Bridge Module Architecture](bridge-module-architecture.md) | Sub-module organization of the Telegram bridge for maintainability | Shipped |
@@ -43,9 +44,11 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Observer Agent](observer-agent.md) | Stage-aware SDLC steerer replacing classifier/coach/routing chain with unified Sonnet agent | Shipped |
 | [Operational Logging](operational-logging.md) | Consistent INFO-level prefix-tagged logging at every decision point for end-to-end message tracing | Shipped |
 | [Plan Prerequisites Validation](plan-prerequisites.md) | Declare and validate environment requirements before plan execution | Shipped |
+| [PM Channels](pm-channels.md) | Project manager mode routing Telegram groups to work-vault folders with SDLC bypass | Shipped |
 | [Popoto Redis Expansion](popoto-redis-expansion.md) | Migration from JSONL/JSON file state to Redis for atomicity and queries | Shipped |
 | [Race Condition Analysis](race-condition-analysis.md) | Structured concurrency analysis section in plan template with soft validator for async code | Shipped |
 | [Reaction Semantics](reaction-semantics.md) | Emoji reaction protocol for message delivery feedback and silent loss prevention | Shipped |
+| [Redis Model Relationships](redis-models.md) | Cross-references between Popoto models, project_key on all models, enrichment metadata ownership on TelegramMessage | Shipped |
 | [Reflections](reflections.md) | Unified reflection scheduler with declarative YAML registry, Redis state tracking, skip-if-running guard; subsumes health check, orphan recovery, branch cleanup, and 15-step daily maintenance | Shipped |
 | [Remote Update](remote-update.md) | Telegram command and cron for remote system updates across machines | Shipped |
 | [Review Workflow Screenshots](review-workflow-screenshots.md) | Screenshot capture during review for visual validation | Shipped |
@@ -71,6 +74,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Task List Isolation Experiment](task-list-isolation.md) | Experiment results validating CLAUDE_CODE_TASK_LIST_ID behavior | Archived |
 | [Telegram History & Links](telegram-history.md) | Searchable message history and link compilation from Telegram | Shipped |
 | [Telegram Messaging](telegram-messaging.md) | Unified interface for reading and sending Telegram messages via `valor-telegram` CLI | Shipped |
+| [Telegram PM Guide](telegram-pm-guide.md) | PM-facing guide for Telegram interaction patterns, session resumption, and pipeline signals | Shipped |
 | [Test Baseline Verification](test-baseline-verification.md) | Verified classification of test failures as regressions vs pre-existing by running failing tests against main | Shipped |
 | [Test Coverage Standards](test-coverage-standards.md) | Standards and tooling for preventing silent failure classes: exception swallowing, empty output loops, coupled tests, missing error rendering, silent builds | Shipped |
 | [Trace & Verify Protocol](trace-and-verify.md) | Data-driven root cause analysis replacing narrative-only 5 Whys with forward verification | Shipped |
