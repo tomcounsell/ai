@@ -8,7 +8,7 @@ import json
 
 import pytest
 
-from bridge.observer import Observer
+from bridge.observer import Observer, _next_sdlc_skill
 from bridge.stage_detector import STAGE_ORDER, apply_transitions, detect_stages
 from config.models import HAIKU
 from models.agent_session import SDLC_STAGES
@@ -1272,3 +1272,97 @@ class TestObserverSdlcSteering:
         assert decision.get("deterministic_guard") is True, (
             "Decision should be marked as deterministic_guard"
         )
+
+
+# ============================================================================
+# _next_sdlc_skill PR Guard Tests
+# ============================================================================
+
+
+class TestNextSdlcSkillPrGuard:
+    """Test that _next_sdlc_skill routes to BUILD when REVIEW is next but no PR exists."""
+
+    def _make_session(self, stage_progress, pr_url=None):
+        """Create a minimal mock session."""
+
+        class MockSession:
+            pass
+
+        session = MockSession()
+        session.pr_url = pr_url
+        session._stage_progress = stage_progress
+
+        def get_stage_progress():
+            return dict(session._stage_progress)
+
+        session.get_stage_progress = get_stage_progress
+        return session
+
+    def test_review_pending_no_pr_routes_to_build(self):
+        """When REVIEW is pending and no pr_url, route to BUILD."""
+        session = self._make_session(
+            stage_progress={
+                "ISSUE": "completed",
+                "PLAN": "completed",
+                "BUILD": "completed",
+                "TEST": "completed",
+                "REVIEW": "pending",
+                "DOCS": "pending",
+            },
+            pr_url=None,
+        )
+        stage, skill = _next_sdlc_skill(session)
+        assert stage == "BUILD", f"Expected BUILD, got {stage}"
+        assert skill == "/do-build"
+
+    def test_review_pending_with_pr_routes_to_review(self):
+        """When REVIEW is pending and pr_url exists, route to REVIEW."""
+        session = self._make_session(
+            stage_progress={
+                "ISSUE": "completed",
+                "PLAN": "completed",
+                "BUILD": "completed",
+                "TEST": "completed",
+                "REVIEW": "pending",
+                "DOCS": "pending",
+            },
+            pr_url="https://github.com/tomcounsell/ai/pull/42",
+        )
+        stage, skill = _next_sdlc_skill(session)
+        assert stage == "REVIEW", f"Expected REVIEW, got {stage}"
+        assert skill == "/do-pr-review"
+
+    def test_review_in_progress_no_pr_continues_review(self):
+        """When REVIEW is already in_progress, continue even without pr_url.
+        The worker is mid-review — don't redirect."""
+        session = self._make_session(
+            stage_progress={
+                "ISSUE": "completed",
+                "PLAN": "completed",
+                "BUILD": "completed",
+                "TEST": "completed",
+                "REVIEW": "in_progress",
+                "DOCS": "pending",
+            },
+            pr_url=None,
+        )
+        stage, skill = _next_sdlc_skill(session)
+        assert stage == "REVIEW", f"Expected REVIEW, got {stage}"
+        assert skill == "/do-pr-review"
+
+    def test_non_review_stage_unaffected(self):
+        """Guard only applies to REVIEW stage — other stages unaffected."""
+        session = self._make_session(
+            stage_progress={
+                "ISSUE": "completed",
+                "PLAN": "completed",
+                "BUILD": "pending",
+                "TEST": "pending",
+                "REVIEW": "pending",
+                "DOCS": "pending",
+            },
+            pr_url=None,
+        )
+        stage, skill = _next_sdlc_skill(session)
+        assert stage == "BUILD", f"Expected BUILD, got {stage}"
+        assert skill == "/do-build"

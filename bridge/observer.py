@@ -239,6 +239,16 @@ def _next_sdlc_skill(session) -> tuple[str, str] | None:
     for stage in STAGE_ORDER:
         status = progress.get(stage, "pending")
         if status in ("pending", "in_progress"):
+            # Guard: REVIEW requires a PR to exist. If REVIEW is pending
+            # (not yet started) and no PR URL is tracked, route back to
+            # BUILD which handles PR creation. If REVIEW is already
+            # in_progress, the worker is mid-review — let it continue.
+            if stage == "REVIEW" and status == "pending" and not getattr(session, "pr_url", None):
+                logger.info(
+                    "SDLC routing: REVIEW is next but no pr_url on session — "
+                    "routing to BUILD to create PR first"
+                )
+                return ("BUILD", "/do-build")
             skill = _STAGE_TO_SKILL.get(stage, f"/do-{stage.lower()}")
             return (stage, skill)
     return None
