@@ -60,7 +60,7 @@ class WorkflowState:
             workflow_id: Unique 8-character workflow identifier
         """
         self.workflow_id = workflow_id
-        self.state_dir = Path(f"/Users/valorengels/src/ai/agents/{workflow_id}")
+        self.state_dir = Path(__file__).parent.parent / "agents" / workflow_id
         self.state_file = self.state_dir / "state.json"
         self._data: WorkflowStateData | None = None
 
@@ -94,7 +94,7 @@ class WorkflowState:
             # Update existing state
             update_dict = self._data.model_dump()
             update_dict.update(kwargs)
-            update_dict["updated_at"] = datetime.utcnow()
+            update_dict["updated_at"] = datetime.now(tz=None)
             self._data = WorkflowStateData(**update_dict)
 
     def save(self, phase: str | None = None) -> None:
