@@ -328,7 +328,7 @@ The reflection scheduler starts automatically as part of the bridge worker loop.
 | Registry | `config/reflections.yaml` |
 | State | Redis via `models/reflection.py` |
 | Tick interval | 60 seconds |
-| Legacy plist | `com.valor.reflections.plist` (kept during migration period) |
+| Legacy plist | `com.valor.reflections.plist` (deprecated, bridge scheduler replaces it) |
 
 ### Adding a New Reflection
 

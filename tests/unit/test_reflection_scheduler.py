@@ -398,6 +398,26 @@ class TestReflectionScheduler:
             enqueued = await scheduler.tick()
             assert enqueued == 0
 
+    @pytest.mark.asyncio
+    async def test_skip_running_preserves_running_status(self):
+        """Skipping a running reflection must NOT overwrite last_status.
+
+        Regression test: mark_skipped() was changing last_status from 'running'
+        to 'skipped', which defeated the skip-if-running guard on the next tick.
+        """
+        scheduler = ReflectionScheduler()
+        scheduler.load()
+
+        with patch("agent.reflection_scheduler.Reflection") as mock_reflection:
+            mock_state = MagicMock()
+            mock_state.last_run = time.time() - 10
+            mock_state.last_status = "running"
+            mock_reflection.get_or_create.return_value = mock_state
+
+            await scheduler.tick()
+            # mark_skipped must NOT be called - it would overwrite "running" status
+            mock_state.mark_skipped.assert_not_called()
+
 
 # === Registry File Integrity Tests ===
 

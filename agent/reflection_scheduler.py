@@ -199,7 +199,7 @@ async def execute_function_reflection(entry: ReflectionEntry) -> None:
         await func()
     else:
         # Run sync functions in a thread to avoid blocking the event loop
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, func)
 
 
@@ -262,7 +262,7 @@ async def _enqueue_agent_reflection(entry: ReflectionEntry) -> None:
     project_root = Path(__file__).parent.parent
 
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(
             None,
             lambda: subprocess.run(
@@ -327,7 +327,6 @@ class ReflectionScheduler:
                         state.save()
                     else:
                         logger.debug("[reflection] Skipping %s: already running", entry.name)
-                        state.mark_skipped("already running")
                         continue
 
                 # Check if due
