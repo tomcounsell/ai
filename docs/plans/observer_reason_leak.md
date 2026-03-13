@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor
@@ -71,13 +71,11 @@ Worker stops -> Observer decides "deliver" -> Message quality check -> If useful
 
 ### Technical Approach
 
-1. **Add a `message_for_user` field to the `deliver_to_telegram` tool**: Allow the observer to optionally craft a user-facing message when it detects the worker output is not useful. This gives the observer agency to improve what the user sees.
+1. **Add a `message_for_user` field to the `deliver_to_telegram` tool**: The observer always curates user-facing text through this field. When delivering, `message_for_user` is what gets sent — not the raw worker output. The field is optional in the schema because the observer may choose to react with an emoji instead of sending text (e.g., for simple completed tasks).
 
-2. **Add a message quality heuristic in `job_queue.py`**: Before sending `msg` to Telegram on the delivery path (line 1640), check if the message is useful:
-   - If `msg` is only meta-commentary (e.g., starts with "Let me check", "I'll look at", "I need to"), and the observer provided a `message_for_user`, use that instead.
-   - If `msg` is empty/whitespace-only, use a fallback like "I've completed the work but don't have a summary to share. Check the PR/issue for details."
+2. **Delivery path uses `message_for_user` as primary**: In `agent/job_queue.py`, when the observer returns `deliver` with `message_for_user`, send that instead of raw `msg`. If `message_for_user` is absent and `msg` is garbage/empty, fall back to stage pipeline (let observer steer to next SDLC stage) or prompt the worker to continue — let the observer discern based on context.
 
-3. **Audit the auto-continue cap path** (line 1572-1580): When the cap forces delivery, the `msg` may be low quality. Apply the same quality filter here.
+3. **Audit the auto-continue cap path** (line 1572-1580): When the cap forces delivery, the `msg` may be low quality. Apply the same logic: prefer `message_for_user` if available, otherwise let the observer decide whether to steer or prompt the worker.
 
 ## Failure Path Test Strategy
 
@@ -136,7 +134,7 @@ No agent integration required -- this is a bridge-internal change affecting `age
 ## Success Criteria
 
 - [ ] Observer's `reason` string never appears in Telegram messages (verified by test)
-- [ ] When worker output is empty/garbage, a meaningful fallback is sent instead
+- [ ] When worker output is empty/garbage, observer either steers to next stage or prompts worker to continue
 - [ ] The `deliver_to_telegram` tool accepts an optional `message_for_user` field
 - [ ] Auto-continue cap path applies the same message quality filter
 - [ ] Existing observer tests still pass
@@ -233,8 +231,8 @@ No agent integration required -- this is a bridge-internal change affecting `age
 
 ---
 
-## Open Questions
+## Open Questions (Resolved)
 
-1. **Should the observer always provide `message_for_user`?** The current design makes it optional -- the observer only provides it when it detects the worker output is garbage. Should it be required instead, so the observer always curates what the user sees?
+1. **Should the observer always provide `message_for_user`?** Yes — the observer always curates what the user sees via `message_for_user`. It remains optional in the schema because the observer doesn't always need to send a message (e.g., for simple completed tasks, a done emoji reaction suffices). But when delivering text, the observer always crafts the user-facing message. Note: in issue #395, the PM persona will take over this curation role.
 
-2. **What should the fallback message say when worker output is empty?** Options: (a) "Work completed. Check the PR/issue for details." (b) A summary of what stage the pipeline is at. (c) Suppress delivery entirely and just set a reaction emoji.
+2. **What should the fallback for empty worker output?** Fall back to the stage pipeline (let the observer steer to the next SDLC stage). If the context suggests the worker should have responded to the user, the observer should prompt the worker to continue or produce a real message. Let the observer discern based on context — no rigid rule.
