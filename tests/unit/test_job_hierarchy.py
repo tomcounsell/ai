@@ -156,7 +156,9 @@ class TestFinalizeParent:
         """_transition_parent transitions parent to completed."""
         from agent.job_queue import _transition_parent
 
+        child1 = self._make_session(job_id="c1", parent_job_id="p1")
         parent = self._make_session(job_id="p1", status="waiting_for_children")
+        parent.get_children.return_value = [child1]
         mock_extract.return_value = {"status": "waiting_for_children", "completed_at": None}
         new_parent = MagicMock()
         new_parent.job_id = "p1-new"
@@ -168,6 +170,9 @@ class TestFinalizeParent:
         call_kwargs = mock_model.create.call_args[1]
         assert call_kwargs["status"] == "completed"
         assert call_kwargs["completed_at"] is not None
+        # Children should be updated to point to the new parent job_id
+        assert child1.parent_job_id == "p1-new"
+        child1.save.assert_called_once()
 
     @patch("agent.job_queue.AgentSession")
     @patch("agent.job_queue._extract_job_fields")
@@ -176,14 +181,35 @@ class TestFinalizeParent:
         from agent.job_queue import _transition_parent
 
         parent = self._make_session(job_id="p1", status="waiting_for_children")
+        parent.get_children.return_value = []
         mock_extract.return_value = {"status": "waiting_for_children", "completed_at": None}
         new_parent = MagicMock()
+        new_parent.job_id = "p1-new"
         mock_model.create.return_value = new_parent
 
         _transition_parent(parent, "failed")
 
         call_kwargs = mock_model.create.call_args[1]
         assert call_kwargs["status"] == "failed"
+
+    @patch("agent.job_queue.AgentSession")
+    @patch("agent.job_queue._extract_job_fields")
+    def test_transition_parent_waiting_no_completed_at(self, mock_extract, mock_model):
+        """_transition_parent does not set completed_at for non-terminal status."""
+        from agent.job_queue import _transition_parent
+
+        parent = self._make_session(job_id="p1", status="running")
+        parent.get_children.return_value = []
+        mock_extract.return_value = {"status": "running", "completed_at": None}
+        new_parent = MagicMock()
+        new_parent.job_id = "p1-new"
+        mock_model.create.return_value = new_parent
+
+        _transition_parent(parent, "waiting_for_children")
+
+        call_kwargs = mock_model.create.call_args[1]
+        assert call_kwargs["status"] == "waiting_for_children"
+        assert call_kwargs["completed_at"] is None
 
     @patch("agent.job_queue._transition_parent")
     @patch("agent.job_queue.AgentSession")

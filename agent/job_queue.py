@@ -539,11 +539,12 @@ def _transition_parent(parent: AgentSession, new_status: str) -> None:
     """Transition a parent job to a new status using delete-and-recreate.
 
     Uses the same pattern as _pop_job() to avoid KeyField index corruption.
-    Note: workers are per-project and sequential, so concurrent finalization
-    of the same parent is not possible. If that invariant changes, the new
-    job_id from delete-and-recreate would need to be propagated to children's
-    parent_job_id references.
+    After creating the new parent, updates all children's parent_job_id
+    references to point to the new job_id (since delete-and-recreate
+    generates a new job_id).
     """
+    old_job_id = parent.job_id
+    children = parent.get_children()
     fields = _extract_job_fields(parent)
     parent.delete()
     fields["status"] = new_status
@@ -551,9 +552,20 @@ def _transition_parent(parent: AgentSession, new_status: str) -> None:
     if new_status in ("completed", "failed"):
         fields["completed_at"] = time.time()
     new_parent = AgentSession.create(**fields)
-    logger.info(
-        f"[job-hierarchy] Parent {parent.job_id} -> {new_parent.job_id} (status={new_status})"
-    )
+
+    # Update children's parent_job_id to point to the new parent
+    if new_parent.job_id != old_job_id and children:
+        for child in children:
+            try:
+                child.parent_job_id = new_parent.job_id
+                child.save()
+            except Exception as e:
+                logger.warning(
+                    f"[job-hierarchy] Failed to update child {child.job_id} "
+                    f"parent_job_id to {new_parent.job_id}: {e}"
+                )
+
+    logger.info(f"[job-hierarchy] Parent {old_job_id} -> {new_parent.job_id} (status={new_status})")
 
 
 def _get_pending_jobs_sync(project_key: str) -> list[AgentSession]:
@@ -649,7 +661,7 @@ def _recover_orphaned_jobs(project_key: str) -> int:
     # Get all keys in status index sets
     # KeyField index pattern: $KeyF:AgentSession:status:{value}
     indexed_keys: set[bytes] = set()
-    for status in ["pending", "running", "completed", "failed"]:
+    for status in ["pending", "running", "completed", "failed", "waiting_for_children"]:
         index_key = DB_key(
             AgentSession._meta.fields["status"].get_special_use_field_db_key(
                 AgentSession, "status"
