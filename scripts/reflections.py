@@ -441,6 +441,24 @@ def extract_errors_from_redis(target_date: str) -> list[dict[str, str]]:
     return errors
 
 
+def _get_principal_priorities_for_report() -> str:
+    """Load condensed principal context for inclusion in the daily report.
+
+    Provides strategic context (mission, goals, active projects) so the
+    report can be read in the context of the principal's priorities.
+
+    Returns:
+        Condensed principal context string, or empty string if unavailable.
+    """
+    try:
+        from agent.sdk_client import load_principal_context
+
+        return load_principal_context(condensed=True)
+    except Exception as e:
+        logger.warning(f"Could not load principal context for report: {e}")
+        return ""
+
+
 class ReflectionRunner:
     """Runs the reflections maintenance process.
 
@@ -788,6 +806,14 @@ class ReflectionRunner:
             f"- Started: {self.state.step_started_at or 'N/A'}",
             "",
         ]
+
+        # Include principal strategic priorities for context
+        principal_priorities = _get_principal_priorities_for_report()
+        if principal_priorities:
+            report_lines.append("## Principal Strategic Priorities")
+            report_lines.append("")
+            report_lines.append(principal_priorities)
+            report_lines.append("")
 
         # Add findings by category
         for category, cat_findings in self.state.findings.items():

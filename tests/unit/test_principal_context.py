@@ -12,8 +12,6 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from agent.sdk_client import load_principal_context, load_system_prompt
@@ -151,7 +149,9 @@ def test_load_principal_context_condensed_token_budget():
         with patcher:
             result = load_principal_context(condensed=True)
             # 500 tokens is roughly 2000 characters
-            assert len(result) < 4000, f"Condensed principal context is too long: {len(result)} chars"
+            assert len(result) < 4000, (
+                f"Condensed principal context is too long: {len(result)} chars"
+            )
     finally:
         os.unlink(tmp_path)
 
@@ -233,3 +233,130 @@ def test_observer_prompt_builder_graceful_without_principal():
         assert "Observer Agent" in prompt
         assert "STEER" in prompt
         assert "DELIVER" in prompt
+
+
+# --- Intake classifier (bridge/routing.py) ---
+
+
+def test_get_principal_priorities_for_classification_returns_string():
+    """Helper returns condensed principal context for classification prompts."""
+    patcher, tmp_path = _mock_principal_path(SAMPLE_PRINCIPAL)
+    try:
+        with patcher:
+            from bridge.routing import _get_principal_priorities_for_classification
+
+            result = _get_principal_priorities_for_classification()
+            assert isinstance(result, str)
+            assert len(result) > 0
+            assert "Mission" in result
+    finally:
+        os.unlink(tmp_path)
+
+
+def test_get_principal_priorities_graceful_without_file():
+    """Helper returns empty string when PRINCIPAL.md is missing."""
+    with patch("agent.sdk_client.PRINCIPAL_PATH", Path("/nonexistent/PRINCIPAL.md")):
+        from bridge.routing import _get_principal_priorities_for_classification
+
+        result = _get_principal_priorities_for_classification()
+        assert result == ""
+
+
+def test_classify_work_request_llm_prompt_includes_priorities():
+    """The LLM classification prompt should include principal priorities when available."""
+    patcher, tmp_path = _mock_principal_path(SAMPLE_PRINCIPAL)
+    try:
+        with patcher:
+            from bridge.routing import _build_classification_prompt
+
+            prompt = _build_classification_prompt("fix the login bug")
+            assert "Principal" in prompt or "priorities" in prompt.lower()
+            assert "fix the login bug" in prompt
+    finally:
+        os.unlink(tmp_path)
+
+
+def test_classify_work_request_llm_prompt_works_without_principal():
+    """Classification prompt works fine when principal context is missing."""
+    with patch("agent.sdk_client.PRINCIPAL_PATH", Path("/nonexistent/PRINCIPAL.md")):
+        from bridge.routing import _build_classification_prompt
+
+        prompt = _build_classification_prompt("what is the weather?")
+        assert "what is the weather?" in prompt
+        # Should still have the base classification instructions
+        assert "sdlc" in prompt
+        assert "question" in prompt
+
+
+# --- Daily report reflection (scripts/reflections.py) ---
+
+
+def test_get_principal_priorities_for_report():
+    """Report helper loads condensed principal context."""
+    patcher, tmp_path = _mock_principal_path(SAMPLE_PRINCIPAL)
+    try:
+        with patcher:
+            from scripts.reflections import _get_principal_priorities_for_report
+
+            result = _get_principal_priorities_for_report()
+            assert isinstance(result, str)
+            assert "Mission" in result
+    finally:
+        os.unlink(tmp_path)
+
+
+def test_get_principal_priorities_for_report_graceful():
+    """Report helper returns empty string when PRINCIPAL.md is missing."""
+    with patch("agent.sdk_client.PRINCIPAL_PATH", Path("/nonexistent/PRINCIPAL.md")):
+        from scripts.reflections import _get_principal_priorities_for_report
+
+        result = _get_principal_priorities_for_report()
+        assert result == ""
+
+
+# --- Escalation logic (bridge/observer.py) ---
+
+
+def test_should_escalate_to_principal_with_strategic_content():
+    """Escalation helper identifies strategically significant messages."""
+    from bridge.observer import should_escalate_to_principal
+
+    # Budget/cost issues should escalate
+    assert should_escalate_to_principal("The API costs exceeded $500 this month") is True
+    # Security issues should escalate
+    assert should_escalate_to_principal("Found a critical security vulnerability in auth") is True
+    # Architecture decisions should escalate
+    assert (
+        should_escalate_to_principal("Should we migrate the entire database to PostgreSQL?") is True
+    )
+
+
+def test_should_escalate_to_principal_not_for_routine():
+    """Escalation helper does not flag routine messages."""
+    from bridge.observer import should_escalate_to_principal
+
+    assert should_escalate_to_principal("Tests pass, PR is ready for review") is False
+    assert should_escalate_to_principal("Fixed the typo in the README") is False
+    assert should_escalate_to_principal("Linting complete, no issues found") is False
+
+
+def test_should_escalate_to_principal_with_principal_context():
+    """Escalation helper uses principal context when available."""
+    patcher, tmp_path = _mock_principal_path(SAMPLE_PRINCIPAL)
+    try:
+        with patcher:
+            from bridge.observer import should_escalate_to_principal
+
+            # Should still work with principal context loaded
+            result = should_escalate_to_principal("Deploy to production now")
+            assert isinstance(result, bool)
+    finally:
+        os.unlink(tmp_path)
+
+
+def test_should_escalate_to_principal_empty_message():
+    """Escalation helper handles empty messages gracefully."""
+    from bridge.observer import should_escalate_to_principal
+
+    assert should_escalate_to_principal("") is False
+    assert should_escalate_to_principal("   ") is False

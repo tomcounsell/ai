@@ -380,20 +380,63 @@ def classify_work_request(message: str) -> str:
         return "question"
 
 
+def _get_principal_priorities_for_classification() -> str:
+    """Load condensed principal context for use in classification prompts.
+
+    Returns a short summary of the principal's strategic priorities (mission,
+    goals, active projects) so the classifier can make better routing decisions
+    -- e.g., recognizing that a message about a priority project is more likely
+    to be a work request.
+
+    Returns:
+        Condensed principal context string, or empty string if unavailable.
+    """
+    try:
+        from agent.sdk_client import load_principal_context
+
+        return load_principal_context(condensed=True)
+    except Exception as e:
+        logger.debug(f"Could not load principal context for classification: {e}")
+        return ""
+
+
+def _build_classification_prompt(text: str) -> str:
+    """Build the LLM classification prompt, optionally including principal priorities.
+
+    Args:
+        text: The message text to classify.
+
+    Returns:
+        The full prompt string for the classification LLM.
+    """
+    principal = _get_principal_priorities_for_classification()
+    principal_block = ""
+    if principal:
+        principal_block = (
+            "\n## Principal's Strategic Priorities\n"
+            "Use these to inform your classification -- messages about priority "
+            "projects or strategic goals are more likely work requests.\n\n"
+            f"{principal}\n\n"
+        )
+
+    return (
+        'Classify this message. Reply with ONLY one word: "sdlc" or "question".\n\n'
+        '- "sdlc" = work request: fix bug, add feature, implement, refactor,\n'
+        "  investigate issue, create/update codebase, deploy, resolve problem\n"
+        '- "question" = asking for info, explanation, opinion, status check,\n'
+        "  how does X work, what is Y, conversational/social\n"
+        f"{principal_block}\n"
+        f"Message: {text[:300]}\n\n"
+        "Classification:"
+    )
+
+
 def _classify_work_request_llm(text: str) -> str:
     """Use LLM to classify whether a message is a work request.
 
     Tries Ollama first (fast, local), falls back to Haiku (cheap, reliable).
     """
-    prompt = (
-        'Classify this message. Reply with ONLY one word: "sdlc" or "question".\n\n'
-        '- "sdlc" = work request: fix bug, add feature, implement, refactor,\n'
-        "  investigate issue, create/update codebase, deploy, resolve problem\n"
-        '- "question" = asking for info, explanation, opinion, status check,\n'
-        "  how does X work, what is Y, conversational/social\n\n"
-        f"Message: {text[:300]}\n\n"
-        "Classification:"
-    )
+    prompt = _build_classification_prompt(text)
 
     # Try Ollama first (fast, local)
     try:

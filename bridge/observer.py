@@ -61,8 +61,7 @@ def _build_observer_system_prompt() -> str:
         f"{principal_block}\n"
         "You have access to the full AgentSession state and must make one of two decisions:\n"
         "1. STEER: Send the worker back to work on the next pipeline stage\n"
-        "2. DELIVER: Send the output to the human on Telegram\n\n"
-        + OBSERVER_SYSTEM_PROMPT_BODY
+        "2. DELIVER: Send the output to the human on Telegram\n\n" + OBSERVER_SYSTEM_PROMPT_BODY
     )
 
 
@@ -132,7 +131,6 @@ Bad coaching messages (avoid these):
 - Vague urgency: "think hard", "be very careful" — specify what to check
 - Threats or artificial pressure — they degrade output quality, not improve it
 """
-
 
 
 def _build_tools() -> list[dict]:
@@ -219,6 +217,85 @@ def _build_tools() -> list[dict]:
             },
         },
     ]
+
+
+def should_escalate_to_principal(message: str) -> bool:
+    """Determine if a message warrants escalation to the principal (supervisor).
+
+    Uses keyword-based heuristics to identify strategically significant
+    messages that should be flagged for human attention. Categories:
+    - Budget/cost concerns
+    - Security vulnerabilities
+    - Architecture/infrastructure decisions
+    - Production deployments or outages
+    - Strategic pivots or major scope changes
+
+    Args:
+        message: The message text to evaluate.
+
+    Returns:
+        True if the message should be escalated to the principal.
+    """
+    if not message or not message.strip():
+        return False
+
+    text_lower = message.lower()
+
+    # Budget/cost signals
+    cost_keywords = ["cost", "budget", "billing", "exceeded", "spending", "expense", "invoice"]
+    # Security signals
+    security_keywords = [
+        "security",
+        "vulnerability",
+        "breach",
+        "exploit",
+        "CVE",
+        "auth leak",
+        "credentials exposed",
+        "unauthorized access",
+    ]
+    # Architecture/infrastructure signals
+    architecture_keywords = [
+        "migrate",
+        "migration",
+        "architecture",
+        "infrastructure",
+        "database change",
+        "breaking change",
+        "deprecat",
+    ]
+    # Production/deployment signals
+    production_keywords = [
+        "production outage",
+        "deploy to production",
+        "downtime",
+        "incident",
+        "rollback production",
+    ]
+    # Strategic signals
+    strategic_keywords = [
+        "pivot",
+        "shut down",
+        "cancel project",
+        "major rewrite",
+        "hiring",
+        "staffing",
+    ]
+
+    all_escalation_groups = [
+        cost_keywords,
+        security_keywords,
+        architecture_keywords,
+        production_keywords,
+        strategic_keywords,
+    ]
+
+    for keyword_group in all_escalation_groups:
+        for keyword in keyword_group:
+            if keyword.lower() in text_lower:
+                return True
+
+    return False
 
 
 class Observer:
