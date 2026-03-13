@@ -102,9 +102,7 @@ class TestGetAgentResponseSdkGhRepo:
             p.stop()
 
     @pytest.mark.asyncio
-    async def test_cross_repo_sdlc_sets_gh_repo(
-        self, mock_agent_class, mock_dependencies
-    ):
+    async def test_cross_repo_sdlc_sets_gh_repo(self, mock_agent_class, mock_dependencies):
         """When classification=sdlc and project is cross-repo, gh_repo should be set."""
         from agent.sdk_client import get_agent_response_sdk
 
@@ -121,9 +119,7 @@ class TestGetAgentResponseSdkGhRepo:
         assert call_kwargs["gh_repo"] == "tomcounsell/popoto"
 
     @pytest.mark.asyncio
-    async def test_ai_repo_sdlc_does_not_set_gh_repo(
-        self, mock_agent_class, mock_dependencies
-    ):
+    async def test_ai_repo_sdlc_does_not_set_gh_repo(self, mock_agent_class, mock_dependencies):
         """When project is the ai repo itself, gh_repo should NOT be set."""
         from agent.sdk_client import get_agent_response_sdk
 
@@ -161,9 +157,7 @@ class TestGetAgentResponseSdkGhRepo:
         assert call_kwargs["gh_repo"] is None
 
     @pytest.mark.asyncio
-    async def test_pm_mode_does_not_set_gh_repo(
-        self, mock_agent_class, mock_dependencies
-    ):
+    async def test_pm_mode_does_not_set_gh_repo(self, mock_agent_class, mock_dependencies):
         """PM mode projects should never set gh_repo regardless of classification."""
         pm_project = {
             **self.POPOTO_PROJECT,
@@ -223,3 +217,36 @@ class TestGetAgentResponseSdkGhRepo:
         query_call = mock_agent_class.return_value.query
         enriched_msg = query_call.call_args[0][0]
         assert "GITHUB: tomcounsell/popoto" in enriched_msg
+
+
+class TestExecuteJobPassesFullProjectConfig:
+    """Test that _execute_job passes the full project config (including github key)
+    to get_agent_response_sdk, not a minimal dict.
+
+    Regression test: _execute_job previously constructed a minimal project_config
+    with only _key/working_directory/name, missing the github config needed for
+    GH_REPO env var injection.
+    """
+
+    def test_execute_job_uses_registered_project_config(self):
+        """get_project_config should return full config including github key."""
+        from agent.job_queue import get_project_config, register_project_config
+
+        full_config = {
+            "name": "Popoto",
+            "working_directory": "/Users/valorengels/src/popoto",
+            "_key": "popoto",
+            "github": {"org": "tomcounsell", "repo": "popoto"},
+            "telegram": {"groups": ["Dev: Popoto"]},
+        }
+        register_project_config("popoto", full_config)
+
+        retrieved = get_project_config("popoto")
+        assert retrieved.get("github") == {"org": "tomcounsell", "repo": "popoto"}
+        assert retrieved.get("working_directory") == "/Users/valorengels/src/popoto"
+
+    def test_unregistered_project_returns_empty(self):
+        """Unregistered project key returns empty dict (fallback to minimal config)."""
+        from agent.job_queue import get_project_config
+
+        assert get_project_config("nonexistent-project-xyz") == {}

@@ -1717,12 +1717,17 @@ async def _execute_job(job: Job) -> None:
         except Exception:
             pass  # Non-critical: best-effort cross-reference
 
-    # Run agent work directly in the project working directory
-    project_config = {
-        "_key": job.project_key,
-        "working_directory": str(working_dir),
-        "name": job.project_key,
-    }
+    # Run agent work directly in the project working directory.
+    # Use the full registered project config (from projects.json) so that
+    # downstream code (e.g., GH_REPO injection for cross-repo SDLC) has
+    # access to all fields including "github", "mode", etc.
+    project_config = get_project_config(job.project_key)
+    if not project_config:
+        project_config = {
+            "_key": job.project_key,
+            "working_directory": str(working_dir),
+            "name": job.project_key,
+        }
 
     async def do_work() -> str:
         return await get_agent_response_sdk(

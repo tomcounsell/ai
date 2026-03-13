@@ -1108,12 +1108,20 @@ async def get_agent_response_sdk(
         # When classification is "sdlc" and the project targets a non-ai repo,
         # set GH_REPO so all gh commands automatically target the correct repo.
         _gh_repo = None
-        if project_mode != "pm" and classification == "sdlc" and project_working_dir != AI_REPO_ROOT:
+        is_cross_repo_sdlc = (
+            project_mode != "pm"
+            and classification == "sdlc"
+            and project_working_dir != AI_REPO_ROOT
+        )
+        if is_cross_repo_sdlc:
             _github_config = project.get("github", {}) if project else {}
             _gh_org = _github_config.get("org", "")
             _gh_name = _github_config.get("repo", "")
             if _gh_org and _gh_name:
                 _gh_repo = f"{_gh_org}/{_gh_name}"
+
+        if _gh_repo:
+            logger.info(f"[{request_id}] Cross-repo: GH_REPO={_gh_repo}")
 
         agent = ValorAgent(
             working_dir=working_dir,
