@@ -146,47 +146,20 @@ Create `docs/plans/{slug}.md` using the template from `PLAN_TEMPLATE.md`.
 
 ### Phase 2.5: Link or Create Tracking Issue
 
-After writing the plan, **push it and link it** to an existing issue OR create a new one.
+After writing the plan, **resolve the tracking issue first**, then push.
+
+#### Step 1: Resolve repo and tracking issue
 
 ```bash
-# Resolve repo identity from git
 REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
-
-# Try pushing plan to main first; fall back to branch + PR if main is protected
-git add docs/plans/{slug}.md && git commit -m "Plan: {Feature Name}"
-if git push 2>/dev/null; then
-  PLAN_BRANCH="main"
-else
-  # Main is protected — create a plan branch and PR
-  PLAN_BRANCH="plan/{slug}"
-  git checkout -b "$PLAN_BRANCH"
-  git push -u origin "$PLAN_BRANCH"
-  # IMPORTANT: Do NOT reference the tracking issue in the PR body with closing
-  # keywords (Closes, Fixes, Resolves). The plan PR should NOT close the issue —
-  # only the implementation PR (from do-build) should close it.
-  gh pr create --title "Plan: {Feature Name}" --body "Adds plan document for {slug}. Related tracking issue will be linked after merge." --label "plan"
-  # Switch back to main for subsequent work
-  git checkout main
-fi
 ```
 
-**Protected branch handling:** If pushing directly to main fails (common with protected branches), the skill automatically creates a `plan/{slug}` branch and opens a PR. The plan link URL should use whichever branch the plan landed on (`$PLAN_BRANCH` instead of hardcoded `main`).
-
-**CRITICAL: Plan PRs must NOT close the tracking issue.** The tracking issue stays open until the *implementation* PR (from `/do-build`) merges with `Closes #N`. Never use closing keywords (Closes, Fixes, Resolves) when referencing the tracking issue in the plan PR body.
-
-**Check for existing issue first!** If the plan was created in response to an existing GitHub issue (e.g., "make a plan for issue #42"), do NOT create a new issue. Instead:
-
-1. Add the "plan" label and prepend the plan link to the issue body
-2. Update the plan frontmatter `tracking:` field with the existing issue URL
+**Check for existing issue first!** If the plan was created in response to an existing GitHub issue (e.g., "make a plan for issue #42"), do NOT create a new issue. Instead, get its title and link the plan:
 
 ```bash
 EXISTING_ISSUE=42
+ISSUE_TITLE=$(gh issue view $EXISTING_ISSUE --json title -q .title)
 gh issue edit $EXISTING_ISSUE --add-label "plan"
-EXISTING_BODY=$(gh issue view $EXISTING_ISSUE --json body -q .body)
-PLAN_LINK="https://github.com/${REPO}/blob/${PLAN_BRANCH}/docs/plans/{slug}.md"
-gh issue edit $EXISTING_ISSUE --body "**Plan:** ${PLAN_LINK}
-
-${EXISTING_BODY}"
 ```
 
 **Only create a NEW issue if** the plan was initiated from scratch (not from an existing issue).
@@ -196,8 +169,6 @@ Before creating, check `config/projects.json` for the current project:
 - If only `github` key exists -> create a GitHub issue (use `gh` CLI)
 - If neither -> skip tracking, just use the plan doc
 
-Extract `type:` from plan frontmatter before creating:
-
 ```bash
 TYPE=$(grep '^type:' docs/plans/{slug}.md | sed 's/type: *//' | tr -d ' ')
 if [ -z "$TYPE" ]; then
@@ -205,19 +176,62 @@ if [ -z "$TYPE" ]; then
   exit 1
 fi
 
+ISSUE_TITLE="{Feature Name}"
 gh issue create \
-  --title "[Plan] {Feature Name}" \
+  --title "$ISSUE_TITLE" \
   --label "plan" \
   --label "$TYPE" \
   --body "$(cat <<EOF
-**Plan:** https://github.com/${REPO}/blob/${PLAN_BRANCH}/docs/plans/{slug}.md
-
 **Type:** {type} | **Appetite:** {appetite} | **Status:** Planning
 
 ---
 This issue is for tracking and discussion. The plan document is the source of truth.
 EOF
 )"
+```
+
+#### Step 2: Push the plan
+
+```bash
+git add docs/plans/{slug}.md && git commit -m "Plan: $ISSUE_TITLE"
+if git push 2>/dev/null; then
+  PLAN_BRANCH="main"
+else
+  # Main is protected — create a branch and PR for the entire SDLC lifecycle
+  PLAN_BRANCH="plan/{slug}"
+  git checkout -b "$PLAN_BRANCH"
+  git push -u origin "$PLAN_BRANCH"
+  # This PR is reused for the full SDLC (plan → build → test → review → merge).
+  # Title MUST match the tracking issue title.
+  # Do NOT reference the tracking issue with closing keywords (Closes, Fixes, Resolves).
+  gh pr create --title "$ISSUE_TITLE" --body "Adds plan document for {slug}. Implementation will follow on this branch." --label "plan"
+  # Switch back to main for subsequent work
+  git checkout main
+fi
+```
+
+**Protected branch handling:** If pushing directly to main fails (common with protected branches), the skill automatically creates a `plan/{slug}` branch and opens a PR. This PR is reused for the entire SDLC — do-build pushes implementation commits to the same branch rather than creating a new PR. The PR title matches the tracking issue title.
+
+**CRITICAL: Plan PRs must NOT close the tracking issue.** The tracking issue stays open until the *implementation* PR merges with `Closes #N`. Never use closing keywords (Closes, Fixes, Resolves) when referencing the tracking issue in the plan PR body.
+
+#### Step 3: Link plan to tracking issue
+
+```bash
+PLAN_LINK="https://github.com/${REPO}/blob/${PLAN_BRANCH}/docs/plans/{slug}.md"
+
+if [ -n "$EXISTING_ISSUE" ]; then
+  # Prepend plan link to existing issue body
+  EXISTING_BODY=$(gh issue view $EXISTING_ISSUE --json body -q .body)
+  gh issue edit $EXISTING_ISSUE --body "**Plan:** ${PLAN_LINK}
+
+${EXISTING_BODY}"
+else
+  # Update the newly created issue with the plan link
+  ISSUE_NUM=$(gh issue list --state open --search "$ISSUE_TITLE" --json number -q '.[0].number')
+  gh issue edit $ISSUE_NUM --body "**Plan:** ${PLAN_LINK}
+
+$(gh issue view $ISSUE_NUM --json body -q .body)"
+fi
 ```
 
 For Notion tasks, use MCP tools to create a page with Title, Status, Type, and link to the plan document.
