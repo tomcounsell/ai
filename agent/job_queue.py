@@ -174,6 +174,10 @@ class Job:
         return self._rj.classification_type
 
     @property
+    def trigger_message_id(self) -> str | None:
+        return self._rj.trigger_message_id
+
+    @property
     def auto_continue_count(self) -> int:
         return self._rj.auto_continue_count or 0
 
@@ -212,6 +216,8 @@ _JOB_FIELDS = [
     "classification_type",
     "auto_continue_count",
     "started_at",
+    "trigger_message_id",
+    "claude_code_session_id",
     # Session-phase fields preserved across delete-and-recreate
     "last_activity",
     "completed_at",
@@ -281,6 +287,7 @@ async def _push_job(
     correlation_id: str | None = None,
     scheduled_after: float | None = None,
     scheduling_depth: int = 0,
+    trigger_message_id: str | None = None,
 ) -> int:
     """Create a job in Redis and return the pending queue depth for this project.
 
@@ -331,6 +338,7 @@ async def _push_job(
         correlation_id=correlation_id,
         scheduled_after=scheduled_after,
         scheduling_depth=scheduling_depth,
+        trigger_message_id=trigger_message_id,
     )
 
     # Log lifecycle transition for newly created pending job
@@ -864,6 +872,7 @@ async def enqueue_job(
     correlation_id: str | None = None,
     scheduled_after: float | None = None,
     scheduling_depth: int = 0,
+    trigger_message_id: str | None = None,
 ) -> int:
     """
     Add a job to Redis and ensure worker is running.
@@ -899,6 +908,7 @@ async def enqueue_job(
         correlation_id=correlation_id,
         scheduled_after=scheduled_after,
         scheduling_depth=scheduling_depth,
+        trigger_message_id=trigger_message_id,
     )
     _ensure_worker(project_key)
     log_prefix = f"[{correlation_id}]" if correlation_id else f"[{project_key}]"
@@ -1394,8 +1404,40 @@ async def _execute_job(job: Job) -> None:
     )
 
     # Deferred enrichment: process media, YouTube, links, reply chain
+    # Prefer reading enrichment params from TelegramMessage (new path),
+    # fall back to AgentSession fields (backward compat for pre-migration sessions).
     enriched_text = job.message_text
-    if job.has_media or job.youtube_urls or job.non_youtube_urls or job.reply_to_msg_id:
+    enrich_has_media = job.has_media
+    enrich_media_type = job.media_type
+    enrich_youtube_urls = job.youtube_urls
+    enrich_non_youtube_urls = job.non_youtube_urls
+    enrich_reply_to_msg_id = job.reply_to_msg_id
+
+    if job.trigger_message_id:
+        try:
+            from models.telegram import TelegramMessage
+
+            trigger_msgs = list(TelegramMessage.query.filter(msg_id=job.trigger_message_id))
+            if trigger_msgs:
+                tm = trigger_msgs[0]
+                enrich_has_media = bool(tm.has_media)
+                enrich_media_type = tm.media_type
+                enrich_youtube_urls = tm.youtube_urls
+                enrich_non_youtube_urls = tm.non_youtube_urls
+                enrich_reply_to_msg_id = tm.reply_to_msg_id
+                logger.debug(
+                    f"[{job.project_key}] Resolved enrichment from "
+                    f"TelegramMessage {job.trigger_message_id}"
+                )
+            else:
+                logger.debug(
+                    f"[{job.project_key}] trigger_message_id {job.trigger_message_id} "
+                    f"not found, falling back to AgentSession fields"
+                )
+        except Exception as e:
+            logger.debug(f"[{job.project_key}] TelegramMessage lookup failed, using fallback: {e}")
+
+    if enrich_has_media or enrich_youtube_urls or enrich_non_youtube_urls or enrich_reply_to_msg_id:
         try:
             from bridge.enrichment import enrich_message, get_telegram_client
 
@@ -1403,18 +1445,30 @@ async def _execute_job(job: Job) -> None:
             enriched_text = await enrich_message(
                 telegram_client=tg_client,
                 message_text=job.message_text,
-                has_media=job.has_media,
-                media_type=job.media_type,
+                has_media=enrich_has_media,
+                media_type=enrich_media_type,
                 raw_media_message_id=job.message_id,
-                youtube_urls=job.youtube_urls,
-                non_youtube_urls=job.non_youtube_urls,
-                reply_to_msg_id=job.reply_to_msg_id,
+                youtube_urls=enrich_youtube_urls,
+                non_youtube_urls=enrich_non_youtube_urls,
+                reply_to_msg_id=enrich_reply_to_msg_id,
                 chat_id=job.chat_id_for_enrichment or job.chat_id,
                 sender_name=job.sender_name,
                 message_id=job.message_id,
             )
         except Exception as e:
             logger.warning(f"[{job.project_key}] Enrichment failed, using raw text: {e}")
+
+    # Set back-reference: TelegramMessage.agent_session_id -> this session's job_id
+    if job.trigger_message_id:
+        try:
+            from models.telegram import TelegramMessage
+
+            trigger_msgs = list(TelegramMessage.query.filter(msg_id=job.trigger_message_id))
+            if trigger_msgs and not trigger_msgs[0].agent_session_id:
+                trigger_msgs[0].agent_session_id = job._rj.job_id
+                trigger_msgs[0].save()
+        except Exception:
+            pass  # Non-critical: best-effort cross-reference
 
     # Run agent work directly in the project working directory
     project_config = {
