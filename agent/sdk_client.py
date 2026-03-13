@@ -520,6 +520,7 @@ class ValorAgent:
         project_key: str | None = None,
         message_id: int | None = None,
         job_id: str | None = None,
+        gh_repo: str | None = None,
     ):
         """
         Initialize ValorAgent.
@@ -537,6 +538,9 @@ class ValorAgent:
             project_key: Optional project key for routing context injection.
             message_id: Optional message ID for routing context injection.
             job_id: Optional job ID injected as JOB_ID env var for child job spawning.
+            gh_repo: Optional GitHub repo (org/repo) to set as GH_REPO env var.
+                When set, all `gh` CLI commands in the subprocess automatically
+                target this repo without needing explicit --repo flags.
         """
         default_dir = Path(__file__).parent.parent
         allowed_root = Path("/Users/valorengels/src")
@@ -552,6 +556,7 @@ class ValorAgent:
         self.project_key = project_key
         self.message_id = message_id
         self.job_id = job_id
+        self.gh_repo = gh_repo or None  # Normalize empty string to None
         self.workflow_state: WorkflowState | None = None
 
         # Load workflow state if workflow_id provided
@@ -679,6 +684,12 @@ class ValorAgent:
         # via `schedule_job --parent-job $JOB_ID` (issue #359)
         if self.job_id:
             env["JOB_ID"] = self.job_id
+
+        # Cross-repo gh resolution: set GH_REPO so all `gh` CLI commands in the
+        # subprocess automatically target the correct repo (issue #375). This is
+        # the deterministic fix -- SKILL.md --repo instructions remain as a safety net.
+        if self.gh_repo:
+            env["GH_REPO"] = self.gh_repo
 
         # Build system prompt with workflow context if workflow_id is present
         system_prompt = self.system_prompt
@@ -1093,6 +1104,17 @@ async def get_agent_response_sdk(
         if project_mode == "pm":
             pm_system_prompt = load_pm_system_prompt(working_dir)
 
+        # Determine gh_repo for cross-repo SDLC requests (issue #375).
+        # When classification is "sdlc" and the project targets a non-ai repo,
+        # set GH_REPO so all gh commands automatically target the correct repo.
+        _gh_repo = None
+        if project_mode != "pm" and classification == "sdlc" and project_working_dir != AI_REPO_ROOT:
+            _github_config = project.get("github", {}) if project else {}
+            _gh_org = _github_config.get("org", "")
+            _gh_name = _github_config.get("repo", "")
+            if _gh_org and _gh_name:
+                _gh_repo = f"{_gh_org}/{_gh_name}"
+
         agent = ValorAgent(
             working_dir=working_dir,
             system_prompt=pm_system_prompt,
@@ -1102,6 +1124,7 @@ async def get_agent_response_sdk(
             project_key=_project_key,
             message_id=_message_id,
             job_id=job_id,
+            gh_repo=_gh_repo,
         )
         response = await agent.query(enriched_message, session_id=session_id)
 
