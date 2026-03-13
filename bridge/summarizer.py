@@ -431,24 +431,24 @@ Phrases like "Got it", "Understood", "Noted", "I'll update", "Will do" followed 
 commitments — without any proof of a durable change — are empty promises. These MUST be classified \
 as STATUS_UPDATE with a coaching_message that demands evidence.
 
-Input: "Understood. Will report final results and blockers only — no intermediate plans or process."
+Input: "Got it, I'll stop doing that from now on."
 Output: {"type": "status", "confidence": 0.95, \
-"reason": "Empty promise — acknowledged feedback without concrete change", \
+"reason": "Empty promise — bare acknowledgment with no evidence of a durable change", \
 "coaching_message": "You acknowledged feedback but made no concrete change to enforce it. \
-A promise without a code change, config update, or memory write is empty. Either make the change \
-now (update a prompt, config, or save a memory) and show evidence (commit hash, file path), or \
-explain what prevents you from making it durable.", "has_workarounds": false}
+A promise without a code change, config update, or memory write is empty. Either make the \
+change now and show evidence (commit hash, file path), or explain what prevents you.", \
+"has_workarounds": false}
 
-Input: "Noted. You'll see the difference in my next output."
+Input: "Noted. I'll adjust my approach going forward."
 Output: {"type": "status", "confidence": 0.95, \
 "reason": "Empty promise — vague commitment to future behavior with no durable change", \
-"coaching_message": "You said the user will 'see the difference' but made no provable change. \
-What file did you edit? What config did you update? What memory did you save? Show the evidence \
-or admit you need to make the change first.", "has_workarounds": false}
+"coaching_message": "You promised to change your approach but made no provable change. \
+What file did you edit? What config did you update? What memory did you save? Show the \
+evidence or admit you need to make the change first.", "has_workarounds": false}
 
-Input: "Got it. I've updated the summarizer prompt to require evidence. Here's the commit: abc1234"
+Input: "Got it. Updated the config in bridge/summarizer.py and committed abc1234."
 Output: {"type": "completion", "confidence": 0.90, \
-"reason": "Feedback acknowledged WITH concrete evidence — commit hash provided", \
+"reason": "Feedback acknowledged WITH concrete evidence — file path and commit hash", \
 "coaching_message": null, "has_workarounds": false}"""
 
 # False question detection explained:
