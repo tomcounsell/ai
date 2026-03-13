@@ -29,6 +29,47 @@ The orchestrator will:
 
 After running, report the result. If there are warnings or errors, list each one clearly.
 
+### Stale Session & Job Audit
+
+After the orchestrator completes, audit Redis for stale or abandoned sessions/jobs. An `/update` implies a soft reset — anything stuck should be surfaced.
+
+```bash
+cd /Users/valorengels/src/ai && .venv/bin/python -c "
+import time
+from models.agent_session import AgentSession
+
+now = time.time()
+STALE_THRESHOLD = 30 * 60  # 30 minutes
+
+sessions = AgentSession.objects.all()
+stale = []
+for s in sessions:
+    status = getattr(s, 'status', None) or 'unknown'
+    if status in ('completed', 'delivered'):
+        continue
+    sid = getattr(s, 'session_id', None) or 'unknown'
+    last = getattr(s, 'last_activity', None) or getattr(s, 'created_at', None)
+    age_sec = (now - float(last)) if last else 0
+    project = getattr(s, 'project_key', None) or ''
+    if age_sec > STALE_THRESHOLD:
+        stale.append((sid, status, project, int(age_sec / 60)))
+
+if not stale:
+    print('No stale sessions found.')
+else:
+    print(f'Found {len(stale)} stale session(s):')
+    for sid, status, project, age_min in stale:
+        print(f'  {status:12s} | {project:12s} | {sid[:50]} | {age_min}m old')
+    print()
+    print('To clean up, set status to abandoned:')
+    print('  python -c \"from models.agent_session import AgentSession; s = AgentSession.objects.get(session_id=\\\"SESSION_ID\\\"); s.status = \\\"abandoned\\\"; s.save()\"')
+"
+```
+
+Report findings:
+- **Clean**: "No stale sessions or jobs"
+- **Stale found**: List each with session ID, status, project, and age. Ask whether to mark them as abandoned.
+
 ### Auto-Bump Critical Dependencies
 
 The update system automatically checks PyPI for newer versions of `anthropic` and `claude-agent-sdk` on every run. When a newer version is available:
