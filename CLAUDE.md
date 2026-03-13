@@ -41,6 +41,9 @@ gws sheets spreadsheets values get --params '{"spreadsheetId": "ID", "range": "S
 | `./scripts/valor-service.sh restart` | Restart after code changes |
 | `tail -f logs/bridge.log` | Stream bridge logs |
 | `pytest tests/` | Run all tests |
+| `pytest tests/unit/` | Run unit tests only (fast, ~60s) |
+| `pytest tests/unit/ -n auto` | Run unit tests in parallel |
+| `pytest tests/integration/` | Run integration tests only |
 | `python -m ruff format . && python -m ruff check .` | Format and lint |
 | `python scripts/reflections.py` | Run reflections maintenance manually |
 | `python scripts/reflections.py --dry-run` | Test reflections without side effects |
