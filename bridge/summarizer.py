@@ -429,7 +429,9 @@ CRITICAL CONTEXT: By the time a response reaches Telegram, the agent's session i
 There is no future execution. The agent cannot "will do" anything — it has already finished. \
 Any "I will", "I'll", "going forward", "from now on", "next time" language is an empty promise \
 UNLESS the agent already made the change in this session and shows evidence. \
-The only honest responses are: "I did X (here's the proof)" or "I didn't do X (here's why)."
+The only exception is scheduling/queuing a job that will execute later AND report back \
+via Telegram (e.g., "I've queued a build job — you'll get a message when it completes"). \
+Otherwise the only honest responses are: "I did X (proof)" or "I didn't do X (why)."
 
 Input: "Will do. I'll update the config next time."
 Output: {"type": "status", "confidence": 0.95, \
@@ -511,6 +513,7 @@ def _detect_empty_promise(text_lower: str) -> bool:
         r"\b(?:saved|written|created)\b.*\bmemory\b",
         r"https?://github\.com/.+/commit/",  # GitHub commit URLs
         r"\brestarted?\b.*\b(?:bridge|service)\b",  # service restart
+        r"\b(?:scheduled|queued)\b",  # scheduled/queued job (will report back)
     ]
 
     has_evidence = any(re.search(p, text_lower) for p in evidence_patterns)
