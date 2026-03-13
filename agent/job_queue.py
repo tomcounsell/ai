@@ -553,12 +553,16 @@ def _transition_parent(parent: AgentSession, new_status: str) -> None:
         fields["completed_at"] = time.time()
     new_parent = AgentSession.create(**fields)
 
-    # Update children's parent_job_id to point to the new parent
+    # Update children's parent_job_id to point to the new parent.
+    # parent_job_id is a KeyField, so we must use delete-and-recreate
+    # to avoid index corruption (same pattern as _pop_job).
     if new_parent.job_id != old_job_id and children:
         for child in children:
             try:
-                child.parent_job_id = new_parent.job_id
-                child.save()
+                child_fields = _extract_job_fields(child)
+                child.delete()
+                child_fields["parent_job_id"] = new_parent.job_id
+                AgentSession.create(**child_fields)
             except Exception as e:
                 logger.warning(
                     f"[job-hierarchy] Failed to update child {child.job_id} "
