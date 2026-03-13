@@ -50,7 +50,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Race Condition Analysis](race-condition-analysis.md) | Structured concurrency analysis section in plan template with soft validator for async code | Shipped |
 | [Reaction Semantics](reaction-semantics.md) | Emoji reaction protocol for message delivery feedback and silent loss prevention | Shipped |
 | [Redis Model Relationships](redis-models.md) | Cross-references between Popoto models, project_key on all models, enrichment metadata ownership on TelegramMessage | Shipped |
-| [Reflections](reflections.md) | Autonomous 14-step daily maintenance: cleanup, log analysis, session quality, LLM reflection, auto-fix PRs, multi-repo support, institutional memory, Telegram notifications | Shipped |
+| [Reflections](reflections.md) | Unified reflection scheduler with declarative YAML registry, Redis state tracking, skip-if-running guard; subsumes health check, orphan recovery, branch cleanup, and 15-step daily maintenance | Shipped |
 | [Remote Update](remote-update.md) | Telegram command and cron for remote system updates across machines | Shipped |
 | [Review Workflow Screenshots](review-workflow-screenshots.md) | Screenshot capture during review for visual validation | Shipped |
 | [Scale Job Queue (Popoto + Worktrees)](scale-job-queue-with-popoto-and-worktrees.md) | Redis persistence and git worktrees for parallel build execution | Shipped |

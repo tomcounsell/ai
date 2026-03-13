@@ -1825,6 +1825,12 @@ class ReflectionsState:
         self.findings[category].append(finding)
 
 
+async def run_reflections_async() -> None:
+    """Run the full reflections pipeline. Called by the reflection scheduler."""
+    runner = ReflectionRunner()
+    await runner.run()
+
+
 async def main() -> None:
     """Main entry point."""
     import argparse
