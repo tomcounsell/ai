@@ -161,13 +161,18 @@ else
   PLAN_BRANCH="plan/{slug}"
   git checkout -b "$PLAN_BRANCH"
   git push -u origin "$PLAN_BRANCH"
-  gh pr create --title "Plan: {Feature Name}" --body "Adds plan document for {slug}." --label "plan"
+  # IMPORTANT: Do NOT reference the tracking issue in the PR body with closing
+  # keywords (Closes, Fixes, Resolves). The plan PR should NOT close the issue —
+  # only the implementation PR (from do-build) should close it.
+  gh pr create --title "Plan: {Feature Name}" --body "Adds plan document for {slug}. Related tracking issue will be linked after merge." --label "plan"
   # Switch back to main for subsequent work
   git checkout main
 fi
 ```
 
 **Protected branch handling:** If pushing directly to main fails (common with protected branches), the skill automatically creates a `plan/{slug}` branch and opens a PR. The plan link URL should use whichever branch the plan landed on (`$PLAN_BRANCH` instead of hardcoded `main`).
+
+**CRITICAL: Plan PRs must NOT close the tracking issue.** The tracking issue stays open until the *implementation* PR (from `/do-build`) merges with `Closes #N`. Never use closing keywords (Closes, Fixes, Resolves) when referencing the tracking issue in the plan PR body.
 
 **Check for existing issue first!** If the plan was created in response to an existing GitHub issue (e.g., "make a plan for issue #42"), do NOT create a new issue. Instead:
 
@@ -324,4 +329,5 @@ Update status as work progresses. Keep all tracking in the plan document itself.
 
 **Tracking issue lifecycle:**
 - When plan status changes to `Ready` or `In Progress`, update the GitHub issue / Notion task status accordingly
-- Issues are closed automatically when the PR merges (via `Closes #N` in PR body) — do NOT close issues manually
+- Issues are closed automatically when the **implementation PR** merges (via `Closes #N` in the do-build PR body) — do NOT close issues manually
+- **Plan PRs (on protected branches) must NEVER close the tracking issue** — only the implementation PR should
