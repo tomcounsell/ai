@@ -143,6 +143,81 @@
         "tech_stack": ["Python", "Data Analysis"],
         "description": "Focus on evidence-based analysis across technology, health, economics, and human performance. Outputs include podcasts, reports, and educational materials."
       }
+    },
+
+    "pm-cuttlefish": {
+      "name": "PM: Cuttlefish",
+      "description": "Project management for Cuttlefish - AI tools and MCP Servers",
+      "mode": "pm",
+      "working_directory": "/Users/valorengels/work-vault/Cuttlefish/",
+      "telegram": {
+        "groups": ["PM: Cuttlefish"],
+        "respond_to_unaddressed": true,
+        "respond_to_dms": false
+      },
+      "context": {
+        "description": "Project management for Cuttlefish. Track status, triage issues, draft communications, manage priorities."
+      }
+    },
+
+    "pm-satsol": {
+      "name": "PM: SATSOL",
+      "description": "Project management for SATSOL",
+      "mode": "pm",
+      "working_directory": "/Users/valorengels/work-vault/SATSOL/",
+      "telegram": {
+        "groups": ["PM: SATSOL"],
+        "respond_to_unaddressed": true,
+        "respond_to_dms": false
+      },
+      "context": {
+        "description": "Project management for SATSOL. Track status, triage issues, draft communications, manage priorities."
+      }
+    },
+
+    "pm-monday-flowers": {
+      "name": "PM: Monday Flowers",
+      "description": "Project management for Monday Flowers",
+      "mode": "pm",
+      "working_directory": "/Users/valorengels/work-vault/Monday Flowers/",
+      "telegram": {
+        "groups": ["PM: Monday Flowers"],
+        "respond_to_unaddressed": true,
+        "respond_to_dms": false
+      },
+      "context": {
+        "description": "Project management for Monday Flowers. Track status, triage issues, draft communications, manage priorities."
+      }
+    },
+
+    "pm-psyoptimal": {
+      "name": "PM: PsyOptimal",
+      "description": "Project management for PsyOptimal - Mental health optimization platform",
+      "mode": "pm",
+      "working_directory": "/Users/valorengels/work-vault/PsyOptimal/",
+      "telegram": {
+        "groups": ["PM: PsyOptimal"],
+        "respond_to_unaddressed": true,
+        "respond_to_dms": false
+      },
+      "context": {
+        "description": "Project management for PsyOptimal. Track status, triage issues, draft communications, manage priorities."
+      }
+    },
+
+    "pm-royop": {
+      "name": "PM: Royop",
+      "description": "Project management for Royop",
+      "mode": "pm",
+      "working_directory": "/Users/valorengels/work-vault/Royop/",
+      "telegram": {
+        "groups": ["PM: Royop"],
+        "respond_to_unaddressed": true,
+        "respond_to_dms": false
+      },
+      "context": {
+        "description": "Project management for Royop. Track status, triage issues, draft communications, manage priorities."
+      }
     }
   },
 

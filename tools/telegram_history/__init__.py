@@ -112,6 +112,14 @@ def store_message(
     message_id: int | None = None,
     timestamp: datetime | None = None,
     message_type: str = "text",
+    project_key: str | None = None,
+    has_media: bool = False,
+    media_type: str | None = None,
+    youtube_urls: str | None = None,
+    non_youtube_urls: str | None = None,
+    reply_to_msg_id: int | None = None,
+    classification_type: str | None = None,
+    classification_confidence: float | None = None,
     db_path=None,  # Ignored — kept for API compatibility
 ) -> dict:
     """Store a message in Redis via TelegramMessage.
@@ -123,6 +131,14 @@ def store_message(
         message_id: Telegram message ID.
         timestamp: Message timestamp (defaults to now).
         message_type: Type of message (text, photo, etc.).
+        project_key: Project key for direct project association.
+        has_media: Whether the message has media attached.
+        media_type: Type of media (photo, voice, document, etc.).
+        youtube_urls: JSON-encoded list of (url, video_id) tuples.
+        non_youtube_urls: JSON-encoded list of URL strings.
+        reply_to_msg_id: Telegram message ID of the parent reply.
+        classification_type: Message classification type.
+        classification_confidence: Classification confidence score.
         db_path: Ignored — kept for backward-compatibility signature.
 
     Returns:
@@ -142,6 +158,14 @@ def store_message(
             content=content or "",
             timestamp=ts,
             message_type=message_type,
+            project_key=project_key,
+            has_media=has_media,
+            media_type=media_type,
+            youtube_urls=youtube_urls,
+            non_youtube_urls=non_youtube_urls,
+            reply_to_msg_id=reply_to_msg_id,
+            classification_type=classification_type,
+            classification_confidence=classification_confidence,
         )
         return {
             "stored": True,
@@ -335,6 +359,7 @@ def store_link(
     tags: list[str] | None = None,
     notes: str | None = None,
     ai_summary: str | None = None,
+    project_key: str | None = None,
     db_path=None,  # Ignored — kept for API compatibility
 ) -> dict:
     """Store a link in Redis via the Link model.
@@ -401,6 +426,7 @@ def store_link(
         link = Link.create(
             url=url,
             chat_id=str(chat_id),
+            project_key=project_key,
             message_id=message_id,
             domain=domain,
             sender=sender,
@@ -804,6 +830,7 @@ def register_chat(
     chat_id: str,
     chat_name: str,
     chat_type: str | None = None,
+    project_key: str | None = None,
     db_path=None,  # Ignored — kept for API compatibility
 ) -> dict:
     """Register or update a chat mapping in Redis via Chat model.
@@ -815,6 +842,7 @@ def register_chat(
         chat_id: Telegram chat ID.
         chat_name: Human-readable chat name/title.
         chat_type: Type of chat (private, group, supergroup, channel).
+        project_key: Project key for direct project association.
         db_path: Ignored — kept for backward-compatibility signature.
 
     Returns:
@@ -834,9 +862,12 @@ def register_chat(
                     chat_id=str(chat_id),
                     chat_name=chat_name,
                     chat_type=old_type,
+                    project_key=project_key or getattr(chat, "project_key", None),
                     updated_at=time.time(),
                 )
             else:
+                if project_key and chat.project_key != project_key:
+                    chat.project_key = project_key
                 chat.updated_at = time.time()
                 chat.save()
         else:
@@ -844,6 +875,7 @@ def register_chat(
                 chat_id=str(chat_id),
                 chat_name=chat_name,
                 chat_type=chat_type,
+                project_key=project_key,
                 updated_at=time.time(),
             )
 
