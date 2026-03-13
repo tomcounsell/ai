@@ -11,7 +11,8 @@ Cross-references TelegramMessage via trigger_message_id. Message metadata
 (media, URLs, classification) lives on TelegramMessage; this model references
 it for enrichment during job execution.
 
-Status lifecycle: pending -> running -> active -> dormant -> completed | failed | waiting_for_children
+Status lifecycle:
+  pending -> running -> active -> dormant -> completed | failed | waiting_for_children
 """
 
 import logging

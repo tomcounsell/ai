@@ -431,15 +431,15 @@ class TestMigrationScript:
                 "scripts.migrate_model_relationships.load_chat_to_project_map",
                 return_value=chat_map,
             ),
-            patch("models.telegram.TelegramMessage") as MockTM,
-            patch("models.link.Link") as MockLink,
-            patch("models.dead_letter.DeadLetter") as MockDL,
-            patch("models.chat.Chat") as MockChat,
+            patch("models.telegram.TelegramMessage") as mock_tm,
+            patch("models.link.Link") as mock_link,
+            patch("models.dead_letter.DeadLetter") as mock_dl,
+            patch("models.chat.Chat") as mock_chat,
         ):
-            MockTM.query.all.return_value = [mock_msg]
-            MockLink.query.all.return_value = []
-            MockDL.query.all.return_value = []
-            MockChat.query.all.return_value = []
+            mock_tm.query.all.return_value = [mock_msg]
+            mock_link.query.all.return_value = []
+            mock_dl.query.all.return_value = []
+            mock_chat.query.all.return_value = []
 
             stats = backfill_project_key(dry_run=True, max_age_days=90)
 
@@ -460,10 +460,10 @@ class TestMigrationScript:
         mock_session.trigger_message_id = None
 
         with (
-            patch("models.agent_session.AgentSession") as MockAS,
+            patch("models.agent_session.AgentSession") as mock_as,
             patch("models.telegram.TelegramMessage"),
         ):
-            MockAS.query.all.return_value = [mock_session]
+            mock_as.query.all.return_value = [mock_session]
 
             stats = backfill_enrichment_metadata(dry_run=True, max_age_days=90)
 

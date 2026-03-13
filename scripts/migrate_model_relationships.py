@@ -214,7 +214,10 @@ def main():
     parser = argparse.ArgumentParser(description="Backfill model relationship fields")
     parser.add_argument("--dry-run", action="store_true", help="Preview changes without writing")
     parser.add_argument(
-        "--max-age", type=int, default=90, help="Only process records from last N days (default: 90)"
+        "--max-age",
+        type=int,
+        default=90,
+        help="Only process records from last N days (default: 90)",
     )
     args = parser.parse_args()
 

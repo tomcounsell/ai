@@ -14,7 +14,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-
 # ===================================================================
 # AgentSession hierarchy helpers (unit, no Redis)
 # ===================================================================
@@ -408,7 +407,6 @@ class TestSchedulerParentJob:
 
     def test_schedule_help_includes_parent_job(self):
         """The schedule subcommand accepts --parent-job flag."""
-        import io
         import sys
 
         from tools.job_scheduler import main
