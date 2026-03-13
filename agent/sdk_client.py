@@ -293,6 +293,43 @@ def load_system_prompt() -> str:
     return f"{WORKER_RULES}\n\n---\n\n{soul_prompt}{criteria_section}"
 
 
+def load_pm_system_prompt(working_directory: str) -> str:
+    """Load system prompt for PM (Project Manager) mode channels.
+
+    PM mode skips WORKER_RULES (no branch safety rails) and loads
+    the project-specific CLAUDE.md from the work vault directory if it exists.
+    Falls back to SOUL.md persona only.
+
+    System prompt structure:
+        [SOUL.md — persona, attitude, purpose, communication style]
+        ---
+        [Work-vault CLAUDE.md — PM-specific instructions for this project]
+
+    Args:
+        working_directory: Path to the work-vault project folder.
+
+    Returns:
+        Combined system prompt for PM mode.
+    """
+    # Load SOUL.md for persona (Valor's attitude/style is valuable in PM mode too)
+    soul_prompt = ""
+    if SOUL_PATH.exists():
+        soul_prompt = SOUL_PATH.read_text()
+    else:
+        logger.warning(f"SOUL.md not found at {SOUL_PATH}, using default prompt")
+        soul_prompt = "You are Valor, an AI coworker. Be direct, concise, and helpful."
+
+    # Try to load project-specific CLAUDE.md from work-vault directory
+    project_claude_path = Path(working_directory) / "CLAUDE.md"
+    if project_claude_path.exists():
+        project_instructions = project_claude_path.read_text()
+        logger.info(f"Loaded PM instructions from {project_claude_path}")
+        return f"{soul_prompt}\n\n---\n\n{project_instructions}"
+
+    logger.info(f"No CLAUDE.md found at {project_claude_path}, using SOUL.md only for PM mode")
+    return soul_prompt
+
+
 def _is_code_file(file_path: str) -> bool:
     """Return True if the file path has a code extension (.py, .js, .ts).
 
@@ -952,20 +989,33 @@ async def get_agent_response_sdk(
     if not project_working_dir:
         project_working_dir = AI_REPO_ROOT
 
-    # Classify: SDLC work → orchestrator in ai/, Q&A → direct in target project
-    from bridge.routing import classify_work_request
+    # Check project mode: "pm" channels bypass SDLC classification entirely
+    project_mode = project.get("mode", "dev") if project else "dev"
+    # Treat any unrecognized mode as "dev" (safe default)
+    if project_mode not in ("dev", "pm"):
+        logger.warning(f"[{request_id}] Unknown project mode '{project_mode}', treating as 'dev'")
+        project_mode = "dev"
 
-    classification = classify_work_request(message)
-    if classification == "sdlc" and project_working_dir != AI_REPO_ROOT:
-        working_dir = AI_REPO_ROOT
-        logger.info(
-            f"[{request_id}] SDLC routed: orchestrator in ai/, target={project_working_dir}"
-        )
-    else:
+    if project_mode == "pm":
+        # PM mode: skip classification, always use "question", work in project dir
+        classification = "question"
         working_dir = project_working_dir
-        logger.info(
-            f"[{request_id}] Direct routed: cwd={working_dir} (classification={classification})"
-        )
+        logger.info(f"[{request_id}] PM mode: cwd={working_dir}, skipping SDLC classification")
+    else:
+        # Dev mode: classify and route as before
+        from bridge.routing import classify_work_request
+
+        classification = classify_work_request(message)
+        if classification == "sdlc" and project_working_dir != AI_REPO_ROOT:
+            working_dir = AI_REPO_ROOT
+            logger.info(
+                f"[{request_id}] SDLC routed: orchestrator in ai/, target={project_working_dir}"
+            )
+        else:
+            working_dir = project_working_dir
+            logger.info(
+                f"[{request_id}] Direct routed: cwd={working_dir} (classification={classification})"
+            )
 
     logger.info(f"[{request_id}] SDK query for {project_name}")
     logger.debug(f"[{request_id}] Working directory: {working_dir}")
@@ -989,8 +1039,8 @@ async def get_agent_response_sdk(
         "work initiated in this specific session. Do not include work, PRs, or "
         "requests from other sessions, other senders, or prior conversation threads."
     )
-    # For SDLC-routed requests, inject target repo context
-    if classification == "sdlc" and project_working_dir != AI_REPO_ROOT:
+    # For SDLC-routed requests, inject target repo context (never for PM mode)
+    if project_mode != "pm" and classification == "sdlc" and project_working_dir != AI_REPO_ROOT:
         github_config = project.get("github", {}) if project else {}
         github_org = github_config.get("org", "")
         github_repo = github_config.get("repo", "")
@@ -1004,13 +1054,15 @@ async def get_agent_response_sdk(
 
     # Log prompt summary before sending to agent
     has_workflow = bool(workflow_id)
+    has_worker_rules = project_mode != "pm"
     logger.info(
         f"[{request_id}] Sending to agent: {len(enriched_message)} chars, "
         f"classification={classification}, has_workflow={has_workflow}, "
-        f"task_list={task_list_id or 'none'}"
+        f"task_list={task_list_id or 'none'}, mode={project_mode}"
     )
+    wr_label = "yes" if has_worker_rules else "no (pm mode)"
     logger.info(
-        f"[{request_id}] Context: soul=yes, worker_rules=yes, "
+        f"[{request_id}] Context: soul=yes, worker_rules={wr_label}, "
         f"workflow_context={'yes' if has_workflow else 'no'}, "
         f"session_id={session_id}"
     )
@@ -1021,8 +1073,14 @@ async def get_agent_response_sdk(
         # Extract message_id from the job context (passed through _execute_job)
         _message_id = None  # message_id not available at this layer
 
+        # PM mode: use PM system prompt (no WORKER_RULES, loads work-vault CLAUDE.md)
+        pm_system_prompt = None
+        if project_mode == "pm":
+            pm_system_prompt = load_pm_system_prompt(working_dir)
+
         agent = ValorAgent(
             working_dir=working_dir,
+            system_prompt=pm_system_prompt,
             workflow_id=workflow_id,
             task_list_id=task_list_id,
             chat_id=chat_id,
