@@ -425,30 +425,31 @@ Output: {"type": "status", "confidence": 0.90, \
 
 Few-shot examples of EMPTY PROMISES (must be classified as status with coaching):
 
-An "empty promise" is when the agent acknowledges feedback or commits to a behavior change \
-WITHOUT showing evidence of a concrete change (commit hash, file path, memory entry, config edit). \
-Phrases like "Got it", "Understood", "Noted", "I'll update", "Will do" followed by behavioral \
-commitments — without any proof of a durable change — are empty promises. These MUST be classified \
-as STATUS_UPDATE with a coaching_message that demands evidence.
+CRITICAL CONTEXT: By the time a response reaches Telegram, the agent's session is OVER. \
+There is no future execution. The agent cannot "will do" anything — it has already finished. \
+Any "I will", "I'll", "going forward", "from now on", "next time" language is an empty promise \
+UNLESS the agent already made the change in this session and shows evidence. \
+The only honest responses are: "I did X (here's the proof)" or "I didn't do X (here's why)."
 
-Input: "Got it, I'll stop doing that from now on."
+Input: "Will do. I'll update the config next time."
 Output: {"type": "status", "confidence": 0.95, \
-"reason": "Empty promise — bare acknowledgment with no evidence of a durable change", \
-"coaching_message": "You acknowledged feedback but made no concrete change to enforce it. \
-A promise without a code change, config update, or memory write is empty. Either make the \
-change now and show evidence (commit hash, file path), or explain what prevents you.", \
+"reason": "Empty promise — agent says 'will do' but session is ending, there is no next time", \
+"coaching_message": "You said 'will do' but your session is about to end — there is no \
+future execution to fulfill this promise. Either make the change NOW (edit a file, save a \
+memory, update a config) and show evidence, or be honest that you didn't do it.", \
 "has_workarounds": false}
 
 Input: "Noted. I'll adjust my approach going forward."
 Output: {"type": "status", "confidence": 0.95, \
-"reason": "Empty promise — vague commitment to future behavior with no durable change", \
-"coaching_message": "You promised to change your approach but made no provable change. \
-What file did you edit? What config did you update? What memory did you save? Show the \
-evidence or admit you need to make the change first.", "has_workarounds": false}
+"reason": "Empty promise — 'going forward' implies future action but session is ending", \
+"coaching_message": "You said 'going forward' but this session is ending. There is no \
+'going forward' unless you made a durable change right now. What did you actually change? \
+Show a commit hash, file path, or memory entry — or admit no change was made.", \
+"has_workarounds": false}
 
-Input: "Got it. Updated the config in bridge/summarizer.py and committed abc1234."
+Input: "Updated bridge/summarizer.py to reject empty promises. Committed abc1234."
 Output: {"type": "completion", "confidence": 0.90, \
-"reason": "Feedback acknowledged WITH concrete evidence — file path and commit hash", \
+"reason": "Concrete action taken with evidence — file path and commit hash", \
 "coaching_message": null, "has_workarounds": false}"""
 
 # False question detection explained:
@@ -572,12 +573,12 @@ def _classify_with_heuristics(text: str) -> ClassificationResult:
         return ClassificationResult(
             output_type=OutputType.STATUS_UPDATE,
             confidence=0.90,
-            reason="Empty promise — acknowledged feedback without concrete evidence of change",
+            reason="Empty promise — session is ending, 'will do' has no future execution",
             coaching_message=(
-                "You acknowledged feedback but showed no evidence of a concrete change. "
-                "A promise without a code change, config update, or memory write is empty. "
-                "Make the change now and show the evidence (commit hash, file path, memory entry), "
-                "or explain what prevents you from making it durable."
+                "Your session is about to end. You cannot 'will do' anything — "
+                "there is no future execution. Make the change NOW (edit a file, "
+                "save a memory, update a config) and show evidence, or honestly "
+                "say you didn't make the change."
             ),
         )
 
