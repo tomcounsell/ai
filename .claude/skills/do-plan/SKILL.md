@@ -57,7 +57,7 @@ python -m tools.session_progress --session-id "$SESSION_ID" --stage PLAN --statu
 
 Where:
 - `$ISSUE_URL` is the full GitHub issue URL (e.g., `https://github.com/owner/repo/issues/42`)
-- `$PLAN_URL` is the full plan document URL (e.g., `https://github.com/owner/repo/blob/main/docs/plans/{slug}.md`)
+- `$PLAN_URL` is the full plan document URL (e.g., `https://github.com/owner/repo/blob/${PLAN_BRANCH}/docs/plans/{slug}.md`)
 
 ## Quick Start Workflow
 
@@ -146,15 +146,28 @@ Create `docs/plans/{slug}.md` using the template from `PLAN_TEMPLATE.md`.
 
 ### Phase 2.5: Link or Create Tracking Issue
 
-After writing the plan, **push it to main first**, then link it to an existing issue OR create a new one.
+After writing the plan, **push it and link it** to an existing issue OR create a new one.
 
 ```bash
 # Resolve repo identity from git
 REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
 
-# Push plan to main before linking
-git add docs/plans/{slug}.md && git commit -m "Plan: {Feature Name}" && git push
+# Try pushing plan to main first; fall back to branch + PR if main is protected
+git add docs/plans/{slug}.md && git commit -m "Plan: {Feature Name}"
+if git push 2>/dev/null; then
+  PLAN_BRANCH="main"
+else
+  # Main is protected — create a plan branch and PR
+  PLAN_BRANCH="plan/{slug}"
+  git checkout -b "$PLAN_BRANCH"
+  git push -u origin "$PLAN_BRANCH"
+  gh pr create --title "Plan: {Feature Name}" --body "Adds plan document for {slug}." --label "plan"
+  # Switch back to main for subsequent work
+  git checkout main
+fi
 ```
+
+**Protected branch handling:** If pushing directly to main fails (common with protected branches), the skill automatically creates a `plan/{slug}` branch and opens a PR. The plan link URL should use whichever branch the plan landed on (`$PLAN_BRANCH` instead of hardcoded `main`).
 
 **Check for existing issue first!** If the plan was created in response to an existing GitHub issue (e.g., "make a plan for issue #42"), do NOT create a new issue. Instead:
 
@@ -165,7 +178,7 @@ git add docs/plans/{slug}.md && git commit -m "Plan: {Feature Name}" && git push
 EXISTING_ISSUE=42
 gh issue edit $EXISTING_ISSUE --add-label "plan"
 EXISTING_BODY=$(gh issue view $EXISTING_ISSUE --json body -q .body)
-PLAN_LINK="https://github.com/${REPO}/blob/main/docs/plans/{slug}.md"
+PLAN_LINK="https://github.com/${REPO}/blob/${PLAN_BRANCH}/docs/plans/{slug}.md"
 gh issue edit $EXISTING_ISSUE --body "**Plan:** ${PLAN_LINK}
 
 ${EXISTING_BODY}"
@@ -192,7 +205,7 @@ gh issue create \
   --label "plan" \
   --label "$TYPE" \
   --body "$(cat <<EOF
-**Plan:** https://github.com/${REPO}/blob/main/docs/plans/{slug}.md
+**Plan:** https://github.com/${REPO}/blob/${PLAN_BRANCH}/docs/plans/{slug}.md
 
 **Type:** {type} | **Appetite:** {appetite} | **Status:** Planning
 
@@ -243,8 +256,8 @@ fi
 3. **Enumerate questions** - List all questions needing supervisor input
 4. **Add questions to plan** - Append to "Open Questions" section
 5. **Pre-send checklist**:
-   - [ ] Plan committed AND pushed to `main`
-   - [ ] GitHub issue has `**Plan:** https://github.com/${REPO}/blob/main/docs/plans/{slug}.md`
+   - [ ] Plan committed AND pushed (to `main` or `plan/{slug}` branch if main is protected)
+   - [ ] GitHub issue has `**Plan:** https://github.com/${REPO}/blob/${PLAN_BRANCH}/docs/plans/{slug}.md`
    - [ ] Plan frontmatter has `tracking:` set to the issue URL
 6. **Send reply**:
 
@@ -288,7 +301,7 @@ Use snake_case for slugs: `async_meeting_reschedule.md`, `dark_mode_toggle.md`, 
 
 ## Branch Workflow
 
-**Plans are written directly on the main branch.** The plan document itself is just a document -- no feature branch needed.
+**Plans are pushed to main when possible.** If the main branch is protected (push rejected), the skill automatically creates a `plan/{slug}` branch and opens a PR for the plan document.
 
 When the plan is *executed* (via `/do-build`), the build skill creates a feature branch, does the work there, and opens a PR.
 
