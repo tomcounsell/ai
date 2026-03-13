@@ -69,7 +69,7 @@ class TestCyclicEpisode:
 
     def test_append_tool(self):
         """append_tool adds entries and caps at MAX_TOOL_SEQUENCE."""
-        from models.cyclic_episode import CyclicEpisode, MAX_TOOL_SEQUENCE
+        from models.cyclic_episode import MAX_TOOL_SEQUENCE, CyclicEpisode
 
         episode = CyclicEpisode.__new__(CyclicEpisode)
         episode.tool_sequence = None
@@ -88,7 +88,7 @@ class TestCyclicEpisode:
 
     def test_append_friction(self):
         """append_friction adds entries and caps at MAX_FRICTION_EVENTS."""
-        from models.cyclic_episode import CyclicEpisode, MAX_FRICTION_EVENTS
+        from models.cyclic_episode import MAX_FRICTION_EVENTS, CyclicEpisode
 
         episode = CyclicEpisode.__new__(CyclicEpisode)
         episode.friction_events = None
@@ -150,8 +150,8 @@ class TestCyclicEpisode:
     def test_enums(self):
         """Enum lists are defined."""
         from models.cyclic_episode import (
-            PROBLEM_TOPOLOGIES,
             AFFECTED_LAYERS,
+            PROBLEM_TOPOLOGIES,
             RESOLUTION_TYPES,
         )
 
@@ -408,7 +408,7 @@ class TestFingerprintClassifier:
 
     def test_default_fingerprint_on_missing_key(self):
         """Returns default fingerprint when ANTHROPIC_API_KEY is missing."""
-        from scripts.fingerprint_classifier import classify_fingerprint, DEFAULT_FINGERPRINT
+        from scripts.fingerprint_classifier import DEFAULT_FINGERPRINT, classify_fingerprint
 
         with patch.dict(os.environ, {}, clear=True):
             # Remove ANTHROPIC_API_KEY if present
@@ -450,7 +450,7 @@ class TestFingerprintClassifier:
 
     def test_malformed_json_returns_default(self):
         """Returns default fingerprint on malformed JSON."""
-        from scripts.fingerprint_classifier import classify_fingerprint, DEFAULT_FINGERPRINT
+        from scripts.fingerprint_classifier import DEFAULT_FINGERPRINT, classify_fingerprint
 
         mock_response = MagicMock()
         mock_response.content = [MagicMock(text="not valid json {{{")]
@@ -467,7 +467,7 @@ class TestFingerprintClassifier:
 
     def test_api_error_returns_default(self):
         """Returns default fingerprint on API error."""
-        from scripts.fingerprint_classifier import classify_fingerprint, DEFAULT_FINGERPRINT
+        from scripts.fingerprint_classifier import DEFAULT_FINGERPRINT, classify_fingerprint
 
         mock_client = MagicMock()
         mock_client.messages.create.side_effect = Exception("API timeout")
@@ -537,7 +537,7 @@ class TestFingerprintClassifier:
 
     def test_classify_session_convenience(self):
         """classify_session wraps classify_fingerprint for AgentSession objects."""
-        from scripts.fingerprint_classifier import classify_session, DEFAULT_FINGERPRINT
+        from scripts.fingerprint_classifier import DEFAULT_FINGERPRINT, classify_session
 
         session = MagicMock()
         session.summary = "test summary"
@@ -636,21 +636,515 @@ class TestReflectionsCycleClose:
         assert step_nums["Episode Cycle-Close"] == 16
         assert step_nums["Pattern Crystallization"] == 17
 
+    @pytest.mark.asyncio
+    async def test_cycle_close_creates_episode_for_completed_sdlc_session(self):
+        """step_episode_cycle_close creates a CyclicEpisode for completed SDLC sessions."""
+        from scripts.reflections import ReflectionRunner
+
+        runner = ReflectionRunner.__new__(ReflectionRunner)
+        state_mock = MagicMock()
+        state_mock.step_progress = {}
+        state_mock.add_finding = MagicMock()
+        runner.state = state_mock
+
+        # Create a mock completed SDLC session
+        mock_session = MagicMock()
+        mock_session.completed_at = time.time()  # completed recently
+        mock_session.is_sdlc_job.return_value = True
+        mock_session.status = "completed"
+        mock_session.job_id = "test-job-123"
+        mock_session.project_key = "ai"
+        mock_session.tool_sequence = ["BUILD:edit", "TEST:bash"]
+        mock_session.friction_events = ["BUILD|test_failure|2"]
+        mock_session.has_failed_stage.return_value = False
+        mock_session.issue_url = "https://github.com/test/1"
+        mock_session.branch_name = "feature/test"
+        mock_session.summary = "Test summary"
+
+        # Mock AgentSession.query.all to return our session
+        with patch("models.agent_session.AgentSession.query") as query_mock:
+            query_mock.all.return_value = [mock_session]
+
+            # Mock CyclicEpisode.query.filter to return empty (no existing episode)
+            with patch("models.cyclic_episode.CyclicEpisode.query") as ep_query_mock:
+                ep_query_mock.filter.return_value = []
+
+                # Mock CyclicEpisode.create
+                with patch("models.cyclic_episode.CyclicEpisode.create") as create_mock:
+                    create_mock.return_value = MagicMock()
+
+                    # Mock classify_session
+                    with patch("scripts.fingerprint_classifier.classify_session") as classify_mock:
+                        classify_mock.return_value = {
+                            "problem_topology": "bug_fix",
+                            "affected_layer": "bridge",
+                            "ambiguity_at_intake": 0.3,
+                            "acceptance_criterion_defined": True,
+                        }
+
+                        await runner.step_episode_cycle_close()
+
+                    # Verify episode was created with correct args
+                    create_mock.assert_called_once()
+                    call_kwargs = create_mock.call_args[1]
+                    assert call_kwargs["vault"] == "mem:ai"
+                    assert call_kwargs["raw_ref"] == "test-job-123"
+                    assert call_kwargs["problem_topology"] == "bug_fix"
+                    assert call_kwargs["affected_layer"] == "bridge"
+                    assert call_kwargs["tool_sequence"] == ["BUILD:edit", "TEST:bash"]
+                    assert call_kwargs["friction_events"] == ["BUILD|test_failure|2"]
+                    assert call_kwargs["resolution_type"] == "clean_merge"
+                    assert call_kwargs["intent_satisfied"] is True
+
+        assert state_mock.step_progress["episode_cycle_close"]["episodes_created"] == 1
+
+    @pytest.mark.asyncio
+    async def test_cycle_close_skips_non_sdlc_sessions(self):
+        """step_episode_cycle_close skips non-SDLC sessions."""
+        from scripts.reflections import ReflectionRunner
+
+        runner = ReflectionRunner.__new__(ReflectionRunner)
+        state_mock = MagicMock()
+        state_mock.step_progress = {}
+        state_mock.add_finding = MagicMock()
+        runner.state = state_mock
+
+        mock_session = MagicMock()
+        mock_session.completed_at = time.time()
+        mock_session.is_sdlc_job.return_value = False
+        mock_session.status = "completed"
+
+        with patch("models.agent_session.AgentSession.query") as query_mock:
+            query_mock.all.return_value = [mock_session]
+            await runner.step_episode_cycle_close()
+
+        assert state_mock.step_progress["episode_cycle_close"]["episodes_created"] == 0
+        assert state_mock.step_progress["episode_cycle_close"]["sessions_skipped"] == 1
+
+    @pytest.mark.asyncio
+    async def test_cycle_close_skips_existing_episode(self):
+        """step_episode_cycle_close is idempotent -- skips if episode exists."""
+        from scripts.reflections import ReflectionRunner
+
+        runner = ReflectionRunner.__new__(ReflectionRunner)
+        state_mock = MagicMock()
+        state_mock.step_progress = {}
+        state_mock.add_finding = MagicMock()
+        runner.state = state_mock
+
+        mock_session = MagicMock()
+        mock_session.completed_at = time.time()
+        mock_session.is_sdlc_job.return_value = True
+        mock_session.status = "completed"
+        mock_session.job_id = "test-job-456"
+
+        with patch("models.agent_session.AgentSession.query") as query_mock:
+            query_mock.all.return_value = [mock_session]
+            with patch("models.cyclic_episode.CyclicEpisode.query") as ep_query_mock:
+                # Existing episode found
+                ep_query_mock.filter.return_value = [MagicMock()]
+                await runner.step_episode_cycle_close()
+
+        assert state_mock.step_progress["episode_cycle_close"]["episodes_created"] == 0
+        assert state_mock.step_progress["episode_cycle_close"]["sessions_skipped"] == 1
+
+    @pytest.mark.asyncio
+    async def test_cycle_close_semantic_dedup_by_branch(self):
+        """step_episode_cycle_close skips duplicate fingerprint+branch combos."""
+        from scripts.reflections import ReflectionRunner
+
+        runner = ReflectionRunner.__new__(ReflectionRunner)
+        state_mock = MagicMock()
+        state_mock.step_progress = {}
+        state_mock.add_finding = MagicMock()
+        runner.state = state_mock
+
+        mock_session = MagicMock()
+        mock_session.completed_at = time.time()
+        mock_session.is_sdlc_job.return_value = True
+        mock_session.status = "completed"
+        mock_session.job_id = "test-job-789"
+        mock_session.project_key = "ai"
+        mock_session.branch_name = "feature/same-branch"
+
+        # Existing episode with same branch
+        existing_episode = MagicMock()
+        existing_episode.branch_name = "feature/same-branch"
+        existing_episode.episode_id = "existing-ep-1"
+
+        with patch("models.agent_session.AgentSession.query") as query_mock:
+            query_mock.all.return_value = [mock_session]
+            with patch("models.cyclic_episode.CyclicEpisode.query") as ep_query_mock:
+                # No episode for this raw_ref (first filter), but matching fingerprint+branch
+                def filter_side_effect(**kwargs):
+                    if "raw_ref" in kwargs:
+                        return []  # no exact match
+                    # fingerprint match returns existing episode with same branch
+                    return [existing_episode]
+
+                ep_query_mock.filter.side_effect = filter_side_effect
+
+                with patch("scripts.fingerprint_classifier.classify_session") as classify_mock:
+                    classify_mock.return_value = {
+                        "problem_topology": "bug_fix",
+                        "affected_layer": "bridge",
+                        "ambiguity_at_intake": 0.3,
+                        "acceptance_criterion_defined": True,
+                    }
+
+                    with patch("models.cyclic_episode.CyclicEpisode.create") as create_mock:
+                        await runner.step_episode_cycle_close()
+
+                    # Should NOT have created an episode (semantic dedup)
+                    create_mock.assert_not_called()
+
+        assert state_mock.step_progress["episode_cycle_close"]["episodes_created"] == 0
+
 
 class TestReflectionsPatternCrystallization:
     """Tests for the pattern crystallization Reflections step."""
 
     def test_crystallization_threshold(self):
         """Pattern crystallization requires 3+ episodes."""
-        # This is a design validation test - the threshold is defined
-        # in step_pattern_crystallization
-        from scripts.reflections import ReflectionRunner
-
-        # Read the source to verify threshold
         import inspect
+
+        from scripts.reflections import ReflectionRunner
 
         source = inspect.getsource(ReflectionRunner.step_pattern_crystallization)
         assert "CRYSTALLIZATION_THRESHOLD = 3" in source
+
+    @pytest.mark.asyncio
+    async def test_crystallization_creates_pattern_from_3_episodes(self):
+        """step_pattern_crystallization creates a pattern when 3+ episodes share fingerprint."""
+        from scripts.reflections import ReflectionRunner
+
+        runner = ReflectionRunner.__new__(ReflectionRunner)
+        state_mock = MagicMock()
+        state_mock.step_progress = {}
+        state_mock.add_finding = MagicMock()
+        runner.state = state_mock
+
+        # Create 3 episodes with same fingerprint cluster
+        episodes = []
+        for i in range(3):
+            ep = MagicMock()
+            ep.problem_topology = "bug_fix"
+            ep.affected_layer = "bridge"
+            ep.intent_satisfied = True
+            ep.tool_sequence = ["BUILD:edit", "TEST:bash"]
+            ep.friction_events = []
+            ep.episode_id = f"ep-{i}"
+            episodes.append(ep)
+
+        with patch("models.cyclic_episode.CyclicEpisode.query") as ep_query_mock:
+            ep_query_mock.all.return_value = episodes
+            with patch("models.procedural_pattern.ProceduralPattern.query") as pat_query_mock:
+                pat_query_mock.filter.return_value = []  # no existing pattern
+                with patch("models.procedural_pattern.ProceduralPattern.create") as create_mock:
+                    create_mock.return_value = MagicMock()
+                    await runner.step_pattern_crystallization()
+
+                    # Pattern should be created
+                    create_mock.assert_called_once()
+                    call_kwargs = create_mock.call_args[1]
+                    assert call_kwargs["problem_topology"] == "bug_fix"
+                    assert call_kwargs["affected_layer"] == "bridge"
+                    assert call_kwargs["success_rate"] == 1.0  # all 3 succeeded
+                    assert call_kwargs["sample_count"] == 3
+                    assert call_kwargs["success_count"] == 3
+
+        assert state_mock.step_progress["pattern_crystallization"]["patterns_created"] == 1
+
+    @pytest.mark.asyncio
+    async def test_crystallization_skips_below_threshold(self):
+        """step_pattern_crystallization skips clusters with fewer than 3 episodes."""
+        from scripts.reflections import ReflectionRunner
+
+        runner = ReflectionRunner.__new__(ReflectionRunner)
+        state_mock = MagicMock()
+        state_mock.step_progress = {}
+        state_mock.add_finding = MagicMock()
+        runner.state = state_mock
+
+        # Only 2 episodes -- below threshold
+        episodes = []
+        for i in range(2):
+            ep = MagicMock()
+            ep.problem_topology = "bug_fix"
+            ep.affected_layer = "bridge"
+            ep.intent_satisfied = True
+            ep.tool_sequence = ["BUILD:edit"]
+            ep.friction_events = []
+            ep.episode_id = f"ep-{i}"
+            episodes.append(ep)
+
+        with patch("models.cyclic_episode.CyclicEpisode.query") as ep_query_mock:
+            ep_query_mock.all.return_value = episodes
+            with patch("models.procedural_pattern.ProceduralPattern.create") as create_mock:
+                await runner.step_pattern_crystallization()
+                create_mock.assert_not_called()
+
+        assert state_mock.step_progress["pattern_crystallization"]["patterns_created"] == 0
+
+    @pytest.mark.asyncio
+    async def test_crystallization_reinforces_existing_pattern(self):
+        """step_pattern_crystallization reinforces existing patterns."""
+        from scripts.reflections import ReflectionRunner
+
+        runner = ReflectionRunner.__new__(ReflectionRunner)
+        state_mock = MagicMock()
+        state_mock.step_progress = {}
+        state_mock.add_finding = MagicMock()
+        runner.state = state_mock
+
+        # 3 episodes
+        episodes = []
+        for i in range(3):
+            ep = MagicMock()
+            ep.problem_topology = "new_feature"
+            ep.affected_layer = "model"
+            ep.intent_satisfied = True
+            ep.tool_sequence = ["BUILD:edit"]
+            ep.friction_events = []
+            ep.episode_id = f"ep-{i}"
+            episodes.append(ep)
+
+        # Existing pattern
+        existing_pattern = MagicMock()
+        existing_pattern.reinforce = MagicMock()
+        existing_pattern.save = MagicMock()
+
+        with patch("models.cyclic_episode.CyclicEpisode.query") as ep_query_mock:
+            ep_query_mock.all.return_value = episodes
+            with patch("models.procedural_pattern.ProceduralPattern.query") as pat_query_mock:
+                pat_query_mock.filter.return_value = [existing_pattern]
+                with patch("models.procedural_pattern.ProceduralPattern.create") as create_mock:
+                    await runner.step_pattern_crystallization()
+
+                    # Should NOT create, should reinforce
+                    create_mock.assert_not_called()
+                    existing_pattern.reinforce.assert_called_once_with(True)
+
+        assert state_mock.step_progress["pattern_crystallization"]["patterns_reinforced"] == 1
+
+    @pytest.mark.asyncio
+    async def test_crystallization_skips_zero_success_clusters(self):
+        """step_pattern_crystallization skips clusters with 0% success rate."""
+        from scripts.reflections import ReflectionRunner
+
+        runner = ReflectionRunner.__new__(ReflectionRunner)
+        state_mock = MagicMock()
+        state_mock.step_progress = {}
+        state_mock.add_finding = MagicMock()
+        runner.state = state_mock
+
+        # 3 episodes, all failed
+        episodes = []
+        for i in range(3):
+            ep = MagicMock()
+            ep.problem_topology = "bug_fix"
+            ep.affected_layer = "bridge"
+            ep.intent_satisfied = False  # all failed
+            ep.tool_sequence = ["BUILD:edit"]
+            ep.friction_events = []
+            ep.episode_id = f"ep-{i}"
+            episodes.append(ep)
+
+        with patch("models.cyclic_episode.CyclicEpisode.query") as ep_query_mock:
+            ep_query_mock.all.return_value = episodes
+            with patch("models.procedural_pattern.ProceduralPattern.create") as create_mock:
+                await runner.step_pattern_crystallization()
+                create_mock.assert_not_called()
+
+        assert state_mock.step_progress["pattern_crystallization"]["patterns_created"] == 0
+
+    @pytest.mark.asyncio
+    async def test_crystallization_generates_friction_warnings(self):
+        """step_pattern_crystallization generates warnings for frequent friction."""
+        from scripts.reflections import ReflectionRunner
+
+        runner = ReflectionRunner.__new__(ReflectionRunner)
+        state_mock = MagicMock()
+        state_mock.step_progress = {}
+        state_mock.add_finding = MagicMock()
+        runner.state = state_mock
+
+        # 4 episodes with recurring friction in 3 of them (>50%)
+        episodes = []
+        for i in range(4):
+            ep = MagicMock()
+            ep.problem_topology = "refactor"
+            ep.affected_layer = "agent"
+            ep.intent_satisfied = True
+            ep.tool_sequence = ["BUILD:edit", "TEST:bash"]
+            # 3 of 4 have same friction
+            ep.friction_events = ["TEST|lint_failure|1"] if i < 3 else []
+            ep.episode_id = f"ep-{i}"
+            episodes.append(ep)
+
+        with patch("models.cyclic_episode.CyclicEpisode.query") as ep_query_mock:
+            ep_query_mock.all.return_value = episodes
+            with patch("models.procedural_pattern.ProceduralPattern.query") as pat_query_mock:
+                pat_query_mock.filter.return_value = []
+                with patch("models.procedural_pattern.ProceduralPattern.create") as create_mock:
+                    create_mock.return_value = MagicMock()
+                    await runner.step_pattern_crystallization()
+
+                    call_kwargs = create_mock.call_args[1]
+                    assert len(call_kwargs["warnings"]) > 0
+                    assert "lint_failure" in call_kwargs["warnings"][0]
+
+
+# ============================================================================
+# Instrumentation wiring tests
+# ============================================================================
+
+
+class TestInstrumentationWiring:
+    """Tests for tool event and friction event wiring in session_transcript."""
+
+    def test_infer_current_stage_returns_in_progress(self):
+        """_infer_current_stage returns in-progress stage."""
+        from bridge.session_transcript import _infer_current_stage
+
+        session = MagicMock()
+        session.get_stage_progress.return_value = {
+            "ISSUE": "completed",
+            "PLAN": "completed",
+            "BUILD": "in_progress",
+            "TEST": "pending",
+            "REVIEW": "pending",
+            "DOCS": "pending",
+        }
+        assert _infer_current_stage(session) == "BUILD"
+
+    def test_infer_current_stage_returns_first_pending(self):
+        """_infer_current_stage returns first pending stage if none in-progress."""
+        from bridge.session_transcript import _infer_current_stage
+
+        session = MagicMock()
+        session.get_stage_progress.return_value = {
+            "ISSUE": "completed",
+            "PLAN": "completed",
+            "BUILD": "completed",
+            "TEST": "pending",
+            "REVIEW": "pending",
+            "DOCS": "pending",
+        }
+        assert _infer_current_stage(session) == "TEST"
+
+    def test_infer_current_stage_returns_unknown_when_all_done(self):
+        """_infer_current_stage returns UNKNOWN when all stages completed."""
+        from bridge.session_transcript import _infer_current_stage
+
+        session = MagicMock()
+        session.get_stage_progress.return_value = {
+            "ISSUE": "completed",
+            "PLAN": "completed",
+            "BUILD": "completed",
+            "TEST": "completed",
+            "REVIEW": "completed",
+            "DOCS": "completed",
+        }
+        assert _infer_current_stage(session) == "UNKNOWN"
+
+    def test_record_friction_event_calls_append(self):
+        """record_friction_event calls append_friction_event on SDLC sessions."""
+        from bridge.session_transcript import record_friction_event
+
+        mock_session = MagicMock()
+        mock_session.is_sdlc_job.return_value = True
+        mock_session.get_stage_progress.return_value = {
+            "ISSUE": "completed",
+            "PLAN": "completed",
+            "BUILD": "in_progress",
+            "TEST": "pending",
+            "REVIEW": "pending",
+            "DOCS": "pending",
+        }
+
+        with patch("models.agent_session.AgentSession.query") as query_mock:
+            query_mock.filter.return_value = [mock_session]
+            record_friction_event("test-session", "sdk_error_retry_1")
+
+        mock_session.append_friction_event.assert_called_once_with("BUILD", "sdk_error_retry_1")
+
+    def test_record_friction_event_skips_non_sdlc(self):
+        """record_friction_event skips non-SDLC sessions."""
+        from bridge.session_transcript import record_friction_event
+
+        mock_session = MagicMock()
+        mock_session.is_sdlc_job.return_value = False
+
+        with patch("models.agent_session.AgentSession.query") as query_mock:
+            query_mock.filter.return_value = [mock_session]
+            record_friction_event("test-session", "sdk_error_retry_1")
+
+        mock_session.append_friction_event.assert_not_called()
+
+
+# ============================================================================
+# Semantic dedup tests
+# ============================================================================
+
+
+class TestSemanticDedup:
+    """Tests for semantic dedup logic in cycle-close."""
+
+    @pytest.mark.asyncio
+    async def test_dedup_allows_different_branches(self):
+        """Semantic dedup allows episodes with different branches."""
+        from scripts.reflections import ReflectionRunner
+
+        runner = ReflectionRunner.__new__(ReflectionRunner)
+        state_mock = MagicMock()
+        state_mock.step_progress = {}
+        state_mock.add_finding = MagicMock()
+        runner.state = state_mock
+
+        mock_session = MagicMock()
+        mock_session.completed_at = time.time()
+        mock_session.is_sdlc_job.return_value = True
+        mock_session.status = "completed"
+        mock_session.job_id = "test-job-new"
+        mock_session.project_key = "ai"
+        mock_session.branch_name = "feature/new-branch"
+        mock_session.tool_sequence = ["BUILD:edit"]
+        mock_session.friction_events = []
+        mock_session.has_failed_stage.return_value = False
+        mock_session.issue_url = None
+        mock_session.summary = "Test"
+
+        # Existing episode with DIFFERENT branch
+        existing_episode = MagicMock()
+        existing_episode.branch_name = "feature/other-branch"
+
+        with patch("models.agent_session.AgentSession.query") as query_mock:
+            query_mock.all.return_value = [mock_session]
+            with patch("models.cyclic_episode.CyclicEpisode.query") as ep_query_mock:
+
+                def filter_side_effect(**kwargs):
+                    if "raw_ref" in kwargs:
+                        return []
+                    return [existing_episode]  # different branch
+
+                ep_query_mock.filter.side_effect = filter_side_effect
+
+                with patch("scripts.fingerprint_classifier.classify_session") as classify_mock:
+                    classify_mock.return_value = {
+                        "problem_topology": "bug_fix",
+                        "affected_layer": "bridge",
+                        "ambiguity_at_intake": 0.3,
+                        "acceptance_criterion_defined": True,
+                    }
+                    with patch("models.cyclic_episode.CyclicEpisode.create") as create_mock:
+                        create_mock.return_value = MagicMock()
+                        await runner.step_episode_cycle_close()
+
+                        # Should create because branches differ
+                        create_mock.assert_called_once()
+
+        assert state_mock.step_progress["episode_cycle_close"]["episodes_created"] == 1
 
 
 # ============================================================================

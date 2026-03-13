@@ -1161,15 +1161,14 @@ class ReflectionRunner:
             from models.agent_session import AgentSession
             from models.bridge_event import BridgeEvent
             from models.chat import Chat
+            from models.cyclic_episode import CyclicEpisode
             from models.link import Link
+            from models.procedural_pattern import ProceduralPattern
             from models.reflections import (
                 ReflectionIgnore,
                 ReflectionRun,
             )
             from models.telegram import TelegramMessage
-
-            from models.cyclic_episode import CyclicEpisode
-            from models.procedural_pattern import ProceduralPattern
 
             msg_deleted = TelegramMessage.cleanup_expired(max_age_days=90)
             link_deleted = Link.cleanup_expired(max_age_days=90)
@@ -1734,7 +1733,7 @@ class ReflectionRunner:
                 sessions_skipped += 1
                 continue
 
-            # Classify fingerprint
+            # Classify fingerprint (needed for dedup check below)
             try:
                 fingerprint = classify_session(session)
             except Exception as e:
@@ -1748,6 +1747,27 @@ class ReflectionRunner:
 
             # Determine vault from project_key
             vault = f"mem:{session.project_key}" if session.project_key else "mem:default"
+
+            # Semantic dedup: skip if an episode with the same fingerprint + vault
+            # already exists and was created within the same session_id scope.
+            # This prevents structurally redundant episodes from auto-continues
+            # or retries of the same work item.
+            dedup_matches = [
+                e
+                for e in CyclicEpisode.query.filter(
+                    problem_topology=fingerprint["problem_topology"],
+                    affected_layer=fingerprint["affected_layer"],
+                    vault=vault,
+                )
+                if e.branch_name and session.branch_name and e.branch_name == session.branch_name
+            ]
+            if dedup_matches:
+                logger.info(
+                    f"Semantic dedup: skipping episode for session {session.job_id}, "
+                    f"existing episode with same fingerprint+branch: {dedup_matches[0].episode_id}"
+                )
+                sessions_skipped += 1
+                continue
 
             # Compute stage durations from history
             stage_durations = {}
