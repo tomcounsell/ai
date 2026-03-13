@@ -197,8 +197,8 @@ class TestFinalizeParent:
             status="waiting_for_children",
         )
         children = [
-            self._make_session(status="completed"),
-            self._make_session(status="completed"),
+            self._make_session(job_id="c1", status="completed"),
+            self._make_session(job_id="c2", status="completed"),
         ]
         parent.get_children.return_value = children
         mock_model.query.get.return_value = parent
@@ -219,8 +219,8 @@ class TestFinalizeParent:
             status="waiting_for_children",
         )
         children = [
-            self._make_session(status="completed"),
-            self._make_session(status="failed"),
+            self._make_session(job_id="c1", status="completed"),
+            self._make_session(job_id="c2", status="failed"),
         ]
         parent.get_children.return_value = children
         mock_model.query.get.return_value = parent
@@ -241,8 +241,8 @@ class TestFinalizeParent:
             status="waiting_for_children",
         )
         children = [
-            self._make_session(status="completed"),
-            self._make_session(status="running"),
+            self._make_session(job_id="c1", status="completed"),
+            self._make_session(job_id="c2", status="running"),
         ]
         parent.get_children.return_value = children
         mock_model.query.get.return_value = parent
@@ -250,6 +250,67 @@ class TestFinalizeParent:
         await _finalize_parent("p1")
 
         mock_transition.assert_not_called()
+
+    @patch("agent.job_queue._transition_parent")
+    @patch("agent.job_queue.AgentSession")
+    @pytest.mark.asyncio
+    async def test_finalize_parent_with_completing_child_override(
+        self, mock_model, mock_transition
+    ):
+        """_finalize_parent overrides status of completing child correctly.
+
+        When called from _complete_job, the completing child's Redis status is
+        still 'running'. The completing_child_id/completing_child_status params
+        let _finalize_parent treat it as terminal.
+        """
+        from agent.job_queue import _finalize_parent
+
+        parent = self._make_session(
+            job_id="p1",
+            status="waiting_for_children",
+        )
+        # c2 is still "running" in Redis, but is the completing child
+        children = [
+            self._make_session(job_id="c1", status="completed"),
+            self._make_session(job_id="c2", status="running"),
+        ]
+        parent.get_children.return_value = children
+        mock_model.query.get.return_value = parent
+
+        # With completing_child_id, c2's status is overridden to "completed"
+        await _finalize_parent(
+            "p1",
+            completing_child_id="c2",
+            completing_child_status="completed",
+        )
+
+        mock_transition.assert_called_once_with(parent, "completed")
+
+    @patch("agent.job_queue._transition_parent")
+    @patch("agent.job_queue.AgentSession")
+    @pytest.mark.asyncio
+    async def test_finalize_parent_completing_child_failed(self, mock_model, mock_transition):
+        """_finalize_parent correctly handles a completing child that failed."""
+        from agent.job_queue import _finalize_parent
+
+        parent = self._make_session(
+            job_id="p1",
+            status="waiting_for_children",
+        )
+        children = [
+            self._make_session(job_id="c1", status="completed"),
+            self._make_session(job_id="c2", status="running"),
+        ]
+        parent.get_children.return_value = children
+        mock_model.query.get.return_value = parent
+
+        await _finalize_parent(
+            "p1",
+            completing_child_id="c2",
+            completing_child_status="failed",
+        )
+
+        mock_transition.assert_called_once_with(parent, "failed")
 
     @patch("agent.job_queue._transition_parent")
     @patch("agent.job_queue.AgentSession")

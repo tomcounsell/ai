@@ -419,23 +419,38 @@ async def _remove_by_session(project_key: str, session_id: str) -> bool:
     return removed
 
 
-async def _complete_job(job: Job) -> None:
+async def _complete_job(job: Job, *, failed: bool = False) -> None:
     """Mark a running job as completed and delete it from Redis.
 
     If this job is a child (has parent_job_id), finalize the parent BEFORE
-    deleting the child. This ensures the child's terminal status is still
-    visible to _finalize_parent when it queries siblings via get_children().
+    deleting the child. The completing child's intended terminal status is
+    passed to _finalize_parent so it can correctly count terminal children
+    even though the child's Redis status hasn't been updated yet.
+
+    Args:
+        job: The job to complete.
+        failed: If True, this job failed (used for parent finalization).
     """
     parent_job_id = getattr(job._rj, "parent_job_id", None)
 
-    # Finalize parent BEFORE deleting child so sibling status check is accurate
+    # Finalize parent BEFORE deleting child, passing the completing child's
+    # intended status so _finalize_parent can treat it as terminal
     if parent_job_id:
-        await _finalize_parent(parent_job_id)
+        child_status = "failed" if failed else "completed"
+        await _finalize_parent(
+            parent_job_id,
+            completing_child_id=job.job_id,
+            completing_child_status=child_status,
+        )
 
     await job._rj.async_delete()
 
 
-async def _finalize_parent(parent_job_id: str) -> None:
+async def _finalize_parent(
+    parent_job_id: str,
+    completing_child_id: str | None = None,
+    completing_child_status: str | None = None,
+) -> None:
     """Check if all children of a parent are terminal; if so, finalize the parent.
 
     Transitions parent from waiting_for_children to completed (all children
@@ -444,13 +459,18 @@ async def _finalize_parent(parent_job_id: str) -> None:
 
     Args:
         parent_job_id: The job_id of the parent AgentSession.
+        completing_child_id: If provided, the job_id of the child that is
+            currently completing. Its Redis status may still be "running",
+            so completing_child_status overrides it.
+        completing_child_status: The intended terminal status ("completed"
+            or "failed") of the completing child.
     """
     try:
         parent = AgentSession.query.get(parent_job_id)
     except Exception:
         logger.warning(
-            f"[job-hierarchy] Parent job {parent_job_id} not found during "
-            f"finalization — orphaned child completed"
+            f"[job-hierarchy] Parent job {parent_job_id} lookup raised "
+            f"exception during finalization — orphaned child completed"
         )
         return
 
@@ -481,8 +501,17 @@ async def _finalize_parent(parent_job_id: str) -> None:
         _transition_parent(parent, "completed")
         return
 
+    # Build effective status map: override the completing child's status
+    # since its Redis status hasn't been updated yet
     terminal_statuses = {"completed", "failed"}
-    non_terminal = [c for c in children if c.status not in terminal_statuses]
+
+    def effective_status(child: AgentSession) -> str:
+        if completing_child_id and child.job_id == completing_child_id:
+            return completing_child_status or "completed"
+        return child.status
+
+    child_statuses = [effective_status(c) for c in children]
+    non_terminal = [s for s in child_statuses if s not in terminal_statuses]
 
     if non_terminal:
         # Some children still running/pending — not ready to finalize
@@ -493,11 +522,11 @@ async def _finalize_parent(parent_job_id: str) -> None:
         return
 
     # All children are terminal — determine final parent status
-    any_failed = any(c.status == "failed" for c in children)
+    any_failed = any(s == "failed" for s in child_statuses)
     new_status = "failed" if any_failed else "completed"
 
-    completed_count = sum(1 for c in children if c.status == "completed")
-    failed_count = sum(1 for c in children if c.status == "failed")
+    completed_count = sum(1 for s in child_statuses if s == "completed")
+    failed_count = sum(1 for s in child_statuses if s == "failed")
     logger.info(
         f"[job-hierarchy] Finalizing parent {parent_job_id}: "
         f"{completed_count} completed, {failed_count} failed -> {new_status}"
@@ -510,11 +539,17 @@ def _transition_parent(parent: AgentSession, new_status: str) -> None:
     """Transition a parent job to a new status using delete-and-recreate.
 
     Uses the same pattern as _pop_job() to avoid KeyField index corruption.
+    Note: workers are per-project and sequential, so concurrent finalization
+    of the same parent is not possible. If that invariant changes, the new
+    job_id from delete-and-recreate would need to be propagated to children's
+    parent_job_id references.
     """
     fields = _extract_job_fields(parent)
     parent.delete()
     fields["status"] = new_status
-    fields["completed_at"] = time.time()
+    # Only set completed_at for terminal statuses, not for waiting_for_children
+    if new_status in ("completed", "failed"):
+        fields["completed_at"] = time.time()
     new_parent = AgentSession.create(**fields)
     logger.info(
         f"[job-hierarchy] Parent {parent.job_id} -> {new_parent.job_id} (status={new_status})"
@@ -1118,12 +1153,14 @@ async def _worker_loop(project_key: str) -> None:
                     break
                 logger.info(f"[{project_key}] Drain guard caught job that would have been lost")
 
+            job_failed = False
             try:
                 await _execute_job(job)
             except Exception as e:
                 logger.error(f"[{project_key}] Job {job.job_id} failed: {e}")
+                job_failed = True
             finally:
-                await _complete_job(job)
+                await _complete_job(job, failed=job_failed)
 
             # Check restart flag after each completed job
             if _check_restart_flag():
