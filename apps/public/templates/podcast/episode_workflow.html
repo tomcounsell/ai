@@ -18,12 +18,7 @@
 {% endblock %}
 
 {% block content %}
-<div class="flex gap-6"
-     {% if workflow_is_running %}
-     hx-get="{% url 'podcast:episode_workflow_poll' slug=podcast.slug episode_slug=episode.slug step=current_step %}"
-     hx-trigger="every 5s"
-     hx-swap="none"
-     {% endif %}>
+<div class="flex gap-6">
   <!-- Sidebar: Phase list -->
   <nav class="w-64 flex-shrink-0">
     <div id="workflow-sidebar" class="space-y-1">
@@ -35,5 +30,14 @@
   <div id="workflow-step-content" class="flex-grow min-w-0">
     {% include "podcast/_workflow_step_content.html" %}
   </div>
+  {% if workflow_is_running %}
+  <!-- Poll derives URL from browser location so it tracks phase navigation -->
+  <div id="workflow-poller"
+       hx-get="placeholder"
+       hx-trigger="every 5s"
+       hx-swap="none"
+       hx-on::config-request="event.detail.path = window.location.pathname + 'status/'">
+  </div>
+  {% endif %}
 </div>
 {% endblock %}

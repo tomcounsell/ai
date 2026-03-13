@@ -275,8 +275,6 @@ class EpisodeWorkflowView(LoginRequiredMixin, UserPassesTestMixin, MainContentVi
 
         if getattr(request, "htmx", False):
             # Return step content + sidebar OOB swap so both update together.
-            # The sidebar needs to update its active-phase highlight when
-            # navigating between steps via HTMX partial swaps.
             from django.template.loader import render_to_string
 
             content_html = render_to_string(
@@ -574,16 +572,16 @@ class WorkflowPollView(LoginRequiredMixin, UserPassesTestMixin, View):
             "workflow_is_running": is_running,
         }
 
-        # Render sidebar with OOB swap
+        # Render sidebar + step content as OOB swaps.
+        # The poll URL now derives from window.location (set by hx-push-url),
+        # so it always matches the step the user is viewing.
         sidebar_html = render_to_string(
             "podcast/_workflow_sidebar.html", ctx, request=request
         )
-        # Render step content
         content_html = render_to_string(
             "podcast/_workflow_step_content.html", ctx, request=request
         )
 
-        # Combine with OOB: both elements swap by matching their IDs
         response_html = (
             f'<div id="workflow-sidebar" hx-swap-oob="innerHTML">'
             f"{sidebar_html}</div>"
