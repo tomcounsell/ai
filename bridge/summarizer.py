@@ -421,6 +421,34 @@ Output: {"type": "completion", "confidence": 0.93, \
 Input: "Let me investigate the logs to find out what happened..."
 Output: {"type": "status", "confidence": 0.90, \
 "reason": "Agent describing planned investigation, not yet answering", \
+"coaching_message": null, "has_workarounds": false}
+
+Few-shot examples of EMPTY PROMISES (must be classified as status with coaching):
+
+An "empty promise" is when the agent acknowledges feedback or commits to a behavior change \
+WITHOUT showing evidence of a concrete change (commit hash, file path, memory entry, config edit). \
+Phrases like "Got it", "Understood", "Noted", "I'll update", "Will do" followed by behavioral \
+commitments — without any proof of a durable change — are empty promises. These MUST be classified \
+as STATUS_UPDATE with a coaching_message that demands evidence.
+
+Input: "Understood. Will report final results and blockers only — no intermediate plans or process."
+Output: {"type": "status", "confidence": 0.95, \
+"reason": "Empty promise — acknowledged feedback without concrete change", \
+"coaching_message": "You acknowledged feedback but made no concrete change to enforce it. \
+A promise without a code change, config update, or memory write is empty. Either make the change \
+now (update a prompt, config, or save a memory) and show evidence (commit hash, file path), or \
+explain what prevents you from making it durable.", "has_workarounds": false}
+
+Input: "Noted. You'll see the difference in my next output."
+Output: {"type": "status", "confidence": 0.95, \
+"reason": "Empty promise — vague commitment to future behavior with no durable change", \
+"coaching_message": "You said the user will 'see the difference' but made no provable change. \
+What file did you edit? What config did you update? What memory did you save? Show the evidence \
+or admit you need to make the change first.", "has_workarounds": false}
+
+Input: "Got it. I've updated the summarizer prompt to require evidence. Here's the commit: abc1234"
+Output: {"type": "completion", "confidence": 0.90, \
+"reason": "Feedback acknowledged WITH concrete evidence — commit hash provided", \
 "coaching_message": null, "has_workarounds": false}"""
 
 # False question detection explained:
@@ -446,6 +474,48 @@ def _detect_workarounds(text_lower: str) -> bool:
         r"\b(?:warning|warn)\b.*\b(?:found|discovered|detected)\b",
     ]
     return any(re.search(p, text_lower) for p in workaround_patterns)
+
+
+def _detect_empty_promise(text_lower: str) -> bool:
+    """Detect if the agent acknowledged feedback without concrete evidence.
+
+    An empty promise is an acknowledgment of behavioral feedback (e.g. "Got it",
+    "Understood", "Noted") combined with a commitment to change behavior, but
+    WITHOUT any evidence of a durable change (commit hash, file path, memory
+    entry, config edit).
+
+    Returns True if the text looks like an empty promise — acknowledged feedback
+    with no proof of concrete action.
+    """
+    # Acknowledgment patterns — agent is agreeing to feedback
+    acknowledgment_patterns = [
+        r"\b(?:got it|understood|noted|will do|roger|acknowledged|fair point)\b",
+        r"\b(?:you're right|good point|makes sense|point taken)\b",
+        r"\b(?:i'll update|i'll change|i'll fix|i'll adjust|i'll modify)\b",
+        r"\b(?:won't happen again|will remember|going forward)\b",
+        r"\byou'll see the difference\b",
+    ]
+
+    has_acknowledgment = any(re.search(p, text_lower) for p in acknowledgment_patterns)
+    if not has_acknowledgment:
+        return False
+
+    # Evidence patterns — concrete proof that a change was made
+    evidence_patterns = [
+        r"\b[0-9a-f]{7,40}\b",  # commit hash
+        r"\bcommit(?:ted)?\b.*\b[0-9a-f]{7}\b",  # "committed abc1234"
+        # file paths (saved/wrote/created/updated to some/file.ext)
+        r"(?:saved|wrote|created|updated|edited|modified)\s+(?:to\s+)?[`'\"]?[\w/]+\.\w+",
+        r"\bmemory\b.*\b(?:saved|written|created|updated)\b",  # memory writes
+        r"\b(?:saved|written|created)\b.*\bmemory\b",
+        r"https?://github\.com/.+/commit/",  # GitHub commit URLs
+        r"\brestarted?\b.*\b(?:bridge|service)\b",  # service restart
+    ]
+
+    has_evidence = any(re.search(p, text_lower) for p in evidence_patterns)
+
+    # Empty promise = acknowledgment WITHOUT evidence
+    return not has_evidence
 
 
 def _classify_with_heuristics(text: str) -> ClassificationResult:
@@ -496,6 +566,20 @@ def _classify_with_heuristics(text: str) -> ClassificationResult:
                 confidence=0.85,
                 reason="Detected direct question pattern",
             )
+
+    # Check for empty promises — agent acknowledged feedback without evidence
+    if _detect_empty_promise(text_lower):
+        return ClassificationResult(
+            output_type=OutputType.STATUS_UPDATE,
+            confidence=0.90,
+            reason="Empty promise — acknowledged feedback without concrete evidence of change",
+            coaching_message=(
+                "You acknowledged feedback but showed no evidence of a concrete change. "
+                "A promise without a code change, config update, or memory write is empty. "
+                "Make the change now and show the evidence (commit hash, file path, memory entry), "
+                "or explain what prevents you from making it durable."
+            ),
+        )
 
     # Check for error indicators
     error_patterns = [
@@ -1075,6 +1159,9 @@ FORMAT RULES for the **response** field (adaptive based on content type):
 GENERAL RULES:
 - NEVER include the agent's plan, approach, or strategy. The PM wants RESULTS, not plans.
   If work is in progress, report what has been DONE so far, not what will be done next.
+- NEVER send empty promises. If the agent acknowledged feedback with "Got it", "Understood", \
+"Noted", "Will do" but made no concrete change (no commit, no file edit, no config update, \
+no memory write), flag it with ⚠️ and note that the promise lacks evidence.
 - Lead with the outcome, not the process
 - Preserve commit hashes inline (e.g., `abc1234`)
 - Flag with ⚠️ ONLY for genuinely external blockers (missing credentials, need third-party \
