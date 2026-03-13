@@ -465,19 +465,24 @@ async def _finalize_parent(
         completing_child_status: The intended terminal status ("completed"
             or "failed") of the completing child.
     """
+    # NOTE: This function is async def but uses synchronous Redis operations
+    # (AgentSession.query.get, _transition_parent with sync delete/create).
+    # This is consistent with the existing codebase patterns — popoto's Redis
+    # operations are synchronous under the hood. If the codebase ever moves to
+    # true async Redis, these will need updating.
     try:
         parent = AgentSession.query.get(parent_job_id)
     except Exception:
         logger.warning(
             f"[job-hierarchy] Parent job {parent_job_id} lookup raised "
-            f"exception during finalization — orphaned child completed"
+            f"exception during finalization — treating child as orphaned"
         )
         return
 
     if parent is None:
         logger.warning(
             f"[job-hierarchy] Parent job {parent_job_id} not found during "
-            f"finalization — orphaned child completed"
+            f"finalization — parent may have been deleted or already finalized"
         )
         return
 
@@ -542,6 +547,13 @@ def _transition_parent(parent: AgentSession, new_status: str) -> None:
     After creating the new parent, updates all children's parent_job_id
     references to point to the new job_id (since delete-and-recreate
     generates a new job_id).
+
+    Note: This is a sync function called from both sync (cmd_schedule) and
+    async (_finalize_parent) contexts. The delete-and-recreate generates a
+    new job_id for the parent. Currently safe because workers are per-project
+    and sequential, so concurrent _finalize_parent calls for the same parent
+    cannot occur. If concurrency changes, consider propagating new job_id
+    to children defensively or using a stable identifier.
     """
     old_job_id = parent.job_id
     children = parent.get_children()

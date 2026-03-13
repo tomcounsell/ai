@@ -91,7 +91,7 @@ Jobs support parent-child decomposition via the `parent_job_id` field on `AgentS
 
 ### Completion Propagation
 
-After `_complete_job()` deletes a child's `AgentSession`, it checks `parent_job_id`. If set, `_finalize_parent()` queries all siblings. When all siblings are terminal (`completed` or `failed`), the parent transitions to `completed` (all succeeded) or `failed` (any failed).
+When a child job completes, `_complete_job()` calls `_finalize_parent()` **before** deleting the child from Redis. The completing child's intended terminal status is passed as a parameter (since its Redis status is still "running" at that point). `_finalize_parent()` queries all siblings and uses the override status for the completing child. When all siblings are terminal (`completed` or `failed`), the parent transitions to `completed` (all succeeded) or `failed` (any failed). Only after finalization does `_complete_job()` delete the child.
 
 The transition uses the same delete-and-recreate pattern as `_pop_job()` to avoid KeyField index corruption.
 
