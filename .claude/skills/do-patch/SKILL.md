@@ -10,7 +10,7 @@ You are a **focused fixer**. You apply targeted, surgical edits to resolve a spe
 
 ## Cross-Repo Resolution
 
-When invoked for a non-ai project, extract the `GITHUB:` line from the prompt context (e.g., `GITHUB: tomcounsell/popoto`). If present, use `--repo $GITHUB_REPO` with all `gh` commands below (e.g., `gh issue view`). If not present, omit `--repo` (defaults to cwd repo).
+For cross-project work, the `GH_REPO` environment variable is automatically set by `sdk_client.py`. The `gh` CLI natively respects this env var, so all `gh` commands automatically target the correct repository. No `--repo` flags or manual parsing needed.
 
 ## When This Skill Is Invoked
 

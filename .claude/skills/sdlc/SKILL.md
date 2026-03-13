@@ -12,38 +12,22 @@ You MUST NOT write code, run tests, or create plans directly -- delegate everyth
 
 ## Cross-Repo Resolution
 
-When working on a non-ai project (e.g., popoto), the worker runs with `cwd=ai/` but the target repo is different. To ensure `gh` commands resolve against the correct repo, extract the `GITHUB:` line from the prompt context injected by `sdk_client.py`.
-
-```bash
-# Extract the target repo from prompt context (e.g., "GITHUB: tomcounsell/popoto")
-# Look for a line like "GITHUB: org/repo" in the enriched message you received.
-# If found, use --repo for ALL gh commands in this skill.
-# If not found (local ai repo work), omit --repo (defaults to cwd repo).
-REPO_FLAG=""
-# Example: GITHUB_REPO="tomcounsell/popoto" extracted from context
-if [ -n "$GITHUB_REPO" ]; then
-  REPO_FLAG="--repo $GITHUB_REPO"
-fi
-```
-
-**CRITICAL**: Always use `$REPO_FLAG` with every `gh` command below. Without it, cross-project SDLC work silently resolves issues and PRs against the wrong repository.
+For cross-project SDLC work, the `GH_REPO` environment variable is automatically set by `sdk_client.py` (e.g., `GH_REPO=tomcounsell/popoto`). The `gh` CLI natively respects this env var, so all `gh` commands automatically target the correct repository. No `--repo` flags or manual parsing needed.
 
 ## Step 1: Resolve the Issue or PR
 
 Determine whether the input is an issue reference or a PR reference:
 
-- **Issue reference** (e.g., `issue 123`, `issue #123`): Fetch with `gh issue view {number} $REPO_FLAG`
-- **PR reference** (e.g., `PR 363`, `pr #363`): Fetch with `gh pr view {number} $REPO_FLAG` to get the branch name, review state, and check status. Then extract the linked issue number from the PR body (look for `Closes #N` or `Fixes #N`).
+- **Issue reference** (e.g., `issue 123`, `issue #123`): Fetch with `gh issue view {number}`
+- **PR reference** (e.g., `PR 363`, `pr #363`): Fetch with `gh pr view {number}` to get the branch name, review state, and check status. Then extract the linked issue number from the PR body (look for `Closes #N` or `Fixes #N`).
 
 ```bash
 # For issue references:
-gh issue view {number} $REPO_FLAG
+gh issue view {number}
 
 # For PR references — get structured state for assessment:
-gh pr view {number} $REPO_FLAG --json number,title,state,headRefName,reviewDecision,statusCheckRollup,body
+gh pr view {number} --json number,title,state,headRefName,reviewDecision,statusCheckRollup,body
 ```
-
-After fetching, **verify the reference belongs to the target project**: check that the URL contains the expected org/repo. If it resolves to a different repo, you have a cross-repo mismatch -- stop and report the error.
 
 **PR state informs Step 2 assessment**: When a PR is provided, its current state (checks passing/failing, review approved/changes-requested, etc.) tells you which pipeline stage to resume from. Skip stages that are already complete -- do not restart from scratch.
 
@@ -61,7 +45,7 @@ grep -r "#{issue_number}" docs/plans/ 2>/dev/null
 git branch -a | grep session/
 
 # Check if a PR already exists
-gh pr list --search "#{issue_number}" --state open $REPO_FLAG
+gh pr list --search "#{issue_number}" --state open
 
 # Check test status (if branch/PR exists)
 # Check review status (if PR exists)
