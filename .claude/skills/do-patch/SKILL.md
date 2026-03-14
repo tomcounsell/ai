@@ -43,6 +43,16 @@ The patch agent is re-entering the build loop. It needs the **same context** tha
 3. **Working directory** — Confirm CWD (worktree path if invoked by do-build, repo root if direct)
 4. **What was already built** — Run `git log --oneline main..HEAD` to see what the build has done so far
 5. **Relevant file paths** — From the plan's "Relevant Files" section, so the builder knows where to look
+6. **PR review comments** (for review blockers) — **MANDATORY** when fixing review feedback:
+   ```bash
+   # Find the PR for the current branch
+   PR_NUMBER=$(gh pr list --head "$(git rev-parse --abbrev-ref HEAD)" --json number -q '.[0].number')
+
+   # Fetch ALL review comments — these are the authoritative blockers
+   gh api repos/{owner}/{repo}/pulls/${PR_NUMBER}/reviews --jq '.[] | select(.state != "APPROVED") | {user: .user.login, state: .state, body: .body}'
+   gh api repos/{owner}/{repo}/pulls/${PR_NUMBER}/comments --jq '.[] | {path: .path, line: .line, body: .body, user: .user.login}'
+   ```
+   Do NOT rely solely on the PATCH_ARG text — it may be a summary that misses specific blockers. The PR review comments are the ground truth. Include the full review comment text in the builder prompt.
 
 **If no plan exists** (e.g., user-invoked hotfix), proceed with failure context alone — but note this in the fix report.
 
@@ -61,6 +71,8 @@ If `PATCH_ARG` is empty, read the most recent failure from session context:
 Parse the input to classify the fix type:
 - **Test failure**: pytest output with `FAILED`, `ERROR`, or traceback lines
 - **Review blocker**: prose describing a code issue, race condition, logic bug, or style violation
+
+**If the fix type is "review blocker"**: You MUST fetch the actual PR review comments from GitHub (see Build Context Recovery step 6 above). The PATCH_ARG may be a summary that omits specific blockers. The PR comments are the authoritative source of what needs fixing.
 
 #### Root Cause Analysis: Trace & Verify
 
@@ -101,6 +113,9 @@ BUILD HISTORY (commits so far on this branch):
 
 FAILURE TO FIX:
 [full PATCH_ARG content or failure text from context]
+
+PR REVIEW COMMENTS (if fixing review blockers):
+[full review comments from gh api — include path, line number, and comment body for each]
 
 YOUR JOB:
 1. Read the failure output carefully. Identify the root cause.
