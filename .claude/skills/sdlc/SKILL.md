@@ -83,16 +83,24 @@ Do NOT restart from scratch if prior stages are already complete.
 
 ## Pipeline Stages Reference
 
+The canonical pipeline graph is defined in `bridge/pipeline_graph.py`. All routing
+derives from that module. The table below is for human readability only.
+
 ```
-1. ISSUE  — /do-issue (or already exists)
-2. PLAN   — /do-plan {slug}
-3. BUILD  — /do-build {plan or issue}
-4. TEST   — /do-test
-5. PATCH  — /do-patch (fix test failures)
-6. REVIEW — /do-pr-review
-7. PATCH  — /do-patch (fix review blockers)
-8. DOCS   — /do-docs
-9. MERGE  — Human decision (Observer reports completion)
+Happy path: ISSUE -> PLAN -> BUILD -> TEST -> REVIEW -> DOCS -> MERGE
+Cycles:     TEST(fail) -> PATCH -> TEST
+            REVIEW(fail) -> PATCH -> TEST -> REVIEW
 ```
+
+| Stage | Skill | Notes |
+|-------|-------|-------|
+| ISSUE | /do-issue | Or already exists |
+| PLAN | /do-plan {slug} | |
+| BUILD | /do-build {plan or issue} | |
+| TEST | /do-test | |
+| PATCH | /do-patch | Routing-only; not a display stage |
+| REVIEW | /do-pr-review | |
+| DOCS | /do-docs | |
+| MERGE | — | Human decision (Observer reports completion) |
 
 This list is for reference only. This skill does NOT advance through stages -- it picks the right one and returns.

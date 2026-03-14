@@ -154,28 +154,9 @@ Parse the results:
 
 Report the test summary (passed/failed/skipped counts) before proceeding.
 
-### Step 4: Advance Pipeline State (on success)
+### Step 4: Report Completion
 
-When tests pass, advance the pipeline to the appropriate next stage.
-
-**Determine the slug** from context:
-- Check the current git branch: `git rev-parse --abbrev-ref HEAD`
-- If branch is `session/{slug}`, extract `{slug}`
-- If no slug can be determined, skip pipeline state update (log a warning)
-
-**Determine the next stage** from the fix context:
-- If fixing a **test failure**: advance to `review`
-- If fixing a **review blocker**: advance to `document`
-
-```bash
-python -c "
-from agent.pipeline_state import advance_stage
-advance_stage('{slug}', '{next_stage}')
-print('Pipeline advanced to: {next_stage}')
-"
-```
-
-If `pipeline_state` raises `FileNotFoundError` (no state file for slug), skip silently — the pipeline may not have been initialized (e.g., user invoked directly).
+When tests pass, report success. Pipeline stage advancement is handled by the Observer/SDLC router -- do-patch does not determine or advance pipeline stages.
 
 ### Step 5: Handle Failure — Retry or Report Stuck
 
@@ -282,6 +263,4 @@ Files modified:
 - [file2.py] — [brief description of change]
 
 Test result: ALL TESTS PASSED
-
-Pipeline stage advanced to: [next_stage]  (or "N/A — no pipeline state")
 ```
