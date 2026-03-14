@@ -64,10 +64,17 @@ ISSUE -> PLAN -> BUILD -> TEST -> REVIEW -> DOCS
 - This is a non-SDLC job (casual conversation, Q&A)
 - The worker produced a final completion with evidence
 
+### DELIVER message_for_user guidance:
+- When delivering, use the `message_for_user` field to curate what the user sees
+- Summarize findings, strip process narration, and present results clearly
+- The `reason` field is for internal logging only — it is NEVER sent to the user
+- If the worker output is already clean and substantive, you may omit message_for_user
+
 ### NEVER:
 - Auto-continue more than 10 times consecutively
 - Silently drop output — always either steer or deliver
 - Ignore queued steering messages from the human
+- Send the `reason` field content to the user — it is internal-only
 
 ## Tool Usage Order
 1. ALWAYS call read_session first to get current state
@@ -177,16 +184,32 @@ def _build_tools() -> list[dict]:
         {
             "name": "deliver_to_telegram",
             "description": (
-                "Deliver the worker's output to the human on Telegram. "
+                "Deliver output to the human on Telegram. "
                 "Use when the pipeline is complete, the worker is asking a "
-                "question, or an error needs human attention."
+                "question, or an error needs human attention. "
+                "Provide message_for_user to curate what the user sees — "
+                "this replaces the raw worker output. If omitted, the raw "
+                "worker output is sent as-is."
             ),
             "input_schema": {
                 "type": "object",
                 "properties": {
                     "reason": {
                         "type": "string",
-                        "description": "Why this output is being delivered to the human",
+                        "description": (
+                            "Internal reason for delivery "
+                            "(logged only, never sent to user)"
+                        ),
+                    },
+                    "message_for_user": {
+                        "type": "string",
+                        "description": (
+                            "Curated message for the user. Use this to craft "
+                            "a clean, substantive message instead of sending "
+                            "raw worker output. Optional — omit for simple "
+                            "completed tasks where an emoji reaction suffices, "
+                            "or when the raw output is already suitable."
+                        ),
                     },
                 },
                 "required": ["reason"],
@@ -445,6 +468,9 @@ class Observer:
                 "action": "deliver_to_telegram",
                 "reason": tool_input.get("reason", ""),
             }
+            # Include message_for_user if the observer provided it
+            if tool_input.get("message_for_user"):
+                result["message_for_user"] = tool_input["message_for_user"]
         else:
             result = {"status": "error", "error": f"Unknown tool: {tool_name}"}
 
@@ -699,6 +725,7 @@ class Observer:
             tools = _build_tools()
             coaching_message = None
             deliver_reason = None
+            message_for_user = None
 
             # Tool-use loop with iteration cap
             for iteration in range(MAX_TOOL_ITERATIONS):
@@ -743,6 +770,8 @@ class Observer:
                         coaching_message = result_data.get("coaching_message", "continue")
                     elif result_data.get("action") == "deliver_to_telegram":
                         deliver_reason = result_data.get("reason", "")
+                        if result_data.get("message_for_user"):
+                            message_for_user = result_data["message_for_user"]
 
                 # Append assistant response and tool results for next iteration
                 messages.append({"role": "assistant", "content": response.content})
@@ -778,11 +807,14 @@ class Observer:
                 reason_preview = (deliver_reason or "Observer decided to deliver")[:120]
                 logger.info(f"{self._log_prefix} Decision: deliver (reason: {reason_preview})")
                 record_decision(self.session.session_id, cid, "deliver", reason_preview)
-                return {
+                result = {
                     "action": "deliver",
                     "reason": deliver_reason or "Observer decided to deliver",
                     "transitions_applied": transitions_applied,
                 }
+                if message_for_user:
+                    result["message_for_user"] = message_for_user
+                return result
 
         except Exception as e:
             cid = getattr(self.session, "correlation_id", None) or "unknown"
