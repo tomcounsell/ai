@@ -24,6 +24,7 @@ import anthropic
 
 from agent.job_queue import MAX_AUTO_CONTINUES, MAX_AUTO_CONTINUES_SDLC
 from agent.skill_outcome import parse_outcome_from_text
+from bridge.pipeline_graph import STAGE_TO_SKILL, get_next_stage
 from bridge.stage_detector import STAGE_ORDER, apply_transitions, detect_stages
 from bridge.summarizer import extract_artifacts
 from config.models import SONNET
@@ -45,8 +46,9 @@ You have access to the full AgentSession state and must make one of two decision
 1. STEER: Send the worker back to work on the next pipeline stage
 2. DELIVER: Send the output to the human on Telegram
 
-## SDLC Pipeline Stages (in order)
+## SDLC Pipeline Stages (in order, from bridge/pipeline_graph.py)
 ISSUE -> PLAN -> BUILD -> TEST -> REVIEW -> DOCS
+Cycles: TEST(fail) -> PATCH -> TEST, REVIEW(fail) -> PATCH -> TEST -> REVIEW
 
 ## Decision Framework
 
@@ -217,19 +219,12 @@ def _output_needs_human_input(text: str) -> bool:
     return any(p.search(text) for p in _HUMAN_INPUT_PATTERNS)
 
 
-# Maps SDLC stages to the skill that advances them
-_STAGE_TO_SKILL: dict[str, str] = {
-    "ISSUE": "/do-issue",
-    "PLAN": "/do-plan",
-    "BUILD": "/do-build",
-    "TEST": "/do-test",
-    "REVIEW": "/do-pr-review",
-    "DOCS": "/do-docs",
-}
-
-
 def _next_sdlc_skill(session) -> tuple[str, str] | None:
     """Determine the next SDLC skill to invoke based on stage progress.
+
+    Uses the canonical pipeline graph from bridge.pipeline_graph for routing.
+    Walks STAGE_ORDER (display stages) to find the first incomplete stage,
+    then resolves the skill command from STAGE_TO_SKILL.
 
     Returns:
         Tuple of (stage_name, skill_command) for the next incomplete stage,
@@ -249,7 +244,7 @@ def _next_sdlc_skill(session) -> tuple[str, str] | None:
                     "routing to BUILD to create PR first"
                 )
                 return ("BUILD", "/do-build")
-            skill = _STAGE_TO_SKILL.get(stage, f"/do-{stage.lower()}")
+            skill = STAGE_TO_SKILL.get(stage, f"/do-{stage.lower()}")
             return (stage, skill)
     return None
 
