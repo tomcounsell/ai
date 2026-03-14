@@ -1,7 +1,5 @@
 """Tests for bridge.message_quality — narration detection and delivery quality filters."""
 
-import pytest
-
 from bridge.message_quality import (
     NARRATION_COACHING_MESSAGE,
     NARRATION_FALLBACK_MESSAGE,
@@ -136,9 +134,7 @@ class TestNarrationPatterns:
 
     def test_normal_text_no_match(self):
         """Normal text should not match any pattern."""
-        assert not any(
-            p.match("The bug is in line 42") for p in PROCESS_NARRATION_PATTERNS
-        )
+        assert not any(p.match("The bug is in line 42") for p in PROCESS_NARRATION_PATTERNS)
 
 
 class TestConstants:

@@ -8,8 +8,6 @@ Verifies that:
 
 import json
 
-import pytest
-
 from bridge.observer import Observer, _build_tools
 
 

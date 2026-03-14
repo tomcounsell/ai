@@ -30,6 +30,7 @@ from pathlib import Path
 import anthropic
 import httpx
 
+from bridge.message_quality import PROCESS_NARRATION_PATTERNS as _PROCESS_NARRATION_PATTERNS
 from config.models import MODEL_FAST, OPENROUTER_HAIKU
 from utils.api_keys import get_anthropic_api_key
 
@@ -45,9 +46,6 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 # Classification confidence threshold — below this, default to QUESTION
 # (conservative: pauses for human input rather than auto-continuing)
 CLASSIFICATION_CONFIDENCE_THRESHOLD = 0.80
-
-# Process narration patterns — imported from shared module
-from bridge.message_quality import PROCESS_NARRATION_PATTERNS as _PROCESS_NARRATION_PATTERNS
 
 
 def _extract_open_questions(text: str) -> list[str]:
