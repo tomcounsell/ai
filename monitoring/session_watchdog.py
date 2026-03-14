@@ -322,11 +322,16 @@ def check_stalled_sessions() -> list[dict]:
 
 
 async def _recover_stalled_pending(stalled: list[dict]) -> None:
-    """Recover stalled pending sessions by ensuring a worker exists.
+    """Recover stalled pending sessions by killing stuck workers and retrying.
 
-    When a pending session is stalled, the most likely cause is that the worker
-    exited before picking up the continuation (Race 2 in issue #342). The fix
-    is to call _ensure_worker() which starts a new worker if none is running.
+    When a pending session is stalled, the worker may be alive but stuck
+    processing a different job. Simply calling _ensure_worker() is a no-op
+    in that case. Instead, we kill the stuck worker, apply exponential backoff,
+    and re-enqueue the session for retry. After STALL_MAX_RETRIES exhausted,
+    the session is abandoned with a Telegram notification.
+
+    This mirrors the recovery logic in fix_unhealthy_session() for active
+    sessions but applies it to the pending stall path.
 
     For non-pending stalled sessions, this function is a no-op — those are
     handled by fix_unhealthy_session() in check_all_sessions().
@@ -334,8 +339,6 @@ async def _recover_stalled_pending(stalled: list[dict]) -> None:
     Args:
         stalled: List of stalled session dicts from check_stalled_sessions().
     """
-    from agent.job_queue import _ensure_worker
-
     pending_stalls = [s for s in stalled if s["status"] == "pending"]
     if not pending_stalls:
         return
@@ -352,18 +355,60 @@ async def _recover_stalled_pending(stalled: list[dict]) -> None:
             continue
 
         try:
-            _ensure_worker(project_key)
-            logger.info(
-                "[watchdog] Ensured worker exists for stalled pending session %s "
-                "(project=%s, stalled %.0fs)",
-                session_id,
-                project_key,
-                stall_info.get("duration", 0),
+            # Load full session from Redis to check retry state
+            session = AgentSession.query.get(session_id)
+            if session is None:
+                logger.warning(
+                    "[watchdog] Stalled pending session %s no longer exists in Redis — skipping",
+                    session_id,
+                )
+                continue
+
+            retry_count = int(session.retry_count or 0)
+            stall_reason = (
+                f"pending stall: session {session_id} stuck for "
+                f"{stall_info.get('duration', 0):.0f}s (project={project_key})"
             )
+
+            if retry_count < STALL_MAX_RETRIES:
+                # Kill the stuck worker, backoff, then re-enqueue
+                killed = await _kill_stalled_worker(project_key)
+                backoff = _compute_stall_backoff(retry_count)
+                logger.info(
+                    "[watchdog] Pending stall recovery for session %s: "
+                    "killed=%s, backoff=%.0fs, retry %d/%d",
+                    session_id,
+                    killed,
+                    backoff,
+                    retry_count + 1,
+                    STALL_MAX_RETRIES,
+                )
+                await asyncio.sleep(backoff)
+                retried = await _enqueue_stall_retry(session, stall_reason)
+                if not retried:
+                    logger.error(
+                        "[watchdog] Failed to re-enqueue stalled pending session %s",
+                        session_id,
+                    )
+            else:
+                # Retries exhausted — abandon and notify
+                saved = _safe_abandon_session(
+                    session,
+                    f"watchdog: {stall_reason} (retries exhausted)",
+                )
+                logger.warning(
+                    "[watchdog] Abandoned stalled pending session %s after %d/%d retries "
+                    "(saved=%s)",
+                    session_id,
+                    retry_count,
+                    STALL_MAX_RETRIES,
+                    saved,
+                )
+                await _notify_stall_failure(session, stall_reason)
+
         except Exception as e:
             logger.error(
-                "[watchdog] Failed to ensure worker for stalled pending session %s "
-                "(project=%s): %s",
+                "[watchdog] Failed to recover stalled pending session %s (project=%s): %s",
                 session_id,
                 project_key,
                 e,

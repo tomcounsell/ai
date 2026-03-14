@@ -50,7 +50,7 @@ For active sessions, `last_activity` is checked first — if recent activity exi
 When a stall is detected:
 - A `LIFECYCLE_STALL` warning is logged with session ID, status, duration, and last history entry
 - The stalled session info is returned for potential alerting
-- **Pending stalls** (#342): `_recover_stalled_pending()` calls `_ensure_worker()` to spawn a worker if none is running, recovering sessions stuck after auto-continue
+- **Pending stalls** (#342, #402): `_recover_stalled_pending()` kills the stuck worker via `_kill_stalled_worker()`, applies exponential backoff, and re-enqueues via `_enqueue_stall_retry()`. After `STALL_MAX_RETRIES` exhausted, the session is abandoned with a Telegram notification. See [stall-retry.md](stall-retry.md) for full details.
 
 ### Stale Save Guard (#342)
 

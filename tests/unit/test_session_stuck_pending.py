@@ -8,7 +8,7 @@ Validates:
 
 import time
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -131,15 +131,15 @@ class TestStaleSaveGuard:
 
 
 class TestPendingStallRecovery:
-    """Verify that _recover_stalled_pending() calls _ensure_worker for
-    stalled pending sessions."""
+    """Verify that _recover_stalled_pending() kills stuck workers and retries
+    stalled pending sessions (updated for kill+retry flow)."""
 
     @pytest.mark.asyncio
-    async def test_ensure_worker_called_for_pending_stall(self):
-        """When a pending session is stalled, _ensure_worker must be called
-        for its project_key to spawn a worker."""
+    async def test_kills_worker_and_retries_for_pending_stall(self):
+        """When a pending session is stalled, should kill worker and re-enqueue."""
         from monitoring.session_watchdog import _recover_stalled_pending
 
+        session = _make_agent_session(session_id="stuck-001", retry_count=0)
         stalled = [
             {
                 "session_id": "stuck-001",
@@ -151,9 +151,25 @@ class TestPendingStallRecovery:
             }
         ]
 
-        with patch("agent.job_queue._ensure_worker") as mock_ensure:
+        with (
+            patch("monitoring.session_watchdog.AgentSession") as mock_as_cls,
+            patch(
+                "monitoring.session_watchdog._kill_stalled_worker",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_kill,
+            patch(
+                "monitoring.session_watchdog._enqueue_stall_retry",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_retry,
+            patch("asyncio.sleep", new_callable=AsyncMock),
+            patch("agent.job_queue._ensure_worker"),
+        ):
+            mock_as_cls.query.get.return_value = session
             await _recover_stalled_pending(stalled)
-            mock_ensure.assert_called_once_with("test-project")
+            mock_kill.assert_called_once_with("test-project")
+            mock_retry.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_no_action_for_non_pending_stalls(self):
@@ -179,15 +195,24 @@ class TestPendingStallRecovery:
             },
         ]
 
-        with patch("agent.job_queue._ensure_worker") as mock_ensure:
+        with (
+            patch("monitoring.session_watchdog.AgentSession") as mock_as_cls,
+            patch("agent.job_queue._ensure_worker"),
+        ):
             await _recover_stalled_pending(stalled)
-            mock_ensure.assert_not_called()
+            mock_as_cls.query.get.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_multiple_pending_stalls_different_projects(self):
-        """Each stalled pending session should trigger _ensure_worker for its project."""
+        """Each stalled pending session should trigger kill+retry for its project."""
         from monitoring.session_watchdog import _recover_stalled_pending
 
+        session_a = _make_agent_session(
+            session_id="stuck-001", project_key="project-a", retry_count=0
+        )
+        session_b = _make_agent_session(
+            session_id="stuck-002", project_key="project-b", retry_count=0
+        )
         stalled = [
             {
                 "session_id": "stuck-001",
@@ -207,11 +232,26 @@ class TestPendingStallRecovery:
             },
         ]
 
-        with patch("agent.job_queue._ensure_worker") as mock_ensure:
+        with (
+            patch("monitoring.session_watchdog.AgentSession") as mock_as_cls,
+            patch(
+                "monitoring.session_watchdog._kill_stalled_worker",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_kill,
+            patch(
+                "monitoring.session_watchdog._enqueue_stall_retry",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch("asyncio.sleep", new_callable=AsyncMock),
+            patch("agent.job_queue._ensure_worker"),
+        ):
+            mock_as_cls.query.get.side_effect = [session_a, session_b]
             await _recover_stalled_pending(stalled)
-            assert mock_ensure.call_count == 2
-            mock_ensure.assert_any_call("project-a")
-            mock_ensure.assert_any_call("project-b")
+            assert mock_kill.call_count == 2
+            mock_kill.assert_any_call("project-a")
+            mock_kill.assert_any_call("project-b")
 
     @pytest.mark.asyncio
     async def test_skips_unknown_project_key(self):
@@ -229,13 +269,16 @@ class TestPendingStallRecovery:
             }
         ]
 
-        with patch("agent.job_queue._ensure_worker") as mock_ensure:
+        with (
+            patch("monitoring.session_watchdog.AgentSession") as mock_as_cls,
+            patch("agent.job_queue._ensure_worker"),
+        ):
             await _recover_stalled_pending(stalled)
-            mock_ensure.assert_not_called()
+            mock_as_cls.query.get.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_ensure_worker_exception_handled(self):
-        """If _ensure_worker raises, _recover_stalled_pending should not crash."""
+    async def test_exception_handled_gracefully(self):
+        """If recovery raises, _recover_stalled_pending should not crash."""
         from monitoring.session_watchdog import _recover_stalled_pending
 
         stalled = [
@@ -249,10 +292,16 @@ class TestPendingStallRecovery:
             }
         ]
 
-        with patch(
-            "agent.job_queue._ensure_worker",
-            side_effect=RuntimeError("no event loop"),
+        with (
+            patch("monitoring.session_watchdog.AgentSession") as mock_as_cls,
+            patch(
+                "monitoring.session_watchdog._kill_stalled_worker",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("simulated failure"),
+            ),
+            patch("agent.job_queue._ensure_worker"),
         ):
+            mock_as_cls.query.get.return_value = _make_agent_session(retry_count=0)
             # Should not raise
             await _recover_stalled_pending(stalled)
 
