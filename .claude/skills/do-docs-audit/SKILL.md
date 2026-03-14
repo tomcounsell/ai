@@ -7,7 +7,7 @@ context: fork
 
 # Documentation Audit Skill
 
-Systematically audits every documentation file in `docs/` against the actual codebase. Works on any repository. Verifies concrete references (file paths, class names, function names, CLI commands, env vars, packages) exist in the codebase. Issues verdicts of KEEP, UPDATE, or DELETE for each file, applies the changes, sweeps index files for broken links, enforces canonical directory structure, then commits with a detailed summary.
+Systematically audits every documentation file in `docs/` against the actual codebase. Works on any repository. Verifies concrete references (file paths, class names, function names, CLI commands, env vars, packages) exist in the codebase. Issues verdicts of KEEP, UPDATE, or DELETE for each file, applies the changes, sweeps index files for broken links, enforces canonical directory structure, then commits with a concise summary of actual changes (routing large audits to GitHub issues instead of bloated commit messages).
 
 ## When to Use
 
