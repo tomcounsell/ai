@@ -693,10 +693,11 @@ def _compute_stall_backoff(retry_count: int) -> float:
 
 
 async def _kill_stalled_worker(project_key: str) -> bool:
-    """Kill the worker task for a stalled session's project.
+    """Kill the worker task and its subprocess for a stalled session's project.
 
-    Cancels the asyncio task from _active_workers, which should terminate
-    the SDK subprocess. Waits briefly for cleanup.
+    Cancels the asyncio task from _active_workers AND kills the underlying
+    Claude Code CLI subprocess. The asyncio cancel alone is insufficient
+    because the subprocess can survive task cancellation.
 
     Args:
         project_key: The project key whose worker should be killed.
@@ -704,7 +705,11 @@ async def _kill_stalled_worker(project_key: str) -> bool:
     Returns:
         True if a worker was found and cancelled, False otherwise.
     """
+    import signal as _signal
+    import subprocess as _subprocess
+
     from agent.job_queue import _active_workers
+    from agent.sdk_client import _active_clients
 
     worker = _active_workers.get(project_key)
     if worker is None or worker.done():
@@ -714,7 +719,69 @@ async def _kill_stalled_worker(project_key: str) -> bool:
         )
         return False
 
-    logger.info("[stall-retry] Cancelling worker task for project %s", project_key)
+    # First, kill any SDK subprocess associated with this project's sessions
+    # by finding active clients and terminating their transport processes
+    killed_pids = []
+    for sid, client in list(_active_clients.items()):
+        try:
+            transport = getattr(client, "_transport", None)
+            if transport is None:
+                continue
+            proc = getattr(transport, "_process", None)
+            if proc is None or proc.returncode is not None:
+                continue
+            pid = proc.pid
+            logger.info(
+                "[stall-retry] Killing SDK subprocess PID %d for session %s",
+                pid,
+                sid,
+            )
+            proc.terminate()
+            # Give it 3 seconds to exit gracefully
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=3.0)
+            except TimeoutError:
+                logger.warning(
+                    "[stall-retry] Subprocess PID %d didn't exit, sending SIGKILL",
+                    pid,
+                )
+                proc.kill()
+            killed_pids.append(pid)
+        except Exception as e:
+            logger.debug("[stall-retry] Error killing subprocess for %s: %s", sid, e)
+
+    # Also scan for orphaned claude processes owned by this bridge
+    try:
+        result = _subprocess.run(
+            ["pgrep", "-P", str(os.getpid()), "-f", "claude_agent_sdk/_bundled/claude"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            for pid_str in result.stdout.strip().split("\n"):
+                try:
+                    pid = int(pid_str.strip())
+                    if pid not in killed_pids:
+                        logger.info("[stall-retry] Killing orphaned child Claude PID %d", pid)
+                        os.kill(pid, _signal.SIGTERM)
+                        await asyncio.sleep(1)
+                        try:
+                            os.kill(pid, 0)
+                            os.kill(pid, _signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        killed_pids.append(pid)
+                except (ValueError, ProcessLookupError, PermissionError):
+                    pass
+    except Exception:
+        pass  # Best-effort
+
+    logger.info(
+        "[stall-retry] Cancelling worker task for project %s (killed %d subprocess(es))",
+        project_key,
+        len(killed_pids),
+    )
     worker.cancel()
 
     # Wait briefly for the task to clean up

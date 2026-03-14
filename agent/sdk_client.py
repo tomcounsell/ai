@@ -21,6 +21,7 @@ Authentication strategy (subscription-first):
       programmatic control. Fewer built-in tools but subscription-native.
 """
 
+import asyncio
 import logging
 import os
 import time
@@ -756,78 +757,97 @@ class ValorAgent:
         _log_system_resources("SDK-init-pre")
 
         try:
-            async with ClaudeSDKClient(options) as client:
-                # Log successful initialization
-                init_elapsed = time.time() - init_start
-                logger.info(f"[SDK-init] SDK initialized successfully in {init_elapsed:.2f}s")
-                _log_system_resources("SDK-init-post")
-                # Register client for steering access
-                if session_id:
-                    _active_clients[session_id] = client
-                    logger.debug(f"Registered active client for session {session_id}")
+            # Overall timeout: prevent query from blocking a worker forever
+            # if the SDK subprocess hangs during init or response streaming.
+            # 10 minutes is generous — most queries complete in 1-5 minutes.
+            query_timeout = int(os.environ.get("SDK_QUERY_TIMEOUT_SECONDS", 600))
 
-                await client.query(message)
+            async with asyncio.timeout(query_timeout):
+                async with ClaudeSDKClient(options) as client:
+                    # Log successful initialization
+                    init_elapsed = time.time() - init_start
+                    logger.info(f"[SDK-init] SDK initialized successfully in {init_elapsed:.2f}s")
+                    _log_system_resources("SDK-init-post")
+                    # Register client for steering access
+                    if session_id:
+                        _active_clients[session_id] = client
+                        logger.debug(f"Registered active client for session {session_id}")
 
-                while True:
-                    async for msg in client.receive_response():
-                        if isinstance(msg, AssistantMessage):
-                            for block in msg.content:
-                                if isinstance(block, TextBlock):
-                                    response_parts.append(block.text)
-                        elif isinstance(msg, ResultMessage):
-                            # Bug 1 fix (issue #374): Store Claude Code session UUID
-                            # so continuation sessions resume the correct transcript.
-                            if msg.session_id and session_id:
-                                _store_claude_session_uuid(session_id, msg.session_id)
-                            # Capture stop_reason for Observer routing decisions
-                            if msg.stop_reason and session_id:
-                                _session_stop_reasons[session_id] = msg.stop_reason
-                                logger.info(
-                                    f"SDK stop_reason={msg.stop_reason} for session {session_id}"
-                                )
+                    await client.query(message)
 
-                            if msg.total_cost_usd is not None:
-                                cost = msg.total_cost_usd
-                                turns = msg.num_turns
-                                duration = msg.duration_ms
-                                # Always log at debug; warn if equivalent
-                                # cost exceeds threshold (sanity check even
-                                # on subscription — tracks what we'd pay on API)
-                                summary = (
-                                    f"Query completed: {turns} turns, "
-                                    f"${cost:.4f} equivalent, "
-                                    f"{duration}ms"
-                                )
-                                if cost >= _COST_WARN_THRESHOLD:
-                                    logger.warning(f"High cost query: {summary}")
-                                else:
-                                    logger.info(summary)
-                            if msg.is_error and retries < max_retries:
-                                retries += 1
-                                error_text = msg.result or "(empty)"
-                                recovery_msg = _build_error_recovery_message(error_text)
-                                logger.warning(
-                                    f"Agent error (attempt {retries}/{max_retries}), "
-                                    f"feeding error back: {error_text}"
-                                )
-                                response_parts.clear()
-                                await client.query(recovery_msg)
-                                break  # Re-enter receive_response() loop
-                            elif msg.is_error:
-                                result_text = msg.result or ""
-                                if _is_auth_error(result_text):
-                                    logger.error(
-                                        f"Auth failure after {retries} retries: {result_text}\n"
-                                        "Subscription fallback may be patched. "
-                                        "Set USE_API_BILLING=true or see module docstring."
+                    while True:
+                        async for msg in client.receive_response():
+                            if isinstance(msg, AssistantMessage):
+                                for block in msg.content:
+                                    if isinstance(block, TextBlock):
+                                        response_parts.append(block.text)
+                            elif isinstance(msg, ResultMessage):
+                                # Bug 1 fix (issue #374): Store Claude Code session UUID
+                                # so continuation sessions resume the correct transcript.
+                                if msg.session_id and session_id:
+                                    _store_claude_session_uuid(session_id, msg.session_id)
+                                # Capture stop_reason for Observer routing decisions
+                                if msg.stop_reason and session_id:
+                                    _session_stop_reasons[session_id] = msg.stop_reason
+                                    logger.info(
+                                        "SDK stop_reason=%s for session %s",
+                                        msg.stop_reason,
+                                        session_id,
                                     )
-                                else:
-                                    logger.error(
-                                        f"Agent error after {retries} retries: {result_text}"
+
+                                if msg.total_cost_usd is not None:
+                                    cost = msg.total_cost_usd
+                                    turns = msg.num_turns
+                                    duration = msg.duration_ms
+                                    # Always log at debug; warn if equivalent
+                                    # cost exceeds threshold (sanity check even
+                                    # on subscription — tracks what we'd pay on API)
+                                    summary = (
+                                        f"Query completed: {turns} turns, "
+                                        f"${cost:.4f} equivalent, "
+                                        f"{duration}ms"
                                     )
-                    else:
-                        # async for completed without break — done
-                        break
+                                    if cost >= _COST_WARN_THRESHOLD:
+                                        logger.warning(f"High cost query: {summary}")
+                                    else:
+                                        logger.info(summary)
+                                if msg.is_error and retries < max_retries:
+                                    retries += 1
+                                    error_text = msg.result or "(empty)"
+                                    recovery_msg = _build_error_recovery_message(error_text)
+                                    logger.warning(
+                                        f"Agent error (attempt {retries}/{max_retries}), "
+                                        f"feeding error back: {error_text}"
+                                    )
+                                    response_parts.clear()
+                                    await client.query(recovery_msg)
+                                    break  # Re-enter receive_response() loop
+                                elif msg.is_error:
+                                    result_text = msg.result or ""
+                                    if _is_auth_error(result_text):
+                                        logger.error(
+                                            f"Auth failure after {retries} retries: {result_text}\n"
+                                            "Subscription fallback may be patched. "
+                                            "Set USE_API_BILLING=true or see module docstring."
+                                        )
+                                    else:
+                                        logger.error(
+                                            f"Agent error after {retries} retries: {result_text}"
+                                        )
+                        else:
+                            # async for completed without break — done
+                            break
+
+        except TimeoutError:
+            elapsed = time.time() - init_start
+            logger.error(
+                "[SDK-timeout] Query timed out after %.0fs for session %s "
+                "(limit=%ds). Subprocess may be hung.",
+                elapsed,
+                session_id,
+                query_timeout,
+            )
+            raise
 
         except Exception as e:
             error_str = str(e)

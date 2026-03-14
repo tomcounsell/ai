@@ -225,6 +225,90 @@ def _cleanup_session_locks() -> int:
     return killed
 
 
+def _cleanup_orphaned_claude_processes() -> int:
+    """Kill orphaned Claude Code CLI subprocesses from prior bridge runs.
+
+    On bridge restart, SDK subprocesses from the old bridge may still be alive
+    because the Python bridge only cancels asyncio tasks (not OS processes).
+    These zombies block new workers via _ensure_worker's .done() check and
+    consume resources.
+
+    Finds all 'claude' processes whose parent is PID 1 (orphaned) or whose
+    parent is the current bridge process (leftover from prior exec), then
+    kills them with SIGTERM/SIGKILL.
+
+    Returns the number of processes killed.
+    """
+    logger = logging.getLogger(__name__)
+    killed = 0
+    current_pid = os.getpid()
+
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "claude_agent_sdk/_bundled/claude"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return 0
+
+        pids = result.stdout.strip().split("\n")
+        for pid_str in pids:
+            try:
+                pid = int(pid_str.strip())
+                if pid == current_pid:
+                    continue
+
+                # Check parent PID — if PPID is 1 (orphaned) or our PID
+                # (child of current bridge from a prior run), it's stale
+                ppid_result = subprocess.run(
+                    ["ps", "-o", "ppid=", "-p", str(pid)],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                if ppid_result.returncode != 0:
+                    continue
+
+                ppid = int(ppid_result.stdout.strip())
+
+                # Only kill if orphaned (PPID=1) or child of current bridge
+                if ppid not in (1, current_pid):
+                    continue
+
+                logger.warning(
+                    "[cleanup] Killing orphaned Claude subprocess PID %d (PPID=%d)",
+                    pid,
+                    ppid,
+                )
+                os.kill(pid, signal.SIGTERM)
+                # Wait up to 3 seconds for graceful exit
+                for _ in range(6):
+                    time.sleep(0.5)
+                    try:
+                        os.kill(pid, 0)
+                    except ProcessLookupError:
+                        break
+                else:
+                    logger.warning("[cleanup] Force-killing Claude subprocess PID %d", pid)
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                killed += 1
+
+            except (ValueError, ProcessLookupError, PermissionError) as e:
+                logger.debug("[cleanup] Could not kill PID %s: %s", pid_str, e)
+
+    except subprocess.TimeoutExpired:
+        logger.warning("[cleanup] Timeout scanning for orphaned Claude processes")
+    except Exception as e:
+        logger.debug("[cleanup] Error scanning for orphaned processes: %s", e)
+
+    return killed
+
+
 # Configuration (environment already loaded at top of file)
 API_ID = int(os.getenv("TELEGRAM_API_ID", "0"))
 API_HASH = os.getenv("TELEGRAM_API_HASH", "")
@@ -1285,9 +1369,16 @@ async def main():
         loop.call_soon_threadsafe(lambda: asyncio.ensure_future(_graceful_shutdown(client)))
 
     async def _graceful_shutdown(tg_client):
-        """Reset in-flight jobs and disconnect."""
+        """Reset in-flight jobs, kill SDK subprocesses, and disconnect."""
         if USE_CLAUDE_SDK:
-            from agent.job_queue import _reset_running_jobs
+            from agent.job_queue import _active_workers, _reset_running_jobs
+
+            # Cancel all worker asyncio tasks
+            for _pkey, worker_task in list(_active_workers.items()):
+                if worker_task and not worker_task.done():
+                    worker_task.cancel()
+                    logger.info(f"[{_pkey}] Cancelled worker task")
+            _active_workers.clear()
 
             for _pkey in ACTIVE_PROJECTS:
                 try:
@@ -1296,6 +1387,12 @@ async def main():
                         logger.info(f"[{_pkey}] Reset {reset} running job(s) to pending")
                 except Exception as e:
                     logger.error(f"[{_pkey}] Failed to reset running jobs: {e}")
+
+            # Kill SDK subprocesses so they don't survive as orphans
+            orphans = _cleanup_orphaned_claude_processes()
+            if orphans:
+                logger.info(f"Killed {orphans} SDK subprocess(es) during shutdown")
+
         logger.info("Waiting 2s for in-flight tasks to finish...")
         await asyncio.sleep(2)
         logger.info("Disconnecting Telegram client...")
@@ -1308,6 +1405,11 @@ async def main():
     killed = _cleanup_session_locks()
     if killed:
         logger.info(f"Cleaned up {killed} stale process(es) holding session locks")
+
+    # Kill orphaned Claude Code CLI subprocesses from prior bridge runs
+    orphans_killed = _cleanup_orphaned_claude_processes()
+    if orphans_killed:
+        logger.info(f"Killed {orphans_killed} orphaned Claude Code subprocess(es)")
 
     # Start the client (retry on SQLite session lock with exponential backoff)
     # Backoff: 2s, 5s, 10s (with jitter added by cleanup function)
