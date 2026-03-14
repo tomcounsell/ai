@@ -77,7 +77,7 @@ The Observer uses Claude API directly (`anthropic.Anthropic().messages.create()`
 | `read_session` | Read current AgentSession state (stages, links, history, queued messages). Must be called first. |
 | `update_session` | Persist extracted data (context_summary, expectations, issue/PR URLs) |
 | `enqueue_continuation` | Steer: re-enqueue the job with a coaching message |
-| `deliver_to_telegram` | Deliver: send output to the human |
+| `deliver_to_telegram` | Deliver: send output to the human. Accepts optional `message_for_user` (curated user-facing text) and `reason` (internal logging only, never sent to user). |
 
 ### STEER when:
 - Pipeline stages remain incomplete
@@ -99,6 +99,16 @@ The Observer uses Claude API directly (`anthropic.Anthropic().messages.create()`
 - **Hard guard** in `agent/job_queue.py`: cap is enforced regardless of Observer decision — if `auto_continue_count > effective_max`, output is delivered to Telegram
 - Each auto-continue increment is logged at INFO level (`Auto-continue {n}/{max} for session {id}`) for full sequence traceability
 - If Observer doesn't converge on a decision, defaults to deliver
+
+### Message Quality Gates
+
+Two quality gates prevent useless or misleading output from reaching the user:
+
+1. **Narration gate** (pre-observer, deterministic): Before the Observer runs, `is_narration_only()` from `bridge/message_quality.py` checks if the worker output consists entirely of process narration ("Let me check...", "Let me look at...") with no substantive content (no code blocks, URLs, file paths, or findings). If detected and auto-continue budget remains, the worker is automatically continued with coaching to produce actual results instead of announcements. If at the auto-continue cap, a fallback message replaces the narration.
+
+2. **`message_for_user` field** (observer-curated): When the Observer calls `deliver_to_telegram`, it can provide a `message_for_user` string — curated user-facing text that replaces raw worker output. The `reason` field is logged internally but never sent to the user. This prevents observer reasoning from leaking into Telegram messages.
+
+Both gates are in `agent/job_queue.py`'s `send_to_chat()` function.
 
 ## Coaching Philosophy
 
@@ -139,13 +149,16 @@ These were removed from the routing path. See [Coaching Loop](coaching-loop.md) 
 
 | File | Purpose |
 |------|---------|
-| `bridge/observer.py` | Observer Agent class, system prompt, tool definitions, typed outcome routing |
+| `bridge/observer.py` | Observer Agent class, system prompt, tool definitions (incl. `message_for_user`), typed outcome routing |
+| `bridge/message_quality.py` | Narration detection (`is_narration_only()`) and process narration patterns shared with summarizer |
 | `bridge/stage_detector.py` | Deterministic stage detection (pure function) with typed outcome cross-check |
 | `agent/skill_outcome.py` | `SkillOutcome` dataclass, `parse_outcome_from_text()`, `format_outcome()` — see [Typed Skill Outcomes](typed-skill-outcomes.md) |
 | `agent/sdk_client.py` | Captures `stop_reason` from `ResultMessage` in `_session_stop_reasons` registry |
 | `agent/job_queue.py` | `send_to_chat()` wiring -- invokes outcome parser, stage detector, then Observer; threads `stop_reason` |
 | `models/agent_session.py` | `AgentSession` with stage progress, steering queue, links |
 | `tests/test_observer.py` | 46 tests: 33 unit (stage detector, Observer tools, fallback) + 13 integration (real API with Haiku floor test) |
+| `tests/unit/test_message_quality.py` | 30 tests for narration detection, substantive content markers, and false positive prevention |
+| `tests/unit/test_observer_message_for_user.py` | Tests for `message_for_user` delivery path and observer tool schema |
 | `tests/unit/test_stop_reason_observer.py` | 7 tests for stop_reason routing (budget_exceeded, rate_limited, end_turn, registry) |
 | `tests/unit/test_skill_outcome.py` | 34 unit tests for SkillOutcome parsing, serialization, and edge cases |
 
