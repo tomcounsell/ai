@@ -4,7 +4,7 @@ type: feature
 appetite: Medium
 owner: Valor
 created: 2026-03-14
-tracking: https://github.com/yudame/cuttlefish/issues/169
+tracking: https://github.com/yudame/cuttlefish/issues/171
 last_comment_id:
 ---
 
