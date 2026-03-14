@@ -363,8 +363,12 @@ def classify_work_request(message: str) -> str:
         logger.info(f"[routing] Classified as passthrough (acknowledgment): {text[:120]}")
         return "passthrough"
 
+    # Fast path: bare "#N" → question (Telegram eats # as hashtag, too ambiguous for SDLC)
+    if re.match(r"^#\d+$", text_lower):
+        logger.info(f"[routing] Classified as question (bare hash reference): {text[:120]}")
+        return "question"
+
     # Fast path: issue/PR references like "issue 123", "pr 363", "pull request 363"
-    # Bare "#N" is intentionally excluded — Telegram consumes the # as a hashtag/topic marker
     if re.match(r"^(?:issue|pr|pull request)\s+#?\d+$", text_lower):
         logger.info(f"[routing] Classified as sdlc (issue/PR reference): {text[:120]}")
         return "sdlc"
