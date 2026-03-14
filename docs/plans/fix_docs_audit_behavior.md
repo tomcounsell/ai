@@ -1,5 +1,5 @@
 ---
-status: In Review
+status: Done
 type: bug
 appetite: Small
 owner: Valor
