@@ -159,7 +159,11 @@ API calls use the `ANTHROPIC_API_KEY` environment variable. In dry-run mode with
 5. Sweep index files for broken links
 6. Enforce directory structure (relocate misplaced docs)
 7. Normalize filenames to lowercase-with-hyphens
-8. Commit all changes with a detailed message
+8. **Threshold router** — count actual changes (UPDATE + DELETE + RELOCATED):
+   - **0 changes**: Skip commit entirely, report all docs accurate
+   - **≤5 changes**: Hotfix path — commit with concise message listing only changed files
+   - **>5 changes**: Report path — create a GitHub issue with the full audit report, commit with a short summary referencing the issue
+9. Commit with accurate message (never includes KEEP verdicts or full audit reports)
 
 ## See Also
 
