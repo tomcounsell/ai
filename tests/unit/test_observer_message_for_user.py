@@ -149,3 +149,101 @@ class TestDispatchToolMessageForUser:
         # is the user-facing text
         assert result["reason"] == "Auto-continue limit exceeded (4 > 3)"
         assert result["message_for_user"] == "Investigation complete."
+
+
+class TestDeliveryMessageWithGateWarnings:
+    """Test that gate warnings are appended AFTER message_for_user selection.
+
+    This mirrors the delivery logic in agent/job_queue.py (send_to_chat)
+    lines 1662-1689. The fix ensures gate warnings are never lost when
+    the Observer provides message_for_user instead of raw msg.
+    """
+
+    @staticmethod
+    def _build_delivery_msg(
+        decision: dict,
+        raw_msg: str,
+        unsatisfied_gates: list[str] | None = None,
+    ) -> str:
+        """Replicate the delivery message construction from job_queue.py.
+
+        This mirrors the exact logic:
+        1. Select message_for_user or fall back to raw msg
+        2. Guard against empty/whitespace
+        3. Append gate warnings if any gates are unsatisfied
+        """
+        # Line 1662: message_for_user takes priority over raw msg
+        delivery_msg = decision.get("message_for_user", raw_msg)
+
+        # Lines 1664-1668: empty/whitespace fallback
+        if not delivery_msg or not delivery_msg.strip():
+            delivery_msg = (
+                "The task completed but produced no output. "
+                "Please re-trigger if you expected results."
+            )
+
+        # Lines 1670-1689: gate warnings appended AFTER selection
+        if unsatisfied_gates:
+            gate_warning = "\n\n\u26a0\ufe0f **Incomplete pipeline gates:**\n" + "\n".join(
+                unsatisfied_gates
+            )
+            delivery_msg = delivery_msg + gate_warning
+
+        return delivery_msg
+
+    def test_message_for_user_with_unsatisfied_gates(self):
+        """When message_for_user is set AND gates are unsatisfied,
+        the final delivery must include BOTH the curated message AND gate warnings.
+        The raw msg must NOT appear in the output.
+        """
+        raw_msg = "Internal worker output with reasoning details"
+        decision = {
+            "message_for_user": "Build stage completed successfully.",
+            "reason": "pipeline stage done",
+        }
+        unsatisfied_gates = [
+            "  - test: No test results found",
+            "  - docs: Missing documentation",
+        ]
+
+        result = self._build_delivery_msg(decision, raw_msg, unsatisfied_gates)
+
+        # message_for_user text is present
+        assert "Build stage completed successfully." in result
+        # Gate warnings are present
+        assert "\u26a0\ufe0f **Incomplete pipeline gates:**" in result
+        assert "  - test: No test results found" in result
+        assert "  - docs: Missing documentation" in result
+        # Raw msg does NOT leak into delivery
+        assert "Internal worker output with reasoning details" not in result
+
+    def test_fallback_to_raw_msg_with_unsatisfied_gates(self):
+        """When message_for_user is NOT set, raw msg is used,
+        and gate warnings are still appended.
+        """
+        raw_msg = "Worker produced this output directly."
+        decision = {"reason": "delivering result"}
+        unsatisfied_gates = ["  - review: PR not approved"]
+
+        result = self._build_delivery_msg(decision, raw_msg, unsatisfied_gates)
+
+        assert "Worker produced this output directly." in result
+        assert "\u26a0\ufe0f **Incomplete pipeline gates:**" in result
+        assert "  - review: PR not approved" in result
+
+    def test_message_for_user_with_all_gates_satisfied(self):
+        """When message_for_user is set and all gates pass,
+        no gate warning appears in the delivery.
+        """
+        raw_msg = "Internal worker output"
+        decision = {
+            "message_for_user": "Everything is complete!",
+            "reason": "all done",
+        }
+
+        # No unsatisfied gates
+        result = self._build_delivery_msg(decision, raw_msg, unsatisfied_gates=None)
+
+        assert result == "Everything is complete!"
+        assert "\u26a0\ufe0f" not in result
+        assert "Internal worker output" not in result
