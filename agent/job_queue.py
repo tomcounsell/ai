@@ -1612,7 +1612,15 @@ async def _execute_job(job: Job) -> None:
                     f"({chat_state.auto_continue_count}/{effective_max}), "
                     f"delivering to Telegram instead of steering"
                 )
-                await send_cb(job.chat_id, msg, job.message_id, agent_session)
+                # If output is narration-only at cap, substitute with fallback
+                cap_msg = msg
+                if is_narration_only(msg):
+                    cap_msg = NARRATION_FALLBACK_MESSAGE
+                    logger.info(
+                        f"[{job.project_key}] Cap-forced delivery: substituting "
+                        f"narration-only output with fallback message"
+                    )
+                await send_cb(job.chat_id, cap_msg, job.message_id, agent_session)
                 chat_state.completion_sent = True
                 return
 
@@ -1674,7 +1682,16 @@ async def _execute_job(job: Job) -> None:
             except Exception as e:
                 logger.warning(f"[{job.project_key}] Gate completion guard failed: {e}")
 
-        await send_cb(job.chat_id, msg, job.message_id, agent_session)
+        # Use message_for_user from Observer if provided (curated user-facing text),
+        # otherwise fall back to raw worker output. The reason is internal-only.
+        delivery_msg = decision.get("message_for_user", msg)
+        # Guard: if delivery message is empty/whitespace, use a fallback
+        if not delivery_msg or not delivery_msg.strip():
+            delivery_msg = (
+                "The task completed but produced no output. "
+                "Please re-trigger if you expected results."
+            )
+        await send_cb(job.chat_id, delivery_msg, job.message_id, agent_session)
         chat_state.completion_sent = True
         logger.info(
             f"[{job.project_key}] Observer delivered to Telegram: "
