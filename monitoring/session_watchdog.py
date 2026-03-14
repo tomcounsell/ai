@@ -339,8 +339,6 @@ async def _recover_stalled_pending(stalled: list[dict]) -> None:
     Args:
         stalled: List of stalled session dicts from check_stalled_sessions().
     """
-    from agent.job_queue import _ensure_worker
-
     pending_stalls = [s for s in stalled if s["status"] == "pending"]
     if not pending_stalls:
         return
@@ -410,8 +408,7 @@ async def _recover_stalled_pending(stalled: list[dict]) -> None:
 
         except Exception as e:
             logger.error(
-                "[watchdog] Failed to recover stalled pending session %s "
-                "(project=%s): %s",
+                "[watchdog] Failed to recover stalled pending session %s (project=%s): %s",
                 session_id,
                 project_key,
                 e,

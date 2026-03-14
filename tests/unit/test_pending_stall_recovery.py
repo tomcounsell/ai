@@ -77,9 +77,7 @@ class TestPendingStallKillRetry:
         stalled = [_make_stall_info()]
 
         with (
-            patch(
-                "monitoring.session_watchdog.AgentSession"
-            ) as mock_as_cls,
+            patch("monitoring.session_watchdog.AgentSession") as mock_as_cls,
             patch(
                 "monitoring.session_watchdog._kill_stalled_worker",
                 new_callable=AsyncMock,
@@ -113,9 +111,7 @@ class TestPendingStallKillRetry:
         stalled = [_make_stall_info()]
 
         with (
-            patch(
-                "monitoring.session_watchdog.AgentSession"
-            ) as mock_as_cls,
+            patch("monitoring.session_watchdog.AgentSession") as mock_as_cls,
             patch(
                 "monitoring.session_watchdog._kill_stalled_worker",
                 new_callable=AsyncMock,
@@ -145,9 +141,7 @@ class TestPendingStallKillRetry:
         stalled = [_make_stall_info()]
 
         with (
-            patch(
-                "monitoring.session_watchdog.AgentSession"
-            ) as mock_as_cls,
+            patch("monitoring.session_watchdog.AgentSession") as mock_as_cls,
             patch(
                 "monitoring.session_watchdog._kill_stalled_worker",
                 new_callable=AsyncMock,
@@ -179,9 +173,7 @@ class TestPendingStallRetryExhaustion:
         stalled = [_make_stall_info()]
 
         with (
-            patch(
-                "monitoring.session_watchdog.AgentSession"
-            ) as mock_as_cls,
+            patch("monitoring.session_watchdog.AgentSession") as mock_as_cls,
             patch(
                 "monitoring.session_watchdog._safe_abandon_session",
                 return_value=True,
@@ -214,9 +206,7 @@ class TestPendingStallRetryExhaustion:
         stalled = [_make_stall_info()]
 
         with (
-            patch(
-                "monitoring.session_watchdog.AgentSession"
-            ) as mock_as_cls,
+            patch("monitoring.session_watchdog.AgentSession") as mock_as_cls,
             patch(
                 "monitoring.session_watchdog._kill_stalled_worker",
                 new_callable=AsyncMock,
@@ -263,9 +253,7 @@ class TestPendingStallEdgeCases:
         ]
 
         with (
-            patch(
-                "monitoring.session_watchdog.AgentSession"
-            ) as mock_as_cls,
+            patch("monitoring.session_watchdog.AgentSession") as mock_as_cls,
             patch("agent.job_queue._ensure_worker"),
         ):
             await _recover_stalled_pending(stalled)
@@ -279,9 +267,7 @@ class TestPendingStallEdgeCases:
         stalled = [_make_stall_info(project_key="?")]
 
         with (
-            patch(
-                "monitoring.session_watchdog.AgentSession"
-            ) as mock_as_cls,
+            patch("monitoring.session_watchdog.AgentSession") as mock_as_cls,
             patch("agent.job_queue._ensure_worker"),
         ):
             await _recover_stalled_pending(stalled)
@@ -295,9 +281,7 @@ class TestPendingStallEdgeCases:
         stalled = [_make_stall_info()]
 
         with (
-            patch(
-                "monitoring.session_watchdog.AgentSession"
-            ) as mock_as_cls,
+            patch("monitoring.session_watchdog.AgentSession") as mock_as_cls,
             patch(
                 "monitoring.session_watchdog._kill_stalled_worker",
                 new_callable=AsyncMock,
@@ -316,9 +300,7 @@ class TestPendingStallEdgeCases:
         from monitoring.session_watchdog import _recover_stalled_pending
 
         session1 = _make_agent_session(session_id="fail-001", retry_count=0)
-        session2 = _make_agent_session(
-            session_id="ok-001", retry_count=0, project_key="project-b"
-        )
+        session2 = _make_agent_session(session_id="ok-001", retry_count=0, project_key="project-b")
         stalled = [
             _make_stall_info(session_id="fail-001", project_key="project-a"),
             _make_stall_info(session_id="ok-001", project_key="project-b"),
@@ -333,9 +315,7 @@ class TestPendingStallEdgeCases:
             return True
 
         with (
-            patch(
-                "monitoring.session_watchdog.AgentSession"
-            ) as mock_as_cls,
+            patch("monitoring.session_watchdog.AgentSession") as mock_as_cls,
             patch(
                 "monitoring.session_watchdog._kill_stalled_worker",
                 new_callable=AsyncMock,
@@ -366,9 +346,7 @@ class TestPendingStallEdgeCases:
         stalled = [_make_stall_info()]
 
         with (
-            patch(
-                "monitoring.session_watchdog.AgentSession"
-            ) as mock_as_cls,
+            patch("monitoring.session_watchdog.AgentSession") as mock_as_cls,
             patch(
                 "monitoring.session_watchdog._kill_stalled_worker",
                 new_callable=AsyncMock,
