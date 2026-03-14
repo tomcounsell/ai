@@ -197,8 +197,7 @@ def _build_tools() -> list[dict]:
                     "reason": {
                         "type": "string",
                         "description": (
-                            "Internal reason for delivery "
-                            "(logged only, never sent to user)"
+                            "Internal reason for delivery (logged only, never sent to user)"
                         ),
                     },
                     "message_for_user": {
