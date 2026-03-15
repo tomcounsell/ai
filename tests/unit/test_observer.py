@@ -1298,10 +1298,7 @@ class TestTypedOutcomeGraphRouting:
                 return dict(self._stage_progress)
 
             def has_remaining_stages(self):
-                return any(
-                    v in ("pending", "in_progress")
-                    for v in self._stage_progress.values()
-                )
+                return any(v in ("pending", "in_progress") for v in self._stage_progress.values())
 
             def get_history_list(self):
                 return self._history
