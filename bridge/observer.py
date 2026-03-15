@@ -248,9 +248,16 @@ def _next_sdlc_skill(session) -> tuple[str, str] | None:
             last_completed = stage
             last_outcome = "fail"
 
+    # Count PATCH cycles from history for the max-cycle safety valve
+    cycle_count = 0
+    history = session.get_history_list() if hasattr(session, "get_history_list") else []
+    for entry in history:
+        if isinstance(entry, dict) and entry.get("stage") == "PATCH":
+            cycle_count += 1
+
     # Use graph routing if we have a completed/failed stage
     if last_completed:
-        next_info = get_next_stage(last_completed, last_outcome)
+        next_info = get_next_stage(last_completed, last_outcome, cycle_count=cycle_count)
         if next_info:
             next_stage, _skill = next_info
             # Guard: REVIEW requires a PR to exist. If REVIEW is pending
