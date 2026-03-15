@@ -544,7 +544,7 @@ class ValorAgent:
                 target this repo without needing explicit --repo flags.
         """
         default_dir = Path(__file__).parent.parent
-        allowed_root = Path("/Users/valorengels/src")
+        allowed_root = Path.home() / "src"
         raw_path = Path(working_dir) if working_dir else default_dir
         is_wt = WORKTREES_DIR in str(raw_path)
         self.working_dir = validate_workspace(raw_path, allowed_root, is_worktree=is_wt)

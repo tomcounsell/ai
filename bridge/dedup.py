@@ -21,7 +21,10 @@ MAX_IDS_PER_CHAT = 50
 def _get_redis():
     global _redis_client
     if _redis_client is None:
-        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+        # Prefer REDIS_URL env var, fall back to settings default
+        redis_url = os.getenv("REDIS_URL", "").strip()
+        if not redis_url:
+            redis_url = "redis://localhost:6379/0"
         _redis_client = redis.from_url(redis_url)
     return _redis_client
 

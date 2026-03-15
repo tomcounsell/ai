@@ -20,7 +20,12 @@ def get_whitelisted_users() -> dict[str, int]:
         FileNotFoundError: If whitelist config file doesn't exist
         json.JSONDecodeError: If config file is invalid JSON
     """
-    whitelist_path = Path.home() / "Desktop/claude_code/dm_whitelist.json"
+    from config.paths import CONFIG_DIR
+
+    # Check config/ first, fall back to legacy ~/Desktop/claude_code/
+    whitelist_path = CONFIG_DIR / "dm_whitelist.json"
+    if not whitelist_path.exists():
+        whitelist_path = Path.home() / "Desktop" / "claude_code" / "dm_whitelist.json"
 
     with open(whitelist_path) as f:
         config = json.load(f)

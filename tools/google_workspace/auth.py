@@ -1,12 +1,13 @@
 """Google Workspace OAuth authentication module.
 
 Handles OAuth2 credential management for Google APIs.
-Token stored at ~/Desktop/claude_code/google_token.json
-Credentials from ~/Desktop/claude_code/google_credentials.json
+Credentials and tokens stored in config/secrets/ (env: GOOGLE_CREDENTIALS_DIR).
+Falls back to ~/Desktop/claude_code/ for backward compatibility.
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from google.auth.transport.requests import Request
@@ -14,7 +15,18 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import Resource, build
 
-CONFIG_DIR = Path.home() / "Desktop" / "claude_code"
+from config.paths import CONFIG_DIR as _CONFIG_DIR
+
+# Resolve credentials directory: env var > config/secrets/ > ~/Desktop/claude_code/ (legacy)
+_env_dir = os.getenv("GOOGLE_CREDENTIALS_DIR")
+if _env_dir:
+    CONFIG_DIR = Path(_env_dir)
+else:
+    _primary = _CONFIG_DIR / "secrets"
+    _legacy = Path.home() / "Desktop" / "claude_code"
+    # Use primary if it has credentials, otherwise fall back to legacy
+    CONFIG_DIR = _primary if (_primary / "google_credentials.json").exists() else _legacy
+
 CREDENTIALS_PATH = CONFIG_DIR / "google_credentials.json"
 TOKEN_PATH = CONFIG_DIR / "google_token.json"
 

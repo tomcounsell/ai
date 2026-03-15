@@ -3,7 +3,7 @@
 Usage: valor-calendar [--project PROJECT] <session-slug>
 
 Routes to the correct Google Calendar by project name using
-~/Desktop/claude_code/calendar_config.json. Falls back to "default" calendar
+config/calendar_config.json. Falls back to "default" calendar
 when no project is specified or no mapping exists.
 Creates or extends events using 30-minute segment rounding.
 Falls back to offline queue on auth failure.
@@ -16,10 +16,16 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
-CONFIG_DIR = Path.home() / "Desktop" / "claude_code"
-CALENDAR_CONFIG_PATH = CONFIG_DIR / "calendar_config.json"
-QUEUE_PATH = CONFIG_DIR / "calendar_queue.jsonl"
-EVENT_ID_CACHE_PATH = CONFIG_DIR / "calendar_event_ids.json"
+from config.paths import CONFIG_DIR as _CONFIG_DIR, DATA_DIR
+
+# Calendar config lives in config/, queue/cache in data/
+_legacy_dir = Path.home() / "Desktop" / "claude_code"
+CALENDAR_CONFIG_PATH = _CONFIG_DIR / "calendar_config.json"
+if not CALENDAR_CONFIG_PATH.exists() and (_legacy_dir / "calendar_config.json").exists():
+    CALENDAR_CONFIG_PATH = _legacy_dir / "calendar_config.json"
+
+QUEUE_PATH = DATA_DIR / "calendar_queue.jsonl"
+EVENT_ID_CACHE_PATH = DATA_DIR / "calendar_event_ids.json"
 
 
 def load_calendar_config() -> dict:

@@ -59,6 +59,15 @@ def load_config() -> dict:
     with open(config_path) as f:
         config = json.load(f)
 
+    # Expand ~ in working_directory values
+    for _proj in config.get("projects", {}).values():
+        wd = _proj.get("working_directory", "")
+        if wd.startswith("~"):
+            _proj["working_directory"] = str(Path(wd).expanduser())
+    _defs = config.get("defaults", {})
+    if _defs.get("working_directory", "").startswith("~"):
+        _defs["working_directory"] = str(Path(_defs["working_directory"]).expanduser())
+
     # Validate defaults section exists and has working_directory
     defaults = config.get("defaults", {})
     if not defaults:

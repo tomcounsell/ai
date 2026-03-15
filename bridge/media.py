@@ -347,7 +347,7 @@ async def describe_image(filepath: Path) -> str | None:
 
         def _describe():
             response = ollama.chat(
-                model="llama3.2-vision:11b",
+                model=os.getenv("OLLAMA_VISION_MODEL", "llama3.2-vision:11b"),
                 messages=[
                     {
                         "role": "user",
