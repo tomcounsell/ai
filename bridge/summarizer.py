@@ -30,6 +30,7 @@ from pathlib import Path
 import anthropic
 import httpx
 
+from bridge.message_quality import PROCESS_NARRATION_PATTERNS as _PROCESS_NARRATION_PATTERNS
 from config.models import MODEL_FAST, OPENROUTER_HAIKU
 from utils.api_keys import get_anthropic_api_key
 
@@ -45,26 +46,6 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 # Classification confidence threshold — below this, default to QUESTION
 # (conservative: pauses for human input rather than auto-continuing)
 CLASSIFICATION_CONFIDENCE_THRESHOLD = 0.80
-
-# Process narration patterns — stripped before summarization
-_PROCESS_NARRATION_PATTERNS = [
-    re.compile(r"^Let me (check|look|read|examine|review|investigate|search|explore)"),
-    re.compile(r"^Now let me (check|look|read|examine|review|investigate|search)"),
-    re.compile(r"^I'll (start|begin|proceed|continue|check|look|read|examine) "),
-    re.compile(r"^First,? (?:let me|I'll) (check|look|read|examine|review)"),
-    re.compile(r"^Good\.$"),
-    re.compile(r"^Now I (need to |will |'ll )?(check|look|read|examine|review)"),
-    re.compile(r"^Looking at (the |this |that )"),
-    re.compile(r"^Alright,? (let me|I'll)"),
-    re.compile(r"^Sure,? (let me|I'll)"),
-    re.compile(r"^OK,? (let me|I'll)"),
-    # Plan-sharing and approach narration — PM wants results, not plans
-    re.compile(r"^Here'?s? (my |the )?(plan|approach|strategy)", re.IGNORECASE),
-    re.compile(r"^My (plan|approach|strategy) (is|will be|would be)", re.IGNORECASE),
-    re.compile(r"^I('ll| will| am going to| plan to) (approach|tackle|handle|address) "),
-    re.compile(r"^(Step|Phase) \d+[.:] ", re.IGNORECASE),
-    re.compile(r"^\d+\.\s+(First|Then|Next|Finally|After that)", re.IGNORECASE),
-]
 
 
 def _extract_open_questions(text: str) -> list[str]:
