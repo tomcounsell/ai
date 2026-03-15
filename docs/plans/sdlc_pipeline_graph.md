@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Medium
 owner: Valor
@@ -210,10 +210,11 @@ No agent integration required -- this changes internal Observer routing, not age
 - **Assigned To**: skill-cleaner
 - **Agent Type**: builder
 - **Parallel**: true
-- Remove pipeline navigation language from `do-pr-review/SKILL.md`
-- Remove pipeline navigation language from `do-patch/SKILL.md` (lines 159-168: "advance to review/document")
-- Remove pipeline navigation language from `do-test/SKILL.md` (line 338: "must fix before merge")
-- Keep internal flow language (e.g., "proceed to Step 4" within a skill is fine)
+- **do-patch/SKILL.md**: Remove entire "Step 4: Advance Pipeline State" section (lines 157-178) — pipeline advancement is the Observer's job, not do-patch's. Also remove intro line referencing "advance the pipeline" (line 9)
+- **do-pr-review/SKILL.md**: Remove line 347 ("After review, `/do-patch` fixes all tech debt and non-subjective nits before proceeding to docs/merge") — the routing decision belongs to the Observer
+- **do-test/SKILL.md**: Remove line 338 reference to "must fix before merge" — blocking decisions belong to the Observer, not individual skills
+- Keep internal flow language (e.g., "proceed to Step 5" within a skill is fine — that's intra-skill flow, not pipeline routing)
+- Keep language about what a skill *produces* (outcomes) — only remove language about what *happens next* in the pipeline
 
 ### 3. Integrate Graph into Observer
 - **Task ID**: build-observer-integration
@@ -280,7 +281,7 @@ No agent integration required -- this changes internal Observer routing, not age
 
 ---
 
-## Open Questions
+## Resolved Questions
 
-1. Should the max-cycle counter (PATCH->TEST loops) be configurable per-session, or is a hardcoded default of 3 sufficient?
-2. The `do-build/SKILL.md` also contains pipeline navigation language ("Advance to branch/implement/test/review/document stage"). Should those be removed too, or are they part of do-build's internal workflow (since do-build spans multiple internal stages)?
+1. **Max-cycle counter**: Hardcoded default of 3 is sufficient. This is internal routing, not a per-session concern. Can be made configurable later if needed.
+2. **do-build pipeline language**: Leave do-build alone. Its "advance to branch/implement/test/review/document" language describes its *internal* workflow stages (do-build spans multiple internal phases). This is intra-skill flow, not cross-skill pipeline routing.
