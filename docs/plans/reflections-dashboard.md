@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Medium
 owner: Valor
@@ -30,7 +30,7 @@ No prior dashboard or web UI work exists in this repo. This is greenfield.
 
 1. **Entry point**: User opens `localhost:PORT` in browser
 2. **Flask app** (`dashboard/app.py`): Receives HTTP request, routes to view function
-3. **Data layer** (`dashboard/data.py`): Queries Redis via Popoto models (`Reflection`, `ReflectionRun`, `ReflectionRunLog`, `ReflectionIgnore`) and reads `config/reflections.yaml` for the registry
+3. **Data layer** (`dashboard/data.py`): Queries Redis via existing Popoto models (`Reflection`, `ReflectionRun`, `ReflectionIgnore`) and reads `config/reflections.yaml` for the registry
 4. **Templates** (`dashboard/templates/`): Jinja2 renders HTML with data, HTMX attributes for interactive drill-down
 5. **HTMX partials**: Browser requests partial HTML fragments (run detail, log viewer, step expansion) via `hx-get` — Flask returns HTML fragments, no JSON API needed
 6. **Log files**: When user drills into a run, Flask reads the log file path from the Redis object and serves the file content inline
@@ -69,8 +69,6 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/reflections-da
 
 - **Flask app** (`dashboard/app.py`): Standalone web server, binds to localhost only, serves Jinja2 templates
 - **Data access layer** (`dashboard/data.py`): Encapsulates all Redis queries and log file reads; provides clean data to templates
-- **ReflectionRunLog model** (`models/reflection.py`): New Popoto model to persist per-run history (the current `Reflection` model only stores the last run)
-- **Scheduler integration**: Modify `run_reflection()` in `agent/reflection_scheduler.py` to create a `ReflectionRunLog` entry for every execution
 - **Templates** (`dashboard/templates/`): Base layout + pages for overview, run history, run detail, schedule, ignores
 - **HTMX interactivity**: Modals for run detail, inline log viewer, expandable step sections — all via HTML fragment endpoints
 
@@ -87,7 +85,7 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/reflections-da
 - Flask app as standalone process (`python -m dashboard.app`), reads same Redis instance as bridge
 - Jinja2 templates with a shared base layout (sidebar nav, status header)
 - HTMX `hx-get` for lazy-loading run details and log content (keeps initial page load fast)
-- `ReflectionRunLog` model stores: reflection name, started_at, finished_at, status, duration, error, log_file_path, step_progress (DictField for multi-step reflections)
+- Data sources: `Reflection` model (per-reflection last-run state), `ReflectionRun` model (daily-maintenance per-step detail, keyed by date), `ReflectionIgnore` model (suppressed patterns), markdown reports in `logs/reflections/`, and log files (`logs/reflections.log`, `logs/reflections_error.log`)
 - Registry loader reuses `agent.reflection_scheduler.load_registry()` — no duplication
 - Color-coded status badges: green=success, red=error, yellow=running, gray=pending/skipped
 - Relative timestamps ("3 hours ago") computed in Jinja2 filters
@@ -118,11 +116,7 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/reflections-da
 
 ## Risks
 
-### Risk 1: Redis model growth from never deleting run history
-**Impact:** Redis memory grows unbounded if run history is never pruned
-**Mitigation:** Add a configurable retention period (default 90 days) to `ReflectionRunLog.cleanup_expired()`. The existing reflections step 12 (Redis TTL Cleanup) can call this.
-
-### Risk 2: Large log files slow down the log viewer
+### Risk 1: Large log files slow down the log viewer
 **Impact:** A 50MB log file loaded inline will freeze the browser
 **Mitigation:** Truncate log display to last 1000 lines by default, with a "Load full log" button. Show file size in the header.
 
@@ -163,12 +157,11 @@ No agent integration required. The dashboard is a standalone local web server fo
 - [ ] `python -m dashboard.app` starts a Flask server on localhost
 - [ ] Dashboard home shows all reflections from `config/reflections.yaml` with status from Redis
 - [ ] Each reflection displays: name, description, last run time, status (color-coded), next due, run count, duration
-- [ ] Clicking a reflection shows paginated run history
-- [ ] Clicking a run shows step-level detail (for multi-step reflections like daily-maintenance)
+- [ ] Clicking a reflection shows its detail: for daily-maintenance, shows `ReflectionRun` entries (keyed by date) with per-step drill-down; for other reflections, shows `Reflection` model state
+- [ ] Daily-maintenance detail shows step-level progress, findings, and results from `ReflectionRun.step_progress`
 - [ ] Failed runs show full error message and log file contents inline
 - [ ] Schedule view shows upcoming runs sorted by next-due time
 - [ ] Ignore patterns page lists active entries with pattern, reason, and expiry
-- [ ] `ReflectionRunLog` model persists run history in Redis
 - [ ] No npm/node/JS framework dependencies — only HTMX from CDN
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
@@ -176,12 +169,6 @@ No agent integration required. The dashboard is a standalone local web server fo
 ## Team Orchestration
 
 ### Team Members
-
-- **Builder (data-model)**
-  - Name: model-builder
-  - Role: Create ReflectionRunLog model and integrate with scheduler
-  - Agent Type: builder
-  - Resume: true
 
 - **Builder (flask-app)**
   - Name: dashboard-builder
@@ -209,30 +196,19 @@ No agent integration required. The dashboard is a standalone local web server fo
 
 ## Step by Step Tasks
 
-### 1. Create ReflectionRunLog model
-- **Task ID**: build-model
-- **Depends On**: none
-- **Assigned To**: model-builder
-- **Agent Type**: builder
-- **Parallel**: true
-- Add `ReflectionRunLog` model to `models/reflection.py` with fields: name (KeyField), started_at (SortedField), finished_at (Field), status (Field), duration (Field), error (Field), log_file_path (Field), step_progress (DictField)
-- Add `cleanup_expired(max_age_days=90)` classmethod
-- Modify `agent/reflection_scheduler.py` `run_reflection()` to create a `ReflectionRunLog` entry on each execution
-- Add `ReflectionRunLog` to the step 12 TTL cleanup in `scripts/reflections.py`
-
-### 2. Build Flask dashboard app
+### 1. Build Flask dashboard app
 - **Task ID**: build-dashboard
-- **Depends On**: build-model
+- **Depends On**: none
 - **Assigned To**: dashboard-builder
 - **Agent Type**: builder
 - **Parallel**: false
 - Create `dashboard/__init__.py`, `dashboard/app.py`, `dashboard/data.py`
-- Implement routes: `/` (home), `/reflections/<name>` (run history), `/reflections/<name>/runs/<id>` (run detail partial), `/schedule` (schedule view), `/ignores` (ignore patterns), `/logs/<path>` (log viewer partial)
-- Data layer reads from Popoto models and `config/reflections.yaml` via `load_registry()`
+- Implement routes: `/` (home), `/reflections/<name>` (reflection detail + run history for daily-maintenance via ReflectionRun), `/schedule` (schedule view), `/ignores` (ignore patterns), `/logs` (log viewer partial), `/reports/<date>` (markdown report viewer)
+- Data layer reads from existing Popoto models (`Reflection`, `ReflectionRun`, `ReflectionIgnore`) and `config/reflections.yaml` via `load_registry()`
 - Add `__main__.py` so `python -m dashboard` works
 - Bind to `localhost:8500` by default, configurable via `--port`
 
-### 3. Create templates with HTMX
+### 2. Create templates with HTMX
 - **Task ID**: build-templates
 - **Depends On**: build-dashboard
 - **Assigned To**: template-designer
@@ -245,7 +221,7 @@ No agent integration required. The dashboard is a standalone local web server fo
 - Color-coded status badges, relative timestamps, collapsible sections
 - Paginated run history (20 per page)
 
-### 4. Validate dashboard
+### 3. Validate dashboard
 - **Task ID**: validate-dashboard
 - **Depends On**: build-templates
 - **Assigned To**: dashboard-validator
@@ -253,12 +229,12 @@ No agent integration required. The dashboard is a standalone local web server fo
 - **Parallel**: false
 - Start dashboard and verify all routes return 200
 - Verify reflections from `config/reflections.yaml` appear on home page
-- Verify Redis data (Reflection, ReflectionRun, ReflectionRunLog) renders correctly
+- Verify Redis data (Reflection, ReflectionRun, ReflectionIgnore) renders correctly
 - Verify HTMX drill-down into run details works
 - Verify log viewer displays log file content
 - Verify empty states render gracefully
 
-### 5. Documentation
+### 4. Documentation
 - **Task ID**: document-feature
 - **Depends On**: validate-dashboard
 - **Assigned To**: docs-writer
@@ -268,7 +244,7 @@ No agent integration required. The dashboard is a standalone local web server fo
 - Add entry to `docs/features/README.md` index table
 - Update CLAUDE.md Quick Commands table
 
-### 6. Final Validation
+### 5. Final Validation
 - **Task ID**: validate-all
 - **Depends On**: document-feature
 - **Assigned To**: dashboard-validator
@@ -286,14 +262,8 @@ No agent integration required. The dashboard is a standalone local web server fo
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | Flask importable | `python -c "from dashboard.app import create_app"` | exit code 0 |
-| Model importable | `python -c "from models.reflection import ReflectionRunLog"` | exit code 0 |
+| Models importable | `python -c "from models.reflection import Reflection; from models.reflections import ReflectionRun, ReflectionIgnore"` | exit code 0 |
 | Dashboard starts | `timeout 5 python -m dashboard.app --port 8599 2>/dev/null; test $? -eq 124` | exit code 0 |
 | Feature docs exist | `test -f docs/features/reflections-dashboard.md` | exit code 0 |
 
 ---
-
-## Open Questions
-
-1. **Port number**: Is `8500` a good default port, or do you have a preference? Need to avoid conflicts with other local services.
-2. **Run history retention**: 90-day default retention for `ReflectionRunLog` entries — is that enough, or do you want longer/shorter?
-3. **Daily-maintenance step detail**: The `ReflectionRun` model (keyed by date) already stores step_progress for daily-maintenance. Should the dashboard link these together (show daily-maintenance `ReflectionRunLog` entries enriched with `ReflectionRun` step data), or should we migrate step data fully into `ReflectionRunLog`?
