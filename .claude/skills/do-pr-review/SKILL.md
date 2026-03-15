@@ -344,7 +344,7 @@ Save this URL as `{review_url}` for the output summary.
 ## Hard Rules
 
 1. **Reviews MUST be posted on GitHub.** A review that only exists in agent output is NOT a review. Use `gh pr review` to post, or `gh pr comment` for self-authored PRs. Step 6.5 verifies posting succeeded. The SDLC dispatcher checks for both reviews and comments before advancing.
-2. **Tech debt and nits get patched.** After review, `/do-patch` fixes all tech debt and non-subjective nits before proceeding to docs/merge. Only purely subjective nits may be skipped — and that requires human approval.
+2. **Tech debt and nits get patched.** `/do-patch` fixes all tech debt and non-subjective nits. Only purely subjective nits may be skipped — and that requires human approval.
 3. **Never approve and skip issues.** If you found tech debt or nits, they appear in the review body. The pipeline will patch them. Don't omit findings to make the review look clean.
 
 ## Best Practices

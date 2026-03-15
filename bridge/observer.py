@@ -24,6 +24,7 @@ import anthropic
 
 from agent.job_queue import MAX_AUTO_CONTINUES, MAX_AUTO_CONTINUES_SDLC
 from agent.skill_outcome import parse_outcome_from_text
+from bridge.pipeline_graph import STAGE_TO_SKILL, get_next_stage
 from bridge.stage_detector import STAGE_ORDER, apply_transitions, detect_stages
 from bridge.summarizer import extract_artifacts
 from config.models import SONNET
@@ -45,8 +46,9 @@ You have access to the full AgentSession state and must make one of two decision
 1. STEER: Send the worker back to work on the next pipeline stage
 2. DELIVER: Send the output to the human on Telegram
 
-## SDLC Pipeline Stages (in order)
+## SDLC Pipeline Stages (in order, from bridge/pipeline_graph.py)
 ISSUE -> PLAN -> BUILD -> TEST -> REVIEW -> DOCS
+Cycles: TEST(fail) -> PATCH -> TEST, REVIEW(fail) -> PATCH -> TEST -> REVIEW
 
 ## Decision Framework
 
@@ -239,40 +241,68 @@ def _output_needs_human_input(text: str) -> bool:
     return any(p.search(text) for p in _HUMAN_INPUT_PATTERNS)
 
 
-# Maps SDLC stages to the skill that advances them
-_STAGE_TO_SKILL: dict[str, str] = {
-    "ISSUE": "/do-issue",
-    "PLAN": "/do-plan",
-    "BUILD": "/do-build",
-    "TEST": "/do-test",
-    "REVIEW": "/do-pr-review",
-    "DOCS": "/do-docs",
-}
-
-
 def _next_sdlc_skill(session) -> tuple[str, str] | None:
     """Determine the next SDLC skill to invoke based on stage progress.
 
+    Uses the canonical pipeline graph from bridge.pipeline_graph for routing.
+    Finds the last completed/failed stage and calls get_next_stage() to resolve
+    the next stage via the directed graph, supporting cycle routing
+    (e.g., TEST fail -> PATCH -> TEST).
+
+    Falls back to a linear walk of STAGE_ORDER for first-run scenarios where
+    no stages have completed yet.
+
     Returns:
-        Tuple of (stage_name, skill_command) for the next incomplete stage,
-        or None if all stages are complete.
+        Tuple of (stage_name, skill_command) for the next stage,
+        or None if all stages are complete or the graph has no transition.
     """
     progress = session.get_stage_progress()
+
+    # Find the last completed or failed stage to determine graph routing
+    last_completed = None
+    last_outcome = "success"
+    for stage in STAGE_ORDER:
+        status = progress.get(stage, "pending")
+        if status == "completed":
+            last_completed = stage
+            last_outcome = "success"
+        elif status == "failed":
+            last_completed = stage
+            last_outcome = "fail"
+
+    # Count PATCH cycles from history for the max-cycle safety valve
+    cycle_count = 0
+    history = session.get_history_list() if hasattr(session, "get_history_list") else []
+    for entry in history:
+        if isinstance(entry, dict) and entry.get("stage") == "PATCH":
+            cycle_count += 1
+
+    # Use graph routing if we have a completed/failed stage
+    if last_completed:
+        next_info = get_next_stage(last_completed, last_outcome, cycle_count=cycle_count)
+        if next_info:
+            next_stage, _skill = next_info
+            # Guard: REVIEW requires a PR to exist. If REVIEW is pending
+            # (not yet started) and no PR URL is tracked, route back to
+            # BUILD which handles PR creation.
+            if next_stage == "REVIEW" and not getattr(session, "pr_url", None):
+                review_status = progress.get("REVIEW", "pending")
+                if review_status == "pending":
+                    logger.info(
+                        "SDLC routing: REVIEW is next but no pr_url on session — "
+                        "routing to BUILD to create PR first"
+                    )
+                    return ("BUILD", "/do-build")
+            return next_info
+        return None
+
+    # Fallback: linear walk for first run (no completed stages yet)
     for stage in STAGE_ORDER:
         status = progress.get(stage, "pending")
         if status in ("pending", "in_progress"):
-            # Guard: REVIEW requires a PR to exist. If REVIEW is pending
-            # (not yet started) and no PR URL is tracked, route back to
-            # BUILD which handles PR creation. If REVIEW is already
-            # in_progress, the worker is mid-review — let it continue.
-            if stage == "REVIEW" and status == "pending" and not getattr(session, "pr_url", None):
-                logger.info(
-                    "SDLC routing: REVIEW is next but no pr_url on session — "
-                    "routing to BUILD to create PR first"
-                )
-                return ("BUILD", "/do-build")
-            skill = _STAGE_TO_SKILL.get(stage, f"/do-{stage.lower()}")
+            skill = STAGE_TO_SKILL.get(stage, f"/do-{stage.lower()}")
             return (stage, skill)
+
     return None
 
 

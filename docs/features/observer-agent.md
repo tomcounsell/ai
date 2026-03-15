@@ -2,7 +2,7 @@
 
 The Observer Agent is the **sole controller of SDLC pipeline progression**. It replaces the fragmented classifier/coach/routing chain with a single Sonnet-powered agent that makes routing decisions with full session context. It runs synchronously inside `send_to_chat()` at the point where `classify_output()`, `classify_routing_decision()`, and `build_coaching_message()` were previously called.
 
-The worker agent receives only safety rails (`WORKER_RULES` in `agent/sdk_client.py`) -- no pipeline stages, no `/sdlc` invocation instructions. The Observer steers the worker one stage at a time via coaching messages, advancing through ISSUE -> PLAN -> BUILD -> TEST -> REVIEW -> DOCS as each stage completes.
+The worker agent receives only safety rails (`WORKER_RULES` in `agent/sdk_client.py`) -- no pipeline stages, no `/sdlc` invocation instructions. The Observer steers the worker one stage at a time via coaching messages, using the [pipeline graph](pipeline-graph.md) for routing. The graph supports cycles (TEST fail -> PATCH -> TEST, REVIEW fail -> PATCH -> TEST -> REVIEW) alongside the happy path (ISSUE -> PLAN -> BUILD -> TEST -> REVIEW -> DOCS).
 
 ## Architecture
 
