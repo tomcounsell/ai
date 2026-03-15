@@ -556,7 +556,14 @@ class Observer:
 
             if outcome.status == "success" and self.session.has_remaining_stages():
                 # Success with remaining stages: steer to next stage (skip LLM)
-                next_skill = outcome.next_skill or "the next pipeline stage"
+                if outcome.next_skill:
+                    next_skill = outcome.next_skill
+                else:
+                    try:
+                        next_info = _next_sdlc_skill(self.session)
+                        next_skill = next_info[1] if next_info else "the next pipeline stage"
+                    except Exception:
+                        next_skill = "the next pipeline stage"
                 coaching = (
                     f"{outcome.stage} completed successfully. "
                     f"{outcome.notes} Continue with {next_skill}."
