@@ -60,7 +60,7 @@ class TelegramSettings(BaseModel):
 
     api_id: int | None = Field(default=None, description="Telegram API ID", ge=1)
     api_hash: str | None = Field(default=None, description="Telegram API hash")
-    session_name: str = Field(default="ai_rebuild_session", description="Telegram session name")
+    session_name: str = Field(default="valor_bridge", description="Telegram session name")
 
     @field_validator("api_hash")
     @classmethod
@@ -145,6 +145,69 @@ class PerformanceSettings(BaseModel):
     memory_limit: int = Field(default=1024, description="Memory limit in MB", ge=256, le=8192)
 
 
+class RedisSettings(BaseModel):
+    """Redis connection settings."""
+
+    url: str = Field(
+        default="redis://localhost:6379/0",
+        description="Redis connection URL (env: REDIS_URL)",
+    )
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, v):
+        """Fall back to default if empty string provided."""
+        if not v or not v.strip():
+            return "redis://localhost:6379/0"
+        return v.strip()
+
+
+class GoogleAuthSettings(BaseModel):
+    """Google OAuth credential settings."""
+
+    credentials_dir: Path = Field(
+        default=Path("config/secrets"),
+        description="Directory for Google auth credentials (env: GOOGLE_CREDENTIALS_DIR)",
+    )
+
+    @field_validator("credentials_dir")
+    @classmethod
+    def ensure_dir_exists(cls, v):
+        """Auto-create credentials directory if missing."""
+        v.mkdir(parents=True, exist_ok=True)
+        return v
+
+
+class ModelSettings(BaseModel):
+    """Local model configuration settings."""
+
+    ollama_vision_model: str = Field(
+        default="llama3.2-vision:11b",
+        description="Ollama vision model for local image analysis (env: OLLAMA_VISION_MODEL)",
+    )
+
+
+class PathSettings(BaseModel):
+    """Path settings derived from project root. No hardcoded usernames."""
+
+    project_root: Path = Field(
+        default_factory=lambda: Path(__file__).resolve().parent.parent,
+        description="Project root directory",
+    )
+    data_dir: Path = Field(default=None, description="Data directory path")
+    logs_dir: Path = Field(default=None, description="Logs directory path")
+    config_dir: Path = Field(default=None, description="Config directory path")
+
+    def model_post_init(self, __context):
+        """Derive paths from project_root after initialization."""
+        if self.data_dir is None:
+            self.data_dir = self.project_root / "data"
+        if self.logs_dir is None:
+            self.logs_dir = self.project_root / "logs"
+        if self.config_dir is None:
+            self.config_dir = self.project_root / "config"
+
+
 class Settings(BaseSettings):
     """Main application settings with environment variable support."""
 
@@ -172,6 +235,10 @@ class Settings(BaseSettings):
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
     workspace: WorkspaceSettings = Field(default_factory=WorkspaceSettings)
     performance: PerformanceSettings = Field(default_factory=PerformanceSettings)
+    redis: RedisSettings = Field(default_factory=RedisSettings)
+    google_auth: GoogleAuthSettings = Field(default_factory=GoogleAuthSettings)
+    models: ModelSettings = Field(default_factory=ModelSettings)
+    paths: PathSettings = Field(default_factory=PathSettings)
 
     @field_validator("environment")
     @classmethod
