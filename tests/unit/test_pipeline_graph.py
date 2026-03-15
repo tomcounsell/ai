@@ -1,7 +1,5 @@
 """Tests for bridge.pipeline_graph — canonical SDLC pipeline routing."""
 
-import pytest
-
 from bridge.pipeline_graph import (
     DISPLAY_STAGES,
     MAX_PATCH_CYCLES,
@@ -169,9 +167,7 @@ class TestExports:
     def test_pipeline_edges_are_complete(self):
         """Every display stage should have at least a success edge."""
         for stage in DISPLAY_STAGES:
-            assert (stage, "success") in PIPELINE_EDGES, (
-                f"Stage {stage} missing success edge"
-            )
+            assert (stage, "success") in PIPELINE_EDGES, f"Stage {stage} missing success edge"
 
     def test_stage_to_skill_values(self):
         """Verify specific skill command mappings."""
