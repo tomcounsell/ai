@@ -174,7 +174,8 @@
       <input type="file" name="audio_file" accept=".mp3,.wav,.m4a" required
              class="block w-full text-sm text-gray-900 border border-gray-300 cursor-pointer bg-white focus:outline-none">
     </div>
-    <button type="submit" class="px-4 py-2 bg-blue-600 text-white text-sm font-medium hover:bg-blue-700">
+    <button type="submit" class="px-4 py-2 bg-blue-600 text-white text-sm font-medium hover:bg-blue-700"
+            onclick="this.disabled=true;this.innerHTML='<i class=\'fas fa-spinner fa-spin mr-1\'></i> Uploading...';this.closest('form').submit()">
       <i class="fas fa-upload mr-1"></i> Upload Audio
     </button>
   </form>
@@ -226,9 +227,10 @@
         action="{% url 'podcast:episode_workflow' slug=podcast.slug episode_slug=episode.slug step=current_step %}"
         hx-post="{% url 'podcast:episode_workflow' slug=podcast.slug episode_slug=episode.slug step=current_step %}"
         hx-swap="none"
+        class="pipeline-action-form"
         onsubmit="return confirm('Publish this episode? It will appear in your RSS feed immediately.');">
     {% csrf_token %}
-    {% include "components/forms/action_button.html" with text="Publish Episode" color="green" icon="check" %}
+    {% include "components/forms/action_button.html" with text="Publish Episode" color="green" icon="check" loading_text="Publishing..." %}
   </form>
 </div>
 
@@ -250,9 +252,10 @@
   <form method="post"
         action="{% url 'podcast:episode_workflow' slug=podcast.slug episode_slug=episode.slug step=current_step %}"
         hx-post="{% url 'podcast:episode_workflow' slug=podcast.slug episode_slug=episode.slug step=current_step %}"
-        hx-swap="none">
+        hx-swap="none"
+        class="pipeline-action-form">
     {% csrf_token %}
-    {% include "components/forms/action_button.html" with text=button_state.label color=button_state.color icon=button_state.icon attrs=button_state.disabled|yesno:"disabled,"|default:"" %}
+    {% include "components/forms/action_button.html" with text=button_state.label color=button_state.color icon=button_state.icon loading_text=button_state.loading_text attrs=button_state.disabled|yesno:"disabled,"|default:"" %}
   </form>
 </div>
 {% endif %}
@@ -320,7 +323,8 @@
           Cancel
         </button>
         <button type="submit"
-                class="px-4 py-2 text-sm text-white bg-gray-900 hover:bg-gray-800">
+                class="px-4 py-2 text-sm text-white bg-gray-900 hover:bg-gray-800"
+                onclick="this.disabled=true;this.innerHTML='<i class=\'fas fa-spinner fa-spin mr-1\'></i> Saving...'">
           <i class="fas fa-save mr-1"></i> Save Research
         </button>
       </div>
@@ -433,7 +437,8 @@
           action="{% url 'podcast:regenerate_cover_art' slug=podcast.slug episode_slug=episode.slug %}">
       {% csrf_token %}
       <button type="submit"
-              class="inline-flex items-center gap-2 px-3 py-1.5 text-xs font-mono text-gray-600 border border-gray-300 hover:bg-gray-50 transition-colors">
+              class="inline-flex items-center gap-2 px-3 py-1.5 text-xs font-mono text-gray-600 border border-gray-300 hover:bg-gray-50 transition-colors"
+              onclick="this.disabled=true;this.innerHTML='<i class=\'fas fa-spinner fa-spin\'></i> Regenerating...'">
         <i class="fas fa-sync-alt"></i> Regenerate
       </button>
     </form>
@@ -454,7 +459,8 @@
           action="{% url 'podcast:regenerate_cover_art' slug=podcast.slug episode_slug=episode.slug %}">
       {% csrf_token %}
       <button type="submit"
-              class="inline-flex items-center gap-2 px-3 py-1.5 text-xs font-mono text-white bg-gray-900 hover:bg-gray-800 transition-colors">
+              class="inline-flex items-center gap-2 px-3 py-1.5 text-xs font-mono text-white bg-gray-900 hover:bg-gray-800 transition-colors"
+              onclick="this.disabled=true;this.innerHTML='<i class=\'fas fa-spinner fa-spin\'></i> Generating...'">
         <i class="fas fa-image"></i> Generate Cover Art
       </button>
     </form>
@@ -503,3 +509,26 @@
   <span></span>
   {% endif %}
 </div>
+
+<!-- Optimistic UI: show spinner + loading text on pipeline action forms, inject poller -->
+<script>
+document.querySelectorAll('.pipeline-action-form').forEach(function(form) {
+  form.addEventListener('htmx:beforeRequest', function() {
+    var b = form.querySelector('button');
+    if (b && b.dataset.loadingText) {
+      b.disabled = true;
+      b.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>' + b.dataset.loadingText;
+    }
+    if (!document.getElementById('workflow-poller')) {
+      var p = document.createElement('div');
+      p.id = 'workflow-poller';
+      p.setAttribute('hx-get', 'placeholder');
+      p.setAttribute('hx-trigger', 'every 2s');
+      p.setAttribute('hx-swap', 'none');
+      p.setAttribute('hx-on::config-request', 'event.detail.path=window.location.pathname+"status/"');
+      document.body.appendChild(p);
+      htmx.process(p);
+    }
+  });
+});
+</script>

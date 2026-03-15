@@ -67,6 +67,7 @@ def _compute_button_state(episode: Episode, step: int) -> dict:
         color (str): Button color (green/amber/blue/red).
         icon (str): Icon name for the action_button component.
         disabled (bool): Whether the button should be disabled.
+        loading_text (str): Text shown with spinner during HTMX request.
         blocked_reason (str): Why the pipeline is paused/failed (shown to user).
         error (str): Error message if the step failed.
     """
@@ -82,6 +83,7 @@ def _compute_button_state(episode: Episode, step: int) -> dict:
                 "color": "green" if not disabled else "gray",
                 "icon": "check",
                 "disabled": disabled,
+                "loading_text": "Starting...",
                 "blocked_reason": "Episode description is required" if disabled else "",
                 "error": "",
             }
@@ -122,6 +124,7 @@ def _compute_button_state(episode: Episode, step: int) -> dict:
                     "color": "blue",
                     "icon": "check",
                     "disabled": False,
+                    "loading_text": "Resuming...",
                     "blocked_reason": (
                         "Automated research complete. Add Grok or manual "
                         "research, or resume to continue."
@@ -134,6 +137,7 @@ def _compute_button_state(episode: Episode, step: int) -> dict:
             "color": "yellow",
             "icon": "",
             "disabled": True,
+            "loading_text": "",
             "blocked_reason": "",
             "error": "",
         }
@@ -145,6 +149,7 @@ def _compute_button_state(episode: Episode, step: int) -> dict:
             "color": "blue",
             "icon": "check",
             "disabled": False,
+            "loading_text": "Resuming...",
             "blocked_reason": wf.blocked_on,
             "error": "",
         }
@@ -156,6 +161,7 @@ def _compute_button_state(episode: Episode, step: int) -> dict:
             "color": "blue",
             "icon": "check",
             "disabled": False,
+            "loading_text": "Resuming...",
             "blocked_reason": wf.blocked_on or "Quality gate review required",
             "error": "",
         }
@@ -173,6 +179,7 @@ def _compute_button_state(episode: Episode, step: int) -> dict:
             "color": "red",
             "icon": "warning",
             "disabled": False,
+            "loading_text": "Retrying...",
             "blocked_reason": "",
             "error": error_msg,
         }
@@ -185,6 +192,7 @@ def _compute_button_state(episode: Episode, step: int) -> dict:
             "color": "green" if not disabled else "gray",
             "icon": "check",
             "disabled": disabled,
+            "loading_text": "Starting...",
             "blocked_reason": "Episode description is required" if disabled else "",
             "error": "",
         }

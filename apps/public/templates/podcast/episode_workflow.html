@@ -34,7 +34,7 @@
   <!-- Poll derives URL from browser location so it tracks phase navigation -->
   <div id="workflow-poller"
        hx-get="placeholder"
-       hx-trigger="every 5s"
+       hx-trigger="every 2s"
        hx-swap="none"
        hx-on::config-request="event.detail.path = window.location.pathname + 'status/'">
   </div>

@@ -8,6 +8,7 @@ Parameters:
 - color: Color theme for the button (optional, "gray", "blue", "green", "red", "yellow", "purple", defaults to "gray")
 - icon: Icon to use (optional, "add", "edit", "check", "delete", "warning", "archive", "x", "info", defaults to none)
 - icon_none: Set to True to hide the icon (optional, defaults to True if no icon is specified)
+- loading_text: Text to show during HTMX request with a spinner (optional). When provided, adds hx-disabled-elt and data-loading-text.
 - href: URL for link buttons (optional, if provided will render an <a> tag instead of <button>)
 - hx_get: URL for HTMX GET request (optional)
 - hx_post: URL for HTMX POST request (optional)
@@ -22,6 +23,7 @@ Usage:
 {% include "components/forms/action_button.html" with text="Edit" color="blue" icon="edit" href="/edit/123/" %}
 {% include "components/forms/action_button.html" with text="Delete" color="red" icon="delete" hx_get="/delete/123/" hx_target="#modal" %}
 {% include "components/forms/action_button.html" with text="Approve" color="green" icon="check" %}
+{% include "components/forms/action_button.html" with text="Start Pipeline" color="green" icon="check" loading_text="Starting..." %}
 {% endcomment %}
 
 {% with btn_color=color|default:"gray" %}
@@ -88,6 +90,7 @@ Usage:
    {% if hx_swap %}hx-swap="{{ hx_swap }}"{% endif %}
    {% if hx_headers %}hx-headers='{{ hx_headers }}'{% endif %}
    {% if hx_ext %}hx-ext="{{ hx_ext }}"{% endif %}
+   {% if loading_text %}data-loading-text="{{ loading_text }}" hx-disabled-elt="this"{% endif %}
    {{ attrs|safe }}
 >
   {% if show_icon %}

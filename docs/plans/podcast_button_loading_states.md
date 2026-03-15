@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Done
 type: feature
 appetite: Small
 owner: Tom
@@ -226,10 +226,10 @@ No feature documentation file needed -- this is a UX enhancement, not a new feat
 
 ---
 
-## Open Questions
+## Resolved Questions
 
-1. **Spinner implementation**: Should the spinner use a Font Awesome icon (`fa-spinner fa-spin`) which is already available in the project, or a CSS-only spinner? Font Awesome is simpler and consistent with existing icon usage.
+1. **Spinner implementation**: Use Font Awesome spinner (`fa-spinner fa-spin`) + disable the button. Consistent with existing icon usage.
 
-2. **Loading text per button**: Should each button type have a distinct loading text ("Starting...", "Resuming...", "Retrying...", "Publishing..."), or should they all use a generic "Processing..."? Distinct text provides better UX clarity.
+2. **Loading text per button**: Use distinct loading text per button type ("Starting...", "Resuming...", "Retrying...", "Publishing...") for better UX clarity.
 
-3. **Polling interval on activation**: When injecting the poller on button click, should it use the same 5s interval, or start with a shorter interval (e.g., 2s) for the first few polls to feel more responsive?
+3. **Polling interval on activation**: Use 2s polling interval when injecting the poller on button click for more responsive feedback.
