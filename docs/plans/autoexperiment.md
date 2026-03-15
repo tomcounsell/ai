@@ -32,10 +32,11 @@ No prior issues found related to this work. This is greenfield.
 4. **Hypothesis generation**: Sends current prompt + eval results to cheap LLM (KimiK2.5 via OpenRouter) → proposed edit
 5. **Apply edit**: Writes proposed change to target file on experiment branch
 6. **Evaluation**: Runs eval function again → new score
-7. **Decision**: If improved → git commit; if regressed → git checkout to revert
+7. **Decision**: If improved → git commit on experiment branch; if regressed → git checkout to revert
 8. **Logging**: Appends result to `data/experiments/{target}/{timestamp}.jsonl`
 9. **Loop**: Repeat steps 4-8 for N iterations
 10. **Output**: Summary report with best score achieved, total improvements, cost
+11. **Winner workflow**: If net improvement found → auto-create GitHub issue with winning diff, scores, and rationale → issue goes through standard SDLC for proper integration with docs update
 
 ## Appetite
 
@@ -77,11 +78,16 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/autoexperiment
 Add to `config/models.py`:
 ```python
 # Ultra-cheap experiment models (via OpenRouter)
-OPENROUTER_KIMI_K2_5 = "moonshotai/kimi-k2.5"           # ~$0.001/call, strong reasoning
-OPENROUTER_QWEN3_32B = "qwen/qwen3-32b"                  # ~$0.001/call, good code understanding
-OPENROUTER_GEMMA3_FREE = "google/gemma-3-27b-it:free"     # Free tier
-MODEL_EXPERIMENT = OPENROUTER_KIMI_K2_5                   # Default for experiments
+OPENROUTER_QWEN35_FLASH = "qwen/qwen3.5-flash"           # $0.0001/$0.0004 per M tokens, 1M context
+OPENROUTER_QWEN35_9B = "qwen/qwen3.5-9b"                 # $0.00005/$0.00015 per M tokens, 256k context
+OPENROUTER_KIMI_K2_5 = "moonshotai/kimi-k2.5"            # $0.00045/$0.0022 per M tokens, 262k context
+OPENROUTER_STEP_FLASH_FREE = "stepfun/step-3.5-flash:free"  # Free, 256k context
+MODEL_EXPERIMENT = OPENROUTER_QWEN35_FLASH                # Default: best cost/quality ratio
+MODEL_EXPERIMENT_FREE = OPENROUTER_STEP_FLASH_FREE        # Free tier for bulk iterations
+# Haiku remains safe fallback for quality-sensitive evaluation judging
 ```
+
+**Model selection rationale**: Qwen 3.5 Flash is the default — extremely cheap ($0.0001/M input), 1M context window, strong instruction-following. Free models (Step Flash, Nemotron) available for bulk hypothesis generation where quality tolerance is higher. Haiku stays as fallback for evaluation judging where accuracy matters more than cost.
 
 #### Core Framework (`scripts/autoexperiment.py`)
 
@@ -119,20 +125,26 @@ class ExperimentRunner:
 
 **Target 1: Observer Routing Accuracy** (Priority)
 - File: `bridge/observer.py` → `OBSERVER_SYSTEM_PROMPT`
-- Eval: Suite of 20+ synthetic scenarios (message + session state → expected decision)
+- Eval: Suite of 20+ scenarios (message + session state → expected decision)
 - Metric: % correct STEER/DELIVER decisions (higher is better)
 - Eval corpus: `data/experiments/observer/eval_corpus.jsonl`
+- **Inputs**: Mined from real bridge logs (actual messages and session states)
+- **Expected outputs**: Hand-crafted idealized routing decisions (not copied from logs — existing routing decisions may be wrong)
 
 **Target 2: Summarizer Voice Quality**
 - File: `bridge/summarizer.py` → `SUMMARIZER_SYSTEM_PROMPT`
-- Eval: Feed 10 sample agent outputs through summarizer, AI-judge voice adherence
+- Eval: Feed 10+ sample agent outputs through summarizer, AI-judge voice adherence
 - Metric: Average judge score 0-1 (higher is better)
 - Judge criteria: direct, concise, no preamble, professional
+- **Inputs**: Real agent output samples from bridge logs
+- **Expected outputs**: Hand-written idealized summaries that exemplify the target voice (existing summaries are too variable to use as gold standard)
 
 **Target 3: Stage Detector Accuracy**
 - File: `bridge/stage_detector.py` → regex patterns and stage mappings
 - Eval: Corpus of agent transcripts with known stage transitions
 - Metric: F1 score (higher is better)
+- **Inputs**: Real agent transcripts from session logs
+- **Expected outputs**: Hand-labeled stage transitions (existing auto-detected stages may be incorrect)
 
 #### Git Safety
 
@@ -215,7 +227,7 @@ No race conditions identified. The experiment runner is single-threaded and sing
 - No live bridge modification — experiments only on branches
 - No expensive models (Sonnet/Opus) for hypothesis generation
 - No multi-file experiments in v1
-- No automatic merge of experiment results — human review required
+- No automatic merge of experiment results — winning strategies are proposed as GitHub issues and go through full SDLC (plan → build → test → review → docs → merge)
 - No web dashboard or visualization
 - No integration with the bridge's runtime — this is an offline optimization tool
 
@@ -313,7 +325,9 @@ No agent integration required — this is a standalone script invoked via CLI or
 - **Parallel**: true
 - Create `data/experiments/observer/eval_corpus.jsonl` with 20+ scenarios
 - Each scenario: `{"input": {"message": "...", "session_state": {...}}, "expected": "STEER"|"DELIVER"}`
-- Scenarios drawn from real observer decisions (check logs) and edge cases
+- **Inputs**: Mine real messages and session states from bridge logs (`logs/bridge.log`, Redis session data)
+- **Expected outputs**: Hand-craft idealized routing decisions — do NOT copy existing observer outputs (they may be wrong; that's what we're optimizing)
+- Include edge cases: ambiguous messages, multi-intent, context-dependent routing
 - Implement eval function that runs scenarios through observer prompt and measures accuracy
 
 ### 4. Build Summarizer Eval Function
@@ -322,7 +336,9 @@ No agent integration required — this is a standalone script invoked via CLI or
 - **Assigned To**: eval-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Create `data/experiments/summarizer/eval_samples.jsonl` with 10 sample agent outputs
+- Create `data/experiments/summarizer/eval_samples.jsonl` with 10+ sample agent outputs
+- **Inputs**: Real agent output samples extracted from bridge logs
+- **Expected outputs**: Hand-written idealized summaries for each input (gold standard — existing summary outputs are too variable/dirty to use as reference)
 - Implement eval function that runs through summarizer and AI-judges voice quality
 - Judge criteria: direct, concise, no preamble, professional, preserves artifacts
 
@@ -333,18 +349,31 @@ No agent integration required — this is a standalone script invoked via CLI or
 - **Agent Type**: builder
 - **Parallel**: true
 - Create `data/experiments/stage_detector/eval_corpus.jsonl` with transcript samples
+- **Inputs**: Real agent transcripts from session logs
+- **Expected outputs**: Hand-labeled correct stage transitions (existing auto-detected stages may be inaccurate)
 - Implement eval function that measures stage detection F1 score
 
 ### 6. Register Experiment Targets
 - **Task ID**: build-targets
-- **Depends On**: build-framework, build-observer-eval, build-summarizer-eval, build-detector-eval
+- **Depends On**: build-framework, build-winner-issue, build-observer-eval, build-summarizer-eval, build-detector-eval
 - **Assigned To**: experiment-builder
 - **Agent Type**: builder
 - **Parallel**: false
 - Wire up extract/inject functions for observer prompt, summarizer prompt, stage detector patterns
 - Register all three targets with CLI
 
-### 7. Create Scheduling Infrastructure
+### 7. Build Winner-to-Issue Workflow
+- **Task ID**: build-winner-issue
+- **Depends On**: build-framework
+- **Assigned To**: experiment-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- When a run finds net improvement, auto-create GitHub issue via `gh issue create`
+- Issue includes: target name, baseline vs final score, winning diff, cost, iteration count
+- Issue is tagged `autoexperiment` and assigned to standard SDLC for integration
+- Log issue URL in experiment results JSONL
+
+### 8. Create Scheduling Infrastructure
 - **Task ID**: build-scheduling
 - **Depends On**: build-framework
 - **Assigned To**: experiment-builder
@@ -354,7 +383,7 @@ No agent integration required — this is a standalone script invoked via CLI or
 - Create `scripts/install_autoexperiment.sh` install script
 - Ensure `data/experiments/` directory creation
 
-### 8. Validate Framework End-to-End
+### 9. Validate Framework End-to-End
 - **Task ID**: validate-framework
 - **Depends On**: build-targets
 - **Assigned To**: experiment-validator
@@ -365,7 +394,7 @@ No agent integration required — this is a standalone script invoked via CLI or
 - Verify cost tracking accuracy
 - Verify branch isolation (experiment branch created, main untouched)
 
-### 9. Write Tests
+### 10. Write Tests
 - **Task ID**: build-tests
 - **Depends On**: build-targets
 - **Assigned To**: experiment-builder
@@ -376,7 +405,7 @@ No agent integration required — this is a standalone script invoked via CLI or
 - Unit tests for git safety (revert on regression)
 - Integration test: full 3-iteration run against observer target
 
-### 10. Documentation
+### 11. Documentation
 - **Task ID**: document-feature
 - **Depends On**: validate-framework
 - **Assigned To**: docs-writer
@@ -386,7 +415,7 @@ No agent integration required — this is a standalone script invoked via CLI or
 - Add entry to `docs/features/README.md`
 - Update `CLAUDE.md` Quick Commands
 
-### 11. Final Validation
+### 12. Final Validation
 - **Task ID**: validate-all
 - **Depends On**: build-tests, document-feature
 - **Assigned To**: experiment-validator
@@ -405,14 +434,14 @@ No agent integration required — this is a standalone script invoked via CLI or
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | Script runs | `python scripts/autoexperiment.py --target observer --iterations 1 --dry-run` | exit code 0 |
 | Eval corpus exists | `test -f data/experiments/observer/eval_corpus.jsonl` | exit code 0 |
-| Models configured | `python -c "from config.models import MODEL_EXPERIMENT; print(MODEL_EXPERIMENT)"` | output contains kimi |
+| Models configured | `python -c "from config.models import MODEL_EXPERIMENT; print(MODEL_EXPERIMENT)"` | output contains qwen |
 
 ---
 
-## Open Questions
+## Resolved Questions
 
-1. **Model preference**: KimiK2.5 is the default experiment model. Any preference for a different ultra-cheap model, or should we let the framework try multiple and pick the cheapest-per-quality?
+1. **Model preference**: ✅ Default is Qwen 3.5 Flash ($0.0001/M input, 1M context) — best cost/quality ratio on OpenRouter. Free models (Step Flash) for bulk iterations. Haiku as safe fallback for evaluation judging. Framework supports swapping models per-target.
 
-2. **Merge workflow**: After an overnight run finds improvements, should we auto-create a PR, or just log results and wait for manual "merge experiment/observer" command?
+2. **Merge workflow**: ✅ Winning experiments are NOT auto-merged. Instead, the framework auto-creates a GitHub issue with the winning diff, scores, and rationale. That issue then goes through standard SDLC (plan → build → test → review → docs → merge) for proper integration.
 
-3. **Eval corpus seeding**: For the observer eval corpus, should I mine real observer decisions from bridge logs, or craft synthetic scenarios from the system prompt's decision framework? (Recommendation: both — real logs for ground truth, synthetic for edge cases.)
+3. **Eval corpus strategy**: ✅ Use existing real data for inputs (messages from bridge logs, agent outputs from sessions, transcripts from session logs). But expected outputs must be hand-crafted idealized gold standards — existing output data is dirty/inconsistent and cannot be used as ground truth.
