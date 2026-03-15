@@ -73,7 +73,9 @@ A `MAX_PATCH_CYCLES` counter (default: 3) prevents infinite PATCH -> TEST loops.
 
 ## Integration
 
-The Observer (`bridge/observer.py`) imports `STAGE_TO_SKILL` from the graph module instead of maintaining its own local mapping. The `_next_sdlc_skill()` function uses this canonical mapping for routing decisions.
+The Observer (`bridge/observer.py`) imports `STAGE_TO_SKILL` and `get_next_stage` from the graph module. The `_next_sdlc_skill()` function uses graph-based routing: it finds the last completed/failed stage, calls `get_next_stage()` with the appropriate outcome and `cycle_count`, and returns the next stage and skill command. The `cycle_count` is derived from the session's history entries tagged with `stage: "PATCH"`.
+
+The coach (`bridge/coach.py`) imports `DISPLAY_STAGES` and `STAGE_TO_SKILL` from the graph module instead of maintaining its own hardcoded copies.
 
 Individual `/do-*` skills no longer contain pipeline navigation language. They report their results; the Observer/graph determines what happens next.
 
@@ -82,6 +84,7 @@ Individual `/do-*` skills no longer contain pipeline navigation language. They r
 | File | Role |
 |------|------|
 | `bridge/pipeline_graph.py` | Canonical graph definition |
-| `bridge/observer.py` | Imports and uses graph for routing |
+| `bridge/observer.py` | Uses `get_next_stage()` for graph-based routing with cycle counting |
+| `bridge/coach.py` | Imports `DISPLAY_STAGES` and `STAGE_TO_SKILL` (no local copies) |
 | `bridge/stage_detector.py` | `STAGE_ORDER` unchanged (display only) |
 | `tests/unit/test_pipeline_graph.py` | 27 tests covering all routing scenarios |
