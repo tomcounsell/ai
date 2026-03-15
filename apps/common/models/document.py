@@ -1,4 +1,3 @@
-
 from .upload import Upload
 
 accepted_file_types = ["pdf", "doc", "docx", "rtf", "pages"]

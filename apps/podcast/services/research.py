@@ -79,9 +79,7 @@ def run_perplexity_research(episode_id: int, prompt: str) -> EpisodeArtifact:
     context = _get_episode_context(episode)
 
     full_prompt = (
-        f"Episode: {episode.title}\n\n"
-        f"Context:\n{context}\n\n"
-        f"Research query:\n{prompt}"
+        f"Episode: {episode.title}\n\nContext:\n{context}\n\nResearch query:\n{prompt}"
     )
 
     # Call the existing Perplexity tool
@@ -96,8 +94,7 @@ def run_perplexity_research(episode_id: int, prompt: str) -> EpisodeArtifact:
 
     if content_text is None or content_text == "":
         logger.warning(
-            "Perplexity research returned no content for episode %s. "
-            "API response: %s",
+            "Perplexity research returned no content for episode %s. API response: %s",
             episode_id,
             response_data if response_data else "empty",
         )
@@ -159,9 +156,7 @@ def run_gpt_researcher(episode_id: int, prompt: str) -> EpisodeArtifact:
     context = _get_episode_context(episode)
 
     full_prompt = (
-        f"Episode: {episode.title}\n\n"
-        f"Context:\n{context}\n\n"
-        f"Research query:\n{prompt}"
+        f"Episode: {episode.title}\n\nContext:\n{context}\n\nResearch query:\n{prompt}"
     )
 
     # Call the existing GPT-Researcher tool (async → sync bridge)
@@ -251,9 +246,7 @@ def run_gemini_research(episode_id: int, prompt: str) -> EpisodeArtifact:
     context = _get_episode_context(episode)
 
     full_prompt = (
-        f"Episode: {episode.title}\n\n"
-        f"Context:\n{context}\n\n"
-        f"Research query:\n{prompt}"
+        f"Episode: {episode.title}\n\nContext:\n{context}\n\nResearch query:\n{prompt}"
     )
 
     # Call the existing Gemini tool
@@ -392,9 +385,7 @@ def run_together_research(episode_id: int, prompt: str) -> EpisodeArtifact:
     context = _get_episode_context(episode)
 
     full_prompt = (
-        f"Episode: {episode.title}\n\n"
-        f"Context:\n{context}\n\n"
-        f"Research query:\n{prompt}"
+        f"Episode: {episode.title}\n\nContext:\n{context}\n\nResearch query:\n{prompt}"
     )
 
     from apps.podcast.tools.together_deep_research import (
@@ -467,9 +458,7 @@ def run_claude_research(episode_id: int, prompt: str) -> EpisodeArtifact:
     context = _get_episode_context(episode)
 
     full_prompt = (
-        f"Episode: {episode.title}\n\n"
-        f"Context:\n{context}\n\n"
-        f"Research query:\n{prompt}"
+        f"Episode: {episode.title}\n\nContext:\n{context}\n\nResearch query:\n{prompt}"
     )
 
     try:
@@ -554,6 +543,180 @@ def run_claude_research(episode_id: int, prompt: str) -> EpisodeArtifact:
             },
         )
         return artifact
+
+
+# ---------------------------------------------------------------------------
+# MiroFish (swarm intelligence simulation)
+# ---------------------------------------------------------------------------
+
+
+def run_mirofish_research(episode_id: int, prompt: str) -> EpisodeArtifact:
+    """Call MiroFish swarm intelligence API and save results as ``p2-mirofish``.
+
+    MiroFish provides *perspective-oriented* research: stakeholder reaction
+    modeling, prediction generation, counter-argument stress-testing, and
+    audience reception simulation.  This complements the factual web-sourced
+    research from other tools (Perplexity, Gemini, etc.).
+
+    The MiroFish service runs as a separate sidecar (Docker or local process).
+    If the service is unavailable or the ``MIROFISH_API_URL`` environment
+    variable is not set, this function creates a ``[SKIPPED]`` artifact and
+    the pipeline continues with other research sources.
+
+    Args:
+        episode_id: Primary key of the target :class:`Episode`.
+        prompt: The research/simulation query to send to MiroFish.
+
+    Returns:
+        The ``p2-mirofish`` :class:`EpisodeArtifact` (either with simulation
+        results or a "skipped" message).
+    """
+    import os
+
+    episode = Episode.objects.get(pk=episode_id)
+
+    # Check for API URL configuration
+    api_url = os.getenv("MIROFISH_API_URL")
+    if not api_url:
+        logger.warning(
+            "MIROFISH_API_URL not found in environment. Skipping MiroFish "
+            "research for episode %s. This is optional and the pipeline will "
+            "continue with other research sources.",
+            episode_id,
+        )
+        artifact, _ = EpisodeArtifact.objects.update_or_create(
+            episode=episode,
+            title="p2-mirofish",
+            defaults={
+                "content": "[SKIPPED: MIROFISH_API_URL not configured]",
+                "description": "MiroFish swarm intelligence (skipped - API URL missing).",
+                "workflow_context": "Research Gathering",
+                "metadata": {"skipped": True, "reason": "API URL not configured"},
+            },
+        )
+        return artifact
+
+    # Check service health before attempting a long simulation
+    from apps.podcast.tools.mirofish_research import check_health
+
+    if not check_health(api_url):
+        logger.warning(
+            "MiroFish service at %s is not reachable. Skipping MiroFish "
+            "research for episode %s. This is optional and the pipeline will "
+            "continue with other research sources.",
+            api_url,
+            episode_id,
+        )
+        artifact, _ = EpisodeArtifact.objects.update_or_create(
+            episode=episode,
+            title="p2-mirofish",
+            defaults={
+                "content": "[SKIPPED: MiroFish service unreachable]",
+                "description": "MiroFish swarm intelligence (skipped - service down).",
+                "workflow_context": "Research Gathering",
+                "metadata": {
+                    "skipped": True,
+                    "reason": "Service unreachable",
+                    "api_url": api_url,
+                },
+            },
+        )
+        return artifact
+
+    # Build the perspective-oriented prompt with episode context
+    context = _get_episode_context(episode)
+
+    # The prompt template emphasises perspective simulation over factual search.
+    # MiroFish's unique strength is multi-agent stakeholder modeling, prediction
+    # generation, and counter-argument stress-testing -- not duplicating the
+    # factual web search that Perplexity/Gemini already provide.
+    full_prompt = (
+        f"Episode: {episode.title}\n\n"
+        f"Context:\n{context}\n\n"
+        f"Research query:\n{prompt}\n\n"
+        "SIMULATION DIRECTIVE: You are running a multi-agent swarm simulation. "
+        "Do NOT search the web or summarise existing articles. Instead:\n"
+        "1. Simulate a diverse panel of stakeholders reacting to the key claims "
+        "in this episode topic.\n"
+        "2. Generate evidence-based predictions about likely outcomes and "
+        "consequences.\n"
+        "3. Produce counter-arguments and identify blind spots the host should "
+        "address.\n"
+        "4. Model audience reception: what will resonate, what will be "
+        "controversial, what needs more explanation.\n"
+        "Focus on 'what would people think/do/say' -- not 'what are the facts'."
+    )
+
+    try:
+        from apps.podcast.tools.mirofish_research import run_mirofish_simulation
+
+        content_text, metadata = run_mirofish_simulation(
+            prompt=full_prompt,
+            api_url=api_url,
+            verbose=False,
+        )
+    except Exception as exc:
+        logger.warning(
+            "MiroFish research failed for episode %s: %s. Skipping MiroFish "
+            "research. This is optional and the pipeline will continue with "
+            "other research sources.",
+            episode_id,
+            str(exc),
+        )
+        artifact, _ = EpisodeArtifact.objects.update_or_create(
+            episode=episode,
+            title="p2-mirofish",
+            defaults={
+                "content": f"[SKIPPED: MiroFish research failed - {str(exc)}]",
+                "description": "MiroFish swarm intelligence (skipped - error).",
+                "workflow_context": "Research Gathering",
+                "metadata": {
+                    "skipped": True,
+                    "reason": f"Exception raised: {str(exc)}",
+                    "error_type": type(exc).__name__,
+                },
+            },
+        )
+        return artifact
+
+    if content_text is None or content_text == "":
+        reason = metadata.get("error", "empty response")
+        logger.warning(
+            "MiroFish research returned no content for episode %s (%s). "
+            "Skipping MiroFish research. This is optional and the pipeline "
+            "will continue with other research sources.",
+            episode_id,
+            reason,
+        )
+        artifact, _ = EpisodeArtifact.objects.update_or_create(
+            episode=episode,
+            title="p2-mirofish",
+            defaults={
+                "content": f"[SKIPPED: MiroFish returned no content - {reason}]",
+                "description": "MiroFish swarm intelligence (skipped - no content).",
+                "workflow_context": "Research Gathering",
+                "metadata": {"skipped": True, "reason": reason, **metadata},
+            },
+        )
+        return artifact
+
+    # Ensure metadata includes the skipped=False flag for consistency
+    metadata["skipped"] = False
+
+    artifact, created = EpisodeArtifact.objects.update_or_create(
+        episode=episode,
+        title="p2-mirofish",
+        defaults={
+            "content": content_text,
+            "description": "MiroFish swarm intelligence simulation output.",
+            "workflow_context": "Research Gathering",
+            "metadata": metadata,
+        },
+    )
+
+    action = "Created" if created else "Updated"
+    logger.info("%s p2-mirofish artifact for episode %s", action, episode_id)
+    return artifact
 
 
 # ---------------------------------------------------------------------------

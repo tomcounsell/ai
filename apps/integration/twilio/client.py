@@ -7,7 +7,10 @@ from django.conf import settings
 try:
     from icecream import ic
 except ImportError:
-    ic = lambda *args, **kwargs: args[0] if args else None
+
+    def ic(*args, **kwargs):
+        return args[0] if args else None
+
 
 logger = logging.getLogger(__name__)
 
@@ -234,4 +237,3 @@ class TwilioClient:
 
 class TwilioAPIError(Exception):
     """Custom exception for Twilio API errors"""
-

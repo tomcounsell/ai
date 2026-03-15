@@ -1,4 +1,3 @@
-
 from django.contrib import messages
 from django.http import HttpRequest, HttpResponse
 from django.template.loader import render_to_string
@@ -133,16 +132,15 @@ class HTMXView(MainContentView):
 
 
 # EXAMPLE USAGE:
-"""
-class TeamDashboardComponent(TeamSessionMixin, HTMXView):
-    template_name = "teams/dashboard.html"
-    oob_templates = {
-        "team-stats": "components/team_stats.html",
-        "toast-container": "layout/messages/toast.html"
-    }
-    push_url = "/teams/dashboard"
-
-    def get(self, request, *args, **kwargs):
-        self.context["stats"] = get_team_stats(self.team)
-        return self.render(request)
-"""
+#
+# class TeamDashboardComponent(TeamSessionMixin, HTMXView):
+#     template_name = "teams/dashboard.html"
+#     oob_templates = {
+#         "team-stats": "components/team_stats.html",
+#         "toast-container": "layout/messages/toast.html"
+#     }
+#     push_url = "/teams/dashboard"
+#
+#     def get(self, request, *args, **kwargs):
+#         self.context["stats"] = get_team_stats(self.team)
+#         return self.render(request)

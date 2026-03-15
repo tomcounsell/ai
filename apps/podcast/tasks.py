@@ -219,6 +219,7 @@ def step_question_discovery(episode_id: int) -> None:
         step_gemini_research.enqueue(episode_id=episode_id)
         step_together_research.enqueue(episode_id=episode_id)
         step_claude_research.enqueue(episode_id=episode_id)
+        step_mirofish_research.enqueue(episode_id=episode_id)
     except Exception as exc:
         workflow.fail_step(episode_id, "Question Discovery", str(exc))
         raise
@@ -336,6 +337,44 @@ def step_claude_research(episode_id: int) -> None:
         prompt = _get_crafted_prompt(episode_id, "prompt-claude")
         research.run_claude_research(episode_id, prompt=prompt)
         logger.info("step_claude_research: completed for episode %d", episode_id)
+        # Do NOT enqueue next step -- signal handles fan-in
+    except Exception as exc:
+        workflow.fail_step(episode_id, "Targeted Research", str(exc))
+        raise
+
+
+@task
+def step_mirofish_research(episode_id: int) -> None:
+    """Run MiroFish swarm intelligence for perspective-oriented simulation.
+
+    This is a parallel sub-step of "Targeted Research".  Does NOT enqueue
+    the next step -- the ``post_save`` signal handles fan-in once all
+    ``p2-*`` research artifacts have content.
+
+    If the MiroFish service is unavailable or ``MIROFISH_API_URL`` is not
+    set, this step is skipped gracefully (a "skipped" artifact is created)
+    and the pipeline continues with other research sources.
+    """
+    # Skip strict step lock for parallel sub-steps
+    wf = EpisodeWorkflow.objects.get(episode_id=episode_id)
+    if wf.current_step != "Targeted Research":
+        raise ValueError(
+            f"Episode {episode_id} is at step '{wf.current_step}', "
+            f"not 'Targeted Research'"
+        )
+    try:
+        prompt = _get_crafted_prompt(episode_id, "prompt-mirofish")
+        result = research.run_mirofish_research(episode_id, prompt=prompt)
+
+        # Check if research was skipped (metadata.skipped == True)
+        if result.metadata.get("skipped"):
+            logger.info(
+                "step_mirofish_research: skipped for episode %d (%s)",
+                episode_id,
+                result.metadata.get("reason", "unknown"),
+            )
+        else:
+            logger.info("step_mirofish_research: completed for episode %d", episode_id)
         # Do NOT enqueue next step -- signal handles fan-in
     except Exception as exc:
         workflow.fail_step(episode_id, "Targeted Research", str(exc))

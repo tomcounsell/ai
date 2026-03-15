@@ -66,13 +66,26 @@ Craft a prompt that directs a multi-agent deep research system to conduct compre
 - Emphasize evidence synthesis, contradiction resolution, and gap identification
 - Request concrete data points alongside higher-level analysis
 
+### MiroFish (Swarm Intelligence / Perspective Simulation)
+
+Craft a prompt that directs MiroFish's multi-agent swarm simulation to model stakeholder perspectives, generate predictions, and stress-test the episode's key claims. This is NOT a factual research tool -- it produces perspective-oriented outputs. The prompt should:
+
+- Identify the key stakeholder groups most relevant to this episode topic (e.g., regulators, consumers, industry leaders, affected communities, researchers)
+- Frame specific claims or assertions from the episode that should be stress-tested through simulated debate
+- Request prediction generation: "What would happen if..." scenarios relevant to the topic's trajectory
+- Ask for counter-arguments to the episode's main thesis from specific stakeholder perspectives
+- Request audience reception modeling: what will resonate with different listener segments, what will be controversial
+- Emphasize "what would people think/do/say" over factual research (other tools cover facts)
+- Include questions about blind spots: what perspectives or consequences might the host overlook
+- Ask for identification of the strongest objections a well-informed critic could raise
+
 ## Guiding Principles
 
 1. **Specificity over generality:** Every prompt must reference the actual topic, not placeholders. "Research the impact of sleep deprivation on cognitive performance in shift workers" is better than "Research the health topic."
 
 2. **Leverage question discovery:** When a question-discovery analysis is available, use the specific gaps, contradictions, and questions it identified. Route questions to the right tool based on `recommended_tools`.
 
-3. **Complementary coverage:** When generating GPT, Gemini, Together, and Claude prompts together, ensure they cover different angles of the topic without redundancy. GPT-Researcher handles industry/practical; Gemini handles policy/regulatory; Together handles exploratory multi-hop research and emerging perspectives; Claude handles comprehensive cross-dimensional synthesis.
+3. **Complementary coverage:** When generating GPT, Gemini, Together, Claude, and MiroFish prompts together, ensure they cover different angles of the topic without redundancy. GPT-Researcher handles industry/practical; Gemini handles policy/regulatory; Together handles exploratory multi-hop research and emerging perspectives; Claude handles comprehensive cross-dimensional synthesis; MiroFish handles stakeholder perspective simulation and prediction modeling.
 
 4. **Actionable framing:** Prompts should produce research that leads to specific, citable findings -- not broad overviews. Ask for data, examples, and evidence, not summaries.
 
@@ -84,12 +97,12 @@ You will receive:
 - **Episode title** for context
 - **Episode brief** (the p1-brief artifact content)
 - For targeted prompts: **Question discovery analysis** (the question-discovery artifact content)
-- **Research type** indicator (perplexity, gpt, gemini, together, claude, or batch for GPT+Gemini+Together+Claude)
+- **Research type** indicator (perplexity, gpt, gemini, together, claude, mirofish, or batch for GPT+Gemini+Together+Claude+MiroFish)
 
 ## Output Format
 
 Return the appropriate output model:
 - For single prompts: `ResearchPrompt` with a focused `prompt` string
-- For batch (GPT + Gemini + Together + Claude): `TargetedResearchPrompts` with `gpt_prompt`, `gemini_prompt`, `together_prompt`, and `claude_prompt` strings
+- For batch (GPT + Gemini + Together + Claude + MiroFish): `TargetedResearchPrompts` with `gpt_prompt`, `gemini_prompt`, `together_prompt`, `claude_prompt`, and `mirofish_prompt` strings
 
 Each prompt should be 200-500 words of precise, actionable research instructions.

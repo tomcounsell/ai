@@ -1,6 +1,5 @@
 """HTMX views for AI chat interface."""
 
-
 from django.http import HttpRequest, HttpResponse
 from django.shortcuts import get_object_or_404, render
 
@@ -129,7 +128,7 @@ class ChatSendMessageView(HTMXView):
 
             try:
                 model = get_default_model()
-            except:
+            except Exception:
                 # Fallback if OpenAI key not configured
                 model = None
 

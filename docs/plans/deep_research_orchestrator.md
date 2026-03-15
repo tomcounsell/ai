@@ -25,7 +25,7 @@ The podcast pipeline needs a `p2-claude` research source that matches the qualit
 Manual copy/paste from claude.ai deep research. Only non-automated research source.
 
 **Desired outcome:**
-An API-powered deep research orchestrator that replicates the multi-agent pattern, producing research quality comparable to claude.ai's deep research. Runs as `p2-claude` in the podcast pipeline alongside Perplexity, GPT-Researcher, and Gemini.
+An API-powered deep research orchestrator that replicates the multi-agent pattern, producing research quality comparable to claude.ai's deep research. Runs as `p2-claude` in the podcast pipeline alongside Perplexity, GPT-Researcher, Gemini, Together, and MiroFish.
 
 ## Appetite
 

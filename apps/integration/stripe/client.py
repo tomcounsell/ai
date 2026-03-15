@@ -14,7 +14,10 @@ from django.conf import settings
 try:
     from icecream import ic
 except ImportError:
-    ic = lambda *args, **kwargs: args[0] if args else None
+
+    def ic(*args, **kwargs):
+        return args[0] if args else None
+
 
 # Import Stripe only if it's available
 try:
@@ -471,4 +474,3 @@ class StripeClient:
 
 class StripeAPIError(Exception):
     """Custom exception for Stripe API errors"""
-

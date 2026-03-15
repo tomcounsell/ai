@@ -31,14 +31,17 @@ flowchart TD
         s4_fork --> s4a[run_gpt_researcher]
         s4_fork --> s4b[run_gemini_research]
         s4_fork --> s4c["add_manual_research (human)"]
+        s4_fork --> s4d[run_mirofish_research]
         s4a -->|"creates"| a4a[p2-chatgpt artifact]
         s4b -->|"creates"| a4b[p2-gemini artifact]
         s4c -->|"creates"| a4c["p2-{source} artifact"]
+        s4d -->|"creates"| a4d[p2-mirofish artifact]
     end
 
     a4a --> s5_pre["create_research_digest (per source)"]
     a4b --> s5_pre
     a4c --> s5_pre
+    a4d --> s5_pre
 
     subgraph P5["Phase 5: Cross-Validation"]
         s5_pre -->|"creates"| a5d["digest-* artifacts"]
@@ -143,7 +146,7 @@ stateDiagram-v2
 | 1 Setup | `p1-brief` | `status` | pending -> running |
 | 2 Perplexity | `p2-perplexity` | -- | advance to step 2 |
 | 3 Question Discovery | `question-discovery` | -- | advance to step 3 |
-| 4 Targeted Research | `p2-chatgpt`, `p2-gemini`, `p2-{source}`, `digest-*` | -- | advance to step 4 |
+| 4 Targeted Research | `p2-chatgpt`, `p2-gemini`, `p2-mirofish`, `p2-{source}`, `digest-*` | -- | advance to step 4 |
 | 5 Cross-Validation | `cross-validation` | -- | advance to step 5 |
 | 6 Master Briefing | `p3-briefing` | -- | advance to step 6 + wave_1 gate |
 | 7 Synthesis | -- | `report_text`, `sources_text` | advance to step 7 |

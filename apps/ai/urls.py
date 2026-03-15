@@ -1,4 +1,3 @@
-
 from django.urls import URLPattern, path
 
 from apps.ai.views import (

@@ -5,7 +5,10 @@ import requests
 try:
     from icecream import ic
 except ImportError:
-    ic = lambda *args, **kwargs: args[0] if args else None
+
+    def ic(*args, **kwargs):
+        return args[0] if args else None
+
 
 from settings import DEBUG, LOOPS_API_KEY
 
@@ -155,4 +158,3 @@ class LoopsClient:
 
 class LoopsAPIError(Exception):
     """Custom exception for Loops API errors"""
-

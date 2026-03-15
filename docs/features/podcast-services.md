@@ -73,6 +73,7 @@ Versioned content artifacts produced during the workflow. Each has `episode` (FK
 | `p2-gemini` | `run_gemini_research` | 4 |
 | `p2-together` | `run_together_research` | 4 |
 | `p2-claude` | `run_claude_research` | 4 |
+| `p2-mirofish` | `run_mirofish_research` | 4 |
 | `p2-{source}` | `add_manual_research` | 4 |
 | `question-discovery` | `discover_questions` | 3 |
 | `digest-{source}` | `create_research_digest` | 4-5 |
@@ -135,6 +136,11 @@ run_claude_research(episode_id: int, prompt: str) -> EpisodeArtifact
 Calls the multi-agent deep research orchestrator (`claude_deep_research.deep_research`). Plans subtasks, runs Sonnet researchers, synthesizes findings. Saves result as `p2-claude` artifact with structured metadata (sources, key findings, confidence assessment). Gracefully degrades on any failure (validation errors, API issues) by creating a skip artifact.
 
 ```python
+run_mirofish_research(episode_id: int, prompt: str) -> EpisodeArtifact
+```
+Calls the MiroFish swarm intelligence service via HTTP API for perspective-oriented simulation. Produces stakeholder reaction modeling, evidence-based predictions, counter-arguments, and audience reception analysis. Saves result as `p2-mirofish` artifact. Gracefully degrades when `MIROFISH_API_URL` is not set or the service is unreachable, creating a skip artifact. Requires the MiroFish sidecar service to be running.
+
+```python
 add_manual_research(episode_id: int, title: str, content: str) -> EpisodeArtifact
 ```
 Stores human-pasted research as `p2-{title}` artifact. Used for Grok, expert interviews, or any manual source.
@@ -173,7 +179,7 @@ Reads the `p1-brief` artifact, delegates to the `craft_research_prompt` Named AI
 ```python
 craft_targeted_research_prompts(episode_id: int) -> dict[str, EpisodeArtifact]
 ```
-Reads `p1-brief` and `question-discovery` artifacts, delegates to the `craft_research_prompt` Named AI Tool for batch GPT + Gemini prompt generation, saves prompts as `prompt-gpt` and `prompt-gemini` artifacts, and creates empty `p2-chatgpt` and `p2-gemini` placeholder artifacts for fan-in.
+Reads `p1-brief` and `question-discovery` artifacts, delegates to the `craft_research_prompt` Named AI Tool for batch prompt generation, saves prompts as `prompt-gpt`, `prompt-gemini`, `prompt-together`, `prompt-claude`, and `prompt-mirofish` artifacts, and creates empty `p2-chatgpt`, `p2-gemini`, `p2-together`, `p2-claude`, and `p2-mirofish` placeholder artifacts for fan-in.
 
 ---
 
@@ -320,11 +326,12 @@ result = produce_episode.enqueue(episode_id=42)
 |------|------------|-----------|
 | `produce_episode` | `setup.setup_episode` | `step_perplexity_research` |
 | `step_perplexity_research` | `research.run_perplexity_research` | `step_question_discovery` |
-| `step_question_discovery` | auto-retries `research.run_perplexity_research` if no usable p2-* artifacts exist, then `analysis.discover_questions` | `step_gpt_research` + `step_gemini_research` + `step_together_research` + `step_claude_research` (parallel) |
+| `step_question_discovery` | auto-retries `research.run_perplexity_research` if no usable p2-* artifacts exist, then `analysis.discover_questions` | `step_gpt_research` + `step_gemini_research` + `step_together_research` + `step_claude_research` + `step_mirofish_research` (parallel) |
 | `step_gpt_research` | `research.run_gpt_researcher` | _(signal fan-in)_ |
 | `step_gemini_research` | `research.run_gemini_research` | _(signal fan-in)_ |
 | `step_together_research` | `research.run_together_research` | _(signal fan-in)_ |
 | `step_claude_research` | `research.run_claude_research` | _(signal fan-in)_ |
+| `step_mirofish_research` | `research.run_mirofish_research` | _(signal fan-in)_ |
 | `step_research_digests` | `analysis.create_research_digest` (per artifact) | `step_cross_validation` |
 | `step_cross_validation` | `analysis.cross_validate` | `step_master_briefing` |
 | `step_master_briefing` | `analysis.write_briefing` | Quality Gate Wave 1 → `step_synthesis` |

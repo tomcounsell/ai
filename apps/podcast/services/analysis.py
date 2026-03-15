@@ -643,23 +643,23 @@ def craft_research_prompt(episode_id: int, research_type: str) -> EpisodeArtifac
 def craft_targeted_research_prompts(
     episode_id: int,
 ) -> dict[str, EpisodeArtifact]:
-    """Craft GPT-Researcher, Gemini, Together, and Claude prompts in a single AI call.
+    """Craft GPT-Researcher, Gemini, Together, Claude, and MiroFish prompts in a single AI call.
 
     Reads the ``p1-brief`` and ``question-discovery`` artifacts, calls the
     :func:`~apps.podcast.services.craft_research_prompt.craft_targeted_prompts`
     Named AI Tool, saves the prompts as ``prompt-gpt``, ``prompt-gemini``,
-    ``prompt-together``, and ``prompt-claude`` artifacts, and creates empty
-    placeholder ``p2-chatgpt`` / ``p2-gemini`` / ``p2-together`` / ``p2-claude``
-    artifacts for the
+    ``prompt-together``, ``prompt-claude``, and ``prompt-mirofish`` artifacts,
+    and creates empty placeholder ``p2-chatgpt`` / ``p2-gemini`` /
+    ``p2-together`` / ``p2-claude`` / ``p2-mirofish`` artifacts for the
     fan-in signal.
 
     Args:
         episode_id: Primary key of the target :class:`Episode`.
 
     Returns:
-        A dict mapping ``"prompt-gpt"``, ``"prompt-gemini"``, and
-        ``"prompt-together"``, and ``"prompt-claude"`` to their
-        :class:`EpisodeArtifact` instances.
+        A dict mapping ``"prompt-gpt"``, ``"prompt-gemini"``,
+        ``"prompt-together"``, ``"prompt-claude"``, and ``"prompt-mirofish"``
+        to their :class:`EpisodeArtifact` instances.
     """
     from apps.podcast.services.craft_research_prompt import (
         craft_targeted_prompts as _craft_targeted_prompts,
@@ -727,6 +727,24 @@ def craft_targeted_research_prompts(
         },
     )
 
+    # MiroFish prompt: perspective-oriented simulation directive.
+    # If the AI did not generate a mirofish_prompt (backward compat with
+    # cached models), fall back to a sensible default.
+    mirofish_prompt_text = result.mirofish_prompt or (
+        f"Simulate diverse stakeholder reactions to the key claims in this "
+        f"episode about '{episode.title}'. Generate predictions, "
+        f"counter-arguments, and audience reception modeling."
+    )
+    mirofish_artifact, _ = EpisodeArtifact.objects.update_or_create(
+        episode=episode,
+        title="prompt-mirofish",
+        defaults={
+            "content": mirofish_prompt_text,
+            "description": "AI-crafted MiroFish swarm simulation prompt.",
+            "workflow_context": "Research Gathering",
+        },
+    )
+
     # Create empty placeholder artifacts for the targeted research steps.
     # These are required for fan-in correctness: without them, if one
     # research task finishes before the other starts, the signal would see
@@ -769,10 +787,19 @@ def craft_targeted_research_prompts(
             "workflow_context": "Research Gathering",
         },
     )
+    EpisodeArtifact.objects.update_or_create(
+        episode=episode,
+        title="p2-mirofish",
+        defaults={
+            "content": "",
+            "description": "MiroFish swarm intelligence (placeholder).",
+            "workflow_context": "Research Gathering",
+        },
+    )
 
     logger.info(
         "craft_targeted_research_prompts: saved prompt-gpt + prompt-gemini + "
-        "prompt-together + prompt-claude artifacts for episode %s",
+        "prompt-together + prompt-claude + prompt-mirofish artifacts for episode %s",
         episode_id,
     )
     return {
@@ -780,4 +807,5 @@ def craft_targeted_research_prompts(
         "prompt-gemini": gemini_artifact,
         "prompt-together": together_artifact,
         "prompt-claude": claude_artifact,
+        "prompt-mirofish": mirofish_artifact,
     }
