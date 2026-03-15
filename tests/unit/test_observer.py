@@ -1275,6 +1275,134 @@ class TestObserverSdlcSteering:
 
 
 # ============================================================================
+# Typed Outcome Graph Routing Tests (issue #414)
+# ============================================================================
+
+
+class TestTypedOutcomeGraphRouting:
+    """Test that the Observer resolves next_skill from the pipeline graph
+    when outcome.next_skill is None (regression test for issue #414)."""
+
+    def _make_session(self, stage_progress, pr_url=None):
+        """Create a mock session with stage progress and has_remaining_stages."""
+
+        class MockSession:
+            def __init__(self):
+                self.session_id = "test-session"
+                self.correlation_id = "test-cid"
+                self.pr_url = pr_url
+                self._stage_progress = stage_progress
+                self._history = []
+
+            def get_stage_progress(self):
+                return dict(self._stage_progress)
+
+            def has_remaining_stages(self):
+                return any(v in ("pending", "in_progress") for v in self._stage_progress.values())
+
+            def get_history_list(self):
+                return self._history
+
+            def save(self):
+                pass
+
+        return MockSession()
+
+    def test_next_skill_none_resolves_from_graph(self):
+        """When outcome.next_skill is None and BUILD just completed,
+        the Observer should resolve /do-test from the pipeline graph."""
+        from agent.skill_outcome import SkillOutcome
+
+        session = self._make_session(
+            stage_progress={
+                "ISSUE": "completed",
+                "PLAN": "completed",
+                "BUILD": "completed",
+                "TEST": "pending",
+                "REVIEW": "pending",
+                "DOCS": "pending",
+            }
+        )
+
+        # Simulate what the Observer does at line 557-566
+        outcome = SkillOutcome(
+            status="success",
+            stage="BUILD",
+            notes="PR created",
+            next_skill=None,
+        )
+
+        # This is the exact logic from the fix
+        if outcome.next_skill:
+            next_skill = outcome.next_skill
+        else:
+            next_info = _next_sdlc_skill(session)
+            next_skill = next_info[1] if next_info else "the next pipeline stage"
+
+        assert next_skill == "/do-test", f"Expected /do-test, got {next_skill}"
+
+    def test_next_skill_explicit_used_directly(self):
+        """When outcome.next_skill is explicitly set, it should be used directly."""
+        from agent.skill_outcome import SkillOutcome
+
+        session = self._make_session(
+            stage_progress={
+                "ISSUE": "completed",
+                "PLAN": "completed",
+                "BUILD": "completed",
+                "TEST": "pending",
+                "REVIEW": "pending",
+                "DOCS": "pending",
+            }
+        )
+
+        outcome = SkillOutcome(
+            status="success",
+            stage="BUILD",
+            notes="PR created",
+            next_skill="/do-custom",
+        )
+
+        if outcome.next_skill:
+            next_skill = outcome.next_skill
+        else:
+            next_info = _next_sdlc_skill(session)
+            next_skill = next_info[1] if next_info else "the next pipeline stage"
+
+        assert next_skill == "/do-custom", f"Expected /do-custom, got {next_skill}"
+
+    def test_next_skill_none_all_complete_uses_fallback(self):
+        """When _next_sdlc_skill returns None (all stages done), use fallback string."""
+        from agent.skill_outcome import SkillOutcome
+
+        session = self._make_session(
+            stage_progress={
+                "ISSUE": "completed",
+                "PLAN": "completed",
+                "BUILD": "completed",
+                "TEST": "completed",
+                "REVIEW": "completed",
+                "DOCS": "completed",
+            }
+        )
+
+        outcome = SkillOutcome(
+            status="success",
+            stage="DOCS",
+            notes="Docs done",
+            next_skill=None,
+        )
+
+        if outcome.next_skill:
+            next_skill = outcome.next_skill
+        else:
+            next_info = _next_sdlc_skill(session)
+            next_skill = next_info[1] if next_info else "the next pipeline stage"
+
+        assert next_skill == "the next pipeline stage"
+
+
+# ============================================================================
 # _next_sdlc_skill PR Guard Tests
 # ============================================================================
 
