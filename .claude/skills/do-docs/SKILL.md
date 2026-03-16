@@ -336,6 +336,12 @@ After all edits are complete:
    **No changes needed**: (list if applicable)
    ```
 
+5. **Commit and push changes:**
+   ```bash
+   git add -A && git commit -m "Docs: cascade updates for <brief change description>" && git push
+   ```
+   Documentation changes must be persisted. If this fails (e.g., nothing to commit), that's fine — report "no changes needed."
+
 ## Edge Cases
 
 - **New feature with no existing docs**: Nothing to cascade. Report "no existing docs reference this area."

@@ -201,15 +201,13 @@ Lint and formatting are handled automatically -- agents should never waste itera
 
 ## Commit and Push Rules
 
-**Context-dependent behavior:**
+After tests pass, always commit and push the fix:
 
-- **When invoked by `/do-build`** (inside a build loop): Do NOT commit — `do-build` handles commits at the appropriate stage. You can detect this when the conversation includes `/do-build` invocation or when `PATCH_ARG` was passed by `do-build`.
-- **When invoked standalone** (by the Observer, by a user, or via `/do-patch` directly): Commit and push changes after tests pass. The Observer cannot commit for you, so if you don't commit, the fix is lost.
-
-When committing standalone:
 ```bash
 git add -A && git commit -m "Fix: [one-line summary of what was fixed]" && git push
 ```
+
+This skill owns its full lifecycle — no parent skill handles commits on its behalf.
 
 ## Critical Rules
 
