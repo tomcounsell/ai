@@ -74,6 +74,9 @@ gh pr view {pr_number} --json title,body,headRefName,baseRefName,files,additions
 
 **Checkout the PR branch (mandatory before any file reads):**
 ```bash
+# Ensure clean git state before switching branches
+python -c "from agent.worktree_manager import ensure_clean_git_state; from pathlib import Path; ensure_clean_git_state(Path('.'))"
+
 gh pr checkout {pr_number}
 ```
 This ensures all subsequent `Read` calls see the PR's actual code, not whatever branch the parent conversation had checked out. Without this, the reviewer reads stale files that contradict the diff — producing hallucinated findings.
