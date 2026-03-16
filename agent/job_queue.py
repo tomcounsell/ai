@@ -1257,6 +1257,32 @@ async def _calendar_heartbeat(slug: str, project: str | None = None) -> None:
 CALENDAR_HEARTBEAT_INTERVAL = 25 * 60  # 25 minutes (fits within 30-min segments)
 
 
+def _diagnose_missing_session(session_id: str) -> dict:
+    """Check Redis directly for session key diagnostics when Popoto query fails.
+
+    Returns a dict with key_exists, ttl, and any error info to aid debugging
+    why the session was not found by the ORM query.
+    """
+    try:
+        import redis as redis_lib
+
+        r = redis_lib.Redis()
+        # Popoto stores keys with model-specific prefixes; scan for matches
+        # TODO: Replace r.keys() with r.scan() if Redis grows beyond ~10k keys.
+        #   KEYS is O(N) across the entire keyspace. Acceptable on error path
+        #   with small Redis, but SCAN would be safer at scale. (PR #419 review)
+        keys = r.keys(f"*{session_id}*")
+        result = {"matching_keys": len(keys)}
+        for key in keys[:5]:  # Cap at 5 to avoid log spam
+            key_str = key.decode() if isinstance(key, bytes) else str(key)
+            ttl = r.ttl(key)
+            exists = r.exists(key)
+            result[key_str] = {"exists": bool(exists), "ttl": ttl}
+        return result
+    except Exception as e:
+        return {"error": str(e)}
+
+
 async def _enqueue_continuation(
     job: "Job",
     branch_name: str,
@@ -1300,24 +1326,31 @@ async def _enqueue_continuation(
     # new index set but never removes from old one).
     sessions = list(AgentSession.query.filter(session_id=job.session_id))
     if not sessions:
+        # Diagnose why the session is missing before falling back.
+        # Check Redis directly for key existence and TTL to aid debugging.
+        _diag = _diagnose_missing_session(job.session_id)
         logger.error(
             f"[{job.project_key}] No session found for {job.session_id} "
-            f"— falling back to enqueue_job"
+            f"— falling back to recreate from Job metadata. "
+            f"Diagnostics: {_diag}"
         )
-        # Fallback: create a new session if the original is somehow gone
-        await enqueue_job(
-            project_key=job.project_key,
-            session_id=job.session_id,
-            working_dir=job.working_dir,
-            message_text=coaching_message,
-            sender_name="System (auto-continue)",
-            chat_id=job.chat_id,
-            message_id=job.message_id,
-            priority="high",
-            work_item_slug=job.work_item_slug,
-            task_list_id=task_list_id,
-            auto_continue_count=auto_continue_count,
-            classification_type=job.classification_type,
+        # Fallback: recreate session preserving ALL metadata from the
+        # underlying AgentSession that was loaded when the job was popped.
+        # This prevents loss of context_summary, expectations, issue_url,
+        # pr_url, history, correlation_id, and other session-phase fields.
+        fields = _extract_job_fields(job._rj)
+        # Override fields that change for continuation
+        fields["status"] = "pending"
+        fields["message_text"] = coaching_message
+        fields["sender_name"] = "System (auto-continue)"
+        fields["auto_continue_count"] = auto_continue_count
+        fields["priority"] = "high"
+        fields["task_list_id"] = task_list_id
+        await AgentSession.async_create(**fields)
+        _ensure_worker(job.project_key)
+        logger.info(
+            f"[{job.project_key}] Recreated session {job.session_id} from Job metadata "
+            f"(fallback path, auto_continue_count={auto_continue_count})"
         )
         return
 

@@ -1213,6 +1213,7 @@ class TestRenderStageProgress:
             "TEST": "completed",
             "REVIEW": "completed",
             "DOCS": "completed",
+            "MERGE": "completed",
         }
         session.get_links.return_value = {}
         result = _render_stage_progress(session)
@@ -1221,6 +1222,7 @@ class TestRenderStageProgress:
         assert "▶" not in result  # No in-progress stages
         assert "☑ PLAN" in result
         assert "☑ DOCS" in result
+        assert "☑ MERGE" in result
 
     def test_issue_number_embedded_in_label(self):
         """ISSUE stage shows the issue number when available in session links."""

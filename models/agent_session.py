@@ -34,7 +34,7 @@ MSG_MAX_CHARS = 20_000
 HISTORY_MAX_ENTRIES = 20
 
 # SDLC stages in pipeline order
-SDLC_STAGES = ["ISSUE", "PLAN", "BUILD", "TEST", "REVIEW", "DOCS"]
+SDLC_STAGES = ["ISSUE", "PLAN", "BUILD", "TEST", "REVIEW", "DOCS", "MERGE"]
 
 
 class AgentSession(Model):

@@ -121,6 +121,7 @@ class TestHasRemainingStages:
             "[stage] TEST COMPLETED",
             "[stage] REVIEW COMPLETED",
             "[stage] DOCS COMPLETED",
+            "[stage] MERGE COMPLETED",
         ]
         assert session.has_remaining_stages() is False
 
@@ -157,6 +158,7 @@ class TestHasRemainingStages:
             "[stage] TEST FAILED",
             "[stage] REVIEW COMPLETED",
             "[stage] DOCS COMPLETED",
+            "[stage] MERGE COMPLETED",
         ]
         # TEST is failed, all others completed — no remaining (pending/in_progress)
         assert session.has_remaining_stages() is False
@@ -252,6 +254,7 @@ class TestStageAwareDecisionMatrix:
             "[stage] TEST COMPLETED",
             "[stage] REVIEW COMPLETED",
             "[stage] DOCS COMPLETED",
+            "[stage] MERGE COMPLETED",
         ]
 
         assert session.is_sdlc_job() is True

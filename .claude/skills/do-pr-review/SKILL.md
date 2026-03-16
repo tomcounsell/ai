@@ -72,6 +72,17 @@ Follow this review process to validate a pull request:
 gh pr view {pr_number} --json title,body,headRefName,baseRefName,files,additions,deletions
 ```
 
+**Checkout the PR branch (mandatory before any file reads):**
+```bash
+# Ensure clean git state before switching branches
+python -c "from agent.worktree_manager import ensure_clean_git_state; from pathlib import Path; ensure_clean_git_state(Path('.'))"
+
+gh pr checkout {pr_number}
+```
+This ensures all subsequent `Read` calls see the PR's actual code, not whatever branch the parent conversation had checked out. Without this, the reviewer reads stale files that contradict the diff — producing hallucinated findings.
+
+> **Worktree isolation:** When spawning this skill via the Agent tool, use `isolation: "worktree"` so the checkout doesn't disrupt the parent conversation's working directory.
+
 **Get the full diff:**
 ```bash
 gh pr diff {pr_number}
@@ -117,14 +128,8 @@ gh pr diff {pr_number} --name-only
 # Prepare screenshot directory
 mkdir -p generated_images/pr-{pr_number}
 
-# Ensure clean git state before switching branches (aborts in-progress merges/rebases)
-python -c "from agent.worktree_manager import ensure_clean_git_state; from pathlib import Path; ensure_clean_git_state(Path('.'))"
-
-# Checkout the PR branch locally
-gh pr checkout {pr_number}
-
-# Use /prepare_app to ensure app is running
-# Then capture with agent-browser:
+# PR branch was already checked out in Step 1.
+# Use /prepare_app to ensure app is running, then capture with agent-browser:
 agent-browser open http://localhost:8000
 agent-browser snapshot -i
 agent-browser screenshot generated_images/pr-{pr_number}/01_main_view.png
