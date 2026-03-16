@@ -404,13 +404,16 @@ class TestNoDuplicateRecords:
     @pytest.mark.asyncio
     async def test_no_duplicates_after_multiple_continuations(self, redis_test_db):
         """Multiple auto-continues still produce exactly one record."""
+        from agent.job_queue import Job
+
         session = _create_session(redis_test_db, classification_type="sdlc")
 
         for i in range(5):
-            job = _make_mock_job(
-                session_id=session.session_id,
-                classification_type="sdlc",
-            )
+            # Re-fetch the session each iteration so job._rj points to the
+            # current record (delete-and-recreate changes the underlying object)
+            sessions = list(AgentSession.query.filter(session_id=session.session_id))
+            current = sessions[0] if sessions else session
+            job = Job(current)
             await _enqueue_continuation(
                 job=job,
                 branch_name="session/test",
