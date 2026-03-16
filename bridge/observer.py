@@ -31,6 +31,7 @@ from bridge.summarizer import extract_artifacts
 from config.models import SONNET
 from models.agent_session import AgentSession
 from monitoring.telemetry import record_decision, record_interjection, record_tool_use
+from agent.goal_gates import check_docs_gate, check_review_gate
 from utils.api_keys import get_anthropic_api_key
 
 logger = logging.getLogger(__name__)
@@ -424,8 +425,6 @@ class Observer:
             return self._gate_cache
 
         try:
-            from agent.goal_gates import check_docs_gate, check_review_gate
-
             working_dir = getattr(self.session, "working_dir", None) or "."
 
             review_result = check_review_gate(slug, working_dir)
