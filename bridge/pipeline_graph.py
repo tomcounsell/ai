@@ -40,6 +40,8 @@ PIPELINE_EDGES: dict[tuple[str, str], str] = {
     ("TEST", "success"): "REVIEW",
     ("REVIEW", "success"): "DOCS",
     ("DOCS", "success"): "MERGE",
+    # Partial: review approved but has tech_debt/nits that need patching
+    ("REVIEW", "partial"): "PATCH",
     # Failure cycles (outcome = "fail")
     ("TEST", "fail"): "PATCH",
     ("REVIEW", "fail"): "PATCH",

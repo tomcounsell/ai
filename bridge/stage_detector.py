@@ -202,7 +202,8 @@ def apply_transitions(
     # where completed stages render as unchecked in Telegram progress displays.
     if outcome is not None:
         regex_stages = {t["stage"] for t in transitions}
-        if outcome.status == "success" and outcome.stage and outcome.stage not in regex_stages:
+        stage_done = outcome.status in ("success", "partial")
+        if stage_done and outcome.stage and outcome.stage not in regex_stages:
             logger.info(
                 f"[stage-detector] Stage {outcome.stage} merged from typed outcome "
                 f"(regex missed). Regex detected: {regex_stages or 'none'}"
@@ -211,7 +212,7 @@ def apply_transitions(
                 {
                     "stage": outcome.stage,
                     "status": "completed",
-                    "reason": f"Typed outcome: {outcome.stage} succeeded (regex missed)",
+                    "reason": f"Typed outcome: {outcome.stage} {outcome.status} (regex missed)",
                 }
             )
         elif outcome.status == "fail" and outcome.stage in regex_stages:

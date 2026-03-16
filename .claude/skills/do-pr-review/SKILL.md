@@ -346,6 +346,27 @@ Save this URL as `{review_url}` for the output summary.
 - Auto-detected and sent via Telegram bridge
 - Bridge uses RELATIVE_PATH_PATTERN to auto-detect generated_images/ files
 
+## Outcome Contract
+
+After posting the review and verifying it was posted (Steps 6-6.5), emit a typed outcome as the **very last line** of output.
+
+**Success (no blockers, no tech_debt, no nits):**
+```
+<!-- OUTCOME {"status":"success","stage":"REVIEW","artifacts":{"review_url":"{review_url}","blockers":0,"tech_debt":0,"nits":0},"notes":"Approved with no findings.","next_skill":"/do-docs"} -->
+```
+
+**Partial (no blockers, but has tech_debt and/or nits that need patching):**
+```
+<!-- OUTCOME {"status":"partial","stage":"REVIEW","artifacts":{"review_url":"{review_url}","blockers":0,"tech_debt":2,"nits":1},"notes":"Approved with 2 tech_debt and 1 nit findings. Routing to /do-patch.","next_skill":"/do-patch"} -->
+```
+
+**Fail (blockers found):**
+```
+<!-- OUTCOME {"status":"fail","stage":"REVIEW","artifacts":{"review_url":"{review_url}","blockers":2,"tech_debt":1,"nits":0},"notes":"Changes requested: 2 blockers found.","failure_reason":"2 blockers must be fixed before merge","next_skill":"/do-patch"} -->
+```
+
+**Important**: The outcome block uses HTML comment syntax (`<!-- ... -->`) so it's invisible in rendered markdown but parseable by the pipeline. Always emit it as the very last line of output. Use `"partial"` — not `"success"` — whenever tech_debt or non-subjective nit findings exist. This ensures the pipeline routes to `/do-patch` before advancing to `/do-docs`.
+
 ## Hard Rules
 
 1. **Reviews MUST be posted on GitHub.** A review that only exists in agent output is NOT a review. Use `gh pr review` to post, or `gh pr comment` for self-authored PRs. Step 6.5 verifies posting succeeded. The SDLC dispatcher checks for both reviews and comments before advancing.

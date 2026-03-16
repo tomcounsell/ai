@@ -89,7 +89,7 @@ derives from that module. The table below is for human readability only.
 ```
 Happy path: ISSUE -> PLAN -> BUILD -> TEST -> REVIEW -> DOCS -> MERGE
 Cycles:     TEST(fail) -> PATCH -> TEST
-            REVIEW(fail) -> PATCH -> TEST -> REVIEW
+            REVIEW(fail|partial) -> PATCH -> TEST -> REVIEW
 ```
 
 | Stage | Skill | Notes |

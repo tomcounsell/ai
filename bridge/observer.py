@@ -791,6 +791,34 @@ class Observer:
                     "typed_outcome": outcome.to_dict(),
                 }
 
+            if outcome.status == "partial":
+                # Partial: stage completed but has findings that need patching
+                # (e.g., REVIEW approved with tech_debt/nits)
+                next_info = get_next_stage(outcome.stage, "partial")
+                if next_info:
+                    next_stage, next_skill = next_info
+                    coaching = (
+                        f"{outcome.stage} completed with findings to patch. "
+                        f"{outcome.notes} Continue with {next_skill}."
+                    )
+                    logger.info(
+                        f"{self._log_prefix} Typed outcome routing: steer "
+                        f"(partial, {outcome.stage} -> {next_stage})"
+                    )
+                    record_decision(
+                        self.session.session_id,
+                        cid,
+                        "steer",
+                        f"typed-outcome: {outcome.stage} partial -> {next_stage}",
+                    )
+                    return {
+                        "action": "steer",
+                        "coaching_message": coaching,
+                        "transitions_applied": transitions_applied,
+                        "typed_outcome": outcome.to_dict(),
+                    }
+                # No graph edge for partial on this stage — fall through to LLM
+
             if outcome.status == "fail":
                 # Failure: deliver to human with failure context
                 reason = f"{outcome.stage} failed: {outcome.failure_reason or outcome.notes}"
@@ -811,7 +839,7 @@ class Observer:
                     "typed_outcome": outcome.to_dict(),
                 }
 
-            # For partial/retry/skipped/unknown: fall through to LLM Observer
+            # For retry/skipped/unknown: fall through to LLM Observer
             logger.info(
                 f"{self._log_prefix} Typed outcome status={outcome.status} "
                 f"is ambiguous, falling through to LLM Observer"
