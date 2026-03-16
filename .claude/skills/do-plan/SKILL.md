@@ -107,6 +107,15 @@ Where:
    XPASS detection and MUST be explicitly listed as conversion targets in the plan.
    **Skip if:** Not a bug fix, or no xfail tests found related to this bug.
 
+4.7. **Infrastructure scan** - Scan `docs/infra/` for existing infrastructure constraints relevant to this work.
+   ```bash
+   # Check for existing infra docs that might contain relevant constraints
+   ls docs/infra/*.md 2>/dev/null | head -20
+   ```
+   Review any relevant INFRA docs for rate limits, API quotas, deployment constraints, or tool rules
+   that should inform the plan. Reference findings in the Solution and Risks sections.
+   **Skip if:** `docs/infra/` doesn't exist or contains no relevant docs.
+
 5. **Data flow trace** - For changes involving multi-component interactions, trace the data
    flow end-to-end through the system. Start from the entry point (user action, API call,
    event trigger) and follow through each component, transformation, and storage layer.
@@ -136,6 +145,33 @@ Where:
    be established before dependent operations read it, and how the implementation prevents races.
    Skip if the change is purely synchronous and single-threaded.
 
+### Phase 1.5: Spike Resolution
+
+Before writing the plan, resolve verifiable assumptions through time-boxed investigations.
+
+1. **Identify assumptions** - Review the research from Phase 1 and list assumptions that could be validated by agents (prototyping, web research, code exploration)
+2. **Enumerate spike tasks** - For each verifiable assumption, create a spike task:
+   ```markdown
+   ### spike-N: [Description of what to verify]
+   - **Assumption**: "[The assumption being tested]"
+   - **Method**: web-research | prototype | code-read
+   - **Agent Type**: Explore (code-read), general-purpose (web-research), builder in worktree (prototype)
+   - **Time cap**: 5 minutes agent time
+   - **Result**: [filled after spike completes]
+   - **Confidence**: [high | medium | low]
+   - **Impact if false**: [what changes in the plan]
+   ```
+3. **Dispatch spikes in parallel** - Use the P-Thread pattern (parallel Agent sub-agents) to run all spikes concurrently
+4. **Appetite limits**:
+   - Small appetite: max 2 spikes
+   - Medium appetite: max 4 spikes
+   - Large appetite: uncapped
+5. **Prototype isolation** - Prototype spikes MUST use `isolation: "worktree"` to avoid repo pollution. Each spike returns a yes/no/finding — no committed code, no half-implementations
+6. **Collect results** - Aggregate spike findings into the `## Spike Results` section of the plan
+7. **Filter Open Questions** - Only assumptions that spikes couldn't resolve go into Open Questions for the human
+
+**Skip if:** No verifiable assumptions identified, or all assumptions require human judgment (business decisions, priority calls).
+
 ### Phase 2: Write Initial Plan
 
 **Classification is mandatory** - every plan MUST include a `type:` field (bug, feature, or chore).
@@ -143,6 +179,28 @@ Where:
 **Auto-Classification**: When a message arrives via Telegram, the bridge auto-classifies it. Check if `classification_type` is available from the session context. If available, use it as the default `type:` value. The user can always override.
 
 Create `docs/plans/{slug}.md` using the template from `PLAN_TEMPLATE.md`.
+
+**Conditional INFRA doc creation:** If the plan introduces new dependencies, services, external API calls, or deployment changes, create `docs/infra/{slug}.md` using this structure:
+
+```markdown
+# {Feature Name} — Infrastructure
+
+## Current State
+- [What infra exists today relevant to this work]
+
+## New Requirements
+- [New deps, services, API keys, config this plan adds]
+- [Resource estimates: API quotas, storage, compute]
+
+## Rules & Constraints
+- [Rate limits, cost ceilings, API quotas]
+- [Deployment topology requirements]
+
+## Rollback Plan
+- [How to revert infra changes if the feature is rolled back]
+```
+
+INFRA docs are NOT archived when plans ship — they accumulate in `docs/infra/` as durable infrastructure knowledge. Skip if the plan involves no infrastructure changes.
 
 ### Phase 2.5: Link or Create Tracking Issue
 
@@ -267,6 +325,29 @@ fi
 4. Commit the updated plan
 
 **If no tracking issue or no comments**: Skip this step.
+
+### Phase 2.8: RFC Review
+
+After the plan is drafted, spawn specialist critic agents to review it for structural flaws.
+
+1. **Select critics** based on plan characteristics:
+   - All plans: `code-reviewer` (always included)
+   - Async/concurrent work: `async-specialist`
+   - External API integration: `api-integration-specialist`
+   - Security-sensitive changes: `security-reviewer`
+   - Data model changes: `data-architect`
+2. **Dispatch critics in parallel** - Each critic receives the full plan document and returns structured feedback:
+   ```
+   - BLOCKER: [must change before build — architectural flaw, missing error path, etc.]
+   - CONCERN: [worth reconsidering — tradeoff the plan didn't acknowledge]
+   - QUESTION: [ambiguity the plan doesn't address]
+   ```
+3. **Aggregate feedback**:
+   - BLOCKERs: Incorporate into the plan immediately (update Solution, add Risks, etc.)
+   - CONCERNs: Add to the `## RFC Feedback` section for the human to weigh in on
+   - QUESTIONs: Merge into Open Questions
+
+**Skip if:** Small appetite plans — the overhead of RFC review exceeds the value for small changes.
 
 ### Phase 3: Critique and Enumerate Questions
 
