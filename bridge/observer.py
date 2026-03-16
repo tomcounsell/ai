@@ -100,8 +100,9 @@ You have access to the full AgentSession state and must make one of two decision
 2. DELIVER: Send the output to the human on Telegram
 
 ## SDLC Pipeline Stages (in order, from bridge/pipeline_graph.py)
-ISSUE -> PLAN -> BUILD -> TEST -> REVIEW -> DOCS
+ISSUE -> PLAN -> BUILD -> TEST -> REVIEW -> DOCS -> MERGE
 Cycles: TEST(fail) -> PATCH -> TEST, REVIEW(fail) -> PATCH -> TEST -> REVIEW
+MERGE is a human-gated stage — the agent presents merge readiness to the human.
 
 ## Decision Framework
 

@@ -30,6 +30,11 @@
             "type": "command",
             "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_commit_message.py",
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_merge_guard.py",
+            "timeout": 5
           }
         ]
       }

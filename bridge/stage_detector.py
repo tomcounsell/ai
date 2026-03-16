@@ -29,14 +29,15 @@ SKILL_TO_STAGE: dict[str, str] = {
     "/do-test": "TEST",
     "/do-pr-review": "REVIEW",
     "/do-docs": "DOCS",
+    "/do-merge": "MERGE",
 }
 
 # The ordered pipeline stages
-STAGE_ORDER = ["ISSUE", "PLAN", "BUILD", "TEST", "REVIEW", "DOCS"]
+STAGE_ORDER = ["ISSUE", "PLAN", "BUILD", "TEST", "REVIEW", "DOCS", "MERGE"]
 
 # Patterns that indicate a stage has been invoked or completed
 _SKILL_INVOCATION_PATTERN = re.compile(
-    r"(?:^|\s)(/do-(?:plan|build|test|pr-review|docs))(?:\s|$|['\"])",
+    r"(?:^|\s)(/do-(?:plan|build|test|pr-review|docs|merge))(?:\s|$|['\"])",
     re.MULTILINE,
 )
 
@@ -66,6 +67,10 @@ _COMPLETION_PATTERNS: dict[str, re.Pattern] = {
     "DOCS": re.compile(
         r"(?:documentation?\s+(?:created|updated|complete))|"
         r"(?:docs/features/\S+\.md\s+created)",
+        re.IGNORECASE,
+    ),
+    "MERGE": re.compile(
+        r"(?:merge\s+(?:complete|approved|authorized))|(?:PR\s+merged)",
         re.IGNORECASE,
     ),
 }
