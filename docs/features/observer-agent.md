@@ -51,7 +51,7 @@ The stage detector (`bridge/stage_detector.py`) is a pure function with no side 
 
 1. **Skill invocations** (strongest signal): Regex matches `/do-plan`, `/do-build`, `/do-test`, `/do-pr-review`, `/do-docs` in transcript text. When a later stage is invoked, earlier stages are implicitly marked as completed.
 
-2. **Completion markers** (secondary signal): Regex matches for stage-specific evidence (e.g., `github.com/.../issues/123` for ISSUE, `42 passed` for TEST).
+2. **Completion markers** (secondary signal): Regex matches for stage-specific evidence (e.g., `github.com/.../issues/123` for ISSUE, `42 passed` for TEST). **Note**: REVIEW and DOCS are excluded from completion markers — they can only be marked complete via typed outcomes or skill invocation detection, preventing false positives from incidental mentions.
 
 3. **Typed outcome cross-check** (validation signal): When a `SkillOutcome` is available (see [Typed Skill Outcomes](typed-skill-outcomes.md)), `apply_transitions()` cross-checks it against regex detections. If the outcome says "success" but regex didn't detect completion, the outcome's transition is merged into the transitions list so the stage is still recorded. If the outcome says "fail" but regex detected completion, the typed outcome takes priority.
 
@@ -92,6 +92,22 @@ The Observer uses Claude API directly (`anthropic.Anthropic().messages.create()`
 - Error the worker cannot recover from
 - Non-SDLC job (casual conversation, Q&A)
 - Final completion with evidence
+
+### Mandatory Delivery Gates
+
+Before any delivery decision (typed outcome, deterministic guard bypass, or LLM decision), the Observer checks mandatory REVIEW and DOCS goal gates via `_check_mandatory_gates()`:
+
+- **REVIEW gate**: Verifies a PR review exists (via `check_review_gate()` in `agent/goal_gates.py`)
+- **DOCS gate**: Verifies feature documentation exists or plan explicitly skips docs (via `check_docs_gate()`)
+
+If either gate is unsatisfied, the delivery is **overridden to steer** with a coaching message directing the worker to the next required skill. This hard enforcement ensures SDLC sessions always complete REVIEW and DOCS before output reaches Telegram.
+
+Gate enforcement is skipped for:
+- Non-SDLC sessions (`is_sdlc_job()` returns False)
+- Sessions without a `work_item_slug`
+- After 3 gate-forced steerings for the same gate (cycle safety — delivers with warning)
+
+Gate results are cached per `run()` invocation to avoid redundant `gh` API calls.
 
 ### Safety Limits
 - Maximum 5 tool-use iterations per Observer invocation
