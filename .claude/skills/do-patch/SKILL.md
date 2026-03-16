@@ -199,10 +199,21 @@ Lint and formatting are handled automatically -- agents should never waste itera
 - **Never run manual lint checks**: Do NOT run `ruff check .` or `ruff format --check .` as a separate validation step. The pre-commit hook handles this automatically on final commits.
 - **PostToolUse hook**: The `format_file.py` hook runs `ruff check --fix` + `ruff format` on individual files after every Write/Edit, so files stay clean as agents work.
 
+## Commit and Push Rules
+
+**Context-dependent behavior:**
+
+- **When invoked by `/do-build`** (inside a build loop): Do NOT commit — `do-build` handles commits at the appropriate stage. You can detect this when the conversation includes `/do-build` invocation or when `PATCH_ARG` was passed by `do-build`.
+- **When invoked standalone** (by the Observer, by a user, or via `/do-patch` directly): Commit and push changes after tests pass. The Observer cannot commit for you, so if you don't commit, the fix is lost.
+
+When committing standalone:
+```bash
+git add -A && git commit -m "Fix: [one-line summary of what was fixed]" && git push
+```
+
 ## Critical Rules
 
 - NEVER create a PR — that is `do-build`'s responsibility
-- NEVER commit changes — builders make edits; `do-build` handles commits at the appropriate stage
 - NEVER touch the Document or PR pipeline stages
 - NEVER create new worktrees — work in the CWD/worktree already active
 - NEVER refactor unrelated code — targeted fixes only
