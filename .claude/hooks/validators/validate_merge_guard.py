@@ -20,7 +20,7 @@ import sys
 
 # Matches `gh pr merge` but NOT `gh pr merge --help`
 _MERGE_CMD_RE = re.compile(r"\bgh\s+pr\s+merge\b")
-_HELP_FLAG_RE = re.compile(r"\b--help\b")
+_HELP_FLAG_RE = re.compile(r"(?:^|\s)--help(?:\s|$)")
 
 
 def read_stdin() -> dict:

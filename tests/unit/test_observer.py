@@ -1383,13 +1383,14 @@ class TestTypedOutcomeGraphRouting:
                 "TEST": "completed",
                 "REVIEW": "completed",
                 "DOCS": "completed",
+                "MERGE": "completed",
             }
         )
 
         outcome = SkillOutcome(
             status="success",
-            stage="DOCS",
-            notes="Docs done",
+            stage="MERGE",
+            notes="Merge done",
             next_skill=None,
         )
 
