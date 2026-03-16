@@ -4,7 +4,7 @@ type: bug
 appetite: Medium
 owner: Valor
 created: 2026-03-16
-tracking:
+tracking: https://github.com/yudame/cuttlefish/issues/176
 last_comment_id:
 ---
 
