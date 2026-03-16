@@ -23,6 +23,7 @@ from typing import Any
 
 import anthropic
 
+from agent.goal_gates import check_docs_gate, check_review_gate
 from agent.job_queue import MAX_AUTO_CONTINUES, MAX_AUTO_CONTINUES_SDLC
 from agent.skill_outcome import parse_outcome_from_text
 from bridge.pipeline_graph import STAGE_TO_SKILL, get_next_stage
@@ -31,7 +32,6 @@ from bridge.summarizer import extract_artifacts
 from config.models import SONNET
 from models.agent_session import AgentSession
 from monitoring.telemetry import record_decision, record_interjection, record_tool_use
-from agent.goal_gates import check_docs_gate, check_review_gate
 from utils.api_keys import get_anthropic_api_key
 
 logger = logging.getLogger(__name__)
