@@ -102,7 +102,9 @@ if HAS_PYTEST_ASYNCIO:
     asyncio_mark = pytest.mark.asyncio
 else:
     # Create a no-op marker if pytest-asyncio is not available
-    asyncio_mark = lambda f: f
+    def asyncio_mark(f):
+        return f
+
 
 # Settings for local development testing
 LOCAL_TEST_SERVER_URL = "http://localhost:8000"
@@ -394,7 +396,7 @@ class E2ETestBase(LiveServerMixin):
                 'document.querySelectorAll("[hx-request]").length === 0',
                 timeout=timeout,
             )
-        except:
+        except Exception:
             # It's possible the request completed very quickly or wasn't marked
             pass
 

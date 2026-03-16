@@ -10,7 +10,7 @@ from django.test import TestCase
 
 User = get_user_model()
 
-from apps.common.tests.factories import (
+from apps.common.tests.factories import (  # noqa: E402
     AddressFactory,
     BlogPostFactory,
     CityFactory,

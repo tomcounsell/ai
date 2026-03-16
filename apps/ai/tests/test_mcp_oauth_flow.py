@@ -375,7 +375,7 @@ def test_complete_oauth_flow_without_pkce(client):
     # Step 1: Discover OAuth server metadata
     metadata_response = client.get("/.well-known/oauth-authorization-server")
     assert metadata_response.status_code == 200
-    metadata = metadata_response.json()
+    metadata_response.json()
 
     # Step 2: Register client
     registration_response = client.post(

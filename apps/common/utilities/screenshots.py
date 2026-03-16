@@ -253,7 +253,7 @@ class ScreenshotService:
         # Start a server
         print(f"No server detected on port {port}. Starting one...")
         try:
-            proc = subprocess.Popen(
+            subprocess.Popen(
                 ["python", "manage.py", "runserver", f"{port}"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,

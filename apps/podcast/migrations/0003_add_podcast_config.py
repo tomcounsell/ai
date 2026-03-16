@@ -5,7 +5,6 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ("podcast", "0002_episode_status_alter_episode_audio_url_and_more"),
     ]

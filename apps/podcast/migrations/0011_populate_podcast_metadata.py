@@ -21,7 +21,6 @@ def populate_yudame_research_metadata(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ("podcast", "0010_rename_topic_series_to_tags"),
     ]

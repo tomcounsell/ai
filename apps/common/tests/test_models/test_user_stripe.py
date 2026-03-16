@@ -136,7 +136,7 @@ class UserStripeTestCase(TestCase):
         self.assertEqual(len(self.user.get_payment_history()), 0)
 
         # Add payments
-        payment1 = Payment.objects.create(
+        Payment.objects.create(
             stripe_payment_intent_id="pi_test123",
             amount=1999,
             status="succeeded",
@@ -144,7 +144,7 @@ class UserStripeTestCase(TestCase):
             created_at=timezone.now() - timedelta(days=3),
         )
 
-        payment2 = Payment.objects.create(
+        Payment.objects.create(
             stripe_payment_intent_id="pi_test456",
             amount=2999,
             status="succeeded",
@@ -152,7 +152,7 @@ class UserStripeTestCase(TestCase):
             created_at=timezone.now() - timedelta(days=2),
         )
 
-        payment3 = Payment.objects.create(
+        Payment.objects.create(
             stripe_payment_intent_id="pi_test789",
             amount=999,
             status="succeeded",

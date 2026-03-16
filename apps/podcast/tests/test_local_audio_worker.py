@@ -326,9 +326,7 @@ class ExtractInstructionsTestCase(TestCase):
     def test_handles_underscore_variant(self):
         """Handles notebooklm_guidance section header variant."""
         content_plan = (
-            "## notebooklm_guidance\n\n"
-            "Guidance content.\n\n"
-            "## Next Section\n\nOther."
+            "## notebooklm_guidance\n\nGuidance content.\n\n## Next Section\n\nOther."
         )
         result = Command._extract_instructions({"content_plan.md": content_plan})
         self.assertIn("Guidance content.", result)

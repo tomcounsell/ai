@@ -4,7 +4,10 @@ from django.urls import reverse
 try:
     from icecream import ic
 except ImportError:
-    ic = lambda *args, **kwargs: args[0] if args else None
+
+    def ic(*args, **kwargs):
+        return args[0] if args else None
+
 
 from apps.common.models import User
 from apps.common.models.team import Role

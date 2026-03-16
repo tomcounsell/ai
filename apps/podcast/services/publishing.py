@@ -182,8 +182,7 @@ def write_episode_metadata(episode_id: int) -> EpisodeArtifact:
         )
     if not episode.transcript:
         raise ValueError(
-            f"Episode '{episode.title}' has no transcript. "
-            "Run transcribe_audio first."
+            f"Episode '{episode.title}' has no transcript. Run transcribe_audio first."
         )
 
     logger.info("write_episode_metadata: episode=%s", episode.title)

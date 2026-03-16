@@ -92,7 +92,7 @@ async def run_python_code(code: str) -> dict[str, Any]:
         try:
             # Try to convert result to string for display
             response["result"] = str(result)
-        except:
+        except Exception:
             response["result"] = repr(result)
 
     return response

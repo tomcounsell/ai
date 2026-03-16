@@ -48,7 +48,7 @@ def transcribe_audio(episode_id: int) -> str:
 
     if not episode.audio_url:
         raise ValueError(
-            f"Episode '{episode.title}' has no audio_url. " "Run generate_audio first."
+            f"Episode '{episode.title}' has no audio_url. Run generate_audio first."
         )
 
     logger.info("transcribe_audio: downloading audio from %s", episode.audio_url)
@@ -121,8 +121,7 @@ def generate_episode_chapters(episode_id: int) -> str:
 
     if not episode.transcript:
         raise ValueError(
-            f"Episode '{episode.title}' has no transcript. "
-            "Run transcribe_audio first."
+            f"Episode '{episode.title}' has no transcript. Run transcribe_audio first."
         )
 
     logger.info("generate_episode_chapters: episode=%s", episode.title)

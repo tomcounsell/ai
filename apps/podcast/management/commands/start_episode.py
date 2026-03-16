@@ -130,9 +130,7 @@ class Command(BaseCommand):
         sources_path = base_dir / "sources.md"
         if not sources_path.exists():
             sources_path.write_text(
-                "# Sources\n"
-                "\n"
-                "<!-- Add sources as they are found during research -->\n",
+                "# Sources\n\n<!-- Add sources as they are found during research -->\n",
                 encoding="utf-8",
             )
 

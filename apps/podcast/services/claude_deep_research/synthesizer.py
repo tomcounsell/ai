@@ -51,8 +51,7 @@ def synthesize_findings(
         DeepResearchReport with comprehensive content, sources, and assessment.
     """
     prompt = (
-        f"Research Plan Summary:\n{plan_summary}\n\n"
-        f"Subagent Findings:\n{findings_text}"
+        f"Research Plan Summary:\n{plan_summary}\n\nSubagent Findings:\n{findings_text}"
     )
     result = synthesizer_agent.run_sync(prompt)
     logger.info(

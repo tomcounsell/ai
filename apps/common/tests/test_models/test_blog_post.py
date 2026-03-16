@@ -181,7 +181,7 @@ class BlogPostModelTestCase(TestCase):
         self.assertFalse(self.blog_post.has_notes)
 
         # Add a note
-        note = self.blog_post.notes.create(author=self.user, text="This is a test note")
+        self.blog_post.notes.create(author=self.user, text="This is a test note")
 
         self.assertEqual(self.blog_post.notes.count(), 1)
         self.assertTrue(self.blog_post.has_notes)

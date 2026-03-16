@@ -154,7 +154,7 @@ class TestHTMXOOBViews(TestCase):
 
         # Get the response - we're not testing template rendering directly,
         # just that the view sets up the correct context and attributes
-        response = view.get(request)
+        view.get(request)
 
         # Verify the view has the correct attributes set
         self.assertTrue(view.has_oob)
@@ -195,7 +195,7 @@ class TestHTMXOOBViews(TestCase):
                     side_effect=capture_templates,
                 ):
                     # Call method
-                    response = view.get(request)
+                    view.get(request)
 
                     # Check if the alert template was included
                     self.assertIn("layout/alerts/alert.html", rendered_templates)
@@ -233,7 +233,7 @@ class TestHTMXOOBViews(TestCase):
                     side_effect=capture_templates,
                 ):
                     # Call method
-                    response = view.get(request)
+                    view.get(request)
 
                     # Check if the expected templates were included
                     self.assertIn("components/modals/examples.html", rendered_templates)

@@ -140,7 +140,7 @@ def generate_chapter_titles(
     for i, chunk in enumerate(chunks):
         start_time = format_timestamp(chunk["start"])
         chunks_text += (
-            f"\n--- Chunk {i+1} (starts at {start_time}) ---\n{chunk['text']}\n"
+            f"\n--- Chunk {i + 1} (starts at {start_time}) ---\n{chunk['text']}\n"
         )
 
     prompt = f"""Analyze this podcast transcript and generate chapter titles.

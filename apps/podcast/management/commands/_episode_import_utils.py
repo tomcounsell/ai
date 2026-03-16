@@ -207,9 +207,7 @@ def populate_episode_fields(
         # File size
         file_size = os.path.getsize(audio_path)
         if verbose:
-            stdout(
-                f"  {audio_path.name} -> audio metadata " f"(size={file_size} bytes)"
-            )
+            stdout(f"  {audio_path.name} -> audio metadata (size={file_size} bytes)")
         if not dry_run:
             episode.audio_file_size_bytes = file_size
 
@@ -229,9 +227,7 @@ def populate_episode_fields(
         duration = get_audio_duration(audio_path)
         if duration is not None:
             if verbose:
-                stdout(
-                    f"  {audio_path.name} -> audio_duration_seconds " f"({duration}s)"
-                )
+                stdout(f"  {audio_path.name} -> audio_duration_seconds ({duration}s)")
             if not dry_run:
                 episode.audio_duration_seconds = duration
             fields_populated.append("audio_duration_seconds")

@@ -66,7 +66,9 @@ if HAS_PYTEST_ASYNCIO:
     asyncio_mark = pytest.mark.asyncio
 else:
     # Create a no-op marker if pytest-asyncio is not available
-    asyncio_mark = lambda f: f
+    def asyncio_mark(f):
+        return f
+
 
 # Skip all tests if browser testing packages aren't available
 pytestmark = pytest.mark.skipif(

@@ -28,8 +28,11 @@ except ImportError:
     class E2ETestBase:
         pass
 
-    browser_test = lambda cls: cls
-    asyncio_mark = lambda f: f
+    def browser_test(cls):
+        return cls
+
+    def asyncio_mark(f):
+        return f
 
     class Page:
         pass

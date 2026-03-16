@@ -18,7 +18,6 @@ def copy_tags_to_topic_series(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ("podcast", "0009_add_topic_series_to_episode"),
     ]

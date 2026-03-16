@@ -86,5 +86,5 @@ def teardown_patches(*patches):
     Args:
         *patches: Patch objects to stop
     """
-    for patch in patches:
-        patch.stop()
+    for p in patches:
+        p.stop()

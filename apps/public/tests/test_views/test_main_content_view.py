@@ -21,7 +21,7 @@ from django.test import RequestFactory, TestCase
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "settings")
 django.setup()
 
-from apps.public.views.helpers.main_content_view import MainContentView
+from apps.public.views.helpers.main_content_view import MainContentView  # noqa: E402
 
 # Use regular Django User model for simple tests
 User = get_user_model()

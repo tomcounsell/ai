@@ -132,7 +132,7 @@ class TeamDetailView(LoginRequiredMixin, MainContentView, DetailView):
     def get(self, request, *args, **kwargs):
         """Handle GET request - check if user is on the team."""
         try:
-            team = self.get_queryset().get(slug=self.kwargs.get("team_slug"))
+            self.get_queryset().get(slug=self.kwargs.get("team_slug"))
         except Team.DoesNotExist:
             messages.error(request, "You are not a member of that team.")
             return redirect("public:team-list")

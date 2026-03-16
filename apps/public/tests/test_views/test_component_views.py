@@ -19,10 +19,12 @@ from django.test import RequestFactory, TestCase
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "settings")
 django.setup()
 
-from apps.public.views.components.account_menu import get_account_menu_context
-from apps.public.views.components.footer import get_footer_context
-from apps.public.views.components.navbar import get_navbar_context
-from apps.public.views.components.toast import get_toast_context
+from apps.public.views.components.account_menu import (  # noqa: E402
+    get_account_menu_context,
+)
+from apps.public.views.components.footer import get_footer_context  # noqa: E402
+from apps.public.views.components.navbar import get_navbar_context  # noqa: E402
+from apps.public.views.components.toast import get_toast_context  # noqa: E402
 
 User = get_user_model()
 

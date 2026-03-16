@@ -318,8 +318,7 @@ class Command(BaseCommand):
 
                 if self.verbose:
                     self.stdout.write(
-                        f"    Artifacts: {arts_created} created, "
-                        f"{arts_updated} updated"
+                        f"    Artifacts: {arts_created} created, {arts_updated} updated"
                     )
 
                 # Set status and published_at

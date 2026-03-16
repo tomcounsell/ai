@@ -6,7 +6,6 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ("podcast", "0007_add_default_to_current_step"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),

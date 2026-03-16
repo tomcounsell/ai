@@ -20,9 +20,9 @@ from django.test import RequestFactory, TestCase
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "settings")
 django.setup()
 
-from apps.common.tests.factories import UserFactory
-from apps.public.views.helpers.main_content_view import MainContentView
-from apps.public.views.helpers.session_mixin import SessionStateMixin
+from apps.common.tests.factories import UserFactory  # noqa: E402
+from apps.public.views.helpers.main_content_view import MainContentView  # noqa: E402
+from apps.public.views.helpers.session_mixin import SessionStateMixin  # noqa: E402
 
 User = get_user_model()
 

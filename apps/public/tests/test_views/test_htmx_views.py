@@ -23,7 +23,7 @@ from django.test import RequestFactory, TestCase
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "settings")
 django.setup()
 
-from apps.public.views.helpers.htmx_view import HTMXView
+from apps.public.views.helpers.htmx_view import HTMXView  # noqa: E402
 
 # Use regular Django User model for simple tests
 User = get_user_model()

@@ -72,7 +72,7 @@ chat_agent = Agent(
 async def dynamic_system_prompt(ctx: RunContext[ChatDependencies]) -> str:
     """Generate a dynamic system prompt based on context."""
     base_prompt = (
-        "You are a helpful AI assistant. " "Be concise, friendly, and knowledgeable."
+        "You are a helpful AI assistant. Be concise, friendly, and knowledgeable."
     )
 
     if ctx.deps.user_id:

@@ -52,7 +52,7 @@ async def forward_to_hosted_service():
             read=sys.stdin.buffer,
             write=sys.stdout.buffer,
         ) as client:
-            async with ClientSession(client) as session:
+            async with ClientSession(client):
                 # Initialize connection to hosted service
                 response = await http_client.post(
                     HOSTED_SERVICE_URL,

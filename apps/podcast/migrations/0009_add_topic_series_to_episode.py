@@ -4,7 +4,6 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ("podcast", "0008_podcast_apple_podcasts_url_podcast_owner_and_more"),
     ]

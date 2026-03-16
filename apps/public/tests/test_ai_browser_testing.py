@@ -57,8 +57,11 @@ except ImportError:
         pass
 
     # Create dummy markers for compatibility
-    browser_test = lambda cls: cls
-    asyncio_mark = lambda f: f
+    def browser_test(cls):
+        return cls
+
+    def asyncio_mark(f):
+        return f
 
     # Create dummy base class
     class E2ETestBase:
@@ -660,7 +663,7 @@ class TestMultiViewportBrowserTesting(AIBrowserTesting):
 
                 # Optional: Run basic accessibility test
                 if self.config.run_accessibility_tests:
-                    a11y_results = await self.run_accessibility_test(page, self.config)
+                    await self.run_accessibility_test(page, self.config)
                     # In a real implementation, process the results
 
             # Close context for this viewport

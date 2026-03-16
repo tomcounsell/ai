@@ -47,8 +47,11 @@ try:
     )
 except ImportError:
     # Create dummy classes if imports fail
-    browser_test = lambda cls: cls
-    asyncio_mark = lambda f: f
+    def browser_test(cls):
+        return cls
+
+    def asyncio_mark(f):
+        return f
 
     class E2ETestBase:
         """Dummy base class when imports aren't available."""
@@ -123,7 +126,7 @@ class HTMXInteractionsTestCase(E2ETestBase):
     async def test_toast_oob_swap(self, page):
         """Test that toasts appear with OOB swaps."""
         # Create a test user in the database
-        user = User.objects.create_user(
+        User.objects.create_user(
             username=self.username, email=self.email, password=self.password
         )
 
@@ -172,7 +175,7 @@ class HTMXInteractionsTestCase(E2ETestBase):
     async def test_modal_oob_swap(self, page):
         """Test that modals appear with OOB swaps."""
         # Create a test user and todo item
-        user = User.objects.create_user(
+        User.objects.create_user(
             username=self.username, email=self.email, password=self.password
         )
 
@@ -231,7 +234,7 @@ class HTMXInteractionsTestCase(E2ETestBase):
     async def test_active_nav_highlighting(self, page):
         """Test that navbar links get active state based on current page."""
         # Create and login test user
-        user = User.objects.create_user(
+        User.objects.create_user(
             username=self.username, email=self.email, password=self.password
         )
 
@@ -282,7 +285,7 @@ class HTMXInteractionsTestCase(E2ETestBase):
     async def test_htmx_form_submit(self, page):
         """Test HTMX form submission behavior."""
         # Create and login test user
-        user = User.objects.create_user(
+        User.objects.create_user(
             username=self.username, email=self.email, password=self.password
         )
 
@@ -297,9 +300,9 @@ class HTMXInteractionsTestCase(E2ETestBase):
 
         if htmx_form:
             # Identify form type and inputs
-            form_method = await htmx_form.get_attribute(
-                "hx-post"
-            ) or await htmx_form.get_attribute("hx-get")
+            await htmx_form.get_attribute("hx-post") or await htmx_form.get_attribute(
+                "hx-get"
+            )
             form_target = await htmx_form.get_attribute("hx-target")
 
             # Find input in the form
@@ -307,7 +310,7 @@ class HTMXInteractionsTestCase(E2ETestBase):
 
             if form_input:
                 # Get input name
-                input_name = await form_input.get_attribute("name")
+                await form_input.get_attribute("name")
 
                 # Fill the form with test data
                 await form_input.fill("test")
@@ -383,7 +386,7 @@ class ResponsiveDesignTestCase(E2ETestBase):
     async def test_responsive_layout(self, browser):
         """Test responsive layout across different device sizes."""
         # Create a test user
-        user = User.objects.create_user(
+        User.objects.create_user(
             username=TEST_DATA["user"]["username"],
             email=TEST_DATA["user"]["email"],
             password=TEST_DATA["user"]["password"],
@@ -491,7 +494,7 @@ class ResponsiveDesignTestCase(E2ETestBase):
     async def test_responsive_navigation(self, browser):
         """Test responsive navigation behavior specifically."""
         # Create a test user
-        user = User.objects.create_user(
+        User.objects.create_user(
             username=TEST_DATA["user"]["username"],
             email=TEST_DATA["user"]["email"],
             password=TEST_DATA["user"]["password"],

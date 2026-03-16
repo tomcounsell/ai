@@ -16,10 +16,10 @@ django.setup()
 logging.basicConfig(level=logging.INFO)
 
 # Test with DEBUG=True (should log instead of sending)
-from django.conf import settings
+from django.conf import settings  # noqa: E402
 
 # Import the LoopsClient
-from apps.integration.loops.client import LoopsClient
+from apps.integration.loops.client import LoopsClient  # noqa: E402
 
 print(f"DEBUG mode is: {settings.DEBUG}")
 

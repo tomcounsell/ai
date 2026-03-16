@@ -208,7 +208,7 @@ def handle_subscription_created(event: dict[str, Any]) -> dict[str, Any]:
             )
 
         # Get product details for display name
-        product_id = items[0].get("price", {}).get("product") if items else None
+        items[0].get("price", {}).get("product") if items else None
         plan_name = metadata.get("plan_name", "Subscription")
 
         # Create subscription record

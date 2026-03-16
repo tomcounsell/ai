@@ -9,6 +9,11 @@ from PIL import Image
 # Add parent directory to path to import the module
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+try:
+    from add_logo_watermark import add_border
+except ImportError:
+    add_border = None  # Function not yet implemented
+
 
 @pytest.mark.skip(
     reason="Function not yet implemented: add_border in add_logo_watermark.py"

@@ -95,7 +95,7 @@ class StripeShortcutsTestCase(TestCase):
         }
 
         # Call shortcut
-        result = create_subscription_checkout(
+        create_subscription_checkout(
             price_id="price_test123", customer_email="customer@example.com"
         )
 

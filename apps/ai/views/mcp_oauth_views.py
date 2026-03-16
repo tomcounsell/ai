@@ -26,8 +26,8 @@ class MCPOAuthAuthorizeView(View):
         # Get OAuth parameters from query string
         redirect_uri = request.GET.get("redirect_uri")
         state = request.GET.get("state")
-        code_challenge = request.GET.get("code_challenge")
-        code_challenge_method = request.GET.get("code_challenge_method")
+        request.GET.get("code_challenge")
+        request.GET.get("code_challenge_method")
 
         if not redirect_uri:
             return JsonResponse(
@@ -78,7 +78,7 @@ class MCPOAuthTokenView(View):
 
         grant_type = data.get("grant_type")
         code = data.get("code")
-        code_verifier = data.get("code_verifier")
+        data.get("code_verifier")
 
         # Validate grant_type
         if grant_type != "authorization_code":

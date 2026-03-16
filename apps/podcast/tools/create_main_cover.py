@@ -44,7 +44,7 @@ def load_font(font_paths, size):
     for font_path in font_paths:
         try:
             return ImageFont.truetype(Path(font_path).expanduser(), size)
-        except:
+        except Exception:
             continue
     return ImageFont.load_default()
 
@@ -145,7 +145,7 @@ def create_cover():
         tagline_bottom + (CANVAS_SIZE - tagline_bottom) // 2 - int(CANVAS_SIZE * 0.04)
     )
     draw.text((logo_x, name_y), name_text, fill=BLACK, font=name_font)
-    print(f"  Name at bottom left")
+    print("  Name at bottom left")
 
     # Save
     canvas_rgb = canvas.convert("RGB")

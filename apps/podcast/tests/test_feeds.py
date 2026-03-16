@@ -346,9 +346,7 @@ class PrivateFeedTestCase(TestCase):
     def test_private_feed_rejects_non_owner_without_token(self):
         """Non-owner without token gets 403 on private feed."""
         owner = User.objects.create_user(username="feedowner2", password="testpass123")
-        non_owner = User.objects.create_user(
-            username="feedstranger", password="testpass123"
-        )
+        User.objects.create_user(username="feedstranger", password="testpass123")
         Podcast.objects.filter(pk=self.private_podcast.pk).update(owner=owner)
 
         self.client.login(username="feedstranger", password="testpass123")

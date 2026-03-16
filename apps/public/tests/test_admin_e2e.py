@@ -43,7 +43,10 @@ try:
     asyncio_mark = pytest.mark.asyncio
 except ImportError:
     HAS_PYTEST_ASYNCIO = False
-    asyncio_mark = lambda f: f
+
+    def asyncio_mark(f):
+        return f
+
 
 # Skip marker for browser tests
 browser_test = pytest.mark.skipif(
@@ -180,7 +183,7 @@ class AdminBrowserTestCase(TestCase):
             result = sock.connect_ex(("localhost", 8000))
             sock.close()
             return result == 0
-        except:
+        except Exception:
             return False
 
     async def test_admin_login_browser(self, page):

@@ -83,7 +83,7 @@ class NavigationRenderingTestCase(TestCase):
     def test_home_page_active_state(self):
         """Test that the home page has the active state in navigation."""
         response = self.client.get(reverse("home"))
-        html = response.content.decode("utf-8")
+        response.content.decode("utf-8")
 
         # Check that the page renders successfully
         self.assertEqual(response.status_code, 200)

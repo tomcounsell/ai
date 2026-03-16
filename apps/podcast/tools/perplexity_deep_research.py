@@ -36,9 +36,9 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
-
 import requests
+
+logger = logging.getLogger(__name__)
 
 # Try to load dotenv, but don't fail if not installed
 try:
@@ -339,9 +339,9 @@ def run_perplexity_research(
     log("\nConfiguration:")
     log("  Model: sonar-deep-research")
     log(f"  Reasoning Effort: {reasoning_effort}")
-    log(f"  Timeout: {timeout} seconds ({timeout//60} minutes)")
+    log(f"  Timeout: {timeout} seconds ({timeout // 60} minutes)")
     log("\nSubmitting research request...")
-    log(f"Expected time: 30-120 seconds (but can take up to {timeout//60} minutes)")
+    log(f"Expected time: 30-120 seconds (but can take up to {timeout // 60} minutes)")
     log("-" * 60)
 
     payload = {
