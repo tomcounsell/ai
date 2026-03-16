@@ -15,7 +15,6 @@ from monitoring.bridge_watchdog import (
     kill_zombie_processes,
 )
 
-
 # --- _parse_elapsed_time tests ---
 
 
@@ -132,7 +131,10 @@ class TestEnumerateClaudeProcesses:
     def test_skips_malformed_lines(self, mock_run):
         mock_run.return_value = MagicMock(
             returncode=0,
-            stdout="  PID   ELAPSED  RSS COMMAND\nbadline\n12345    05:23 102400 /usr/local/bin/claude\n",
+            stdout=(
+                "  PID   ELAPSED  RSS COMMAND\nbadline\n"
+                "12345    05:23 102400 /usr/local/bin/claude\n"
+            ),
             stderr="",
         )
         procs = _enumerate_claude_processes()
@@ -144,7 +146,11 @@ class TestEnumerateClaudeProcesses:
     def test_skips_bridge_watchdog_itself(self, mock_run):
         mock_run.return_value = MagicMock(
             returncode=0,
-            stdout="  PID   ELAPSED  RSS COMMAND\n12345    05:23 102400 python monitoring/bridge_watchdog.py --check-only\n",
+            stdout=(
+                "  PID   ELAPSED  RSS COMMAND\n"
+                "12345    05:23 102400 "
+                "python monitoring/bridge_watchdog.py --check-only\n"
+            ),
             stderr="",
         )
         procs = _enumerate_claude_processes()
@@ -164,7 +170,9 @@ class TestEnumerateClaudeProcesses:
     def test_no_matching_processes(self, mock_run):
         mock_run.return_value = MagicMock(
             returncode=0,
-            stdout="  PID   ELAPSED  RSS COMMAND\n12345    05:23 102400 /usr/bin/python3 myapp.py\n",
+            stdout=(
+                "  PID   ELAPSED  RSS COMMAND\n12345    05:23 102400 /usr/bin/python3 myapp.py\n"
+            ),
             stderr="",
         )
         procs = _enumerate_claude_processes()
@@ -190,7 +198,12 @@ class TestClassifyZombies:
 
     def test_exact_threshold_is_zombie(self):
         processes = [
-            {"pid": 1, "etime_seconds": ZOMBIE_THRESHOLD_SECONDS, "rss_mb": 50.0, "command": "claude"},
+            {
+                "pid": 1,
+                "etime_seconds": ZOMBIE_THRESHOLD_SECONDS,
+                "rss_mb": 50.0,
+                "command": "claude",
+            },
         ]
         zombies, active = classify_zombies(processes)
         assert len(zombies) == 1
@@ -198,7 +211,12 @@ class TestClassifyZombies:
 
     def test_just_below_threshold_is_active(self):
         processes = [
-            {"pid": 1, "etime_seconds": ZOMBIE_THRESHOLD_SECONDS - 1, "rss_mb": 50.0, "command": "claude"},
+            {
+                "pid": 1,
+                "etime_seconds": ZOMBIE_THRESHOLD_SECONDS - 1,
+                "rss_mb": 50.0,
+                "command": "claude",
+            },
         ]
         zombies, active = classify_zombies(processes)
         assert len(zombies) == 0
