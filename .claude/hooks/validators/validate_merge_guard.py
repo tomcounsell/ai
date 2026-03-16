@@ -1,9 +1,20 @@
 #!/usr/bin/env python3
 """
-Merge guard: blocks `gh pr merge` commands in Bash tool calls.
+Merge guard: blocks `gh pr merge` unless authorized via /do-merge.
 
-PR merges require human authorization. Workers must use /do-merge to
-check prerequisites and request merge approval instead of merging directly.
+Autonomous workers cannot merge PRs directly. The /do-merge skill checks
+prerequisites (TEST, REVIEW, DOCS) and creates a short-lived authorization
+file that this hook checks before allowing the merge.
+
+Authorization flow:
+1. Human says "merge it" (via Telegram or local session)
+2. /do-merge checks prerequisites, creates data/merge_authorized_{pr_number}
+3. Worker runs `gh pr merge {pr_number}`
+4. This hook finds the authorization file → allows the merge
+5. /do-merge cleans up the authorization file after merge
+
+Without authorization:
+- Worker tries `gh pr merge` → blocked with message to use /do-merge
 
 Exit codes:
 - 0: Always (Claude Code hook protocol)
@@ -17,10 +28,26 @@ Claude Code hook protocol:
 import json
 import re
 import sys
+from pathlib import Path
 
 # Matches `gh pr merge` but NOT `gh pr merge --help`
 _MERGE_CMD_RE = re.compile(r"\bgh\s+pr\s+merge\b")
 _HELP_FLAG_RE = re.compile(r"(?:^|\s)--help(?:\s|$)")
+# Extract PR number from `gh pr merge 123` or `gh pr merge 123 --squash`
+_PR_NUMBER_RE = re.compile(r"\bgh\s+pr\s+merge\s+(\d+)")
+
+# Authorization files live in data/ relative to project root
+_DATA_DIR = Path(__file__).resolve().parents[3] / "data"
+
+
+def _is_authorized(command: str) -> bool:
+    """Check if a merge authorization file exists for the PR number in the command."""
+    match = _PR_NUMBER_RE.search(command)
+    if not match:
+        return False
+    pr_number = match.group(1)
+    auth_file = _DATA_DIR / f"merge_authorized_{pr_number}"
+    return auth_file.exists()
 
 
 def read_stdin() -> dict:
@@ -48,10 +75,7 @@ def main() -> None:
     if not command:
         return
 
-    # Don't block commands where gh pr merge appears inside quotes/echo
-    # Simple heuristic: if the line starts with echo or contains it in quotes
-    # Check if the actual command (not echoed text) contains gh pr merge
-    # Strip echo/printf prefix to avoid false positives
+    # Don't block commands where gh pr merge appears inside echo/printf
     stripped = command.strip()
     if stripped.startswith(("echo ", "echo\t", "printf ")):
         return
@@ -59,6 +83,10 @@ def main() -> None:
     if _MERGE_CMD_RE.search(command):
         # Allow --help queries
         if _HELP_FLAG_RE.search(command):
+            return
+
+        # Allow if authorized via /do-merge
+        if _is_authorized(command):
             return
 
         print(

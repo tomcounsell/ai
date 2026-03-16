@@ -134,6 +134,37 @@ class TestMergeGuardHook:
         assert result is not None
         assert result["decision"] == "block"
 
+    def test_allows_authorized_merge(self, tmp_path, monkeypatch):
+        """Merge is allowed when authorization file exists."""
+        # Create the data dir and auth file in the project root
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        auth_file = os.path.join(project_root, "data", "merge_authorized_42")
+        os.makedirs(os.path.dirname(auth_file), exist_ok=True)
+        try:
+            with open(auth_file, "w") as f:
+                f.write("")
+            result = self._run_hook("Bash", "gh pr merge 42 --squash")
+            assert result is None  # Allowed
+        finally:
+            os.unlink(auth_file)
+
+    def test_blocks_unauthorized_merge(self):
+        """Merge is blocked when no authorization file exists."""
+        # Ensure no auth file exists
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        auth_file = os.path.join(project_root, "data", "merge_authorized_999")
+        if os.path.exists(auth_file):
+            os.unlink(auth_file)
+        result = self._run_hook("Bash", "gh pr merge 999 --squash")
+        assert result is not None
+        assert result["decision"] == "block"
+
+    def test_blocks_merge_without_pr_number(self):
+        """Merge without a PR number is blocked (can't check authorization)."""
+        result = self._run_hook("Bash", "gh pr merge --squash")
+        assert result is not None
+        assert result["decision"] == "block"
+
 
 class TestEnqueueContinuationFallback:
     """Test that the fallback path preserves session metadata."""
