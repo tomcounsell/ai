@@ -173,7 +173,7 @@ class TestExports:
             assert stage in STAGE_TO_SKILL, f"Stage {stage} missing from STAGE_TO_SKILL"
 
     def test_pipeline_edges_are_complete(self):
-        """Every display stage (except MERGE which is terminal) should have at least a success edge."""
+        """Every display stage (except terminal MERGE) has a success edge."""
         for stage in DISPLAY_STAGES:
             if stage == "MERGE":
                 continue  # MERGE is terminal, no outgoing edges

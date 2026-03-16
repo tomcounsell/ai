@@ -64,8 +64,7 @@ def _construct_canonical_url(url: str | None, gh_repo: str | None) -> str | None
 
     if not gh_repo:
         logger.warning(
-            f"Cannot construct canonical URL: GH_REPO not configured. "
-            f"Original URL discarded: {url}"
+            f"Cannot construct canonical URL: GH_REPO not configured. Original URL discarded: {url}"
         )
         return None
 
@@ -82,10 +81,9 @@ def _construct_canonical_url(url: str | None, gh_repo: str | None) -> str | None
         return f"https://github.com/{gh_repo}/issues/{number}"
 
     # No extractable number — discard with warning
-    logger.warning(
-        f"Cannot extract issue/PR number from URL: {url}. URL discarded."
-    )
+    logger.warning(f"Cannot extract issue/PR number from URL: {url}. URL discarded.")
     return None
+
 
 # Maximum tool-use iterations to prevent infinite loops
 MAX_TOOL_ITERATIONS = 5
@@ -519,9 +517,7 @@ class Observer:
                 self.session.issue_url = canonical
                 updated.append("issue_url")
             else:
-                logger.info(
-                    f"{self._log_prefix} Discarded invalid issue_url: {issue_url}"
-                )
+                logger.info(f"{self._log_prefix} Discarded invalid issue_url: {issue_url}")
         if pr_url is not None:
             gh_repo = os.environ.get("GH_REPO")
             canonical = _construct_canonical_url(pr_url, gh_repo)
@@ -529,9 +525,7 @@ class Observer:
                 self.session.pr_url = canonical
                 updated.append("pr_url")
             else:
-                logger.info(
-                    f"{self._log_prefix} Discarded invalid pr_url: {pr_url}"
-                )
+                logger.info(f"{self._log_prefix} Discarded invalid pr_url: {pr_url}")
 
         if updated or cleared_messages:
             try:
@@ -617,9 +611,7 @@ class Observer:
                 try:
                     gh_repo = os.environ.get("GH_REPO")
                     if outcome.artifacts.get("pr_url"):
-                        canonical = _construct_canonical_url(
-                            outcome.artifacts["pr_url"], gh_repo
-                        )
+                        canonical = _construct_canonical_url(outcome.artifacts["pr_url"], gh_repo)
                         if canonical:
                             self.session.pr_url = canonical
                     if outcome.artifacts.get("issue_url"):

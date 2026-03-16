@@ -11,8 +11,6 @@ import os
 import subprocess
 import sys
 
-import pytest
-
 from bridge.observer import _construct_canonical_url
 
 
@@ -82,10 +80,12 @@ class TestMergeGuardHook:
 
     def _run_hook(self, tool_name: str, command: str) -> dict | None:
         """Run the hook with given input and return parsed output or None."""
-        hook_input = json.dumps({
-            "tool_name": tool_name,
-            "tool_input": {"command": command},
-        })
+        hook_input = json.dumps(
+            {
+                "tool_name": tool_name,
+                "tool_input": {"command": command},
+            }
+        )
         result = subprocess.run(
             [sys.executable, self.HOOK_PATH],
             input=hook_input,
@@ -170,26 +170,32 @@ class TestMergeStageTracking:
 
     def test_merge_in_stage_order(self):
         from bridge.stage_detector import STAGE_ORDER
+
         assert "MERGE" in STAGE_ORDER
 
     def test_merge_in_display_stages(self):
         from bridge.pipeline_graph import DISPLAY_STAGES
+
         assert "MERGE" in DISPLAY_STAGES
 
     def test_merge_in_stage_to_skill(self):
         from bridge.pipeline_graph import STAGE_TO_SKILL
+
         assert "MERGE" in STAGE_TO_SKILL
         assert STAGE_TO_SKILL["MERGE"] == "/do-merge"
 
     def test_merge_in_sdlc_stages(self):
         from models.agent_session import SDLC_STAGES
+
         assert "MERGE" in SDLC_STAGES
 
     def test_docs_routes_to_merge(self):
         from bridge.pipeline_graph import get_next_stage
+
         result = get_next_stage("DOCS", "success")
         assert result == ("MERGE", "/do-merge")
 
     def test_merge_skill_to_stage(self):
         from bridge.stage_detector import SKILL_TO_STAGE
+
         assert SKILL_TO_STAGE["/do-merge"] == "MERGE"

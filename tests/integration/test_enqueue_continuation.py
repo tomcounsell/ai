@@ -11,7 +11,7 @@ Tests use Redis db=1 via the autouse redis_test_db fixture in conftest.py.
 """
 
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
