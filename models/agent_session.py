@@ -367,17 +367,23 @@ class AgentSession(Model):
             # No transition from current stage — pipeline is complete (MERGE terminal)
             return False
 
-        # Check if the next stage is already completed
-        next_stage = next_info[0]
-        next_status = progress.get(next_stage, "pending")
-        if next_status == "completed":
-            # Next stage already done — do a simple scan: are ALL non-PATCH stages done?
-            for stage in SDLC_STAGES:
-                if progress.get(stage, "pending") in ("pending", "in_progress"):
-                    return True
-            return False
-
-        return True
+        # Walk the graph forward from the last completed stage.
+        # If every reachable stage is already completed, the pipeline is done.
+        current = last_completed
+        outcome = last_outcome
+        while True:
+            next_info = get_next_stage(current, outcome)
+            if next_info is None:
+                # Reached terminal (MERGE) — no remaining stages
+                return False
+            next_stage = next_info[0]
+            next_status = progress.get(next_stage, "pending")
+            if next_status != "completed":
+                # Found a stage that still needs work
+                return True
+            # This stage is done, keep walking
+            current = next_stage
+            outcome = "success"
 
     def has_failed_stage(self) -> bool:
         """Check if any SDLC stage has failed.
