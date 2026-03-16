@@ -1268,6 +1268,9 @@ def _diagnose_missing_session(session_id: str) -> dict:
 
         r = redis_lib.Redis()
         # Popoto stores keys with model-specific prefixes; scan for matches
+        # TODO: Replace r.keys() with r.scan() if Redis grows beyond ~10k keys.
+        #   KEYS is O(N) across the entire keyspace. Acceptable on error path
+        #   with small Redis, but SCAN would be safer at scale. (PR #419 review)
         keys = r.keys(f"*{session_id}*")
         result = {"matching_keys": len(keys)}
         for key in keys[:5]:  # Cap at 5 to avoid log spam

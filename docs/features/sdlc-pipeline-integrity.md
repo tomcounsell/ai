@@ -62,13 +62,38 @@ ISSUE -> PLAN -> BUILD -> TEST -> REVIEW -> DOCS -> MERGE
 
 MERGE is the terminal stage, gated by human authorization.
 
+## Known Tech Debt
+
+### `r.keys()` in `_diagnose_missing_session` (agent/job_queue.py:1271)
+
+The diagnostic function uses `r.keys(f"*{session_id}*")` which is O(N) across the entire Redis keyspace. Redis documentation explicitly warns against using `KEYS` in production. This is acceptable today because:
+
+- It only runs on the error path (session not found during continuation)
+- Our Redis instance is small (hundreds of keys, not millions)
+- The function is diagnostic — it aids debugging, not critical path
+
+**When to fix:** If Redis grows beyond ~10k keys, or if session-not-found errors become frequent enough that this diagnostic runs regularly. Replace with `SCAN` cursor iteration:
+
+```python
+cursor = 0
+keys = []
+while True:
+    cursor, batch = r.scan(cursor, match=f"*{session_id}*", count=100)
+    keys.extend(batch)
+    if cursor == 0:
+        break
+```
+
+**Tracked in:** PR #419 review comment
+
 ## Testing
 
 - 28 new tests in `tests/unit/test_pipeline_integrity.py`
 - Updated existing tests in `test_pipeline_graph.py`, `test_observer.py`, `test_summarizer.py`
-- All 1746 unit tests pass
+- All 1752 unit tests pass
 
 ## Tracking
 
 - Issue: #417
+- PR: #419
 - Related: #400 (session metadata loss), #409 (merge guard)
