@@ -1594,9 +1594,7 @@ class TestMandatoryGateEnforcement:
         with (
             patch(
                 "bridge.observer.check_review_gate",
-                return_value=GateResult(
-                    satisfied=False, evidence="No review", missing="PR review"
-                ),
+                return_value=GateResult(satisfied=False, evidence="No review", missing="PR review"),
             ),
             patch(
                 "bridge.observer.check_docs_gate",
@@ -1678,9 +1676,7 @@ class TestMandatoryGateEnforcement:
         with (
             patch(
                 "bridge.observer.check_review_gate",
-                return_value=GateResult(
-                    satisfied=False, evidence="No review", missing="PR review"
-                ),
+                return_value=GateResult(satisfied=False, evidence="No review", missing="PR review"),
             ),
             patch(
                 "bridge.observer.check_docs_gate",
@@ -1762,67 +1758,77 @@ class TestHasRemainingStagesGraph:
 
     def test_no_stages_completed(self):
         """No stages completed means remaining stages exist."""
-        session = self._make_session({
-            "ISSUE": "pending",
-            "PLAN": "pending",
-            "BUILD": "pending",
-            "TEST": "pending",
-            "REVIEW": "pending",
-            "DOCS": "pending",
-            "MERGE": "pending",
-        })
+        session = self._make_session(
+            {
+                "ISSUE": "pending",
+                "PLAN": "pending",
+                "BUILD": "pending",
+                "TEST": "pending",
+                "REVIEW": "pending",
+                "DOCS": "pending",
+                "MERGE": "pending",
+            }
+        )
         assert session.has_remaining_stages() is True
 
     def test_all_stages_through_merge_completed(self):
         """When MERGE is completed, no remaining stages."""
-        session = self._make_session({
-            "ISSUE": "completed",
-            "PLAN": "completed",
-            "BUILD": "completed",
-            "TEST": "completed",
-            "REVIEW": "completed",
-            "DOCS": "completed",
-            "MERGE": "completed",
-        })
+        session = self._make_session(
+            {
+                "ISSUE": "completed",
+                "PLAN": "completed",
+                "BUILD": "completed",
+                "TEST": "completed",
+                "REVIEW": "completed",
+                "DOCS": "completed",
+                "MERGE": "completed",
+            }
+        )
         assert session.has_remaining_stages() is False
 
     def test_test_completed_review_pending(self):
         """After TEST completes, REVIEW/DOCS/MERGE remain."""
-        session = self._make_session({
-            "ISSUE": "completed",
-            "PLAN": "completed",
-            "BUILD": "completed",
-            "TEST": "completed",
-            "REVIEW": "pending",
-            "DOCS": "pending",
-            "MERGE": "pending",
-        })
+        session = self._make_session(
+            {
+                "ISSUE": "completed",
+                "PLAN": "completed",
+                "BUILD": "completed",
+                "TEST": "completed",
+                "REVIEW": "pending",
+                "DOCS": "pending",
+                "MERGE": "pending",
+            }
+        )
         assert session.has_remaining_stages() is True
 
     def test_docs_completed_merge_pending(self):
         """After DOCS completes, MERGE remains."""
-        session = self._make_session({
-            "ISSUE": "completed",
-            "PLAN": "completed",
-            "BUILD": "completed",
-            "TEST": "completed",
-            "REVIEW": "completed",
-            "DOCS": "completed",
-            "MERGE": "pending",
-        })
+        session = self._make_session(
+            {
+                "ISSUE": "completed",
+                "PLAN": "completed",
+                "BUILD": "completed",
+                "TEST": "completed",
+                "REVIEW": "completed",
+                "DOCS": "completed",
+                "MERGE": "pending",
+            }
+        )
         assert session.has_remaining_stages() is True
 
     def test_test_failed_has_remaining(self):
         """Failed TEST has remaining stages (PATCH cycle)."""
-        session = self._make_session({
-            "ISSUE": "completed",
-            "PLAN": "completed",
-            "BUILD": "completed",
-            "TEST": "failed",
-            "REVIEW": "pending",
-            "DOCS": "pending",
-            "MERGE": "pending",
-        })
+        session = self._make_session(
+            {
+                "ISSUE": "completed",
+                "PLAN": "completed",
+                "BUILD": "completed",
+                "TEST": "failed",
+                "REVIEW": "pending",
+                "DOCS": "pending",
+                "MERGE": "pending",
+            }
+        )
         assert session.has_remaining_stages() is True
 
 
@@ -1849,16 +1855,12 @@ class TestNoReviewDocsRegex:
     def test_review_still_detected_via_skill_invocation(self):
         """REVIEW in_progress should still be detected via /do-pr-review invocation."""
         transitions = detect_stages("Running /do-pr-review 42")
-        assert any(
-            t["stage"] == "REVIEW" and t["status"] == "in_progress" for t in transitions
-        )
+        assert any(t["stage"] == "REVIEW" and t["status"] == "in_progress" for t in transitions)
 
     def test_docs_still_detected_via_skill_invocation(self):
         """DOCS in_progress should still be detected via /do-docs invocation."""
         transitions = detect_stages("Running /do-docs 42")
-        assert any(
-            t["stage"] == "DOCS" and t["status"] == "in_progress" for t in transitions
-        )
+        assert any(t["stage"] == "DOCS" and t["status"] == "in_progress" for t in transitions)
 
     def test_review_completed_only_via_typed_outcome(self):
         """REVIEW completion should only come from typed outcomes, not regex."""
