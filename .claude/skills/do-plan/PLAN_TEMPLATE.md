@@ -160,6 +160,18 @@ Settings page → Click "Enable 2FA" → Setup screen → Enter code → Confirm
 - [ ] If the feature has user-visible output, test the error/failure rendering path (not just success)
 - [ ] Verify error messages propagate to the user rather than being swallowed silently
 
+## Test Impact
+
+[Audit existing tests that will break or need changes due to this work. For each affected test file or test case, specify a disposition: UPDATE, DELETE, or REPLACE. This gives builders clear guidance on test modifications before they start implementation.]
+
+- [ ] `tests/unit/test_example.py::test_old_behavior` — UPDATE: assert new return value instead of old
+- [ ] `tests/integration/test_flow.py::test_end_to_end` — REPLACE: rewrite for new API contract
+- [ ] `tests/unit/test_legacy.py::test_deprecated_path` — DELETE: tests removed feature
+
+[If no existing tests are affected, state that explicitly with justification:]
+
+No existing tests affected — [justification explaining why, e.g., "this is a greenfield feature with no prior test coverage" or "changes are purely additive and don't modify any existing behavior or interfaces"].
+
 ## Rabbit Holes
 
 [Areas that look tempting but will swallow disproportionate time. Call these out so the team deliberately avoids them.]
