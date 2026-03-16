@@ -91,15 +91,6 @@ Where:
    addressed the same problem, also fill the **Why Previous Fixes Failed** section.
    **Skip if:** Small appetite AND greenfield work (no existing code being modified).
 
-4.7. **Infrastructure scan** - Scan `docs/infra/` for existing infrastructure constraints relevant to this work.
-   ```bash
-   # Check for existing infra docs that might contain relevant constraints
-   ls docs/infra/*.md 2>/dev/null | head -20
-   ```
-   Review any relevant INFRA docs for rate limits, API quotas, deployment constraints, or tool rules
-   that should inform the plan. Reference findings in the Solution and Risks sections.
-   **Skip if:** `docs/infra/` doesn't exist or contains no relevant docs.
-
 4.5. **xfail test search** - For bug fixes, search the test suite for xfail markers related to the bug.
    These represent tests that document the bug but are marked as expected failures.
    ```bash
@@ -115,6 +106,15 @@ Where:
    assertions — so they silently pass even after the bug is fixed. These are invisible to pytest's
    XPASS detection and MUST be explicitly listed as conversion targets in the plan.
    **Skip if:** Not a bug fix, or no xfail tests found related to this bug.
+
+4.7. **Infrastructure scan** - Scan `docs/infra/` for existing infrastructure constraints relevant to this work.
+   ```bash
+   # Check for existing infra docs that might contain relevant constraints
+   ls docs/infra/*.md 2>/dev/null | head -20
+   ```
+   Review any relevant INFRA docs for rate limits, API quotas, deployment constraints, or tool rules
+   that should inform the plan. Reference findings in the Solution and Risks sections.
+   **Skip if:** `docs/infra/` doesn't exist or contains no relevant docs.
 
 5. **Data flow trace** - For changes involving multi-component interactions, trace the data
    flow end-to-end through the system. Start from the entry point (user action, API call,
