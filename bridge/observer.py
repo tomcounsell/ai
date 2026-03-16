@@ -23,6 +23,7 @@ from typing import Any
 
 import anthropic
 
+from agent.goal_gates import check_docs_gate, check_review_gate
 from agent.job_queue import MAX_AUTO_CONTINUES, MAX_AUTO_CONTINUES_SDLC
 from agent.skill_outcome import parse_outcome_from_text
 from bridge.pipeline_graph import STAGE_TO_SKILL, get_next_stage
@@ -398,6 +399,116 @@ class Observer:
             else "[observer]"
         )
 
+    def _check_mandatory_gates(self) -> dict[str, Any] | None:
+        """Check if mandatory REVIEW and DOCS gates are satisfied before delivery.
+
+        Only applies to SDLC sessions with a work_item_slug. Returns None if
+        gates are satisfied or enforcement should be skipped. Returns a steer
+        result dict if gates are unsatisfied and delivery should be blocked.
+
+        Results are cached per run() invocation via self._gate_cache.
+
+        Cycle safety: if gate-forced steering has happened 3+ times for the
+        same unsatisfied gate (tracked via session history), delivers with
+        a warning instead of looping forever.
+        """
+        # Skip for non-SDLC sessions
+        if not self.session.is_sdlc_job():
+            return None
+
+        slug = getattr(self.session, "work_item_slug", None)
+        if not slug:
+            return None
+
+        # Use cached result if available
+        if hasattr(self, "_gate_cache"):
+            return self._gate_cache
+
+        try:
+            working_dir = getattr(self.session, "working_dir", None) or "."
+
+            review_result = check_review_gate(slug, working_dir)
+            docs_result = check_docs_gate(slug, working_dir)
+
+            if review_result.satisfied and docs_result.satisfied:
+                self._gate_cache = None
+                return None
+
+            # Determine which gate is unsatisfied and the corresponding skill
+            if not review_result.satisfied:
+                unsatisfied_gate = "REVIEW"
+                next_skill = "/do-pr-review"
+                missing = review_result.missing or "PR review"
+            else:
+                unsatisfied_gate = "DOCS"
+                next_skill = "/do-docs"
+                missing = docs_result.missing or "Documentation"
+
+            # Cycle safety: count how many times we've forced steering for this gate
+            gate_steer_count = 0
+            history = self.session.get_history_list()
+            gate_steer_marker = f"gate-forced-steer:{unsatisfied_gate}"
+            for entry in history:
+                if isinstance(entry, str) and gate_steer_marker in entry:
+                    gate_steer_count += 1
+
+            if gate_steer_count >= 3:
+                logger.warning(
+                    f"{self._log_prefix} Gate enforcement cycle limit reached for "
+                    f"{unsatisfied_gate} ({gate_steer_count} steerings). "
+                    f"Delivering with warning."
+                )
+                self._gate_cache = None
+                return None
+
+            # Record the gate-forced steer in history
+            try:
+                self.session.append_history(
+                    "system",
+                    f"Delivery blocked: {unsatisfied_gate} gate unsatisfied "
+                    f"({gate_steer_marker}). Missing: {missing}",
+                )
+            except Exception as e:
+                logger.warning(f"{self._log_prefix} Failed to record gate steer: {e}")
+
+            coaching = (
+                f"Delivery blocked: {unsatisfied_gate} gate unsatisfied. "
+                f"Missing: {missing}. "
+                f"Continue with {next_skill} to satisfy the gate. "
+                f"If you encounter a critical blocker, state it clearly."
+            )
+
+            cid = getattr(self.session, "correlation_id", None) or "unknown"
+            logger.info(
+                f"{self._log_prefix} Mandatory gate enforcement: blocking delivery, "
+                f"steering to {unsatisfied_gate} ({next_skill})"
+            )
+            record_decision(
+                self.session.session_id,
+                cid,
+                "steer",
+                f"mandatory-gate: {unsatisfied_gate} unsatisfied",
+            )
+
+            result = {
+                "action": "steer",
+                "coaching_message": coaching,
+                "mandatory_gate_enforcement": True,
+                "unsatisfied_gate": unsatisfied_gate,
+            }
+            self._gate_cache = result
+            return result
+
+        except Exception as e:
+            # Gate check failure should not crash the Observer — fall back to
+            # current behavior (allow delivery)
+            logger.warning(
+                f"{self._log_prefix} Mandatory gate check failed: {e}. "
+                f"Falling back to allow delivery."
+            )
+            self._gate_cache = None
+            return None
+
     def _handle_read_session(self) -> dict[str, Any]:
         """Tool handler: read the current session state."""
         progress = self.session.get_stage_progress()
@@ -655,6 +766,13 @@ class Observer:
                 }
 
             if outcome.status == "success" and not self.session.has_remaining_stages():
+                # Enforcement point 1: check mandatory gates before delivering
+                gate_override = self._check_mandatory_gates()
+                if gate_override:
+                    gate_override["transitions_applied"] = transitions_applied
+                    gate_override["typed_outcome"] = outcome.to_dict()
+                    return gate_override
+
                 # Success with no remaining stages: deliver to human
                 logger.info(
                     f"{self._log_prefix} Typed outcome routing: deliver "
@@ -804,6 +922,19 @@ class Observer:
                 f"— falling through to LLM Observer"
             )
 
+            # Enforcement point 2: even when the deterministic guard is bypassed
+            # (e.g., needs_human), check if REVIEW/DOCS gates are unsatisfied.
+            # If the "question" is from a stage before REVIEW, still steer.
+            if needs_human and not has_failed and not stop_is_terminal and not cap_reached:
+                gate_override = self._check_mandatory_gates()
+                if gate_override:
+                    gate_override["transitions_applied"] = transitions_applied
+                    logger.info(
+                        f"{self._log_prefix} Gate enforcement overrides guard bypass: "
+                        f"steering to {gate_override.get('unsatisfied_gate', 'unknown')}"
+                    )
+                    return gate_override
+
         # Phase 2: Run the Observer LLM for judgment calls
         try:
             api_key = get_anthropic_api_key()
@@ -910,6 +1041,16 @@ class Observer:
                     "transitions_applied": transitions_applied,
                 }
             else:
+                # Enforcement point 3: LLM decided to deliver — check mandatory gates
+                gate_override = self._check_mandatory_gates()
+                if gate_override:
+                    gate_override["transitions_applied"] = transitions_applied
+                    logger.info(
+                        f"{self._log_prefix} Gate enforcement overrides LLM deliver: "
+                        f"steering to {gate_override.get('unsatisfied_gate', 'unknown')}"
+                    )
+                    return gate_override
+
                 reason_preview = (deliver_reason or "Observer decided to deliver")[:120]
                 logger.info(f"{self._log_prefix} Decision: deliver (reason: {reason_preview})")
                 record_decision(self.session.session_id, cid, "deliver", reason_preview)

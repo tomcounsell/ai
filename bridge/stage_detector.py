@@ -41,7 +41,11 @@ _SKILL_INVOCATION_PATTERN = re.compile(
     re.MULTILINE,
 )
 
-# Patterns for explicit completion markers in transcript
+# Patterns for explicit completion markers in transcript.
+# REVIEW and DOCS are intentionally excluded — these stages should ONLY be
+# marked complete via typed SkillOutcome from /do-pr-review or /do-docs, or
+# via skill invocation detection. This prevents false positives from incidental
+# mentions like "review complete" in unrelated output.
 _COMPLETION_PATTERNS: dict[str, re.Pattern] = {
     "ISSUE": re.compile(
         r"(?:issue\s+(?:created|opened|#\d+))|(?:github\.com/.+/issues/\d+)",
@@ -58,15 +62,6 @@ _COMPLETION_PATTERNS: dict[str, re.Pattern] = {
     ),
     "TEST": re.compile(
         r"(?:\d+\s+passed.*\d+\s+failed|\d+\s+passed\b)|(?:tests?\s+pass(?:ing|ed))",
-        re.IGNORECASE,
-    ),
-    "REVIEW": re.compile(
-        r"(?:review\s+(?:passed|approved|complete))|(?:pr-review\s+complete)",
-        re.IGNORECASE,
-    ),
-    "DOCS": re.compile(
-        r"(?:documentation?\s+(?:created|updated|complete))|"
-        r"(?:docs/features/\S+\.md\s+created)",
         re.IGNORECASE,
     ),
     "MERGE": re.compile(

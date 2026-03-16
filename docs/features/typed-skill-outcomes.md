@@ -47,7 +47,7 @@ The Observer (`bridge/observer.py`) now checks for a typed outcome before callin
 
 1. **Parse outcome** from worker output using `parse_outcome_from_text()`
 2. **If outcome found with `status: "success"`** and remaining stages exist: steer to next stage (no LLM call needed)
-3. **If outcome found with `status: "success"`** and all stages complete: deliver to human
+3. **If outcome found with `status: "success"`** and all stages complete: check mandatory REVIEW/DOCS gates via `_check_mandatory_gates()` before delivering to human (see [Goal Gates](goal-gates.md))
 4. **If outcome found with `status: "fail"`**: deliver to human with failure context
 5. **If outcome found with ambiguous status** (`partial`, `retry`, `skipped`, unknown): fall through to LLM Observer
 6. **If no outcome found**: fall back to current LLM-based routing (full backward compatibility)
@@ -78,7 +78,7 @@ The system is fully backward compatible:
 
 - If a skill does not emit an outcome block, `parse_outcome_from_text()` returns `None`
 - The Observer falls back to LLM-based classification (existing behavior)
-- The stage detector continues regex-based detection as before
+- The stage detector continues regex-based detection as before (except REVIEW and DOCS, which are excluded from `_COMPLETION_PATTERNS` and can only be marked complete via typed outcomes or skill invocation detection)
 - No changes to how skills are invoked or how Telegram messages are formatted
 
 ## Key Files

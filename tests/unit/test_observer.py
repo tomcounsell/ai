@@ -105,11 +105,17 @@ class TestDetectStages:
         transitions = detect_stages(transcript)
         assert any(t["stage"] == "ISSUE" and t["status"] == "completed" for t in transitions)
 
-    def test_completion_marker_docs_created(self):
-        """Detect DOCS completion from documentation patterns."""
+    def test_docs_not_detected_from_regex(self):
+        """DOCS should NOT be detected from regex patterns — only typed outcomes."""
         transcript = "Documentation created at docs/features/observer-agent.md"
         transitions = detect_stages(transcript)
-        assert any(t["stage"] == "DOCS" and t["status"] == "completed" for t in transitions)
+        assert not any(t["stage"] == "DOCS" and t["status"] == "completed" for t in transitions)
+
+    def test_review_not_detected_from_regex(self):
+        """REVIEW should NOT be detected from regex patterns — only typed outcomes."""
+        transcript = "review passed and approved by the team, pr-review complete"
+        transitions = detect_stages(transcript)
+        assert not any(t["stage"] == "REVIEW" and t["status"] == "completed" for t in transitions)
 
     def test_no_false_positives_on_normal_text(self):
         """Normal conversation text should not trigger stage detection."""
@@ -1495,3 +1501,391 @@ class TestNextSdlcSkillPrGuard:
         stage, skill = _next_sdlc_skill(session)
         assert stage == "BUILD", f"Expected BUILD, got {stage}"
         assert skill == "/do-build"
+
+
+# ============================================================================
+# Mandatory Gate Enforcement Tests
+# ============================================================================
+
+
+class TestMandatoryGateEnforcement:
+    """Test the hard delivery gate that blocks premature delivery."""
+
+    def _make_observer(
+        self,
+        is_sdlc=True,
+        slug="test-slug",
+        working_dir="/tmp",
+        history=None,
+    ):
+        """Create an Observer with a mock session for gate testing."""
+
+        class MockSession:
+            def __init__(self):
+                self.session_id = "test-session"
+                self.correlation_id = "test-corr"
+                self.classification_type = "sdlc" if is_sdlc else "casual"
+                self.work_item_slug = slug
+                self.working_dir = working_dir
+                self.history = history or []
+                self.context_summary = None
+                self.expectations = None
+                self.queued_steering_messages = []
+                self.issue_url = None
+                self.plan_url = None
+                self.pr_url = None
+                self.status = "running"
+                self.created_at = 1.0
+
+            def is_sdlc_job(self):
+                return self.classification_type == "sdlc"
+
+            def get_stage_progress(self):
+                return {}
+
+            def get_history_list(self):
+                return list(self.history)
+
+            def get_links(self):
+                return {}
+
+            def has_remaining_stages(self):
+                return False
+
+            def has_failed_stage(self):
+                return False
+
+            def append_history(self, role, text):
+                self.history.append(f"[{role}] {text}")
+
+            def save(self):
+                pass
+
+        session = MockSession()
+        observer = Observer(
+            session=session,
+            worker_output="Test output",
+            auto_continue_count=0,
+            send_cb=None,
+            enqueue_fn=None,
+        )
+        return observer
+
+    def test_gate_skipped_for_non_sdlc(self):
+        """Non-SDLC sessions should skip gate enforcement."""
+        observer = self._make_observer(is_sdlc=False)
+        result = observer._check_mandatory_gates()
+        assert result is None
+
+    def test_gate_skipped_when_no_slug(self):
+        """Sessions without work_item_slug should skip gate enforcement."""
+        observer = self._make_observer(slug=None)
+        result = observer._check_mandatory_gates()
+        assert result is None
+
+    def test_gate_returns_steer_when_review_unsatisfied(self):
+        """When REVIEW gate is unsatisfied, should steer to /do-pr-review."""
+        from unittest.mock import patch
+
+        from agent.goal_gates import GateResult
+
+        observer = self._make_observer()
+
+        with (
+            patch(
+                "bridge.observer.check_review_gate",
+                return_value=GateResult(
+                    satisfied=False, evidence="No review", missing="PR review"
+                ),
+            ),
+            patch(
+                "bridge.observer.check_docs_gate",
+                return_value=GateResult(satisfied=True, evidence="Docs exist"),
+            ),
+        ):
+            result = observer._check_mandatory_gates()
+
+        assert result is not None
+        assert result["action"] == "steer"
+        assert result["unsatisfied_gate"] == "REVIEW"
+        assert "/do-pr-review" in result["coaching_message"]
+
+    def test_gate_returns_steer_when_docs_unsatisfied(self):
+        """When DOCS gate is unsatisfied, should steer to /do-docs."""
+        from unittest.mock import patch
+
+        from agent.goal_gates import GateResult
+
+        observer = self._make_observer()
+
+        with (
+            patch(
+                "bridge.observer.check_review_gate",
+                return_value=GateResult(satisfied=True, evidence="Review exists"),
+            ),
+            patch(
+                "bridge.observer.check_docs_gate",
+                return_value=GateResult(
+                    satisfied=False, evidence="No docs", missing="Documentation"
+                ),
+            ),
+        ):
+            result = observer._check_mandatory_gates()
+
+        assert result is not None
+        assert result["action"] == "steer"
+        assert result["unsatisfied_gate"] == "DOCS"
+        assert "/do-docs" in result["coaching_message"]
+
+    def test_gate_returns_none_when_all_satisfied(self):
+        """When both gates are satisfied, should return None (allow delivery)."""
+        from unittest.mock import patch
+
+        from agent.goal_gates import GateResult
+
+        observer = self._make_observer()
+
+        with (
+            patch(
+                "bridge.observer.check_review_gate",
+                return_value=GateResult(satisfied=True, evidence="Review exists"),
+            ),
+            patch(
+                "bridge.observer.check_docs_gate",
+                return_value=GateResult(satisfied=True, evidence="Docs exist"),
+            ),
+        ):
+            result = observer._check_mandatory_gates()
+
+        assert result is None
+
+    def test_gate_cycle_safety_delivers_after_3_steerings(self):
+        """After 3 gate-forced steerings, should allow delivery (cycle safety)."""
+        from unittest.mock import patch
+
+        from agent.goal_gates import GateResult
+
+        history = [
+            "[system] Delivery blocked: REVIEW gate unsatisfied "
+            "(gate-forced-steer:REVIEW). Missing: PR review",
+            "[system] Delivery blocked: REVIEW gate unsatisfied "
+            "(gate-forced-steer:REVIEW). Missing: PR review",
+            "[system] Delivery blocked: REVIEW gate unsatisfied "
+            "(gate-forced-steer:REVIEW). Missing: PR review",
+        ]
+        observer = self._make_observer(history=history)
+
+        with (
+            patch(
+                "bridge.observer.check_review_gate",
+                return_value=GateResult(
+                    satisfied=False, evidence="No review", missing="PR review"
+                ),
+            ),
+            patch(
+                "bridge.observer.check_docs_gate",
+                return_value=GateResult(satisfied=True, evidence="Docs exist"),
+            ),
+        ):
+            result = observer._check_mandatory_gates()
+
+        assert result is None
+
+    def test_gate_cache_reused(self):
+        """Gate results should be cached per run() invocation."""
+        from unittest.mock import patch
+
+        from agent.goal_gates import GateResult
+
+        observer = self._make_observer()
+
+        with (
+            patch(
+                "bridge.observer.check_review_gate",
+                return_value=GateResult(satisfied=True, evidence="Review exists"),
+            ) as mock_review,
+            patch(
+                "bridge.observer.check_docs_gate",
+                return_value=GateResult(satisfied=True, evidence="Docs exist"),
+            ) as mock_docs,
+        ):
+            result1 = observer._check_mandatory_gates()
+            result2 = observer._check_mandatory_gates()
+
+        assert result1 is None
+        assert result2 is None
+        mock_review.assert_called_once()
+        mock_docs.assert_called_once()
+
+    def test_gate_exception_falls_back_to_allow_delivery(self):
+        """If gate check raises an exception, should allow delivery (not crash)."""
+        from unittest.mock import patch
+
+        observer = self._make_observer()
+
+        with patch(
+            "bridge.observer.check_review_gate",
+            side_effect=Exception("gh command failed"),
+        ):
+            result = observer._check_mandatory_gates()
+
+        assert result is None
+
+
+# ============================================================================
+# Graph-aware has_remaining_stages Tests
+# ============================================================================
+
+
+class TestHasRemainingStagesGraph:
+    """Test the graph-aware has_remaining_stages implementation."""
+
+    def _make_session(self, stage_progress):
+        """Create a minimal mock session with stage progress."""
+        from models.agent_session import AgentSession
+
+        class MockSession:
+            def __init__(self):
+                self.session_id = "test"
+                self._progress = stage_progress
+                self.history = []
+
+            def _get_history_list(self):
+                return self.history
+
+            def get_stage_progress(self):
+                return dict(self._progress)
+
+        session = MockSession()
+        session.has_remaining_stages = AgentSession.has_remaining_stages.__get__(session)
+        return session
+
+    def test_no_stages_completed(self):
+        """No stages completed means remaining stages exist."""
+        session = self._make_session({
+            "ISSUE": "pending",
+            "PLAN": "pending",
+            "BUILD": "pending",
+            "TEST": "pending",
+            "REVIEW": "pending",
+            "DOCS": "pending",
+            "MERGE": "pending",
+        })
+        assert session.has_remaining_stages() is True
+
+    def test_all_stages_through_merge_completed(self):
+        """When MERGE is completed, no remaining stages."""
+        session = self._make_session({
+            "ISSUE": "completed",
+            "PLAN": "completed",
+            "BUILD": "completed",
+            "TEST": "completed",
+            "REVIEW": "completed",
+            "DOCS": "completed",
+            "MERGE": "completed",
+        })
+        assert session.has_remaining_stages() is False
+
+    def test_test_completed_review_pending(self):
+        """After TEST completes, REVIEW/DOCS/MERGE remain."""
+        session = self._make_session({
+            "ISSUE": "completed",
+            "PLAN": "completed",
+            "BUILD": "completed",
+            "TEST": "completed",
+            "REVIEW": "pending",
+            "DOCS": "pending",
+            "MERGE": "pending",
+        })
+        assert session.has_remaining_stages() is True
+
+    def test_docs_completed_merge_pending(self):
+        """After DOCS completes, MERGE remains."""
+        session = self._make_session({
+            "ISSUE": "completed",
+            "PLAN": "completed",
+            "BUILD": "completed",
+            "TEST": "completed",
+            "REVIEW": "completed",
+            "DOCS": "completed",
+            "MERGE": "pending",
+        })
+        assert session.has_remaining_stages() is True
+
+    def test_test_failed_has_remaining(self):
+        """Failed TEST has remaining stages (PATCH cycle)."""
+        session = self._make_session({
+            "ISSUE": "completed",
+            "PLAN": "completed",
+            "BUILD": "completed",
+            "TEST": "failed",
+            "REVIEW": "pending",
+            "DOCS": "pending",
+            "MERGE": "pending",
+        })
+        assert session.has_remaining_stages() is True
+
+
+# ============================================================================
+# Stage Detector: No REVIEW/DOCS Regex Tests
+# ============================================================================
+
+
+class TestNoReviewDocsRegex:
+    """Verify REVIEW and DOCS are NOT in _COMPLETION_PATTERNS."""
+
+    def test_review_not_in_completion_patterns(self):
+        """REVIEW should not be in _COMPLETION_PATTERNS."""
+        from bridge.stage_detector import _COMPLETION_PATTERNS
+
+        assert "REVIEW" not in _COMPLETION_PATTERNS
+
+    def test_docs_not_in_completion_patterns(self):
+        """DOCS should not be in _COMPLETION_PATTERNS."""
+        from bridge.stage_detector import _COMPLETION_PATTERNS
+
+        assert "DOCS" not in _COMPLETION_PATTERNS
+
+    def test_review_still_detected_via_skill_invocation(self):
+        """REVIEW in_progress should still be detected via /do-pr-review invocation."""
+        transitions = detect_stages("Running /do-pr-review 42")
+        assert any(
+            t["stage"] == "REVIEW" and t["status"] == "in_progress" for t in transitions
+        )
+
+    def test_docs_still_detected_via_skill_invocation(self):
+        """DOCS in_progress should still be detected via /do-docs invocation."""
+        transitions = detect_stages("Running /do-docs 42")
+        assert any(
+            t["stage"] == "DOCS" and t["status"] == "in_progress" for t in transitions
+        )
+
+    def test_review_completed_only_via_typed_outcome(self):
+        """REVIEW completion should only come from typed outcomes, not regex."""
+        from agent.skill_outcome import SkillOutcome
+
+        transcript = "The review is complete and approved"
+        transitions = detect_stages(transcript)
+        assert not any(t["stage"] == "REVIEW" for t in transitions)
+
+        class MockSession:
+            def __init__(self):
+                self.history = []
+
+            def get_history_list(self):
+                return self.history
+
+            def get_stage_progress(self):
+                return {"REVIEW": "pending"}
+
+            def append_history(self, role, text):
+                self.history.append(f"[{role}] {text}")
+
+            def save(self):
+                pass
+
+        session = MockSession()
+        outcome = SkillOutcome(status="success", stage="REVIEW", notes="Review passed")
+        result = apply_transitions(session, [], outcome=outcome)
+        assert result == 1
+        assert any("REVIEW COMPLETED" in entry for entry in session.history)

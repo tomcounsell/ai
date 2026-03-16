@@ -31,7 +31,7 @@ Methods for querying pipeline state from history:
 | Method | Returns | Purpose |
 |---|---|---|
 | `is_sdlc_job()` | `bool` | `True` if `classification_type == "sdlc"` OR history contains `[stage]` entries |
-| `has_remaining_stages()` | `bool` | `True` if any SDLC stage is `pending` or `in_progress` |
+| `has_remaining_stages()` | `bool` | `True` if pipeline graph has a non-terminal next stage from the last completed stage |
 | `has_failed_stage()` | `bool` | `True` if any stage has `FAILED` or `ERROR` status |
 | `get_stage_progress()` | `dict` | Maps stage names to status (`completed`, `in_progress`, `pending`, `failed`) |
 

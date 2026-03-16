@@ -330,15 +330,60 @@ class AgentSession(Model):
     def has_remaining_stages(self) -> bool:
         """Check if any SDLC stages are not yet completed.
 
-        Returns True if at least one stage in the pipeline is still
-        'pending' or 'in_progress'. Returns False when all stages
-        are 'completed' (or 'failed').
+        Uses the pipeline graph to determine remaining stages rather than
+        a flat check. Finds the last completed/failed stage and calls
+        get_next_stage() to see if a non-terminal next stage exists.
+
+        Returns True if pipeline progression should continue.
+        Returns False when the pipeline is complete (MERGE reached or
+        no graph transitions remain).
 
         Used by stage-aware auto-continue to decide whether to keep
         going (stages remain) or consult the classifier (all done).
         """
+        from bridge.pipeline_graph import get_next_stage
+
         progress = self.get_stage_progress()
-        return any(status in ("pending", "in_progress") for status in progress.values())
+
+        # Find the last completed or failed stage in pipeline order
+        last_completed = None
+        last_outcome = "success"
+        for stage in SDLC_STAGES:
+            status = progress.get(stage, "pending")
+            if status == "completed":
+                last_completed = stage
+                last_outcome = "success"
+            elif status == "failed":
+                last_completed = stage
+                last_outcome = "fail"
+
+        # If no stage has completed, there are definitely remaining stages
+        if last_completed is None:
+            return True
+
+        # Use the graph to check if a next stage exists
+        next_info = get_next_stage(last_completed, last_outcome)
+        if next_info is None:
+            # No transition from current stage — pipeline is complete (MERGE terminal)
+            return False
+
+        # Walk the graph forward from the last completed stage.
+        # If every reachable stage is already completed, the pipeline is done.
+        current = last_completed
+        outcome = last_outcome
+        while True:
+            next_info = get_next_stage(current, outcome)
+            if next_info is None:
+                # Reached terminal (MERGE) — no remaining stages
+                return False
+            next_stage = next_info[0]
+            next_status = progress.get(next_stage, "pending")
+            if next_status != "completed":
+                # Found a stage that still needs work
+                return True
+            # This stage is done, keep walking
+            current = next_stage
+            outcome = "success"
 
     def has_failed_stage(self) -> bool:
         """Check if any SDLC stage has failed.
