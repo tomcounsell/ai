@@ -509,7 +509,7 @@ class Observer:
             self._gate_cache = None
             return None
 
-
+    def _handle_read_session(self) -> dict[str, Any]:
         """Tool handler: read the current session state."""
         progress = self.session.get_stage_progress()
         links = self.session.get_links()
