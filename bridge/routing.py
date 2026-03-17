@@ -380,17 +380,43 @@ def classify_work_request(message: str) -> str:
         return "question"
 
 
+def _get_principal_priorities_for_classification() -> str:
+    """Load condensed principal context for classification decisions.
+
+    Provides the classifier with project priorities so it can make better
+    routing decisions (e.g., recognizing project names, understanding which
+    requests are high-priority work vs. casual questions).
+
+    Returns:
+        A short principal context string, or empty string if unavailable.
+    """
+    try:
+        from agent.sdk_client import load_principal_context
+
+        return load_principal_context(condensed=True)
+    except Exception:
+        return ""
+
+
 def _classify_work_request_llm(text: str) -> str:
     """Use LLM to classify whether a message is a work request.
 
     Tries Ollama first (fast, local), falls back to Haiku (cheap, reliable).
+    Includes principal context (project priorities) when available.
     """
+    # Inject principal context for better classification of project-related messages
+    principal = _get_principal_priorities_for_classification()
+    principal_hint = ""
+    if principal:
+        principal_hint = f"\n\nContext — active projects and priorities:\n{principal[:500]}\n\n"
+
     prompt = (
         'Classify this message. Reply with ONLY one word: "sdlc" or "question".\n\n'
         '- "sdlc" = work request: fix bug, add feature, implement, refactor,\n'
         "  investigate issue, create/update codebase, deploy, resolve problem\n"
         '- "question" = asking for info, explanation, opinion, status check,\n'
         "  how does X work, what is Y, conversational/social\n\n"
+        f"{principal_hint}"
         f"Message: {text[:300]}\n\n"
         "Classification:"
     )
@@ -440,6 +466,87 @@ async def classify_work_request_async(message: str) -> str:
     """Async wrapper for work request classification."""
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, classify_work_request, message)
+
+
+# =============================================================================
+# Escalation Decision Logic
+# =============================================================================
+
+
+def should_escalate_to_human(
+    issue_summary: str,
+    severity: str = "unknown",
+    project_key: str = "",
+) -> dict:
+    """Decide whether an issue warrants escalating (interrupting) the human.
+
+    Uses principal context to understand which projects and problems are
+    high-priority enough to justify an interruption. Without principal
+    context, falls back to conservative defaults.
+
+    Args:
+        issue_summary: Brief description of the issue or blocker.
+        severity: Estimated severity ("critical", "high", "medium", "low", "unknown").
+        project_key: The project this issue relates to (e.g., "valor-ai").
+
+    Returns:
+        Dict with keys:
+        - escalate: bool — whether to interrupt the human
+        - reason: str — explanation of the decision
+        - priority: str — inferred priority level
+    """
+    # Always escalate critical issues regardless of context
+    if severity == "critical":
+        return {
+            "escalate": True,
+            "reason": "Critical severity — always escalate",
+            "priority": "critical",
+        }
+
+    # Load principal context for priority-aware decisions
+    principal = _get_principal_priorities_for_classification()
+
+    if not principal:
+        # No principal context: conservative default — escalate high+, skip medium/low
+        should = severity in ("critical", "high")
+        return {
+            "escalate": should,
+            "reason": f"No principal context available, using severity-based default ({severity})",
+            "priority": severity,
+        }
+
+    # Check if the project is mentioned in principal priorities
+    project_mentioned = project_key.lower() in principal.lower() if project_key else False
+    issue_lower = issue_summary.lower()
+
+    # High-priority project + any non-low severity = escalate
+    if project_mentioned and severity in ("high", "unknown"):
+        return {
+            "escalate": True,
+            "reason": (
+                f"Project '{project_key}' is in principal priorities with {severity} severity"
+            ),
+            "priority": "high",
+        }
+
+    # Check if issue text matches strategic keywords from principal context
+    strategic_keywords = ["mission", "revenue", "production", "outage", "data loss"]
+    if any(kw in issue_lower for kw in strategic_keywords):
+        return {
+            "escalate": True,
+            "reason": "Issue matches strategic keywords from principal context",
+            "priority": "high",
+        }
+
+    # Default: don't escalate low/medium issues for non-priority projects
+    return {
+        "escalate": severity == "high",
+        "reason": (
+            f"Standard priority assessment"
+            f" (severity={severity}, project_in_priorities={project_mentioned})"
+        ),
+        "priority": severity,
+    }
 
 
 # =============================================================================

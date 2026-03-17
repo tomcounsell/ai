@@ -36,15 +36,40 @@ logger = logging.getLogger(__name__)
 # Maximum tool-use iterations to prevent infinite loops
 MAX_TOOL_ITERATIONS = 5
 
-# Observer system prompt — defines the decision framework
-OBSERVER_SYSTEM_PROMPT = """\
-You are the Observer Agent for an autonomous SDLC pipeline. Your job is to decide
-what happens when the worker agent stops producing output.
 
-You have access to the full AgentSession state and must make one of two decisions:
-1. STEER: Send the worker back to work on the next pipeline stage
-2. DELIVER: Send the output to the human on Telegram
+def _build_observer_system_prompt() -> str:
+    """Build the Observer system prompt with principal context injected.
 
+    The Observer gets the full (non-condensed) principal context because it
+    makes triage and prioritization decisions that benefit from the complete
+    strategic picture. This is loaded once per Observer invocation.
+    """
+    from agent.sdk_client import load_principal_context
+
+    principal = load_principal_context(condensed=False)
+    principal_block = ""
+    if principal:
+        principal_block = (
+            "\n## Principal Context (Supervisor's Strategic Priorities)\n\n"
+            "The following is the supervisor's operating context. Use it for "
+            "prioritization, scoping, and escalation decisions.\n\n"
+            f"{principal}\n\n---\n"
+        )
+
+    return (
+        "You are the Observer Agent for an autonomous SDLC pipeline. Your job is to decide\n"
+        "what happens when the worker agent stops producing output.\n"
+        f"{principal_block}\n"
+        "You have access to the full AgentSession state and must make one of two decisions:\n"
+        "1. STEER: Send the worker back to work on the next pipeline stage\n"
+        "2. DELIVER: Send the output to the human on Telegram\n\n" + OBSERVER_SYSTEM_PROMPT_BODY
+    )
+
+
+# The static body of the Observer system prompt (everything after the intro
+# and principal context block). Extracted so _build_observer_system_prompt()
+# can prepend the dynamic principal context.
+OBSERVER_SYSTEM_PROMPT_BODY = """\
 ## SDLC Pipeline Stages (in order)
 ISSUE -> PLAN -> BUILD -> TEST -> REVIEW -> DOCS
 
@@ -719,12 +744,15 @@ class Observer:
             coaching_message = None
             deliver_reason = None
 
+            # Build system prompt once (reads PRINCIPAL.md from disk)
+            observer_prompt = _build_observer_system_prompt()
+
             # Tool-use loop with iteration cap
             for iteration in range(MAX_TOOL_ITERATIONS):
                 response = client.messages.create(
                     model=self.model,
                     max_tokens=1024,
-                    system=OBSERVER_SYSTEM_PROMPT,
+                    system=observer_prompt,
                     messages=messages,
                     tools=tools,
                 )
