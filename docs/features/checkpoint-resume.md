@@ -1,6 +1,8 @@
 # Checkpoint/Resume for Abandoned Sessions
 
-**Status**: Shipped
+> **Deprecated**: The checkpoint module (`agent/checkpoint.py`) was deleted in #430. Stage persistence is now handled by the `stage_states` JSON field on AgentSession, managed by the `PipelineStateMachine` in `bridge/pipeline_state.py`. Session revival no longer requires file-based checkpoints.
+
+**Status**: Deprecated (was Shipped)
 **Issue**: [#332](https://github.com/tomcounsell/ai/issues/332)
 **PR**: [#357](https://github.com/tomcounsell/ai/pull/357)
 

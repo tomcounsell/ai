@@ -16,7 +16,7 @@ Each SDLC stage has a deterministic gate check:
 |-------|---------------|----------|
 | PLAN | `docs/plans/{slug}.md` exists | File existence |
 | BUILD | PR exists for `session/{slug}` branch | `gh pr list` result |
-| TEST | `[stage] TEST COMPLETED` in session history, or `test` in pipeline state | Session history or `state.json` |
+| TEST | `test` stage marked completed in `stage_states` JSON field on AgentSession | `stage_states` field |
 | REVIEW | PR review or `## Review:` comment exists | `gh api` review count |
 | DOCS | `docs/features/{slug}.md` exists, or plan declares "No documentation changes needed" | File existence or plan content |
 
