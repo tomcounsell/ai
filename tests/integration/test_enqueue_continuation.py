@@ -285,8 +285,8 @@ class TestMetadataPreservation:
         assert sessions[0].expectations == "Waiting for test results from CI"
 
     @pytest.mark.asyncio
-    async def test_is_sdlc_job_works_after_continuation(self, redis_test_db):
-        """is_sdlc_job() returns True on the reused session."""
+    async def test_is_sdlc_works_after_continuation(self, redis_test_db):
+        """is_sdlc returns True on the reused session."""
         session = _create_session(redis_test_db, classification_type="sdlc")
         session.append_history("stage", "ISSUE completed")
         job = _make_mock_job(
@@ -303,7 +303,7 @@ class TestMetadataPreservation:
         )
 
         sessions = list(AgentSession.query.filter(session_id=session.session_id))
-        assert sessions[0].is_sdlc_job() is True
+        assert sessions[0].is_sdlc is True
 
     @pytest.mark.asyncio
     async def test_stage_progress_works_after_continuation(self, redis_test_db):

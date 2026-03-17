@@ -55,7 +55,8 @@ class TestDispatchToolMessageForUser:
             correlation_id = "test-cid"
             classification_type = "QUESTION"
 
-            def is_sdlc_job(self):
+            @property
+            def is_sdlc(self):
                 return False
 
             def has_remaining_stages(self):

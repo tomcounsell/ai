@@ -1081,7 +1081,7 @@ class TestNoMessageEcho:
         ]
         session.message_text = "continue"
         session.status = "running"
-        session.is_sdlc_job.return_value = True
+        session.is_sdlc = True
 
         result = _compose_structured_summary(
             "• Built the bypass\n• Tests passing", session=session, is_completion=True
@@ -1419,11 +1419,11 @@ class TestSummarizationBypass:
         from unittest.mock import MagicMock
 
         session = MagicMock()
-        session.is_sdlc_job.return_value = False
+        session.is_sdlc = False
 
         # Simulate the bypass logic from response.py
         text = "Update complete. 3 packages updated."
-        is_sdlc = hasattr(session, "is_sdlc_job") and session.is_sdlc_job()
+        is_sdlc = hasattr(session, "is_sdlc") and session.is_sdlc
         should_summarize = text and (is_sdlc or len(text) >= 500)
 
         assert not should_summarize
@@ -1436,10 +1436,10 @@ class TestSummarizationBypass:
         from unittest.mock import MagicMock
 
         session = MagicMock()
-        session.is_sdlc_job.return_value = True
+        session.is_sdlc = True
 
         text = "Done."
-        is_sdlc = hasattr(session, "is_sdlc_job") and session.is_sdlc_job()
+        is_sdlc = hasattr(session, "is_sdlc") and session.is_sdlc
         should_summarize = text and (is_sdlc or len(text) >= 500)
 
         assert should_summarize
@@ -1451,10 +1451,10 @@ class TestSummarizationBypass:
         from unittest.mock import MagicMock
 
         session = MagicMock()
-        session.is_sdlc_job.return_value = False
+        session.is_sdlc = False
 
         text = "x" * 600
-        is_sdlc = hasattr(session, "is_sdlc_job") and session.is_sdlc_job()
+        is_sdlc = hasattr(session, "is_sdlc") and session.is_sdlc
         should_summarize = text and (is_sdlc or len(text) >= 500)
 
         assert should_summarize
@@ -1466,7 +1466,7 @@ class TestSummarizationBypass:
         """When session is None, the bypass uses length threshold only."""
         session = None
         text = "Short reply."
-        is_sdlc = session and hasattr(session, "is_sdlc_job") and session.is_sdlc_job()
+        is_sdlc = session and hasattr(session, "is_sdlc") and session.is_sdlc
         should_summarize = text and (is_sdlc or len(text) >= 500)
 
         assert not should_summarize
@@ -1477,10 +1477,10 @@ class TestSummarizationBypass:
         from unittest.mock import MagicMock
 
         session = MagicMock()
-        session.is_sdlc_job.return_value = True
+        session.is_sdlc = True
 
         text = ""
-        is_sdlc = session and hasattr(session, "is_sdlc_job") and session.is_sdlc_job()
+        is_sdlc = session and hasattr(session, "is_sdlc") and session.is_sdlc
         should_summarize = text and (is_sdlc or len(text) >= 500)
 
         assert not should_summarize
@@ -1785,7 +1785,7 @@ class TestErrorStateRendering:
         ]
         session.message_text = "continue"
         session.status = "failed"
-        session.is_sdlc_job.return_value = True
+        session.is_sdlc = True
         session.session_id = "test-error-rendering"
         session.get_stage_progress.return_value = {
             "ISSUE": "completed",
@@ -1854,7 +1854,7 @@ class TestErrorStateRendering:
         session.message_text = "continue"
         session.status = "failed"
         session.session_id = "test-failed-stage"
-        session.is_sdlc_job.return_value = True
+        session.is_sdlc = True
         session.get_stage_progress.return_value = {
             "ISSUE": "completed",
             "PLAN": "completed",
@@ -1916,7 +1916,7 @@ class TestErrorStateRendering:
         session.message_text = "continue"
         session.status = "failed"
         session.session_id = "test-failed-links"
-        session.is_sdlc_job.return_value = True
+        session.is_sdlc = True
         session.get_stage_progress.return_value = {
             "ISSUE": "completed",
             "PLAN": "completed",

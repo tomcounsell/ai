@@ -745,8 +745,8 @@ class TestSDLCClassificationTypeLifecycle:
             classification_type="sdlc",
         )
 
-        # Verify is_sdlc_job works via classification_type alone
-        assert s.is_sdlc_job() is True
+        # Verify is_sdlc works via classification_type alone
+        assert s.is_sdlc is True
 
         # Add stage progress and links
         s.append_history("stage", "ISSUE completed ☑")
@@ -795,8 +795,8 @@ class TestSDLCClassificationTypeLifecycle:
         )
 
         # The continuation session starts fresh but has classification_type
-        assert s.is_sdlc_job() is True
-        # Even without stage history, is_sdlc_job returns True via classification_type
+        assert s.is_sdlc is True
+        # Even without stage history, is_sdlc returns True via classification_type
         assert s._get_history_list() == []
 
         # Add stage progress as the session progresses

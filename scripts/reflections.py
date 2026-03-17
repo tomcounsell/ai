@@ -1750,7 +1750,7 @@ class ReflectionRunner:
                 continue
 
             # Skip non-SDLC sessions
-            if not session.is_sdlc_job():
+            if not session.is_sdlc:
                 sessions_skipped += 1
                 continue
 
