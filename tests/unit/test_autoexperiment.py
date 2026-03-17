@@ -32,12 +32,19 @@ from scripts.autoexperiment import (
 SAMPLE_OBSERVER_FILE = '''\
 """Observer module."""
 
-OBSERVER_SYSTEM_PROMPT = """\
-You are the Observer Agent. Your job is to decide what happens.
+def _build_observer_system_prompt(principal_context: str = "") -> str:
+    """Build the full observer system prompt dynamically."""
+    return "You are the Observer.\\n" + OBSERVER_SYSTEM_PROMPT_BODY
+
+OBSERVER_SYSTEM_PROMPT_BODY = """\
+Your job is to decide what happens next with the worker output.
 
 ## Decision Framework
 ### STEER when:
 - Pipeline stages remain incomplete
+- The worker needs redirection
+### DELIVER when:
+- The output is ready for the human
 """
 
 class Observer:
@@ -113,7 +120,7 @@ class TestExperimentTarget:
 class TestExtractInject:
     def test_extract_observer_prompt(self):
         prompt = extract_observer_prompt(SAMPLE_OBSERVER_FILE)
-        assert "You are the Observer Agent" in prompt
+        assert "Your job is to decide what happens next" in prompt
         assert "Decision Framework" in prompt
 
     def test_inject_observer_prompt(self):
@@ -122,7 +129,7 @@ class TestExtractInject:
         assert "NEW Observer Agent" in result
         assert "class Observer:" in result  # Surrounding code preserved
         # Original prompt replaced
-        assert "Your job is to decide" not in result
+        assert "Your job is to decide what happens next" not in result
 
     def test_extract_summarizer_prompt(self):
         prompt = extract_summarizer_prompt(SAMPLE_SUMMARIZER_FILE)
