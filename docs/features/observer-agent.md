@@ -2,7 +2,7 @@
 
 The Observer Agent is the **sole controller of SDLC pipeline progression**. It replaces the fragmented classifier/coach/routing chain with a single Sonnet-powered agent that makes routing decisions with full session context. It runs synchronously inside `send_to_chat()` at the point where `classify_output()`, `classify_routing_decision()`, and `build_coaching_message()` were previously called.
 
-The worker agent receives only safety rails (`WORKER_RULES` in `agent/sdk_client.py`) -- no pipeline stages, no `/sdlc` invocation instructions. The Observer steers the worker one stage at a time via coaching messages, advancing through ISSUE -> PLAN -> BUILD -> TEST -> REVIEW -> DOCS as each stage completes.
+The worker agent receives only safety rails (`WORKER_RULES` in `agent/sdk_client.py`) -- no pipeline stages, no `/sdlc` invocation instructions. The Observer steers the worker one stage at a time via coaching messages, using the [pipeline graph](pipeline-graph.md) for routing. The graph supports cycles (TEST fail -> PATCH -> TEST, REVIEW fail -> PATCH -> TEST -> REVIEW) alongside the happy path (ISSUE -> PLAN -> BUILD -> TEST -> REVIEW -> DOCS).
 
 ## Architecture
 
@@ -56,7 +56,7 @@ The stage detector (`bridge/stage_detector.py`) is a pure function with no side 
 
 1. **Skill invocations** (strongest signal): Regex matches `/do-plan`, `/do-build`, `/do-test`, `/do-pr-review`, `/do-docs` in transcript text. When a later stage is invoked, earlier stages are implicitly marked as completed.
 
-2. **Completion markers** (secondary signal): Regex matches for stage-specific evidence (e.g., `github.com/.../issues/123` for ISSUE, `42 passed` for TEST).
+2. **Completion markers** (secondary signal): Regex matches for stage-specific evidence (e.g., `github.com/.../issues/123` for ISSUE, `42 passed` for TEST). **Note**: REVIEW and DOCS are excluded from completion markers — they can only be marked complete via typed outcomes or skill invocation detection, preventing false positives from incidental mentions.
 
 3. **Typed outcome cross-check** (validation signal): When a `SkillOutcome` is available (see [Typed Skill Outcomes](typed-skill-outcomes.md)), `apply_transitions()` cross-checks it against regex detections. If the outcome says "success" but regex didn't detect completion, the outcome's transition is merged into the transitions list so the stage is still recorded. If the outcome says "fail" but regex detected completion, the typed outcome takes priority.
 
@@ -82,7 +82,7 @@ The Observer uses Claude API directly (`anthropic.Anthropic().messages.create()`
 | `read_session` | Read current AgentSession state (stages, links, history, queued messages). Must be called first. |
 | `update_session` | Persist extracted data (context_summary, expectations, issue/PR URLs) |
 | `enqueue_continuation` | Steer: re-enqueue the job with a coaching message |
-| `deliver_to_telegram` | Deliver: send output to the human |
+| `deliver_to_telegram` | Deliver: send output to the human. Accepts optional `message_for_user` (curated user-facing text) and `reason` (internal logging only, never sent to user). |
 
 ### STEER when:
 - Pipeline stages remain incomplete
@@ -98,12 +98,38 @@ The Observer uses Claude API directly (`anthropic.Anthropic().messages.create()`
 - Non-SDLC job (casual conversation, Q&A)
 - Final completion with evidence
 
+### Mandatory Delivery Gates
+
+Before any delivery decision (typed outcome, deterministic guard bypass, or LLM decision), the Observer checks mandatory REVIEW and DOCS goal gates via `_check_mandatory_gates()`:
+
+- **REVIEW gate**: Verifies a PR review exists (via `check_review_gate()` in `agent/goal_gates.py`)
+- **DOCS gate**: Verifies feature documentation exists or plan explicitly skips docs (via `check_docs_gate()`)
+
+If either gate is unsatisfied, the delivery is **overridden to steer** with a coaching message directing the worker to the next required skill. This hard enforcement ensures SDLC sessions always complete REVIEW and DOCS before output reaches Telegram.
+
+Gate enforcement is skipped for:
+- Non-SDLC sessions (`is_sdlc_job()` returns False)
+- Sessions without a `work_item_slug`
+- After 3 gate-forced steerings for the same gate (cycle safety — delivers with warning)
+
+Gate results are cached per `run()` invocation to avoid redundant `gh` API calls.
+
 ### Safety Limits
 - Maximum 5 tool-use iterations per Observer invocation
 - Maximum 10 auto-continues for SDLC jobs, 3 for non-SDLC
 - **Hard guard** in `agent/job_queue.py`: cap is enforced regardless of Observer decision — if `auto_continue_count > effective_max`, output is delivered to Telegram
 - Each auto-continue increment is logged at INFO level (`Auto-continue {n}/{max} for session {id}`) for full sequence traceability
 - If Observer doesn't converge on a decision, defaults to deliver
+
+### Message Quality Gates
+
+Two quality gates prevent useless or misleading output from reaching the user:
+
+1. **Narration gate** (pre-observer, deterministic): Before the Observer runs, `is_narration_only()` from `bridge/message_quality.py` checks if the worker output consists entirely of process narration ("Let me check...", "Let me look at...") with no substantive content (no code blocks, URLs, file paths, or findings). If detected and auto-continue budget remains, the worker is automatically continued with coaching to produce actual results instead of announcements. If at the auto-continue cap, a fallback message replaces the narration.
+
+2. **`message_for_user` field** (observer-curated): When the Observer calls `deliver_to_telegram`, it can provide a `message_for_user` string — curated user-facing text that replaces raw worker output. The `reason` field is logged internally but never sent to the user. This prevents observer reasoning from leaking into Telegram messages.
+
+Both gates are in `agent/job_queue.py`'s `send_to_chat()` function.
 
 ## Coaching Philosophy
 
@@ -144,13 +170,16 @@ These were removed from the routing path. See [Coaching Loop](coaching-loop.md) 
 
 | File | Purpose |
 |------|---------|
-| `bridge/observer.py` | Observer Agent class, system prompt, tool definitions, typed outcome routing |
+| `bridge/observer.py` | Observer Agent class, system prompt, tool definitions (incl. `message_for_user`), typed outcome routing |
+| `bridge/message_quality.py` | Narration detection (`is_narration_only()`) and process narration patterns shared with summarizer |
 | `bridge/stage_detector.py` | Deterministic stage detection (pure function) with typed outcome cross-check |
 | `agent/skill_outcome.py` | `SkillOutcome` dataclass, `parse_outcome_from_text()`, `format_outcome()` — see [Typed Skill Outcomes](typed-skill-outcomes.md) |
 | `agent/sdk_client.py` | Captures `stop_reason` from `ResultMessage` in `_session_stop_reasons` registry |
 | `agent/job_queue.py` | `send_to_chat()` wiring -- invokes outcome parser, stage detector, then Observer; threads `stop_reason` |
 | `models/agent_session.py` | `AgentSession` with stage progress, steering queue, links |
-| `tests/test_observer.py` | 60 tests: 33 unit (stage detector, Observer tools, fallback) + 17 integration (real API with Haiku floor test) + 4 deterministic guard + 6 typed outcome merge |
+| `tests/test_observer.py` | 60+ tests: 33 unit (stage detector, Observer tools, fallback) + 17 integration (real API with Haiku floor test) + 4 deterministic guard + 6 typed outcome merge |
+| `tests/unit/test_message_quality.py` | 30 tests for narration detection, substantive content markers, and false positive prevention |
+| `tests/unit/test_observer_message_for_user.py` | Tests for `message_for_user` delivery path and observer tool schema |
 | `tests/unit/test_stop_reason_observer.py` | 7 tests for stop_reason routing (budget_exceeded, rate_limited, end_turn, registry) |
 | `tests/unit/test_skill_outcome.py` | 34 unit tests for SkillOutcome parsing, serialization, and edge cases |
 

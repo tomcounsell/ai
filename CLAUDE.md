@@ -50,6 +50,9 @@ gws sheets spreadsheets values get --params '{"spreadsheetId": "ID", "range": "S
 | `python scripts/reflections.py --ignore "pattern"` | Silence a bug pattern for 14 days |
 | `./scripts/install_reflections.sh` | Install reflections launchd schedule |
 | `tail -f logs/reflections.log` | Stream reflections logs |
+| `python scripts/issue_poller.py` | Run issue poller manually (polls GitHub for new issues) |
+| `./scripts/install_issue_poller.sh` | Install issue poller launchd schedule (5-min interval) |
+| `tail -f logs/issue_poller.log` | Stream issue poller logs |
 
 ## Development Principles
 
@@ -223,7 +226,7 @@ The bridge includes automatic crash recovery (see `docs/features/bridge-self-hea
 
 ## Plan Requirements (This Repo Only)
 
-Plans created with `/do-plan` must include three required sections. These are enforced by hooks that block plan creation if sections are missing or empty.
+Plans created with `/do-plan` must include four required sections. These are enforced by hooks that block plan creation if sections are missing or empty.
 
 ### ## Documentation (Required)
 
@@ -263,6 +266,27 @@ The **## Agent Integration** section should cover:
 - Whether the bridge itself needs to import/call the new code directly
 - Integration tests that verify the agent can actually invoke the new tools
 - If no agent integration is needed, state that explicitly (e.g., "No agent integration required — this is a bridge-internal change")
+
+### ## Test Impact (Required)
+
+Include a **## Test Impact** section after **## Failure Path Test Strategy** and before **## Rabbit Holes**. This section audits existing tests that will break or need changes due to the planned work. It is enforced by `.claude/hooks/validators/validate_test_impact_section.py`.
+
+The **## Test Impact** section must contain:
+- Checklist items listing affected test files/cases with dispositions: UPDATE, DELETE, or REPLACE
+- If no existing tests are affected, explicitly state "No existing tests affected" with justification (50+ chars)
+
+Example:
+```markdown
+## Test Impact
+- [ ] `tests/unit/test_example.py::test_old_behavior` — UPDATE: assert new return value
+- [ ] `tests/integration/test_flow.py::test_end_to_end` — REPLACE: rewrite for new API
+```
+
+Or for greenfield work:
+```markdown
+## Test Impact
+No existing tests affected — this is a greenfield feature with no prior test coverage.
+```
 
 ## See Also
 

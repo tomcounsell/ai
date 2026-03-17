@@ -7,6 +7,7 @@ Provides fast, queryable Redis models for all persistent data:
 - AgentSession: unified agent work lifecycle (replaces RedisJob + SessionLog)
 - BridgeEvent: structured bridge events for analytics
 - DeadLetter: failed message queue
+- Reflection: per-reflection scheduler state (unified recurring task tracking)
 - ReflectionRun: per-day reflection execution state
 - ReflectionIgnore: ignored bug patterns with TTL-based expiry
 """
@@ -16,6 +17,7 @@ from models.bridge_event import BridgeEvent
 from models.chat import Chat
 from models.dead_letter import DeadLetter
 from models.link import Link
+from models.reflection import Reflection
 from models.reflections import ReflectionIgnore, ReflectionRun
 from models.telegram import TelegramMessage
 
@@ -27,6 +29,7 @@ __all__ = [
     "SessionLog",
     "DeadLetter",
     "BridgeEvent",
+    "Reflection",
     "ReflectionIgnore",
     "ReflectionRun",
     "TelegramMessage",

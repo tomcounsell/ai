@@ -175,6 +175,10 @@ class Job:
         return self._rj.classification_type
 
     @property
+    def trigger_message_id(self) -> str | None:
+        return self._rj.trigger_message_id
+
+    @property
     def auto_continue_count(self) -> int:
         return self._rj.auto_continue_count or 0
 
@@ -213,6 +217,8 @@ _JOB_FIELDS = [
     "classification_type",
     "auto_continue_count",
     "started_at",
+    "trigger_message_id",
+    "claude_code_session_id",
     # Session-phase fields preserved across delete-and-recreate
     "last_activity",
     "completed_at",
@@ -240,6 +246,8 @@ _JOB_FIELDS = [
     "correlation_id",
     # Claude Code identity mapping — must be preserved across delete-and-recreate
     "claude_session_uuid",
+    # Job hierarchy fields — must be preserved across delete-and-recreate
+    "parent_job_id",
 ]
 
 # Backward compat alias
@@ -282,6 +290,8 @@ async def _push_job(
     correlation_id: str | None = None,
     scheduled_after: float | None = None,
     scheduling_depth: int = 0,
+    parent_job_id: str | None = None,
+    trigger_message_id: str | None = None,
 ) -> int:
     """Create a job in Redis and return the pending queue depth for this project.
 
@@ -332,6 +342,8 @@ async def _push_job(
         correlation_id=correlation_id,
         scheduled_after=scheduled_after,
         scheduling_depth=scheduling_depth,
+        parent_job_id=parent_job_id,
+        trigger_message_id=trigger_message_id,
     )
 
     # Log lifecycle transition for newly created pending job
@@ -416,9 +428,169 @@ async def _remove_by_session(project_key: str, session_id: str) -> bool:
     return removed
 
 
-async def _complete_job(job: Job) -> None:
-    """Mark a running job as completed and delete it from Redis."""
+async def _complete_job(job: Job, *, failed: bool = False) -> None:
+    """Mark a running job as completed and delete it from Redis.
+
+    If this job is a child (has parent_job_id), finalize the parent BEFORE
+    deleting the child. The completing child's intended terminal status is
+    passed to _finalize_parent so it can correctly count terminal children
+    even though the child's Redis status hasn't been updated yet.
+
+    Args:
+        job: The job to complete.
+        failed: If True, this job failed (used for parent finalization).
+    """
+    parent_job_id = getattr(job._rj, "parent_job_id", None)
+
+    # Finalize parent BEFORE deleting child, passing the completing child's
+    # intended status so _finalize_parent can treat it as terminal
+    if parent_job_id:
+        child_status = "failed" if failed else "completed"
+        await _finalize_parent(
+            parent_job_id,
+            completing_child_id=job.job_id,
+            completing_child_status=child_status,
+        )
+
     await job._rj.async_delete()
+
+
+async def _finalize_parent(
+    parent_job_id: str,
+    completing_child_id: str | None = None,
+    completing_child_status: str | None = None,
+) -> None:
+    """Check if all children of a parent are terminal; if so, finalize the parent.
+
+    Transitions parent from waiting_for_children to completed (all children
+    succeeded) or failed (any child failed). Idempotent: no-op if parent is
+    already in a terminal state or no longer exists.
+
+    Args:
+        parent_job_id: The job_id of the parent AgentSession.
+        completing_child_id: If provided, the job_id of the child that is
+            currently completing. Its Redis status may still be "running",
+            so completing_child_status overrides it.
+        completing_child_status: The intended terminal status ("completed"
+            or "failed") of the completing child.
+    """
+    # NOTE: This function is async def but uses synchronous Redis operations
+    # (AgentSession.query.get, _transition_parent with sync delete/create).
+    # This is consistent with the existing codebase patterns — popoto's Redis
+    # operations are synchronous under the hood. If the codebase ever moves to
+    # true async Redis, these will need updating.
+    try:
+        parent = AgentSession.query.get(parent_job_id)
+    except Exception:
+        logger.warning(
+            f"[job-hierarchy] Parent job {parent_job_id} lookup raised "
+            f"exception during finalization — treating child as orphaned"
+        )
+        return
+
+    if parent is None:
+        logger.warning(
+            f"[job-hierarchy] Parent job {parent_job_id} not found during "
+            f"finalization — parent may have been deleted or already finalized"
+        )
+        return
+
+    # Only finalize if parent is in waiting_for_children status
+    if parent.status != "waiting_for_children":
+        logger.debug(
+            f"[job-hierarchy] Parent {parent_job_id} status is "
+            f"{parent.status!r}, skipping finalization"
+        )
+        return
+
+    # Check all children
+    children = parent.get_children()
+    if not children:
+        # Edge case: parent has no children but is waiting_for_children.
+        # Transition to completed as a safety guard.
+        logger.warning(
+            f"[job-hierarchy] Parent {parent_job_id} has no children but "
+            f"status is waiting_for_children — auto-completing"
+        )
+        _transition_parent(parent, "completed")
+        return
+
+    # Build effective status map: override the completing child's status
+    # since its Redis status hasn't been updated yet
+    terminal_statuses = {"completed", "failed"}
+
+    def effective_status(child: AgentSession) -> str:
+        if completing_child_id and child.job_id == completing_child_id:
+            return completing_child_status or "completed"
+        return child.status
+
+    child_statuses = [effective_status(c) for c in children]
+    non_terminal = [s for s in child_statuses if s not in terminal_statuses]
+
+    if non_terminal:
+        # Some children still running/pending — not ready to finalize
+        logger.debug(
+            f"[job-hierarchy] Parent {parent_job_id} has "
+            f"{len(non_terminal)} non-terminal children — waiting"
+        )
+        return
+
+    # All children are terminal — determine final parent status
+    any_failed = any(s == "failed" for s in child_statuses)
+    new_status = "failed" if any_failed else "completed"
+
+    completed_count = sum(1 for s in child_statuses if s == "completed")
+    failed_count = sum(1 for s in child_statuses if s == "failed")
+    logger.info(
+        f"[job-hierarchy] Finalizing parent {parent_job_id}: "
+        f"{completed_count} completed, {failed_count} failed -> {new_status}"
+    )
+
+    _transition_parent(parent, new_status)
+
+
+def _transition_parent(parent: AgentSession, new_status: str) -> None:
+    """Transition a parent job to a new status using delete-and-recreate.
+
+    Uses the same pattern as _pop_job() to avoid KeyField index corruption.
+    After creating the new parent, updates all children's parent_job_id
+    references to point to the new job_id (since delete-and-recreate
+    generates a new job_id).
+
+    Note: This is a sync function called from both sync (cmd_schedule) and
+    async (_finalize_parent) contexts. The delete-and-recreate generates a
+    new job_id for the parent. Currently safe because workers are per-project
+    and sequential, so concurrent _finalize_parent calls for the same parent
+    cannot occur. If concurrency changes, consider propagating new job_id
+    to children defensively or using a stable identifier.
+    """
+    old_job_id = parent.job_id
+    children = parent.get_children()
+    fields = _extract_job_fields(parent)
+    parent.delete()
+    fields["status"] = new_status
+    # Only set completed_at for terminal statuses, not for waiting_for_children
+    if new_status in ("completed", "failed"):
+        fields["completed_at"] = time.time()
+    new_parent = AgentSession.create(**fields)
+
+    # Update children's parent_job_id to point to the new parent.
+    # parent_job_id is a KeyField, so we must use delete-and-recreate
+    # to avoid index corruption (same pattern as _pop_job).
+    if new_parent.job_id != old_job_id and children:
+        for child in children:
+            try:
+                child_fields = _extract_job_fields(child)
+                child.delete()
+                child_fields["parent_job_id"] = new_parent.job_id
+                AgentSession.create(**child_fields)
+            except Exception as e:
+                logger.warning(
+                    f"[job-hierarchy] Failed to update child {child.job_id} "
+                    f"parent_job_id to {new_parent.job_id}: {e}"
+                )
+
+    logger.info(f"[job-hierarchy] Parent {old_job_id} -> {new_parent.job_id} (status={new_status})")
 
 
 def _get_pending_jobs_sync(project_key: str) -> list[AgentSession]:
@@ -514,7 +686,7 @@ def _recover_orphaned_jobs(project_key: str) -> int:
     # Get all keys in status index sets
     # KeyField index pattern: $KeyF:AgentSession:status:{value}
     indexed_keys: set[bytes] = set()
-    for status in ["pending", "running", "completed", "failed"]:
+    for status in ["pending", "running", "completed", "failed", "waiting_for_children"]:
         index_key = DB_key(
             AgentSession._meta.fields["status"].get_special_use_field_db_key(
                 AgentSession, "status"
@@ -708,6 +880,80 @@ async def _job_health_check() -> None:
     )
 
 
+async def _job_hierarchy_health_check() -> None:
+    """Check for orphaned children and stuck parents in job hierarchy.
+
+    1. Orphaned children: child's parent_job_id points to a non-existent session.
+       Action: clear the parent_job_id field (child completes normally).
+    2. Stuck parents: status is waiting_for_children but all children are terminal.
+       Action: finalize the parent (transition to completed/failed).
+    """
+    orphans_fixed = 0
+    stuck_fixed = 0
+
+    # Check for orphaned children
+    try:
+        all_sessions = list(AgentSession.query.all())
+        children_with_parent = [s for s in all_sessions if s.parent_job_id]
+        parent_ids = {s.job_id for s in all_sessions}
+
+        for child in children_with_parent:
+            if child.parent_job_id not in parent_ids:
+                logger.warning(
+                    "[job-health] Orphaned child %s: parent %s no longer exists — "
+                    "clearing parent_job_id",
+                    child.job_id,
+                    child.parent_job_id,
+                )
+                # Use delete-and-recreate to safely clear the KeyField
+                fields = _extract_job_fields(child)
+                child.delete()
+                fields["parent_job_id"] = None
+                AgentSession.create(**fields)
+                orphans_fixed += 1
+    except Exception as e:
+        logger.error("[job-health] Orphan detection failed: %s", e, exc_info=True)
+
+    # Check for stuck parents
+    try:
+        waiting_parents = list(AgentSession.query.filter(status="waiting_for_children"))
+        for parent in waiting_parents:
+            children = parent.get_children()
+            if not children:
+                # No children but waiting — auto-complete
+                logger.warning(
+                    "[job-health] Stuck parent %s has no children — auto-completing",
+                    parent.job_id,
+                )
+                _transition_parent(parent, "completed")
+                stuck_fixed += 1
+                continue
+
+            terminal_statuses = {"completed", "failed"}
+            non_terminal = [c for c in children if c.status not in terminal_statuses]
+            if not non_terminal:
+                # All children terminal but parent still waiting
+                any_failed = any(c.status == "failed" for c in children)
+                new_status = "failed" if any_failed else "completed"
+                logger.warning(
+                    "[job-health] Stuck parent %s: all %d children terminal — finalizing as %s",
+                    parent.job_id,
+                    len(children),
+                    new_status,
+                )
+                _transition_parent(parent, new_status)
+                stuck_fixed += 1
+    except Exception as e:
+        logger.error("[job-health] Stuck parent detection failed: %s", e, exc_info=True)
+
+    if orphans_fixed or stuck_fixed:
+        logger.info(
+            "[job-health] Hierarchy check: %d orphan(s) fixed, %d stuck parent(s) fixed",
+            orphans_fixed,
+            stuck_fixed,
+        )
+
+
 async def _job_health_loop() -> None:
     """Periodically check running jobs for liveness and timeout."""
     logger.info(
@@ -717,6 +963,7 @@ async def _job_health_loop() -> None:
     while True:
         try:
             await _job_health_check()
+            await _job_hierarchy_health_check()
         except Exception as e:
             logger.error("[job-health] Error in health check: %s", e, exc_info=True)
         await asyncio.sleep(JOB_HEALTH_CHECK_INTERVAL)
@@ -865,6 +1112,8 @@ async def enqueue_job(
     correlation_id: str | None = None,
     scheduled_after: float | None = None,
     scheduling_depth: int = 0,
+    parent_job_id: str | None = None,
+    trigger_message_id: str | None = None,
 ) -> int:
     """
     Add a job to Redis and ensure worker is running.
@@ -900,6 +1149,8 @@ async def enqueue_job(
         correlation_id=correlation_id,
         scheduled_after=scheduled_after,
         scheduling_depth=scheduling_depth,
+        parent_job_id=parent_job_id,
+        trigger_message_id=trigger_message_id,
     )
     _ensure_worker(project_key)
     log_prefix = f"[{correlation_id}]" if correlation_id else f"[{project_key}]"
@@ -941,12 +1192,14 @@ async def _worker_loop(project_key: str) -> None:
                     break
                 logger.info(f"[{project_key}] Drain guard caught job that would have been lost")
 
+            job_failed = False
             try:
                 await _execute_job(job)
             except Exception as e:
                 logger.error(f"[{project_key}] Job {job.job_id} failed: {e}")
+                job_failed = True
             finally:
-                await _complete_job(job)
+                await _complete_job(job, failed=job_failed)
 
             # Check restart flag after each completed job
             if _check_restart_flag():
@@ -1004,6 +1257,32 @@ async def _calendar_heartbeat(slug: str, project: str | None = None) -> None:
 CALENDAR_HEARTBEAT_INTERVAL = 25 * 60  # 25 minutes (fits within 30-min segments)
 
 
+def _diagnose_missing_session(session_id: str) -> dict:
+    """Check Redis directly for session key diagnostics when Popoto query fails.
+
+    Returns a dict with key_exists, ttl, and any error info to aid debugging
+    why the session was not found by the ORM query.
+    """
+    try:
+        import redis as redis_lib
+
+        r = redis_lib.Redis()
+        # Popoto stores keys with model-specific prefixes; scan for matches
+        # TODO: Replace r.keys() with r.scan() if Redis grows beyond ~10k keys.
+        #   KEYS is O(N) across the entire keyspace. Acceptable on error path
+        #   with small Redis, but SCAN would be safer at scale. (PR #419 review)
+        keys = r.keys(f"*{session_id}*")
+        result = {"matching_keys": len(keys)}
+        for key in keys[:5]:  # Cap at 5 to avoid log spam
+            key_str = key.decode() if isinstance(key, bytes) else str(key)
+            ttl = r.ttl(key)
+            exists = r.exists(key)
+            result[key_str] = {"exists": bool(exists), "ttl": ttl}
+        return result
+    except Exception as e:
+        return {"error": str(e)}
+
+
 async def _enqueue_continuation(
     job: "Job",
     branch_name: str,
@@ -1047,24 +1326,31 @@ async def _enqueue_continuation(
     # new index set but never removes from old one).
     sessions = list(AgentSession.query.filter(session_id=job.session_id))
     if not sessions:
+        # Diagnose why the session is missing before falling back.
+        # Check Redis directly for key existence and TTL to aid debugging.
+        _diag = _diagnose_missing_session(job.session_id)
         logger.error(
             f"[{job.project_key}] No session found for {job.session_id} "
-            f"— falling back to enqueue_job"
+            f"— falling back to recreate from Job metadata. "
+            f"Diagnostics: {_diag}"
         )
-        # Fallback: create a new session if the original is somehow gone
-        await enqueue_job(
-            project_key=job.project_key,
-            session_id=job.session_id,
-            working_dir=job.working_dir,
-            message_text=coaching_message,
-            sender_name="System (auto-continue)",
-            chat_id=job.chat_id,
-            message_id=job.message_id,
-            priority="high",
-            work_item_slug=job.work_item_slug,
-            task_list_id=task_list_id,
-            auto_continue_count=auto_continue_count,
-            classification_type=job.classification_type,
+        # Fallback: recreate session preserving ALL metadata from the
+        # underlying AgentSession that was loaded when the job was popped.
+        # This prevents loss of context_summary, expectations, issue_url,
+        # pr_url, history, correlation_id, and other session-phase fields.
+        fields = _extract_job_fields(job._rj)
+        # Override fields that change for continuation
+        fields["status"] = "pending"
+        fields["message_text"] = coaching_message
+        fields["sender_name"] = "System (auto-continue)"
+        fields["auto_continue_count"] = auto_continue_count
+        fields["priority"] = "high"
+        fields["task_list_id"] = task_list_id
+        await AgentSession.async_create(**fields)
+        _ensure_worker(job.project_key)
+        logger.info(
+            f"[{job.project_key}] Recreated session {job.session_id} from Job metadata "
+            f"(fallback path, auto_continue_count={auto_continue_count})"
         )
         return
 
@@ -1261,6 +1547,43 @@ async def _execute_job(job: Job) -> None:
             chat_state.completion_sent = True
             return
 
+        # Narration gate: detect false-promise output before running Observer.
+        # If worker output is pure narration ("Let me check...", "I'll look at...")
+        # with no substantive findings, auto-continue instead of delivering.
+        from bridge.message_quality import (
+            NARRATION_COACHING_MESSAGE,
+            NARRATION_FALLBACK_MESSAGE,
+            is_narration_only,
+        )
+
+        if is_narration_only(msg):
+            effective_max = MAX_AUTO_CONTINUES_SDLC if _is_sdlc else MAX_AUTO_CONTINUES
+            if chat_state.auto_continue_count < effective_max:
+                # Auto-continue: worker announced work but didn't do it
+                chat_state.auto_continue_count += 1
+                logger.info(
+                    f"[{job.project_key}] Narration gate: output is pure narration, "
+                    f"auto-continuing ({chat_state.auto_continue_count}/{effective_max})"
+                )
+                await _enqueue_continuation(
+                    job,
+                    branch_name,
+                    task_list_id,
+                    chat_state.auto_continue_count,
+                    msg,
+                    coaching_message=NARRATION_COACHING_MESSAGE,
+                )
+                chat_state.completion_sent = True
+                chat_state.defer_reaction = True
+                return
+            else:
+                # At cap: send fallback instead of narration
+                logger.warning(
+                    f"[{job.project_key}] Narration gate: output is pure narration "
+                    f"and auto-continue cap reached, sending fallback message"
+                )
+                msg = NARRATION_FALLBACK_MESSAGE
+
         # Run the Observer Agent for routing decisions
         if not agent_session:
             logger.warning(
@@ -1322,7 +1645,15 @@ async def _execute_job(job: Job) -> None:
                     f"({chat_state.auto_continue_count}/{effective_max}), "
                     f"delivering to Telegram instead of steering"
                 )
-                await send_cb(job.chat_id, msg, job.message_id, agent_session)
+                # If output is narration-only at cap, substitute with fallback
+                cap_msg = msg
+                if is_narration_only(msg):
+                    cap_msg = NARRATION_FALLBACK_MESSAGE
+                    logger.info(
+                        f"[{job.project_key}] Cap-forced delivery: substituting "
+                        f"narration-only output with fallback message"
+                    )
+                await send_cb(job.chat_id, cap_msg, job.message_id, agent_session)
                 chat_state.completion_sent = True
                 return
 
@@ -1384,7 +1715,16 @@ async def _execute_job(job: Job) -> None:
             except Exception as e:
                 logger.warning(f"[{job.project_key}] Gate completion guard failed: {e}")
 
-        await send_cb(job.chat_id, msg, job.message_id, agent_session)
+        # Use message_for_user from Observer if provided (curated user-facing text),
+        # otherwise fall back to raw worker output. The reason is internal-only.
+        delivery_msg = decision.get("message_for_user", msg)
+        # Guard: if delivery message is empty/whitespace, use a fallback
+        if not delivery_msg or not delivery_msg.strip():
+            delivery_msg = (
+                "The task completed but produced no output. "
+                "Please re-trigger if you expected results."
+            )
+        await send_cb(job.chat_id, delivery_msg, job.message_id, agent_session)
         chat_state.completion_sent = True
         logger.info(
             f"[{job.project_key}] Observer delivered to Telegram: "
@@ -1398,8 +1738,40 @@ async def _execute_job(job: Job) -> None:
     )
 
     # Deferred enrichment: process media, YouTube, links, reply chain
+    # Prefer reading enrichment params from TelegramMessage (new path),
+    # fall back to AgentSession fields (backward compat for pre-migration sessions).
     enriched_text = job.message_text
-    if job.has_media or job.youtube_urls or job.non_youtube_urls or job.reply_to_msg_id:
+    enrich_has_media = job.has_media
+    enrich_media_type = job.media_type
+    enrich_youtube_urls = job.youtube_urls
+    enrich_non_youtube_urls = job.non_youtube_urls
+    enrich_reply_to_msg_id = job.reply_to_msg_id
+
+    if job.trigger_message_id:
+        try:
+            from models.telegram import TelegramMessage
+
+            trigger_msgs = list(TelegramMessage.query.filter(msg_id=job.trigger_message_id))
+            if trigger_msgs:
+                tm = trigger_msgs[0]
+                enrich_has_media = bool(tm.has_media)
+                enrich_media_type = tm.media_type
+                enrich_youtube_urls = tm.youtube_urls
+                enrich_non_youtube_urls = tm.non_youtube_urls
+                enrich_reply_to_msg_id = tm.reply_to_msg_id
+                logger.debug(
+                    f"[{job.project_key}] Resolved enrichment from "
+                    f"TelegramMessage {job.trigger_message_id}"
+                )
+            else:
+                logger.debug(
+                    f"[{job.project_key}] trigger_message_id {job.trigger_message_id} "
+                    f"not found, falling back to AgentSession fields"
+                )
+        except Exception as e:
+            logger.debug(f"[{job.project_key}] TelegramMessage lookup failed, using fallback: {e}")
+
+    if enrich_has_media or enrich_youtube_urls or enrich_non_youtube_urls or enrich_reply_to_msg_id:
         try:
             from bridge.enrichment import enrich_message, get_telegram_client
 
@@ -1407,12 +1779,12 @@ async def _execute_job(job: Job) -> None:
             enriched_text = await enrich_message(
                 telegram_client=tg_client,
                 message_text=job.message_text,
-                has_media=job.has_media,
-                media_type=job.media_type,
+                has_media=enrich_has_media,
+                media_type=enrich_media_type,
                 raw_media_message_id=job.message_id,
-                youtube_urls=job.youtube_urls,
-                non_youtube_urls=job.non_youtube_urls,
-                reply_to_msg_id=job.reply_to_msg_id,
+                youtube_urls=enrich_youtube_urls,
+                non_youtube_urls=enrich_non_youtube_urls,
+                reply_to_msg_id=enrich_reply_to_msg_id,
                 chat_id=job.chat_id_for_enrichment or job.chat_id,
                 sender_name=job.sender_name,
                 message_id=job.message_id,
@@ -1420,12 +1792,29 @@ async def _execute_job(job: Job) -> None:
         except Exception as e:
             logger.warning(f"[{job.project_key}] Enrichment failed, using raw text: {e}")
 
-    # Run agent work directly in the project working directory
-    project_config = {
-        "_key": job.project_key,
-        "working_directory": str(working_dir),
-        "name": job.project_key,
-    }
+    # Set back-reference: TelegramMessage.agent_session_id -> this session's job_id
+    if job.trigger_message_id:
+        try:
+            from models.telegram import TelegramMessage
+
+            trigger_msgs = list(TelegramMessage.query.filter(msg_id=job.trigger_message_id))
+            if trigger_msgs and not trigger_msgs[0].agent_session_id:
+                trigger_msgs[0].agent_session_id = job._rj.job_id
+                trigger_msgs[0].save()
+        except Exception:
+            pass  # Non-critical: best-effort cross-reference
+
+    # Run agent work directly in the project working directory.
+    # Use the full registered project config (from projects.json) so that
+    # downstream code (e.g., GH_REPO injection for cross-repo SDLC) has
+    # access to all fields including "github", "mode", etc.
+    project_config = get_project_config(job.project_key)
+    if not project_config:
+        project_config = {
+            "_key": job.project_key,
+            "working_directory": str(working_dir),
+            "name": job.project_key,
+        }
 
     async def do_work() -> str:
         return await get_agent_response_sdk(
@@ -1439,6 +1828,7 @@ async def _execute_job(job: Job) -> None:
             job.workflow_id,
             task_list_id,
             cid,
+            job.job_id,
         )
 
     task = BackgroundTask(messenger=messenger)
@@ -1785,6 +2175,50 @@ async def cleanup_stale_branches(working_dir: str, max_age_hours: float = 72) ->
         logger.error(f"Branch cleanup error: {e}")
 
     return cleaned
+
+
+# === Reflection-callable wrappers ===
+# These are called by the reflection scheduler (agent/reflection_scheduler.py)
+# and iterate all registered projects, so they don't need a project_key argument.
+
+
+def recover_orphaned_jobs_all_projects() -> int:
+    """Recover orphaned jobs across all registered projects.
+
+    Called by the reflection scheduler as the 'orphan-recovery' reflection.
+    Returns total number of recovered jobs.
+    """
+    total = 0
+    for project_key in list(_project_configs.keys()):
+        try:
+            recovered = _recover_orphaned_jobs(project_key)
+            total += recovered
+        except Exception as e:
+            logger.error("[reflection] Orphan recovery failed for %s: %s", project_key, e)
+    if not _project_configs:
+        logger.debug("[reflection] No projects registered, skipping orphan recovery")
+    return total
+
+
+async def cleanup_stale_branches_all_projects() -> list[str]:
+    """Clean up stale session branches across all registered projects.
+
+    Called by the reflection scheduler as the 'stale-branch-cleanup' reflection.
+    Returns list of all cleaned branch names.
+    """
+    all_cleaned = []
+    for project_key, config in list(_project_configs.items()):
+        working_dir = config.get("working_dir", "")
+        if not working_dir:
+            continue
+        try:
+            cleaned = await cleanup_stale_branches(working_dir)
+            all_cleaned.extend(cleaned)
+        except Exception as e:
+            logger.error("[reflection] Branch cleanup failed for %s: %s", project_key, e)
+    if not _project_configs:
+        logger.debug("[reflection] No projects registered, skipping branch cleanup")
+    return all_cleaned
 
 
 # === CLI Entry Point ===

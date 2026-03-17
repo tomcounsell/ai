@@ -10,7 +10,7 @@ Human-readable index of all Claude Code skills in this project. Not loaded by Cl
 | checking-system-logs | 66 | Model only | - | Find bridge events, agent responses, errors in system logs |
 | do-build | 115 | User + Model | fork | Execute a plan document using team orchestration |
 | do-docs | 268 | User + Model | - | Cascade documentation updates after code changes |
-| do-docs-audit | 298 | User + Model | fork | Audit docs against codebase for accuracy |
+| do-docs-audit | 373 | User + Model | fork | Audit docs against codebase for accuracy |
 | do-patch | 204 | User + Model | - | Targeted fix for failing tests or review blockers |
 | do-plan | 202 | User + Model | - | Create or update feature plan documents |
 | do-pr-review | 218 | User + Model | fork | Review PRs with code analysis and screenshots |

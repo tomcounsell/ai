@@ -105,6 +105,62 @@ All commands return structured JSON for agent parsing:
 {"status": "error", "message": "Rate limit exceeded"}
 ```
 
+## Parent-Child Job Hierarchy
+
+Jobs can be decomposed into smaller child jobs linked to a parent via `parent_job_id`. This enables:
+
+- **Partial re-runs**: If child 3/5 fails, only that child needs re-running
+- **Progress visibility**: `/queue-status` shows job trees with per-child status
+- **Automatic completion**: When all children complete, the parent auto-transitions
+
+### Spawning Child Jobs
+
+An agent mid-job can decompose work by passing `--parent-job`:
+
+```bash
+python -m tools.job_scheduler schedule --issue 113 --parent-job $JOB_ID
+```
+
+The `JOB_ID` environment variable is injected into the agent subprocess automatically.
+
+Child jobs inherit from the parent:
+- `correlation_id` (end-to-end tracing)
+- `chat_id` (output routing)
+- `classification_type` (SDLC/Q&A classification)
+- `working_dir` (project working directory)
+- `priority` (unless explicitly overridden)
+
+### Parent Lifecycle
+
+1. Parent spawns children via `schedule_job --parent-job $JOB_ID`
+2. Parent transitions to `waiting_for_children` status
+3. Worker processes children sequentially (same as any other jobs)
+4. After each child completes, worker checks if all siblings are terminal
+5. When all children are done: parent auto-transitions to `completed` or `failed`
+
+### Listing Children
+
+```bash
+python -m tools.job_scheduler children --job-id <PARENT_JOB_ID>
+```
+
+Returns structured JSON with progress summary and per-child status.
+
+### Health Monitoring
+
+The job health monitor (runs every 5 minutes) includes hierarchy checks:
+
+- **Orphaned children**: Parent deleted but children still reference it -- clears the link
+- **Stuck parents**: `waiting_for_children` with all children terminal -- auto-finalizes
+
+### AgentSession Helpers
+
+```python
+session.get_parent()              # Returns parent AgentSession or None
+session.get_children()            # Returns list of child AgentSessions
+session.get_completion_progress() # Returns (completed, total, failed) tuple
+```
+
 ## Batch Dispatch
 
 "Handle issues #111, #112, #113" is just the agent calling `schedule` three times:

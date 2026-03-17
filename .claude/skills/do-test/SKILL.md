@@ -335,7 +335,7 @@ Replace the generic "Failures" section with a **verified classification table**:
 | tests/e2e/test_flow.py::test_deleted | FAILED | N/A | inconclusive |
 
 **Summary:**
-- Regressions: 1 (must fix before merge)
+- Regressions: 1 (blocking)
 - Pre-existing: 1 (does not block merge)
 - Inconclusive: 1 (manual review recommended)
 ```

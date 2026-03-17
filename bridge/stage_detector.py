@@ -29,18 +29,23 @@ SKILL_TO_STAGE: dict[str, str] = {
     "/do-test": "TEST",
     "/do-pr-review": "REVIEW",
     "/do-docs": "DOCS",
+    "/do-merge": "MERGE",
 }
 
 # The ordered pipeline stages
-STAGE_ORDER = ["ISSUE", "PLAN", "BUILD", "TEST", "REVIEW", "DOCS"]
+STAGE_ORDER = ["ISSUE", "PLAN", "BUILD", "TEST", "REVIEW", "DOCS", "MERGE"]
 
 # Patterns that indicate a stage has been invoked or completed
 _SKILL_INVOCATION_PATTERN = re.compile(
-    r"(?:^|\s)(/do-(?:plan|build|test|pr-review|docs))(?:\s|$|['\"])",
+    r"(?:^|\s)(/do-(?:plan|build|test|pr-review|docs|merge))(?:\s|$|['\"])",
     re.MULTILINE,
 )
 
-# Patterns for explicit completion markers in transcript
+# Patterns for explicit completion markers in transcript.
+# REVIEW and DOCS are intentionally excluded — these stages should ONLY be
+# marked complete via typed SkillOutcome from /do-pr-review or /do-docs, or
+# via skill invocation detection. This prevents false positives from incidental
+# mentions like "review complete" in unrelated output.
 _COMPLETION_PATTERNS: dict[str, re.Pattern] = {
     "ISSUE": re.compile(
         r"(?:issue\s+(?:created|opened|#\d+))|(?:github\.com/.+/issues/\d+)",
@@ -59,13 +64,8 @@ _COMPLETION_PATTERNS: dict[str, re.Pattern] = {
         r"(?:\d+\s+passed.*\d+\s+failed|\d+\s+passed\b)|(?:tests?\s+pass(?:ing|ed))",
         re.IGNORECASE,
     ),
-    "REVIEW": re.compile(
-        r"(?:review\s+(?:passed|approved|complete))|(?:pr-review\s+complete)",
-        re.IGNORECASE,
-    ),
-    "DOCS": re.compile(
-        r"(?:documentation?\s+(?:created|updated|complete))|"
-        r"(?:docs/features/\S+\.md\s+created)",
+    "MERGE": re.compile(
+        r"(?:merge\s+(?:complete|approved|authorized))|(?:PR\s+merged)",
         re.IGNORECASE,
     ),
 }
@@ -202,7 +202,8 @@ def apply_transitions(
     # where completed stages render as unchecked in Telegram progress displays.
     if outcome is not None:
         regex_stages = {t["stage"] for t in transitions}
-        if outcome.status == "success" and outcome.stage and outcome.stage not in regex_stages:
+        stage_done = outcome.status in ("success", "partial")
+        if stage_done and outcome.stage and outcome.stage not in regex_stages:
             logger.info(
                 f"[stage-detector] Stage {outcome.stage} merged from typed outcome "
                 f"(regex missed). Regex detected: {regex_stages or 'none'}"
@@ -211,7 +212,7 @@ def apply_transitions(
                 {
                     "stage": outcome.stage,
                     "status": "completed",
-                    "reason": f"Typed outcome: {outcome.stage} succeeded (regex missed)",
+                    "reason": f"Typed outcome: {outcome.stage} {outcome.status} (regex missed)",
                 }
             )
         elif outcome.status == "fail" and outcome.stage in regex_stages:

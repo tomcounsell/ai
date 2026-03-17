@@ -23,6 +23,8 @@ import logging
 import re
 from pathlib import Path
 
+from bridge.pipeline_graph import DISPLAY_STAGES, STAGE_TO_SKILL
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -41,22 +43,6 @@ logger = logging.getLogger(__name__)
 #   2. Optionally add a skill-specific coaching template
 #   3. The coach will automatically pick it up — no other wiring needed
 # ---------------------------------------------------------------------------
-# Maps SDLC stage names (from AgentSession.get_stage_progress()) to the
-# corresponding /do-* skill that should be invoked next. Used by the
-# SDLC stage progress coaching tier (1c) to build explicit next-step
-# instructions that prevent the agent from drifting to unrelated work.
-STAGE_TO_SKILL: dict[str, str] = {
-    "PLAN": "/do-plan",
-    "BUILD": "/do-build",
-    "TEST": "/do-test",
-    "REVIEW": "/do-pr-review",
-    "DOCS": "/do-docs",
-}
-
-# Ordered list of SDLC stages for determining "next stage" from progress.
-# Must match the order in models.agent_session.SDLC_STAGES.
-_STAGE_ORDER = ["ISSUE", "PLAN", "BUILD", "TEST", "REVIEW", "DOCS"]
-
 SKILL_DETECTORS: dict[str, dict] = {
     "/do-plan": {
         "phase": "plan",
@@ -175,8 +161,8 @@ def _build_sdlc_stage_coaching(stage_progress: dict) -> str | None:
     if not stage_progress:
         return None
 
-    completed = [s for s in _STAGE_ORDER if stage_progress.get(s) == "completed"]
-    in_progress = [s for s in _STAGE_ORDER if stage_progress.get(s) == "in_progress"]
+    completed = [s for s in DISPLAY_STAGES if stage_progress.get(s) == "completed"]
+    in_progress = [s for s in DISPLAY_STAGES if stage_progress.get(s) == "in_progress"]
 
     # If nothing is completed and nothing is in progress, no useful coaching
     if not completed and not in_progress:
@@ -184,7 +170,7 @@ def _build_sdlc_stage_coaching(stage_progress: dict) -> str | None:
 
     # Find the next stage to invoke: first pending stage in pipeline order
     next_stage = None
-    for stage in _STAGE_ORDER:
+    for stage in DISPLAY_STAGES:
         if stage_progress.get(stage) == "pending":
             next_stage = stage
             break
@@ -197,7 +183,7 @@ def _build_sdlc_stage_coaching(stage_progress: dict) -> str | None:
     skill_name = STAGE_TO_SKILL.get(next_stage)
     if not skill_name:
         # ISSUE stage has no corresponding skill — skip to the next pending
-        for stage in _STAGE_ORDER:
+        for stage in DISPLAY_STAGES:
             if stage_progress.get(stage) == "pending" and stage in STAGE_TO_SKILL:
                 next_stage = stage
                 skill_name = STAGE_TO_SKILL[next_stage]

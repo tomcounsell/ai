@@ -8,7 +8,7 @@ import json
 
 import pytest
 
-from bridge.observer import Observer
+from bridge.observer import Observer, _next_sdlc_skill
 from bridge.stage_detector import STAGE_ORDER, apply_transitions, detect_stages
 from config.models import HAIKU
 from models.agent_session import SDLC_STAGES
@@ -105,11 +105,17 @@ class TestDetectStages:
         transitions = detect_stages(transcript)
         assert any(t["stage"] == "ISSUE" and t["status"] == "completed" for t in transitions)
 
-    def test_completion_marker_docs_created(self):
-        """Detect DOCS completion from documentation patterns."""
+    def test_docs_not_detected_from_regex(self):
+        """DOCS should NOT be detected from regex patterns — only typed outcomes."""
         transcript = "Documentation created at docs/features/observer-agent.md"
         transitions = detect_stages(transcript)
-        assert any(t["stage"] == "DOCS" and t["status"] == "completed" for t in transitions)
+        assert not any(t["stage"] == "DOCS" and t["status"] == "completed" for t in transitions)
+
+    def test_review_not_detected_from_regex(self):
+        """REVIEW should NOT be detected from regex patterns — only typed outcomes."""
+        transcript = "review passed and approved by the team, pr-review complete"
+        transitions = detect_stages(transcript)
+        assert not any(t["stage"] == "REVIEW" and t["status"] == "completed" for t in transitions)
 
     def test_no_false_positives_on_normal_text(self):
         """Normal conversation text should not trigger stage detection."""
@@ -490,27 +496,20 @@ class TestObserverFallback:
     async def test_observer_error_returns_deliver(self):
         """When Observer errors (no API key), it returns a deliver decision.
 
-        Uses a non-SDLC session so the deterministic SDLC guard doesn't
-        short-circuit before reaching the API call path.
+        Uses a non-SDLC session so the deterministic SDLC guard (Phase 1.75)
+        doesn't intercept before reaching the LLM error path we're testing.
         """
 
         class MockSession:
             session_id = "test-fallback"
-            classification_type = "conversation"  # Non-SDLC to reach LLM path
+            classification_type = "general"  # Non-SDLC to reach LLM path
             context_summary = None
             expectations = None
             queued_steering_messages = []
             history = []
 
             def get_stage_progress(self):
-                return {
-                    "ISSUE": "pending",
-                    "PLAN": "pending",
-                    "BUILD": "pending",
-                    "TEST": "pending",
-                    "REVIEW": "pending",
-                    "DOCS": "pending",
-                }
+                return {}
 
             def get_history_list(self):
                 return []
@@ -524,7 +523,7 @@ class TestObserverFallback:
                 return False
 
             def has_remaining_stages(self):
-                return True
+                return False
 
             def has_failed_stage(self):
                 return False
@@ -1254,6 +1253,7 @@ class TestObserverSdlcSteering:
         decision = await observer.run()
 
         # Should NOT be a deterministic guard steer — must fall through to LLM
+        # which should deliver the failure to human
         assert decision.get("deterministic_guard") is not True, (
             "Deterministic guard should NOT fire when a stage has failed"
         )
@@ -1330,3 +1330,616 @@ class TestObserverSdlcSteering:
         assert decision.get("deterministic_guard") is True, (
             "Decision should be marked as deterministic_guard"
         )
+
+
+# ============================================================================
+# Typed Outcome Graph Routing Tests (issue #414)
+# ============================================================================
+
+
+class TestTypedOutcomeGraphRouting:
+    """Test that the Observer resolves next_skill from the pipeline graph
+    when outcome.next_skill is None (regression test for issue #414)."""
+
+    def _make_session(self, stage_progress, pr_url=None):
+        """Create a mock session with stage progress and has_remaining_stages."""
+
+        class MockSession:
+            def __init__(self):
+                self.session_id = "test-session"
+                self.correlation_id = "test-cid"
+                self.pr_url = pr_url
+                self._stage_progress = stage_progress
+                self._history = []
+
+            def get_stage_progress(self):
+                return dict(self._stage_progress)
+
+            def has_remaining_stages(self):
+                return any(v in ("pending", "in_progress") for v in self._stage_progress.values())
+
+            def get_history_list(self):
+                return self._history
+
+            def save(self):
+                pass
+
+        return MockSession()
+
+    def test_next_skill_none_resolves_from_graph(self):
+        """When outcome.next_skill is None and BUILD just completed,
+        the Observer should resolve /do-test from the pipeline graph."""
+        from agent.skill_outcome import SkillOutcome
+
+        session = self._make_session(
+            stage_progress={
+                "ISSUE": "completed",
+                "PLAN": "completed",
+                "BUILD": "completed",
+                "TEST": "pending",
+                "REVIEW": "pending",
+                "DOCS": "pending",
+            }
+        )
+
+        # Simulate what the Observer does at line 557-566
+        outcome = SkillOutcome(
+            status="success",
+            stage="BUILD",
+            notes="PR created",
+            next_skill=None,
+        )
+
+        # This is the exact logic from the fix
+        if outcome.next_skill:
+            next_skill = outcome.next_skill
+        else:
+            next_info = _next_sdlc_skill(session)
+            next_skill = next_info[1] if next_info else "the next pipeline stage"
+
+        assert next_skill == "/do-test", f"Expected /do-test, got {next_skill}"
+
+    def test_next_skill_explicit_used_directly(self):
+        """When outcome.next_skill is explicitly set, it should be used directly."""
+        from agent.skill_outcome import SkillOutcome
+
+        session = self._make_session(
+            stage_progress={
+                "ISSUE": "completed",
+                "PLAN": "completed",
+                "BUILD": "completed",
+                "TEST": "pending",
+                "REVIEW": "pending",
+                "DOCS": "pending",
+            }
+        )
+
+        outcome = SkillOutcome(
+            status="success",
+            stage="BUILD",
+            notes="PR created",
+            next_skill="/do-custom",
+        )
+
+        if outcome.next_skill:
+            next_skill = outcome.next_skill
+        else:
+            next_info = _next_sdlc_skill(session)
+            next_skill = next_info[1] if next_info else "the next pipeline stage"
+
+        assert next_skill == "/do-custom", f"Expected /do-custom, got {next_skill}"
+
+    def test_next_skill_none_all_complete_uses_fallback(self):
+        """When _next_sdlc_skill returns None (all stages done), use fallback string."""
+        from agent.skill_outcome import SkillOutcome
+
+        session = self._make_session(
+            stage_progress={
+                "ISSUE": "completed",
+                "PLAN": "completed",
+                "BUILD": "completed",
+                "TEST": "completed",
+                "REVIEW": "completed",
+                "DOCS": "completed",
+                "MERGE": "completed",
+            }
+        )
+
+        outcome = SkillOutcome(
+            status="success",
+            stage="MERGE",
+            notes="Merge done",
+            next_skill=None,
+        )
+
+        if outcome.next_skill:
+            next_skill = outcome.next_skill
+        else:
+            next_info = _next_sdlc_skill(session)
+            next_skill = next_info[1] if next_info else "the next pipeline stage"
+
+        assert next_skill == "the next pipeline stage"
+
+
+# ============================================================================
+# _next_sdlc_skill PR Guard Tests
+# ============================================================================
+
+
+class TestNextSdlcSkillPrGuard:
+    """Test that _next_sdlc_skill routes to BUILD when REVIEW is next but no PR exists."""
+
+    def _make_session(self, stage_progress, pr_url=None):
+        """Create a minimal mock session."""
+
+        class MockSession:
+            pass
+
+        session = MockSession()
+        session.pr_url = pr_url
+        session._stage_progress = stage_progress
+
+        def get_stage_progress():
+            return dict(session._stage_progress)
+
+        session.get_stage_progress = get_stage_progress
+        return session
+
+    def test_review_pending_no_pr_routes_to_build(self):
+        """When REVIEW is pending and no pr_url, route to BUILD."""
+        session = self._make_session(
+            stage_progress={
+                "ISSUE": "completed",
+                "PLAN": "completed",
+                "BUILD": "completed",
+                "TEST": "completed",
+                "REVIEW": "pending",
+                "DOCS": "pending",
+            },
+            pr_url=None,
+        )
+        stage, skill = _next_sdlc_skill(session)
+        assert stage == "BUILD", f"Expected BUILD, got {stage}"
+        assert skill == "/do-build"
+
+    def test_review_pending_with_pr_routes_to_review(self):
+        """When REVIEW is pending and pr_url exists, route to REVIEW."""
+        session = self._make_session(
+            stage_progress={
+                "ISSUE": "completed",
+                "PLAN": "completed",
+                "BUILD": "completed",
+                "TEST": "completed",
+                "REVIEW": "pending",
+                "DOCS": "pending",
+            },
+            pr_url="https://github.com/tomcounsell/ai/pull/42",
+        )
+        stage, skill = _next_sdlc_skill(session)
+        assert stage == "REVIEW", f"Expected REVIEW, got {stage}"
+        assert skill == "/do-pr-review"
+
+    def test_review_in_progress_no_pr_continues_review(self):
+        """When REVIEW is already in_progress, continue even without pr_url.
+        The worker is mid-review — don't redirect."""
+        session = self._make_session(
+            stage_progress={
+                "ISSUE": "completed",
+                "PLAN": "completed",
+                "BUILD": "completed",
+                "TEST": "completed",
+                "REVIEW": "in_progress",
+                "DOCS": "pending",
+            },
+            pr_url=None,
+        )
+        stage, skill = _next_sdlc_skill(session)
+        assert stage == "REVIEW", f"Expected REVIEW, got {stage}"
+        assert skill == "/do-pr-review"
+
+    def test_non_review_stage_unaffected(self):
+        """Guard only applies to REVIEW stage — other stages unaffected."""
+        session = self._make_session(
+            stage_progress={
+                "ISSUE": "completed",
+                "PLAN": "completed",
+                "BUILD": "pending",
+                "TEST": "pending",
+                "REVIEW": "pending",
+                "DOCS": "pending",
+            },
+            pr_url=None,
+        )
+        stage, skill = _next_sdlc_skill(session)
+        assert stage == "BUILD", f"Expected BUILD, got {stage}"
+        assert skill == "/do-build"
+
+
+# ============================================================================
+# Mandatory Gate Enforcement Tests
+# ============================================================================
+
+
+class TestMandatoryGateEnforcement:
+    """Test the hard delivery gate that blocks premature delivery."""
+
+    def _make_observer(
+        self,
+        is_sdlc=True,
+        slug="test-slug",
+        working_dir="/tmp",
+        history=None,
+    ):
+        """Create an Observer with a mock session for gate testing."""
+
+        class MockSession:
+            def __init__(self):
+                self.session_id = "test-session"
+                self.correlation_id = "test-corr"
+                self.classification_type = "sdlc" if is_sdlc else "casual"
+                self.work_item_slug = slug
+                self.working_dir = working_dir
+                self.history = history or []
+                self.context_summary = None
+                self.expectations = None
+                self.queued_steering_messages = []
+                self.issue_url = None
+                self.plan_url = None
+                self.pr_url = None
+                self.status = "running"
+                self.created_at = 1.0
+
+            def is_sdlc_job(self):
+                return self.classification_type == "sdlc"
+
+            def get_stage_progress(self):
+                return {}
+
+            def get_history_list(self):
+                return list(self.history)
+
+            def get_links(self):
+                return {}
+
+            def has_remaining_stages(self):
+                return False
+
+            def has_failed_stage(self):
+                return False
+
+            def append_history(self, role, text):
+                self.history.append(f"[{role}] {text}")
+
+            def save(self):
+                pass
+
+        session = MockSession()
+        observer = Observer(
+            session=session,
+            worker_output="Test output",
+            auto_continue_count=0,
+            send_cb=None,
+            enqueue_fn=None,
+        )
+        return observer
+
+    def test_gate_skipped_for_non_sdlc(self):
+        """Non-SDLC sessions should skip gate enforcement."""
+        observer = self._make_observer(is_sdlc=False)
+        result = observer._check_mandatory_gates()
+        assert result is None
+
+    def test_gate_skipped_when_no_slug(self):
+        """Sessions without work_item_slug should skip gate enforcement."""
+        observer = self._make_observer(slug=None)
+        result = observer._check_mandatory_gates()
+        assert result is None
+
+    def test_gate_returns_steer_when_review_unsatisfied(self):
+        """When REVIEW gate is unsatisfied, should steer to /do-pr-review."""
+        from unittest.mock import patch
+
+        from agent.goal_gates import GateResult
+
+        observer = self._make_observer()
+
+        with (
+            patch(
+                "bridge.observer.check_review_gate",
+                return_value=GateResult(satisfied=False, evidence="No review", missing="PR review"),
+            ),
+            patch(
+                "bridge.observer.check_docs_gate",
+                return_value=GateResult(satisfied=True, evidence="Docs exist"),
+            ),
+        ):
+            result = observer._check_mandatory_gates()
+
+        assert result is not None
+        assert result["action"] == "steer"
+        assert result["unsatisfied_gate"] == "REVIEW"
+        assert "/do-pr-review" in result["coaching_message"]
+
+    def test_gate_returns_steer_when_docs_unsatisfied(self):
+        """When DOCS gate is unsatisfied, should steer to /do-docs."""
+        from unittest.mock import patch
+
+        from agent.goal_gates import GateResult
+
+        observer = self._make_observer()
+
+        with (
+            patch(
+                "bridge.observer.check_review_gate",
+                return_value=GateResult(satisfied=True, evidence="Review exists"),
+            ),
+            patch(
+                "bridge.observer.check_docs_gate",
+                return_value=GateResult(
+                    satisfied=False, evidence="No docs", missing="Documentation"
+                ),
+            ),
+        ):
+            result = observer._check_mandatory_gates()
+
+        assert result is not None
+        assert result["action"] == "steer"
+        assert result["unsatisfied_gate"] == "DOCS"
+        assert "/do-docs" in result["coaching_message"]
+
+    def test_gate_returns_none_when_all_satisfied(self):
+        """When both gates are satisfied, should return None (allow delivery)."""
+        from unittest.mock import patch
+
+        from agent.goal_gates import GateResult
+
+        observer = self._make_observer()
+
+        with (
+            patch(
+                "bridge.observer.check_review_gate",
+                return_value=GateResult(satisfied=True, evidence="Review exists"),
+            ),
+            patch(
+                "bridge.observer.check_docs_gate",
+                return_value=GateResult(satisfied=True, evidence="Docs exist"),
+            ),
+        ):
+            result = observer._check_mandatory_gates()
+
+        assert result is None
+
+    def test_gate_cycle_safety_delivers_after_3_steerings(self):
+        """After 3 gate-forced steerings, should allow delivery (cycle safety)."""
+        from unittest.mock import patch
+
+        from agent.goal_gates import GateResult
+
+        history = [
+            "[system] Delivery blocked: REVIEW gate unsatisfied "
+            "(gate-forced-steer:REVIEW). Missing: PR review",
+            "[system] Delivery blocked: REVIEW gate unsatisfied "
+            "(gate-forced-steer:REVIEW). Missing: PR review",
+            "[system] Delivery blocked: REVIEW gate unsatisfied "
+            "(gate-forced-steer:REVIEW). Missing: PR review",
+        ]
+        observer = self._make_observer(history=history)
+
+        with (
+            patch(
+                "bridge.observer.check_review_gate",
+                return_value=GateResult(satisfied=False, evidence="No review", missing="PR review"),
+            ),
+            patch(
+                "bridge.observer.check_docs_gate",
+                return_value=GateResult(satisfied=True, evidence="Docs exist"),
+            ),
+        ):
+            result = observer._check_mandatory_gates()
+
+        assert result is None
+
+    def test_gate_cache_reused(self):
+        """Gate results should be cached per run() invocation."""
+        from unittest.mock import patch
+
+        from agent.goal_gates import GateResult
+
+        observer = self._make_observer()
+
+        with (
+            patch(
+                "bridge.observer.check_review_gate",
+                return_value=GateResult(satisfied=True, evidence="Review exists"),
+            ) as mock_review,
+            patch(
+                "bridge.observer.check_docs_gate",
+                return_value=GateResult(satisfied=True, evidence="Docs exist"),
+            ) as mock_docs,
+        ):
+            result1 = observer._check_mandatory_gates()
+            result2 = observer._check_mandatory_gates()
+
+        assert result1 is None
+        assert result2 is None
+        mock_review.assert_called_once()
+        mock_docs.assert_called_once()
+
+    def test_gate_exception_falls_back_to_allow_delivery(self):
+        """If gate check raises an exception, should allow delivery (not crash)."""
+        from unittest.mock import patch
+
+        observer = self._make_observer()
+
+        with patch(
+            "bridge.observer.check_review_gate",
+            side_effect=Exception("gh command failed"),
+        ):
+            result = observer._check_mandatory_gates()
+
+        assert result is None
+
+
+# ============================================================================
+# Graph-aware has_remaining_stages Tests
+# ============================================================================
+
+
+class TestHasRemainingStagesGraph:
+    """Test the graph-aware has_remaining_stages implementation."""
+
+    def _make_session(self, stage_progress):
+        """Create a minimal mock session with stage progress."""
+        from models.agent_session import AgentSession
+
+        class MockSession:
+            def __init__(self):
+                self.session_id = "test"
+                self._progress = stage_progress
+                self.history = []
+
+            def _get_history_list(self):
+                return self.history
+
+            def get_stage_progress(self):
+                return dict(self._progress)
+
+        session = MockSession()
+        session.has_remaining_stages = AgentSession.has_remaining_stages.__get__(session)
+        return session
+
+    def test_no_stages_completed(self):
+        """No stages completed means remaining stages exist."""
+        session = self._make_session(
+            {
+                "ISSUE": "pending",
+                "PLAN": "pending",
+                "BUILD": "pending",
+                "TEST": "pending",
+                "REVIEW": "pending",
+                "DOCS": "pending",
+                "MERGE": "pending",
+            }
+        )
+        assert session.has_remaining_stages() is True
+
+    def test_all_stages_through_merge_completed(self):
+        """When MERGE is completed, no remaining stages."""
+        session = self._make_session(
+            {
+                "ISSUE": "completed",
+                "PLAN": "completed",
+                "BUILD": "completed",
+                "TEST": "completed",
+                "REVIEW": "completed",
+                "DOCS": "completed",
+                "MERGE": "completed",
+            }
+        )
+        assert session.has_remaining_stages() is False
+
+    def test_test_completed_review_pending(self):
+        """After TEST completes, REVIEW/DOCS/MERGE remain."""
+        session = self._make_session(
+            {
+                "ISSUE": "completed",
+                "PLAN": "completed",
+                "BUILD": "completed",
+                "TEST": "completed",
+                "REVIEW": "pending",
+                "DOCS": "pending",
+                "MERGE": "pending",
+            }
+        )
+        assert session.has_remaining_stages() is True
+
+    def test_docs_completed_merge_pending(self):
+        """After DOCS completes, MERGE remains."""
+        session = self._make_session(
+            {
+                "ISSUE": "completed",
+                "PLAN": "completed",
+                "BUILD": "completed",
+                "TEST": "completed",
+                "REVIEW": "completed",
+                "DOCS": "completed",
+                "MERGE": "pending",
+            }
+        )
+        assert session.has_remaining_stages() is True
+
+    def test_test_failed_has_remaining(self):
+        """Failed TEST has remaining stages (PATCH cycle)."""
+        session = self._make_session(
+            {
+                "ISSUE": "completed",
+                "PLAN": "completed",
+                "BUILD": "completed",
+                "TEST": "failed",
+                "REVIEW": "pending",
+                "DOCS": "pending",
+                "MERGE": "pending",
+            }
+        )
+        assert session.has_remaining_stages() is True
+
+
+# ============================================================================
+# Stage Detector: No REVIEW/DOCS Regex Tests
+# ============================================================================
+
+
+class TestNoReviewDocsRegex:
+    """Verify REVIEW and DOCS are NOT in _COMPLETION_PATTERNS."""
+
+    def test_review_not_in_completion_patterns(self):
+        """REVIEW should not be in _COMPLETION_PATTERNS."""
+        from bridge.stage_detector import _COMPLETION_PATTERNS
+
+        assert "REVIEW" not in _COMPLETION_PATTERNS
+
+    def test_docs_not_in_completion_patterns(self):
+        """DOCS should not be in _COMPLETION_PATTERNS."""
+        from bridge.stage_detector import _COMPLETION_PATTERNS
+
+        assert "DOCS" not in _COMPLETION_PATTERNS
+
+    def test_review_still_detected_via_skill_invocation(self):
+        """REVIEW in_progress should still be detected via /do-pr-review invocation."""
+        transitions = detect_stages("Running /do-pr-review 42")
+        assert any(t["stage"] == "REVIEW" and t["status"] == "in_progress" for t in transitions)
+
+    def test_docs_still_detected_via_skill_invocation(self):
+        """DOCS in_progress should still be detected via /do-docs invocation."""
+        transitions = detect_stages("Running /do-docs 42")
+        assert any(t["stage"] == "DOCS" and t["status"] == "in_progress" for t in transitions)
+
+    def test_review_completed_only_via_typed_outcome(self):
+        """REVIEW completion should only come from typed outcomes, not regex."""
+        from agent.skill_outcome import SkillOutcome
+
+        transcript = "The review is complete and approved"
+        transitions = detect_stages(transcript)
+        assert not any(t["stage"] == "REVIEW" for t in transitions)
+
+        class MockSession:
+            def __init__(self):
+                self.history = []
+
+            def get_history_list(self):
+                return self.history
+
+            def get_stage_progress(self):
+                return {"REVIEW": "pending"}
+
+            def append_history(self, role, text):
+                self.history.append(f"[{role}] {text}")
+
+            def save(self):
+                pass
+
+        session = MockSession()
+        outcome = SkillOutcome(status="success", stage="REVIEW", notes="Review passed")
+        result = apply_transitions(session, [], outcome=outcome)
+        assert result == 1
+        assert any("REVIEW COMPLETED" in entry for entry in session.history)

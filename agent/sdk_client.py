@@ -21,6 +21,7 @@ Authentication strategy (subscription-first):
       programmatic control. Fewer built-in tools but subscription-native.
 """
 
+import asyncio
 import logging
 import os
 import time
@@ -40,6 +41,8 @@ from agent.hooks import build_hooks_config
 from agent.workflow_state import WorkflowState
 from agent.workflow_types import WorkflowStateData
 from agent.worktree_manager import WORKTREES_DIR, validate_workspace
+from utils.github_patterns import ISSUE_NUMBER_RE as _ISSUE_NUMBER_RE
+from utils.github_patterns import PR_NUMBER_RE as _PR_NUMBER_RE
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +148,87 @@ def _store_claude_session_uuid(session_id: str, claude_uuid: str) -> None:
             f"_store_claude_session_uuid({session_id!r}) failed",
             exc_info=True,
         )
+
+
+def _extract_sdlc_env_vars(session_id: str, gh_repo: str | None = None) -> dict[str, str]:
+    """Extract SDLC context variables from an AgentSession for env injection.
+
+    Reads the AgentSession from Redis and maps its fields to SDLC_* env vars.
+    Only returns vars for fields that are non-None and non-empty, ensuring
+    skills never see "None" as a value (issue #420).
+
+    Args:
+        session_id: The bridge/Telegram session ID.
+        gh_repo: Optional GH_REPO already set on the agent.
+
+    Returns:
+        Dict of SDLC_* env var name -> value. Empty dict if session not found.
+    """
+    env: dict[str, str] = {}
+    try:
+        from models.agent_session import AgentSession
+
+        sessions = list(AgentSession.query.filter(session_id=session_id))
+        if not sessions:
+            return env
+        # Pick the newest active session
+        active = [s for s in sessions if s.status in ("running", "active", "pending")]
+        candidates = active if active else sessions
+        candidates.sort(key=lambda s: s.created_at or 0, reverse=True)
+        session = candidates[0]
+
+        # PR URL -> SDLC_PR_NUMBER and SDLC_PR_BRANCH
+        # Use isinstance(str) guards to prevent TypeError from non-string
+        # ORM field values (e.g. Popoto proxy objects).
+        pr_url = getattr(session, "pr_url", None)
+        if isinstance(pr_url, str) and pr_url:
+            pr_match = _PR_NUMBER_RE.search(pr_url)
+            if pr_match:
+                env["SDLC_PR_NUMBER"] = pr_match.group(1)
+
+        # Branch name
+        branch = getattr(session, "branch_name", None)
+        if isinstance(branch, str) and branch:
+            env["SDLC_PR_BRANCH"] = branch
+
+        # Work item slug
+        slug = getattr(session, "work_item_slug", None)
+        if isinstance(slug, str) and slug:
+            env["SDLC_SLUG"] = slug
+
+        # Plan URL -> SDLC_PLAN_PATH (convert URL to local path)
+        plan_url = getattr(session, "plan_url", None)
+        if isinstance(plan_url, str) and plan_url:
+            # plan_url is typically a GitHub URL or a local path
+            # Extract the path portion (docs/plans/...)
+            if "docs/plans/" in plan_url:
+                plan_path = "docs/plans/" + plan_url.split("docs/plans/")[-1]
+                env["SDLC_PLAN_PATH"] = plan_path
+            else:
+                env["SDLC_PLAN_PATH"] = plan_url
+
+        # Issue URL -> SDLC_ISSUE_NUMBER
+        issue_url = getattr(session, "issue_url", None)
+        if isinstance(issue_url, str) and issue_url:
+            issue_match = _ISSUE_NUMBER_RE.search(issue_url)
+            if issue_match:
+                env["SDLC_ISSUE_NUMBER"] = issue_match.group(1)
+
+        # Repo (complement GH_REPO, don't replace it)
+        if gh_repo:
+            env["SDLC_REPO"] = gh_repo
+
+        if env:
+            logger.info(
+                f"SDLC env vars for session {session_id}: "
+                f"{', '.join(f'{k}={v}' for k, v in sorted(env.items()))}"
+            )
+    except Exception:
+        logger.warning(
+            f"_extract_sdlc_env_vars({session_id!r}) failed, skipping SDLC vars",
+            exc_info=True,
+        )
+    return env
 
 
 def get_active_client(session_id: str) -> ClaudeSDKClient | None:
@@ -292,6 +376,43 @@ def load_system_prompt() -> str:
 
     # Worker rules FIRST — safety rails take precedence over persona
     return f"{WORKER_RULES}\n\n---\n\n{soul_prompt}{criteria_section}"
+
+
+def load_pm_system_prompt(working_directory: str) -> str:
+    """Load system prompt for PM (Project Manager) mode channels.
+
+    PM mode skips WORKER_RULES (no branch safety rails) and loads
+    the project-specific CLAUDE.md from the work vault directory if it exists.
+    Falls back to SOUL.md persona only.
+
+    System prompt structure:
+        [SOUL.md — persona, attitude, purpose, communication style]
+        ---
+        [Work-vault CLAUDE.md — PM-specific instructions for this project]
+
+    Args:
+        working_directory: Path to the work-vault project folder.
+
+    Returns:
+        Combined system prompt for PM mode.
+    """
+    # Load SOUL.md for persona (Valor's attitude/style is valuable in PM mode too)
+    soul_prompt = ""
+    if SOUL_PATH.exists():
+        soul_prompt = SOUL_PATH.read_text()
+    else:
+        logger.warning(f"SOUL.md not found at {SOUL_PATH}, using default prompt")
+        soul_prompt = "You are Valor, an AI coworker. Be direct, concise, and helpful."
+
+    # Try to load project-specific CLAUDE.md from work-vault directory
+    project_claude_path = Path(working_directory) / "CLAUDE.md"
+    if project_claude_path.exists():
+        project_instructions = project_claude_path.read_text()
+        logger.info(f"Loaded PM instructions from {project_claude_path}")
+        return f"{soul_prompt}\n\n---\n\n{project_instructions}"
+
+    logger.info(f"No CLAUDE.md found at {project_claude_path}, using SOUL.md only for PM mode")
+    return soul_prompt
 
 
 def _is_code_file(file_path: str) -> bool:
@@ -482,6 +603,8 @@ class ValorAgent:
         chat_id: str | None = None,
         project_key: str | None = None,
         message_id: int | None = None,
+        job_id: str | None = None,
+        gh_repo: str | None = None,
     ):
         """
         Initialize ValorAgent.
@@ -498,6 +621,10 @@ class ValorAgent:
             chat_id: Optional chat ID for routing context injection.
             project_key: Optional project key for routing context injection.
             message_id: Optional message ID for routing context injection.
+            job_id: Optional job ID injected as JOB_ID env var for child job spawning.
+            gh_repo: Optional GitHub repo (org/repo) to set as GH_REPO env var.
+                When set, all `gh` CLI commands in the subprocess automatically
+                target this repo without needing explicit --repo flags.
         """
         default_dir = Path(__file__).parent.parent
         allowed_root = Path("/Users/valorengels/src")
@@ -512,6 +639,8 @@ class ValorAgent:
         self.chat_id = chat_id
         self.project_key = project_key
         self.message_id = message_id
+        self.job_id = job_id
+        self.gh_repo = gh_repo or None  # Normalize empty string to None
         self.workflow_state: WorkflowState | None = None
 
         # Load workflow state if workflow_id provided
@@ -635,6 +764,24 @@ class ValorAgent:
         if session_id:
             env["VALOR_SESSION_ID"] = session_id
 
+        # Pass job_id so the agent can reference its own job when spawning children
+        # via `schedule_job --parent-job $JOB_ID` (issue #359)
+        if self.job_id:
+            env["JOB_ID"] = self.job_id
+
+        # Cross-repo gh resolution: set GH_REPO so all `gh` CLI commands in the
+        # subprocess automatically target the correct repo (issue #375). This is
+        # the deterministic fix -- SKILL.md --repo instructions remain as a safety net.
+        if self.gh_repo:
+            env["GH_REPO"] = self.gh_repo
+
+        # SDLC context injection: pre-resolve session fields as env vars so
+        # skills can reference $SDLC_PR_NUMBER etc. instead of guessing (issue #420).
+        # Only set vars when the field is non-None and non-empty.
+        if session_id:
+            sdlc_env = _extract_sdlc_env_vars(session_id, self.gh_repo)
+            env.update(sdlc_env)
+
         # Build system prompt with workflow context if workflow_id is present
         system_prompt = self.system_prompt
         if self.workflow_id and self.workflow_state and self.workflow_state.data:
@@ -700,78 +847,97 @@ class ValorAgent:
         _log_system_resources("SDK-init-pre")
 
         try:
-            async with ClaudeSDKClient(options) as client:
-                # Log successful initialization
-                init_elapsed = time.time() - init_start
-                logger.info(f"[SDK-init] SDK initialized successfully in {init_elapsed:.2f}s")
-                _log_system_resources("SDK-init-post")
-                # Register client for steering access
-                if session_id:
-                    _active_clients[session_id] = client
-                    logger.debug(f"Registered active client for session {session_id}")
+            # Overall timeout: prevent query from blocking a worker forever
+            # if the SDK subprocess hangs during init or response streaming.
+            # 10 minutes is generous — most queries complete in 1-5 minutes.
+            query_timeout = int(os.environ.get("SDK_QUERY_TIMEOUT_SECONDS", 600))
 
-                await client.query(message)
+            async with asyncio.timeout(query_timeout):
+                async with ClaudeSDKClient(options) as client:
+                    # Log successful initialization
+                    init_elapsed = time.time() - init_start
+                    logger.info(f"[SDK-init] SDK initialized successfully in {init_elapsed:.2f}s")
+                    _log_system_resources("SDK-init-post")
+                    # Register client for steering access
+                    if session_id:
+                        _active_clients[session_id] = client
+                        logger.debug(f"Registered active client for session {session_id}")
 
-                while True:
-                    async for msg in client.receive_response():
-                        if isinstance(msg, AssistantMessage):
-                            for block in msg.content:
-                                if isinstance(block, TextBlock):
-                                    response_parts.append(block.text)
-                        elif isinstance(msg, ResultMessage):
-                            # Bug 1 fix (issue #374): Store Claude Code session UUID
-                            # so continuation sessions resume the correct transcript.
-                            if msg.session_id and session_id:
-                                _store_claude_session_uuid(session_id, msg.session_id)
-                            # Capture stop_reason for Observer routing decisions
-                            if msg.stop_reason and session_id:
-                                _session_stop_reasons[session_id] = msg.stop_reason
-                                logger.info(
-                                    f"SDK stop_reason={msg.stop_reason} for session {session_id}"
-                                )
+                    await client.query(message)
 
-                            if msg.total_cost_usd is not None:
-                                cost = msg.total_cost_usd
-                                turns = msg.num_turns
-                                duration = msg.duration_ms
-                                # Always log at debug; warn if equivalent
-                                # cost exceeds threshold (sanity check even
-                                # on subscription — tracks what we'd pay on API)
-                                summary = (
-                                    f"Query completed: {turns} turns, "
-                                    f"${cost:.4f} equivalent, "
-                                    f"{duration}ms"
-                                )
-                                if cost >= _COST_WARN_THRESHOLD:
-                                    logger.warning(f"High cost query: {summary}")
-                                else:
-                                    logger.info(summary)
-                            if msg.is_error and retries < max_retries:
-                                retries += 1
-                                error_text = msg.result or "(empty)"
-                                recovery_msg = _build_error_recovery_message(error_text)
-                                logger.warning(
-                                    f"Agent error (attempt {retries}/{max_retries}), "
-                                    f"feeding error back: {error_text}"
-                                )
-                                response_parts.clear()
-                                await client.query(recovery_msg)
-                                break  # Re-enter receive_response() loop
-                            elif msg.is_error:
-                                result_text = msg.result or ""
-                                if _is_auth_error(result_text):
-                                    logger.error(
-                                        f"Auth failure after {retries} retries: {result_text}\n"
-                                        "Subscription fallback may be patched. "
-                                        "Set USE_API_BILLING=true or see module docstring."
+                    while True:
+                        async for msg in client.receive_response():
+                            if isinstance(msg, AssistantMessage):
+                                for block in msg.content:
+                                    if isinstance(block, TextBlock):
+                                        response_parts.append(block.text)
+                            elif isinstance(msg, ResultMessage):
+                                # Bug 1 fix (issue #374): Store Claude Code session UUID
+                                # so continuation sessions resume the correct transcript.
+                                if msg.session_id and session_id:
+                                    _store_claude_session_uuid(session_id, msg.session_id)
+                                # Capture stop_reason for Observer routing decisions
+                                if msg.stop_reason and session_id:
+                                    _session_stop_reasons[session_id] = msg.stop_reason
+                                    logger.info(
+                                        "SDK stop_reason=%s for session %s",
+                                        msg.stop_reason,
+                                        session_id,
                                     )
-                                else:
-                                    logger.error(
-                                        f"Agent error after {retries} retries: {result_text}"
+
+                                if msg.total_cost_usd is not None:
+                                    cost = msg.total_cost_usd
+                                    turns = msg.num_turns
+                                    duration = msg.duration_ms
+                                    # Always log at debug; warn if equivalent
+                                    # cost exceeds threshold (sanity check even
+                                    # on subscription — tracks what we'd pay on API)
+                                    summary = (
+                                        f"Query completed: {turns} turns, "
+                                        f"${cost:.4f} equivalent, "
+                                        f"{duration}ms"
                                     )
-                    else:
-                        # async for completed without break — done
-                        break
+                                    if cost >= _COST_WARN_THRESHOLD:
+                                        logger.warning(f"High cost query: {summary}")
+                                    else:
+                                        logger.info(summary)
+                                if msg.is_error and retries < max_retries:
+                                    retries += 1
+                                    error_text = msg.result or "(empty)"
+                                    recovery_msg = _build_error_recovery_message(error_text)
+                                    logger.warning(
+                                        f"Agent error (attempt {retries}/{max_retries}), "
+                                        f"feeding error back: {error_text}"
+                                    )
+                                    response_parts.clear()
+                                    await client.query(recovery_msg)
+                                    break  # Re-enter receive_response() loop
+                                elif msg.is_error:
+                                    result_text = msg.result or ""
+                                    if _is_auth_error(result_text):
+                                        logger.error(
+                                            f"Auth failure after {retries} retries: {result_text}\n"
+                                            "Subscription fallback may be patched. "
+                                            "Set USE_API_BILLING=true or see module docstring."
+                                        )
+                                    else:
+                                        logger.error(
+                                            f"Agent error after {retries} retries: {result_text}"
+                                        )
+                        else:
+                            # async for completed without break — done
+                            break
+
+        except TimeoutError:
+            elapsed = time.time() - init_start
+            logger.error(
+                "[SDK-timeout] Query timed out after %.0fs for session %s "
+                "(limit=%ds). Subprocess may be hung.",
+                elapsed,
+                session_id,
+                query_timeout,
+            )
+            raise
 
         except Exception as e:
             error_str = str(e)
@@ -920,6 +1086,7 @@ async def get_agent_response_sdk(
     workflow_id: str | None = None,
     task_list_id: str | None = None,
     correlation_id: str | None = None,
+    job_id: str | None = None,
 ) -> str:
     """
     Get agent response using Claude Agent SDK.
@@ -938,6 +1105,7 @@ async def get_agent_response_sdk(
         workflow_id: Optional 8-char workflow identifier for tracked work
         task_list_id: Optional task list ID to scope sub-agent Task storage
         correlation_id: Optional end-to-end tracing ID from the bridge
+        job_id: Optional job ID for child job spawning (issue #359)
 
     Returns:
         The assistant's response text
@@ -957,20 +1125,33 @@ async def get_agent_response_sdk(
     if not project_working_dir:
         project_working_dir = AI_REPO_ROOT
 
-    # Classify: SDLC work → orchestrator in ai/, Q&A → direct in target project
-    from bridge.routing import classify_work_request
+    # Check project mode: "pm" channels bypass SDLC classification entirely
+    project_mode = project.get("mode", "dev") if project else "dev"
+    # Treat any unrecognized mode as "dev" (safe default)
+    if project_mode not in ("dev", "pm"):
+        logger.warning(f"[{request_id}] Unknown project mode '{project_mode}', treating as 'dev'")
+        project_mode = "dev"
 
-    classification = classify_work_request(message)
-    if classification == "sdlc" and project_working_dir != AI_REPO_ROOT:
-        working_dir = AI_REPO_ROOT
-        logger.info(
-            f"[{request_id}] SDLC routed: orchestrator in ai/, target={project_working_dir}"
-        )
-    else:
+    if project_mode == "pm":
+        # PM mode: skip classification, always use "question", work in project dir
+        classification = "question"
         working_dir = project_working_dir
-        logger.info(
-            f"[{request_id}] Direct routed: cwd={working_dir} (classification={classification})"
-        )
+        logger.info(f"[{request_id}] PM mode: cwd={working_dir}, skipping SDLC classification")
+    else:
+        # Dev mode: classify and route as before
+        from bridge.routing import classify_work_request
+
+        classification = classify_work_request(message)
+        if classification == "sdlc" and project_working_dir != AI_REPO_ROOT:
+            working_dir = AI_REPO_ROOT
+            logger.info(
+                f"[{request_id}] SDLC routed: orchestrator in ai/, target={project_working_dir}"
+            )
+        else:
+            working_dir = project_working_dir
+            logger.info(
+                f"[{request_id}] Direct routed: cwd={working_dir} (classification={classification})"
+            )
 
     logger.info(f"[{request_id}] SDK query for {project_name}")
     logger.debug(f"[{request_id}] Working directory: {working_dir}")
@@ -994,8 +1175,8 @@ async def get_agent_response_sdk(
         "work initiated in this specific session. Do not include work, PRs, or "
         "requests from other sessions, other senders, or prior conversation threads."
     )
-    # For SDLC-routed requests, inject target repo context
-    if classification == "sdlc" and project_working_dir != AI_REPO_ROOT:
+    # For SDLC-routed requests, inject target repo context (never for PM mode)
+    if project_mode != "pm" and classification == "sdlc" and project_working_dir != AI_REPO_ROOT:
         github_config = project.get("github", {}) if project else {}
         github_org = github_config.get("org", "")
         github_repo = github_config.get("repo", "")
@@ -1009,13 +1190,15 @@ async def get_agent_response_sdk(
 
     # Log prompt summary before sending to agent
     has_workflow = bool(workflow_id)
+    has_worker_rules = project_mode != "pm"
     logger.info(
         f"[{request_id}] Sending to agent: {len(enriched_message)} chars, "
         f"classification={classification}, has_workflow={has_workflow}, "
-        f"task_list={task_list_id or 'none'}"
+        f"task_list={task_list_id or 'none'}, mode={project_mode}"
     )
+    wr_label = "yes" if has_worker_rules else "no (pm mode)"
     logger.info(
-        f"[{request_id}] Context: soul=yes, worker_rules=yes, "
+        f"[{request_id}] Context: soul=yes, worker_rules={wr_label}, "
         f"workflow_context={'yes' if has_workflow else 'no'}, "
         f"session_id={session_id}"
     )
@@ -1026,13 +1209,40 @@ async def get_agent_response_sdk(
         # Extract message_id from the job context (passed through _execute_job)
         _message_id = None  # message_id not available at this layer
 
+        # PM mode: use PM system prompt (no WORKER_RULES, loads work-vault CLAUDE.md)
+        pm_system_prompt = None
+        if project_mode == "pm":
+            pm_system_prompt = load_pm_system_prompt(working_dir)
+
+        # Determine gh_repo for cross-repo SDLC requests (issue #375).
+        # When classification is "sdlc" and the project targets a non-ai repo,
+        # set GH_REPO so all gh commands automatically target the correct repo.
+        _gh_repo = None
+        is_cross_repo_sdlc = (
+            project_mode != "pm"
+            and classification == "sdlc"
+            and project_working_dir != AI_REPO_ROOT
+        )
+        if is_cross_repo_sdlc:
+            _github_config = project.get("github", {}) if project else {}
+            _gh_org = _github_config.get("org", "")
+            _gh_name = _github_config.get("repo", "")
+            if _gh_org and _gh_name:
+                _gh_repo = f"{_gh_org}/{_gh_name}"
+
+        if _gh_repo:
+            logger.info(f"[{request_id}] Cross-repo: GH_REPO={_gh_repo}")
+
         agent = ValorAgent(
             working_dir=working_dir,
+            system_prompt=pm_system_prompt,
             workflow_id=workflow_id,
             task_list_id=task_list_id,
             chat_id=chat_id,
             project_key=_project_key,
             message_id=_message_id,
+            job_id=job_id,
+            gh_repo=_gh_repo,
         )
         response = await agent.query(enriched_message, session_id=session_id)
 

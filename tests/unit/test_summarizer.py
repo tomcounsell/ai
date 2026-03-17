@@ -622,6 +622,63 @@ class TestClassifyWithHeuristics:
         assert result.output_type == OutputType.QUESTION
 
 
+class TestEmptyPromiseDetection:
+    """Tests for empty promise detection in heuristic classifier."""
+
+    def test_bare_acknowledgment_is_empty_promise(self):
+        """'Got it' + commitment without evidence = empty promise."""
+        result = _classify_with_heuristics("Got it. Will report final results and blockers only.")
+        assert result.output_type == OutputType.STATUS_UPDATE
+        assert result.coaching_message is not None
+        assert (
+            "empty" in result.coaching_message.lower()
+            or "evidence" in result.coaching_message.lower()
+        )
+
+    def test_understood_without_evidence_is_empty_promise(self):
+        """'Understood' without a concrete change = empty promise."""
+        result = _classify_with_heuristics(
+            "Understood. I'll adjust my communication style going forward."
+        )
+        assert result.output_type == OutputType.STATUS_UPDATE
+        assert result.coaching_message is not None
+
+    def test_noted_without_evidence_is_empty_promise(self):
+        """'Noted' with a vague commitment = empty promise."""
+        result = _classify_with_heuristics("Noted. You'll see the difference in my next output.")
+        assert result.output_type == OutputType.STATUS_UPDATE
+        assert result.coaching_message is not None
+
+    def test_acknowledgment_with_commit_is_not_empty(self):
+        """Acknowledgment WITH a commit hash = real action, not empty."""
+        result = _classify_with_heuristics(
+            "Got it. Updated the summarizer prompt. Committed abc1234."
+        )
+        # Should be classified as completion (has commit evidence)
+        assert result.output_type == OutputType.COMPLETION
+
+    def test_acknowledgment_with_file_path_is_not_empty(self):
+        """Acknowledgment WITH a file edit = real action, not empty."""
+        result = _classify_with_heuristics(
+            "Understood. Saved memory to feedback_no_plans.md with this rule."
+        )
+        assert result.output_type != OutputType.STATUS_UPDATE or result.coaching_message is None
+
+    def test_normal_status_not_flagged(self):
+        """Regular status updates should not trigger empty promise detection."""
+        result = _classify_with_heuristics("Running tests now, found 3 issues so far.")
+        assert (
+            result.coaching_message is None
+            or "empty" not in (result.coaching_message or "").lower()
+        )
+
+    def test_will_do_without_evidence(self):
+        """'Will do' without proof = empty promise."""
+        result = _classify_with_heuristics("Will do. I'll change my approach from now on.")
+        assert result.output_type == OutputType.STATUS_UPDATE
+        assert result.coaching_message is not None
+
+
 class TestApplyHeuristicConfidenceGate:
     """Tests for _apply_heuristic_confidence_gate."""
 
@@ -1156,6 +1213,7 @@ class TestRenderStageProgress:
             "TEST": "completed",
             "REVIEW": "completed",
             "DOCS": "completed",
+            "MERGE": "completed",
         }
         session.get_links.return_value = {}
         result = _render_stage_progress(session)
@@ -1164,6 +1222,7 @@ class TestRenderStageProgress:
         assert "▶" not in result  # No in-progress stages
         assert "☑ PLAN" in result
         assert "☑ DOCS" in result
+        assert "☑ MERGE" in result
 
     def test_issue_number_embedded_in_label(self):
         """ISSUE stage shows the issue number when available in session links."""

@@ -18,6 +18,10 @@ A long-running process that performs daily self-directed maintenance tasks:
 13. Redis data quality checks (unsummarized links, dead channels)
 14. Branch and plan cleanup (stale branches, orphaned/completed/duplicate plans)
 15. Feature docs audit (stale refs, README.md accuracy, plan-masquerading-as-feature)
+16. Episode cycle-close (CyclicEpisode records from completed SDLC sessions)
+17. Pattern crystallization (ProceduralPatterns from episode clusters)
+18. Principal context staleness (PRINCIPAL.md age check)
+19. Disk space check (project volume free space, finding if <10GB)
 
 All persistence is Redis-backed via Popoto models (see models/ directory).
 State: ReflectionRun | Ignore patterns: ReflectionIgnore
@@ -32,6 +36,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timedelta
@@ -470,6 +475,7 @@ class ReflectionRunner:
             (16, "Episode Cycle-Close", self.step_episode_cycle_close),
             (17, "Pattern Crystallization", self.step_pattern_crystallization),
             (18, "Principal Context Staleness", self.step_principal_staleness),
+            (19, "Disk Space Check", self.step_disk_space_check),
         ]
 
     def _load_state(self) -> ReflectionsState:
@@ -1710,9 +1716,9 @@ class ReflectionRunner:
         import time as _time
 
         from models.cyclic_episode import CyclicEpisode
-        from scripts.fingerprint_classifier import classify_session
 
         from models.agent_session import AgentSession
+        from scripts.fingerprint_classifier import classify_session
 
         cutoff = _time.time() - 86400  # past 24 hours
         episodes_created = 0
@@ -2009,6 +2015,45 @@ class ReflectionRunner:
             "threshold": staleness_threshold,
         }
 
+    async def step_disk_space_check(self) -> None:
+        """Step 19: Check available disk space on the project volume.
+
+        This is the canonical template step — use it as a reference when adding
+        new reflection steps. It demonstrates:
+
+        1. Method signature: ``async def step_<key>(self) -> None``
+        2. Local ``findings: list[str]`` for collecting issues
+        3. ``self.state.add_finding("<key>", text)`` to persist each finding
+        4. ``self.state.step_progress["<key>"] = {...}`` for metrics
+        5. Top-level try/except so a single step failure never halts the run
+
+        The check uses :func:`shutil.disk_usage` on ``PROJECT_ROOT`` and records
+        a finding when free space drops below 10 GB.
+        """
+        findings: list[str] = []
+
+        try:
+            usage = shutil.disk_usage(PROJECT_ROOT)
+            free_gb = usage.free / (1024**3)
+            total_gb = usage.total / (1024**3)
+
+            if free_gb < 10:
+                finding = (
+                    f"Low disk space: {free_gb:.1f} GB free "
+                    f"of {total_gb:.1f} GB total on project volume"
+                )
+                findings.append(finding)
+                self.state.add_finding("disk_space_check", finding)
+                logger.warning(finding)
+            else:
+                logger.info(f"Disk space OK: {free_gb:.1f} GB free of {total_gb:.1f} GB total")
+        except Exception:
+            logger.exception("Failed to check disk space")
+
+        self.state.step_progress["disk_space_check"] = {
+            "findings": len(findings),
+        }
+
     async def step_post_to_telegram(self, project: dict, issue_url: str = "") -> None:
         """Post reflections summary to project's Telegram chat.
 
@@ -2115,6 +2160,12 @@ class ReflectionsState:
         if category not in self.findings:
             self.findings[category] = []
         self.findings[category].append(finding)
+
+
+async def run_reflections_async() -> None:
+    """Run the full reflections pipeline. Called by the reflection scheduler."""
+    runner = ReflectionRunner()
+    await runner.run()
 
 
 async def main() -> None:
