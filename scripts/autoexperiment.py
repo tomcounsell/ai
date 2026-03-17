@@ -220,8 +220,6 @@ def inject_summarizer_prompt(file_content: str, new_prompt: str) -> str:
     return _inject_prompt_var(file_content, "SUMMARIZER_SYSTEM_PROMPT", new_prompt)
 
 
-
-
 # ---------------------------------------------------------------------------
 # Eval functions
 # ---------------------------------------------------------------------------
@@ -346,8 +344,6 @@ def eval_summarizer(corpus_path: str | None = None) -> float:
             logger.warning(f"Summarizer eval error: {e}")
 
     return sum(scores) / len(scores) if scores else 0.0
-
-
 
 
 # ---------------------------------------------------------------------------
