@@ -855,21 +855,34 @@ def _parse_classification_response(raw: str) -> ClassificationResult | None:
 
 
 def _render_stage_progress(session) -> str | None:
-    """Render SDLC stage progress line from session history.
+    """Render SDLC stage progress line from session state.
+
+    Uses PipelineStateMachine when stage_states is available, falls back
+    to legacy get_stage_progress() for sessions without state machine data.
 
     Returns two lines like:
         ISSUE 243 → ☑ PLAN → ▶ BUILD
         ☐ TEST → ☐ REVIEW → ☐ DOCS
-    ISSUE has no checkbox (just label + number). Other stages show ☑ when completed,
-    ▶ when in-progress, ☐ when pending. Returns None if no stage data is available.
+    Returns None if no stage data is available.
     """
     if not session:
         return None
 
-    progress = session.get_stage_progress()
+    # Use state machine when stage_states is available
+    stage_states = getattr(session, "stage_states", None)
+    if stage_states:
+        try:
+            from bridge.pipeline_state import PipelineStateMachine
 
-    # Only render if at least one stage has progressed
-    if all(v == "pending" for v in progress.values()):
+            sm = PipelineStateMachine(session)
+            progress = sm.get_display_progress()
+        except Exception:
+            progress = session.get_stage_progress()
+    else:
+        progress = session.get_stage_progress()
+
+    # Only render if at least one stage has progressed beyond pending/ready
+    if all(v in ("pending", "ready") for v in progress.values()):
         return None
 
     from models.agent_session import SDLC_STAGES
@@ -901,7 +914,10 @@ def _render_stage_progress(session) -> str | None:
             parts.append(f"☑ {label}")
         elif status == "in_progress":
             parts.append(f"▶ {label}")
+        elif status == "failed":
+            parts.append(f"✗ {label}")
         else:
+            # pending or ready
             parts.append(f"☐ {label}")
 
     line1 = " → ".join(parts[:3])
