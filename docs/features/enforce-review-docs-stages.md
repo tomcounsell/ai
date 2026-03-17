@@ -22,17 +22,13 @@ Three enforcement points:
 
 If the same gate-forced steering happens 3+ times (tracked via `_gate_steering_count` in session history), the Observer delivers with a warning instead of looping indefinitely.
 
-### Stage Detector Changes (`bridge/stage_detector.py`)
+### State Machine Stage Transitions (`bridge/pipeline_state.py`)
 
-REVIEW and DOCS were removed from `_COMPLETION_PATTERNS`. These stages now only complete via:
-- Typed `SkillOutcome` from `/do-pr-review` or `/do-docs`
-- Explicit skill invocation detected by `_SKILL_INVOCATION_PATTERN`
+Stage completion is now managed by the `PipelineStateMachine`. Stages can only complete via explicit `complete_stage()` calls at job completion time — no transcript parsing or pattern matching. This eliminates false completions entirely.
 
-This prevents false completions from incidental mentions like "review complete" in unrelated output.
+### `has_remaining_stages()` (`bridge/pipeline_state.py`)
 
-### Graph-Aware `has_remaining_stages()` (`models/agent_session.py`)
-
-Replaced the flat list scan with a graph walk: starting from the last completed stage, walks forward through `get_next_stage()` until it either finds a non-completed stage (returns True) or reaches the terminal MERGE node (returns False).
+The `PipelineStateMachine.has_remaining_stages()` method walks the pipeline graph from the current stage forward, checking if any reachable stage is not yet completed.
 
 ### Plan Status Update in `/do-docs`
 

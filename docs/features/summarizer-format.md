@@ -90,7 +90,7 @@ No checkbox icons are used. The ISSUE stage label includes the issue number when
 
 ## Session Freshness
 
-Stage data (`[stage] BUILD completed`) and links (`issue_url`, `pr_url`) are written to Redis by `tools/session_progress.py` during agent execution. By the time the summarizer runs, the session object passed through the callback chain may be stale (loaded before stages were recorded).
+Stage data (via `stage_states` JSON field managed by `PipelineStateMachine` in `bridge/pipeline_state.py`) and links (`issue_url`, `pr_url`) are written to Redis during agent execution. By the time the summarizer runs, the session object passed through the callback chain may be stale (loaded before stages were recorded).
 
 Both `response.py` and `summarizer.py` re-read the session from Redis before composing structured output:
 

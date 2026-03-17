@@ -1,6 +1,8 @@
 # Deterministic SDLC Guard (Phase 1.75)
 
-The deterministic SDLC guard is a routing layer in the Observer Agent that force-steers SDLC sessions to the next pipeline stage without consulting the LLM. It sits between the stop-reason routing (Phase 1.5) and the LLM Observer (Phase 2), ensuring pipeline progression is driven by session state rather than LLM judgment.
+> **Deprecated**: The deterministic SDLC guard was subsumed by the `PipelineStateMachine` in `bridge/pipeline_state.py` (PR #433, issue #430). Stage progression is now handled by state machine transitions at job enqueue/completion. The Observer was simplified to only perform steer/deliver classification.
+
+The deterministic SDLC guard was a routing layer in the Observer Agent that force-steered SDLC sessions to the next pipeline stage without consulting the LLM. It sat between the stop-reason routing (Phase 1.5) and the LLM Observer (Phase 2), ensuring pipeline progression was driven by session state rather than LLM judgment.
 
 ## Problem
 

@@ -24,7 +24,7 @@ The bridge uses a two-path auto-continue strategy based on whether the job is an
 All routing decisions — SDLC and non-SDLC — are now made by the [Observer Agent](observer-agent.md):
 
 1. Worker agent produces output
-2. **Stage Detector** (deterministic, pure function) parses transcript for `/do-*` skill invocations and completion markers, updates `AgentSession` stages
+2. **Pipeline State Machine** (`bridge/pipeline_state.py`) tracks stage transitions on `AgentSession.stage_states`
 3. **Observer Agent** (Sonnet) reads full session state and makes a unified decision:
    - **STEER**: Re-enqueue with a coaching message directing the worker to the next stage
    - **DELIVER**: Send output to Telegram for human review
@@ -93,7 +93,7 @@ The thumbs-up emoji reaction (👍) in Telegram serves as a **human-to-human** c
 | File | Purpose |
 |---|---|
 | `bridge/observer.py` | Observer Agent: unified routing decisions with session context |
-| `bridge/stage_detector.py` | Deterministic stage detection (pure function) |
+| `bridge/pipeline_state.py` | Pipeline state machine for stage tracking |
 | `bridge/session_logs.py` | `save_session_snapshot()`, `cleanup_old_snapshots()` |
 | `agent/job_queue.py` | Observer wiring in `send_to_chat`, hard cap enforcement, `mark_work_done()` |
 | `models/agent_session.py` | `is_sdlc_job()`, `has_remaining_stages()`, `has_failed_stage()`, `queued_steering_messages` |

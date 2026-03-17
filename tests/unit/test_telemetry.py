@@ -245,27 +245,6 @@ class TestSetLinkStructuredLogging:
             assert "corr-99" in link_calls[0]
 
 
-class TestStageDetectorTelemetry:
-    """Test that stage detector calls record_stage_transition."""
-
-    def test_apply_transitions_records_telemetry(self):
-        """apply_transitions should call record_stage_transition for each applied transition."""
-        from bridge.stage_detector import apply_transitions
-
-        session = MagicMock()
-        session.get_stage_progress.return_value = {"BUILD": "pending", "TEST": "pending"}
-        session.session_id = "sess-1"
-        session.correlation_id = "corr-1"
-
-        transitions = [
-            {"stage": "BUILD", "status": "completed", "reason": "test"},
-        ]
-
-        with patch("monitoring.telemetry.record_stage_transition") as mock_record:
-            apply_transitions(session, transitions)
-            mock_record.assert_called_once_with("sess-1", "corr-1", "BUILD", "pending", "completed")
-
-
 class TestHealthCheckerTelemetry:
     """Test that health checker includes observer telemetry."""
 

@@ -4,24 +4,34 @@ You are the merge gate for the SDLC pipeline. Your job is to programmatically ve
 
 ## Prerequisites Check
 
-Run the goal gates to verify TEST, REVIEW, and DOCS stages are satisfied:
+Use the pipeline state machine to verify TEST, REVIEW, and DOCS stages are completed:
 
 ```bash
 # Extract slug from PR branch name
 BRANCH=$(gh pr view $ARGUMENTS --json headRefName -q .headRefName)
 SLUG=$(echo "$BRANCH" | sed 's|^session/||')
-REPO_ROOT=$(git rev-parse --show-toplevel)
 
-# Run programmatic gate checks
+# Run programmatic gate checks via PipelineStateMachine
 python -c "
-from agent.goal_gates import check_all_gates
-results = check_all_gates('$SLUG', '$REPO_ROOT')
+from bridge.pipeline_state import PipelineStateMachine
+from models.agent_session import AgentSession
+
+session = AgentSession.get_by_slug('$SLUG')
+if not session:
+    print('ERROR: No session found for slug $SLUG')
+    print('GATES_FAILED')
+    exit()
+
+sm = PipelineStateMachine(session)
+states = sm.get_display_progress()
+required = ['TEST', 'REVIEW', 'DOCS']
 all_pass = True
-for stage, result in results.items():
-    status = 'PASS' if result.satisfied else 'FAIL'
-    detail = result.evidence if result.satisfied else result.missing
-    print(f'{stage}: {status} — {detail}')
-    if not result.satisfied:
+for stage in required:
+    status = states.get(stage, 'pending')
+    passed = status == 'completed'
+    label = 'PASS' if passed else 'FAIL'
+    print(f'{stage}: {label} — {status}')
+    if not passed:
         all_pass = False
 print()
 print('ALL_GATES_PASS' if all_pass else 'GATES_FAILED')

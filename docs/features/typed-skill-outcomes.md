@@ -1,5 +1,7 @@
 # Typed Skill Outcomes
 
+> **Deprecated**: Typed skill outcomes were removed in #430. Stage tracking is now handled by the `PipelineStateMachine` in `bridge/pipeline_state.py`. The Observer no longer parses `SkillOutcome` blocks from agent output.
+
 Structured outcome contracts for `/do-*` skills that enable deterministic routing by the Observer without LLM classification.
 
 ## Problem
