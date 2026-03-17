@@ -87,7 +87,6 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Test Baseline Verification](test-baseline-verification.md) | Verified classification of test failures as regressions vs pre-existing by running failing tests against main | Shipped |
 | [Test Coverage Standards](test-coverage-standards.md) | Standards and tooling for preventing silent failure classes: exception swallowing, empty output loops, coupled tests, missing error rendering, silent builds | Shipped |
 | [Trace & Verify Protocol](trace-and-verify.md) | Data-driven root cause analysis replacing narrative-only 5 Whys with forward verification | Shipped |
-| [Typed Skill Outcomes](typed-skill-outcomes.md) | Structured outcome contracts for /do-* skills enabling deterministic Observer routing without LLM classification | Shipped |
 | [Workspace Safety Invariants](workspace-safety-invariants.md) | Pre-launch validation of agent working directories with CWD existence, path containment, and slug sanitization | Shipped |
 | [Worktree SDK Compatibility Experiment](worktree-sdk-compatibility.md) | Experiment results for Claude Agent SDK compatibility with git worktrees | Archived |
 | [xfail Hygiene](xfail-hygiene.md) | Three-layer xfail hygiene system preventing stale test markers after bug fixes land | Shipped |
