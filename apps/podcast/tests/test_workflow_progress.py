@@ -168,7 +168,7 @@ class ComputeWorkflowProgressTestCase(TestCase):
         self.assertEqual(phases[1].progress_fraction, 1.0)
 
     def test_phase_4_multiple_targeted_research(self):
-        """Adding p2-grok and p2-gemini artifacts makes phase 4 in_progress (2 of 6)."""
+        """Adding p2-grok and p2-gemini artifacts makes phase 4 in_progress (2 of 7)."""
         episode = self._create_episode()
         EpisodeArtifact.objects.create(
             episode=episode,
@@ -184,7 +184,8 @@ class ComputeWorkflowProgressTestCase(TestCase):
 
         self.assertEqual(phases[3].number, 4)
         self.assertEqual(phases[3].status, "in_progress")
-        self.assertAlmostEqual(phases[3].progress_fraction, 2 / 6)
+        # 7 sub-steps: chatgpt, gemini, claude, together, mirofish, grok, manual
+        self.assertAlmostEqual(phases[3].progress_fraction, 2 / 7)
 
     def test_phase_7_report_text_with_word_count(self):
         """Episode with report_text completes phase 7 and detail has word count."""
@@ -244,7 +245,7 @@ class ComputeWorkflowProgressTestCase(TestCase):
         episode.published_at = timezone.now()
         episode.save()
 
-        # Create all required artifacts
+        # Create all required artifacts (including p2-mirofish for Phase 4)
         artifact_titles = [
             "research/p2-perplexity.md",
             "research/question-discovery.md",
@@ -253,6 +254,7 @@ class ComputeWorkflowProgressTestCase(TestCase):
             "research/p2-gemini.md",
             "research/p2-claude.md",
             "research/p2-together.md",
+            "research/p2-mirofish.md",
             "research/p2-manual.md",
             "research/cross-validation.md",
             "research/p3-briefing.md",

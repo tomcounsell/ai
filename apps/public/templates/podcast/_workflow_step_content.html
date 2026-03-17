@@ -263,30 +263,70 @@
 <!-- Sub-steps checklist -->
 <div class="space-y-3">
   {% for step in current_phase.sub_steps %}
-  <div class="flex items-start gap-3 px-3 py-2 {% if step.complete %}bg-green-50{% elif step.optional %}bg-white border border-dashed border-gray-300{% else %}bg-gray-50{% endif %}">
-    {% if step.complete %}
+  <div class="flex items-start gap-3 px-3 py-2
+    {% if step.status == 'complete' %}bg-green-50
+    {% elif step.status == 'failed' %}bg-red-50
+    {% elif step.status == 'skipped' %}bg-gray-50
+    {% elif step.status == 'running' %}bg-amber-50
+    {% elif step.optional %}bg-white border border-dashed border-gray-300
+    {% else %}bg-gray-50{% endif %}">
+
+    {# Status icon based on sub-step status #}
+    {% if step.status == 'complete' %}
     <span class="text-green-600 mt-0.5"><i class="fas fa-check-circle"></i></span>
-    {% elif step.optional %}
-    <span class="text-gray-300 mt-0.5"><i class="far fa-circle"></i></span>
+    {% elif step.status == 'failed' %}
+    <span class="text-red-600 mt-0.5"><i class="fas fa-exclamation-triangle"></i></span>
+    {% elif step.status == 'skipped' %}
+    <span class="text-gray-400 mt-0.5"><i class="fas fa-forward"></i></span>
+    {% elif step.status == 'running' %}
+    <span class="text-amber-500 mt-0.5"><i class="fas fa-spinner fa-spin"></i></span>
     {% else %}
     <span class="text-gray-300 mt-0.5"><i class="far fa-circle"></i></span>
     {% endif %}
-    <div class="flex-1 flex items-center justify-between">
-      <div>
-        <span class="text-sm {% if step.complete %}text-green-800{% else %}text-gray-600{% endif %}">{{ step.label }}</span>
-        {% if step.optional and not step.complete %}
-        <span class="text-xs text-gray-400 ml-2 font-mono">optional</span>
-        {% endif %}
-        {% if step.detail %}
-        <span class="text-xs text-gray-400 ml-2 font-mono">{{ step.detail }}</span>
-        {% endif %}
+
+    <div class="flex-1">
+      <div class="flex items-center justify-between">
+        <div>
+          <span class="text-sm
+            {% if step.status == 'complete' %}text-green-800
+            {% elif step.status == 'failed' %}text-red-800
+            {% elif step.status == 'skipped' %}text-gray-500
+            {% else %}text-gray-600{% endif %}">{{ step.label }}</span>
+          {% if step.optional and step.status == 'pending' %}
+          <span class="text-xs text-gray-400 ml-2 font-mono">optional</span>
+          {% endif %}
+          {% if step.status == 'skipped' %}
+          <span class="text-xs text-gray-400 ml-2 font-mono">skipped</span>
+          {% endif %}
+          {% if step.detail %}
+          <span class="text-xs text-gray-400 ml-2 font-mono">{{ step.detail }}</span>
+          {% endif %}
+        </div>
+        <div class="flex items-center gap-2">
+          {# Per-source retry button for failed sources in Phase 4 #}
+          {% if step.status == 'failed' and current_step == 4 and step.artifact_key %}
+          <form method="post"
+                action="{% url 'podcast:retry_research_source' slug=podcast.slug episode_slug=episode.slug source=step.artifact_key %}">
+            {% csrf_token %}
+            <button type="submit"
+                    class="text-xs font-mono px-2 py-1 text-red-600 border border-red-300 hover:bg-red-50 hover:text-red-700">
+              <i class="fas fa-redo mr-1"></i>Retry
+            </button>
+          </form>
+          {% endif %}
+          {# Paste button for optional sources #}
+          {% if step.optional and step.artifact_key %}
+          <button type="button"
+                  onclick="document.getElementById('paste-modal-{{ step.artifact_key }}').showModal()"
+                  class="text-xs font-mono px-2 py-1 text-gray-500 border border-gray-300 hover:bg-gray-50 hover:text-gray-700">
+            {% if step.complete %}<i class="fas fa-edit mr-1"></i>Edit{% else %}<i class="fas fa-paste mr-1"></i>Add{% endif %}
+          </button>
+          {% endif %}
+        </div>
       </div>
-      {% if step.optional and step.artifact_key %}
-      <button type="button"
-              onclick="document.getElementById('paste-modal-{{ step.artifact_key }}').showModal()"
-              class="text-xs font-mono px-2 py-1 text-gray-500 border border-gray-300 hover:bg-gray-50 hover:text-gray-700">
-        {% if step.complete %}<i class="fas fa-edit mr-1"></i>Edit{% else %}<i class="fas fa-paste mr-1"></i>Add{% endif %}
-      </button>
+      {# Error message for failed sub-steps #}
+      {% if step.status == 'failed' and step.error %}
+      <p class="text-xs text-red-600 mt-1 font-mono">{{ step.error|truncatechars:200 }}</p>
       {% endif %}
     </div>
   </div>

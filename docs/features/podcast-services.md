@@ -276,16 +276,21 @@ Returns `{passed: bool, details: str}`. Supported gates:
 ```python
 fail_step(episode_id: int, step: str, error: str) -> EpisodeWorkflow
 ```
-Sets `status='failed'` and records the error in the step's history entry.
+Sets `status='failed'` and records the error in the step's history entry. Multiple calls for the same step accumulate errors (separated by `\n---\n`) rather than overwriting.
+
+```python
+fail_research_source(episode_id: int, artifact_title: str, error: str) -> EpisodeArtifact
+```
+Records a per-source research failure by writing `[FAILED: error]` to the artifact's content and storing error details in `metadata`. Does NOT change workflow status — the fan-in signal evaluates aggregate state. Used by parallel research sub-tasks instead of `fail_step()`.
 
 ---
 
 ### `workflow_progress.py` -- Progress Computation
 
 ```python
-compute_workflow_progress(episode: Episode, artifact_titles: list[str]) -> list[Phase]
+compute_workflow_progress(episode: Episode, artifact_titles: list[str], artifact_contents: dict[str, str] | None = None) -> list[Phase]
 ```
-Maps episode fields and artifact titles to 12 `Phase` dataclass objects. Each Phase has a list of `SubStep` items with `complete` status. Used for dashboard display and progress tracking.
+Maps episode fields and artifact titles to 12 `Phase` dataclass objects. Each Phase has a list of `SubStep` items. For Phase 4, `SubStep` includes `status` (pending/running/complete/failed/skipped) and `error` fields derived from artifact content via `_resolve_substep_status()`. Used for dashboard display and progress tracking.
 
 ```python
 get_workflow_summary(episode_id: int) -> dict
@@ -359,7 +364,9 @@ def _acquire_step_lock(episode_id, expected_step):
 
 ### Fan-In Signal (`apps/podcast/signals.py`)
 
-Parallel steps (Targeted Research and Publishing Assets) use a `post_save` signal on `EpisodeArtifact` for fan-in coordination. When all expected artifacts have content, the signal enqueues the next step using `select_for_update` to prevent double-enqueue.
+Parallel steps (Targeted Research and Publishing Assets) use a `post_save` signal on `EpisodeArtifact` for fan-in coordination. The signal uses `select_for_update` inside `_try_enqueue_next_step()` to prevent double-enqueue.
+
+**Targeted Research fan-in** uses threshold-based advancement: all p2-* artifacts must have non-empty content (task resolved), and at least one must have real content (not `[FAILED:]` or `[SKIPPED:]`). This allows the pipeline to continue when some research sources fail while others succeed. Failed sources write `[FAILED: error]` to their artifact via `fail_research_source()`, which triggers the signal without halting the workflow.
 
 ### Quality Gates
 

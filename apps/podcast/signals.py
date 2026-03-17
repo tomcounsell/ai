@@ -37,16 +37,16 @@ _PUBLISHING_ASSET_TITLES = {
 
 
 def _check_targeted_research_complete(episode_id: int) -> bool:
-    """Check whether all targeted research artifacts have content.
+    """Check whether all targeted research tasks have resolved.
 
-    Targeted Research expects all p2-* artifacts (except p2-perplexity,
-    which is created in an earlier phase) to have content. The set of
-    expected artifacts is determined by the placeholder artifacts created
-    during question discovery.
+    Uses a **threshold-based** check: all p2-* artifacts (except
+    p2-perplexity, from an earlier phase) must be non-empty (i.e. every
+    task has finished — succeeded, failed, or was skipped), **and** at
+    least one artifact must contain real research content (not a
+    ``[FAILED: ...]`` or ``[SKIPPED: ...]`` marker).
 
-    Artifacts with content (even "[SKIPPED: ...]" messages) count as
-    complete, allowing the pipeline to progress when optional research
-    services have missing API keys.
+    This allows the pipeline to advance even when some research sources
+    fail, as long as at least one produced usable content.
     """
     targeted_artifacts = EpisodeArtifact.objects.filter(
         episode_id=episode_id,
@@ -56,9 +56,19 @@ def _check_targeted_research_complete(episode_id: int) -> bool:
     if not targeted_artifacts.exists():
         return False
 
-    # All targeted artifacts must have content (including skipped markers).
-    # Empty string means the task hasn't run yet.
-    return not targeted_artifacts.filter(content="").exists()
+    # Still have pending tasks (empty content = still running or not started)
+    if targeted_artifacts.filter(content="").exists():
+        return False
+
+    # At least 1 must have real content (not FAILED, not SKIPPED)
+    has_real = (
+        targeted_artifacts.exclude(content__startswith="[FAILED:")
+        .exclude(content__startswith="[SKIPPED:")
+        .exclude(content="")
+        .exists()
+    )
+
+    return has_real
 
 
 def _check_publishing_assets_complete(episode_id: int) -> bool:

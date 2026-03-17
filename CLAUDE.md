@@ -306,7 +306,7 @@ DB-backed service functions that read from and write to the database. Each funct
 | `synthesis.py` | `synthesize_report`, `plan_episode_content` | Report + content plan generation |
 | `audio.py` | `transcribe_audio`, `generate_episode_chapters` | Whisper transcription + chapter extraction |
 | `publishing.py` | `generate_cover_art`, `write_episode_metadata`, `generate_companions`, `publish_episode` | Publishing assets + final publish |
-| `workflow.py` | `get_status`, `advance_step`, `pause_for_human`, `resume_workflow`, `check_quality_gate`, `fail_step` | Workflow state machine |
+| `workflow.py` | `get_status`, `advance_step`, `pause_for_human`, `resume_workflow`, `check_quality_gate`, `fail_step`, `fail_research_source` | Workflow state machine |
 | `workflow_progress.py` | `compute_workflow_progress`, `get_workflow_summary` | 12-phase progress computation |
 
 ### Named AI Tools (`apps/podcast/services/`)
@@ -337,7 +337,7 @@ Django `@task`-per-step pipeline for autonomous episode production.
 
 **Entry point:** `produce_episode.enqueue(episode_id=42)`
 
-**Graceful degradation:** All research steps except OpenAI (GPT-Researcher) degrade gracefully. If API keys are missing or calls fail, the pipeline logs a warning, creates a "[SKIPPED: ...]" artifact, and continues with other research sources. Gemini quota errors (HTTP 429) are detected specifically with an actionable upgrade message. Claude research catches validation and API errors. Perplexity and Together AI skip when keys are missing. Additionally, `step_question_discovery` auto-retries Perplexity research if no usable p2-* artifacts exist (all empty or SKIPPED), so Phase 3 self-heals without manual intervention.
+**Graceful degradation:** Research steps handle failures at two layers. Service-level: missing API keys or known errors create `[SKIPPED: ...]` artifacts (Gemini, Claude, MiroFish, Together, Perplexity). Task-level: unexpected exceptions are caught by `fail_research_source()` which writes `[FAILED: error]` to the artifact without halting the workflow. The fan-in signal uses threshold-based advancement: all p2-* artifacts must be non-empty (task resolved) and at least one must have real content (not SKIPPED/FAILED). Per-source retry is available via `RetryResearchSourceView`. Additionally, `step_question_discovery` auto-retries Perplexity research if no usable p2-* artifacts exist (all empty, SKIPPED, or FAILED), so Phase 3 self-heals without manual intervention.
 
 ### Models
 

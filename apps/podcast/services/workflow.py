@@ -266,18 +266,56 @@ def fail_step(episode_id: int, step: str, error: str) -> EpisodeWorkflow:
     """Mark the workflow as failed at *step* with an error message.
 
     Sets ``status='failed'`` and records the error in the history entry for
-    the given step.
+    the given step.  If the history entry already has an error (e.g. from a
+    previous parallel sub-task failure), the new error is appended rather
+    than overwriting the existing one.
     """
     wf = EpisodeWorkflow.objects.get(episode_id=episode_id)
 
     wf.status = "failed"
 
-    # Update the matching history entry
+    # Update the matching history entry, accumulating errors
     for entry in reversed(wf.history):
         if entry["step"] == step:
             entry["status"] = "failed"
-            entry["error"] = error
+            existing = entry.get("error") or ""
+            if existing:
+                entry["error"] = f"{existing}\n---\n{error}"
+            else:
+                entry["error"] = error
             break
 
     wf.save(update_fields=["status", "history"])
     return wf
+
+
+def fail_research_source(
+    episode_id: int, artifact_title: str, error: str
+) -> EpisodeArtifact:
+    """Record a per-source research failure without halting the workflow.
+
+    Writes ``[FAILED: <error>]`` to the artifact's content (using ``.save()``
+    to trigger the ``post_save`` signal for fan-in evaluation) and stores
+    structured error details in the artifact's ``metadata`` field.
+
+    Unlike :func:`fail_step`, this does **not** set the workflow status to
+    ``"failed"``.  The fan-in signal in :mod:`apps.podcast.signals` evaluates
+    the aggregate state of all research artifacts to decide whether the
+    workflow can advance.
+
+    Args:
+        episode_id: Primary key of the Episode.
+        artifact_title: Title of the research artifact (e.g. ``"p2-chatgpt"``).
+        error: Human-readable error message.
+
+    Returns:
+        The updated :class:`EpisodeArtifact`.
+    """
+    artifact = EpisodeArtifact.objects.get(episode_id=episode_id, title=artifact_title)
+    artifact.content = f"[FAILED: {error}]"
+    artifact.metadata = artifact.metadata or {}
+    artifact.metadata["error"] = str(error)
+    artifact.metadata["failed_at"] = _now_iso()
+    # Use .save() (not .update()) to trigger post_save signal for fan-in.
+    artifact.save()
+    return artifact

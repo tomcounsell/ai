@@ -198,6 +198,7 @@ def step_question_discovery(episode_id: int) -> None:
             )
             .exclude(content="")
             .exclude(content__startswith="[SKIPPED:")
+            .exclude(content__startswith="[FAILED:")
             .exists()
         )
         if not has_research:
@@ -252,7 +253,8 @@ def step_gpt_research(episode_id: int) -> None:
         logger.info("step_gpt_research: completed for episode %d", episode_id)
         # Do NOT enqueue next step -- signal handles fan-in
     except Exception as exc:
-        workflow.fail_step(episode_id, "Targeted Research", str(exc))
+        # Per-source error: write [FAILED: ...] to artifact, don't halt workflow.
+        workflow.fail_research_source(episode_id, "p2-chatgpt", str(exc))
         raise
 
 
@@ -277,7 +279,8 @@ def step_gemini_research(episode_id: int) -> None:
         logger.info("step_gemini_research: completed for episode %d", episode_id)
         # Do NOT enqueue next step -- signal handles fan-in
     except Exception as exc:
-        workflow.fail_step(episode_id, "Targeted Research", str(exc))
+        # Per-source error: write [FAILED: ...] to artifact, don't halt workflow.
+        workflow.fail_research_source(episode_id, "p2-gemini", str(exc))
         raise
 
 
@@ -315,7 +318,8 @@ def step_together_research(episode_id: int) -> None:
             logger.info("step_together_research: completed for episode %d", episode_id)
         # Do NOT enqueue next step -- signal handles fan-in
     except Exception as exc:
-        workflow.fail_step(episode_id, "Targeted Research", str(exc))
+        # Per-source error: write [FAILED: ...] to artifact, don't halt workflow.
+        workflow.fail_research_source(episode_id, "p2-together", str(exc))
         raise
 
 
@@ -339,7 +343,8 @@ def step_claude_research(episode_id: int) -> None:
         logger.info("step_claude_research: completed for episode %d", episode_id)
         # Do NOT enqueue next step -- signal handles fan-in
     except Exception as exc:
-        workflow.fail_step(episode_id, "Targeted Research", str(exc))
+        # Per-source error: write [FAILED: ...] to artifact, don't halt workflow.
+        workflow.fail_research_source(episode_id, "p2-claude", str(exc))
         raise
 
 
@@ -377,7 +382,8 @@ def step_mirofish_research(episode_id: int) -> None:
             logger.info("step_mirofish_research: completed for episode %d", episode_id)
         # Do NOT enqueue next step -- signal handles fan-in
     except Exception as exc:
-        workflow.fail_step(episode_id, "Targeted Research", str(exc))
+        # Per-source error: write [FAILED: ...] to artifact, don't halt workflow.
+        workflow.fail_research_source(episode_id, "p2-mirofish", str(exc))
         raise
 
 
@@ -398,10 +404,15 @@ def step_research_digests(episode_id: int) -> None:
     # Cross-Validation.  The workflow is still at "Targeted Research"
     # when the signal fires, so we advance first.
     try:
-        p2_artifacts = EpisodeArtifact.objects.filter(
-            episode_id=episode_id,
-            title__startswith="p2-",
-        ).exclude(content="")
+        p2_artifacts = (
+            EpisodeArtifact.objects.filter(
+                episode_id=episode_id,
+                title__startswith="p2-",
+            )
+            .exclude(content="")
+            .exclude(content__startswith="[FAILED:")
+            .exclude(content__startswith="[SKIPPED:")
+        )
 
         for artifact in p2_artifacts:
             analysis.create_research_digest(episode_id, artifact.title)

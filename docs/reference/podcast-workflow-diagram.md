@@ -167,7 +167,7 @@ stateDiagram-v2
 
 | Trigger | Reason | Resumes When |
 |---------|--------|-------------|
-| Phase 4 | Manual research needed (Grok, Claude) | `add_manual_research()` called, then `resume_workflow()` |
+| Phase 4 | Automated research complete; review and optionally add manual/Grok research or retry failed sources | Per-source retry via `RetryResearchSourceView`, or `resume_workflow()` |
 | Phase 6 | Wave 1 quality gate failure | Human reviews briefing, triggers retry |
 | Phase 8 | Wave 2 quality gate failure | Human reviews plan, triggers retry |
 | Phase 11 | Cover art not automated | Cover art manually uploaded |
@@ -186,7 +186,7 @@ Setup -> Perplexity (30-120s) -> Question Discovery -> Targeted Research (6-20 m
 
 ## Parallel Execution Opportunities
 
-**Phase 4 -- Research tools:** GPT-Researcher, Gemini, and manual research run concurrently. The bottleneck is whichever finishes last.
+**Phase 4 -- Research tools:** GPT-Researcher, Gemini, Together, Claude, and MiroFish run concurrently. Fan-in uses threshold-based advancement: all tasks must resolve (non-empty content) and at least one must succeed. Failed sources write `[FAILED: error]` artifacts and can be retried individually.
 
 **Phase 5 -- Research digests:** One `create_research_digest` call per `p2-*` artifact, all independent.
 

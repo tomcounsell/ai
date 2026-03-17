@@ -16,7 +16,7 @@ from apps.podcast.views import (
     RegenerateCoverArtView,
     UploadCoverArtView,
 )
-from apps.podcast.workflow import WorkflowPollView
+from apps.podcast.workflow import RetryResearchSourceView, WorkflowPollView
 
 app_name = "podcast"
 
@@ -30,6 +30,11 @@ urlpatterns = [
         "<slug:slug>/<slug:episode_slug>/edit/<int:step>/status/",
         WorkflowPollView.as_view(),
         name="episode_workflow_poll",
+    ),
+    path(
+        "<slug:slug>/<slug:episode_slug>/edit/4/retry/<str:source>/",
+        RetryResearchSourceView.as_view(),
+        name="retry_research_source",
     ),
     path(
         "<slug:slug>/<slug:episode_slug>/edit/<int:step>/",

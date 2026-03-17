@@ -233,20 +233,29 @@ class EpisodeWorkflowView(LoginRequiredMixin, UserPassesTestMixin, MainContentVi
         if step < 1 or step > 12:
             raise Http404("Workflow step must be between 1 and 12.")
 
-        artifact_titles: list[str] = list(
-            episode.artifacts.values_list("title", flat=True)
-        )
-        phases = compute_workflow_progress(episode, artifact_titles)
-        current_phase = phases[step - 1]
-
-        # Get artifact for current phase
-        phase_artifact = self._get_phase_artifact(episode, step)
-        auto_expand = step in [6, 8]  # Quality gates
+        artifacts = episode.artifacts.all()
+        artifact_titles: list[str] = [a.title for a in artifacts]
+        # Build content map for Phase 4 per-source status rendering
+        artifact_contents: dict[str, str] = {
+            a.title: a.content or "" for a in artifacts if a.title.startswith("p2-")
+        }
 
         # Check if workflow is actively running (for polling)
         workflow_is_running = False
         with contextlib.suppress(EpisodeWorkflow.DoesNotExist):
             workflow_is_running = episode.workflow.status == "running"
+
+        phases = compute_workflow_progress(
+            episode,
+            artifact_titles,
+            artifact_contents=artifact_contents,
+            workflow_is_running=workflow_is_running,
+        )
+        current_phase = phases[step - 1]
+
+        # Get artifact for current phase
+        phase_artifact = self._get_phase_artifact(episode, step)
+        auto_expand = step in [6, 8]  # Quality gates
 
         self.context["podcast"] = podcast
         self.context["episode"] = episode
@@ -546,9 +555,18 @@ class WorkflowPollView(LoginRequiredMixin, UserPassesTestMixin, View):
         except EpisodeWorkflow.DoesNotExist:
             is_running = False
 
-        # Build context
-        artifact_titles = list(episode.artifacts.values_list("title", flat=True))
-        phases = compute_workflow_progress(episode, artifact_titles)
+        # Build context with per-source content for Phase 4 status
+        artifacts = episode.artifacts.all()
+        artifact_titles = [a.title for a in artifacts]
+        artifact_contents = {
+            a.title: a.content or "" for a in artifacts if a.title.startswith("p2-")
+        }
+        phases = compute_workflow_progress(
+            episode,
+            artifact_titles,
+            artifact_contents=artifact_contents,
+            workflow_is_running=is_running,
+        )
         current_phase = phases[step - 1]
 
         # Get artifact for current phase (same logic as main view)
@@ -604,6 +622,110 @@ class WorkflowPollView(LoginRequiredMixin, UserPassesTestMixin, View):
             response.status_code = 286
 
         return response
+
+
+# Maps per-source retry key to (artifact_title, task_dotted_path)
+_RETRY_SOURCE_MAP: dict[str, tuple[str, str]] = {
+    "chatgpt": ("p2-chatgpt", "apps.podcast.tasks.step_gpt_research"),
+    "gemini": ("p2-gemini", "apps.podcast.tasks.step_gemini_research"),
+    "together": ("p2-together", "apps.podcast.tasks.step_together_research"),
+    "claude": ("p2-claude", "apps.podcast.tasks.step_claude_research"),
+    "mirofish": ("p2-mirofish", "apps.podcast.tasks.step_mirofish_research"),
+}
+
+
+class RetryResearchSourceView(LoginRequiredMixin, UserPassesTestMixin, View):
+    """Retry a single failed research source in Phase 4 (Targeted Research).
+
+    Clears the artifact content (resetting it to empty so it appears as
+    "pending"), sets the workflow back to "running" if paused, and
+    re-enqueues just the one research task.
+    """
+
+    def test_func(self) -> bool:
+        slug = self.kwargs.get("slug")
+        if not slug:
+            return False
+        podcast = get_object_or_404(Podcast, slug=slug)
+        return self.request.user.is_staff or podcast.owner == self.request.user
+
+    def post(self, request, slug: str, episode_slug: str, source: str):
+        from apps.podcast.models import EpisodeArtifact
+
+        podcast = get_object_or_404(Podcast, slug=slug)
+        episode = get_object_or_404(Episode, podcast=podcast, slug=episode_slug)
+
+        # Validate source key
+        if source not in _RETRY_SOURCE_MAP:
+            logger.warning(
+                "Invalid retry source '%s' for episode %d", source, episode.pk
+            )
+            return self._redirect(slug, episode_slug)
+
+        # Guard: only allow retry when workflow is at Targeted Research
+        try:
+            wf = episode.workflow
+        except EpisodeWorkflow.DoesNotExist:
+            logger.warning("No workflow for episode %d", episode.pk)
+            return self._redirect(slug, episode_slug)
+
+        if wf.current_step != "Targeted Research":
+            logger.warning(
+                "Cannot retry source '%s': workflow is at '%s', not 'Targeted Research' "
+                "(episode %d)",
+                source,
+                wf.current_step,
+                episode.pk,
+            )
+            return self._redirect(slug, episode_slug)
+
+        artifact_title, task_path = _RETRY_SOURCE_MAP[source]
+
+        # Clear the artifact to reset it to "pending"
+        try:
+            artifact = EpisodeArtifact.objects.get(
+                episode=episode, title=artifact_title
+            )
+            artifact.content = ""
+            artifact.metadata = artifact.metadata or {}
+            artifact.metadata.pop("error", None)
+            artifact.metadata.pop("failed_at", None)
+            # Use .save() to trigger post_save signal
+            artifact.save()
+        except EpisodeArtifact.DoesNotExist:
+            logger.warning(
+                "Artifact '%s' not found for episode %d", artifact_title, episode.pk
+            )
+            return self._redirect(slug, episode_slug)
+
+        # Resume workflow if paused
+        if wf.status in ("paused_for_human", "failed"):
+            from apps.podcast.services import workflow as wf_service
+
+            wf_service.resume_workflow(episode.pk)
+
+        # Re-enqueue just this one task
+        task_fn = _resolve_task(task_path)
+        task_fn.enqueue(episode_id=episode.pk)
+        logger.info(
+            "Retrying source '%s' (task: %s) for episode %d",
+            source,
+            task_path,
+            episode.pk,
+        )
+
+        return self._redirect(slug, episode_slug)
+
+    def _redirect(self, slug: str, episode_slug: str) -> HttpResponse:
+        url = reverse(
+            "podcast:episode_workflow",
+            kwargs={"slug": slug, "episode_slug": episode_slug, "step": 4},
+        )
+        if getattr(self.request, "htmx", False):
+            response = HttpResponse(status=204)
+            response["HX-Redirect"] = url
+            return response
+        return HttpResponseRedirect(url)
 
 
 class PasteResearchView(LoginRequiredMixin, UserPassesTestMixin, View):

@@ -5,13 +5,22 @@ from dataclasses import dataclass, field
 
 @dataclass
 class SubStep:
-    """A single checkable item within a workflow phase."""
+    """A single checkable item within a workflow phase.
+
+    Attributes:
+        status: One of ``"pending"``, ``"running"``, ``"complete"``,
+            ``"failed"``, or ``"skipped"``.  Used by the template to select
+            the appropriate icon and styling for each sub-step.
+        error: Human-readable error message when ``status == "failed"``.
+    """
 
     label: str
     complete: bool
     detail: str = ""
     optional: bool = False
     artifact_key: str = ""
+    status: str = "pending"  # pending | running | complete | failed | skipped
+    error: str = ""
 
 
 @dataclass
@@ -54,9 +63,33 @@ def _word_count(text: str) -> int:
     return len(text.split()) if text else 0
 
 
+def _resolve_substep_status(
+    content: str, workflow_is_running: bool = False
+) -> tuple[str, str]:
+    """Derive sub-step status and error from artifact content.
+
+    Returns:
+        A ``(status, error)`` tuple where *status* is one of
+        ``"pending"``, ``"running"``, ``"complete"``, ``"failed"``,
+        ``"skipped"`` and *error* is a human-readable message (empty
+        string when not applicable).
+    """
+    if not content:
+        return ("running" if workflow_is_running else "pending", "")
+    if content.startswith("[FAILED:"):
+        # Extract message between "[FAILED: " and trailing "]"
+        error_msg = content[len("[FAILED: ") :].rstrip("]").strip()
+        return ("failed", error_msg)
+    if content.startswith("[SKIPPED:"):
+        return ("skipped", "")
+    return ("complete", "")
+
+
 def compute_workflow_progress(
     episode: object,
     artifact_titles: list[str],
+    artifact_contents: dict[str, str] | None = None,
+    workflow_is_running: bool = False,
 ) -> list[Phase]:
     """Compute the 12-phase workflow progress for a podcast episode.
 
@@ -69,8 +102,9 @@ def compute_workflow_progress(
         Phase 3  (Question Disc.)   - Artifact contains "question-discovery" or
                                       "gap-analysis"
         Phase 4  (Targeted Research) - Artifacts containing p2-grok, p2-chatgpt,
-                                      p2-gemini, p2-claude, p2-together, p2-manual
-                                      (each a separate sub-step)
+                                      p2-gemini, p2-claude, p2-together, p2-manual,
+                                      p2-mirofish (each a separate sub-step with
+                                      per-source status)
         Phase 5  (Cross-Validation) - Artifact contains "cross-validation"
         Phase 6  (Master Briefing)  - Artifact contains "p3-briefing"
         Phase 7  (Synthesis)        - episode.report_text is non-empty
@@ -90,10 +124,17 @@ def compute_workflow_progress(
             transcript, chapters, cover_image_url, description, published_at).
         artifact_titles: A flat list of artifact title strings associated with
             the episode (e.g. ["research/p2-perplexity.md", "plans/content-plan.md"]).
+        artifact_contents: Optional mapping of artifact title to content string.
+            When provided, Phase 4 sub-steps derive per-source status from
+            the actual content (complete, failed, skipped, pending).
+        workflow_is_running: If ``True``, empty artifacts are shown as
+            "running" rather than "pending" in Phase 4.
 
     Returns:
         A list of 12 Phase objects ordered by phase number.
     """
+    if artifact_contents is None:
+        artifact_contents = {}
 
     # -- Phase 1: Setup --
     phase_1 = Phase(
@@ -144,22 +185,33 @@ def compute_workflow_progress(
         ("Gemini research", "p2-gemini", False),
         ("Claude research", "p2-claude", False),
         ("Together research", "p2-together", False),
+        ("MiroFish research", "p2-mirofish", False),
         ("Grok research", "p2-grok", True),
         ("Manual research", "p2-manual", True),
     ]
+    phase_4_substeps = []
+    for label, needle, is_optional in targeted_sources:
+        has_art = _has_artifact(artifact_titles, needle)
+        content = artifact_contents.get(needle, "")
+        status, error = _resolve_substep_status(content, workflow_is_running)
+        # Override: if artifact exists but we have no content data, mark complete
+        if has_art and not artifact_contents:
+            status = "complete"
+        phase_4_substeps.append(
+            SubStep(
+                label=label,
+                complete=has_art and status in ("complete", "failed", "skipped"),
+                optional=is_optional,
+                artifact_key=needle.replace("p2-", ""),
+                status=status if has_art or content else "pending",
+                error=error,
+            )
+        )
     phase_4 = Phase(
         number=4,
         name="Targeted Research",
         description="Multi-source research to fill identified gaps",
-        sub_steps=[
-            SubStep(
-                label=label,
-                complete=_has_artifact(artifact_titles, needle),
-                optional=is_optional,
-                artifact_key=needle.replace("p2-", ""),
-            )
-            for label, needle, is_optional in targeted_sources
-        ],
+        sub_steps=phase_4_substeps,
     )
 
     # -- Phase 5: Cross-Validation --

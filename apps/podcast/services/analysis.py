@@ -280,11 +280,15 @@ def discover_questions(episode_id: int) -> EpisodeArtifact:
     episode = Episode.objects.get(pk=episode_id)
 
     # Prefer p2-perplexity; fall back to any p2-* artifact with real content
-    # (exclude skipped artifacts whose content starts with "[SKIPPED:")
+    # (exclude skipped/failed artifacts)
     research_artifact = None
     try:
         candidate = EpisodeArtifact.objects.get(episode=episode, title="p2-perplexity")
-        if candidate.content and not candidate.content.startswith("[SKIPPED:"):
+        if (
+            candidate.content
+            and not candidate.content.startswith("[SKIPPED:")
+            and not candidate.content.startswith("[FAILED:")
+        ):
             research_artifact = candidate
     except EpisodeArtifact.DoesNotExist:
         pass
@@ -294,6 +298,7 @@ def discover_questions(episode_id: int) -> EpisodeArtifact:
             EpisodeArtifact.objects.filter(episode=episode, title__startswith="p2-")
             .exclude(content="")
             .exclude(content__startswith="[SKIPPED:")
+            .exclude(content__startswith="[FAILED:")
             .first()
         )
 
@@ -456,6 +461,7 @@ def cross_validate(episode_id: int) -> EpisodeArtifact:
         EpisodeArtifact.objects.filter(episode=episode, title__startswith="p2-")
         .exclude(content="")
         .exclude(content__startswith="[SKIPPED:")
+        .exclude(content__startswith="[FAILED:")
     )
 
     research_texts: dict[str, str] = {}
@@ -531,8 +537,10 @@ def write_briefing(episode_id: int) -> EpisodeArtifact:
     for art in digest_artifacts:
         if art.content:
             tool_name = art.title.replace("digest-", "", 1)
-            # Check if digest was skipped due to quota errors
-            if art.content.startswith("[SKIPPED:"):
+            # Check if digest was skipped or failed
+            if art.content.startswith("[SKIPPED:") or art.content.startswith(
+                "[FAILED:"
+            ):
                 skipped_digests.add(tool_name)
             else:
                 research_digests[tool_name] = art.content
