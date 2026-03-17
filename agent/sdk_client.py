@@ -1261,7 +1261,10 @@ async def get_agent_response_sdk(
         try:
             from bridge.session_transcript import complete_transcript
 
-            complete_transcript(session_id, status="failed")
+            # Capture exception details so the reflections system can produce
+            # actionable bug reports instead of "empty error summary" issues.
+            error_summary = f"{type(e).__name__}: {e}"[:500]
+            complete_transcript(session_id, status="failed", summary=error_summary)
         except Exception:
             pass  # Best-effort cleanup
         return (
