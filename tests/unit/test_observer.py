@@ -158,7 +158,8 @@ class TestStateMachineIntegration:
             mock_llm.return_value = {
                 "action": "deliver",
                 "reason": "casual conversation",
-                "completed_stage": None,
+                "resolved_stage": None,
+                "stage_outcome": None,
                 "next_stage": None,
             }
             decision = await observer.run()
@@ -175,7 +176,8 @@ class TestStateMachineIntegration:
             mock_llm.return_value = {
                 "action": "deliver",
                 "reason": "human input needed",
-                "completed_stage": None,
+                "resolved_stage": None,
+                "stage_outcome": None,
                 "next_stage": None,
             }
             await observer.run()
@@ -191,7 +193,8 @@ class TestStateMachineIntegration:
             mock_llm.return_value = {
                 "action": "deliver",
                 "reason": "cap reached",
-                "completed_stage": None,
+                "resolved_stage": None,
+                "stage_outcome": None,
                 "next_stage": None,
             }
             await observer.run()
@@ -207,7 +210,8 @@ class TestStateMachineIntegration:
             mock_llm.return_value = {
                 "action": "deliver",
                 "reason": "test failed",
-                "completed_stage": None,
+                "resolved_stage": None,
+                "stage_outcome": None,
                 "next_stage": None,
             }
             await observer.run()
@@ -302,7 +306,7 @@ class TestDecisionStructure:
             session, worker_output="PR created: https://github.com/org/repo/pull/42"
         )
         decision = await observer.run()
-        assert "completed_stage" in decision
+        assert "resolved_stage" in decision
         assert "next_stage" in decision
 
     @pytest.mark.asyncio
@@ -310,5 +314,5 @@ class TestDecisionStructure:
         session = _make_session(stage_states=json.dumps({"BUILD": "in_progress"}))
         observer = _make_observer(session, stop_reason="budget_exceeded")
         decision = await observer.run()
-        assert "completed_stage" in decision
+        assert "resolved_stage" in decision
         assert "next_stage" in decision

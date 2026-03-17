@@ -1629,12 +1629,16 @@ async def _execute_job(job: Job) -> None:
         # Apply state machine transitions based on Observer decision
         if _state_machine and _is_sdlc:
             try:
-                completed_stage = decision.get("completed_stage")
+                resolved_stage = decision.get("resolved_stage")
+                stage_outcome = decision.get("stage_outcome")
                 next_stage = decision.get("next_stage")
-                if completed_stage:
+                if resolved_stage:
                     current = _state_machine.current_stage()
-                    if current == completed_stage:
-                        _state_machine.complete_stage(completed_stage)
+                    if current == resolved_stage:
+                        if stage_outcome == "fail":
+                            _state_machine.fail_stage(resolved_stage)
+                        else:
+                            _state_machine.complete_stage(resolved_stage)
                 if next_stage:
                     try:
                         _state_machine.start_stage(next_stage)
@@ -1710,31 +1714,21 @@ async def _execute_job(job: Job) -> None:
             return
 
         # Observer decided to deliver to Telegram
-        # Completion guard: check goal gates for SDLC sessions
-        if _is_sdlc and agent_session:
-            try:
-                from agent.goal_gates import check_all_gates
-
-                slug = getattr(agent_session, "work_item_slug", None)
-                if slug:
-                    gate_wd = getattr(agent_session, "working_dir", None) or "."
-                    gate_results = check_all_gates(slug, gate_wd, agent_session)
-                    unsatisfied = [
-                        f"  - {stage}: {r.missing or r.evidence}"
-                        for stage, r in gate_results.items()
-                        if not r.satisfied
-                    ]
-                    if unsatisfied:
-                        gate_warning = "\n\n⚠️ **Incomplete pipeline gates:**\n" + "\n".join(
-                            unsatisfied
-                        )
-                        msg = msg + gate_warning
-                        logger.info(
-                            f"[{job.project_key}] Gate completion guard: "
-                            f"{len(unsatisfied)} unsatisfied gates for slug {slug}"
-                        )
-            except Exception as e:
-                logger.warning(f"[{job.project_key}] Gate completion guard failed: {e}")
+        # Completion guard: check state machine for incomplete stages
+        if _is_sdlc and _state_machine and _state_machine.has_remaining_stages():
+            progress = _state_machine.get_display_progress()
+            incomplete = [
+                f"  - {stage}: {status}"
+                for stage, status in progress.items()
+                if status not in ("completed",)
+            ]
+            if incomplete:
+                gate_warning = "\n\n⚠️ **Incomplete pipeline stages:**\n" + "\n".join(incomplete)
+                msg = msg + gate_warning
+                logger.info(
+                    f"[{job.project_key}] State machine completion guard: "
+                    f"{len(incomplete)} incomplete stages"
+                )
 
         # Use message_for_user from Observer if provided (curated user-facing text),
         # otherwise fall back to raw worker output. The reason is internal-only.

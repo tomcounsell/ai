@@ -443,7 +443,8 @@ class Observer:
             - action: "steer" | "deliver"
             - coaching_message: str (if action is "steer")
             - reason: str (if action is "deliver")
-            - completed_stage: str | None (stage just completed)
+            - resolved_stage: str | None (stage just resolved)
+            - stage_outcome: str | None ("success", "fail", or "ambiguous")
             - next_stage: str | None (stage to start next)
         """
         is_sdlc = self.session.is_sdlc_job()
@@ -482,7 +483,8 @@ class Observer:
                     "action": "deliver",
                     "reason": "Worker budget exceeded. Partial output delivered.",
                     "stop_reason": self.stop_reason,
-                    "completed_stage": None,
+                    "resolved_stage": None,
+                    "stage_outcome": None,
                     "next_stage": None,
                 }
 
@@ -503,7 +505,8 @@ class Observer:
                         "where you left off. Do not restart from scratch."
                     ),
                     "stop_reason": self.stop_reason,
-                    "completed_stage": None,
+                    "resolved_stage": None,
+                    "stage_outcome": None,
                     "next_stage": current,
                 }
 
@@ -513,22 +516,18 @@ class Observer:
             )
 
         # Phase 2: State machine outcome classification
-        completed_stage = None
+        resolved_stage = None
+        stage_outcome = None
         next_stage_name = None
         next_skill = None
 
         if sm and current:
-            outcome = sm.classify_outcome(
+            stage_outcome = sm.classify_outcome(
                 current, self.stop_reason, self.worker_output[-500:] if self.worker_output else ""
             )
-            if outcome == "success":
-                completed_stage = current
-                next_info = sm.next_stage("success")
-                if next_info:
-                    next_stage_name, next_skill = next_info
-            elif outcome == "fail":
-                completed_stage = current
-                next_info = sm.next_stage("fail")
+            if stage_outcome in ("success", "fail"):
+                resolved_stage = current
+                next_info = sm.next_stage(stage_outcome)
                 if next_info:
                     next_stage_name, next_skill = next_info
 
@@ -586,7 +585,8 @@ class Observer:
                     "action": "steer",
                     "coaching_message": coaching,
                     "deterministic_guard": True,
-                    "completed_stage": completed_stage,
+                    "resolved_stage": resolved_stage,
+                    "stage_outcome": stage_outcome,
                     "next_stage": stage_name,
                 }
 
@@ -603,15 +603,20 @@ class Observer:
             )
 
         # Phase 4: LLM Observer for judgment calls
-        return await self._run_llm_observer(completed_stage, next_stage_name)
+        return await self._run_llm_observer(resolved_stage, stage_outcome, next_stage_name)
 
     async def _run_llm_observer(
         self,
-        completed_stage: str | None,
+        resolved_stage: str | None,
+        stage_outcome: str | None,
         next_stage_name: str | None,
     ) -> dict[str, Any]:
         """Run the LLM Observer for ambiguous routing decisions."""
-        base = {"completed_stage": completed_stage, "next_stage": next_stage_name}
+        base = {
+            "resolved_stage": resolved_stage,
+            "stage_outcome": stage_outcome,
+            "next_stage": next_stage_name,
+        }
         try:
             api_key = get_anthropic_api_key()
             if not api_key:
