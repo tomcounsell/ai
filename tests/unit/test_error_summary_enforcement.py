@@ -95,51 +95,51 @@ class TestReflectionsEmptySummaryGuard:
             turn_count=0,
         )
 
-    @patch("scripts.reflections.BridgeEvent")
-    @patch("scripts.reflections.AgentSession")
+    @patch("models.bridge_event.BridgeEvent")
+    @patch("models.agent_session.AgentSession")
     def test_skips_empty_summary_failed_session(
         self, mock_agent_session, mock_bridge_event, caplog
     ):
         """Failed sessions with empty summary are skipped with a warning."""
-        from scripts.reflections import collect_session_analysis
+        from scripts.reflections import analyze_sessions_from_redis
 
         session = self._make_session("sess-empty", "failed", summary="", started_at=1710000000)
         mock_agent_session.query.all.return_value = [session]
         mock_bridge_event.query.filter.return_value = []
 
         with caplog.at_level(logging.WARNING):
-            result = collect_session_analysis("2024-03-09")
+            result = analyze_sessions_from_redis("2024-03-09")
 
         # Session should NOT appear in error_patterns
         assert len(result["error_patterns"]) == 0
         # Warning should have been logged
         assert any("Skipping failed session sess-empty" in r.message for r in caplog.records)
 
-    @patch("scripts.reflections.BridgeEvent")
-    @patch("scripts.reflections.AgentSession")
+    @patch("models.bridge_event.BridgeEvent")
+    @patch("models.agent_session.AgentSession")
     def test_skips_none_summary_failed_session(
         self, mock_agent_session, mock_bridge_event, caplog
     ):
         """Failed sessions with None summary are skipped."""
-        from scripts.reflections import collect_session_analysis
+        from scripts.reflections import analyze_sessions_from_redis
 
         session = self._make_session("sess-none", "failed", summary=None, started_at=1710000000)
         mock_agent_session.query.all.return_value = [session]
         mock_bridge_event.query.filter.return_value = []
 
         with caplog.at_level(logging.WARNING):
-            result = collect_session_analysis("2024-03-09")
+            result = analyze_sessions_from_redis("2024-03-09")
 
         assert len(result["error_patterns"]) == 0
         assert any("Skipping failed session sess-none" in r.message for r in caplog.records)
 
-    @patch("scripts.reflections.BridgeEvent")
-    @patch("scripts.reflections.AgentSession")
+    @patch("models.bridge_event.BridgeEvent")
+    @patch("models.agent_session.AgentSession")
     def test_includes_nonempty_summary_failed_session(
         self, mock_agent_session, mock_bridge_event
     ):
         """Failed sessions with a populated summary are included normally."""
-        from scripts.reflections import collect_session_analysis
+        from scripts.reflections import analyze_sessions_from_redis
 
         session = self._make_session(
             "sess-good", "failed", summary="ConnectionError: Redis refused", started_at=1710000000
@@ -147,25 +147,25 @@ class TestReflectionsEmptySummaryGuard:
         mock_agent_session.query.all.return_value = [session]
         mock_bridge_event.query.filter.return_value = []
 
-        result = collect_session_analysis("2024-03-09")
+        result = analyze_sessions_from_redis("2024-03-09")
 
         assert len(result["error_patterns"]) == 1
         assert result["error_patterns"][0]["session_id"] == "sess-good"
         assert result["error_patterns"][0]["summary"] == "ConnectionError: Redis refused"
 
-    @patch("scripts.reflections.BridgeEvent")
-    @patch("scripts.reflections.AgentSession")
+    @patch("models.bridge_event.BridgeEvent")
+    @patch("models.agent_session.AgentSession")
     def test_skips_whitespace_only_summary(
         self, mock_agent_session, mock_bridge_event, caplog
     ):
         """Failed sessions with whitespace-only summary are skipped."""
-        from scripts.reflections import collect_session_analysis
+        from scripts.reflections import analyze_sessions_from_redis
 
         session = self._make_session("sess-ws", "failed", summary="   \n  ", started_at=1710000000)
         mock_agent_session.query.all.return_value = [session]
         mock_bridge_event.query.filter.return_value = []
 
         with caplog.at_level(logging.WARNING):
-            result = collect_session_analysis("2024-03-09")
+            result = analyze_sessions_from_redis("2024-03-09")
 
         assert len(result["error_patterns"]) == 0
