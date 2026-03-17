@@ -181,25 +181,27 @@ def _extract_sdlc_env_vars(session_id: str, gh_repo: str | None = None) -> dict[
         session = candidates[0]
 
         # PR URL -> SDLC_PR_NUMBER and SDLC_PR_BRANCH
+        # Use isinstance(str) guards to prevent TypeError from non-string
+        # ORM field values (e.g. Popoto proxy objects).
         pr_url = getattr(session, "pr_url", None)
-        if pr_url:
+        if isinstance(pr_url, str) and pr_url:
             pr_match = _PR_NUMBER_RE.search(pr_url)
             if pr_match:
                 env["SDLC_PR_NUMBER"] = pr_match.group(1)
 
         # Branch name
         branch = getattr(session, "branch_name", None)
-        if branch:
+        if isinstance(branch, str) and branch:
             env["SDLC_PR_BRANCH"] = branch
 
         # Work item slug
         slug = getattr(session, "work_item_slug", None)
-        if slug:
+        if isinstance(slug, str) and slug:
             env["SDLC_SLUG"] = slug
 
         # Plan URL -> SDLC_PLAN_PATH (convert URL to local path)
         plan_url = getattr(session, "plan_url", None)
-        if plan_url:
+        if isinstance(plan_url, str) and plan_url:
             # plan_url is typically a GitHub URL or a local path
             # Extract the path portion (docs/plans/...)
             if "docs/plans/" in plan_url:
@@ -210,7 +212,7 @@ def _extract_sdlc_env_vars(session_id: str, gh_repo: str | None = None) -> dict[
 
         # Issue URL -> SDLC_ISSUE_NUMBER
         issue_url = getattr(session, "issue_url", None)
-        if issue_url:
+        if isinstance(issue_url, str) and issue_url:
             issue_match = _ISSUE_NUMBER_RE.search(issue_url)
             if issue_match:
                 env["SDLC_ISSUE_NUMBER"] = issue_match.group(1)
