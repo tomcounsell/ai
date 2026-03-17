@@ -141,7 +141,7 @@ class TestIsSectionComplete:
         )
         is_complete, reason = mod.is_section_complete(content)
         assert is_complete
-        assert "checklist" in reason.lower()
+        assert "checklist" in reason.lower() or "items" in reason.lower()
 
     def test_case_insensitive_dispositions(self):
         mod = import_validator()

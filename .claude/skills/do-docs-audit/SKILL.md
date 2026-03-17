@@ -272,7 +272,8 @@ EOF
 
 ### 7B.1: Create GitHub Issue with Full Report
 
-Before committing, create a GitHub issue containing the complete audit report:
+Before committing, create a GitHub issue containing the complete audit report.
+Note: For cross-repo work, the `GH_REPO` env var is set automatically by sdk_client.py.
 
 ```bash
 gh issue create \

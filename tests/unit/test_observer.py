@@ -1132,7 +1132,7 @@ class TestCrossRepoGhResolution:
         skill_path = repo_root / ".claude" / "skills" / "sdlc" / "SKILL.md"
         content = skill_path.read_text()
         assert "--repo" in content, "SDLC skill must contain --repo instructions"
-        assert "REPO_FLAG" in content or "GITHUB_REPO" in content, (
+        assert "REPO_FLAG" in content or "GITHUB_REPO" in content or "GH_REPO" in content, (
             "SDLC skill must reference GITHUB: context line for repo resolution"
         )
 
@@ -1154,7 +1154,12 @@ class TestCrossRepoGhResolution:
                 "gh issue" in content or "gh pr" in content or "gh api" in content
             ):
                 skills_with_gh.append(skill_path.name)
-                has_repo_ref = "REPO_FLAG" in content or "--repo" in content or "GITHUB" in content
+                has_repo_ref = (
+                    "REPO_FLAG" in content
+                    or "--repo" in content
+                    or "GITHUB" in content
+                    or "GH_REPO" in content
+                )
                 if not has_repo_ref:
                     skills_missing_repo.append(str(skill_path))
 
