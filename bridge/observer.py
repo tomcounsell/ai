@@ -33,12 +33,10 @@ from config.models import SONNET
 from models.agent_session import AgentSession
 from monitoring.telemetry import record_decision, record_interjection, record_tool_use
 from utils.api_keys import get_anthropic_api_key
+from utils.github_patterns import ISSUE_NUMBER_RE as _ISSUE_NUMBER_RE
+from utils.github_patterns import PR_NUMBER_RE as _PR_NUMBER_RE
 
 logger = logging.getLogger(__name__)
-
-# Regex patterns for extracting issue/PR numbers from GitHub URLs
-_ISSUE_NUMBER_RE = re.compile(r"/issues/(\d+)")
-_PR_NUMBER_RE = re.compile(r"/pull/(\d+)")
 
 
 def _build_sdlc_context(session: AgentSession) -> dict[str, str]:

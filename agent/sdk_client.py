@@ -24,7 +24,6 @@ Authentication strategy (subscription-first):
 import asyncio
 import logging
 import os
-import re
 import time
 from pathlib import Path
 
@@ -42,6 +41,8 @@ from agent.hooks import build_hooks_config
 from agent.workflow_state import WorkflowState
 from agent.workflow_types import WorkflowStateData
 from agent.worktree_manager import WORKTREES_DIR, validate_workspace
+from utils.github_patterns import ISSUE_NUMBER_RE as _ISSUE_NUMBER_RE
+from utils.github_patterns import PR_NUMBER_RE as _PR_NUMBER_RE
 
 logger = logging.getLogger(__name__)
 
@@ -52,10 +53,6 @@ logger = logging.getLogger(__name__)
 # is empty and recovered jobs create fresh clients. See plan doc for
 # crash safety analysis.
 _active_clients: dict[str, "ClaudeSDKClient"] = {}
-
-# Regex patterns for extracting issue/PR numbers from GitHub URLs (issue #420)
-_ISSUE_NUMBER_RE = re.compile(r"/issues/(\d+)")
-_PR_NUMBER_RE = re.compile(r"/pull/(\d+)")
 
 # === Stop Reason Registry ===
 # Stores the stop_reason from the most recent ResultMessage for each session.
