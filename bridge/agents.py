@@ -112,7 +112,6 @@ async def _handle_update_command(tg_client, event):
         await tg_client.send_message(
             event.chat_id,
             f"{machine} - scripts/remote-update.sh not found",
-            reply_to=event.message.id,
         )
         return
 
@@ -134,27 +133,25 @@ async def _handle_update_command(tg_client, event):
         # Prepend machine name for multi-instance identification
         output = f"{machine} - {output}"
 
-        # Send via send_response_with_files so <<FILE:>> markers get
-        # parsed and the log file is uploaded as an attachment
+        # Send as standalone message (no reply-to) so multi-instance
+        # responses don't create a messy reply chain
         await send_response_with_files(
             tg_client,
             event=None,
             response=output,
             chat_id=event.chat_id,
-            reply_to=event.message.id,
+            reply_to=None,
         )
     except subprocess.TimeoutExpired:
         await tg_client.send_message(
             event.chat_id,
             f"{machine} - update timed out after 120s",
-            reply_to=event.message.id,
         )
     except Exception as e:
         logger.error(f"[bridge] /update command failed: {e}")
         await tg_client.send_message(
             event.chat_id,
             f"{machine} - update failed: {e}",
-            reply_to=event.message.id,
         )
 
 
@@ -230,7 +227,7 @@ async def _handle_force_update_command(tg_client, event):
         event=None,
         response=summary,
         chat_id=event.chat_id,
-        reply_to=event.message.id,
+        reply_to=None,
     )
 
 
