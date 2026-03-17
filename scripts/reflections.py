@@ -255,11 +255,21 @@ def analyze_sessions_from_redis(target_date: str) -> dict[str, Any]:
 
             # Check for failed sessions
             if session.status == "failed":
+                summary_text = (session.summary or "")[:200]
+                if not summary_text.strip():
+                    # Skip failed sessions with empty summaries -- these produce
+                    # vague, unactionable reflections. Log a warning so we can
+                    # track if code paths still produce empty summaries.
+                    logger.warning(
+                        "Skipping failed session %s with empty summary",
+                        session_id,
+                    )
+                    continue
                 result["error_patterns"].append(
                     {
                         "session_id": session_id,
                         "status": "failed",
-                        "summary": (session.summary or "")[:200],
+                        "summary": summary_text,
                     }
                 )
 
