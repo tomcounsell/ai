@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor
@@ -42,21 +42,25 @@ No prior attempts to fix the silent failure problem itself.
 
 ## Data Flow
 
-1. **Entry:** `step_question_discovery` creates empty placeholder artifacts (`p2-chatgpt`, `p2-gemini`, etc. with `content=""`) then enqueues 5 parallel research tasks
-2. **Parallel tasks:** Each `step_*_research` task calls the research service, which writes content to the artifact. On failure, `except` block calls `workflow.fail_step()` then re-raises
-3. **Fan-in signal:** `post_save` on `EpisodeArtifact` fires `_check_targeted_research_complete()`, which checks `not artifacts.filter(content="").exists()` — all must have content
-4. **UI rendering:** `compute_workflow_progress()` builds Phase 4 sub_steps using `_has_artifact()` (title existence only). `_compute_button_state()` checks workflow status for button label
-5. **Stuck state:** If any task fails → artifact stays `content=""` → fan-in never fires → status stays "running" → UI shows "Running..." disabled button with no error → polls forever
+1. **Entry:** `step_question_discovery` calls `analysis.craft_targeted_research_prompts()` which creates empty placeholder artifacts (`p2-chatgpt`, `p2-gemini`, `p2-together`, `p2-claude`, `p2-mirofish` with `content=""`) and prompt artifacts, then enqueues 5 parallel research tasks
+2. **Parallel tasks:** Each `step_*_research` task calls the research service. On success, the service writes content to the artifact via `update_or_create`. On failure, the task's `except` block calls `workflow.fail_step()` then re-raises
+3. **Fan-in signal:** `post_save` on `EpisodeArtifact` fires `check_workflow_progression()`. If `current_step == "Targeted Research"`, calls `_check_targeted_research_complete()` which checks `not artifacts.filter(content="").exists()` — all p2-* (except p2-perplexity) must have non-empty content. If complete, calls `_try_enqueue_next_step()` with `select_for_update` to prevent double-advance, then `pause_for_human()` to let the user review and optionally add Grok/manual research
+4. **UI rendering:** `compute_workflow_progress()` builds a flat list of phases with artifact counts. Phase 4 shows as "active" with artifact count badge but no per-source status
+5. **Stuck state:** Two compounding failures:
+   - **Path A:** Task fails → except calls `fail_step()` → sets `wf.status = "failed"` → fan-in signal checks `wf.status != "running"` → returns early → stuck even if other tasks succeed
+   - **Path B:** Task fails but service didn't create artifact → placeholder stays `content=""` → fan-in's `filter(content="").exists()` returns True → never completes
 
-**The gap:** Between step 2 (task failure) and step 3 (fan-in check), the failure information is lost. `fail_step()` writes the error to the shared workflow history and sets `status="failed"`, but the first `fail_step()` call sets the workflow to "failed" immediately. The second/third failing tasks find `wf.status="failed"` and still write to the same history entry. Meanwhile, placeholder artifacts remain `content=""` giving no indication of what happened.
+**The gap:** `fail_step()` is designed for sequential steps where one failure should halt the pipeline. For parallel sub-steps, it's the wrong tool: it blocks the entire workflow when only one source failed. The correct behavior is to record the failure per-source (in the artifact) and let the fan-in evaluate the aggregate state.
 
-**Actually worse with ImmediateBackend:** All 5 tasks run synchronously in sequence. The first failure sets `status="failed"`, then subsequent tasks check `wf.status` and may raise `ValueError` in `_acquire_step_lock` — but these are parallel sub-steps that skip `_acquire_step_lock`. So all 5 run to completion/failure sequentially, each overwriting the error in history.
+**Two-layer error handling in service functions:** Gemini, Claude, and MiroFish service functions already catch exceptions and write `[SKIPPED: ...]` artifacts — these exceptions never reach the task layer. GPT and Together do NOT catch runtime errors, so their exceptions propagate to the task layer where `fail_step()` kills the workflow. The fix must handle both layers: service-level `[SKIPPED: ...]` for known conditions (missing API keys, quota errors), task-level `[FAILED: ...]` as a safety net for unexpected exceptions that escape the service layer.
+
+**ImmediateBackend:** All 5 tasks run synchronously in sequence. The first failure sets `status="failed"` via `fail_step()`. Subsequent tasks check `wf.current_step != "Targeted Research"` (still matches), so they proceed. Each failing task calls `fail_step()` again, overwriting the error in the history entry. The fan-in signal fires after each save but sees `status == "failed"` and returns early.
 
 ## Architectural Impact
 
 - **No new model fields** — uses existing `metadata` JSONField on `EpisodeArtifact` and existing `content` TextField with content conventions
-- **Interface changes:** `_check_targeted_research_complete()` changes from "all must have content" to "at least 1 has real content AND no tasks still running"
-- **New coupling:** `SubStep` dataclass gains `status` and `error` fields for richer UI rendering
+- **Interface changes:** `_check_targeted_research_complete()` changes from "all must have content" to "all must be non-empty AND at least 1 has real content (not FAILED/SKIPPED)"
+- **New coupling:** New `SubStep` dataclass in `workflow_progress.py` for richer UI rendering; downstream analysis functions must exclude `[FAILED: ...]` like they already exclude `[SKIPPED: ...]`
 - **Reversibility:** High — content conventions (`[FAILED: ...]`) are backwards compatible with existing `[SKIPPED: ...]` pattern
 
 ## Appetite
@@ -91,22 +95,19 @@ No prerequisites — all changes are internal to existing models and services.
 
 #### 1. Failed artifact content convention
 
-In each `step_*_research` task's `except` block, write the error to the artifact BEFORE calling `fail_step()`:
+In each `step_*_research` task's `except` block, call `fail_research_source()` (see #2) instead of `fail_step()`:
 
 ```python
 except Exception as exc:
-    # Write error to artifact so it's visible per-source
-    EpisodeArtifact.objects.filter(
-        episode_id=episode_id, title="p2-chatgpt"
-    ).update(
-        content=f"[FAILED: {exc}]",
-        metadata={"error": str(exc), "failed_at": now().isoformat()},
-    )
-    workflow.fail_step(episode_id, "Targeted Research", str(exc))
+    # Write error to artifact so it's visible per-source.
+    # Use .save() (not .update()) to trigger post_save signal for fan-in.
+    fail_research_source(episode_id, "p2-chatgpt", str(exc))
     raise
 ```
 
-This makes the artifact self-describing. The `post_save` signal fires on the update, which triggers fan-in re-evaluation.
+**Two-layer error handling:** Service functions like `run_gemini_research()` already catch known errors and write `[SKIPPED: ...]` artifacts — these return normally and never reach the task-level except. The task-level except is a safety net for unexpected exceptions (GPT Researcher crashes, network timeouts, etc.) that escape the service layer. Both `[SKIPPED: ...]` and `[FAILED: ...]` make the artifact non-empty, enabling the fan-in to detect completion.
+
+**Important:** Use `artifact.save()` (not `queryset.update()`) to trigger the `post_save` signal, which re-evaluates fan-in completion.
 
 #### 2. Don't set workflow to "failed" for individual sub-task failures
 
@@ -145,9 +146,22 @@ def _check_targeted_research_complete(episode_id: int) -> bool:
 
 This means: all tasks must finish (no empty placeholders), and at least one must have succeeded.
 
-#### 4. Per-source status in `SubStep`
+#### 4. Downstream `[FAILED: ...]` handling
 
-Add `status` and `error` fields to `SubStep`:
+`analysis.py` already excludes `[SKIPPED: ...]` artifacts in 6 places (question discovery, digest creation, cross-validation). Add matching exclusions for `[FAILED: ...]`:
+
+```python
+# Everywhere that currently has:
+.exclude(content__startswith="[SKIPPED:")
+# Also add:
+.exclude(content__startswith="[FAILED:")
+```
+
+Locations in `analysis.py`: lines 283-287, 296, 417, 458, 535. Also update `step_question_discovery` auto-retry check in `tasks.py:195-201` to treat `[FAILED: ...]` like `[SKIPPED: ...]` when deciding whether to re-run Perplexity.
+
+#### 5. Per-source status in `SubStep`
+
+Add new `SubStep` dataclass and `status`/`error` fields:
 
 ```python
 @dataclass
@@ -167,9 +181,9 @@ Update `compute_workflow_progress()` Phase 4 to query artifact content (not just
 - `content.startswith("[SKIPPED:")` → "skipped"
 - Non-empty real content → "complete"
 
-#### 5. UI: per-source status icons + retry buttons
+#### 6. UI: per-source status icons + retry buttons
 
-Update `_workflow_step_content.html` Phase 4 sub-steps:
+Update `workflow_progress.html` Phase 4 sub-steps (currently shows only artifact count badge, no per-source detail):
 - **pending**: `far fa-circle` (gray)
 - **running**: `fas fa-spinner fa-spin` (amber)
 - **complete**: `fas fa-check-circle` (green)
@@ -178,17 +192,19 @@ Update `_workflow_step_content.html` Phase 4 sub-steps:
 
 Per-source retry button POSTs to a new endpoint that re-enqueues just that one research task.
 
-#### 6. Per-source retry endpoint
+#### 7. Per-source retry endpoint
 
 New view/URL: `POST /podcast/<slug>/<episode>/workflow/4/retry/<source>/`
 
-Maps source name to task function, clears the artifact (reset `content=""`, clear `metadata.error`), and enqueues just that task. Sets workflow status back to "running" if it was "failed".
+Maps source name to task function, clears the artifact (reset `content=""`, clear `metadata.error`), and enqueues just that task. Sets workflow status back to "running" if it was "paused_for_human".
 
-#### 7. Polling cutoff
+**Guard:** Retry endpoint must verify `wf.current_step == "Targeted Research"`. If the workflow has already advanced past Phase 4 (user clicked Resume), reject the retry with an error message. This prevents late artifact updates from confusing downstream phases.
 
-In `_compute_button_state()`, the "running" status already has stuck detection for Targeted Research. Extend it: if all p2-* artifacts have content (some FAILED, some real) but workflow is still "running", show "Resume Pipeline" instead of "Running..." — the fan-in should have caught this but in edge cases it may not.
+#### 8. Polling cutoff
 
-#### 8. Accumulate errors in fail_step instead of overwriting
+After the fan-in fires and calls `pause_for_human()`, the workflow status becomes `"paused_for_human"` which naturally stops the "active" polling indicator. As a safety net: if all p2-* artifacts have non-empty content but the workflow is still `"running"` (fan-in didn't fire due to an edge case), the UI should detect this in `compute_workflow_progress()` and show the phase as "paused" rather than "active".
+
+#### 9. Accumulate errors in fail_step instead of overwriting
 
 For the shared workflow history (used by non-parallel steps), change `fail_step()` to append errors rather than overwrite:
 
@@ -200,17 +216,24 @@ else:
     entry["error"] = error
 ```
 
-#### 9. Signal filtering
+#### 10. Signal filtering
 
-Ensure the fan-in signal only reacts to `p2-*` artifact saves (not digest artifacts like `digest-p2-chatgpt`). Current code already checks `title__startswith="p2-"` in `_check_targeted_research_complete()`. The signal handler itself fires on ALL artifact saves — add an early return for non-p2 titles during "Targeted Research" step to avoid unnecessary DB queries.
+The `check_workflow_progression` signal handler fires on ALL `EpisodeArtifact` saves. It already gates on `current_step` before calling `_check_targeted_research_complete()`. No additional filtering needed — digest artifacts (e.g., `digest-p2-chatgpt`) don't start with `p2-` so they're excluded by the `title__startswith="p2-"` filter in `_check_targeted_research_complete()`.
 
-#### 10. Add MiroFish to Phase 4 sub_steps
+#### 11. Add MiroFish to Phase 4 display
 
-`workflow_progress.py` is missing `p2-mirofish` from the `targeted_sources` list. Add it:
+`workflow_progress.py` PHASES list for `targeted_research` is missing `p2-mirofish`. Add it:
 
 ```python
-("MiroFish research", "p2-mirofish", False),
+(
+    2,
+    "targeted_research",
+    "Targeted Research",
+    ["p2-perplexity", "p2-gemini", "p2-together", "p2-claude", "p2-mirofish"],
+),
 ```
+
+Note: The fan-in signal's `_check_targeted_research_complete()` already includes MiroFish via the `title__startswith="p2-"` query — this is only a display fix.
 
 ## Failure Path Test Strategy
 
@@ -228,6 +251,10 @@ Ensure the fan-in signal only reacts to `p2-*` artifact saves (not digest artifa
 - [ ] Failed sub-step shows red icon + error message in UI
 - [ ] Per-source retry button appears only for failed sources
 - [ ] Multiple failures show all errors, not just the last one
+
+## Test Impact
+
+No existing tests are affected — the podcast workflow tests (`test_ux_episode_flows.py`, `test_ui_episode_editor.py`) have xfail tests for quality gates and audio upload, which are unrelated to targeted research error handling. The changes are additive: new `fail_research_source()` function, modified fan-in logic, new SubStep dataclass, and new retry endpoint. All require new tests.
 
 ## Rabbit Holes
 
@@ -344,15 +371,15 @@ See plan template for full list.
 - **Assigned To**: backend-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add `fail_research_source(episode_id, artifact_title, error)` to `services/workflow.py` — writes `[FAILED: error]` to artifact content + `{"error": str, "failed_at": iso}` to metadata, does NOT change workflow status
+- Add `fail_research_source(episode_id, artifact_title, error)` to `services/workflow.py` — writes `[FAILED: error]` to artifact content via `.save()` (not `.update()`, to trigger post_save signal) + `{"error": str, "failed_at": iso}` to metadata, does NOT change workflow status
 - Update each `step_*_research` task's `except` block in `tasks.py` to call `fail_research_source()` instead of `fail_step()` for Targeted Research sub-tasks
-- Update `_check_targeted_research_complete()` in `signals.py` to use threshold: all artifacts must be non-empty, at least 1 must have real content
+- Update `_check_targeted_research_complete()` in `signals.py` to use threshold: all artifacts must be non-empty, at least 1 must have real content (exclude `[FAILED: ...]` and `[SKIPPED: ...]`)
 - Update `fail_step()` in `services/workflow.py` to accumulate errors instead of overwriting
-- Add early return in signal handler for non-p2 artifact saves during Targeted Research
-- Add MiroFish (`p2-mirofish`) to `targeted_sources` in `workflow_progress.py`
-- Add `status` and `error` fields to `SubStep` dataclass
+- Update downstream `[FAILED: ...]` exclusions in `analysis.py` (6 places) and `step_question_discovery` auto-retry check in `tasks.py`
+- Add MiroFish (`p2-mirofish`) to PHASES list in `workflow_progress.py`
+- Add `SubStep` dataclass with `status` and `error` fields to `workflow_progress.py`
 - Update `compute_workflow_progress()` Phase 4 to query artifact content and set per-source status
-- Add per-source retry view: `POST .../workflow/4/retry/<source>/` — clears artifact, re-enqueues single task
+- Add per-source retry view: `POST .../workflow/4/retry/<source>/` — guard: must verify `current_step == "Targeted Research"` before allowing retry
 - Add URL pattern for retry endpoint
 
 ### 2. Frontend: Per-source status UI and retry buttons
@@ -413,8 +440,18 @@ See plan template for full list.
 | SubStep has status | `grep "status:" apps/podcast/services/workflow_progress.py` | output contains "status" |
 | Retry endpoint exists | `grep "retry" apps/podcast/urls.py` | output contains "retry" |
 
+## RFC Feedback
+
+| Severity | Critic | Feedback | Plan Response |
+|----------|--------|----------|---------------|
+| CONCERN | code-reviewer | Service functions already catch errors and create `[SKIPPED: ...]` artifacts — task-level handling may be redundant | Clarified: two-layer design is intentional. Service `[SKIPPED:]` handles known conditions (missing keys, quotas). Task `[FAILED:]` catches unexpected exceptions that escape the service. GPT and Together have no service-level error handling for runtime errors. |
+| CONCERN | code-reviewer | Publishing Assets fan-in has the same vulnerability | Acknowledged in No-Gos as explicit follow-up. Fix Targeted Research first, apply same pattern later. |
+| CONCERN | async-specialist | Retry after fan-in has advanced — late artifact updates could confuse downstream phases | Added guard: retry endpoint must verify `current_step == "Targeted Research"` before allowing retry. Rejects if workflow has already advanced. |
+| CONCERN | async-specialist | Document `select_for_update` + `current_step` check as critical safety invariant | Already documented in Race Conditions section. `_try_enqueue_next_step()` in `signals.py` uses `select_for_update` and checks both `current_step` and `status` inside the atomic block. |
+| CONCERN | code-reviewer | `advance_step` has no `select_for_update` | Not applicable to this bug: the fan-in path uses `_try_enqueue_next_step()` which has `select_for_update`. `advance_step` is only called from non-parallel steps and from `_try_enqueue_next_step` (after the lock). Pre-existing, not in scope. |
+
 ---
 
 ## Open Questions
 
-None — the issue is well-specified and the solution builds on established patterns (`[SKIPPED: ...]` convention, existing metadata JSONField, existing fan-in architecture). Ready for implementation.
+None — RFC feedback has been incorporated. The solution builds on established patterns (`[SKIPPED: ...]` convention, existing metadata JSONField, existing fan-in architecture with `select_for_update`). Ready for implementation.
