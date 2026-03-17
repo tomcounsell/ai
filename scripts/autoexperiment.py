@@ -19,6 +19,7 @@ Usage:
 """
 
 import argparse
+import difflib
 import json
 import logging
 import os
@@ -544,8 +545,6 @@ class ExperimentRunner:
         # Build diff for logging
         diff = ""
         if current_prompt != hypothesis:
-            import difflib
-
             diff = "".join(
                 difflib.unified_diff(
                     current_prompt.splitlines(keepends=True),
@@ -674,6 +673,14 @@ def get_targets() -> dict[str, ExperimentTarget]:
 
 
 def main():
+    # Load .env for API keys — critical for launchd/cron where shell env isn't inherited
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv()
+    except ImportError:
+        pass  # dotenv optional; env vars may be set directly
+
     parser = argparse.ArgumentParser(
         description="Autonomous prompt optimization via cheap LLM experiments"
     )
