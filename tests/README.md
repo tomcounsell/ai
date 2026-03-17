@@ -1,6 +1,6 @@
 # Test Suite
 
-**2,567 tests** across 112 files, organized by test level and tagged by feature.
+Organized by test level and tagged by feature. Run `pytest --collect-only -q` for current counts.
 
 ## Running Tests
 
@@ -27,26 +27,26 @@ pytest tests/unit/test_observer.py::TestX    # Single class
 
 Every test is auto-tagged by filename via `tests/conftest.py`. When a feature changes, run its marker to find tests that may need updating.
 
-| Marker | Tests | What it covers |
-|--------|------:|----------------|
-| `sdlc` | 516 | Pipeline stages, observer, steering, hooks, skill outcomes |
-| `messaging` | 327 | Telegram routing, delivery, dedup, markdown, media |
-| `sessions` | 293 | Lifecycle, watchdog, stall detection, recovery, goals |
-| `summarizer` | 212 | Response summarization, coaching, message formatting |
-| `classifiers` | 196 | Intake, work requests, message quality, auto-continue |
-| `validation` | 168 | Commit messages, plan sections, build checks, docs audit |
-| `reflections` | 154 | Learning system, bug detection, scheduling, reports |
-| `tools` | 123 | Search, code execution, link analysis, image analysis |
-| `jobs` | 105 | Job scheduling, queue priority, health monitoring |
-| `git` | 90 | Branch management, worktrees, workspace safety |
-| `models` | 77 | Redis/Popoto model relationships and persistence |
-| `monitoring` | 74 | Health checks, telemetry, watchdog, benchmarks |
-| `impact` | 71 | Code and documentation impact analysis |
-| `context` | 63 | Context modes, session tags, enrichment |
-| `config` | 42 | Configuration loading, settings, remote updates |
-| `sdk` | 20 | Claude SDK client, permissions, SDLC enforcement |
+| Marker | What it covers | Example command |
+|--------|----------------|-----------------|
+| `sdlc` | Pipeline stages, observer, steering, hooks, skill outcomes | `pytest -m sdlc` |
+| `messaging` | Telegram routing, delivery, dedup, markdown, media | `pytest -m messaging` |
+| `sessions` | Lifecycle, watchdog, stall detection, recovery, goals | `pytest -m sessions` |
+| `summarizer` | Response summarization, coaching, message formatting | `pytest -m summarizer` |
+| `classifiers` | Intake, work requests, message quality, auto-continue | `pytest -m classifiers` |
+| `validation` | Commit messages, plan sections, build checks, docs audit | `pytest -m validation` |
+| `reflections` | Learning system, bug detection, scheduling, reports | `pytest -m reflections` |
+| `tools` | Search, code execution, link analysis, image analysis | `pytest -m tools` |
+| `jobs` | Job scheduling, queue priority, health monitoring | `pytest -m jobs` |
+| `git` | Branch management, worktrees, workspace safety | `pytest -m git` |
+| `models` | Redis/Popoto model relationships and persistence | `pytest -m models` |
+| `monitoring` | Health checks, telemetry, watchdog, benchmarks | `pytest -m monitoring` |
+| `impact` | Code and documentation impact analysis | `pytest -m impact` |
+| `context` | Context modes, session tags, enrichment | `pytest -m context` |
+| `config` | Configuration loading, settings, remote updates | `pytest -m config` |
+| `sdk` | Claude SDK client, permissions, SDLC enforcement | `pytest -m sdk` |
 
-**Coverage**: 2,531 of 2,567 tests are feature-tagged (98.6%).
+Check counts with: `pytest -m <marker> --collect-only -q`
 
 ## Directory Structure
 
