@@ -1536,8 +1536,19 @@ async def _execute_job(job: Job) -> None:
                 logger.warning(f"Failed to re-read session {agent_session.session_id}: {e}")
 
         # Empty output guard: deliver immediately to prevent silent loops
+        # Use PipelineStateMachine when stage_states is available; fall back to legacy
         _is_sdlc = agent_session.is_sdlc_job() if agent_session else False
-        _sdlc_has_remaining = agent_session.has_remaining_stages() if _is_sdlc else False
+        _state_machine = None
+        if _is_sdlc and agent_session:
+            try:
+                from bridge.pipeline_state import PipelineStateMachine
+
+                _state_machine = PipelineStateMachine(agent_session)
+                _sdlc_has_remaining = _state_machine.has_remaining_stages()
+            except Exception:
+                _sdlc_has_remaining = agent_session.has_remaining_stages()
+        else:
+            _sdlc_has_remaining = False
         if should_guard_empty_output(msg, _is_sdlc, _sdlc_has_remaining):
             logger.warning(
                 f"[{job.project_key}] Empty output with remaining SDLC stages — "
@@ -1624,6 +1635,28 @@ async def _execute_job(job: Job) -> None:
             f"[{job.project_key}] Observer decision: {decision.get('action')} "
             f"(transitions={decision.get('transitions_applied', 0)})"
         )
+
+        # Apply state machine transitions based on Observer decision
+        if _state_machine and _is_sdlc:
+            try:
+                completed_stage = decision.get("completed_stage")
+                next_stage = decision.get("next_stage")
+                if completed_stage:
+                    current = _state_machine.current_stage()
+                    if current == completed_stage:
+                        _state_machine.complete_stage(completed_stage)
+                if next_stage:
+                    try:
+                        _state_machine.start_stage(next_stage)
+                    except ValueError:
+                        logger.debug(
+                            f"[{job.project_key}] State machine: cannot start "
+                            f"{next_stage} (ordering constraint)"
+                        )
+            except Exception as e:
+                logger.warning(
+                    f"[{job.project_key}] State machine transition failed: {e}"
+                )
 
         if decision["action"] == "steer":
             # Observer wants to auto-continue — enqueue continuation with coaching
