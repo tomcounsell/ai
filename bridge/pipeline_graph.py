@@ -64,7 +64,7 @@ STAGE_TO_SKILL: dict[str, str] = {
 
 # Display-only linear stage list for progress templates and PM-facing messages.
 # PATCH is intentionally excluded -- it's a routing concept, not a display stage.
-# This matches the existing STAGE_ORDER in stage_detector.py.
+# Used by PipelineStateMachine.get_display_progress() and summarizer rendering.
 DISPLAY_STAGES: list[str] = ["ISSUE", "PLAN", "BUILD", "TEST", "REVIEW", "DOCS", "MERGE"]
 
 

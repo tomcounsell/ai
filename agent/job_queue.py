@@ -626,16 +626,6 @@ def _recover_interrupted_jobs(project_key: str) -> int:
 
     logger.warning(f"[{project_key}] Recovered {count} interrupted job(s)")
 
-    # Clean up stale checkpoints on startup
-    try:
-        from agent.checkpoint import cleanup_old_checkpoints
-
-        cleaned = cleanup_old_checkpoints(max_age_days=7)
-        if cleaned:
-            logger.info(f"[{project_key}] Cleaned {len(cleaned)} stale checkpoint(s)")
-    except Exception as e:
-        logger.warning(f"[{project_key}] Stale checkpoint cleanup failed: {e}")
-
     return count
 
 
@@ -1964,18 +1954,6 @@ async def _execute_job(job: Job) -> None:
         except Exception as e:
             logger.warning(f"[{job.project_key}] Failed to auto-mark session done: {e}")
 
-        # Clean up checkpoint on successful completion
-        if job.work_item_slug:
-            try:
-                from agent.checkpoint import delete_checkpoint
-
-                delete_checkpoint(job.work_item_slug)
-                logger.info(f"[{job.project_key}] Deleted checkpoint for {job.work_item_slug}")
-            except Exception as e:
-                logger.warning(
-                    f"[{job.project_key}] Checkpoint cleanup failed for {job.work_item_slug}: {e}"
-                )
-
         # Save session snapshot on successful completion
         save_session_snapshot(
             session_id=job.session_id,
@@ -2090,24 +2068,11 @@ def check_revival(project_key: str, working_dir: str, chat_id: str) -> dict | No
     if state.active_plan:
         plan_context = get_plan_context(state.active_plan)
 
-    # Enrich with checkpoint context if available
-    checkpoint_context = ""
-    slug = branches[0].replace("session/", "", 1)
-    try:
-        from agent.checkpoint import build_compact_context, load_checkpoint
-
-        checkpoint = load_checkpoint(slug)
-        if checkpoint:
-            checkpoint_context = build_compact_context(checkpoint)
-    except Exception as e:
-        logger.warning(f"[{project_key}] Checkpoint load failed during revival: {e}")
-
     return {
         "branch": branches[0],
         "all_branches": branches,
         "has_uncommitted": state.has_uncommitted_changes,
         "plan_context": plan_context[:200] if plan_context else "",
-        "checkpoint_context": checkpoint_context,
     }
 
 
@@ -2128,19 +2093,11 @@ async def queue_revival_job(
     Queue a revival job (low priority) when user reacts/replies to revival notification.
     Returns queue depth.
     """
-    checkpoint_ctx = revival_info.get("checkpoint_context", "")
-    if checkpoint_ctx:
-        # Checkpoint is the PRIMARY context — not a supplement
-        revival_text = checkpoint_ctx
-        if additional_context:
-            revival_text += f"\n\nUser context: {additional_context}"
-    else:
-        # Fallback: no checkpoint available (ad-hoc session or old data)
-        revival_text = f"Continue the unfinished work on branch `{revival_info['branch']}`."
-        if additional_context:
-            revival_text += (
-                f"\n\nAsked user whether to resume and user responded with: {additional_context}"
-            )
+    revival_text = f"Continue the unfinished work on branch `{revival_info['branch']}`."
+    if additional_context:
+        revival_text += (
+            f"\n\nAsked user whether to resume and user responded with: {additional_context}"
+        )
 
     return await enqueue_job(
         project_key=revival_info["project_key"],
