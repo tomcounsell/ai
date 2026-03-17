@@ -252,6 +252,9 @@ AI_REPO_ROOT = str(Path(__file__).parent.parent)
 # Path to SOUL.md system prompt
 SOUL_PATH = Path(__file__).parent.parent / "config" / "SOUL.md"
 
+# Path to PRINCIPAL.md — supervisor's operating context for strategic decisions
+PRINCIPAL_PATH = Path(__file__).parent.parent / "config" / "PRINCIPAL.md"
+
 # Log a warning when a single query's equivalent API cost exceeds this
 _COST_WARN_THRESHOLD = float(os.getenv("SDK_COST_WARN_THRESHOLD", "0.50"))
 
@@ -350,6 +353,57 @@ def load_completion_criteria() -> str:
     return match.group(0) if match else ""
 
 
+def load_principal_context(condensed: bool = True) -> str:
+    """Load principal (supervisor) context from PRINCIPAL.md.
+
+    Provides strategic context for decision-making: mission, goals, project
+    priorities, and operating assumptions. Used by workers (condensed) and
+    the Observer (full) to ground autonomous decisions.
+
+    Args:
+        condensed: If True, return only Mission + Goals + Projects sections
+                   (~300 tokens). If False, return the full file content.
+
+    Returns:
+        Principal context string, or empty string if file is missing/empty.
+    """
+    if not PRINCIPAL_PATH.exists():
+        logger.warning(f"PRINCIPAL.md not found at {PRINCIPAL_PATH}, skipping principal context")
+        return ""
+
+    content = PRINCIPAL_PATH.read_text().strip()
+    if not content:
+        logger.warning("PRINCIPAL.md is empty, skipping principal context")
+        return ""
+
+    if not condensed:
+        return content
+
+    # Extract condensed summary: Mission + Goals + Projects sections only.
+    # This keeps the worker prompt lean while providing strategic context.
+    import re
+
+    sections_to_extract = ["Mission", "Goals.*", "Projects.*"]
+    extracted = []
+    for pattern in sections_to_extract:
+        match = re.search(
+            rf"^## {pattern}\n\n(.*?)(?=\n---|\n## |\Z)",
+            content,
+            re.MULTILINE | re.DOTALL,
+        )
+        if match:
+            # Include the section header for clarity
+            header_match = re.search(rf"^(## {pattern})", content, re.MULTILINE)
+            header = header_match.group(1) if header_match else ""
+            extracted.append(f"{header}\n\n{match.group(1).strip()}")
+
+    if not extracted:
+        # Fallback: return first 500 chars if section extraction fails
+        return content[:500]
+
+    return "\n\n".join(extracted)
+
+
 def load_system_prompt() -> str:
     """Load Valor's system prompt from SOUL.md with worker rules and completion criteria.
 
@@ -357,6 +411,8 @@ def load_system_prompt() -> str:
         [WORKER_RULES — safety rails for the worker, FIRST — takes precedence]
         ---
         [SOUL.md — persona, attitude, purpose, communication style]
+        ---
+        [Principal Context — condensed mission/goals/priorities from PRINCIPAL.md]
         ---
         [Work Completion Criteria — from CLAUDE.md]
 
@@ -374,8 +430,12 @@ def load_system_prompt() -> str:
     criteria = load_completion_criteria()
     criteria_section = f"\n\n---\n\n{criteria}" if criteria else ""
 
+    # Load condensed principal context (mission + goals + project priorities)
+    principal = load_principal_context(condensed=True)
+    principal_section = f"\n\n---\n\n## Principal Context\n\n{principal}" if principal else ""
+
     # Worker rules FIRST — safety rails take precedence over persona
-    return f"{WORKER_RULES}\n\n---\n\n{soul_prompt}{criteria_section}"
+    return f"{WORKER_RULES}\n\n---\n\n{soul_prompt}{principal_section}{criteria_section}"
 
 
 def load_pm_system_prompt(working_directory: str) -> str:
