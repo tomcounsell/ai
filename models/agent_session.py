@@ -119,6 +119,11 @@ class AgentSession(Model):
     plan_url = Field(null=True)
     pr_url = Field(null=True)
 
+    # === Pipeline state machine ===
+    # JSON-serialized dict of stage -> status managed by PipelineStateMachine.
+    # Replaces the [stage] history entry parsing approach.
+    stage_states = Field(null=True)
+
     # === Claude Code identity mapping ===
     # Stores the Claude Code session UUID (from transcript filename) so that
     # continuation sessions can resume the correct transcript instead of falling
