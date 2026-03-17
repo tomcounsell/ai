@@ -1644,9 +1644,7 @@ async def _execute_job(job: Job) -> None:
                             f"{next_stage} (ordering constraint)"
                         )
             except Exception as e:
-                logger.warning(
-                    f"[{job.project_key}] State machine transition failed: {e}"
-                )
+                logger.warning(f"[{job.project_key}] State machine transition failed: {e}")
 
         if decision["action"] == "steer":
             # Observer wants to auto-continue — enqueue continuation with coaching

@@ -18,7 +18,6 @@ from bridge.observer import Observer, _output_needs_human_input
 from config.models import HAIKU
 from models.agent_session import SDLC_STAGES
 
-
 # ============================================================================
 # Helper: build a mock session for Observer tests
 # ============================================================================
@@ -171,9 +170,7 @@ class TestStateMachineIntegration:
         """When worker asks a question, guard is bypassed to LLM."""
         states = {"ISSUE": "completed", "PLAN": "in_progress"}
         session = _make_session(stage_states=json.dumps(states))
-        observer = _make_observer(
-            session, worker_output="Should I proceed with this approach?"
-        )
+        observer = _make_observer(session, worker_output="Should I proceed with this approach?")
         with patch.object(observer, "_run_llm_observer") as mock_llm:
             mock_llm.return_value = {
                 "action": "deliver",
@@ -181,7 +178,7 @@ class TestStateMachineIntegration:
                 "completed_stage": None,
                 "next_stage": None,
             }
-            decision = await observer.run()
+            await observer.run()
             mock_llm.assert_called_once()
 
     @pytest.mark.asyncio
@@ -197,7 +194,7 @@ class TestStateMachineIntegration:
                 "completed_stage": None,
                 "next_stage": None,
             }
-            decision = await observer.run()
+            await observer.run()
             mock_llm.assert_called_once()
 
     @pytest.mark.asyncio
@@ -213,7 +210,7 @@ class TestStateMachineIntegration:
                 "completed_stage": None,
                 "next_stage": None,
             }
-            decision = await observer.run()
+            await observer.run()
             mock_llm.assert_called_once()
 
 
@@ -277,8 +274,8 @@ class TestToolHandlers:
     def test_update_session_persists_context(self):
         session = _make_session()
         # Mock AgentSession.query.filter to return the session
-        with patch("bridge.observer.AgentSession") as MockAS:
-            MockAS.query.filter.return_value = [session]
+        with patch("bridge.observer.AgentSession") as mock_as:
+            mock_as.query.filter.return_value = [session]
             observer = _make_observer(session)
             result = observer._handle_update_session(
                 context_summary="Building auth feature",

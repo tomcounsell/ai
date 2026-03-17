@@ -31,9 +31,7 @@ from typing import TYPE_CHECKING, Any
 
 from bridge.pipeline_graph import (
     DISPLAY_STAGES,
-    MAX_PATCH_CYCLES,
     PIPELINE_EDGES,
-    STAGE_TO_SKILL,
     get_next_stage,
 )
 
@@ -141,9 +139,7 @@ class PipelineStateMachine:
             ValueError: If stage is invalid or predecessor not completed.
         """
         if stage not in ALL_STAGES:
-            raise ValueError(
-                f"Invalid stage: {stage!r}. Valid stages: {ALL_STAGES}"
-            )
+            raise ValueError(f"Invalid stage: {stage!r}. Valid stages: {ALL_STAGES}")
 
         current = self.states.get(stage, "pending")
         if current == "in_progress":
@@ -194,8 +190,7 @@ class PipelineStateMachine:
 
         pred_statuses = {p: self.states.get(p, "pending") for p in predecessors}
         raise ValueError(
-            f"Cannot start {stage}: no predecessor completed. "
-            f"Predecessors: {pred_statuses}"
+            f"Cannot start {stage}: no predecessor completed. Predecessors: {pred_statuses}"
         )
 
     def complete_stage(self, stage: str) -> None:
@@ -211,9 +206,7 @@ class PipelineStateMachine:
             ValueError: If stage is invalid or not in_progress.
         """
         if stage not in ALL_STAGES:
-            raise ValueError(
-                f"Invalid stage: {stage!r}. Valid stages: {ALL_STAGES}"
-            )
+            raise ValueError(f"Invalid stage: {stage!r}. Valid stages: {ALL_STAGES}")
 
         current = self.states.get(stage, "pending")
         if current == "completed":
@@ -256,15 +249,11 @@ class PipelineStateMachine:
             stage: Stage name to fail.
         """
         if stage not in ALL_STAGES:
-            raise ValueError(
-                f"Invalid stage: {stage!r}. Valid stages: {ALL_STAGES}"
-            )
+            raise ValueError(f"Invalid stage: {stage!r}. Valid stages: {ALL_STAGES}")
 
         current = self.states.get(stage, "pending")
         if current == "completed":
-            logger.warning(
-                f"Stage {stage} already completed, fail_stage is no-op"
-            )
+            logger.warning(f"Stage {stage} already completed, fail_stage is no-op")
             return
 
         self.states[stage] = "failed"
@@ -279,8 +268,7 @@ class PipelineStateMachine:
 
         self._save()
         logger.info(
-            f"Stage {stage} failed. "
-            f"Next: {next_info[0] if next_info else 'terminal (escalate)'}"
+            f"Stage {stage} failed. Next: {next_info[0] if next_info else 'terminal (escalate)'}"
         )
 
     def get_display_progress(self) -> dict[str, str]:
@@ -290,10 +278,7 @@ class PipelineStateMachine:
             Dict mapping display stage names to their status strings.
             Only includes DISPLAY_STAGES (not PATCH).
         """
-        return {
-            stage: self.states.get(stage, "pending")
-            for stage in DISPLAY_STAGES
-        }
+        return {stage: self.states.get(stage, "pending") for stage in DISPLAY_STAGES}
 
     def current_stage(self) -> str | None:
         """Return the stage currently in_progress, or None.
@@ -358,10 +343,7 @@ class PipelineStateMachine:
 
         Returns True if any stage is in failed status.
         """
-        return any(
-            self.states.get(stage) == "failed"
-            for stage in DISPLAY_STAGES
-        )
+        return any(self.states.get(stage) == "failed" for stage in DISPLAY_STAGES)
 
     def classify_outcome(
         self,
@@ -386,9 +368,7 @@ class PipelineStateMachine:
         """
         # Tier 1: SDK stop_reason
         if stop_reason and stop_reason != "end_turn":
-            logger.info(
-                f"classify_outcome({stage}): stop_reason={stop_reason} -> fail"
-            )
+            logger.info(f"classify_outcome({stage}): stop_reason={stop_reason} -> fail")
             return "fail"
 
         # Tier 2: deterministic output patterns per stage

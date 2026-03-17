@@ -23,7 +23,6 @@ from typing import Any
 import anthropic
 
 from agent.job_queue import MAX_AUTO_CONTINUES, MAX_AUTO_CONTINUES_SDLC
-from bridge.pipeline_graph import STAGE_TO_SKILL, get_next_stage
 from bridge.pipeline_state import PipelineStateMachine
 from bridge.summarizer import extract_artifacts
 from config.models import SONNET
@@ -93,8 +92,7 @@ def _construct_canonical_url(url: str | None, gh_repo: str | None) -> str | None
 
     if not gh_repo:
         logger.warning(
-            f"Cannot construct canonical URL: GH_REPO not configured. "
-            f"Original URL discarded: {url}"
+            f"Cannot construct canonical URL: GH_REPO not configured. Original URL discarded: {url}"
         )
         return None
 
@@ -136,8 +134,7 @@ def _build_observer_system_prompt() -> str:
         f"{principal_block}\n"
         "You have access to the full AgentSession state and must make one of two decisions:\n"
         "1. STEER: Send the worker back to work on the next pipeline stage\n"
-        "2. DELIVER: Send the output to the human on Telegram\n\n"
-        + OBSERVER_SYSTEM_PROMPT_BODY
+        "2. DELIVER: Send the output to the human on Telegram\n\n" + OBSERVER_SYSTEM_PROMPT_BODY
     )
 
 
@@ -162,26 +159,61 @@ Never send bare "continue" or vague urgency.
 def _build_tools() -> list[dict]:
     """Build the tool definitions for the Observer agent."""
     return [
-        {"name": "read_session",
-         "description": "Read current session state (stages, links, history). Call first.",
-         "input_schema": {"type": "object", "properties": {}, "required": []}},
-        {"name": "update_session",
-         "description": "Persist context_summary or expectations after your decision.",
-         "input_schema": {"type": "object", "properties": {
-             "context_summary": {"type": ["string", "null"], "description": "Session summary"},
-             "expectations": {"type": ["string", "null"], "description": "What agent needs from human"},
-         }, "required": []}},
-        {"name": "enqueue_continuation",
-         "description": "Steer the worker back to work with a coaching message.",
-         "input_schema": {"type": "object", "properties": {
-             "coaching_message": {"type": "string", "description": "Instruction for the worker"},
-         }, "required": ["coaching_message"]}},
-        {"name": "deliver_to_telegram",
-         "description": "Deliver output to Telegram. Use message_for_user to curate what user sees.",
-         "input_schema": {"type": "object", "properties": {
-             "reason": {"type": "string", "description": "Internal reason (not sent to user)"},
-             "message_for_user": {"type": "string", "description": "Curated message for user (optional)"},
-         }, "required": ["reason"]}},
+        {
+            "name": "read_session",
+            "description": "Read current session state (stages, links, history). Call first.",
+            "input_schema": {"type": "object", "properties": {}, "required": []},
+        },
+        {
+            "name": "update_session",
+            "description": "Persist context_summary or expectations after your decision.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "context_summary": {
+                        "type": ["string", "null"],
+                        "description": "Session summary",
+                    },
+                    "expectations": {
+                        "type": ["string", "null"],
+                        "description": "What agent needs from human",
+                    },
+                },
+                "required": [],
+            },
+        },
+        {
+            "name": "enqueue_continuation",
+            "description": "Steer the worker back to work with a coaching message.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "coaching_message": {
+                        "type": "string",
+                        "description": "Instruction for the worker",
+                    },
+                },
+                "required": ["coaching_message"],
+            },
+        },
+        {
+            "name": "deliver_to_telegram",
+            "description": "Deliver output to Telegram. Curate via message_for_user.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "reason": {
+                        "type": "string",
+                        "description": "Internal reason (not sent to user)",
+                    },
+                    "message_for_user": {
+                        "type": "string",
+                        "description": "Curated message for user (optional)",
+                    },
+                },
+                "required": ["reason"],
+            },
+        },
     ]
 
 
@@ -330,22 +362,14 @@ class Observer:
         """Tool handler: update session with extracted data."""
         # Re-read session from Redis before writing
         try:
-            all_sessions = list(
-                AgentSession.query.filter(session_id=self.session.session_id)
-            )
-            active = [
-                s
-                for s in all_sessions
-                if s.status in ("running", "active", "pending")
-            ]
+            all_sessions = list(AgentSession.query.filter(session_id=self.session.session_id))
+            active = [s for s in all_sessions if s.status in ("running", "active", "pending")]
             candidates = active if active else all_sessions
             if candidates:
                 candidates.sort(key=lambda s: s.created_at or 0, reverse=True)
                 self.session = candidates[0]
         except Exception as e:
-            logger.warning(
-                f"{self._log_prefix} Failed to re-read session before update: {e}"
-            )
+            logger.warning(f"{self._log_prefix} Failed to re-read session before update: {e}")
 
         # Clear queued steering messages
         cleared_messages = False
@@ -372,9 +396,7 @@ class Observer:
             try:
                 self.session.save()
             except Exception as e:
-                logger.error(
-                    f"{self._log_prefix} Failed to save session updates: {e}"
-                )
+                logger.error(f"{self._log_prefix} Failed to save session updates: {e}")
                 return {"status": "error", "error": str(e)}
 
         return {"status": "ok", "updated_fields": updated}
@@ -443,11 +465,11 @@ class Observer:
         if self.stop_reason and self.stop_reason not in ("end_turn", None):
             cid = getattr(self.session, "correlation_id", None) or "unknown"
             if self.stop_reason == "budget_exceeded":
-                logger.warning(
-                    f"{self._log_prefix} Worker stopped: budget_exceeded — delivering"
-                )
+                logger.warning(f"{self._log_prefix} Worker stopped: budget_exceeded — delivering")
                 record_decision(
-                    self.session.session_id, cid, "deliver",
+                    self.session.session_id,
+                    cid,
+                    "deliver",
                     "stop_reason: budget_exceeded",
                 )
                 # Mark current stage as failed
@@ -469,7 +491,9 @@ class Observer:
                     f"{self._log_prefix} Worker stopped: rate_limited — steering with backoff"
                 )
                 record_decision(
-                    self.session.session_id, cid, "steer",
+                    self.session.session_id,
+                    cid,
+                    "steer",
                     "stop_reason: rate_limited",
                 )
                 return {
@@ -550,11 +574,12 @@ class Observer:
                     coaching += f"\nContext: {ctx_str}"
 
                 logger.info(
-                    f"{self._log_prefix} Deterministic guard: steer to "
-                    f"{stage_name} ({skill_cmd})"
+                    f"{self._log_prefix} Deterministic guard: steer to {stage_name} ({skill_cmd})"
                 )
                 record_decision(
-                    self.session.session_id, cid, "steer",
+                    self.session.session_id,
+                    cid,
+                    "steer",
                     f"state-machine-guard: {stage_name} pending",
                 )
                 return {
@@ -566,7 +591,11 @@ class Observer:
                 }
 
         # Log when guard was bypassed
-        if is_sdlc and has_remaining and (has_failed or stop_is_terminal or cap_reached or needs_human):
+        if (
+            is_sdlc
+            and has_remaining
+            and (has_failed or stop_is_terminal or cap_reached or needs_human)
+        ):
             logger.info(
                 f"{self._log_prefix} Guard bypassed: has_failed={has_failed}, "
                 f"stop_reason={self.stop_reason}, cap_reached={cap_reached}, "
@@ -577,7 +606,9 @@ class Observer:
         return await self._run_llm_observer(completed_stage, next_stage_name)
 
     async def _run_llm_observer(
-        self, completed_stage: str | None, next_stage_name: str | None,
+        self,
+        completed_stage: str | None,
+        next_stage_name: str | None,
     ) -> dict[str, Any]:
         """Run the LLM Observer for ambiguous routing decisions."""
         base = {"completed_stage": completed_stage, "next_stage": next_stage_name}
@@ -593,7 +624,9 @@ class Observer:
                 f"{self.worker_output[:3000]}"
             )
             if len(self.worker_output) > 3000:
-                user_message += f"\n\n[...truncated, {len(self.worker_output) - 3000} more chars...]"
+                user_message += (
+                    f"\n\n[...truncated, {len(self.worker_output) - 3000} more chars...]"
+                )
 
             messages = [{"role": "user", "content": user_message}]
             tools = _build_tools()
@@ -601,9 +634,11 @@ class Observer:
 
             for iteration in range(MAX_TOOL_ITERATIONS):
                 response = client.messages.create(
-                    model=self.model, max_tokens=1024,
+                    model=self.model,
+                    max_tokens=1024,
                     system=_build_observer_system_prompt(),
-                    messages=messages, tools=tools,
+                    messages=messages,
+                    tools=tools,
                 )
                 tool_uses = [b for b in response.content if b.type == "tool_use"]
                 if not tool_uses:
@@ -612,10 +647,12 @@ class Observer:
                 tool_results = []
                 for tu in tool_uses:
                     result_str = self._dispatch_tool(tu.name, tu.input)
-                    logger.info(f"{self._log_prefix} LLM iter {iteration+1}: tool={tu.name}")
+                    logger.info(f"{self._log_prefix} LLM iter {iteration + 1}: tool={tu.name}")
                     cid = getattr(self.session, "correlation_id", None) or "unknown"
                     record_tool_use(self.session.session_id, cid, tu.name)
-                    tool_results.append({"type": "tool_result", "tool_use_id": tu.id, "content": result_str})
+                    tool_results.append(
+                        {"type": "tool_result", "tool_use_id": tu.id, "content": result_str}
+                    )
                     data = json.loads(result_str)
                     if data.get("action") == "enqueue_continuation":
                         coaching_message = data.get("coaching_message", "continue")
@@ -629,16 +666,30 @@ class Observer:
                     break
 
             if not self._decision_made:
-                logger.warning(f"{self._log_prefix} Observer did not converge, defaulting to deliver")
+                logger.warning(
+                    f"{self._log_prefix} Observer did not converge, defaulting to deliver"
+                )
                 return {"action": "deliver", "reason": "Observer did not converge", **base}
 
             cid = getattr(self.session, "correlation_id", None) or "unknown"
             if self._action_taken == "steer":
-                record_decision(self.session.session_id, cid, "steer", (coaching_message or "")[:120])
-                return {"action": "steer", "coaching_message": coaching_message or "continue", **base}
+                record_decision(
+                    self.session.session_id, cid, "steer", (coaching_message or "")[:120]
+                )
+                return {
+                    "action": "steer",
+                    "coaching_message": coaching_message or "continue",
+                    **base,
+                }
 
-            record_decision(self.session.session_id, cid, "deliver", (deliver_reason or "deliver")[:120])
-            result = {"action": "deliver", "reason": deliver_reason or "Observer decided to deliver", **base}
+            record_decision(
+                self.session.session_id, cid, "deliver", (deliver_reason or "deliver")[:120]
+            )
+            result = {
+                "action": "deliver",
+                "reason": deliver_reason or "Observer decided to deliver",
+                **base,
+            }
             if message_for_user:
                 result["message_for_user"] = message_for_user
             return result

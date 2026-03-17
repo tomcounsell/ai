@@ -390,8 +390,7 @@ class TestHasRemainingStages:
     def test_false_when_merge_completed(self):
         """Returns False when MERGE is completed."""
         states = {
-            s: "completed"
-            for s in ["ISSUE", "PLAN", "BUILD", "TEST", "REVIEW", "DOCS", "MERGE"]
+            s: "completed" for s in ["ISSUE", "PLAN", "BUILD", "TEST", "REVIEW", "DOCS", "MERGE"]
         }
         session = _make_session(stage_states=json.dumps(states))
         sm = PipelineStateMachine(session)
