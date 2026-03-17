@@ -41,6 +41,51 @@ _ISSUE_NUMBER_RE = re.compile(r"/issues/(\d+)")
 _PR_NUMBER_RE = re.compile(r"/pull/(\d+)")
 
 
+def _build_sdlc_context(session: AgentSession) -> dict[str, str]:
+    """Build resolved SDLC context variables from session fields.
+
+    Returns a dict of variable name -> value for use in Observer coaching
+    messages. Only includes variables that have non-None, non-empty values.
+    The Observer can append these to coaching messages so the worker gets
+    pre-resolved context (issue #420).
+    """
+    ctx: dict[str, str] = {}
+
+    pr_url = getattr(session, "pr_url", None)
+    if pr_url:
+        pr_match = _PR_NUMBER_RE.search(pr_url)
+        if pr_match:
+            ctx["SDLC_PR_NUMBER"] = pr_match.group(1)
+
+    branch = getattr(session, "branch_name", None)
+    if branch:
+        ctx["SDLC_PR_BRANCH"] = branch
+
+    slug = getattr(session, "work_item_slug", None)
+    if slug:
+        ctx["SDLC_SLUG"] = slug
+
+    plan_url = getattr(session, "plan_url", None)
+    if plan_url:
+        if "docs/plans/" in plan_url:
+            ctx["SDLC_PLAN_PATH"] = "docs/plans/" + plan_url.split("docs/plans/")[-1]
+        else:
+            ctx["SDLC_PLAN_PATH"] = plan_url
+
+    issue_url = getattr(session, "issue_url", None)
+    if issue_url:
+        issue_match = _ISSUE_NUMBER_RE.search(issue_url)
+        if issue_match:
+            ctx["SDLC_ISSUE_NUMBER"] = issue_match.group(1)
+
+    # Include GH_REPO from environment if available
+    gh_repo = os.environ.get("GH_REPO")
+    if gh_repo:
+        ctx["SDLC_REPO"] = gh_repo
+
+    return ctx
+
+
 def _construct_canonical_url(url: str | None, gh_repo: str | None) -> str | None:
     """Construct a canonical GitHub URL from a worker-provided URL.
 
@@ -142,6 +187,12 @@ MERGE is a human-gated stage — the agent presents merge readiness to the human
 When steering, craft a message that encourages the worker to continue with \
 discernment. The worker is a skilled agent — speak to its competence, not \
 its compliance.
+
+**SDLC Context Injection**: The `sdlc_context` field in read_session contains \
+pre-resolved variables (SDLC_PR_NUMBER, SDLC_SLUG, SDLC_PR_BRANCH, etc.). \
+When these are available, append them to your coaching message so the worker \
+receives concrete values instead of guessing. Format: \
+`Context: SDLC_PR_NUMBER=220, SDLC_SLUG=my-feature, SDLC_PR_BRANCH=session/my-feature`
 
 Good coaching messages:
 - Acknowledge what was done, then encourage forward progress
@@ -551,6 +602,11 @@ class Observer:
                 logger.warning(f"{self._log_prefix} Gate check failed: {e}")
                 gate_status = {"error": str(e)}
 
+        # Build resolved SDLC context vars for coaching message enrichment (issue #420).
+        # These give the Observer concrete values to include in coaching messages,
+        # so the worker receives pre-resolved context instead of guessing.
+        sdlc_context = _build_sdlc_context(self.session)
+
         return {
             "session_id": self.session.session_id,
             "correlation_id": getattr(self.session, "correlation_id", None),
@@ -559,6 +615,7 @@ class Observer:
             "stage_progress": progress,
             "gate_status": gate_status,
             "links": links,
+            "sdlc_context": sdlc_context,
             "history": history[-10:],  # Last 10 entries for context
             "queued_steering_messages": queued,
             "auto_continue_count": self.auto_continue_count,

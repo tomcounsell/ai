@@ -24,6 +24,7 @@ Authentication strategy (subscription-first):
 import asyncio
 import logging
 import os
+import re
 import time
 from pathlib import Path
 
@@ -51,6 +52,10 @@ logger = logging.getLogger(__name__)
 # is empty and recovered jobs create fresh clients. See plan doc for
 # crash safety analysis.
 _active_clients: dict[str, "ClaudeSDKClient"] = {}
+
+# Regex patterns for extracting issue/PR numbers from GitHub URLs (issue #420)
+_ISSUE_NUMBER_RE = re.compile(r"/issues/(\d+)")
+_PR_NUMBER_RE = re.compile(r"/pull/(\d+)")
 
 # === Stop Reason Registry ===
 # Stores the stop_reason from the most recent ResultMessage for each session.
@@ -146,6 +151,85 @@ def _store_claude_session_uuid(session_id: str, claude_uuid: str) -> None:
             f"_store_claude_session_uuid({session_id!r}) failed",
             exc_info=True,
         )
+
+
+def _extract_sdlc_env_vars(session_id: str, gh_repo: str | None = None) -> dict[str, str]:
+    """Extract SDLC context variables from an AgentSession for env injection.
+
+    Reads the AgentSession from Redis and maps its fields to SDLC_* env vars.
+    Only returns vars for fields that are non-None and non-empty, ensuring
+    skills never see "None" as a value (issue #420).
+
+    Args:
+        session_id: The bridge/Telegram session ID.
+        gh_repo: Optional GH_REPO already set on the agent.
+
+    Returns:
+        Dict of SDLC_* env var name -> value. Empty dict if session not found.
+    """
+    env: dict[str, str] = {}
+    try:
+        from models.agent_session import AgentSession
+
+        sessions = list(AgentSession.query.filter(session_id=session_id))
+        if not sessions:
+            return env
+        # Pick the newest active session
+        active = [s for s in sessions if s.status in ("running", "active", "pending")]
+        candidates = active if active else sessions
+        candidates.sort(key=lambda s: s.created_at or 0, reverse=True)
+        session = candidates[0]
+
+        # PR URL -> SDLC_PR_NUMBER and SDLC_PR_BRANCH
+        pr_url = getattr(session, "pr_url", None)
+        if pr_url:
+            pr_match = _PR_NUMBER_RE.search(pr_url)
+            if pr_match:
+                env["SDLC_PR_NUMBER"] = pr_match.group(1)
+
+        # Branch name
+        branch = getattr(session, "branch_name", None)
+        if branch:
+            env["SDLC_PR_BRANCH"] = branch
+
+        # Work item slug
+        slug = getattr(session, "work_item_slug", None)
+        if slug:
+            env["SDLC_SLUG"] = slug
+
+        # Plan URL -> SDLC_PLAN_PATH (convert URL to local path)
+        plan_url = getattr(session, "plan_url", None)
+        if plan_url:
+            # plan_url is typically a GitHub URL or a local path
+            # Extract the path portion (docs/plans/...)
+            if "docs/plans/" in plan_url:
+                plan_path = "docs/plans/" + plan_url.split("docs/plans/")[-1]
+                env["SDLC_PLAN_PATH"] = plan_path
+            else:
+                env["SDLC_PLAN_PATH"] = plan_url
+
+        # Issue URL -> SDLC_ISSUE_NUMBER
+        issue_url = getattr(session, "issue_url", None)
+        if issue_url:
+            issue_match = _ISSUE_NUMBER_RE.search(issue_url)
+            if issue_match:
+                env["SDLC_ISSUE_NUMBER"] = issue_match.group(1)
+
+        # Repo (complement GH_REPO, don't replace it)
+        if gh_repo:
+            env["SDLC_REPO"] = gh_repo
+
+        if env:
+            logger.info(
+                f"SDLC env vars for session {session_id}: "
+                f"{', '.join(f'{k}={v}' for k, v in sorted(env.items()))}"
+            )
+    except Exception:
+        logger.warning(
+            f"_extract_sdlc_env_vars({session_id!r}) failed, skipping SDLC vars",
+            exc_info=True,
+        )
+    return env
 
 
 def get_active_client(session_id: str) -> ClaudeSDKClient | None:
@@ -691,6 +775,13 @@ class ValorAgent:
         # the deterministic fix -- SKILL.md --repo instructions remain as a safety net.
         if self.gh_repo:
             env["GH_REPO"] = self.gh_repo
+
+        # SDLC context injection: pre-resolve session fields as env vars so
+        # skills can reference $SDLC_PR_NUMBER etc. instead of guessing (issue #420).
+        # Only set vars when the field is non-None and non-empty.
+        if session_id:
+            sdlc_env = _extract_sdlc_env_vars(session_id, self.gh_repo)
+            env.update(sdlc_env)
 
         # Build system prompt with workflow context if workflow_id is present
         system_prompt = self.system_prompt

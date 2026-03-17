@@ -101,6 +101,10 @@ No prerequisites — this work uses existing session fields and env var patterns
 ### Error State Rendering
 - [ ] Not applicable — no user-visible output changes
 
+## Test Impact
+
+No existing tests affected — this is a greenfield feature adding new env var injection logic and sub-skill files. No prior test coverage exists for skill context injection or sub-skill decomposition.
+
 ## Rabbit Holes
 
 - **Rewriting all 28 skills at once**: Only decompose `/do-pr-review` as proof-of-concept. Other skills can be migrated incrementally in follow-up work
