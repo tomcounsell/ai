@@ -199,11 +199,6 @@ class TestEnqueueContinuationFallback:
 class TestMergeStageTracking:
     """Test MERGE stage is properly tracked across modules."""
 
-    def test_merge_in_stage_order(self):
-        from bridge.stage_detector import STAGE_ORDER
-
-        assert "MERGE" in STAGE_ORDER
-
     def test_merge_in_display_stages(self):
         from bridge.pipeline_graph import DISPLAY_STAGES
 
@@ -226,7 +221,7 @@ class TestMergeStageTracking:
         result = get_next_stage("DOCS", "success")
         assert result == ("MERGE", "/do-merge")
 
-    def test_merge_skill_to_stage(self):
-        from bridge.stage_detector import SKILL_TO_STAGE
+    def test_merge_skill_mapped(self):
+        from bridge.pipeline_graph import STAGE_TO_SKILL
 
-        assert SKILL_TO_STAGE["/do-merge"] == "MERGE"
+        assert STAGE_TO_SKILL["MERGE"] == "/do-merge"

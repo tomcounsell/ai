@@ -30,7 +30,7 @@ Added `_construct_canonical_url(url, gh_repo)` which extracts the issue/PR numbe
 
 Applied in both:
 - `_handle_update_session()` (tool-based updates from Observer LLM)
-- Outcome artifact storage (typed SkillOutcome path)
+- State machine outcome classification path
 
 Invalid URLs (no extractable number, non-GitHub URLs, empty/None) are logged at warning level and discarded.
 
@@ -40,7 +40,7 @@ Invalid URLs (no extractable number, non-GitHub URLs, empty/None) are logged at 
 - `.claude/hooks/validators/validate_merge_guard.py` - PreToolUse hook
 - `.claude/settings.json` - Hook registration
 - `.claude/commands/do-merge.md` - Gated merge skill
-- `bridge/stage_detector.py` - MERGE in STAGE_ORDER
+- `bridge/pipeline_state.py` - PipelineStateMachine manages stage transitions
 - `bridge/pipeline_graph.py` - MERGE in DISPLAY_STAGES, STAGE_TO_SKILL, routing
 - `models/agent_session.py` - MERGE in SDLC_STAGES
 

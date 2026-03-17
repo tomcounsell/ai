@@ -372,7 +372,7 @@ def run_smoke_test(project_dir: Path) -> tuple[bool, str]:
     # Phase 2: run one fast test file
     try:
         result = run_cmd(
-            [str(python_path), "-m", "pytest", "tests/test_docs_auditor.py", "-x", "-q"],
+            [str(python_path), "-m", "pytest", "tests/unit/test_docs_auditor.py", "-x", "-q"],
             cwd=project_dir,
             check=False,
             timeout=60,

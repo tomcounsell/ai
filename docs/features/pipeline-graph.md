@@ -14,7 +14,7 @@ Before this feature, pipeline routing was defined in three places that disagreed
 |----------|-----------|
 | SDLC `SKILL.md` dispatch table | 9 stages including PATCH |
 | Observer `_STAGE_TO_SKILL` | 6 stages without PATCH |
-| `stage_detector.py` `STAGE_ORDER` | 6 stages without PATCH |
+| `pipeline_state.py` stage tracking | 6 stages without PATCH |
 
 The Observer's `_next_sdlc_skill()` walked stages linearly and could not model cycles (TEST fail -> PATCH -> TEST). Cycles happened via ad-hoc LLM decisions rather than being encoded in the routing logic.
 
@@ -97,17 +97,9 @@ The gate check runs at three locations in the Observer decision flow:
 
 If the same gate forces steering 3+ times (tracked via `gate-forced-steer:{STAGE}` markers in session history), the gate allows delivery with a warning to prevent infinite loops.
 
-### Stage Detector Changes
+### State Machine Integration
 
-REVIEW and DOCS are excluded from `_COMPLETION_PATTERNS` in `bridge/stage_detector.py`. These stages can only be marked completed via:
-- **Typed `SkillOutcome`** from `/do-pr-review` or `/do-docs`
-- **Skill invocation detection** (`/do-pr-review` or `/do-docs` appearing in transcript)
-
-This prevents false positives from incidental mentions like "review complete" in unrelated output.
-
-### Graph-Aware `has_remaining_stages()`
-
-`AgentSession.has_remaining_stages()` uses the pipeline graph (`get_next_stage()`) instead of a flat list check. It finds the last completed/failed stage and checks if a non-terminal next stage exists, correctly handling cycles and the PATCH routing-only stage.
+Stage tracking is handled by `PipelineStateMachine` in `bridge/pipeline_state.py`, which uses the pipeline graph for transitions. The state machine's `has_remaining_stages()` method uses `get_next_stage()` to check if a non-terminal next stage exists, correctly handling cycles and the PATCH routing-only stage.
 
 ## Integration
 
@@ -124,5 +116,5 @@ Individual `/do-*` skills no longer contain pipeline navigation language. They r
 | `bridge/pipeline_graph.py` | Canonical graph definition |
 | `bridge/observer.py` | Uses `get_next_stage()` for graph-based routing with cycle counting |
 | `bridge/coach.py` | Imports `DISPLAY_STAGES` and `STAGE_TO_SKILL` (no local copies) |
-| `bridge/stage_detector.py` | `STAGE_ORDER` unchanged (display only) |
+| `bridge/pipeline_state.py` | `PipelineStateMachine` — stage tracking and transitions using the graph |
 | `tests/unit/test_pipeline_graph.py` | 27 tests covering all routing scenarios |
