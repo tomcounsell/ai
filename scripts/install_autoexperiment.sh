@@ -2,7 +2,7 @@
 # Install the autoexperiment launchd schedule for nightly 2 AM runs.
 #
 # Usage:
-#   ./scripts/install_autoexperiment.sh [--target observer|summarizer|stage_detector]
+#   ./scripts/install_autoexperiment.sh [--target observer|summarizer]
 #
 # This installs a launchd plist that runs autoexperiment nightly at 2 AM
 # with a $2.00 budget ceiling and 100 iteration cap.

@@ -38,6 +38,10 @@ logger = logging.getLogger(__name__)
 # OpenRouter endpoint
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
+# Accumulates costs from eval function calls so the runner can track them.
+# Drained by ExperimentRunner after each eval_fn() call.
+_eval_cost_accumulator: list[float] = []
+
 # Approximate costs per 1K tokens for budget tracking (conservative estimates)
 COST_PER_1K_INPUT = 0.0001  # $0.0001 per 1K input tokens
 COST_PER_1K_OUTPUT = 0.0003  # $0.0003 per 1K output tokens
@@ -272,7 +276,8 @@ def eval_observer(corpus_path: str | None = None) -> float:
             )
 
         try:
-            response, _ = call_openrouter(eval_prompt, model=OPENROUTER_HAIKU, max_tokens=10)
+            response, cost = call_openrouter(eval_prompt, model=OPENROUTER_HAIKU, max_tokens=10)
+            _eval_cost_accumulator.append(cost)
             decision = response.strip().upper()
             # Extract just STEER or DELIVER from response
             if "STEER" in decision:
@@ -319,12 +324,13 @@ def eval_summarizer(corpus_path: str | None = None) -> float:
 
         # Generate summary using the prompt
         try:
-            summary, _ = call_openrouter(
+            summary, cost1 = call_openrouter(
                 f"Summarize this output:\n\n{input_text}",
                 model=OPENROUTER_HAIKU,
                 system=prompt_text,
                 max_tokens=512,
             )
+            _eval_cost_accumulator.append(cost1)
 
             # Judge the quality
             criteria_str = ", ".join(criteria)
@@ -334,7 +340,10 @@ def eval_summarizer(corpus_path: str | None = None) -> float:
                 f"Original:\n{input_text[:500]}\n\n"
                 f"Reply with ONLY a decimal number between 0.0 and 1.0"
             )
-            score_response, _ = call_openrouter(judge_prompt, model=OPENROUTER_HAIKU, max_tokens=10)
+            score_response, cost2 = call_openrouter(
+                judge_prompt, model=OPENROUTER_HAIKU, max_tokens=10
+            )
+            _eval_cost_accumulator.append(cost2)
             # Parse score
             score_match = re.search(r"(\d+\.?\d*)", score_response)
             if score_match:
@@ -473,13 +482,17 @@ class ExperimentRunner:
         """
         self._iteration += 1
         timestamp = datetime.now(UTC).isoformat()
+        cost_before = self.total_cost
 
         # Read current source and extract prompt
         source = self._read_source()
         current_prompt = self.target.extract_fn(source)
 
         # Get baseline score
+        _eval_cost_accumulator.clear()
         baseline_score = self.target.eval_fn()
+        self.total_cost += sum(_eval_cost_accumulator)
+        _eval_cost_accumulator.clear()
 
         # Generate hypothesis
         hypothesis = self._generate_hypothesis(current_prompt, baseline_score)
@@ -496,14 +509,17 @@ class ExperimentRunner:
                 baseline_score=baseline_score,
                 new_score=baseline_score,
                 kept=False,
-                cost_usd=self.total_cost,
+                cost_usd=self.total_cost - cost_before,
                 timestamp=timestamp,
             )
 
         self._write_source(modified_source)
 
         # Evaluate
+        _eval_cost_accumulator.clear()
         new_score = self.target.eval_fn()
+        self.total_cost += sum(_eval_cost_accumulator)
+        _eval_cost_accumulator.clear()
 
         # Decide: keep or revert
         kept = self._is_improvement(baseline_score, new_score)
@@ -528,10 +544,16 @@ class ExperimentRunner:
         # Build diff for logging
         diff = ""
         if current_prompt != hypothesis:
-            diff = "--- baseline\n+++ hypothesis\n"
-            for old_line, new_line in zip(current_prompt.splitlines(), hypothesis.splitlines()):
-                if old_line != new_line:
-                    diff += f"- {old_line}\n+ {new_line}\n"
+            import difflib
+
+            diff = "".join(
+                difflib.unified_diff(
+                    current_prompt.splitlines(keepends=True),
+                    hypothesis.splitlines(keepends=True),
+                    fromfile="baseline",
+                    tofile="hypothesis",
+                )
+            )
 
         result = ExperimentResult(
             iteration=self._iteration,
@@ -540,7 +562,7 @@ class ExperimentRunner:
             baseline_score=baseline_score,
             new_score=new_score,
             kept=kept,
-            cost_usd=self.total_cost,
+            cost_usd=self.total_cost - cost_before,
             timestamp=timestamp,
         )
 
