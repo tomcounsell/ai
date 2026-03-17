@@ -153,4 +153,4 @@ In `monitoring/session_watchdog.py`. Called from the watchdog loop after `check_
 - [Session Lifecycle Diagnostics](session-lifecycle-diagnostics.md): Foundation for stall detection (`LIFECYCLE_STALL` log entries)
 - [Session Watchdog](session-watchdog.md): The monitoring loop that runs stall checks
 - [Job Health Monitor](job-health-monitor.md): Complementary liveness monitor for running jobs with dead workers
-- [Coaching Loop](coaching-loop.md): Auto-continue mechanism that retry builds upon
+- [Bridge Workflow Gaps](bridge-workflow-gaps.md): Auto-continue mechanism that retry builds upon

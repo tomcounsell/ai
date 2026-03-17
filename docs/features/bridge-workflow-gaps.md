@@ -43,7 +43,7 @@ All routing decisions — SDLC and non-SDLC — are now made by the [Observer Ag
 
 ### Safety Limits
 
-- **Error bypass (crash guard)** -- If output is classified as `ERROR`, auto-continue is skipped entirely and the error is sent straight to Telegram. This prevents cascading retry loops when the SDK crashes. See [Coaching Loop — Error Crash Guard](coaching-loop.md).
+- **Error bypass (crash guard)** -- If output is classified as `ERROR`, auto-continue is skipped entirely and the error is sent straight to Telegram. This prevents cascading retry loops when the SDK crashes.
 - **MAX_AUTO_CONTINUES = 3** -- Safety cap for non-SDLC jobs. After 3 auto-continues, the next status update goes to Telegram.
 - **MAX_AUTO_CONTINUES_SDLC = 10** -- Higher safety cap for SDLC jobs where stage progress is the primary termination signal.
 - **Counter resets on human reply** -- When the human sends a new message to the session, the auto-continue counter resets to zero.

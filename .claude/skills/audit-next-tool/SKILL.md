@@ -13,7 +13,7 @@ Comprehensive tool audit system for validating and maintaining code quality acro
 **System Health**: Production-ready and maintainable
 **Architecture**: GOLD STANDARD patterns throughout
 
-**Audit Registry**: See `docs/plan/AUDITS.md` for complete audit history and results
+**Audit Registry**: Audit history tracked in GitHub issues and commit history
 
 ## Command Purpose
 
@@ -47,7 +47,7 @@ When auditing new or modified tools, follow the 4-phase process:
 - **Regression Prevention**: Ensure changes don't break existing functionality
 
 ### Phase 4: Documentation and Completion
-- **Update Audit Registry**: Add results to `docs/plan/AUDITS.md`
+- **Update Audit Registry**: Document results in commit messages or GitHub issues
 - **Create Audit Report**: Document findings and recommendations
 - **Implement Fixes**: Address critical and high priority issues
 - **Commit Changes**: Preserve audit work and improvements
@@ -117,7 +117,7 @@ When new tools are added to the system:
 
 1. **Use the established 4-phase process** as outlined above
 2. **Follow GOLD STANDARD patterns** from existing approved tools
-3. **Update the audit registry** in `docs/plan/AUDITS.md`
+3. **Update the audit registry** in `GitHub issues and commit history`
 4. **Ensure architectural consistency** with the established codebase patterns
 5. **Document lessons learned** for future audit improvements
 
@@ -128,7 +128,7 @@ When new tools are added to the system:
 - **Integration Tools**: External service connectors
 
 ### Audit Documentation
-- **Update** `docs/plan/AUDITS.md` with new audit results
+- **Update** `GitHub issues and commit history` with new audit results
 - **Create** detailed audit reports for comprehensive audits
 - **Document** any new patterns or architectural decisions
 - **Preserve** audit methodology improvements
@@ -151,7 +151,7 @@ The audit system supports ongoing system health through:
 - **Quality improvements**: Enhanced testing, documentation, security
 - **System consolidation**: Clean, maintainable architecture achieved
 
-**Audit Registry**: Complete history available in `docs/plan/AUDITS.md`
+**Audit Registry**: Complete history available in `GitHub issues and commit history`
 
 ---
 

@@ -156,7 +156,11 @@ def is_section_complete(section_content: str) -> tuple[bool, str]:
     if checklists:
         # Has checklists but no dispositions — warn but accept if substantive
         if len(section_content) >= 50:
-            return True, f"Contains {len(checklists)} checklist items (consider adding UPDATE/DELETE/REPLACE dispositions)"
+            return (
+                True,
+                f"Contains {len(checklists)} checklist items"
+                " (consider adding UPDATE/DELETE/REPLACE dispositions)",
+            )
 
     # Check for common placeholder text
     placeholder_patterns = [

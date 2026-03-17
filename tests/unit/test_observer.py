@@ -494,7 +494,7 @@ class TestObserverFallback:
 
     @pytest.mark.asyncio
     async def test_observer_error_returns_deliver(self):
-        """When Observer errors, it returns a deliver decision.
+        """When Observer errors (no API key), it returns a deliver decision.
 
         Uses a non-SDLC session so the deterministic SDLC guard (Phase 1.75)
         doesn't intercept before reaching the LLM error path we're testing.
@@ -502,7 +502,7 @@ class TestObserverFallback:
 
         class MockSession:
             session_id = "test-fallback"
-            classification_type = "general"
+            classification_type = "general"  # Non-SDLC to reach LLM path
             context_summary = None
             expectations = None
             queued_steering_messages = []
@@ -1110,6 +1110,63 @@ class TestApplyTransitionsTypedOutcomeMerge:
         assert result == 2
         assert any("BUILD COMPLETED" in entry for entry in session.history)
         assert any("DOCS COMPLETED" in entry for entry in session.history)
+
+
+# ============================================================================
+# Cross-Repo gh Resolution Tests (Bug 1 regression tests)
+# ============================================================================
+
+
+class TestCrossRepoGhResolution:
+    """Test that skills include --repo instructions for cross-project builds.
+
+    Regression tests for issue #375 Bug 1: when SDLC is invoked for a non-ai
+    project, gh commands must use --repo to target the correct repository.
+    """
+
+    def test_sdlc_skill_contains_repo_flag_instructions(self):
+        """SDLC skill should contain --repo in gh issue view and gh pr list examples."""
+        from pathlib import Path
+
+        repo_root = Path(__file__).parent.parent.parent
+        skill_path = repo_root / ".claude" / "skills" / "sdlc" / "SKILL.md"
+        content = skill_path.read_text()
+        assert "--repo" in content, "SDLC skill must contain --repo instructions"
+        assert "REPO_FLAG" in content or "GITHUB_REPO" in content or "GH_REPO" in content, (
+            "SDLC skill must reference GITHUB: context line for repo resolution"
+        )
+
+    def test_all_do_skills_reference_github_context(self):
+        """All /do-* skills that contain 'gh ' commands should reference
+        GITHUB: context line or --repo."""
+        from pathlib import Path
+
+        skills_dir = Path(__file__).parent.parent.parent / ".claude" / "skills"
+        do_skills = list(skills_dir.glob("do-*/SKILL.md"))
+        assert len(do_skills) > 0, "Should find at least one /do-* skill"
+
+        skills_with_gh = []
+        skills_missing_repo = []
+
+        for skill_path in do_skills:
+            content = skill_path.read_text()
+            if "gh " in content and (
+                "gh issue" in content or "gh pr" in content or "gh api" in content
+            ):
+                skills_with_gh.append(skill_path.name)
+                has_repo_ref = (
+                    "REPO_FLAG" in content
+                    or "--repo" in content
+                    or "GITHUB" in content
+                    or "GH_REPO" in content
+                )
+                if not has_repo_ref:
+                    skills_missing_repo.append(str(skill_path))
+
+        assert len(skills_with_gh) > 0, "Should find skills with gh commands"
+        assert len(skills_missing_repo) == 0, (
+            f"These skills use gh commands but lack --repo/GITHUB references: {skills_missing_repo}"
+        )
 
 
 # ============================================================================

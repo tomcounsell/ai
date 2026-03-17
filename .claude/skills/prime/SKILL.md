@@ -30,7 +30,7 @@ Telegram → Python Bridge (Telethon) → Claude Agent SDK → Claude API
 
 ```
 ai/                          # This repo
-├── .claude/commands/        # Claude Code skills (/prime, /pthread, /sdlc)
+├── .claude/skills/          # Claude Code skills (/prime, /pthread, /sdlc)
 ├── agent/                   # Claude Agent SDK integration
 ├── bridge/                  # Telegram bridge
 ├── config/SOUL.md           # Persona definition
@@ -49,7 +49,7 @@ ai/                          # This repo
 
 ### New Claude Code Skill
 
-Create `.claude/commands/<name>.md` with instructions for Claude Code to follow.
+Create `.claude/skills/<name>/SKILL.md` with instructions for Claude Code to follow.
 
 ### Permission Model
 

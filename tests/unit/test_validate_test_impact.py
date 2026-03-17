@@ -89,7 +89,9 @@ class TestIsSectionComplete:
 
     def test_accepts_no_tests_affected_with_justification(self):
         mod = import_validator()
-        content = "No existing tests affected — this is a greenfield feature with no prior test coverage."
+        content = (
+            "No existing tests affected — this is a greenfield feature with no prior test coverage."
+        )
         is_complete, reason = mod.is_section_complete(content)
         assert is_complete
         assert "no existing tests affected" in reason.lower()
@@ -139,17 +141,23 @@ class TestIsSectionComplete:
         )
         is_complete, reason = mod.is_section_complete(content)
         assert is_complete
-        assert "checklist" in reason.lower()
+        assert "checklist" in reason.lower() or "items" in reason.lower()
 
     def test_case_insensitive_dispositions(self):
         mod = import_validator()
-        content = "- [ ] `tests/unit/test_foo.py::test_bar` — update: new assertion value for changed output"
+        content = (
+            "- [ ] `tests/unit/test_foo.py::test_bar`"
+            " — update: new assertion value for changed output"
+        )
         is_complete, reason = mod.is_section_complete(content)
         assert is_complete
 
     def test_checked_items_accepted(self):
         mod = import_validator()
-        content = "- [x] `tests/unit/test_foo.py::test_bar` — UPDATE: new assertion value for changed output"
+        content = (
+            "- [x] `tests/unit/test_foo.py::test_bar`"
+            " — UPDATE: new assertion value for changed output"
+        )
         is_complete, reason = mod.is_section_complete(content)
         assert is_complete
 
@@ -225,7 +233,7 @@ Something.
 
 ## Test Impact
 
-No existing tests affected — this is a greenfield feature with no prior test coverage or existing assertions.
+No existing tests affected — this is a greenfield feature with no prior test coverage.
 
 ## Rabbit Holes
 

@@ -28,7 +28,12 @@ Typed Outcome Routing (deterministic, no LLM)
 Stop Reason Routing (deterministic, no LLM)
     |  if stop_reason == "budget_exceeded" → DELIVER with warning
     |  if stop_reason == "rate_limited" → STEER with backoff
-    |  if stop_reason == "end_turn" or None → fall through to Observer
+    |  if stop_reason == "end_turn" or None → fall through
+    v
+Deterministic SDLC Guard (deterministic, no LLM)
+    |  if SDLC + stages remain + no blocker → STEER to next /do-* skill
+    |  if failed stage, terminal stop, at cap, or blocker signal → fall through
+    |  see: deterministic-sdlc-guard.md
     v
 Observer Agent (Sonnet in production, configurable for testing)
     |  reads AgentSession state
@@ -128,7 +133,7 @@ Both gates are in `agent/job_queue.py`'s `send_to_chat()` function.
 
 ## Coaching Philosophy
 
-The Observer's coaching messages follow identity-affirming prompting principles (see [Claude Prompting Best Practices](../references/claude_prompting_best_practices.md)):
+The Observer's coaching messages follow identity-affirming prompting principles (see [Claude Prompting Best Practices](../guides/claude-prompting-best-practices.md)):
 
 - **Speak to competence, not compliance** — the worker is a skilled agent, not a script runner
 - **Concrete success criteria** — close with what success looks like: "Success here means clean, tested code with no silent assumptions"
@@ -159,7 +164,7 @@ The Observer replaces three interleaved systems that shared responsibility for r
 | `build_coaching_message()` | `bridge/coach.py` | 5-tier fallback chain -- overly complex, often produced generic coaching |
 | `session_progress.py` | `tools/session_progress.py` | CLI tool the worker LLM had to call -- silently failed, stages got skipped |
 
-These were removed from the routing path. See [Coaching Loop](coaching-loop.md) for historical context on the old system (no longer in use).
+These were removed from the routing path.
 
 ## Key Files
 
@@ -172,7 +177,7 @@ These were removed from the routing path. See [Coaching Loop](coaching-loop.md) 
 | `agent/sdk_client.py` | Captures `stop_reason` from `ResultMessage` in `_session_stop_reasons` registry |
 | `agent/job_queue.py` | `send_to_chat()` wiring -- invokes outcome parser, stage detector, then Observer; threads `stop_reason` |
 | `models/agent_session.py` | `AgentSession` with stage progress, steering queue, links |
-| `tests/test_observer.py` | 46 tests: 33 unit (stage detector, Observer tools, fallback) + 13 integration (real API with Haiku floor test) |
+| `tests/test_observer.py` | 60+ tests: 33 unit (stage detector, Observer tools, fallback) + 17 integration (real API with Haiku floor test) + 4 deterministic guard + 6 typed outcome merge |
 | `tests/unit/test_message_quality.py` | 30 tests for narration detection, substantive content markers, and false positive prevention |
 | `tests/unit/test_observer_message_for_user.py` | Tests for `message_for_user` delivery path and observer tool schema |
 | `tests/unit/test_stop_reason_observer.py` | 7 tests for stop_reason routing (budget_exceeded, rate_limited, end_turn, registry) |
@@ -191,3 +196,4 @@ Test categories:
 - **Cap enforcement**: SDLC cap (10) and non-SDLC cap (3) both cause delivery
 - **Error/blocker delivery**: unrecoverable errors go to human
 - **Completion delivery**: all-stages-done with evidence goes to human
+- **Deterministic guard** (4 tests): guard fires on clean SDLC, bypassed on failed stage / terminal stop_reason / budget_exceeded — see [Deterministic SDLC Guard](deterministic-sdlc-guard.md)

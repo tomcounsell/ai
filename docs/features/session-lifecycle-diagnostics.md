@@ -97,7 +97,7 @@ Constants in `monitoring/session_watchdog.py`:
 | `monitoring/session_status.py` | CLI session status report |
 | `tests/test_lifecycle_transition.py` | Integration tests for lifecycle logging |
 | `tests/unit/test_stall_detection.py` | Unit tests for stall detection |
-| `tests/test_session_stuck_pending.py` | Tests for stale save guard and pending recovery (#342) |
+| `tests/unit/test_pending_recovery.py` | Tests for stale save guard, pending recovery, and kill+retry (#342) |
 | `tests/unit/test_session_status.py` | Unit tests for CLI report |
 
 ## Related

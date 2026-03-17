@@ -132,15 +132,40 @@ def _construct_canonical_url(url: str | None, gh_repo: str | None) -> str | None
 # Maximum tool-use iterations to prevent infinite loops
 MAX_TOOL_ITERATIONS = 5
 
-# Observer system prompt — defines the decision framework
-OBSERVER_SYSTEM_PROMPT = """\
-You are the Observer Agent for an autonomous SDLC pipeline. Your job is to decide
-what happens when the worker agent stops producing output.
 
-You have access to the full AgentSession state and must make one of two decisions:
-1. STEER: Send the worker back to work on the next pipeline stage
-2. DELIVER: Send the output to the human on Telegram
+def _build_observer_system_prompt() -> str:
+    """Build the Observer system prompt with principal context injected.
 
+    The Observer gets the full (non-condensed) principal context because it
+    makes triage and prioritization decisions that benefit from the complete
+    strategic picture. This is loaded once per Observer invocation.
+    """
+    from agent.sdk_client import load_principal_context
+
+    principal = load_principal_context(condensed=False)
+    principal_block = ""
+    if principal:
+        principal_block = (
+            "\n## Principal Context (Supervisor's Strategic Priorities)\n\n"
+            "The following is the supervisor's operating context. Use it for "
+            "prioritization, scoping, and escalation decisions.\n\n"
+            f"{principal}\n\n---\n"
+        )
+
+    return (
+        "You are the Observer Agent for an autonomous SDLC pipeline. Your job is to decide\n"
+        "what happens when the worker agent stops producing output.\n"
+        f"{principal_block}\n"
+        "You have access to the full AgentSession state and must make one of two decisions:\n"
+        "1. STEER: Send the worker back to work on the next pipeline stage\n"
+        "2. DELIVER: Send the output to the human on Telegram\n\n" + OBSERVER_SYSTEM_PROMPT_BODY
+    )
+
+
+# The static body of the Observer system prompt (everything after the intro
+# and principal context block). Extracted so _build_observer_system_prompt()
+# can prepend the dynamic principal context.
+OBSERVER_SYSTEM_PROMPT_BODY = """\
 ## SDLC Pipeline Stages (in order, from bridge/pipeline_graph.py)
 ISSUE -> PLAN -> BUILD -> TEST -> REVIEW -> DOCS -> MERGE
 Cycles: TEST(fail) -> PATCH -> TEST, REVIEW(fail) -> PATCH -> TEST -> REVIEW
@@ -325,10 +350,21 @@ def _build_tools() -> list[dict]:
 # When detected, the deterministic SDLC guard defers to the LLM Observer
 # so it can decide whether to deliver or steer.
 _HUMAN_INPUT_PATTERNS = [
-    re.compile(r"## Open Questions", re.IGNORECASE),
+    re.compile(r"##\s*Open\s+Questions", re.IGNORECASE),
+    re.compile(
+        r"(?:question|decision|input)\s+(?:for|from)\s+"
+        r"(?:tom|the\s+(?:pm|architect|human))",
+        re.IGNORECASE,
+    ),
     re.compile(r"(?:Should I|Should we|Do you want|Would you prefer)", re.IGNORECASE),
-    re.compile(r"(?:FATAL|cannot proceed|nothing I can do)", re.IGNORECASE),
-    re.compile(r"(?:requires? (?:human|your|a human))", re.IGNORECASE),
+    re.compile(r"(?:should\s+I|your\s+(?:call|input|decision))", re.IGNORECASE),
+    re.compile(r"(?:FATAL|unrecoverable|cannot\s+proceed)", re.IGNORECASE),
+    re.compile(
+        r"(?:API\s+key\s+has\s+been\s+(?:revoked|disabled|expired))",
+        re.IGNORECASE,
+    ),
+    re.compile(r"(?:nothing\s+I\s+can\s+do|requires?\s+(?:a\s+)?human)", re.IGNORECASE),
+    re.compile(r"(?:Option\s+[A-C]\))", re.IGNORECASE),
     re.compile(r"(?:I(?:'d| would) rather get your input)", re.IGNORECASE),
 ]
 
@@ -404,7 +440,6 @@ def _next_sdlc_skill(session) -> tuple[str, str] | None:
         if status in ("pending", "in_progress"):
             skill = STAGE_TO_SKILL.get(stage, f"/do-{stage.lower()}")
             return (stage, skill)
-
     return None
 
 
@@ -945,6 +980,9 @@ class Observer:
                 f"falling through to LLM Observer"
             )
 
+        # Recalculate has_remaining after transitions may have advanced stages
+        has_remaining = self.session.has_remaining_stages()
+
         # Phase 1.75: Deterministic SDLC stage guard
         # If this is an SDLC session with remaining stages, ALWAYS steer to the
         # next stage. The LLM Observer must not override stage tracking — this was
@@ -1047,12 +1085,15 @@ class Observer:
             deliver_reason = None
             message_for_user = None
 
+            # Build system prompt once (reads PRINCIPAL.md from disk)
+            observer_prompt = _build_observer_system_prompt()
+
             # Tool-use loop with iteration cap
             for iteration in range(MAX_TOOL_ITERATIONS):
                 response = client.messages.create(
                     model=self.model,
                     max_tokens=1024,
-                    system=OBSERVER_SYSTEM_PROMPT,
+                    system=observer_prompt,
                     messages=messages,
                     tools=tools,
                 )

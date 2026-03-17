@@ -166,4 +166,4 @@ Basic `md` parse mode (not MarkdownV2). Supports bold, inline code, and `[text](
 
 - [AgentSession Model](agent-session-model.md) - Unified lifecycle model with stage progress helpers
 - [Bridge Response Improvements](bridge-response-improvements.md) - Response pipeline
-- [Coaching Loop](coaching-loop.md) - Output classification and auto-continue
+- [Bridge Workflow Gaps](bridge-workflow-gaps.md) - Output classification and auto-continue

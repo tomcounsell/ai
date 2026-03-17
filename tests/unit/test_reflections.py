@@ -144,6 +144,14 @@ class TestTaskCleanup:
 
         runner = ReflectionRunner()
         runner.state.findings = {}
+        # Ensure at least one project has github config
+        runner.projects = [
+            {
+                "slug": "test-project",
+                "working_directory": "/tmp",
+                "github": {"org": "test-org", "repo": "test-repo"},
+            }
+        ]
         await runner.step_clean_tasks()
 
         # Should have called gh

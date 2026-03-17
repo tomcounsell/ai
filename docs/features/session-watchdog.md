@@ -76,7 +76,7 @@ Fires when `time.time() - session.started_at > DURATION_THRESHOLD`. Most tasks s
 
 ### ModelException Handling (Crash Guard)
 
-When the watchdog encounters a `popoto.exceptions.ModelException` while processing a session (e.g. unique constraint violations from duplicate Redis keys, or other ORM errors from corrupted state), it marks that session as `failed` instead of logging the error and retrying every cycle. This prevents infinite retry loops caused by stale sessions left over from SDK crashes. See [Coaching Loop — Error Crash Guard](coaching-loop.md) for the full crash guard mechanism.
+When the watchdog encounters a `popoto.exceptions.ModelException` while processing a session (e.g. unique constraint violations from duplicate Redis keys, or other ORM errors from corrupted state), it marks that session as `failed` instead of logging the error and retrying every cycle. This prevents infinite retry loops caused by stale sessions left over from SDK crashes. See [Bridge Workflow Gaps](bridge-workflow-gaps.md) for the full crash guard mechanism.
 
 ## Remediation
 
