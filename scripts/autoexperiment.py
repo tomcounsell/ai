@@ -197,13 +197,17 @@ def _inject_prompt_var(file_content: str, var_name: str, new_prompt: str) -> str
 
 
 def extract_observer_prompt(file_content: str) -> str:
-    """Extract OBSERVER_SYSTEM_PROMPT from observer.py content."""
-    return _extract_prompt_var(file_content, "OBSERVER_SYSTEM_PROMPT")
+    """Extract OBSERVER_SYSTEM_PROMPT_BODY from observer.py content.
+
+    Only the static body template is an experiment target. The dynamic
+    prompt construction logic (_build_observer_system_prompt) is off-limits.
+    """
+    return _extract_prompt_var(file_content, "OBSERVER_SYSTEM_PROMPT_BODY")
 
 
 def inject_observer_prompt(file_content: str, new_prompt: str) -> str:
-    """Inject a new OBSERVER_SYSTEM_PROMPT into observer.py content."""
-    return _inject_prompt_var(file_content, "OBSERVER_SYSTEM_PROMPT", new_prompt)
+    """Inject a new OBSERVER_SYSTEM_PROMPT_BODY into observer.py content."""
+    return _inject_prompt_var(file_content, "OBSERVER_SYSTEM_PROMPT_BODY", new_prompt)
 
 
 def extract_summarizer_prompt(file_content: str) -> str:
@@ -216,33 +220,6 @@ def inject_summarizer_prompt(file_content: str, new_prompt: str) -> str:
     return _inject_prompt_var(file_content, "SUMMARIZER_SYSTEM_PROMPT", new_prompt)
 
 
-def extract_stage_detector_patterns(file_content: str) -> str:
-    """Extract the pattern definitions section from stage_detector.py.
-
-    Returns the block containing SKILL_TO_STAGE, STAGE_ORDER, and the
-    compiled regex patterns, which are the tunable parts of the detector.
-    """
-    # Extract the section between the module docstring and the detect_stages function
-    pattern = re.compile(
-        r"(# Maps skill invocations.*?)(?=\ndef detect_stages)",
-        re.DOTALL,
-    )
-    match = pattern.search(file_content)
-    if not match:
-        raise ValueError("Could not find pattern definitions in stage_detector.py")
-    return match.group(1)
-
-
-def inject_stage_detector_patterns(file_content: str, new_patterns: str) -> str:
-    """Inject modified pattern definitions into stage_detector.py."""
-    pattern = re.compile(
-        r"(# Maps skill invocations.*?)(?=\ndef detect_stages)",
-        re.DOTALL,
-    )
-    match = pattern.search(file_content)
-    if not match:
-        raise ValueError("Could not find pattern definitions in stage_detector.py")
-    return file_content[: match.start()] + new_patterns + file_content[match.end() :]
 
 
 # ---------------------------------------------------------------------------
@@ -371,75 +348,6 @@ def eval_summarizer(corpus_path: str | None = None) -> float:
     return sum(scores) / len(scores) if scores else 0.0
 
 
-def eval_stage_detector(corpus_path: str | None = None) -> float:
-    """Evaluate stage detector accuracy against eval corpus.
-
-    Loads eval_corpus.jsonl, runs each transcript through detect_stages(),
-    compares detected stages with expected.
-
-    Returns F1 score as float 0-1.
-    """
-    if corpus_path is None:
-        corpus_path = "data/experiments/stage_detector/eval_corpus.jsonl"
-
-    corpus = load_jsonl(corpus_path)
-    if not corpus:
-        logger.warning("Stage detector eval corpus is empty")
-        return 0.0
-
-    from bridge.stage_detector import detect_stages
-
-    true_positives = 0
-    false_positives = 0
-    false_negatives = 0
-
-    for sample in corpus:
-        transcript = sample.get("transcript", "")
-        expected_stages = sample.get("expected_stages", {})
-
-        # Run detector
-        transitions = detect_stages(transcript)
-        detected = {}
-        for t in transitions:
-            stage = t["stage"]
-            status = t["status"]
-            # Keep highest status per stage
-            if stage not in detected or status == "completed":
-                detected[stage] = status
-
-        # Compare
-        all_stages = set(list(expected_stages.keys()) + list(detected.keys()))
-        for stage in all_stages:
-            expected_status = expected_stages.get(stage)
-            detected_status = detected.get(stage)
-
-            if expected_status and detected_status:
-                # Both present — check if status matches
-                if expected_status == detected_status:
-                    true_positives += 1
-                else:
-                    # Partial match — count as both FP and FN
-                    false_positives += 1
-                    false_negatives += 1
-            elif expected_status and not detected_status:
-                false_negatives += 1
-            elif detected_status and not expected_status:
-                false_positives += 1
-
-    # Calculate F1
-    precision = (
-        true_positives / (true_positives + false_positives)
-        if (true_positives + false_positives) > 0
-        else 0.0
-    )
-    recall = (
-        true_positives / (true_positives + false_negatives)
-        if (true_positives + false_negatives) > 0
-        else 0.0
-    )
-    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
-
-    return f1
 
 
 # ---------------------------------------------------------------------------
@@ -739,18 +647,6 @@ def get_targets() -> dict[str, ExperimentTarget]:
                 "Higher score means better adherence to format rules and tone."
             ),
         ),
-        "stage_detector": ExperimentTarget(
-            name="stage_detector",
-            file_path="bridge/stage_detector.py",
-            extract_fn=extract_stage_detector_patterns,
-            inject_fn=inject_stage_detector_patterns,
-            eval_fn=eval_stage_detector,
-            metric_direction="higher",
-            description=(
-                "Stage detector F1 score: accurately detecting SDLC pipeline stages from "
-                "agent transcripts. Higher F1 means fewer missed stages and fewer false positives."
-            ),
-        ),
     }
 
 
@@ -765,7 +661,7 @@ def main():
     )
     parser.add_argument(
         "--target",
-        choices=["observer", "summarizer", "stage_detector"],
+        choices=["observer", "summarizer"],
         help="Which target to optimize",
     )
     parser.add_argument(
