@@ -11,10 +11,9 @@ from __future__ import annotations
 
 import logging
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
-
 
 # ===================================================================
 # sdk_client.py: error summary in crash guard
@@ -30,9 +29,7 @@ class TestSdkClientErrorCapture:
         captured_calls = []
 
         def mock_complete_transcript(session_id, status=None, summary=None):
-            captured_calls.append(
-                {"session_id": session_id, "status": status, "summary": summary}
-            )
+            captured_calls.append({"session_id": session_id, "status": status, "summary": summary})
 
         # We test the crash guard pattern directly by simulating the catch block logic
         # from sdk_client.py lines 1254-1269. This avoids mocking the entire
@@ -117,9 +114,7 @@ class TestReflectionsEmptySummaryGuard:
 
     @patch("models.bridge_event.BridgeEvent")
     @patch("models.agent_session.AgentSession")
-    def test_skips_none_summary_failed_session(
-        self, mock_agent_session, mock_bridge_event, caplog
-    ):
+    def test_skips_none_summary_failed_session(self, mock_agent_session, mock_bridge_event, caplog):
         """Failed sessions with None summary are skipped."""
         from scripts.reflections import analyze_sessions_from_redis
 
@@ -135,9 +130,7 @@ class TestReflectionsEmptySummaryGuard:
 
     @patch("models.bridge_event.BridgeEvent")
     @patch("models.agent_session.AgentSession")
-    def test_includes_nonempty_summary_failed_session(
-        self, mock_agent_session, mock_bridge_event
-    ):
+    def test_includes_nonempty_summary_failed_session(self, mock_agent_session, mock_bridge_event):
         """Failed sessions with a populated summary are included normally."""
         from scripts.reflections import analyze_sessions_from_redis
 
@@ -155,9 +148,7 @@ class TestReflectionsEmptySummaryGuard:
 
     @patch("models.bridge_event.BridgeEvent")
     @patch("models.agent_session.AgentSession")
-    def test_skips_whitespace_only_summary(
-        self, mock_agent_session, mock_bridge_event, caplog
-    ):
+    def test_skips_whitespace_only_summary(self, mock_agent_session, mock_bridge_event, caplog):
         """Failed sessions with whitespace-only summary are skipped."""
         from scripts.reflections import analyze_sessions_from_redis
 
