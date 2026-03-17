@@ -8,7 +8,7 @@ Covers:
 5. Stop reason registry get/consume semantics
 """
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
 
@@ -21,7 +21,7 @@ class TestObserverStopReasonRouting:
         session = MagicMock()
         session.session_id = "test-session"
         session.correlation_id = "test-corr"
-        session.is_sdlc_job.return_value = False
+        type(session).is_sdlc = PropertyMock(return_value=False)
         session.has_remaining_stages.return_value = False
         session.has_failed_stage.return_value = False
         session.classification_type = "conversation"

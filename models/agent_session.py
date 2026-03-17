@@ -307,29 +307,49 @@ class AgentSession(Model):
 
     # === Stage-aware auto-continue helpers ===
 
-    def is_sdlc_job(self) -> bool:
-        """Check if this session is an SDLC pipeline job.
+    @property
+    def is_sdlc(self) -> bool:
+        """Derive SDLC status from observable state.
 
-        Returns True if:
-        1. The session was classified as "sdlc" at input routing time, OR
-        2. The session's history contains at least one [stage] entry
+        Returns True if this session is an SDLC pipeline job, checked in
+        priority order:
+        1. stage_states — if any stage is in_progress/completed/failed
+        2. History [stage] entries — legacy fallback
+        3. classification_type == "sdlc" — tertiary for freshly classified sessions
 
-        The classification_type check (added for issue #246) is the primary
-        signal — it's set at classification time and cannot be lost. The
-        history check is the legacy fallback for sessions that have stage
-        entries from session_progress calls.
-
-        Used by the auto-continue logic to choose between stage-aware
-        routing (for SDLC jobs) and classifier-based routing (for
-        casual/ad-hoc jobs).
+        This is a derived property: if stages have started, the session IS
+        SDLC regardless of whether classification happened correctly.
         """
-        # Primary: classification_type set at input routing time
-        if self.classification_type == "sdlc":
-            return True
-        # Fallback: check for [stage] entries in history
+        # Primary: check stage_states for any active/completed/failed stage
+        raw = getattr(self, "stage_states", None)
+        if raw:
+            try:
+                import json
+
+                data = (
+                    raw
+                    if isinstance(raw, dict)
+                    else json.loads(raw)
+                    if isinstance(raw, str)
+                    else None
+                )
+                if isinstance(data, dict):
+                    active_statuses = {"in_progress", "completed", "failed"}
+                    for key, val in data.items():
+                        if not key.startswith("_") and val in active_statuses:
+                            return True
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        # Secondary: check for [stage] entries in history
         for entry in self._get_history_list():
             if isinstance(entry, str) and "[stage]" in entry.lower():
                 return True
+
+        # Tertiary: classification_type set at input routing time
+        if self.classification_type == "sdlc":
+            return True
+
         return False
 
     def has_remaining_stages(self) -> bool:

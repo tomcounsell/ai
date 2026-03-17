@@ -870,7 +870,7 @@ def _render_stage_progress(session) -> str | None:
 
     # Use state machine when stage_states is available (must be a str or dict)
     stage_states = getattr(session, "stage_states", None)
-    if stage_states and isinstance(stage_states, (str, dict)):
+    if stage_states and isinstance(stage_states, str | dict):
         try:
             from bridge.pipeline_state import PipelineStateMachine
 
@@ -1414,7 +1414,7 @@ def _compose_structured_summary(summary_text: str, session=None, is_completion: 
             f"Rendered stage progress for session "
             f"{session.session_id if session else 'N/A'}: {stage_line}"
         )
-    elif session and hasattr(session, "is_sdlc_job") and session.is_sdlc_job():
+    elif session and hasattr(session, "is_sdlc") and session.is_sdlc:
         logger.warning(f"SDLC session {session.session_id} has no stage progress to render")
 
     # Summary text (bullets or prose)

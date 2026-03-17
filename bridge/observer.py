@@ -286,7 +286,7 @@ class Observer:
         )
         # Initialize state machine for SDLC sessions
         self._state_machine: PipelineStateMachine | None = None
-        if session.is_sdlc_job():
+        if session.is_sdlc:
             try:
                 self._state_machine = PipelineStateMachine(session)
             except Exception as e:
@@ -320,7 +320,7 @@ class Observer:
                 f"correlation={cid} count={len(queued)} action=read"
             )
             record_interjection(self.session.session_id, cid, len(queued), "read")
-        is_sdlc = self.session.is_sdlc_job()
+        is_sdlc = self.session.is_sdlc
 
         # Extract artifacts from worker output
         artifacts = extract_artifacts(self.worker_output)
@@ -447,7 +447,7 @@ class Observer:
             - stage_outcome: str | None ("success", "fail", or "ambiguous")
             - next_stage: str | None (stage to start next)
         """
-        is_sdlc = self.session.is_sdlc_job()
+        is_sdlc = self.session.is_sdlc
         max_continues = MAX_AUTO_CONTINUES_SDLC if is_sdlc else MAX_AUTO_CONTINUES
 
         # Use state machine for stage queries
