@@ -44,6 +44,7 @@ gws sheets spreadsheets values get --params '{"spreadsheetId": "ID", "range": "S
 | `pytest tests/unit/` | Run unit tests only (fast, ~60s) |
 | `pytest tests/unit/ -n auto` | Run unit tests in parallel |
 | `pytest tests/integration/` | Run integration tests only |
+| `pytest -m sdlc` | Run tests for a specific feature (see `tests/README.md`) |
 | `python -m ruff format . && python -m ruff check .` | Format and lint |
 | `python scripts/reflections.py` | Run reflections maintenance manually |
 | `python scripts/reflections.py --dry-run` | Test reflections without side effects |
@@ -301,6 +302,7 @@ No existing tests affected — this is a greenfield feature with no prior test c
 | `docs/tools-reference.md` | Complete tool documentation |
 | `config/SOUL.md` | Valor persona and philosophy |
 | `docs/features/README.md` | Feature index — look up how things work |
+| `tests/README.md` | Test suite index — feature markers, blind spots, contribution guide |
 
 ## Business Context
 
