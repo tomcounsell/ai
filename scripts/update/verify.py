@@ -158,13 +158,14 @@ def check_python_alias() -> ToolCheck:
         except Exception:
             pass
 
-    # python not found but python3 exists
-    return ToolCheck(
-        name="python",
-        available=False,
-        error="'python' not found but python3 exists. "
-        "Fix: brew install python@3.12 && brew link python@3.12",
-    )
+    # python not found but python3 exists — acceptable, all our scripts use python3
+    python3_version = ""
+    try:
+        r = run_cmd([python3_path, "--version"], timeout=5)
+        python3_version = r.stdout.strip()
+    except Exception:
+        pass
+    return ToolCheck(name="python", available=True, version=python3_version or "python3")
 
 
 def check_system_tools() -> list[ToolCheck]:
