@@ -8,6 +8,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 |---------|-------------|--------|
 | [Adding Reflection Tasks](adding-reflection-tasks.md) | Developer guide with copy-paste template for adding new reflection steps | Shipped |
 | [Agent Session Model](agent-session-model.md) | Unified lifecycle model merging RedisJob + SessionLog for agent work tracking | Shipped |
+| [Autoexperiment](autoexperiment.md) | Autonomous overnight prompt optimization using ultra-cheap LLMs via OpenRouter | Shipped |
 | [Bridge Message Query](bridge-message-query.md) | CLI tool to fetch Telegram message history via file-based IPC with running bridge | Shipped |
 | [Bridge Module Architecture](bridge-module-architecture.md) | Sub-module organization of the Telegram bridge for maintainability | Shipped |
 | [Bridge Response Improvements](bridge-response-improvements.md) | Enhancements to how the Telegram bridge formats and delivers responses | Shipped |
