@@ -52,28 +52,28 @@ def _build_sdlc_context(session: AgentSession) -> dict[str, str]:
     ctx: dict[str, str] = {}
 
     pr_url = getattr(session, "pr_url", None)
-    if pr_url:
+    if isinstance(pr_url, str) and pr_url:
         pr_match = _PR_NUMBER_RE.search(pr_url)
         if pr_match:
             ctx["SDLC_PR_NUMBER"] = pr_match.group(1)
 
     branch = getattr(session, "branch_name", None)
-    if branch:
+    if isinstance(branch, str) and branch:
         ctx["SDLC_PR_BRANCH"] = branch
 
     slug = getattr(session, "work_item_slug", None)
-    if slug:
+    if isinstance(slug, str) and slug:
         ctx["SDLC_SLUG"] = slug
 
     plan_url = getattr(session, "plan_url", None)
-    if plan_url:
+    if isinstance(plan_url, str) and plan_url:
         if "docs/plans/" in plan_url:
             ctx["SDLC_PLAN_PATH"] = "docs/plans/" + plan_url.split("docs/plans/")[-1]
         else:
             ctx["SDLC_PLAN_PATH"] = plan_url
 
     issue_url = getattr(session, "issue_url", None)
-    if issue_url:
+    if isinstance(issue_url, str) and issue_url:
         issue_match = _ISSUE_NUMBER_RE.search(issue_url)
         if issue_match:
             ctx["SDLC_ISSUE_NUMBER"] = issue_match.group(1)
