@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Medium
 owner: Valor
@@ -114,11 +114,13 @@ No prerequisites — this work has no external dependencies.
 - `start_stage(name)` validates predecessor is completed (via `PIPELINE_EDGES`), sets to `in_progress`, saves
 - `complete_stage(name)` validates stage is `in_progress`, sets to `completed`, marks next stage as `ready`, saves
 - `fail_stage(name)` sets to `failed`, saves
+- `classify_outcome(stage, stop_reason, output_tail)` determines success/failure from SDK stop_reason + deterministic output patterns scoped to the known stage. Returns `"success"`, `"fail"`, or `"ambiguous"` (for Observer LLM fallback).
 - `get_display_progress()` returns `{stage: status}` for `DISPLAY_STAGES` only (excludes PATCH)
 - `current_stage()` returns the stage currently `in_progress`, or None
 - `next_stage(outcome)` delegates to `pipeline_graph.get_next_stage()` using current state
 - PATCH cycle counting: state machine tracks cycle count internally, delegates to `get_next_stage(cycle_count=N)`
 - State is persisted as a JSON dict on `AgentSession.stage_states` — one Redis field, no history parsing
+- **No special cases for any stage**: The pipeline always starts at ISSUE. If an existing issue number is known, the steering message passes it to `/do-issue` which validates/enriches it before marking ISSUE complete. All stages follow the same lifecycle.
 
 Observer simplification:
 - Delete `_next_sdlc_skill()` — replaced by `state_machine.next_stage()`
@@ -380,8 +382,8 @@ No agent integration required — stage tracking is bridge infrastructure. The a
 
 ---
 
-## Open Questions
+## Resolved Questions
 
-1. **Failure detection**: When a job returns, how do we distinguish success from failure? The SDK provides `stop_reason` — is `stop_reason == "end_turn"` sufficient to mean success, with everything else being failure? Or should the Observer LLM still classify the outcome?
+1. **Failure detection**: Two-tier approach. First, `stop_reason` from the SDK: anything other than `"end_turn"` (e.g., `budget_exceeded`, `rate_limited`) is a process failure — mark stage as failed. Second, for `end_turn` completions, deterministic tail patterns on the worker output scoped to the known current stage: `/do-test` output with `N passed, 0 failed` → success; `N failed` → failure; `/do-build` output with a PR URL → success; etc. The Observer LLM remains as fallback for ambiguous cases, but most completions are classifiable from `stop_reason` + output tail.
 
-2. **Stage initialization for ISSUE**: The ISSUE stage is typically already completed when the SDLC pipeline starts (the issue exists). Should the state machine auto-complete ISSUE when initialized from an SDLC job that already has an `issue_url`?
+2. **ISSUE stage**: No special case. Every stage follows the same pattern — the pipeline always starts at ISSUE. If an issue already exists, the steering message passes the issue number to `/do-issue`, which enriches/validates the existing issue (ensuring it meets the quality bar from the do-issue skill) and marks ISSUE complete. This keeps all stages uniform and ensures issues always have the full descriptions required by downstream `/do-plan`.
