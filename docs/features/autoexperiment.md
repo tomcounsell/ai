@@ -96,7 +96,7 @@ data/experiments/
 └── STOP                           # Sentinel file to halt any running experiment
 ```
 
-Each result line contains: iteration number, hypothesis text, diff, baseline/new scores, kept/reverted, cumulative cost, timestamp.
+Each result line contains: iteration number, hypothesis text, diff, baseline/new scores, kept/reverted, per-iteration cost, timestamp.
 
 ## Safety Mechanisms
 
