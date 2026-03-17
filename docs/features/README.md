@@ -68,6 +68,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Session Tagging](session-tagging.md) | Auto-tagging and CRUD for session categorization based on activity, classification, and transcript patterns | Shipped |
 | [Session Transcripts](session-transcripts.md) | Append-only session transcript files with AgentSession Redis model for metadata | Shipped |
 | [Session Watchdog](session-watchdog.md) | Active session monitoring with proper cleanup and state management | Shipped |
+| [Skill Context Injection](skill-context-injection.md) | Pre-resolved SDLC_* env vars from AgentSession into Claude Code subprocesses, plus /do-pr-review sub-skill decomposition | Shipped |
 | [Skills Audit](do-skills-audit.md) | Deterministic validation of all SKILL.md files with 12 rules and Anthropic best practices sync | Shipped |
 | [Skills Dependency Map](skills-dependency-map.md) | Visual map of skill-to-skill, skill-to-agent, and sub-file relationships for cleanup planning | Shipped |
 | [Skills Reorganization](skills-reorganization.md) | Canonical SKILL.md template, progressive disclosure, command consolidation, hardlink scoping | Shipped |

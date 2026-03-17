@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Complete
 type: feature
 appetite: Medium
 owner: Valor
