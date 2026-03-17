@@ -133,7 +133,7 @@ Both gates are in `agent/job_queue.py`'s `send_to_chat()` function.
 
 ## Coaching Philosophy
 
-The Observer's coaching messages follow identity-affirming prompting principles (see [Claude Prompting Best Practices](../references/claude_prompting_best_practices.md)):
+The Observer's coaching messages follow identity-affirming prompting principles (see [Claude Prompting Best Practices](../guides/claude-prompting-best-practices.md)):
 
 - **Speak to competence, not compliance** — the worker is a skilled agent, not a script runner
 - **Concrete success criteria** — close with what success looks like: "Success here means clean, tested code with no silent assumptions"
@@ -164,7 +164,7 @@ The Observer replaces three interleaved systems that shared responsibility for r
 | `build_coaching_message()` | `bridge/coach.py` | 5-tier fallback chain -- overly complex, often produced generic coaching |
 | `session_progress.py` | `tools/session_progress.py` | CLI tool the worker LLM had to call -- silently failed, stages got skipped |
 
-These were removed from the routing path. See [Coaching Loop](coaching-loop.md) for historical context on the old system (no longer in use).
+These were removed from the routing path.
 
 ## Key Files
 

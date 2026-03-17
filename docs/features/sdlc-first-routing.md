@@ -104,4 +104,4 @@ After fetching an issue, the SDLC skill verifies the issue URL matches the expec
 
 - [SDLC Enforcement](sdlc-enforcement.md) -- Quality gates and pipeline stage model
 - [Summarizer Format](summarizer-format.md) -- Process narration stripping added alongside routing
-- [Coaching Loop](coaching-loop.md) -- Output classification (distinct from input classification)
+- [Observer Agent](observer-agent.md) -- Output classification and routing decisions
