@@ -87,28 +87,6 @@ python -c "from agent.worktree_manager import resolve_repo_root; print(resolve_r
 
 If `TARGET_REPO == ORCHESTRATOR_REPO`, this is a same-repo build and no special handling is needed (all existing behavior works as-is).
 
-## Session Progress Tracking
-
-Extract the session ID from the conversation context. The bridge injects `SESSION_ID: {id}` into enriched messages. Look for this pattern and store it:
-
-```bash
-# Extract SESSION_ID from context
-# Look for a line like "SESSION_ID: abc123" in the message you received
-# Store in variable: SESSION_ID="abc123"
-
-# Mark BUILD stage as in_progress at the start
-python -m tools.session_progress --session-id "$SESSION_ID" --stage BUILD --status in_progress 2>/dev/null || true
-```
-
-After the PR is successfully created (Step 7):
-
-```bash
-# Mark BUILD stage complete and set PR link
-python -m tools.session_progress --session-id "$SESSION_ID" --stage BUILD --status completed --pr-url "$PR_URL" 2>/dev/null || true
-```
-
-Where `$PR_URL` is the full GitHub PR URL returned by `gh pr create`.
-
 ## Instructions
 
 1. **Resolve the plan path** using the Plan Resolution logic above
@@ -590,45 +568,6 @@ If a task fails:
 2. Decide: retry, skip, or abort
 3. For validators: if validation fails, report what's wrong
 4. Don't proceed past blocking failures
-
-## Outcome Contract
-
-When the build completes (successfully or not), emit a typed `SkillOutcome` block as the **last line** of your output. This enables deterministic routing by the Observer without LLM classification.
-
-### Status Values
-
-| Status | Meaning |
-|--------|---------|
-| `success` | Build complete, PR created, all checks passed |
-| `fail` | Build failed, unrecoverable error |
-| `partial` | Some tasks completed but build is incomplete |
-| `retry` | Transient failure, worth retrying |
-
-### Expected Artifacts (on success)
-
-| Key | Description | Example |
-|-----|-------------|---------|
-| `pr_url` | GitHub PR URL | `https://github.com/org/repo/pull/42` |
-| `branch` | Session branch name | `session/my-feature` |
-| `plan_path` | Path to the plan document | `docs/plans/my-feature.md` |
-| `issue_number` | Tracking issue number | `42` |
-| `commits` | Number of commits on branch | `5` |
-
-### Emission Template
-
-After your final report, emit this block (replace values):
-
-```
-<!-- OUTCOME {"status":"success","stage":"BUILD","artifacts":{"pr_url":"https://github.com/org/repo/pull/42","branch":"session/my-feature","plan_path":"docs/plans/my-feature.md"},"notes":"PR created with 5 commits, all tests passing","next_skill":"/do-test"} -->
-```
-
-On failure:
-
-```
-<!-- OUTCOME {"status":"fail","stage":"BUILD","artifacts":{},"notes":"Build failed","failure_reason":"3 tasks failed: build-api, build-frontend, validate-api"} -->
-```
-
-**Important**: The outcome block uses HTML comment syntax (`<!-- ... -->`) so it's invisible in rendered markdown but parseable by the pipeline. Always emit it as the very last line of output.
 
 ## Notes
 

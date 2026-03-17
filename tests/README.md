@@ -29,7 +29,7 @@ Every test is auto-tagged by filename via `tests/conftest.py`. When a feature ch
 
 | Marker | What it covers | Example command |
 |--------|----------------|-----------------|
-| `sdlc` | Pipeline stages, observer, steering, hooks, skill outcomes | `pytest -m sdlc` |
+| `sdlc` | Pipeline stages, observer, steering, hooks, state machine | `pytest -m sdlc` |
 | `messaging` | Telegram routing, delivery, dedup, markdown, media | `pytest -m messaging` |
 | `sessions` | Lifecycle, watchdog, stall detection, recovery, goals | `pytest -m sessions` |
 | `summarizer` | Response summarization, coaching, message formatting | `pytest -m summarizer` |
@@ -86,7 +86,6 @@ tests/
 |-------|------|------:|-------------|
 | unit | `test_observer.py` | 81 | Stage detection, routing, progression |
 | unit | `test_skills_audit.py` | 53 | Skills directory structure validation |
-| unit | `test_skill_outcome.py` | 34 | Skill outcome serialization |
 | unit | `test_pipeline_integrity.py` | 31 | Pipeline state preservation |
 | unit | `test_post_tool_use_sdlc.py` | 31 | Post-tool SDLC hook execution |
 | unit | `test_pipeline_graph.py` | 29 | Pipeline graph visualization |
@@ -140,7 +139,6 @@ tests/
 | Level | File | Tests | Description |
 |-------|------|------:|-------------|
 | unit | `test_docs_auditor.py` | 62 | Documentation reference validation |
-| unit | `test_checkpoint.py` | 28 | Checkpoint validation and recovery |
 | unit | `test_features_readme_sort.py` | 27 | README table sorting |
 | unit | `test_verification_parser.py` | 20 | Verification section parsing |
 | unit | `test_validate_test_impact.py` | 20 | Test impact section validation |

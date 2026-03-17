@@ -14,29 +14,6 @@ TEST_ARGS: $ARGUMENTS
 
 **If TEST_ARGS is empty or literally `$ARGUMENTS`**: The skill argument substitution did not run. Look at the user's original message in the conversation — they invoked this as `/do-test <argument>`. Extract whatever follows `/do-test` as the value of TEST_ARGS. Do NOT stop or report an error; just use the argument from the message.
 
-## Session Progress Tracking
-
-Extract the session ID from the conversation context. The bridge injects `SESSION_ID: {id}` into enriched messages. Look for this pattern and store it:
-
-```bash
-# Extract SESSION_ID from context
-# Look for a line like "SESSION_ID: abc123" in the message you received
-# Store in variable: SESSION_ID="abc123"
-
-# Mark TEST stage as in_progress at the start
-python -m tools.session_progress --session-id "$SESSION_ID" --stage TEST --status in_progress 2>/dev/null || true
-```
-
-After tests complete:
-
-```bash
-# On success (all tests passed):
-python -m tools.session_progress --session-id "$SESSION_ID" --stage TEST --status completed 2>/dev/null || true
-
-# On failure (any tests failed):
-python -m tools.session_progress --session-id "$SESSION_ID" --stage TEST --status failed 2>/dev/null || true
-```
-
 ## Step 0: Discover Additional Test Skills
 
 Before running tests, scan for any additional test-related skill docs in the project:
@@ -506,65 +483,6 @@ For each stale xfail detected (either form):
 **Important:** Runtime `pytest.xfail()` is a stronger smell than decorator `@pytest.mark.xfail`. If `--changed` mode is active and the changed files include a bug fix, runtime xfails in related test files should be flagged as **blockers**, not just warnings.
 
 **Skip if:** No xfail markers found in the test suite.
-
-## Outcome Contract
-
-When tests complete, emit a typed `SkillOutcome` block as the **last line** of your output. This enables deterministic routing by the Observer without LLM classification.
-
-### Status Values
-
-| Status | Meaning |
-|--------|---------|
-| `success` | All tests passed, lint clean |
-| `fail` | Regressions detected (tests that pass on main but fail on branch) |
-| `partial` | Only pre-existing failures remain (no regressions introduced by branch) |
-| `blocked` | Regression fix not converging after 3 attempts -- escalate to planning |
-| `skipped` | No tests found to run |
-
-### Expected Artifacts
-
-| Key | Description | Example |
-|-----|-------------|---------|
-| `total_passed` | Total tests passed | `42` |
-| `total_failed` | Total tests failed | `0` |
-| `total_skipped` | Total tests skipped | `2` |
-| `suites_run` | List of suites executed | `["unit", "integration"]` |
-| `lint_clean` | Whether lint passed | `true` |
-| `regressions` | Test IDs that pass on main but fail on branch | `["tests/unit/test_foo.py::test_bar"]` |
-| `pre_existing` | Test IDs that fail on both main and branch | `["tests/unit/test_old.py::test_bug"]` |
-| `inconclusive` | Test IDs that cannot be classified | `[]` |
-| `baseline_commit` | SHA of main HEAD used for verification | `"abc123"` |
-| `regression_fix_attempt` | Current regression fix attempt number (0 = first run) | `1` |
-| `max_regression_fix_attempts` | Circuit breaker threshold | `3` |
-| `persistent_regressions` | Regression test IDs for counter tracking | `["tests/unit/test_foo.py::test_bar"]` |
-
-**Note:** The `regressions`, `pre_existing`, `inconclusive`, `baseline_commit`, `regression_fix_attempt`, `max_regression_fix_attempts`, and `persistent_regressions` fields are additive -- existing consumers that do not read these fields are unaffected. These fields are only populated when baseline verification runs (failures on a non-main branch with fewer than 50 failures).
-
-### Emission Template
-
-After your test results summary, emit this block (replace values):
-
-**Success (all tests passed):**
-```
-<!-- OUTCOME {"status":"success","stage":"TEST","artifacts":{"total_passed":42,"total_failed":0,"total_skipped":2,"suites_run":["unit"],"lint_clean":true},"notes":"42 passed, 0 failed, 2 skipped. Lint clean.","next_skill":"/do-pr-review"} -->
-```
-
-**Fail (regressions detected):**
-```
-<!-- OUTCOME {"status":"fail","stage":"TEST","artifacts":{"total_passed":38,"total_failed":4,"total_skipped":0,"suites_run":["unit","integration"],"lint_clean":true,"regressions":["tests/unit/test_foo.py::test_bar"],"pre_existing":["tests/unit/test_old.py::test_bug"],"inconclusive":[],"baseline_commit":"abc123","regression_fix_attempt":1,"max_regression_fix_attempts":3,"persistent_regressions":["tests/unit/test_foo.py::test_bar"]},"notes":"38 passed, 4 failed. 1 regression, 1 pre-existing.","failure_reason":"1 regression: tests/unit/test_foo.py::test_bar","next_skill":"/do-patch"} -->
-```
-
-**Partial (only pre-existing failures, no regressions):**
-```
-<!-- OUTCOME {"status":"partial","stage":"TEST","artifacts":{"total_passed":40,"total_failed":2,"total_skipped":0,"suites_run":["unit","integration"],"lint_clean":true,"regressions":[],"pre_existing":["tests/unit/test_old.py::test_bug","tests/unit/test_legacy.py::test_known"],"inconclusive":[],"baseline_commit":"abc123","regression_fix_attempt":0,"max_regression_fix_attempts":3,"persistent_regressions":[]},"notes":"40 passed, 2 failed. All failures are pre-existing on main -- branch did not introduce regressions.","next_skill":"/do-pr-review"} -->
-```
-
-**Blocked (regression fix not converging -- escalate to planning):**
-```
-<!-- OUTCOME {"status":"blocked","stage":"TEST","artifacts":{"total_passed":38,"total_failed":4,"total_skipped":0,"suites_run":["unit"],"lint_clean":true,"regressions":["tests/unit/test_foo.py::test_bar"],"pre_existing":[],"inconclusive":[],"baseline_commit":"abc123","regression_fix_attempt":3,"max_regression_fix_attempts":3,"persistent_regressions":["tests/unit/test_foo.py::test_bar"]},"notes":"Regression fix not converging after 3 attempts.","failure_reason":"Persistent regression: tests/unit/test_foo.py::test_bar -- fix attempts exhausted","next_skill":"/do-plan"} -->
-```
-
-**Important**: The outcome block uses HTML comment syntax (`<!-- ... -->`) so it's invisible in rendered markdown but parseable by the pipeline. Always emit it as the very last line of output.
 
 ## Notes
 
