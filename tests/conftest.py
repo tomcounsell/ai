@@ -128,6 +128,122 @@ def redis_test_db(request):
     rdb._POPOTO_ASYNC_REDIS_DB = None
 
 
+# ---------------------------------------------------------------------------
+# Auto-apply feature markers based on test filename
+# ---------------------------------------------------------------------------
+# Centralised here so it applies to ALL test directories (unit, integration,
+# e2e, tools, performance, ai_judge).  Run a specific feature's tests with:
+#     pytest -m sdlc
+#     pytest -m "messaging or sessions"
+# ---------------------------------------------------------------------------
+FEATURE_MAP = {
+    "bridge": "messaging",
+    "messenger": "messaging",
+    "telegram": "messaging",
+    "duplicate_delivery": "messaging",
+    "transcript": "messaging",
+    "dedup": "messaging",
+    "markdown": "messaging",
+    "media_handling": "messaging",
+    "routing": "messaging",
+    "pm_channels": "messaging",
+    "unthreaded": "messaging",
+    "file_extraction": "messaging",
+    "message_pipeline": "messaging",
+    "reply_delivery": "messaging",
+    "pipeline": "sdlc",
+    "sdlc": "sdlc",
+    "observer": "sdlc",
+    "stop_hook": "sdlc",
+    "stop_reason": "sdlc",
+    "post_tool_use": "sdlc",
+    "pre_tool_use": "sdlc",
+    "skill_outcome": "sdlc",
+    "skills_audit": "sdlc",
+    "steering": "sdlc",
+    "issue_poller": "sdlc",
+    "cross_repo_build": "sdlc",
+    "session_status": "sessions",
+    "session_stuck": "sessions",
+    "session_watchdog": "sessions",
+    "stall_detection": "sessions",
+    "pending_stall": "sessions",
+    "pending_recovery": "sessions",
+    "escape_hatch": "sessions",
+    "lifecycle": "sessions",
+    "session_continuity": "sessions",
+    "goal_gates": "sessions",
+    "open_question": "sessions",
+    "agent_session": "sessions",
+    "job_hierarchy": "jobs",
+    "job_scheduler": "jobs",
+    "job_queue": "jobs",
+    "job_health": "jobs",
+    "enqueue": "jobs",
+    "reflection": "reflections",
+    "config": "config",
+    "context_modes": "context",
+    "session_tags": "context",
+    "auto_continue": "classifiers",
+    "intake_classifier": "classifiers",
+    "work_request_classifier": "classifiers",
+    "message_quality": "classifiers",
+    "stage_aware_auto_continue": "classifiers",
+    "validate_commit": "validation",
+    "validate_verification": "validation",
+    "validate_test_impact": "validation",
+    "validate_sdlc": "validation",
+    "verification_parser": "validation",
+    "features_readme": "validation",
+    "build_validation": "validation",
+    "checkpoint": "validation",
+    "docs_auditor": "validation",
+    "branch_manager": "git",
+    "worktree_manager": "git",
+    "git_state": "git",
+    "workspace_safety": "git",
+    "symlinks": "git",
+    "sdk_client": "sdk",
+    "sdk_permissions": "sdk",
+    "workflow_sdk": "sdk",
+    "code_impact": "impact",
+    "doc_impact": "impact",
+    "cross_repo_gh": "impact",
+    "cross_wire": "impact",
+    "model_relationships": "models",
+    "redis_models": "models",
+    "summarizer": "summarizer",
+    "coach": "summarizer",
+    "telemetry": "monitoring",
+    "health_check": "monitoring",
+    "bridge_watchdog": "monitoring",
+    "connectivity": "monitoring",
+    "silent_failures": "monitoring",
+    "remote_update": "config",
+    "benchmarks": "monitoring",
+    "classifier": "classifiers",
+    "code_execution": "tools",
+    "link_analysis": "tools",
+    "doc_summary": "tools",
+    "image_analysis": "tools",
+    "knowledge_search": "tools",
+    "search": "tools",
+    "test_judge": "tools",
+    "ai_judge": "tools",
+    "telegram_history": "tools",
+}
+
+
+def pytest_collection_modifyitems(items):
+    """Auto-apply feature markers based on test file name."""
+    for item in items:
+        filename = item.nodeid.split("::")[0].split("/")[-1].replace("test_", "").replace(".py", "")
+        for pattern, marker_name in FEATURE_MAP.items():
+            if pattern in filename:
+                item.add_marker(getattr(pytest.mark, marker_name))
+                break
+
+
 @pytest.fixture
 def sample_config():
     """Sample project configuration matching config/projects.json structure."""
