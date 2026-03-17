@@ -23,6 +23,33 @@ For cross-project work, the `GH_REPO` environment variable is automatically set 
 
 - `pr_number` (required): The PR number to review (e.g., `42` or `#42`)
 
+## SDLC Context Variables (auto-injected)
+
+When running in the SDLC pipeline, these environment variables are pre-resolved
+by `sdk_client.py` from the `AgentSession` (issue #420):
+
+| Variable | Description | Fallback |
+|----------|-------------|----------|
+| `$SDLC_PR_NUMBER` | PR number | Extract from args or `gh pr list` |
+| `$SDLC_PR_BRANCH` | PR head branch | `gh pr view --json headRefName` |
+| `$SDLC_SLUG` | Work item slug | Derive from branch name |
+| `$SDLC_PLAN_PATH` | Path to plan doc | Derive from slug |
+| `$SDLC_ISSUE_NUMBER` | Tracking issue | Extract from PR body |
+| `$SDLC_REPO` | GitHub repo (org/name) | `$GH_REPO` |
+
+**Usage:** Prefer `$SDLC_PR_NUMBER` over `$PR_NUMBER` when available.
+Fall back to manual resolution if the env var is unset.
+
+## Sub-Skills
+
+This skill is decomposed into focused sub-skills in `sub-skills/`:
+- `checkout.md` — Mechanical: clean git state, checkout PR branch
+- `code-review.md` — Judgment: read files, analyze diff, classify findings
+- `screenshot.md` — Mechanical: start app, capture UI screenshots
+- `post-review.md` — Mechanical: format findings, post review to GitHub
+
+Each sub-skill has a single responsibility and receives pre-resolved context.
+
 ## Session Progress Tracking
 
 Extract the session ID from the conversation context. The bridge injects `SESSION_ID: {id}` into enriched messages. Look for this pattern and store it:
@@ -67,9 +94,22 @@ Follow this review process to validate a pull request:
 
 ### 1. PR Context Gathering
 
+**Resolve context variables** (prefer env vars, fall back to manual resolution):
+```bash
+PR_NUMBER="${SDLC_PR_NUMBER:-$PR_NUMBER}"
+REPO="${SDLC_REPO:-${GH_REPO:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}}"
+PLAN_PATH="${SDLC_PLAN_PATH:-}"
+SLUG="${SDLC_SLUG:-}"
+
+# If PLAN_PATH not set, derive from slug or branch
+if [ -z "$PLAN_PATH" ] && [ -n "$SLUG" ]; then
+  PLAN_PATH="docs/plans/${SLUG}.md"
+fi
+```
+
 **Fetch PR details:**
 ```bash
-gh pr view {pr_number} --json title,body,headRefName,baseRefName,files,additions,deletions
+gh pr view $PR_NUMBER --json title,body,headRefName,baseRefName,files,additions,deletions
 ```
 
 **Checkout the PR branch (mandatory before any file reads):**
@@ -77,7 +117,7 @@ gh pr view {pr_number} --json title,body,headRefName,baseRefName,files,additions
 # Ensure clean git state before switching branches
 python -c "from agent.worktree_manager import ensure_clean_git_state; from pathlib import Path; ensure_clean_git_state(Path('.'))"
 
-gh pr checkout {pr_number}
+gh pr checkout $PR_NUMBER
 ```
 This ensures all subsequent `Read` calls see the PR's actual code, not whatever branch the parent conversation had checked out. Without this, the reviewer reads stale files that contradict the diff — producing hallucinated findings.
 
@@ -85,12 +125,12 @@ This ensures all subsequent `Read` calls see the PR's actual code, not whatever 
 
 **Get the full diff:**
 ```bash
-gh pr diff {pr_number}
+gh pr diff $PR_NUMBER
 ```
 
 **Get changed files:**
 ```bash
-gh pr diff {pr_number} --name-only
+gh pr diff $PR_NUMBER --name-only
 ```
 
 **Find and read the associated plan and issue:**
@@ -126,13 +166,13 @@ gh pr diff {pr_number} --name-only
 
 ```bash
 # Prepare screenshot directory
-mkdir -p generated_images/pr-{pr_number}
+mkdir -p generated_images/pr-$PR_NUMBER
 
 # PR branch was already checked out in Step 1.
 # Use /prepare_app to ensure app is running, then capture with agent-browser:
 agent-browser open http://localhost:8000
 agent-browser snapshot -i
-agent-browser screenshot generated_images/pr-{pr_number}/01_main_view.png
+agent-browser screenshot generated_images/pr-$PR_NUMBER/01_main_view.png
 ```
 
 **Screenshot naming convention:**
@@ -159,7 +199,7 @@ If the plan document has a `## Verification` section with a machine-readable tab
 python -c "
 from agent.verification_parser import parse_verification_table, run_checks, format_results
 from pathlib import Path
-plan = Path('{PLAN_PATH}').read_text()
+plan = Path('${SDLC_PLAN_PATH}').read_text()
 checks = parse_verification_table(plan)
 if checks:
     results = run_checks(checks)
@@ -226,7 +266,7 @@ This step exists because of issue #181: a prior review hallucinated two "blocker
 
 **First, detect if this is a self-authored PR:**
 ```bash
-PR_AUTHOR=$(gh pr view {pr_number} --json author --jq .author.login)
+PR_AUTHOR=$(gh pr view $PR_NUMBER --json author --jq .author.login)
 CURRENT_USER=$(gh api user --jq .login)
 SELF_AUTHORED=$( [ "$PR_AUTHOR" = "$CURRENT_USER" ] && echo "true" || echo "false" )
 ```
@@ -253,9 +293,9 @@ EOF
 )"
 
 if [ "$SELF_AUTHORED" = "true" ]; then
-  gh pr comment {pr_number} --body "$REVIEW_BODY"
+  gh pr comment $PR_NUMBER --body "$REVIEW_BODY"
 else
-  gh pr review {pr_number} --request-changes --body "$REVIEW_BODY"
+  gh pr review $PR_NUMBER --request-changes --body "$REVIEW_BODY"
 fi
 ```
 
@@ -281,9 +321,9 @@ EOF
 )"
 
 if [ "$SELF_AUTHORED" = "true" ]; then
-  gh pr comment {pr_number} --body "$REVIEW_BODY"
+  gh pr comment $PR_NUMBER --body "$REVIEW_BODY"
 else
-  gh pr review {pr_number} --approve --body "$REVIEW_BODY"
+  gh pr review $PR_NUMBER --approve --body "$REVIEW_BODY"
 fi
 ```
 
@@ -292,25 +332,25 @@ fi
 **Always verify the review or comment exists after posting:**
 ```bash
 # Check for formal reviews
-REVIEW_COUNT=$(gh api repos/{owner}/{repo}/pulls/{pr_number}/reviews --jq length)
+REVIEW_COUNT=$(gh api repos/$REPO/pulls/$PR_NUMBER/reviews --jq length)
 
 # Check for comments (used for self-authored PRs)
-COMMENT_COUNT=$(gh api repos/{owner}/{repo}/issues/{pr_number}/comments --jq '[.[] | select(.body | startswith("## Review:"))] | length')
+COMMENT_COUNT=$(gh api repos/$REPO/issues/$PR_NUMBER/comments --jq '[.[] | select(.body | startswith("## Review:"))] | length')
 
 if [ "$REVIEW_COUNT" -eq 0 ] && [ "$COMMENT_COUNT" -eq 0 ]; then
   echo "WARNING: Review was not posted. Retrying as comment..."
-  gh pr comment {pr_number} --body "$REVIEW_BODY"
+  gh pr comment $PR_NUMBER --body "$REVIEW_BODY"
 fi
 ```
 
 **After verification, fetch the review URL:**
 ```bash
 # Try formal review URL first
-REVIEW_URL=$(gh api repos/{owner}/{repo}/pulls/{pr_number}/reviews --jq '.[-1].html_url // empty')
+REVIEW_URL=$(gh api repos/$REPO/pulls/$PR_NUMBER/reviews --jq '.[-1].html_url // empty')
 
 # Fall back to comment URL
 if [ -z "$REVIEW_URL" ]; then
-  REVIEW_URL=$(gh api repos/{owner}/{repo}/issues/{pr_number}/comments --jq '.[-1].html_url // empty')
+  REVIEW_URL=$(gh api repos/$REPO/issues/$PR_NUMBER/comments --jq '.[-1].html_url // empty')
 fi
 ```
 Save this URL as `{review_url}` for the output summary.
@@ -331,7 +371,7 @@ Save this URL as `{review_url}` for the output summary.
 - **Tech Debt: {count}**
 - **Nits: {count}**
 
-**Screenshots: {count}** captured -> `generated_images/pr-{pr_number}/`
+**Screenshots: {count}** captured -> `generated_images/pr-$PR_NUMBER/`
 
 ## Integration Notes
 
@@ -342,7 +382,7 @@ Save this URL as `{review_url}` for the output summary.
 - `gh` CLI - Fetches PR data and posts reviews
 
 **Screenshot storage:**
-- Saved to `generated_images/pr-{pr_number}/` directory
+- Saved to `generated_images/pr-$PR_NUMBER/` directory
 - Auto-detected and sent via Telegram bridge
 - Bridge uses RELATIVE_PATH_PATTERN to auto-detect generated_images/ files
 
