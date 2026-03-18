@@ -29,7 +29,7 @@ The guard fires when ALL six conditions are true:
 
 | Condition | Check | Why |
 |-----------|-------|-----|
-| `is_sdlc` | `session.is_sdlc_job()` | Only SDLC sessions have pipeline stages |
+| `is_sdlc` | `session.is_sdlc` | Only SDLC sessions have pipeline stages |
 | `has_remaining` | `session.has_remaining_stages()` | Nothing to steer to if all stages are done |
 | `not has_failed` | `not session.has_failed_stage()` | Failed stages need human triage |
 | `not stop_is_terminal` | `stop_reason not in ("fail", "budget_exceeded")` | Terminal conditions must reach human |
