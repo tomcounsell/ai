@@ -263,9 +263,7 @@ class TestStageAwareDecisionMatrix:
 
         # Decision: fall through to classifier (all stages done)
         should_use_stage_routing = (
-            session.is_sdlc
-            and session.has_remaining_stages()
-            and not session.has_failed_stage()
+            session.is_sdlc and session.has_remaining_stages() and not session.has_failed_stage()
         )
         assert should_use_stage_routing is False
 
