@@ -16,13 +16,13 @@ Three interrelated failure modes are degrading session reliability and producing
 
 **Current behavior:**
 1. Stalled `push-*` sessions trigger `AttributeError: 'str' object has no attribute 'redis_key'` every 5 minutes indefinitely — the watchdog never recovers or cleans them up.
-2. SDLC jobs hit the 600s SDK timeout (16 occurrences on March 17), killing in-progress work and wasting compute on timeout→steer→timeout cycles.
+2. SDLC jobs hit the 600s SDK timeout (16 occurrences on March 17), killing in-progress work and wasting compute on timeout→steer→timeout cycles. Hard absolute timeouts are the wrong model — the 5-minute heartbeat health checker should detect stalls based on *inactivity* (time since last tool call or log output), not wall-clock duration.
 3. Observer import crashes (`load_principal_context` ImportError) go unhandled with no circuit breaker — the observer retries forever with the same error.
 
 **Desired outcome:**
 - `push-*` stalled sessions are recovered or cleaned without crashes
-- SDK timeout is tunable per job type, with higher defaults for SDLC phases
-- Observer has a circuit breaker: N consecutive failures escalate to human instead of infinite retry
+- SDK timeout replaced with activity-based stall detection: the existing 5-minute heartbeat checks time since last tool call or log text, not absolute phase duration
+- Observer has a circuit breaker with escalating backoff for API/outage errors, retrying automatically when possible — only escalating to human when human action can actually help
 - Observer import errors are caught gracefully with fallback behavior
 
 ## Prior Art
@@ -43,12 +43,13 @@ Three interrelated failure modes are degrading session reliability and producing
 3. **Recovery**: `_recover_stalled_pending()` calls `_kill_stalled_worker(project_key)` at line 378
 4. **Crash**: `_kill_stalled_worker()` passes `project_key` to `_active_workers.get()` — if the worker lookup succeeds, downstream code may attempt `.redis_key` on the string value, causing `AttributeError`
 
-### Problem 2: SDK timeout cycle
+### Problem 2: Stall detection via activity heartbeat
 
 1. **Entry**: SDLC job dispatched via `agent/sdk_client.py:run_sdk_query()`
-2. **Timeout**: `asyncio.timeout(600)` wraps the entire SDK client lifecycle (init + query + response streaming)
-3. **Observer trigger**: Timeout surfaces as error, observer evaluates via `_run_llm_observer()`
-4. **Steer loop**: Observer decides "steer" → re-dispatches → hits 600s again → repeat
+2. **Activity tracking**: SDK client records timestamp of last tool call or log output
+3. **Heartbeat check**: The existing 5-minute watchdog cycle checks `time_since_last_activity` instead of absolute wall-clock duration
+4. **Stall detection**: If no tool call or log output for a configurable inactivity threshold (e.g., 5 minutes), the session is flagged as stalled
+5. **Recovery**: Watchdog can kill the stalled worker — active sessions (still producing tool calls/logs) are never interrupted regardless of total runtime
 
 ### Problem 3: Observer import crash
 
@@ -70,7 +71,7 @@ Three interrelated failure modes are degrading session reliability and producing
 ## Architectural Impact
 
 - **New dependencies**: None — all fixes use existing stdlib and project patterns
-- **Interface changes**: `SDK_QUERY_TIMEOUT_SECONDS` env var gains per-phase overrides (backward compatible)
+- **Interface changes**: New `SDK_INACTIVITY_TIMEOUT_SECONDS` env var (backward compatible, default 300s)
 - **Coupling**: Reduces coupling — observer becomes more resilient to sdk_client import state
 - **Data ownership**: No change
 - **Reversibility**: Fully reversible — all changes are additive guards and configuration
@@ -96,17 +97,17 @@ No prerequisites — this work uses only existing dependencies and infrastructur
 ### Key Elements
 
 - **Type guard in watchdog**: Defensive handling of `project_key` as plain string in `_recover_stalled_pending()` and `_kill_stalled_worker()`
-- **Per-phase SDK timeout**: Environment variable overrides for SDLC phases (build, test, plan) with higher defaults
-- **Observer circuit breaker**: Track consecutive failures per session, escalate to human after threshold
+- **Activity-based stall detection**: Track last tool call / log output timestamp; the 5-minute heartbeat detects inactivity instead of enforcing hard timeouts
+- **Observer circuit breaker with escalating backoff**: Retry API/outage errors with exponential backoff; only escalate to human when human action can actually help (not for transient API issues)
 - **Observer import guard**: Try/except around `load_principal_context` import with graceful fallback
 
 ### Flow
 
 **Watchdog detects stall** → Type-guard project_key → Kill worker or clean up orphan → Session recovered
 
-**SDLC job starts** → Phase-specific timeout applied → If timeout, observer sees "timeout" context → Observer can choose "escalate" instead of blind steer
+**SDLC job runs** → SDK client records last_activity timestamp on each tool call/log output → 5-min heartbeat checks inactivity → If idle > threshold, kill worker and recover session
 
-**Observer evaluates** → Import guarded → If failure, increment counter → If counter >= 3, escalate to human via Telegram → Counter resets on success
+**Observer evaluates** → Import guarded → If failure, classify error type → API/outage: retry with escalating backoff (30s, 60s, 120s, 240s...) → Non-retryable / human-actionable: escalate to Telegram → Counter resets on success
 
 ### Technical Approach
 
@@ -115,16 +116,21 @@ No prerequisites — this work uses only existing dependencies and infrastructur
    - In `_recover_stalled_pending()`: add cleanup path for sessions stuck >1 hour with no history — abandon and notify instead of retry
    - Add `str()` coercion wherever `project_key` is used for lookups/comparisons
 
-2. **Problem 2 (SDK timeout)**:
-   - Add phase-specific timeout env vars: `SDK_TIMEOUT_PLAN=600`, `SDK_TIMEOUT_BUILD=1200`, `SDK_TIMEOUT_TEST=900`
-   - Fall back to `SDK_QUERY_TIMEOUT_SECONDS` (default 600) if phase-specific var not set
-   - Pass phase info into `run_sdk_query()` so it can select the right timeout
-   - Default remains 600s for non-SDLC queries
+2. **Problem 2 (Activity-based stall detection)**:
+   - Add `_last_activity_timestamp: dict[str, float]` tracker in SDK client, updated on each tool call and log output
+   - Expose `get_session_last_activity(session_id) -> float | None` for the watchdog to query
+   - In the watchdog's 5-minute heartbeat: check `time.time() - last_activity` instead of `time.time() - session_start`
+   - Configurable inactivity threshold via `SDK_INACTIVITY_TIMEOUT_SECONDS` env var (default: 300s / 5 minutes)
+   - Active sessions (producing tool calls/logs) are never interrupted regardless of total runtime
+   - Remove or relax the hard `asyncio.timeout(600)` — let the heartbeat handle stall detection
 
-3. **Problem 3 (Observer circuit breaker)**:
-   - Add `_consecutive_failures: dict[str, int]` class-level tracker in observer
-   - Increment on any observer error, reset on success
-   - After 3 consecutive failures for a session, return `{"action": "escalate"}` which triggers Telegram notification
+3. **Problem 3 (Observer circuit breaker with escalating backoff)**:
+   - Add `_observer_failure_counts: dict[str, int]` and `_observer_last_retry: dict[str, float]` trackers
+   - Classify errors: API/outage errors → retryable; import errors, logic bugs → non-retryable
+   - Retryable errors: exponential backoff (30s, 60s, 120s, 240s, max 480s), retry automatically
+   - Non-retryable errors or errors where human action can help (e.g., missing credentials, config issues): escalate to Telegram immediately
+   - After max backoff retries exhausted (e.g., 5 consecutive retryable failures): escalate as likely sustained outage
+   - Reset counters on success
    - Wrap `_build_observer_system_prompt()` import in try/except with fallback to prompt without principal context
 
 ## Failure Path Test Strategy
@@ -148,24 +154,24 @@ No prerequisites — this work uses only existing dependencies and infrastructur
 - [ ] `tests/unit/test_session_watchdog.py` — UPDATE: add test cases for string project_key handling and orphan push-* cleanup
 - [ ] `tests/unit/test_observer.py` — UPDATE: add circuit breaker tests and import fallback tests
 - [ ] `tests/unit/test_pending_recovery.py` — UPDATE: add push-* session recovery scenarios
-- [ ] `tests/unit/test_sdk_client_sdlc.py` — UPDATE: add per-phase timeout configuration tests
+- [ ] `tests/unit/test_sdk_client_sdlc.py` — UPDATE: add activity tracking and inactivity detection tests
 
 ## Rabbit Holes
 
 - **Redesigning the Popoto ORM layer** — The root cause is Popoto returning raw types, but fixing the ORM is a separate, large project. Just add type guards.
-- **Dynamic timeout adjustment based on task complexity** — Tempting but over-engineered. Static per-phase defaults with env var overrides is sufficient.
-- **Observer retry with exponential backoff** — The circuit breaker should escalate, not retry with increasing delays. The human needs to know.
+- **Per-phase hard timeout limits** — Hard wall-clock timeouts are the wrong model. Active sessions producing tool calls should never be killed. Activity-based detection is the correct approach.
+- **Complex retry orchestration frameworks** — Keep backoff logic simple (exponential with cap). Don't add retry queues, dead-letter patterns, or separate retry services.
 - **Rewriting the entire stall detection system** — The current system works; just fix the edge cases.
 
 ## Risks
 
-### Risk 1: Higher timeouts mask underlying performance issues
-**Impact:** Builds that should complete in 5 minutes now have 20 minutes to hide problems.
-**Mitigation:** Log warnings at the original 600s threshold even if the timeout is higher. This preserves visibility while avoiding premature kills.
+### Risk 1: Activity tracking misses silent stalls
+**Impact:** If an SDK session stalls without producing tool calls or log output (e.g., hanging network request), the activity tracker won't see updates, but the session is technically "doing something."
+**Mitigation:** The inactivity threshold (default 5 min) is generous enough that even slow operations will produce some output. If a network call hangs for 5+ minutes with zero output, it's genuinely stalled.
 
-### Risk 2: Circuit breaker false positives
-**Impact:** Human gets notified for transient API errors that would self-resolve.
-**Mitigation:** Set threshold at 3 consecutive failures (not total). Single failures reset the counter. Only sustained cascades trigger escalation.
+### Risk 2: Escalating backoff delays recovery too long
+**Impact:** 5 retries with exponential backoff (30s→60s→120s→240s→480s) means ~15 minutes before escalation on sustained outage.
+**Mitigation:** This is acceptable — Anthropic API outages typically resolve within minutes, and blind escalation during outages just creates noise. The backoff schedule can be tuned via env vars if needed.
 
 ## Race Conditions
 
@@ -179,14 +185,14 @@ No prerequisites — this work uses only existing dependencies and infrastructur
 ## No-Gos (Out of Scope)
 
 - Fixing the Popoto ORM to always return proper DB_key objects (separate issue)
-- Implementing observer retries with backoff (escalate instead)
+- Building a separate retry queue or scheduling service
 - Adding per-session timeout tuning UI
 - Refactoring the entire watchdog architecture
 - Addressing why `push-*` webhook sessions are created with plain string project_keys (separate issue — fix the symptom here)
 
 ## Update System
 
-No update system changes required — all fixes are internal to the bridge and monitoring code. No new dependencies, config files, or migration steps needed. The existing `SDK_QUERY_TIMEOUT_SECONDS` env var pattern is extended with optional per-phase overrides but the default behavior is unchanged.
+No update system changes required — all fixes are internal to the bridge and monitoring code. No new dependencies, config files, or migration steps needed. New `SDK_INACTIVITY_TIMEOUT_SECONDS` env var is optional with a sensible default (300s).
 
 ## Agent Integration
 
@@ -198,17 +204,20 @@ No agent integration required — this is a bridge-internal change affecting the
 - [ ] Add entry to `docs/features/README.md` index table
 - [ ] Update inline docstrings in `monitoring/session_watchdog.py` for `_recover_stalled_pending()` and `_kill_stalled_worker()`
 - [ ] Update inline docstrings in `bridge/observer.py` for circuit breaker behavior
-- [ ] Document `SDK_TIMEOUT_PLAN`, `SDK_TIMEOUT_BUILD`, `SDK_TIMEOUT_TEST` env vars in `.env.example` or inline comments
+- [ ] Document `SDK_INACTIVITY_TIMEOUT_SECONDS` env var in `.env.example` or inline comments
 
 ## Success Criteria
 
 - [ ] `push-*` stalled sessions are recovered or cleaned up without AttributeError
-- [ ] SDK timeout is configurable per job type, with higher defaults for SDLC
-- [ ] Observer has circuit breaker: 3 consecutive failures escalates to human via Telegram
+- [ ] Stall detection is activity-based: sessions are only killed when idle (no tool calls/logs) for > inactivity threshold
+- [ ] Active sessions (producing output) are never killed regardless of total runtime
+- [ ] Observer circuit breaker retries API/outage errors with escalating backoff (30s→480s)
+- [ ] Observer only escalates to human when human action can actually help
 - [ ] Observer import errors are caught gracefully with fallback behavior (prompt without principal context)
 - [ ] Unit test: simulate stalled push-* session with string project_key, verify recovery without crash
 - [ ] Unit test: simulate observer failure cascade, verify circuit breaker fires at threshold
-- [ ] Unit test: per-phase timeout selection returns correct values
+- [ ] Unit test: activity tracking updates on tool call and log output
+- [ ] Unit test: inactivity detection correctly identifies stalled vs active sessions
 - [ ] All existing tests continue to pass
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
@@ -262,35 +271,38 @@ No agent integration required — this is a bridge-internal change affecting the
 - Add guard: if session status changed since stall detection, skip recovery
 - Add unit tests for string project_key, None project_key, and orphan push-* cleanup
 
-### 2. Implement per-phase SDK timeout
-- **Task ID**: build-timeout
+### 2. Implement activity-based stall detection
+- **Task ID**: build-activity-detection
 - **Depends On**: none
 - **Validates**: tests/unit/test_sdk_client_sdlc.py
 - **Assigned To**: timeout-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add `SDK_TIMEOUT_PLAN`, `SDK_TIMEOUT_BUILD`, `SDK_TIMEOUT_TEST` env var support in `sdk_client.py`
-- Create `_get_phase_timeout(phase: str | None) -> int` helper function
-- Thread phase info through `run_sdk_query()` to select appropriate timeout
-- Default: plan=600s, build=1200s, test=900s, other=600s
-- Log warning at 600s even if phase timeout is higher (preserve visibility)
-- Add unit tests for timeout selection logic
+- Add `_last_activity_timestamp: dict[str, float]` tracker in `sdk_client.py`, updated on each tool call callback and log output
+- Expose `get_session_last_activity(session_id) -> float | None` function for watchdog consumption
+- Update watchdog heartbeat to check `time_since_last_activity` instead of `time_since_session_start`
+- Add `SDK_INACTIVITY_TIMEOUT_SECONDS` env var (default: 300s) for configurable inactivity threshold
+- Remove or relax the hard `asyncio.timeout(600)` — active sessions should never be killed
+- Add unit tests for activity tracking, inactivity detection, and threshold configuration
 
-### 3. Add observer circuit breaker and import guard
+### 3. Add observer circuit breaker with escalating backoff and import guard
 - **Task ID**: build-observer
 - **Depends On**: none
 - **Validates**: tests/unit/test_observer.py
 - **Assigned To**: observer-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add module-level `_observer_failure_counts: dict[str, int]` tracker
-- In `_run_llm_observer()`: increment on error, reset on success
-- After 3 consecutive failures: return `{"action": "escalate", "reason": "..."}` instead of `deliver`
+- Add module-level `_observer_failure_counts: dict[str, int]` and `_observer_last_retry: dict[str, float]` trackers
+- Classify errors: API/outage → retryable, import/config/logic → non-retryable
+- Retryable errors: exponential backoff (30s, 60s, 120s, 240s, max 480s), auto-retry
+- Non-retryable errors (human can help): escalate to Telegram immediately
+- After 5 consecutive retryable failures (backoff exhausted): escalate as sustained outage
+- Reset counters on success
 - Wrap `from agent.sdk_client import load_principal_context` in try/except ImportError
 - On ImportError: log warning, build prompt without principal context section
-- Add unit tests for circuit breaker threshold, reset on success, and import fallback
+- Add unit tests for backoff schedule, error classification, escalation conditions, reset on success, and import fallback
 
-### 4. Handle escalation action in bridge
+### 4. Handle escalation and backoff retry in bridge
 - **Task ID**: build-escalation-handler
 - **Depends On**: build-observer
 - **Validates**: tests/unit/test_observer.py
@@ -298,8 +310,10 @@ No agent integration required — this is a bridge-internal change affecting the
 - **Agent Type**: builder
 - **Parallel**: false
 - Ensure the observer's "escalate" action is handled wherever observer results are consumed
-- Send Telegram notification with session ID, failure count, and last error when escalation triggers
-- Add integration-style unit test verifying escalation flow
+- Implement backoff retry scheduler: when observer returns "retry_after" with delay, schedule re-evaluation
+- Send Telegram notification with session ID, failure count, error type, and last error ONLY when human action can help
+- Error message should clearly state what the human can do (e.g., "API key expired", "config missing X")
+- Add integration-style unit test verifying escalation flow and backoff retry scheduling
 
 ### 5. Validate all fixes
 - **Task ID**: validate-all-fixes
@@ -341,12 +355,14 @@ No agent integration required — this is a bridge-internal change affecting the
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | Watchdog tests | `pytest tests/unit/test_session_watchdog.py tests/unit/test_pending_recovery.py -v` | exit code 0 |
 | Observer tests | `pytest tests/unit/test_observer.py -v` | exit code 0 |
-| SDK timeout tests | `pytest tests/unit/test_sdk_client_sdlc.py -v` | exit code 0 |
+| Activity detection tests | `pytest tests/unit/test_sdk_client_sdlc.py -v` | exit code 0 |
 | Feature docs exist | `test -f docs/features/session-watchdog-reliability.md` | exit code 0 |
 
 ---
 
 ## Open Questions
 
-1. **SDK timeout values**: The proposed defaults are plan=600s, build=1200s, test=900s. Are these reasonable, or should build go even higher (e.g., 1800s/30min) for complex SDLC builds?
-2. **Circuit breaker escalation channel**: Should the escalation go to a specific Telegram chat (e.g., the project's dev chat), or to the original session's chat thread?
+*All resolved by PM feedback (2026-03-18):*
+
+1. ~~**SDK timeout values**~~: **Resolved** — No hard timeouts. Activity-based stall detection via 5-minute heartbeat. Inactivity threshold default: 300s.
+2. ~~**Circuit breaker escalation channel**~~: **Resolved** — Retry with escalating backoff for API/outage errors. Only escalate to chat when human action can actually help (not for transient API issues).
