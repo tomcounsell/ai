@@ -32,6 +32,10 @@ The env var is set in `ValorAgent._create_options()` and passed through `get_age
 - `Job.work_item_slug` -- Propagated from the session to each job for task list routing.
 - `Job.task_list_id` -- The computed task list ID (either slug or thread-derived).
 
+### SDLC Detection
+
+SDLC status is determined by the `AgentSession.is_sdlc` property, which derives its value from observable session state rather than a stored flag. It checks in priority order: (1) `stage_states` for any non-pending stage, (2) history `[stage]` entries, (3) `classification_type == "sdlc"`. This eliminates timing race conditions between classification and stage progression.
+
 ### Tier Transition
 
 Tier 1 tasks do not migrate to tier 2. They are scratch work from investigation and exploration. When `/do-plan` runs, it creates a clean slate for the named task list. The plan document captures what matters.
