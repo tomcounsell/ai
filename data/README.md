@@ -7,8 +7,8 @@ Runtime state and ephemeral data. This directory is gitignored except for this R
 | Path | Description | Cleanup Policy |
 |------|-------------|----------------|
 | `valor_bridge.session` | Active Telethon session file for the Telegram bridge | Do not delete while bridge is running |
-| `ai_rebuild_session.session` | Legacy session file (superseded by `valor_bridge.session`) | Safe to delete |
-| `ai_rebuild_session.session.backup` | Backup of legacy session | Safe to delete |
+| `ai_rebuild_session.session` | Previous session file (use `valor_bridge.session` instead) | Safe to delete |
+| `ai_rebuild_session.session.backup` | Backup of old session file | Safe to delete |
 | `telegram_session.session` | Stale test session file | Safe to delete |
 | `test_session.session` | Stale test session file | Safe to delete |
 | `doc_embeddings.json` | Cached document embeddings (~46MB) | Safe to delete; regenerated on next embedding run |

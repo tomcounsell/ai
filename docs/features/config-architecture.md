@@ -61,9 +61,9 @@ from config.paths import PROJECT_ROOT, DATA_DIR, CONFIG_DIR, SECRETS_DIR, LOGS_D
 | `config/secrets/` | Google OAuth tokens, DM whitelist | No (gitignored) |
 | `config/models.py` | Model name constants | Yes |
 
-### Migration from Legacy Paths
+### Path Fallback Behavior
 
-Previously, Google auth tokens lived at `~/Desktop/claude_code/`. They are now in `config/secrets/` with a fallback: code checks the new path first, then falls back to the legacy path. The DM whitelist follows the same pattern: `config/dm_whitelist.json` first, then `~/Desktop/claude_code/dm_whitelist.json`.
+Google auth tokens live in `config/secrets/`. If tokens are not found there, the code checks `~/Desktop/claude_code/` as a secondary location. The DM whitelist follows the same pattern: `config/dm_whitelist.json` first, then `~/Desktop/claude_code/dm_whitelist.json`. The secondary path check is temporary (one release cycle).
 
 ## Adding New Config
 
