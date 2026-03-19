@@ -28,7 +28,7 @@ class DatabaseSettings(BaseModel):
     """Database configuration settings."""
 
     path: Path = Field(
-        default=Path("data/ai_rebuild.db"), description="Path to SQLite database file"
+        default=Path("data/valor_bridge.db"), description="Path to SQLite database file"
     )
     echo: bool = Field(default=False, description="Enable SQL query logging")
     pool_size: int = Field(default=20, description="Database connection pool size", ge=1, le=100)
@@ -104,7 +104,9 @@ class LoggingSettings(BaseModel):
         default="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         description="Log message format",
     )
-    file_path: Path | None = Field(default=Path("logs/ai_rebuild.log"), description="Log file path")
+    file_path: Path | None = Field(
+        default=Path("logs/valor_bridge.log"), description="Log file path"
+    )
     max_file_size: int = Field(
         default=10 * 1024 * 1024,  # 10MB
         description="Maximum log file size in bytes",
@@ -118,10 +120,6 @@ class LoggingSettings(BaseModel):
 class WorkspaceSettings(BaseModel):
     """Workspace configuration settings."""
 
-    config_path: Path = Field(
-        default=Path("config/workspace_config.json"),
-        description="Path to workspace configuration file",
-    )
     data_dir: Path = Field(default=Path("data"), description="Data directory path")
     temp_dir: Path = Field(default=Path("temp"), description="Temporary files directory")
     max_file_size: int = Field(
@@ -173,8 +171,7 @@ class GoogleAuthSettings(BaseModel):
     @field_validator("credentials_dir")
     @classmethod
     def ensure_dir_exists(cls, v):
-        """Auto-create credentials directory if missing."""
-        v.mkdir(parents=True, exist_ok=True)
+        """Validate credentials directory path."""
         return v
 
 
@@ -275,7 +272,7 @@ class Settings(BaseSettings):
             self.database.path.parent,
             self.workspace.data_dir,
             self.workspace.temp_dir,
-            self.workspace.config_path.parent,
+            self.google_auth.credentials_dir,
         ]
 
         if self.logging.file_path:

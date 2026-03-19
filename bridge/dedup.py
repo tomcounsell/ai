@@ -5,9 +5,10 @@ Keeps ~50 most recent IDs per chat to bound memory usage.
 """
 
 import logging
-import os
 
 import redis
+
+from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -21,11 +22,7 @@ MAX_IDS_PER_CHAT = 50
 def _get_redis():
     global _redis_client
     if _redis_client is None:
-        # Prefer REDIS_URL env var, fall back to settings default
-        redis_url = os.getenv("REDIS_URL", "").strip()
-        if not redis_url:
-            redis_url = "redis://localhost:6379/0"
-        _redis_client = redis.from_url(redis_url)
+        _redis_client = redis.from_url(settings.redis.url)
     return _redis_client
 
 

@@ -14,6 +14,8 @@ from telethon.tl.types import (
     MessageMediaPhoto,
 )
 
+from config.settings import settings
+
 logger = logging.getLogger(__name__)
 
 # =============================================================================
@@ -347,7 +349,7 @@ async def describe_image(filepath: Path) -> str | None:
 
         def _describe():
             response = ollama.chat(
-                model=os.getenv("OLLAMA_VISION_MODEL", "llama3.2-vision:11b"),
+                model=settings.models.ollama_vision_model,
                 messages=[
                     {
                         "role": "user",
