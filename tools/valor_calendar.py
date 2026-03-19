@@ -16,7 +16,8 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from config.paths import CONFIG_DIR as _CONFIG_DIR, DATA_DIR
+from config.paths import CONFIG_DIR as _CONFIG_DIR
+from config.paths import DATA_DIR
 
 # Calendar config lives in config/, queue/cache in data/
 _legacy_dir = Path.home() / "Desktop" / "claude_code"
