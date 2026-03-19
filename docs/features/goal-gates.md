@@ -16,19 +16,21 @@ Each SDLC stage has a deterministic gate check:
 |-------|---------------|----------|
 | PLAN | `docs/plans/{slug}.md` exists | File existence |
 | BUILD | PR exists for `session/{slug}` branch | `gh pr list` result |
-| TEST | `[stage] TEST COMPLETED` in session history, or `test` in pipeline state | Session history or `state.json` |
+| TEST | `test` stage marked completed in `stage_states` JSON field on AgentSession | `stage_states` field |
 | REVIEW | PR review or `## Review:` comment exists | `gh api` review count |
 | DOCS | `docs/features/{slug}.md` exists, or plan declares "No documentation changes needed" | File existence or plan content |
 
 ### Enforcement Points
 
-Gates are checked at three levels:
+Gates are checked at four levels:
 
 1. **`/sdlc` dispatcher** -- Before advancing to the next stage, runs a gate check for the previous stage. If the gate fails, re-invokes the previous skill (max 2 retries before human escalation).
 
-2. **Observer Agent** -- The `_handle_read_session()` response includes a `gate_status` dict for each stage. If the Observer sees a stage marked "completed" but its gate is unsatisfied, it steers back to that stage.
+2. **Observer Agent read_session** -- The `_handle_read_session()` response includes a `gate_status` dict for each stage. If the Observer sees a stage marked "completed" but its gate is unsatisfied, it steers back to that stage.
 
-3. **Completion guard in job_queue.py** -- Before delivering the final message to Telegram, `check_all_gates()` runs. If any gate is unsatisfied, a warning listing the missing gates is appended to the delivery message.
+3. **Observer mandatory delivery gates** -- Before any delivery decision (typed outcome success, deterministic guard bypass, or LLM deliver), `_check_mandatory_gates()` checks REVIEW and DOCS gates via `check_review_gate()` and `check_docs_gate()`. If either gate is unsatisfied, delivery is overridden to steer with a coaching message. This hard enforcement runs at three points in the Observer decision flow. Cycle safety allows delivery after 3 forced steerings for the same gate, and gate results are cached per `run()` invocation.
+
+4. **Completion guard in job_queue.py** -- Before delivering the final message to Telegram, `check_all_gates()` runs. If any gate is unsatisfied, a warning listing the missing gates is appended to the delivery message.
 
 ### GateResult
 
@@ -62,6 +64,7 @@ Gate checks never raise exceptions. All subprocess and IO errors are caught and 
 - **Fail-open on errors**: A gate check that crashes returns unsatisfied (not an exception), so the pipeline can escalate rather than hang.
 - **No graph engine**: Inspired by attractor's `goal_gate=true` pattern but implemented as simple linear checks, not a graph DSL.
 - **2-retry cap**: Automatic retries are capped at 2 per gate to prevent infinite loops. After 2 failures, the system escalates to the human.
+- **Mandatory delivery gates**: REVIEW and DOCS gates have hard enforcement in the Observer via `_check_mandatory_gates()`. These cannot be bypassed by the LLM Observer or deterministic guard — delivery is blocked until both gates are satisfied (or the 3-steering cycle safety limit is reached).
 
 ## Related
 

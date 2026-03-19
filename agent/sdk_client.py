@@ -41,6 +41,8 @@ from agent.hooks import build_hooks_config
 from agent.workflow_state import WorkflowState
 from agent.workflow_types import WorkflowStateData
 from agent.worktree_manager import WORKTREES_DIR, validate_workspace
+from utils.github_patterns import ISSUE_NUMBER_RE as _ISSUE_NUMBER_RE
+from utils.github_patterns import PR_NUMBER_RE as _PR_NUMBER_RE
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +150,87 @@ def _store_claude_session_uuid(session_id: str, claude_uuid: str) -> None:
         )
 
 
+def _extract_sdlc_env_vars(session_id: str, gh_repo: str | None = None) -> dict[str, str]:
+    """Extract SDLC context variables from an AgentSession for env injection.
+
+    Reads the AgentSession from Redis and maps its fields to SDLC_* env vars.
+    Only returns vars for fields that are non-None and non-empty, ensuring
+    skills never see "None" as a value (issue #420).
+
+    Args:
+        session_id: The bridge/Telegram session ID.
+        gh_repo: Optional GH_REPO already set on the agent.
+
+    Returns:
+        Dict of SDLC_* env var name -> value. Empty dict if session not found.
+    """
+    env: dict[str, str] = {}
+    try:
+        from models.agent_session import AgentSession
+
+        sessions = list(AgentSession.query.filter(session_id=session_id))
+        if not sessions:
+            return env
+        # Pick the newest active session
+        active = [s for s in sessions if s.status in ("running", "active", "pending")]
+        candidates = active if active else sessions
+        candidates.sort(key=lambda s: s.created_at or 0, reverse=True)
+        session = candidates[0]
+
+        # PR URL -> SDLC_PR_NUMBER and SDLC_PR_BRANCH
+        # Use isinstance(str) guards to prevent TypeError from non-string
+        # ORM field values (e.g. Popoto proxy objects).
+        pr_url = getattr(session, "pr_url", None)
+        if isinstance(pr_url, str) and pr_url:
+            pr_match = _PR_NUMBER_RE.search(pr_url)
+            if pr_match:
+                env["SDLC_PR_NUMBER"] = pr_match.group(1)
+
+        # Branch name
+        branch = getattr(session, "branch_name", None)
+        if isinstance(branch, str) and branch:
+            env["SDLC_PR_BRANCH"] = branch
+
+        # Work item slug
+        slug = getattr(session, "work_item_slug", None)
+        if isinstance(slug, str) and slug:
+            env["SDLC_SLUG"] = slug
+
+        # Plan URL -> SDLC_PLAN_PATH (convert URL to local path)
+        plan_url = getattr(session, "plan_url", None)
+        if isinstance(plan_url, str) and plan_url:
+            # plan_url is typically a GitHub URL or a local path
+            # Extract the path portion (docs/plans/...)
+            if "docs/plans/" in plan_url:
+                plan_path = "docs/plans/" + plan_url.split("docs/plans/")[-1]
+                env["SDLC_PLAN_PATH"] = plan_path
+            else:
+                env["SDLC_PLAN_PATH"] = plan_url
+
+        # Issue URL -> SDLC_ISSUE_NUMBER
+        issue_url = getattr(session, "issue_url", None)
+        if isinstance(issue_url, str) and issue_url:
+            issue_match = _ISSUE_NUMBER_RE.search(issue_url)
+            if issue_match:
+                env["SDLC_ISSUE_NUMBER"] = issue_match.group(1)
+
+        # Repo (complement GH_REPO, don't replace it)
+        if gh_repo:
+            env["SDLC_REPO"] = gh_repo
+
+        if env:
+            logger.info(
+                f"SDLC env vars for session {session_id}: "
+                f"{', '.join(f'{k}={v}' for k, v in sorted(env.items()))}"
+            )
+    except Exception:
+        logger.warning(
+            f"_extract_sdlc_env_vars({session_id!r}) failed, skipping SDLC vars",
+            exc_info=True,
+        )
+    return env
+
+
 def get_active_client(session_id: str) -> ClaudeSDKClient | None:
     """Get the live SDK client for a running session, if any.
 
@@ -168,6 +251,9 @@ AI_REPO_ROOT = str(Path(__file__).parent.parent)
 
 # Path to SOUL.md system prompt
 SOUL_PATH = Path(__file__).parent.parent / "config" / "SOUL.md"
+
+# Path to PRINCIPAL.md — supervisor's operating context for strategic decisions
+PRINCIPAL_PATH = Path(__file__).parent.parent / "config" / "PRINCIPAL.md"
 
 # Log a warning when a single query's equivalent API cost exceeds this
 _COST_WARN_THRESHOLD = float(os.getenv("SDK_COST_WARN_THRESHOLD", "0.50"))
@@ -267,6 +353,57 @@ def load_completion_criteria() -> str:
     return match.group(0) if match else ""
 
 
+def load_principal_context(condensed: bool = True) -> str:
+    """Load principal (supervisor) context from PRINCIPAL.md.
+
+    Provides strategic context for decision-making: mission, goals, project
+    priorities, and operating assumptions. Used by workers (condensed) and
+    the Observer (full) to ground autonomous decisions.
+
+    Args:
+        condensed: If True, return only Mission + Goals + Projects sections
+                   (~300 tokens). If False, return the full file content.
+
+    Returns:
+        Principal context string, or empty string if file is missing/empty.
+    """
+    if not PRINCIPAL_PATH.exists():
+        logger.warning(f"PRINCIPAL.md not found at {PRINCIPAL_PATH}, skipping principal context")
+        return ""
+
+    content = PRINCIPAL_PATH.read_text().strip()
+    if not content:
+        logger.warning("PRINCIPAL.md is empty, skipping principal context")
+        return ""
+
+    if not condensed:
+        return content
+
+    # Extract condensed summary: Mission + Goals + Projects sections only.
+    # This keeps the worker prompt lean while providing strategic context.
+    import re
+
+    sections_to_extract = ["Mission", "Goals.*", "Projects.*"]
+    extracted = []
+    for pattern in sections_to_extract:
+        match = re.search(
+            rf"^## {pattern}\n\n(.*?)(?=\n---|\n## |\Z)",
+            content,
+            re.MULTILINE | re.DOTALL,
+        )
+        if match:
+            # Include the section header for clarity
+            header_match = re.search(rf"^(## {pattern})", content, re.MULTILINE)
+            header = header_match.group(1) if header_match else ""
+            extracted.append(f"{header}\n\n{match.group(1).strip()}")
+
+    if not extracted:
+        # Fallback: return first 500 chars if section extraction fails
+        return content[:500]
+
+    return "\n\n".join(extracted)
+
+
 def load_system_prompt() -> str:
     """Load Valor's system prompt from SOUL.md with worker rules and completion criteria.
 
@@ -274,6 +411,8 @@ def load_system_prompt() -> str:
         [WORKER_RULES — safety rails for the worker, FIRST — takes precedence]
         ---
         [SOUL.md — persona, attitude, purpose, communication style]
+        ---
+        [Principal Context — condensed mission/goals/priorities from PRINCIPAL.md]
         ---
         [Work Completion Criteria — from CLAUDE.md]
 
@@ -291,8 +430,12 @@ def load_system_prompt() -> str:
     criteria = load_completion_criteria()
     criteria_section = f"\n\n---\n\n{criteria}" if criteria else ""
 
+    # Load condensed principal context (mission + goals + project priorities)
+    principal = load_principal_context(condensed=True)
+    principal_section = f"\n\n---\n\n## Principal Context\n\n{principal}" if principal else ""
+
     # Worker rules FIRST — safety rails take precedence over persona
-    return f"{WORKER_RULES}\n\n---\n\n{soul_prompt}{criteria_section}"
+    return f"{WORKER_RULES}\n\n---\n\n{soul_prompt}{principal_section}{criteria_section}"
 
 
 def load_pm_system_prompt(working_directory: str) -> str:
@@ -691,6 +834,13 @@ class ValorAgent:
         # the deterministic fix -- SKILL.md --repo instructions remain as a safety net.
         if self.gh_repo:
             env["GH_REPO"] = self.gh_repo
+
+        # SDLC context injection: pre-resolve session fields as env vars so
+        # skills can reference $SDLC_PR_NUMBER etc. instead of guessing (issue #420).
+        # Only set vars when the field is non-None and non-empty.
+        if session_id:
+            sdlc_env = _extract_sdlc_env_vars(session_id, self.gh_repo)
+            env.update(sdlc_env)
 
         # Build system prompt with workflow context if workflow_id is present
         system_prompt = self.system_prompt
@@ -1171,7 +1321,10 @@ async def get_agent_response_sdk(
         try:
             from bridge.session_transcript import complete_transcript
 
-            complete_transcript(session_id, status="failed")
+            # Capture exception details so the reflections system can produce
+            # actionable bug reports instead of "empty error summary" issues.
+            error_summary = f"{type(e).__name__}: {e}"[:500]
+            complete_transcript(session_id, status="failed", summary=error_summary)
         except Exception:
             pass  # Best-effort cleanup
         return (

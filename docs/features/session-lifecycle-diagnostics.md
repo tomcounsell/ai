@@ -97,8 +97,23 @@ Constants in `monitoring/session_watchdog.py`:
 | `monitoring/session_status.py` | CLI session status report |
 | `tests/test_lifecycle_transition.py` | Integration tests for lifecycle logging |
 | `tests/unit/test_stall_detection.py` | Unit tests for stall detection |
-| `tests/test_session_stuck_pending.py` | Tests for stale save guard and pending recovery (#342) |
+| `tests/unit/test_pending_recovery.py` | Tests for stale save guard, pending recovery, and kill+retry (#342) |
 | `tests/unit/test_session_status.py` | Unit tests for CLI report |
+
+## Error Summary Enforcement (#434)
+
+When sessions fail, the `summary` field on `AgentSession` is now populated with error context from the exception that caused the failure. This ensures the reflections system (`scripts/reflections.py`) receives actionable data instead of empty strings.
+
+**Failure paths that capture error summaries:**
+
+| Caller | Summary format | Example |
+|--------|---------------|---------|
+| `agent/sdk_client.py` crash guard | `{ExceptionType}: {message}` | `ConnectionError: Redis refused` |
+| `monitoring/session_watchdog.py` ModelException handler | `Watchdog: {ExceptionType}: {message}` | `Watchdog: ModelException: unique constraint` |
+
+**Reflections guard:** `scripts/reflections.py` skips failed sessions with empty summaries (logging a warning), preventing vague "empty error summary" issues from being auto-filed.
+
+Summaries are truncated to 500 characters at capture time. The `AgentSession.summary` field supports up to 50,000 characters, but concise one-line summaries are preferred since full tracebacks are available in `bridge.log`.
 
 ## Related
 

@@ -60,7 +60,7 @@ Returns a structured dict describing all cleanup actions taken:
 The guard is called at three SDLC skill entry points:
 
 1. **`/do-build`** (Step 6): Before creating a worktree for the build
-2. **`/do-pr-review`** (Step 3): Before `gh pr checkout` for screenshot capture
+2. **`/do-pr-review`** (Step 1): Before `gh pr checkout` for code review (checkout moved from Step 3 to Step 1 so all file reads see the PR branch)
 3. **`/sdlc`** (Step 2): Before assessing current state and branch operations
 
 ### Usage
@@ -87,7 +87,7 @@ python -c "from agent.worktree_manager import ensure_clean_git_state; from pathl
 | `agent/worktree_manager.py` | `ensure_clean_git_state()`, `_resolve_git_dir()`, `_is_worktree()` |
 | `tests/unit/test_git_state_guard.py` | 21 unit tests covering all detection/resolution paths |
 | `.claude/skills/do-build/SKILL.md` | Guard call at Step 6 |
-| `.claude/skills/do-pr-review/SKILL.md` | Guard call before `gh pr checkout` |
+| `.claude/skills/do-pr-review/SKILL.md` | Guard call in Step 1 before `gh pr checkout` |
 | `.claude/skills/sdlc/SKILL.md` | Guard call at Step 2 |
 
 ## Tracking

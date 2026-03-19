@@ -5,10 +5,10 @@ All routing code (Observer, SDLC skill, stage detector display) derives from
 this graph. The graph supports cycles for test-failure and review-feedback loops.
 
 Graph structure:
-- Nodes are pipeline stages (ISSUE, PLAN, BUILD, TEST, PATCH, REVIEW, DOCS)
+- Nodes are pipeline stages (ISSUE, PLAN, BUILD, TEST, PATCH, REVIEW, DOCS, MERGE)
 - Edges are (stage, outcome) -> next_stage transitions
 - PATCH is a routing-only stage -- it does NOT appear in display/progress templates
-- The happy path is: ISSUE -> PLAN -> BUILD -> TEST -> REVIEW -> DOCS
+- The happy path is: ISSUE -> PLAN -> BUILD -> TEST -> REVIEW -> DOCS -> MERGE
 - Cycles: TEST(fail) -> PATCH -> TEST, REVIEW(fail) -> PATCH -> TEST -> REVIEW
 
 Usage:
@@ -40,6 +40,8 @@ PIPELINE_EDGES: dict[tuple[str, str], str] = {
     ("TEST", "success"): "REVIEW",
     ("REVIEW", "success"): "DOCS",
     ("DOCS", "success"): "MERGE",
+    # Partial: review approved but has tech_debt/nits that need patching
+    ("REVIEW", "partial"): "PATCH",
     # Failure cycles (outcome = "fail")
     ("TEST", "fail"): "PATCH",
     ("REVIEW", "fail"): "PATCH",
@@ -57,12 +59,13 @@ STAGE_TO_SKILL: dict[str, str] = {
     "PATCH": "/do-patch",
     "REVIEW": "/do-pr-review",
     "DOCS": "/do-docs",
+    "MERGE": "/do-merge",
 }
 
 # Display-only linear stage list for progress templates and PM-facing messages.
 # PATCH is intentionally excluded -- it's a routing concept, not a display stage.
-# This matches the existing STAGE_ORDER in stage_detector.py.
-DISPLAY_STAGES: list[str] = ["ISSUE", "PLAN", "BUILD", "TEST", "REVIEW", "DOCS"]
+# Used by PipelineStateMachine.get_display_progress() and summarizer rendering.
+DISPLAY_STAGES: list[str] = ["ISSUE", "PLAN", "BUILD", "TEST", "REVIEW", "DOCS", "MERGE"]
 
 
 def get_next_stage(
@@ -88,7 +91,7 @@ def get_next_stage(
 
     Returns:
         Tuple of (stage_name, skill_command) for the next stage, or None if:
-        - All stages are complete (DOCS succeeded -> MERGE, which has no skill)
+        - All stages are complete (MERGE is terminal)
         - Max cycle count reached (escalate to human)
         - Unknown current_stage with no matching edge
     """
@@ -118,10 +121,6 @@ def get_next_stage(
             f"No transition found for ({current_stage}, {outcome}). "
             f"Pipeline may be complete or stage is unknown."
         )
-        return None
-
-    # MERGE is terminal -- no skill to invoke
-    if next_stage == "MERGE":
         return None
 
     skill = STAGE_TO_SKILL.get(next_stage)

@@ -626,16 +626,6 @@ def _recover_interrupted_jobs(project_key: str) -> int:
 
     logger.warning(f"[{project_key}] Recovered {count} interrupted job(s)")
 
-    # Clean up stale checkpoints on startup
-    try:
-        from agent.checkpoint import cleanup_old_checkpoints
-
-        cleaned = cleanup_old_checkpoints(max_age_days=7)
-        if cleaned:
-            logger.info(f"[{project_key}] Cleaned {len(cleaned)} stale checkpoint(s)")
-    except Exception as e:
-        logger.warning(f"[{project_key}] Stale checkpoint cleanup failed: {e}")
-
     return count
 
 
@@ -1257,6 +1247,32 @@ async def _calendar_heartbeat(slug: str, project: str | None = None) -> None:
 CALENDAR_HEARTBEAT_INTERVAL = 25 * 60  # 25 minutes (fits within 30-min segments)
 
 
+def _diagnose_missing_session(session_id: str) -> dict:
+    """Check Redis directly for session key diagnostics when Popoto query fails.
+
+    Returns a dict with key_exists, ttl, and any error info to aid debugging
+    why the session was not found by the ORM query.
+    """
+    try:
+        import redis as redis_lib
+
+        r = redis_lib.Redis()
+        # Popoto stores keys with model-specific prefixes; scan for matches
+        # TODO: Replace r.keys() with r.scan() if Redis grows beyond ~10k keys.
+        #   KEYS is O(N) across the entire keyspace. Acceptable on error path
+        #   with small Redis, but SCAN would be safer at scale. (PR #419 review)
+        keys = r.keys(f"*{session_id}*")
+        result = {"matching_keys": len(keys)}
+        for key in keys[:5]:  # Cap at 5 to avoid log spam
+            key_str = key.decode() if isinstance(key, bytes) else str(key)
+            ttl = r.ttl(key)
+            exists = r.exists(key)
+            result[key_str] = {"exists": bool(exists), "ttl": ttl}
+        return result
+    except Exception as e:
+        return {"error": str(e)}
+
+
 async def _enqueue_continuation(
     job: "Job",
     branch_name: str,
@@ -1300,24 +1316,31 @@ async def _enqueue_continuation(
     # new index set but never removes from old one).
     sessions = list(AgentSession.query.filter(session_id=job.session_id))
     if not sessions:
+        # Diagnose why the session is missing before falling back.
+        # Check Redis directly for key existence and TTL to aid debugging.
+        _diag = _diagnose_missing_session(job.session_id)
         logger.error(
             f"[{job.project_key}] No session found for {job.session_id} "
-            f"— falling back to enqueue_job"
+            f"— falling back to recreate from Job metadata. "
+            f"Diagnostics: {_diag}"
         )
-        # Fallback: create a new session if the original is somehow gone
-        await enqueue_job(
-            project_key=job.project_key,
-            session_id=job.session_id,
-            working_dir=job.working_dir,
-            message_text=coaching_message,
-            sender_name="System (auto-continue)",
-            chat_id=job.chat_id,
-            message_id=job.message_id,
-            priority="high",
-            work_item_slug=job.work_item_slug,
-            task_list_id=task_list_id,
-            auto_continue_count=auto_continue_count,
-            classification_type=job.classification_type,
+        # Fallback: recreate session preserving ALL metadata from the
+        # underlying AgentSession that was loaded when the job was popped.
+        # This prevents loss of context_summary, expectations, issue_url,
+        # pr_url, history, correlation_id, and other session-phase fields.
+        fields = _extract_job_fields(job._rj)
+        # Override fields that change for continuation
+        fields["status"] = "pending"
+        fields["message_text"] = coaching_message
+        fields["sender_name"] = "System (auto-continue)"
+        fields["auto_continue_count"] = auto_continue_count
+        fields["priority"] = "high"
+        fields["task_list_id"] = task_list_id
+        await AgentSession.async_create(**fields)
+        _ensure_worker(job.project_key)
+        logger.info(
+            f"[{job.project_key}] Recreated session {job.session_id} from Job metadata "
+            f"(fallback path, auto_continue_count={auto_continue_count})"
         )
         return
 
@@ -1503,8 +1526,19 @@ async def _execute_job(job: Job) -> None:
                 logger.warning(f"Failed to re-read session {agent_session.session_id}: {e}")
 
         # Empty output guard: deliver immediately to prevent silent loops
+        # Use PipelineStateMachine when stage_states is available; fall back to legacy
         _is_sdlc = agent_session.is_sdlc_job() if agent_session else False
-        _sdlc_has_remaining = agent_session.has_remaining_stages() if _is_sdlc else False
+        _state_machine = None
+        if _is_sdlc and agent_session:
+            try:
+                from bridge.pipeline_state import PipelineStateMachine
+
+                _state_machine = PipelineStateMachine(agent_session)
+                _sdlc_has_remaining = _state_machine.has_remaining_stages()
+            except Exception:
+                _sdlc_has_remaining = agent_session.has_remaining_stages()
+        else:
+            _sdlc_has_remaining = False
         if should_guard_empty_output(msg, _is_sdlc, _sdlc_has_remaining):
             logger.warning(
                 f"[{job.project_key}] Empty output with remaining SDLC stages — "
@@ -1592,6 +1626,30 @@ async def _execute_job(job: Job) -> None:
             f"(transitions={decision.get('transitions_applied', 0)})"
         )
 
+        # Apply state machine transitions based on Observer decision
+        if _state_machine and _is_sdlc:
+            try:
+                resolved_stage = decision.get("resolved_stage")
+                stage_outcome = decision.get("stage_outcome")
+                next_stage = decision.get("next_stage")
+                if resolved_stage:
+                    current = _state_machine.current_stage()
+                    if current == resolved_stage:
+                        if stage_outcome == "fail":
+                            _state_machine.fail_stage(resolved_stage)
+                        else:
+                            _state_machine.complete_stage(resolved_stage)
+                if next_stage:
+                    try:
+                        _state_machine.start_stage(next_stage)
+                    except ValueError:
+                        logger.debug(
+                            f"[{job.project_key}] State machine: cannot start "
+                            f"{next_stage} (ordering constraint)"
+                        )
+            except Exception as e:
+                logger.warning(f"[{job.project_key}] State machine transition failed: {e}")
+
         if decision["action"] == "steer":
             # Observer wants to auto-continue — enqueue continuation with coaching
             chat_state.auto_continue_count += 1
@@ -1656,31 +1714,21 @@ async def _execute_job(job: Job) -> None:
             return
 
         # Observer decided to deliver to Telegram
-        # Completion guard: check goal gates for SDLC sessions
-        if _is_sdlc and agent_session:
-            try:
-                from agent.goal_gates import check_all_gates
-
-                slug = getattr(agent_session, "work_item_slug", None)
-                if slug:
-                    gate_wd = getattr(agent_session, "working_dir", None) or "."
-                    gate_results = check_all_gates(slug, gate_wd, agent_session)
-                    unsatisfied = [
-                        f"  - {stage}: {r.missing or r.evidence}"
-                        for stage, r in gate_results.items()
-                        if not r.satisfied
-                    ]
-                    if unsatisfied:
-                        gate_warning = "\n\n⚠️ **Incomplete pipeline gates:**\n" + "\n".join(
-                            unsatisfied
-                        )
-                        msg = msg + gate_warning
-                        logger.info(
-                            f"[{job.project_key}] Gate completion guard: "
-                            f"{len(unsatisfied)} unsatisfied gates for slug {slug}"
-                        )
-            except Exception as e:
-                logger.warning(f"[{job.project_key}] Gate completion guard failed: {e}")
+        # Completion guard: check state machine for incomplete stages
+        if _is_sdlc and _state_machine and _state_machine.has_remaining_stages():
+            progress = _state_machine.get_display_progress()
+            incomplete = [
+                f"  - {stage}: {status}"
+                for stage, status in progress.items()
+                if status not in ("completed",)
+            ]
+            if incomplete:
+                gate_warning = "\n\n⚠️ **Incomplete pipeline stages:**\n" + "\n".join(incomplete)
+                msg = msg + gate_warning
+                logger.info(
+                    f"[{job.project_key}] State machine completion guard: "
+                    f"{len(incomplete)} incomplete stages"
+                )
 
         # Use message_for_user from Observer if provided (curated user-facing text),
         # otherwise fall back to raw worker output. The reason is internal-only.
@@ -1898,18 +1946,6 @@ async def _execute_job(job: Job) -> None:
         except Exception as e:
             logger.warning(f"[{job.project_key}] Failed to auto-mark session done: {e}")
 
-        # Clean up checkpoint on successful completion
-        if job.work_item_slug:
-            try:
-                from agent.checkpoint import delete_checkpoint
-
-                delete_checkpoint(job.work_item_slug)
-                logger.info(f"[{job.project_key}] Deleted checkpoint for {job.work_item_slug}")
-            except Exception as e:
-                logger.warning(
-                    f"[{job.project_key}] Checkpoint cleanup failed for {job.work_item_slug}: {e}"
-                )
-
         # Save session snapshot on successful completion
         save_session_snapshot(
             session_id=job.session_id,
@@ -2024,24 +2060,11 @@ def check_revival(project_key: str, working_dir: str, chat_id: str) -> dict | No
     if state.active_plan:
         plan_context = get_plan_context(state.active_plan)
 
-    # Enrich with checkpoint context if available
-    checkpoint_context = ""
-    slug = branches[0].replace("session/", "", 1)
-    try:
-        from agent.checkpoint import build_compact_context, load_checkpoint
-
-        checkpoint = load_checkpoint(slug)
-        if checkpoint:
-            checkpoint_context = build_compact_context(checkpoint)
-    except Exception as e:
-        logger.warning(f"[{project_key}] Checkpoint load failed during revival: {e}")
-
     return {
         "branch": branches[0],
         "all_branches": branches,
         "has_uncommitted": state.has_uncommitted_changes,
         "plan_context": plan_context[:200] if plan_context else "",
-        "checkpoint_context": checkpoint_context,
     }
 
 
@@ -2062,19 +2085,11 @@ async def queue_revival_job(
     Queue a revival job (low priority) when user reacts/replies to revival notification.
     Returns queue depth.
     """
-    checkpoint_ctx = revival_info.get("checkpoint_context", "")
-    if checkpoint_ctx:
-        # Checkpoint is the PRIMARY context — not a supplement
-        revival_text = checkpoint_ctx
-        if additional_context:
-            revival_text += f"\n\nUser context: {additional_context}"
-    else:
-        # Fallback: no checkpoint available (ad-hoc session or old data)
-        revival_text = f"Continue the unfinished work on branch `{revival_info['branch']}`."
-        if additional_context:
-            revival_text += (
-                f"\n\nAsked user whether to resume and user responded with: {additional_context}"
-            )
+    revival_text = f"Continue the unfinished work on branch `{revival_info['branch']}`."
+    if additional_context:
+        revival_text += (
+            f"\n\nAsked user whether to resume and user responded with: {additional_context}"
+        )
 
     return await enqueue_job(
         project_key=revival_info["project_key"],

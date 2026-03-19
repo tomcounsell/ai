@@ -32,9 +32,14 @@ class TestHappyPath:
         result = get_next_stage("REVIEW", "success")
         assert result == ("DOCS", "/do-docs")
 
-    def test_docs_success_is_terminal(self):
-        """DOCS success leads to MERGE which is terminal (no skill)."""
+    def test_docs_to_merge(self):
+        """DOCS success leads to MERGE stage with /do-merge skill."""
         result = get_next_stage("DOCS", "success")
+        assert result == ("MERGE", "/do-merge")
+
+    def test_merge_is_terminal(self):
+        """MERGE has no outgoing success edge — it is the terminal stage."""
+        result = get_next_stage("MERGE", "success")
         assert result is None
 
     def test_full_happy_path_traversal(self):
@@ -45,6 +50,7 @@ class TestHappyPath:
             ("BUILD", "TEST", "/do-test"),
             ("TEST", "REVIEW", "/do-pr-review"),
             ("REVIEW", "DOCS", "/do-docs"),
+            ("DOCS", "MERGE", "/do-merge"),
         ]
         for current, expected_next, expected_skill in expected_path:
             result = get_next_stage(current, "success")
@@ -152,21 +158,25 @@ class TestExports:
         assert "PATCH" not in DISPLAY_STAGES
 
     def test_display_stages_order(self):
-        assert DISPLAY_STAGES == ["ISSUE", "PLAN", "BUILD", "TEST", "REVIEW", "DOCS"]
+        assert DISPLAY_STAGES == ["ISSUE", "PLAN", "BUILD", "TEST", "REVIEW", "DOCS", "MERGE"]
+
+    def test_display_stages_includes_merge(self):
+        assert "MERGE" in DISPLAY_STAGES
 
     def test_stage_to_skill_has_all_stages(self):
         """All stages in edges should have a skill mapping."""
         all_stages = set()
         for (stage, _), next_stage in PIPELINE_EDGES.items():
             all_stages.add(stage)
-            if next_stage != "MERGE":
-                all_stages.add(next_stage)
+            all_stages.add(next_stage)
         for stage in all_stages:
             assert stage in STAGE_TO_SKILL, f"Stage {stage} missing from STAGE_TO_SKILL"
 
     def test_pipeline_edges_are_complete(self):
-        """Every display stage should have at least a success edge."""
+        """Every display stage (except terminal MERGE) has a success edge."""
         for stage in DISPLAY_STAGES:
+            if stage == "MERGE":
+                continue  # MERGE is terminal, no outgoing edges
             assert (stage, "success") in PIPELINE_EDGES, f"Stage {stage} missing success edge"
 
     def test_stage_to_skill_values(self):
@@ -178,3 +188,4 @@ class TestExports:
         assert STAGE_TO_SKILL["PATCH"] == "/do-patch"
         assert STAGE_TO_SKILL["REVIEW"] == "/do-pr-review"
         assert STAGE_TO_SKILL["DOCS"] == "/do-docs"
+        assert STAGE_TO_SKILL["MERGE"] == "/do-merge"

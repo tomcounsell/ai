@@ -57,5 +57,5 @@ context = get_context_for_skill("do-test", request)
 
 - **No token budget enforcement** -- approximate sizes are guidelines, not hard limits. The model handles truncation naturally.
 - **No graph DSL for context modes** -- the fidelity registry is a simple dict, not a graph. (Pipeline routing uses a separate directed graph in `bridge/pipeline_graph.py`.)
-- **Plain dicts for artifacts** -- when SkillOutcome (#328) ships, artifacts can be replaced with typed objects.
+- **Plain dicts for artifacts** -- stage outcomes are classified by the `PipelineStateMachine` rather than typed outcome blocks.
 - **Default to compact** -- safe middle ground for any skill not explicitly registered.

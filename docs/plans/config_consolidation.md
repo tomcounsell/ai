@@ -133,6 +133,15 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/config_consoli
 - [ ] Bridge startup with missing config should log clear error messages indicating which config is missing
 - [ ] Settings validation failure should print which env var to set
 
+## Test Impact
+
+- [ ] `tests/unit/test_cross_repo_gh_resolution.py` — UPDATE: replace hardcoded `/Users/valorengels/src` with `Path.home() / "src"` in working_directory fixtures
+- [ ] `tests/unit/test_workflow_sdk_integration.py` — UPDATE: replace hardcoded paths with derived paths from `config/paths.py`
+- [ ] `tests/unit/test_sdk_client.py` — UPDATE: replace hardcoded paths with derived paths
+- [ ] `tests/integration/test_job_scheduler.py` — UPDATE: replace hardcoded paths with derived paths
+- [ ] `tests/unit/test_summarizer.py` — UPDATE: `_linkify_references` tests need to verify URLs are built from project config, not LLM output
+- [ ] `tests/integration/test_agent_session_lifecycle.py` — UPDATE: `set_link` test fixtures use hardcoded `tomcounsell/ai` URLs that should come from project config
+
 ## Rabbit Holes
 
 - **Rewriting projects.json schema**: The current schema works. Don't redesign it — just add missing per-project fields (testing credentials, calendar mappings)
@@ -166,6 +175,13 @@ No race conditions identified. Config is loaded at startup and cached. The bridg
 - Cleaning up `data/pipeline/` contents (54 subdirs) — just document the policy
 - Removing `doc_embeddings.json` (46MB) — just document it and add to cleanup schedule
 - Changing the update/deployment architecture
+- Stage tracking or Observer refactoring (addressed by [#430](https://github.com/tomcounsell/ai/issues/430))
+
+## Interaction with #430 (State Machine)
+
+[#430](https://github.com/tomcounsell/ai/issues/430) will delete `bridge/stage_detector.py`, `agent/skill_outcome.py`, and `agent/checkpoint.py` before or after this work. Any hardcoded paths in those files do not need fixing — they'll be gone.
+
+More importantly: once this plan consolidates the `github.org` and `github.repo` fields in `projects.json` as the canonical source of GitHub repo identity, the summarizer's URL construction (`_linkify_references()` in `bridge/summarizer.py`) becomes fully deterministic — no LLM involved. This fixes the hallucinated repo URL problem (e.g., `valor-labs/valor-app` appearing instead of the real repo) by ensuring every URL is built from project config, never from LLM output.
 
 ## Update System
 
@@ -363,10 +379,10 @@ No agent integration required — this is infrastructure/config refactoring. The
 
 ---
 
-## Open Questions
+## Resolved Questions
 
-1. **Session file migration**: The active Telegram session is `data/valor_bridge.session`. Should we keep the session file in `data/` (current location, works) or move it to `config/secrets/`? Recommendation: keep in `data/` since it's runtime state, not config.
+1. **Session file migration**: Keep in `data/` — it's runtime state, not config.
 
-2. **projects.json path format**: Should `working_directory` values use `~` (shell expansion, needs processing) or remain absolute but derived at runtime? Recommendation: store as relative to `$HOME/src/` (e.g., just `"ai"`, `"popoto"`) and resolve at load time.
+2. **projects.json path format**: Store as relative to `$HOME/src/` (e.g., just `"ai"`, `"popoto"`) and resolve at load time via `config/paths.py`.
 
-3. **`~/Desktop/claude_code/` symlink duration**: How long should backward-compatible symlinks remain? Recommendation: one release cycle (2 weeks), then remove.
+3. **`~/Desktop/claude_code/` symlink duration**: One release cycle (2 weeks), then remove.

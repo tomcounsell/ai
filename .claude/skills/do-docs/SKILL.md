@@ -336,6 +336,31 @@ After all edits are complete:
    **No changes needed**: (list if applicable)
    ```
 
+5. **Commit and push changes:**
+   ```bash
+   git add -A && git commit -m "Docs: cascade updates for <brief change description>" && git push
+   ```
+   Documentation changes must be persisted. If this fails (e.g., nothing to commit), that's fine — report "no changes needed."
+
+## Plan Status Update
+
+After documentation is created/updated and committed, update the plan's `status:` frontmatter from "Ready" or "In Progress" to "Complete". This signals to the pipeline that the DOCS stage is done:
+
+```bash
+# Find the plan file for the current slug
+SLUG=$(git branch --show-current | sed 's|session/||')
+PLAN_PATH="docs/plans/${SLUG}.md"
+
+if [ -f "$PLAN_PATH" ]; then
+    # Update status in frontmatter
+    sed -i '' 's/^status: .*/status: Complete/' "$PLAN_PATH"
+    git add "$PLAN_PATH"
+    git commit -m "Mark plan status as Complete after docs update"
+fi
+```
+
+This ensures the DOCS goal gate can verify documentation was completed by the pipeline.
+
 ## Edge Cases
 
 - **New feature with no existing docs**: Nothing to cascade. Report "no existing docs reference this area."

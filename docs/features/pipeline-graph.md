@@ -14,7 +14,7 @@ Before this feature, pipeline routing was defined in three places that disagreed
 |----------|-----------|
 | SDLC `SKILL.md` dispatch table | 9 stages including PATCH |
 | Observer `_STAGE_TO_SKILL` | 6 stages without PATCH |
-| `stage_detector.py` `STAGE_ORDER` | 6 stages without PATCH |
+| `pipeline_state.py` stage tracking | 6 stages without PATCH |
 
 The Observer's `_next_sdlc_skill()` walked stages linearly and could not model cycles (TEST fail -> PATCH -> TEST). Cycles happened via ad-hoc LLM decisions rather than being encoded in the routing logic.
 
@@ -71,6 +71,36 @@ A `MAX_PATCH_CYCLES` counter (default: 3) prevents infinite PATCH -> TEST loops.
 - **Fallback behavior**: Unknown outcomes fall back to the "success" transition. Unknown stages return `None`.
 - **MERGE is terminal**: `get_next_stage("DOCS", "success")` returns `None` because MERGE has no corresponding skill -- it requires human decision.
 
+## Mandatory Gate Enforcement
+
+The pipeline graph is the backbone of stage routing, but routing alone does not prevent premature delivery to Telegram. The Observer (`bridge/observer.py`) includes a **hard delivery gate** that checks REVIEW and DOCS goal gates before any delivery decision.
+
+### How It Works
+
+Before the Observer delivers output to Telegram for SDLC sessions, `_check_mandatory_gates()` runs:
+
+1. Checks `check_review_gate()` — verifies a PR review exists
+2. Checks `check_docs_gate()` — verifies feature docs exist or plan explicitly skips them
+3. If either gate is unsatisfied, overrides the deliver decision to **steer** instead, with a coaching message naming the next required skill (`/do-pr-review` or `/do-docs`)
+
+### Enforcement Points
+
+The gate check runs at three locations in the Observer decision flow:
+
+| Point | Location | Scenario |
+|-------|----------|----------|
+| 1 | Typed outcome success + no remaining stages | Pipeline thinks it is done but REVIEW/DOCS not satisfied |
+| 2 | Deterministic guard bypass (needs_human) | Worker asked a question but REVIEW/DOCS not done yet |
+| 3 | LLM Observer deliver decision | LLM decided to deliver but mandatory gates unsatisfied |
+
+### Cycle Safety
+
+If the same gate forces steering 3+ times (tracked via `gate-forced-steer:{STAGE}` markers in session history), the gate allows delivery with a warning to prevent infinite loops.
+
+### State Machine Integration
+
+Stage tracking is handled by `PipelineStateMachine` in `bridge/pipeline_state.py`, which uses the pipeline graph for transitions. The state machine's `has_remaining_stages()` method uses `get_next_stage()` to check if a non-terminal next stage exists, correctly handling cycles and the PATCH routing-only stage.
+
 ## Integration
 
 The Observer (`bridge/observer.py`) imports `STAGE_TO_SKILL` and `get_next_stage` from the graph module. The `_next_sdlc_skill()` function uses graph-based routing: it finds the last completed/failed stage, calls `get_next_stage()` with the appropriate outcome and `cycle_count`, and returns the next stage and skill command. The `cycle_count` is derived from the session's history entries tagged with `stage: "PATCH"`.
@@ -86,5 +116,5 @@ Individual `/do-*` skills no longer contain pipeline navigation language. They r
 | `bridge/pipeline_graph.py` | Canonical graph definition |
 | `bridge/observer.py` | Uses `get_next_stage()` for graph-based routing with cycle counting |
 | `bridge/coach.py` | Imports `DISPLAY_STAGES` and `STAGE_TO_SKILL` (no local copies) |
-| `bridge/stage_detector.py` | `STAGE_ORDER` unchanged (display only) |
+| `bridge/pipeline_state.py` | `PipelineStateMachine` — stage tracking and transitions using the graph |
 | `tests/unit/test_pipeline_graph.py` | 27 tests covering all routing scenarios |

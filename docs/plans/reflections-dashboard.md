@@ -106,6 +106,10 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/reflections-da
 - [ ] Failed runs display red status badges with the error message visible
 - [ ] Step-level failures within daily-maintenance show per-step error indicators
 
+## Test Impact
+
+No existing tests affected — this is a greenfield feature creating a new FastAPI dashboard with no prior test coverage or existing module interfaces.
+
 ## Rabbit Holes
 
 - **Real-time WebSocket updates** — Tempting to add live-updating status. Not worth it. Page refresh or HTMX polling on a 30s interval is sufficient for a management dashboard.

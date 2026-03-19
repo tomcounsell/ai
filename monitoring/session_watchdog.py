@@ -177,6 +177,9 @@ async def check_all_sessions() -> None:
             # on it every cycle. See docs/features/coaching-loop.md "Related Guards".
             try:
                 session.status = "failed"
+                # Capture exception details so the reflections system can produce
+                # actionable bug reports instead of "empty error summary" issues.
+                session.summary = f"Watchdog: {type(e).__name__}: {e}"[:500]
                 session.save()
                 logger.warning(
                     "[watchdog] Marked stale session %s as failed (%s)",

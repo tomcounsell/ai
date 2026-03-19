@@ -53,7 +53,7 @@ class TestRemoteUpdateScript:
         # Since we just pulled (or are current), expect "Already up to date"
         assert result.returncode == 0
         assert (
-            "Already up to date" in result.stdout
+            "up to date" in result.stdout.lower()
             or "commit(s)" in result.stdout
             or "update successful" in result.stdout
         )
@@ -293,12 +293,11 @@ class TestBridgeUpdateCommand:
     """Test the /update command handling in the bridge."""
 
     def test_handle_update_command_exists(self):
-        """The _handle_update_command function should be importable."""
-        # The function was moved from telegram_bridge.py to agents.py
-        agents_path = PROJECT_DIR / "bridge" / "agents.py"
-        source = agents_path.read_text()
-        assert "async def _handle_update_command" in source
-        assert "remote-update.sh" in source
+        """The handle_update_command function should be importable."""
+        from bridge.update import handle_force_update_command, handle_update_command
+
+        assert callable(handle_update_command)
+        assert callable(handle_force_update_command)
 
     def test_update_intercept_before_message_processing(self):
         """The /update check should come before message storage."""

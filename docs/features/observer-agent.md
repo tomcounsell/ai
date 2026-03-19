@@ -1,8 +1,8 @@
 # Observer Agent
 
-The Observer Agent is the **sole controller of SDLC pipeline progression**. It replaces the fragmented classifier/coach/routing chain with a single Sonnet-powered agent that makes routing decisions with full session context. It runs synchronously inside `send_to_chat()` at the point where `classify_output()`, `classify_routing_decision()`, and `build_coaching_message()` were previously called.
+The Observer Agent is the **sole controller of SDLC pipeline progression**. It decides whether to steer the worker agent to the next pipeline stage or deliver output to the human on Telegram. It runs synchronously inside `send_to_chat()` in `agent/job_queue.py`.
 
-The worker agent receives only safety rails (`WORKER_RULES` in `agent/sdk_client.py`) -- no pipeline stages, no `/sdlc` invocation instructions. The Observer steers the worker one stage at a time via coaching messages, using the [pipeline graph](pipeline-graph.md) for routing. The graph supports cycles (TEST fail -> PATCH -> TEST, REVIEW fail -> PATCH -> TEST -> REVIEW) alongside the happy path (ISSUE -> PLAN -> BUILD -> TEST -> REVIEW -> DOCS).
+The worker agent receives only safety rails (`WORKER_RULES` in `agent/sdk_client.py`) -- no pipeline stages, no `/sdlc` invocation instructions. The Observer steers the worker one stage at a time via coaching messages, using the [pipeline graph](pipeline-graph.md) for routing.
 
 ## Architecture
 
@@ -10,168 +10,76 @@ The worker agent receives only safety rails (`WORKER_RULES` in `agent/sdk_client
 Worker stops
     |
     v
-Typed Outcome Parser (deterministic, no LLM)
-    |  extracts <!-- OUTCOME {...} --> block if present
-    |  returns SkillOutcome or None
-    v
-Stage Detector (deterministic, no LLM)
-    |  parses transcript for /do-* skill invocations
-    |  marks stages in_progress or completed
-    |  cross-checks against typed outcome if available
-    v
-Typed Outcome Routing (deterministic, no LLM)
-    |  if outcome.status == "success" + stages remain → STEER
-    |  if outcome.status == "success" + all done → DELIVER
-    |  if outcome.status == "fail" → DELIVER with failure context
-    |  if no outcome or ambiguous status → fall through
-    v
 Stop Reason Routing (deterministic, no LLM)
-    |  if stop_reason == "budget_exceeded" → DELIVER with warning
-    |  if stop_reason == "rate_limited" → STEER with backoff
-    |  if stop_reason == "end_turn" or None → fall through to Observer
+    |  if stop_reason == "budget_exceeded" -> DELIVER with warning
+    |  if stop_reason == "rate_limited" -> STEER with backoff
+    |  if stop_reason == "end_turn" or None -> fall through
     v
-Observer Agent (Sonnet in production, configurable for testing)
-    |  reads AgentSession state
+State Machine Outcome Classification (deterministic, no LLM)
+    |  classifies current stage outcome from stop_reason + output tail
+    |  determines completed_stage and next_stage
+    v
+Deterministic SDLC Guard (deterministic, no LLM)
+    |  if SDLC + stages remain + no blocker -> STEER to next /do-* skill
+    |  if failed stage, terminal stop, at cap, or blocker signal -> fall through
+    v
+Observer LLM (Sonnet in production)
+    |  reads AgentSession state via read_session tool
     |  reads queued steering messages
-    |  makes judgment call (LLM-based)
-    |
-    +-- STEER: enqueue continuation with coaching message
-    |          (identity-affirming, with concrete success criteria)
-    |
-    +-- DELIVER: send output to Telegram for human review
+    |  decides: STEER or DELIVER
+    v
+send_to_chat() applies state machine transitions
 ```
 
-**Fallback**: If the Observer API call errors, raw worker output is delivered to Telegram. Output is never silently dropped.
+## Stage Tracking
 
-## Stage Detector
+The Observer uses [PipelineStateMachine](pipeline-state-machine.md) for all stage tracking. The state machine:
+- Records transitions programmatically (not by parsing transcripts)
+- Enforces stage ordering via the pipeline graph
+- Persists state as a JSON dict on `AgentSession.stage_states`
 
-The stage detector (`bridge/stage_detector.py`) is a pure function with no side effects. It replaces `tools/session_progress.py`, which required the worker LLM to explicitly call a CLI tool to record stage progress.
-
-### Detection Rules
-
-1. **Skill invocations** (strongest signal): Regex matches `/do-plan`, `/do-build`, `/do-test`, `/do-pr-review`, `/do-docs` in transcript text. When a later stage is invoked, earlier stages are implicitly marked as completed.
-
-2. **Completion markers** (secondary signal): Regex matches for stage-specific evidence (e.g., `github.com/.../issues/123` for ISSUE, `42 passed` for TEST).
-
-3. **Typed outcome cross-check** (validation signal): When a `SkillOutcome` is available (see [Typed Skill Outcomes](typed-skill-outcomes.md)), `apply_transitions()` cross-checks it against regex detections. If the outcome says "success" but regex didn't detect completion, the outcome's transition is merged into the transitions list so the stage is still recorded. If the outcome says "fail" but regex detected completion, the typed outcome takes priority.
-
-### Pipeline Order
-
-```
-ISSUE -> PLAN -> BUILD -> TEST -> REVIEW -> DOCS
-```
-
-### Functions
-
-| Function | Purpose |
-|----------|---------|
-| `detect_stages(transcript)` | Pure function: returns list of `{stage, status, reason}` transitions |
-| `apply_transitions(session, transitions, outcome=None)` | Writes transitions to `AgentSession.history` entries, skipping duplicates. When a `SkillOutcome` is provided, cross-checks it against regex detections — merging missed successful stages into the transitions list and logging warnings on fail/detect mismatches. |
-
-## Observer Decision Framework
-
-The Observer uses Claude API directly (`anthropic.Anthropic().messages.create()`) with tool-use for structured decisions. It has four tools:
-
-| Tool | Purpose |
-|------|---------|
-| `read_session` | Read current AgentSession state (stages, links, history, queued messages). Must be called first. |
-| `update_session` | Persist extracted data (context_summary, expectations, issue/PR URLs) |
-| `enqueue_continuation` | Steer: re-enqueue the job with a coaching message |
-| `deliver_to_telegram` | Deliver: send output to the human. Accepts optional `message_for_user` (curated user-facing text) and `reason` (internal logging only, never sent to user). |
+## Decision Framework
 
 ### STEER when:
-- Pipeline stages remain incomplete
-- Worker paused with a status update, not a question
-- Worker finished one stage and needs the next
-- Missing links (issue URL, PR URL) that should have been created
+- Pipeline stages remain incomplete (state machine shows pending/ready/in_progress stages)
+- The worker paused with a status update, not a question
+- The worker finished one stage and needs to move to the next
 
 ### DELIVER when:
-- All pipeline stages complete
-- Worker is asking a genuine question
-- Worker hit a blocker requiring human intervention
-- Error the worker cannot recover from
-- Non-SDLC job (casual conversation, Q&A)
-- Final completion with evidence
+- All pipeline stages are complete (MERGE completed)
+- The worker is asking the human a genuine question
+- The worker hit a blocker requiring human intervention
+- An error occurred that the worker cannot recover from
+- This is a non-SDLC job (casual conversation, Q&A)
 
-### Safety Limits
-- Maximum 5 tool-use iterations per Observer invocation
-- Maximum 10 auto-continues for SDLC jobs, 3 for non-SDLC
-- **Hard guard** in `agent/job_queue.py`: cap is enforced regardless of Observer decision — if `auto_continue_count > effective_max`, output is delivered to Telegram
-- Each auto-continue increment is logged at INFO level (`Auto-continue {n}/{max} for session {id}`) for full sequence traceability
-- If Observer doesn't converge on a decision, defaults to deliver
+## Coaching Messages
 
-### Message Quality Gates
+When steering, the Observer crafts a coaching message that:
+- Acknowledges what was done
+- References the next /do-* skill
+- Includes SDLC context variables (PR number, slug, branch)
+- Closes with what success looks like for this step
 
-Two quality gates prevent useless or misleading output from reaching the user:
+## Tools
 
-1. **Narration gate** (pre-observer, deterministic): Before the Observer runs, `is_narration_only()` from `bridge/message_quality.py` checks if the worker output consists entirely of process narration ("Let me check...", "Let me look at...") with no substantive content (no code blocks, URLs, file paths, or findings). If detected and auto-continue budget remains, the worker is automatically continued with coaching to produce actual results instead of announcements. If at the auto-continue cap, a fallback message replaces the narration.
+The Observer has four tools:
+1. `read_session` -- reads current session state (stages, links, history)
+2. `update_session` -- persists context_summary and expectations
+3. `enqueue_continuation` -- steers the worker with a coaching message
+4. `deliver_to_telegram` -- delivers output to the human
 
-2. **`message_for_user` field** (observer-curated): When the Observer calls `deliver_to_telegram`, it can provide a `message_for_user` string — curated user-facing text that replaces raw worker output. The `reason` field is logged internally but never sent to the user. This prevents observer reasoning from leaking into Telegram messages.
-
-Both gates are in `agent/job_queue.py`'s `send_to_chat()` function.
-
-## Coaching Philosophy
-
-The Observer's coaching messages follow identity-affirming prompting principles (see [Claude Prompting Best Practices](../references/claude_prompting_best_practices.md)):
-
-- **Speak to competence, not compliance** — the worker is a skilled agent, not a script runner
-- **Concrete success criteria** — close with what success looks like: "Success here means clean, tested code with no silent assumptions"
-- **Narrow opening for questions** — give permission to raise genuine critical questions to the architect/PM, but frame it as a narrow exception, not an invitation to stop
-- **Specific over vague** — "verify the tests pass before proceeding" rather than "think carefully"
-- **No threats or artificial pressure** — these degrade output quality in Claude models
-
-Example coaching message:
-> "Good progress on the plan. Continue with the build — invoke /do-build. Prioritize correctness over speed. If you encounter a critical architecture question that needs human input, state it clearly and directly. Otherwise, press forward. Success here means working code with tests that pass on the first run."
-
-## Session Integration
-
-The Observer reads from and writes to `AgentSession` (Redis-backed via Popoto ORM):
-
-- **`queued_steering_messages`**: Human messages injected by the bridge via two paths: (1) the reply-to fast path for direct Telegram replies to running sessions, and (2) the [intake classifier](intake-classifier.md) for non-reply follow-up messages classified as interjections. Observer checks these first -- human input always takes priority over automated steering.
-- **`context_summary`** and **`expectations`**: Set by Observer on deliver, enabling semantic session routing for future messages.
-- **Stage progress**: Read via `get_stage_progress()`, written by `apply_transitions()` as `[stage]` history entries.
-- **Links**: Issue URL, PR URL, plan path -- extracted from worker output and persisted via `set_link()`.
-
-## What It Replaced
-
-The Observer replaces three interleaved systems that shared responsibility for routing decisions:
-
-| Old Component | Location | Problem |
-|---------------|----------|---------|
-| `classify_output()` | `bridge/summarizer.py` | Haiku LLM classifier -- no session context, no stage awareness |
-| `classify_routing_decision()` | `agent/job_queue.py` | Rule-based routing with 20+ conditionals, planning language guard, error guard |
-| `build_coaching_message()` | `bridge/coach.py` | 5-tier fallback chain -- overly complex, often produced generic coaching |
-| `session_progress.py` | `tools/session_progress.py` | CLI tool the worker LLM had to call -- silently failed, stages got skipped |
-
-These were removed from the routing path. See [Coaching Loop](coaching-loop.md) for historical context on the old system (no longer in use).
-
-## Key Files
+## Files
 
 | File | Purpose |
 |------|---------|
-| `bridge/observer.py` | Observer Agent class, system prompt, tool definitions (incl. `message_for_user`), typed outcome routing |
-| `bridge/message_quality.py` | Narration detection (`is_narration_only()`) and process narration patterns shared with summarizer |
-| `bridge/stage_detector.py` | Deterministic stage detection (pure function) with typed outcome cross-check |
-| `agent/skill_outcome.py` | `SkillOutcome` dataclass, `parse_outcome_from_text()`, `format_outcome()` — see [Typed Skill Outcomes](typed-skill-outcomes.md) |
-| `agent/sdk_client.py` | Captures `stop_reason` from `ResultMessage` in `_session_stop_reasons` registry |
-| `agent/job_queue.py` | `send_to_chat()` wiring -- invokes outcome parser, stage detector, then Observer; threads `stop_reason` |
-| `models/agent_session.py` | `AgentSession` with stage progress, steering queue, links |
-| `tests/test_observer.py` | 46 tests: 33 unit (stage detector, Observer tools, fallback) + 13 integration (real API with Haiku floor test) |
-| `tests/unit/test_message_quality.py` | 30 tests for narration detection, substantive content markers, and false positive prevention |
-| `tests/unit/test_observer_message_for_user.py` | Tests for `message_for_user` delivery path and observer tool schema |
-| `tests/unit/test_stop_reason_observer.py` | 7 tests for stop_reason routing (budget_exceeded, rate_limited, end_turn, registry) |
-| `tests/unit/test_skill_outcome.py` | 34 unit tests for SkillOutcome parsing, serialization, and edge cases |
+| `bridge/observer.py` | Observer class with run() method |
+| `bridge/pipeline_state.py` | PipelineStateMachine for stage tracking |
+| `bridge/pipeline_graph.py` | Transition table and DISPLAY_STAGES |
+| `agent/job_queue.py` | send_to_chat() integration point |
 
-## Testing Strategy
+## Safety Guards
 
-Integration tests use **Haiku as a robustness floor**: if the Observer makes correct STEER/DELIVER decisions with Haiku's lower intelligence, production Sonnet handles real-world nuance even better.
-
-The `model` parameter on `Observer.__init__()` defaults to `SONNET` for production and can be overridden for testing. All 13 integration tests pass `model=HAIKU`.
-
-Test categories:
-- **Status update steering** (6 parametrized): Observer steers at each SDLC stage
-- **Open questions delivery**: Observer delivers when genuine architect/PM questions detected
-- **Discernment quality**: coaching messages are substantive, not bare "continue"
-- **Cap enforcement**: SDLC cap (10) and non-SDLC cap (3) both cause delivery
-- **Error/blocker delivery**: unrecoverable errors go to human
-- **Completion delivery**: all-stages-done with evidence goes to human
+- **Empty output guard**: delivers immediately to prevent silent loops
+- **Narration gate**: auto-continues when output is pure narration without substance
+- **Auto-continue cap**: MAX_AUTO_CONTINUES_SDLC (10) prevents infinite loops
+- **Human input detection**: regex patterns detect questions and blockers

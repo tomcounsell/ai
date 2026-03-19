@@ -74,12 +74,7 @@ class TestObserverStopReasonRouting:
             enqueue_fn=AsyncMock(),
             stop_reason="budget_exceeded",
         )
-        with (
-            patch("bridge.observer.parse_outcome_from_text", return_value=None),
-            patch("bridge.observer.detect_stages", return_value=[]),
-            patch("bridge.observer.apply_transitions", return_value=0),
-        ):
-            decision = await observer.run()
+        decision = await observer.run()
 
         assert decision["action"] == "deliver"
         assert "budget" in decision["reason"].lower()
@@ -98,12 +93,7 @@ class TestObserverStopReasonRouting:
             enqueue_fn=AsyncMock(),
             stop_reason="rate_limited",
         )
-        with (
-            patch("bridge.observer.parse_outcome_from_text", return_value=None),
-            patch("bridge.observer.detect_stages", return_value=[]),
-            patch("bridge.observer.apply_transitions", return_value=0),
-        ):
-            decision = await observer.run()
+        decision = await observer.run()
 
         assert decision["action"] == "steer"
         assert "rate" in decision["coaching_message"].lower()
@@ -124,9 +114,6 @@ class TestObserverStopReasonRouting:
         )
         # end_turn should fall through to LLM observer, so we mock the API
         with (
-            patch("bridge.observer.parse_outcome_from_text", return_value=None),
-            patch("bridge.observer.detect_stages", return_value=[]),
-            patch("bridge.observer.apply_transitions", return_value=0),
             patch("bridge.observer.get_anthropic_api_key", return_value="fake-key"),
             patch("bridge.observer.anthropic") as mock_anthropic,
         ):

@@ -40,6 +40,7 @@ Issue #309 documented 20+ PRs that each "fixed" stage progress rendering, each a
 
 ## Related
 
+- [Enhanced Planning](enhanced-planning.md) -- Spike Resolution (Phase 1.5), RFC Review (Phase 2.8), and Infrastructure Documentation added after these analysis sections
 - [Race Condition Analysis](race-condition-analysis.md) -- Prior art for adding analytical sections to the plan template (PR #288)
 - [Code Impact Finder](code-impact-finder.md) -- Blast radius analysis tool used in step 3
 - [Trace & Verify Protocol](trace-and-verify.md) -- Related root cause analysis at bug-fix time (not planning time)

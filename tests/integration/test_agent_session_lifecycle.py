@@ -63,6 +63,7 @@ def sdlc_session(redis_test_db):
     s.append_history("stage", "TEST completed ☑")
     s.append_history("stage", "REVIEW completed ☑")
     s.append_history("stage", "DOCS completed ☑")
+    s.append_history("stage", "MERGE completed ☑")
     s.set_link("issue", "https://github.com/tomcounsell/ai/issues/177")
     s.set_link("plan", "https://github.com/tomcounsell/ai/blob/main/docs/plans/summarizer.md")
     s.set_link("pr", "https://github.com/tomcounsell/ai/pull/180")
@@ -176,6 +177,7 @@ class TestStageProgress:
         assert progress["TEST"] == "pending"
         assert progress["REVIEW"] == "pending"
         assert progress["DOCS"] == "pending"
+        assert progress["MERGE"] == "pending"
 
     def test_non_stage_entries_ignored(self, session):
         session.append_history("user", "SDLC 177")
@@ -691,11 +693,12 @@ class TestSDLCLifecycle:
         s.set_link("issue", "https://github.com/org/repo/issues/177")
         s.set_link("plan", "https://example.com/plan.md")
 
-        # 5. Complete build, test, review, docs
+        # 5. Complete build, test, review, docs, merge
         s.append_history("stage", "BUILD completed ☑")
         s.append_history("stage", "TEST completed ☑")
         s.append_history("stage", "REVIEW completed ☑")
         s.append_history("stage", "DOCS completed ☑")
+        s.append_history("stage", "MERGE completed ☑")
         s.set_link("pr", "https://github.com/org/repo/pull/180")
 
         # 6. Compose structured summary
@@ -803,6 +806,7 @@ class TestSDLCClassificationTypeLifecycle:
         s.append_history("stage", "TEST completed ☑")
         s.append_history("stage", "REVIEW completed ☑")
         s.append_history("stage", "DOCS completed ☑")
+        s.append_history("stage", "MERGE completed ☑")
         s.set_link("issue", "https://github.com/valorengels/ai/issues/276")
         s.set_link("pr", "https://github.com/valorengels/ai/pull/277")
 

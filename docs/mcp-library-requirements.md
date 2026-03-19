@@ -1,7 +1,7 @@
 # MCP Library & Session Management Requirements
 
 **Status**: ✅ Core Implementation Complete (2026-01-19)
-**Implementation**: `mcp/library.py`, `config/mcp_library.json`
+**Implementation**: `config/mcp_library.json` (library module was removed; server selection is now handled by `.mcp.json` configuration)
 
 Core features implemented:
 - MCP server catalog with 10 servers configured

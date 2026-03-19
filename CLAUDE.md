@@ -44,6 +44,7 @@ gws sheets spreadsheets values get --params '{"spreadsheetId": "ID", "range": "S
 | `pytest tests/unit/` | Run unit tests only (fast, ~60s) |
 | `pytest tests/unit/ -n auto` | Run unit tests in parallel |
 | `pytest tests/integration/` | Run integration tests only |
+| `pytest -m sdlc` | Run tests for a specific feature (see `tests/README.md`) |
 | `python -m ruff format . && python -m ruff check .` | Format and lint |
 | `python scripts/reflections.py` | Run reflections maintenance manually |
 | `python scripts/reflections.py --dry-run` | Test reflections without side effects |
@@ -53,6 +54,10 @@ gws sheets spreadsheets values get --params '{"spreadsheetId": "ID", "range": "S
 | `python scripts/issue_poller.py` | Run issue poller manually (polls GitHub for new issues) |
 | `./scripts/install_issue_poller.sh` | Install issue poller launchd schedule (5-min interval) |
 | `tail -f logs/issue_poller.log` | Stream issue poller logs |
+| `python scripts/autoexperiment.py --target observer --iterations 50` | Run autoexperiment on observer prompt |
+| `python scripts/autoexperiment.py --target summarizer --dry-run` | Dry-run autoexperiment on summarizer |
+| `python scripts/autoexperiment.py --list-targets` | List autoexperiment targets |
+| `./scripts/install_autoexperiment.sh` | Install autoexperiment nightly schedule |
 
 ## Development Principles
 
@@ -226,7 +231,7 @@ The bridge includes automatic crash recovery (see `docs/features/bridge-self-hea
 
 ## Plan Requirements (This Repo Only)
 
-Plans created with `/do-plan` must include three required sections. These are enforced by hooks that block plan creation if sections are missing or empty.
+Plans created with `/do-plan` must include four required sections. These are enforced by hooks that block plan creation if sections are missing or empty.
 
 ### ## Documentation (Required)
 
@@ -267,6 +272,27 @@ The **## Agent Integration** section should cover:
 - Integration tests that verify the agent can actually invoke the new tools
 - If no agent integration is needed, state that explicitly (e.g., "No agent integration required — this is a bridge-internal change")
 
+### ## Test Impact (Required)
+
+Include a **## Test Impact** section after **## Failure Path Test Strategy** and before **## Rabbit Holes**. This section audits existing tests that will break or need changes due to the planned work. It is enforced by `.claude/hooks/validators/validate_test_impact_section.py`.
+
+The **## Test Impact** section must contain:
+- Checklist items listing affected test files/cases with dispositions: UPDATE, DELETE, or REPLACE
+- If no existing tests are affected, explicitly state "No existing tests affected" with justification (50+ chars)
+
+Example:
+```markdown
+## Test Impact
+- [ ] `tests/unit/test_example.py::test_old_behavior` — UPDATE: assert new return value
+- [ ] `tests/integration/test_flow.py::test_end_to_end` — REPLACE: rewrite for new API
+```
+
+Or for greenfield work:
+```markdown
+## Test Impact
+No existing tests affected — this is a greenfield feature with no prior test coverage.
+```
+
 ## See Also
 
 | Resource | Purpose |
@@ -280,6 +306,7 @@ The **## Agent Integration** section should cover:
 | `docs/tools-reference.md` | Complete tool documentation |
 | `config/SOUL.md` | Valor persona and philosophy |
 | `docs/features/README.md` | Feature index — look up how things work |
+| `tests/README.md` | Test suite index — feature markers, blind spots, contribution guide |
 
 ## Business Context
 

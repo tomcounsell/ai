@@ -476,9 +476,6 @@ from bridge.agents import (  # noqa: E402
     RETRY_DELAYS,  # noqa: F401
     _detect_issue_number,  # noqa: F401
     _get_github_repo_url,  # noqa: F401
-    _get_running_jobs_info,  # noqa: F401
-    _handle_force_update_command,
-    _handle_update_command,
     _match_plan_by_name,  # noqa: F401
     attempt_self_healing,  # noqa: F401
     create_failure_plan,  # noqa: F401
@@ -486,6 +483,10 @@ from bridge.agents import (  # noqa: E402
     detect_tracked_work,  # noqa: F401
     get_agent_response,  # noqa: F401
     get_agent_response_with_retry,
+)
+from bridge.update import (  # noqa: E402
+    handle_force_update_command,
+    handle_update_command,
 )
 
 
@@ -638,9 +639,9 @@ async def main():
                     logger.debug("Ignoring /update from DM - DMs disabled on this instance")
                     return
             if _raw_text in ("/update --force", "/update \u2014force"):
-                await _handle_force_update_command(client, event)
+                await handle_force_update_command(client, event)
             else:
-                await _handle_update_command(client, event)
+                await handle_update_command(client, event)
             return
 
         # Get message details
