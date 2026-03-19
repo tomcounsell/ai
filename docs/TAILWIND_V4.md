@@ -47,10 +47,6 @@ python manage.py tailwind watch # For development
   .text-accent {
     color: var(--color-accent);
   }
-  
-  .bg-slate-900 {
-    background-color: var(--color-slate-900);
-  }
 }
 ```
 
@@ -113,33 +109,31 @@ python manage.py tailwind watch # For development
 
 ## Our Color System
 
-Our project uses this custom color palette defined as CSS variables:
+Colors are defined as CSS variables in `static/css/brand.css`. Use Tailwind arbitrary values to reference them:
 
 ```
---color-accent: #ffd404      /* Yellow accent color */
---color-slate-900: #0a192f    /* Deep navy blue */
---color-slate-800: #112240    /* Navy blue */
---color-slate-700: #1d3557    /* Lighter navy blue */
+--color-bg-cream: #FAF9F6       /* Primary surface */
+--color-bg-warm-gray: #F5F4F1   /* Subtle section differentiation */
+--color-text-black: #1A1A1A     /* Headlines */
+--color-text-gray: #5A5A5A      /* Labels, secondary text */
+--color-border-dark: #3A3A3A    /* Primary structure */
+--color-border-medium: #C4C4C4  /* Standard dividers */
+--color-accent: #B91C1C         /* Red annotation accent */
 ```
 
 ### Usage
 
 ```html
-<div class="text-accent bg-slate-900">
-  <!-- Content with yellow text on navy background -->
+<div class="text-[var(--color-text-gray)] border-[var(--color-border-medium)]">
+  <!-- Content using brand CSS variables -->
 </div>
 ```
 
 ## Building Components
 
 ### Component Classes
-```css
-@layer components {
-  .btn-primary {
-    @apply py-2 px-4 bg-slate-900 text-white rounded-md hover:bg-slate-800;
-  }
-}
-```
+
+Semantic components are defined in `static/css/brand.css` (e.g., `.btn-brand`, `.card-technical`, `.server-card`). Use Tailwind for layout utilities (grid, flex, spacing) and brand.css for semantic components.
 
 ## Running Tailwind CLI Commands
 

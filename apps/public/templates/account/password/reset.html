@@ -11,7 +11,7 @@
   <div class="w-full max-w-md">
     <div class="bg-white shadow-xs rounded-xs overflow-hidden">
       <div class="p-6">
-        <p class="text-gray-600 mb-6">
+        <p class="text-[var(--color-text-gray)] mb-6">
           Enter your email address below, and we'll send you instructions to reset your password.
         </p>
 
@@ -38,13 +38,13 @@
 
           <!-- Email Field -->
           <div class="mb-6">
-            <label for="{{ form.email.id_for_label }}" class="block text-sm font-medium text-gray-700 mb-1">
+            <label for="{{ form.email.id_for_label }}" class="block text-sm font-medium text-[var(--color-text-gray)] mb-1">
               Email <span class="text-red-500">*</span>
             </label>
             <div class="relative">
               {{ form.email|add_class:"w-full px-3 py-2 border rounded-xs bg-white focus:outline-hidden focus:ring-2 focus:ring-[var(--color-border-dark)] focus:border-[var(--color-border-dark)] text-sm" }}
               <div class="absolute inset-y-0 right-0 pr-3 flex items-center pointer-events-none">
-                <i class="fas fa-envelope text-gray-400"></i>
+                <i class="fas fa-envelope text-[var(--color-text-light-gray)]"></i>
               </div>
             </div>
             {% if form.email.errors %}

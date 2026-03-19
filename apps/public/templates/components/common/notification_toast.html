@@ -36,7 +36,7 @@
   {% if messages %}
     {% for message in messages %}
     <div
-      class="rounded-xs shadow-xs overflow-hidden bg-white border-l-4 {% if message.level == DEFAULT_MESSAGE_LEVELS.SUCCESS %}border-green-500{% elif message.level == DEFAULT_MESSAGE_LEVELS.ERROR %}border-red-500{% elif message.level == DEFAULT_MESSAGE_LEVELS.WARNING %}border-accent{% else %}border-slate-700{% endif %}"
+      class="rounded-xs shadow-xs overflow-hidden bg-white border-l-4 {% if message.level == DEFAULT_MESSAGE_LEVELS.SUCCESS %}border-green-500{% elif message.level == DEFAULT_MESSAGE_LEVELS.ERROR %}border-red-500{% elif message.level == DEFAULT_MESSAGE_LEVELS.WARNING %}border-accent{% else %}border-[var(--color-border-dark)]{% endif %}"
       _="on load wait 5s then add .opacity-0 then wait 500ms then remove me"
       style="transition: opacity 0.5s ease-in-out"
     >
@@ -55,18 +55,18 @@
               <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
             </svg>
           {% else %}
-            <svg class="h-5 w-5 text-slate-700" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+            <svg class="h-5 w-5 text-[var(--color-border-dark)]" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
               <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd" />
             </svg>
           {% endif %}
         </div>
 
         <div class="grow">
-          <p class="text-sm text-gray-800">{{ message }}</p>
+          <p class="text-sm text-[var(--color-text-charcoal)]">{{ message }}</p>
         </div>
 
         <button
-          class="ml-4 text-gray-400 hover:text-gray-500 focus:outline-hidden"
+          class="ml-4 text-[var(--color-text-light-gray)] hover:text-[var(--color-text-gray)] focus:outline-hidden"
           _="on click add .opacity-0 to closest div.rounded-lg then wait 500ms then remove closest div.rounded-lg"
         >
           <svg class="h-4 w-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">

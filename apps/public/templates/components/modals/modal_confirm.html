@@ -74,7 +74,7 @@
   <div class="flex flex-col-reverse sm:flex-row-reverse sm:gap-x-3 gap-y-3">
     <button
       type="button"
-      class="inline-flex w-full justify-center rounded-xs {% if icon == 'danger' %}bg-red-600 hover:bg-red-500{% else %}bg-slate-700 hover:bg-slate-600{% endif %} px-3 py-2 text-sm font-semibold text-white shadow-xs focus-visible:outline-2 focus-visible:outline-offset-2 {% if icon == 'danger' %}focus-visible:outline-red-600{% else %}focus-visible:outline-slate-600{% endif %} sm:w-auto {{ confirm_class|default:'' }}"
+      class="inline-flex w-full justify-center rounded-xs {% if icon == 'danger' %}bg-red-600 hover:bg-red-500{% else %}bg-[var(--color-border-dark)] hover:bg-[var(--color-text-gray)]{% endif %} px-3 py-2 text-sm font-semibold text-white shadow-xs focus-visible:outline-2 focus-visible:outline-offset-2 {% if icon == 'danger' %}focus-visible:outline-red-600{% else %}focus-visible:outline-[var(--color-border-dark)]{% endif %} sm:w-auto {{ confirm_class|default:'' }}"
       hx-{{ confirm_method|default:"post" }}="{{ confirm_url }}"
       {% if target %}hx-target="{{ target }}"{% endif %}
       {% if swap %}hx-swap="{{ swap }}"{% endif %}

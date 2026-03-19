@@ -124,7 +124,7 @@ class DashboardBrandCSSTestCase(TestCase):
 
     def test_uses_section_hero_class(self):
         """Test that the outer container uses section-hero class."""
-        self.assertIn('class="section-hero"', self.html)
+        self.assertIn("section-hero", self.html)
 
     def test_uses_card_technical_class(self):
         """Test that the MCP overview section uses card-technical class."""

@@ -46,18 +46,18 @@
       {% csrf_token %}
       <div class="space-y-12">
         <div class="pb-12 p-6">
-          <h2 class="text-base/7 font-semibold text-gray-900">Basic Information</h2>
-          <p class="mt-1 text-sm/6 text-gray-600">Update your account details.</p>
+          <h2 class="text-base/7 font-semibold text-[var(--color-text-black)]">Basic Information</h2>
+          <p class="mt-1 text-sm/6 text-[var(--color-text-gray)]">Update your account details.</p>
 
           <div class="mt-10 grid grid-cols-1 gap-x-6 gap-y-8 sm:grid-cols-6">
             <!-- First Name -->
             <div class="sm:col-span-3">
-              <label for="id_first_name" class="block text-sm/6 font-medium text-gray-900">
+              <label for="id_first_name" class="block text-sm/6 font-medium text-[var(--color-text-black)]">
                 First Name
               </label>
               <div class="mt-2">
                 <input type="text" name="first_name" id="id_first_name" value="{{ user_form.first_name.value|default:'' }}"
-                  class="w-full px-3 py-2 border {% if user_form.first_name.errors %}border-red-500{% else %}border-gray-300{% endif %} bg-white rounded-xs focus:outline-hidden focus:ring-2 focus:ring-[var(--color-border-dark)] focus:border-[var(--color-border-dark)]" />
+                  class="w-full px-3 py-2 border {% if user_form.first_name.errors %}border-red-500{% else %}border-[var(--color-border-medium)]{% endif %} bg-white rounded-xs focus:outline-hidden focus:ring-2 focus:ring-[var(--color-border-dark)] focus:border-[var(--color-border-dark)]" />
                 {% if user_form.first_name.errors %}
                   <p class="mt-2 text-sm text-red-600">{{ user_form.first_name.errors.0 }}</p>
                 {% endif %}
@@ -66,12 +66,12 @@
 
             <!-- Last Name -->
             <div class="sm:col-span-3">
-              <label for="id_last_name" class="block text-sm/6 font-medium text-gray-900">
+              <label for="id_last_name" class="block text-sm/6 font-medium text-[var(--color-text-black)]">
                 Last Name
               </label>
               <div class="mt-2">
                 <input type="text" name="last_name" id="id_last_name" value="{{ user_form.last_name.value|default:'' }}"
-                  class="w-full px-3 py-2 border {% if user_form.last_name.errors %}border-red-500{% else %}border-gray-300{% endif %} bg-white rounded-xs focus:outline-hidden focus:ring-2 focus:ring-[var(--color-border-dark)] focus:border-[var(--color-border-dark)]" />
+                  class="w-full px-3 py-2 border {% if user_form.last_name.errors %}border-red-500{% else %}border-[var(--color-border-medium)]{% endif %} bg-white rounded-xs focus:outline-hidden focus:ring-2 focus:ring-[var(--color-border-dark)] focus:border-[var(--color-border-dark)]" />
                 {% if user_form.last_name.errors %}
                   <p class="mt-2 text-sm text-red-600">{{ user_form.last_name.errors.0 }}</p>
                 {% endif %}
@@ -80,12 +80,12 @@
 
             <!-- Email -->
             <div class="sm:col-span-4">
-              <label for="id_email" class="block text-sm/6 font-medium text-gray-900">
+              <label for="id_email" class="block text-sm/6 font-medium text-[var(--color-text-black)]">
                 Email address
               </label>
               <div class="mt-2">
                 <input type="email" name="email" id="id_email" value="{{ user_form.email.value|default:'' }}"
-                  class="w-full px-3 py-2 border {% if user_form.email.errors %}border-red-500{% else %}border-gray-300{% endif %} bg-white rounded-xs focus:outline-hidden focus:ring-2 focus:ring-[var(--color-border-dark)] focus:border-[var(--color-border-dark)]" />
+                  class="w-full px-3 py-2 border {% if user_form.email.errors %}border-red-500{% else %}border-[var(--color-border-medium)]{% endif %} bg-white rounded-xs focus:outline-hidden focus:ring-2 focus:ring-[var(--color-border-dark)] focus:border-[var(--color-border-dark)]" />
                 {% if user_form.email.errors %}
                   <p class="mt-2 text-sm text-red-600">{{ user_form.email.errors.0 }}</p>
                 {% endif %}
@@ -95,7 +95,7 @@
         </div>
       </div>
 
-      <div class="mt-6 flex items-center justify-end gap-x-6 p-6 bg-white border-t border-gray-100">
+      <div class="mt-6 flex items-center justify-end gap-x-6 p-6 bg-white border-t border-[var(--color-border-light)]">
         <button type="submit" name="update_info" class="btn-brand">Save Changes</button>
       </div>
     </form>
@@ -107,8 +107,8 @@
       {% csrf_token %}
       <div class="space-y-12">
         <div class="pb-12 p-6">
-          <h2 class="text-base/7 font-semibold text-gray-900">Change Password</h2>
-          <p class="mt-1 text-sm/6 text-gray-600">Ensure your account uses a secure password.</p>
+          <h2 class="text-base/7 font-semibold text-[var(--color-text-black)]">Change Password</h2>
+          <p class="mt-1 text-sm/6 text-[var(--color-text-gray)]">Ensure your account uses a secure password.</p>
 
           <!-- Password Form Errors -->
           {% if password_form.errors %}
@@ -138,12 +138,12 @@
           <div class="mt-10 grid grid-cols-1 gap-x-6 gap-y-8 sm:grid-cols-6">
             <!-- Current Password -->
             <div class="sm:col-span-4">
-              <label for="id_old_password" class="block text-sm/6 font-medium text-gray-900">
+              <label for="id_old_password" class="block text-sm/6 font-medium text-[var(--color-text-black)]">
                 Current Password
               </label>
               <div class="mt-2">
                 <input type="password" name="old_password" id="id_old_password"
-                  class="w-full px-3 py-2 border {% if password_form.old_password.errors %}border-red-500{% else %}border-gray-300{% endif %} bg-white rounded-xs focus:outline-hidden focus:ring-2 focus:ring-[var(--color-border-dark)] focus:border-[var(--color-border-dark)]" />
+                  class="w-full px-3 py-2 border {% if password_form.old_password.errors %}border-red-500{% else %}border-[var(--color-border-medium)]{% endif %} bg-white rounded-xs focus:outline-hidden focus:ring-2 focus:ring-[var(--color-border-dark)] focus:border-[var(--color-border-dark)]" />
                 {% if password_form.old_password.errors %}
                   <p class="mt-2 text-sm text-red-600">{{ password_form.old_password.errors.0 }}</p>
                 {% endif %}
@@ -152,12 +152,12 @@
 
             <!-- New Password -->
             <div class="sm:col-span-4">
-              <label for="id_new_password1" class="block text-sm/6 font-medium text-gray-900">
+              <label for="id_new_password1" class="block text-sm/6 font-medium text-[var(--color-text-black)]">
                 New Password
               </label>
               <div class="mt-2">
                 <input type="password" name="new_password1" id="id_new_password1"
-                  class="w-full px-3 py-2 border {% if password_form.new_password1.errors %}border-red-500{% else %}border-gray-300{% endif %} bg-white rounded-xs focus:outline-hidden focus:ring-2 focus:ring-[var(--color-border-dark)] focus:border-[var(--color-border-dark)]" />
+                  class="w-full px-3 py-2 border {% if password_form.new_password1.errors %}border-red-500{% else %}border-[var(--color-border-medium)]{% endif %} bg-white rounded-xs focus:outline-hidden focus:ring-2 focus:ring-[var(--color-border-dark)] focus:border-[var(--color-border-dark)]" />
                 {% if password_form.new_password1.errors %}
                   <p class="mt-2 text-sm text-red-600">{{ password_form.new_password1.errors.0 }}</p>
                 {% endif %}
@@ -166,12 +166,12 @@
 
             <!-- Confirm Password -->
             <div class="sm:col-span-4">
-              <label for="id_new_password2" class="block text-sm/6 font-medium text-gray-900">
+              <label for="id_new_password2" class="block text-sm/6 font-medium text-[var(--color-text-black)]">
                 Confirm New Password
               </label>
               <div class="mt-2">
                 <input type="password" name="new_password2" id="id_new_password2"
-                  class="w-full px-3 py-2 border {% if password_form.new_password2.errors %}border-red-500{% else %}border-gray-300{% endif %} bg-white rounded-xs focus:outline-hidden focus:ring-2 focus:ring-[var(--color-border-dark)] focus:border-[var(--color-border-dark)]" />
+                  class="w-full px-3 py-2 border {% if password_form.new_password2.errors %}border-red-500{% else %}border-[var(--color-border-medium)]{% endif %} bg-white rounded-xs focus:outline-hidden focus:ring-2 focus:ring-[var(--color-border-dark)] focus:border-[var(--color-border-dark)]" />
                 {% if password_form.new_password2.errors %}
                   <p class="mt-2 text-sm text-red-600">{{ password_form.new_password2.errors.0 }}</p>
                 {% endif %}
@@ -181,7 +181,7 @@
         </div>
       </div>
 
-      <div class="mt-6 flex items-center justify-end gap-x-6 p-6 bg-white border-t border-gray-100">
+      <div class="mt-6 flex items-center justify-end gap-x-6 p-6 bg-white border-t border-[var(--color-border-light)]">
         <button type="submit" name="update_password" class="btn-brand">Update Password</button>
       </div>
     </form>
@@ -189,7 +189,7 @@
 
   <!-- Help Section -->
   <div class="mt-8 bg-[var(--color-bg-warm-gray)] p-6">
-    <p class="text-sm/6 text-gray-600">
+    <p class="text-sm/6 text-[var(--color-text-gray)]">
       Need help? <a href="#" class="font-medium text-[var(--color-text-gray)] hover:text-[var(--color-text-black)]">Contact support</a>
     </p>
   </div>

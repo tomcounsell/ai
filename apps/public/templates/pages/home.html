@@ -7,25 +7,25 @@
 {% endblock %}
 
 {% block content %}
-<div class="section-hero" style="text-align: left; padding: 0 var(--space-lg);">
+<div class="section-hero text-left px-[var(--space-lg)]">
 
   <!-- HERO SECTION -->
-  <div style="margin-bottom: var(--space-3xl); padding-top: var(--space-2xl);">
+  <div class="mb-[var(--space-3xl)] pt-[var(--space-2xl)]">
     <div class="technical-spec-box">
-      <div style="display: grid; grid-template-columns: auto 1fr; gap: var(--space-lg); align-items: start;">
+      <div class="grid grid-cols-[auto_1fr] gap-[var(--space-lg)] items-start">
 
         <!-- Left: Label & Title -->
-        <div style="border-right: 1px solid var(--color-border-light); padding-right: var(--space-lg);">
-          <div class="label" style="margin-bottom: var(--space-sm);">Dashboard</div>
-          <h1 style="font-size: 2.5rem; font-weight: 300; letter-spacing: 0.15em; line-height: 1;">
-            YUDAME<br>AI
+        <div class="border-r border-[var(--color-border-light)] pr-[var(--space-lg)]">
+          <div class="label mb-[var(--space-sm)]">Dashboard</div>
+          <h1 class="text-4xl font-light tracking-wide leading-none normal-case">
+            Yudame AI
           </h1>
         </div>
 
         <!-- Right: Specs -->
         <div>
-          <div class="label" style="margin-bottom: var(--space-md);">Platform Specifications</div>
-          <table class="spec-table-inline" style="width: 100%;">
+          <div class="label mb-[var(--space-md)]">Platform Specifications</div>
+          <table class="spec-table-inline w-full">
             <tr>
               <td>Type</td>
               <td>AI Integration Platform</td>
@@ -51,96 +51,96 @@
   </div>
 
   <!-- WHAT IS MCP SECTION -->
-  <div style="margin-bottom: var(--space-3xl);">
-    <div class="label" style="margin-bottom: var(--space-md);">Protocol Overview</div>
+  <div class="mb-[var(--space-3xl)]">
+    <div class="label mb-[var(--space-md)]">Protocol Overview</div>
 
     <div class="card-technical">
       <h2>What is Model Context Protocol?</h2>
 
-      <p style="font-size: 0.875rem; line-height: 1.8; color: var(--color-text-charcoal); margin-bottom: var(--space-md);">
+      <p class="text-sm leading-relaxed text-[var(--color-text-charcoal)] mb-[var(--space-md)]">
         MCP is an open protocol that standardizes how applications provide context to Large Language Models.
         Think of it as a USB-C port for AI: a universal interface that lets any AI assistant connect to any tool,
         regardless of implementation details.
       </p>
 
-      <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-md); margin-top: var(--space-lg);">
-        <div style="border-left: 2px solid var(--color-border-dark); padding-left: var(--space-sm);">
-          <div class="text-technical-label" style="margin-bottom: 4px;">Benefit</div>
-          <div style="font-size: 0.75rem; font-weight: 500;">Standardized Interface</div>
+      <div class="grid grid-cols-3 gap-[var(--space-md)] mt-[var(--space-lg)]">
+        <div class="border-l-2 border-[var(--color-border-dark)] pl-[var(--space-sm)]">
+          <div class="text-technical-label mb-1">Benefit</div>
+          <div class="text-xs font-medium">Standardized Interface</div>
         </div>
-        <div style="border-left: 2px solid var(--color-border-dark); padding-left: var(--space-sm);">
-          <div class="text-technical-label" style="margin-bottom: 4px;">Benefit</div>
-          <div style="font-size: 0.75rem; font-weight: 500;">Tool Discovery</div>
+        <div class="border-l-2 border-[var(--color-border-dark)] pl-[var(--space-sm)]">
+          <div class="text-technical-label mb-1">Benefit</div>
+          <div class="text-xs font-medium">Tool Discovery</div>
         </div>
-        <div style="border-left: 2px solid var(--color-border-dark); padding-left: var(--space-sm);">
-          <div class="text-technical-label" style="margin-bottom: 4px;">Benefit</div>
-          <div style="font-size: 0.75rem; font-weight: 500;">Secure Execution</div>
+        <div class="border-l-2 border-[var(--color-border-dark)] pl-[var(--space-sm)]">
+          <div class="text-technical-label mb-1">Benefit</div>
+          <div class="text-xs font-medium">Secure Execution</div>
         </div>
       </div>
     </div>
   </div>
 
   <!-- DIVIDER -->
-  <div class="divider-technical" style="margin: var(--space-3xl) 0;"></div>
+  <div class="divider-technical my-[var(--space-3xl)]"></div>
 
   <!-- MCP SERVERS SECTION -->
-  <div style="margin-bottom: var(--space-3xl);">
-    <div class="label" style="margin-bottom: var(--space-lg);">Available Servers</div>
+  <div class="mb-[var(--space-3xl)]">
+    <div class="label mb-[var(--space-lg)]">Available Servers</div>
 
-    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: var(--space-lg);">
+    <div class="grid grid-cols-[repeat(auto-fit,minmax(300px,1fr))] gap-[var(--space-lg)]">
 
       <!-- Creative Juices -->
       <div class="server-card">
-        <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: var(--space-md);">
+        <div class="flex justify-between items-start mb-[var(--space-md)]">
           <div>
-            <h3 style="font-size: 1rem; font-weight: 500; letter-spacing: 0.05em;">
+            <h3 class="text-base font-medium tracking-wide">
               Creative Juices
             </h3>
           </div>
-          <span class="status-indicator status-operational" style="margin-top: 8px;"></span>
+          <span class="status-indicator status-operational mt-2"></span>
         </div>
 
-        <p style="font-size: 0.813rem; line-height: 1.6; color: var(--color-text-gray); margin-bottom: var(--space-md);">
+        <p class="text-[0.813rem] leading-relaxed text-[var(--color-text-gray)] mb-[var(--space-md)]">
           Randomness tools for divergent thinking. Breaks predictable AI patterns with concrete metaphors and strategic frameworks.
         </p>
 
-        <div class="install-note" style="margin-bottom: var(--space-md); border-left-color: var(--color-border-dark);">
-          <div style="display: grid; grid-template-columns: 80px 1fr; gap: var(--space-xs); font-family: var(--font-mono); font-size: 0.75rem;">
-            <span style="color: var(--color-text-gray);">Tools:</span><span>3</span>
-            <span style="color: var(--color-text-gray);">Auth:</span><span>None</span>
-            <span style="color: var(--color-text-gray);">Privacy:</span><span>Local Only</span>
+        <div class="install-note mb-[var(--space-md)]">
+          <div class="grid grid-cols-[80px_1fr] gap-[var(--space-xs)] font-[var(--font-mono)] text-xs">
+            <span class="text-[var(--color-text-gray)]">Tools:</span><span>3</span>
+            <span class="text-[var(--color-text-gray)]">Auth:</span><span>None</span>
+            <span class="text-[var(--color-text-gray)]">Privacy:</span><span>Local Only</span>
           </div>
         </div>
 
-        <a href="https://ai.yuda.me/mcp/creative-juices" class="btn-brand" style="text-decoration: none; display: inline-block;">
+        <a href="https://ai.yuda.me/mcp/creative-juices" class="btn-brand no-underline inline-block">
           View Documentation
         </a>
       </div>
 
       <!-- CTO Tools -->
       <div class="server-card">
-        <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: var(--space-md);">
+        <div class="flex justify-between items-start mb-[var(--space-md)]">
           <div>
-            <h3 style="font-size: 1rem; font-weight: 500; letter-spacing: 0.05em;">
+            <h3 class="text-base font-medium tracking-wide">
               CTO Tools
             </h3>
           </div>
-          <span class="status-indicator status-operational" style="margin-top: 8px;"></span>
+          <span class="status-indicator status-operational mt-2"></span>
         </div>
 
-        <p style="font-size: 0.813rem; line-height: 1.6; color: var(--color-text-gray); margin-bottom: var(--space-md);">
+        <p class="text-[0.813rem] leading-relaxed text-[var(--color-text-gray)] mb-[var(--space-md)]">
           Engineering leadership frameworks. Structured approach to weekly reviews, team analysis, and strategic decisions.
         </p>
 
-        <div class="install-note" style="margin-bottom: var(--space-md); border-left-color: var(--color-border-dark);">
-          <div style="display: grid; grid-template-columns: 80px 1fr; gap: var(--space-xs); font-family: var(--font-mono); font-size: 0.75rem;">
-            <span style="color: var(--color-text-gray);">Tools:</span><span>1</span>
-            <span style="color: var(--color-text-gray);">Auth:</span><span>None</span>
-            <span style="color: var(--color-text-gray);">Privacy:</span><span>Local Only</span>
+        <div class="install-note mb-[var(--space-md)]">
+          <div class="grid grid-cols-[80px_1fr] gap-[var(--space-xs)] font-[var(--font-mono)] text-xs">
+            <span class="text-[var(--color-text-gray)]">Tools:</span><span>1</span>
+            <span class="text-[var(--color-text-gray)]">Auth:</span><span>None</span>
+            <span class="text-[var(--color-text-gray)]">Privacy:</span><span>Local Only</span>
           </div>
         </div>
 
-        <a href="https://ai.yuda.me/mcp/cto-tools" class="btn-brand" style="text-decoration: none; display: inline-block;">
+        <a href="https://ai.yuda.me/mcp/cto-tools" class="btn-brand no-underline inline-block">
           View Documentation
         </a>
       </div>
@@ -149,36 +149,36 @@
   </div>
 
   <!-- DIVIDER -->
-  <div class="divider-technical" style="margin: var(--space-3xl) 0;"></div>
+  <div class="divider-technical my-[var(--space-3xl)]"></div>
 
   <!-- TECHNICAL SPECS FOOTER -->
-  <div style="margin-bottom: var(--space-3xl);">
-    <div class="label" style="margin-bottom: var(--space-md);">Implementation Details</div>
+  <div class="mb-[var(--space-3xl)]">
+    <div class="label mb-[var(--space-md)]">Implementation Details</div>
 
-    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: var(--space-lg);">
+    <div class="grid grid-cols-[repeat(auto-fit,minmax(200px,1fr))] gap-[var(--space-lg)]">
 
-      <div style="border-top: 1px solid var(--color-border-medium); padding-top: var(--space-sm);">
-        <div class="text-technical-label" style="margin-bottom: var(--space-xs);">Framework</div>
-        <div class="text-mono" style="font-size: 0.813rem;">Django 5.0+ / FastMCP</div>
+      <div class="border-t border-[var(--color-border-medium)] pt-[var(--space-sm)]">
+        <div class="text-technical-label mb-[var(--space-xs)]">Framework</div>
+        <div class="text-mono text-[0.813rem]">Django 5.0+ / FastMCP</div>
       </div>
 
-      <div style="border-top: 1px solid var(--color-border-medium); padding-top: var(--space-sm);">
-        <div class="text-technical-label" style="margin-bottom: var(--space-xs);">Deployment</div>
-        <div class="text-mono" style="font-size: 0.813rem;">Render.com (Production)</div>
+      <div class="border-t border-[var(--color-border-medium)] pt-[var(--space-sm)]">
+        <div class="text-technical-label mb-[var(--space-xs)]">Deployment</div>
+        <div class="text-mono text-[0.813rem]">Render.com (Production)</div>
       </div>
 
-      <div style="border-top: 1px solid var(--color-border-medium); padding-top: var(--space-sm);">
-        <div class="text-technical-label" style="margin-bottom: var(--space-xs);">Repository</div>
-        <div class="text-mono" style="font-size: 0.813rem;">
-          <a href="https://github.com/yudame/ai-skills" class="footer-link" style="border-bottom: 1px solid var(--color-border-medium);">
+      <div class="border-t border-[var(--color-border-medium)] pt-[var(--space-sm)]">
+        <div class="text-technical-label mb-[var(--space-xs)]">Repository</div>
+        <div class="text-mono text-[0.813rem]">
+          <a href="https://github.com/yudame/ai-skills" class="footer-link border-b border-[var(--color-border-medium)]">
             github.com/yudame
           </a>
         </div>
       </div>
 
-      <div style="border-top: 1px solid var(--color-border-medium); padding-top: var(--space-sm);">
-        <div class="text-technical-label" style="margin-bottom: var(--space-xs);">License</div>
-        <div class="text-mono" style="font-size: 0.813rem;">MIT Open Source</div>
+      <div class="border-t border-[var(--color-border-medium)] pt-[var(--space-sm)]">
+        <div class="text-technical-label mb-[var(--space-xs)]">License</div>
+        <div class="text-mono text-[0.813rem]">MIT Open Source</div>
       </div>
 
     </div>

@@ -120,8 +120,15 @@ XL:   48px   (6x)    — Between components
 
 **Sections & Layout**
 - `section-hero`: Centered hero section with max-width and auto margins
+- `mcp-container`: Max-width 1000px MCP page layout with auto margins
+- `mcp-header`: Blueprint-style header with double border and inset border
 - `footer-section-header`: Monospace uppercase footer column headers
 - `footer-link`: Gray footer links that darken on hover
+
+**Interactive Elements**
+- `install-note`: Technical note box with warm-gray bg, red left border, small text
+- `details-accordion`: Collapsible `<details>` element with cream bg, light border, monospace summary
+- `copy-btn`: Code block copy button styling
 
 **Labels**
 - Technical numbering convention — `MCP_SERVER_01`, `TOOL_03`, `BENEFIT_01`. Monospace, uppercase, gray. Annotation labels use red for emphasis.

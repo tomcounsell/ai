@@ -36,7 +36,7 @@ Usage:
           value="{{ option.0 }}"
           {% if option.0|stringformat:"s" == field.value|stringformat:"s" %}checked{% endif %}
           {% if required|default:field.field.required %}required{% endif %}
-          class="w-4 h-4 text-blue-600 border-gray-300 focus:ring-2 focus:ring-blue-500
+          class="w-4 h-4 text-[var(--color-border-dark)] border-gray-300 focus:ring-2 focus:ring-[var(--color-border-dark)]
                  {{ radio_class }}"
         >
         <label for="{{ field_id }}_{{ forloop.counter }}" class="ml-2 block text-gray-700 {{ option_label_class }}">

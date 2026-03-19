@@ -33,7 +33,7 @@ Usage:
 {% if href %}
 <a href="{{ href }}"
    class="inline-flex items-center text-xs px-2 py-1 rounded-xs
-   {% if btn_color == "blue" %}bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 focus:ring-blue-500
+   {% if btn_color == "blue" %}bg-[var(--color-accent-subtle)] text-[var(--color-accent)] border border-[var(--color-border-light)] hover:bg-[var(--color-accent-subtle)] focus:ring-[var(--color-border-dark)]
    {% elif btn_color == "green" %}bg-green-50 text-green-700 border border-green-200 hover:bg-green-100 focus:ring-green-300
    {% elif btn_color == "red" %}bg-red-50 text-red-700 border border-red-200 hover:bg-red-100 focus:ring-red-300
    {% elif btn_color == "yellow" %}bg-yellow-50 text-yellow-700 border border-yellow-200 hover:bg-yellow-100 focus:ring-yellow-300
@@ -76,7 +76,7 @@ Usage:
 {% else %}
 <button
    class="inline-flex items-center text-xs px-2 py-1 rounded-xs
-   {% if btn_color == "blue" %}bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 focus:ring-blue-500
+   {% if btn_color == "blue" %}bg-[var(--color-accent-subtle)] text-[var(--color-accent)] border border-[var(--color-border-light)] hover:bg-[var(--color-accent-subtle)] focus:ring-[var(--color-border-dark)]
    {% elif btn_color == "green" %}bg-green-50 text-green-700 border border-green-200 hover:bg-green-100 focus:ring-green-300
    {% elif btn_color == "red" %}bg-red-50 text-red-700 border border-red-200 hover:bg-red-100 focus:ring-red-300
    {% elif btn_color == "yellow" %}bg-yellow-50 text-yellow-700 border border-yellow-200 hover:bg-yellow-100 focus:ring-yellow-300

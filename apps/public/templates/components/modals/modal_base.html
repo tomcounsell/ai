@@ -36,7 +36,7 @@
 
     {% block modal_header %}
     <div class="modal-header flex justify-between items-center border-b border-gray-200 p-5 bg-white">
-      <h3 id="{{ modal_id }}-title" class="text-xl font-semibold text-slate-700">
+      <h3 id="{{ modal_id }}-title" class="text-xl font-semibold text-[var(--color-text-gray)]">
         {{ modal_title }}
       </h3>
       {% if show_close_button|default:True %}

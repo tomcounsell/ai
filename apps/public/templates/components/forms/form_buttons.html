@@ -42,7 +42,7 @@ Usage:
   {% endif %}
 
   <button type="submit"
-          class="inline-flex items-center justify-center py-2 px-4 border border-transparent shadow-xs text-sm font-medium rounded-xs text-white {% if secondary %}bg-gray-600 hover:bg-gray-500 focus:ring-gray-500{% else %}bg-slate-700 hover:bg-slate-600 focus:ring-2 focus:ring-slate-700{% endif %} focus:outline-hidden focus:ring-2 focus:ring-offset-2 {{ submit_class }}">
+          class="inline-flex items-center justify-center py-2 px-4 border border-transparent shadow-xs text-sm font-medium rounded-xs text-white {% if secondary %}bg-gray-600 hover:bg-gray-500 focus:ring-gray-500{% else %}bg-[var(--color-border-dark)] hover:bg-[var(--color-text-gray)] focus:ring-2 focus:ring-[var(--color-border-dark)]{% endif %} focus:outline-hidden focus:ring-2 focus:ring-offset-2 {{ submit_class }}">
       {% if not submit_icon_none %}
       <svg class="h-4 w-4 mr-1.5" fill="currentColor" viewBox="0 0 20 20">
         {% if submit_icon == "delete" %}

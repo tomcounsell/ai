@@ -70,55 +70,55 @@ The `templates/layout/` directory contains layout elements that make up the page
 The project uses a minimalist design system with a focused color palette:
 
 ### Color System
-- **Primary**: Deep navy blue from the theme palette:
-  - `navy-900: #0a192f` - Primary buttons, footer background
-  - `navy-800: #112240` - Button hover states
-  - `navy-700: #1d3557` - Borders, focus rings, secondary accents
-- **Accent**: Yellow (`accent: #ffd404`) used sparingly for important highlights and decorative elements
-- **Grayscale**: Consistent gray shades for UI elements and text:
-  - `gray-900` through `gray-700`: Primary and secondary text
-  - `gray-600` through `gray-400`: Tertiary text, icons, and disabled states
-  - `gray-300` through `gray-100`: Borders, dividers, and background variations
-  - `gray-50`: Very light background for secondary content areas
-- **Feedback**: Standard semantic colors for system feedback:
-  - Red: Errors and destructive actions
-  - Green: Success and completion states
-  - Yellow: Warnings and attention states
+
+All colors are defined as CSS variables in `static/css/brand.css`. Use brand variables via Tailwind arbitrary values instead of generic Tailwind color classes.
+
+- **Backgrounds**: `var(--color-bg-cream)` (#FAF9F6), `var(--color-bg-white)`, `var(--color-bg-warm-gray)` (#F5F4F1)
+- **Text**: `var(--color-text-black)` (#1A1A1A), `var(--color-text-charcoal)`, `var(--color-text-gray)` (#5A5A5A), `var(--color-text-light-gray)` (#8A8A8A)
+- **Borders**: `var(--color-border-dark)` (#3A3A3A), `var(--color-border-medium)` (#C4C4C4), `var(--color-border-light)` (#E5E5E5)
+- **Accent**: Red (#B91C1C) — annotations, active states, emphasis. Never a surface color.
+- **Feedback**: Standard semantic colors for system feedback (red for errors, green for success)
+
+**Usage pattern** — use Tailwind arbitrary values with CSS variables:
+```html
+<span class="text-[var(--color-text-gray)]">Secondary text</span>
+<div class="border-[var(--color-border-medium)]">Bordered container</div>
+<button class="focus:ring-[var(--color-border-dark)]">Focused element</button>
+```
+
+**Do NOT use** generic Tailwind color classes like `bg-slate-*`, `ring-blue-*`, `text-slate-*` — use brand CSS variables instead.
 
 ### Standardized UI Elements
 
 #### Buttons
-- **Primary Buttons**:
-  ```html
-  class="inline-flex justify-center py-2 px-4 border border-transparent shadow-sm text-sm 
-  font-medium rounded-md text-white bg-slate-900 hover:bg-slate-800 focus:outline-none 
-  focus:ring-2 focus:ring-offset-2 focus:ring-slate-700"
-  ```
 
-- **Secondary/Gray Buttons**:
-  ```html
-  class="inline-flex justify-center py-2 px-4 border border-gray-300 shadow-sm text-sm 
-  font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none 
-  focus:ring-2 focus:ring-offset-2 focus:ring-gray-500"
-  ```
+Use brand.css button classes instead of inline Tailwind:
+
+- **Primary**: `class="btn-brand"` — white bg, dark border, monospace uppercase, inverts on hover
+- **Accent**: `class="btn-brand-accent"` — red border/text, fills red on hover (one per page max)
 
 #### Links
-- **Standard Links**: `class="text-slate-700 hover:text-slate-900"`
-- **Subtle Links**: `class="text-gray-600 hover:text-slate-700 hover:underline"`
+- **Standard Links**: `class="text-[var(--color-text-gray)] hover:text-[var(--color-text-black)]"`
+- **Footer Links**: `class="footer-link"` — gray links that darken on hover
 
 #### Cards/Panels
-- **Standard Card**: `class="bg-white shadow rounded-lg p-6"`
-- **Bordered Card**: `class="bg-white shadow rounded-lg overflow-hidden"` with inner container `class="border-l-4 border-slate-700 p-6"`
+
+Use brand.css card classes:
+
+- **Technical Card**: `class="card-technical"` — 1px medium border, white bg, darkens on hover
+- **Spec Box**: `class="technical-spec-box"` — 2px dark border with inset inner border (hero sections)
+- **Server Card**: `class="server-card"` — product card styling
+- **Product Card**: `class="product-card"` — homepage multi-product cards
 
 #### Form Elements
 - **Form Layout**: Use `space-y-6` for vertical spacing and `grid` for multi-column layouts
 - **Form Groups**: Apply consistent spacing with `class="mb-4"` or `class="space-y-2"`
-- **Form Labels**: `class="block text-sm font-medium text-gray-700 mb-2"`
-- **Form Inputs**: `class="block w-full rounded-md border-gray-300 shadow-sm focus:border-slate-700 focus:ring-slate-700 sm:text-sm"`
+- **Form Labels**: `class="block text-sm font-medium text-[var(--color-text-gray)] mb-2"`
+- **Form Inputs**: `class="block w-full rounded-md border-[var(--color-border-medium)] shadow-sm focus:border-[var(--color-border-dark)] focus:ring-[var(--color-border-dark)] sm:text-sm"`
 
-#### Badges/Pills
-- **Status Badges**: `class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-slate-100 text-slate-800"`
-- **Alternative Badges**: Use gray-scale for neutral states and standard semantic colors for others
+#### Status Indicators
+- **Status Dots**: `class="status-indicator status-operational"` (green), `status-offline` (red), `status-development` (amber)
+- **Labels**: `class="label"` — monospace uppercase, or `class="text-technical-label"` for inline use
 
 ### Design Principles
 - **Minimalist**: Clean layouts with ample white space
@@ -170,7 +170,7 @@ The examples page demonstrates the following standards:
 - Button styles for primary and secondary actions
 - Card/panel layouts with consistent styling
 - Form element styling and organization
-- Consistent use of navy and grayscale color palette
+- Consistent use of brand.css color variables and component classes
 - Modal component usage and styling
 - Status badges and indicators
 
@@ -183,15 +183,15 @@ Form components provide consistent styling and error handling:
 ```html
 <!-- Basic Input -->
 <div class="sm:col-span-3">
-  <label for="id_first_name" class="block text-sm font-medium text-gray-700">
+  <label for="id_first_name" class="block text-sm font-medium text-[var(--color-text-gray)]">
     First Name
   </label>
   <div class="mt-1">
-    <input type="text" name="first_name" id="id_first_name" value="{{ value|default:'' }}" 
-      class="block w-full rounded-md border-gray-300 shadow-sm focus:border-slate-700 focus:ring-slate-700 sm:text-sm" />
+    <input type="text" name="first_name" id="id_first_name" value="{{ value|default:'' }}"
+      class="block w-full rounded-md border-[var(--color-border-medium)] shadow-sm focus:border-[var(--color-border-dark)] focus:ring-[var(--color-border-dark)] sm:text-sm" />
   </div>
   {% if errors %}
-    <p class="mt-2 text-sm text-red-600">{{ errors.0 }}</p>
+    <p class="mt-2 text-sm text-[var(--color-accent)]">{{ errors.0 }}</p>
   {% endif %}
 </div>
 
@@ -201,17 +201,17 @@ Form components provide consistent styling and error handling:
 
 ### Button Styles
 
-The project uses consistent button styling:
+Use brand.css button classes for consistent styling:
 
 ```html
 <!-- Primary Button -->
-<button type="submit" class="inline-flex justify-center py-2 px-4 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-slate-900 hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-slate-700">
+<button type="submit" class="btn-brand">
   Primary Action
 </button>
 
-<!-- Secondary Button -->
-<button type="button" class="inline-flex justify-center py-2 px-4 border border-gray-300 shadow-sm text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-slate-500">
-  Secondary Action
+<!-- Accent Button (use sparingly — one per page max) -->
+<button type="button" class="btn-brand-accent">
+  Accent Action
 </button>
 ```
 

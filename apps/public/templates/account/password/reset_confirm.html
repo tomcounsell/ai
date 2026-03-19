@@ -6,7 +6,7 @@
 <div class="container mx-auto max-w-md px-4 py-12">
   <div class="text-center mb-8">
     <h1 class="text-2xl font-bold mb-2">Set New Password</h1>
-    <p class="text-gray-600">
+    <p class="text-[var(--color-text-gray)]">
       Please enter your new password twice to verify.
     </p>
   </div>
@@ -17,13 +17,13 @@
         {% csrf_token %}
 
         {% if form.non_field_errors %}
-          <div class="mb-4 p-3 bg-red-100 text-red-700 rounded-xs">
+          <div class="mb-4 p-3 bg-[var(--color-accent-subtle)] text-[var(--color-accent)] rounded-xs">
             {{ form.non_field_errors }}
           </div>
         {% endif %}
 
         <div class="mb-4">
-          <label for="{{ form.new_password1.id_for_label }}" class="block text-gray-700 font-semibold mb-2">
+          <label for="{{ form.new_password1.id_for_label }}" class="block text-[var(--color-text-gray)] font-semibold mb-2">
             New Password
           </label>
           {{ form.new_password1 }}
@@ -31,7 +31,7 @@
             <p class="text-red-500 text-sm mt-1">{{ form.new_password1.errors.0 }}</p>
           {% endif %}
           {% if form.new_password1.help_text %}
-            <div class="text-gray-500 text-sm mt-1">
+            <div class="text-[var(--color-text-light-gray)] text-sm mt-1">
               <ul class="list-disc pl-5">
                 {% for help_text in form.new_password1.help_text|split:'<li>' %}
                   {% if not forloop.first %}
@@ -44,7 +44,7 @@
         </div>
 
         <div class="mb-4">
-          <label for="{{ form.new_password2.id_for_label }}" class="block text-gray-700 font-semibold mb-2">
+          <label for="{{ form.new_password2.id_for_label }}" class="block text-[var(--color-text-gray)] font-semibold mb-2">
             Confirm New Password
           </label>
           {{ form.new_password2 }}
@@ -58,7 +58,7 @@
         </button>
       </form>
     {% else %}
-      <div class="p-4 bg-yellow-50 text-yellow-700 rounded-xs">
+      <div class="p-4 bg-[var(--color-bg-warm-gray)] text-[var(--color-text-charcoal)] rounded-xs">
         <h2 class="font-semibold mb-2">Invalid Password Reset Link</h2>
         <p>
           This password reset link is invalid, possibly because it has already been used

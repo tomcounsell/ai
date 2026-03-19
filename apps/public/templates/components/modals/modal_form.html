@@ -84,7 +84,7 @@
         {% for field in form %}
           {% if field.name == 'title' %}
             <div class="col-span-full">
-              <label for="id_{{ field.name }}" class="block text-sm font-semibold text-slate-700 mb-1">
+              <label for="id_{{ field.name }}" class="block text-sm font-semibold text-[var(--color-text-gray)] mb-1">
                 {{ field.label }}{% if field.field.required %} <span class="text-red-500">*</span>{% endif %}
               </label>
 
@@ -93,7 +93,7 @@
                 id="id_{{ field.name }}"
                 name="{{ field.name }}"
                 value="{% if field.value %}{{ field.value }}{% endif %}"
-                class="block w-full rounded-xs px-3 py-2 border border-gray-300 bg-white focus:outline-hidden focus:ring-2 focus:ring-slate-600 focus:border-slate-600 shadow-xs text-sm {% if field.errors %}border-red-500 focus:border-red-500 focus:ring-red-200{% endif %}"
+                class="block w-full rounded-xs px-3 py-2 border border-gray-300 bg-white focus:outline-hidden focus:ring-2 focus:ring-[var(--color-border-dark)] focus:border-[var(--color-border-dark)] shadow-xs text-sm {% if field.errors %}border-red-500 focus:border-red-500 focus:ring-red-200{% endif %}"
                 placeholder="Enter title"
                 {% if field.field.required %}required{% endif %}
                 autocomplete="off"
@@ -116,7 +116,7 @@
           {% for field in form %}
             {% if field.name == 'status' %}
               <div>
-                <label for="id_{{ field.name }}" class="block text-sm font-semibold text-slate-700 mb-1">
+                <label for="id_{{ field.name }}" class="block text-sm font-semibold text-[var(--color-text-gray)] mb-1">
                   {{ field.label }}{% if field.field.required %} <span class="text-red-500">*</span>{% endif %}
                 </label>
 
@@ -124,7 +124,7 @@
                   <select
                     id="id_{{ field.name }}"
                     name="{{ field.name }}"
-                    class="appearance-none block w-full rounded-xs border-gray-300 {% if field.field.disabled %}bg-gray-100 text-gray-500{% else %}bg-white{% endif %} focus:outline-hidden focus:ring-2 focus:ring-slate-600 focus:border-slate-600 shadow-xs py-2 text-sm pr-8 {% if field.errors %}border-red-500 focus:border-red-500 focus:ring-red-200{% endif %}"
+                    class="appearance-none block w-full rounded-xs border-gray-300 {% if field.field.disabled %}bg-gray-100 text-gray-500{% else %}bg-white{% endif %} focus:outline-hidden focus:ring-2 focus:ring-[var(--color-border-dark)] focus:border-[var(--color-border-dark)] shadow-xs py-2 text-sm pr-8 {% if field.errors %}border-red-500 focus:border-red-500 focus:ring-red-200{% endif %}"
                     {% if field.field.required %}required{% endif %}
                     {% if field.field.disabled %}disabled{% endif %}
                   >
@@ -153,7 +153,7 @@
               </div>
             {% elif field.name == 'priority' %}
               <div>
-                <label for="id_{{ field.name }}" class="block text-sm font-semibold text-slate-700 mb-1">
+                <label for="id_{{ field.name }}" class="block text-sm font-semibold text-[var(--color-text-gray)] mb-1">
                   {{ field.label }}{% if field.field.required %} <span class="text-red-500">*</span>{% endif %}
                 </label>
 
@@ -161,7 +161,7 @@
                   <select
                     id="id_{{ field.name }}"
                     name="{{ field.name }}"
-                    class="appearance-none block w-full rounded-xs border-gray-300 bg-white focus:outline-hidden focus:ring-2 focus:ring-slate-600 focus:border-slate-600 shadow-xs py-2 text-sm pr-8 {% if field.errors %}border-red-500 focus:border-red-500 focus:ring-red-200{% endif %}"
+                    class="appearance-none block w-full rounded-xs border-gray-300 bg-white focus:outline-hidden focus:ring-2 focus:ring-[var(--color-border-dark)] focus:border-[var(--color-border-dark)] shadow-xs py-2 text-sm pr-8 {% if field.errors %}border-red-500 focus:border-red-500 focus:ring-red-200{% endif %}"
                     {% if field.field.required %}required{% endif %}
                   >
                     {% for priority_value, priority_label in form.fields.priority.choices %}
@@ -188,21 +188,21 @@
               </div>
             {% elif field.name == 'cost_estimate' %}
               <div>
-                <label for="id_{{ field.name }}" class="block text-sm font-semibold text-slate-700 mb-1">
+                <label for="id_{{ field.name }}" class="block text-sm font-semibold text-[var(--color-text-gray)] mb-1">
                   {{ field.label }}{% if field.field.required %} <span class="text-red-500">*</span>{% endif %}
                 </label>
 
                 <!-- Cost Estimate with $ prefix -->
                 <div class="relative rounded-xs shadow-xs">
                   <div class="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3">
-                    <span class="text-slate-500 sm:text-sm">$</span>
+                    <span class="text-[var(--color-text-light-gray)] sm:text-sm">$</span>
                   </div>
                   <input
                     type="number"
                     id="id_{{ field.name }}"
                     name="{{ field.name }}"
                     value="{% if field.value %}{{ field.value }}{% endif %}"
-                    class="block w-full rounded-xs px-3 py-2 border border-gray-300 bg-white focus:outline-hidden focus:ring-2 focus:ring-slate-600 focus:border-slate-600 pl-7 shadow-xs text-sm {% if field.errors %}border-red-500 focus:border-red-500 focus:ring-red-200{% endif %}"
+                    class="block w-full rounded-xs px-3 py-2 border border-gray-300 bg-white focus:outline-hidden focus:ring-2 focus:ring-[var(--color-border-dark)] focus:border-[var(--color-border-dark)] pl-7 shadow-xs text-sm {% if field.errors %}border-red-500 focus:border-red-500 focus:ring-red-200{% endif %}"
                     min="0"
                     step="1"
                     placeholder="0"
@@ -231,7 +231,7 @@
         {% for field in form %}
           {% if field.name == 'description' %}
             <div class="col-span-full">
-              <label for="id_{{ field.name }}" class="block text-sm font-semibold text-slate-700 mb-1">
+              <label for="id_{{ field.name }}" class="block text-sm font-semibold text-[var(--color-text-gray)] mb-1">
                 {{ field.label }}{% if field.field.required %} <span class="text-red-500">*</span>{% endif %}
               </label>
 
@@ -239,7 +239,7 @@
                 id="id_{{ field.name }}"
                 name="{{ field.name }}"
                 rows="4"
-                class="block w-full rounded-xs px-3 py-2 border border-gray-300 bg-white focus:outline-hidden focus:ring-2 focus:ring-slate-600 focus:border-slate-600 shadow-xs text-sm {% if field.errors %}border-red-500 focus:border-red-500 focus:ring-red-200{% endif %}"
+                class="block w-full rounded-xs px-3 py-2 border border-gray-300 bg-white focus:outline-hidden focus:ring-2 focus:ring-[var(--color-border-dark)] focus:border-[var(--color-border-dark)] shadow-xs text-sm {% if field.errors %}border-red-500 focus:border-red-500 focus:ring-red-200{% endif %}"
                 placeholder="Describe this in detail"
                 {% if field.field.required %}required{% endif %}
               >{% if field.value %}{{ field.value }}{% endif %}</textarea>
@@ -261,7 +261,7 @@
           {% for field in form %}
             {% if field.name == 'effort' %}
               <div>
-                <label for="id_{{ field.name }}" class="block text-sm font-semibold text-slate-700 mb-1">
+                <label for="id_{{ field.name }}" class="block text-sm font-semibold text-[var(--color-text-gray)] mb-1">
                   {{ field.label }}{% if field.field.required %} <span class="text-red-500">*</span>{% endif %}
                 </label>
 
@@ -269,7 +269,7 @@
                   <select
                     id="id_{{ field.name }}"
                     name="{{ field.name }}"
-                    class="appearance-none block w-full rounded-xs px-3 py-2 border border-gray-300 bg-white focus:outline-hidden focus:ring-2 focus:ring-slate-600 focus:border-slate-600 shadow-xs text-sm pr-8 {% if field.errors %}border-red-500 focus:border-red-500 focus:ring-red-200{% endif %}"
+                    class="appearance-none block w-full rounded-xs px-3 py-2 border border-gray-300 bg-white focus:outline-hidden focus:ring-2 focus:ring-[var(--color-border-dark)] focus:border-[var(--color-border-dark)] shadow-xs text-sm pr-8 {% if field.errors %}border-red-500 focus:border-red-500 focus:ring-red-200{% endif %}"
                     {% if field.field.required %}required{% endif %}
                   >
                     <option value="">Select Effort</option>
@@ -297,7 +297,7 @@
               </div>
             {% elif field.name == 'value' %}
               <div>
-                <label for="id_{{ field.name }}" class="block text-sm font-semibold text-slate-700 mb-1">
+                <label for="id_{{ field.name }}" class="block text-sm font-semibold text-[var(--color-text-gray)] mb-1">
                   {{ field.label }}{% if field.field.required %} <span class="text-red-500">*</span>{% endif %}
                 </label>
 
@@ -305,7 +305,7 @@
                   <select
                     id="id_{{ field.name }}"
                     name="{{ field.name }}"
-                    class="appearance-none block w-full rounded-xs px-3 py-2 border border-gray-300 bg-white focus:outline-hidden focus:ring-2 focus:ring-slate-600 focus:border-slate-600 shadow-xs text-sm pr-8 {% if field.errors %}border-red-500 focus:border-red-500 focus:ring-red-200{% endif %}"
+                    class="appearance-none block w-full rounded-xs px-3 py-2 border border-gray-300 bg-white focus:outline-hidden focus:ring-2 focus:ring-[var(--color-border-dark)] focus:border-[var(--color-border-dark)] shadow-xs text-sm pr-8 {% if field.errors %}border-red-500 focus:border-red-500 focus:ring-red-200{% endif %}"
                     {% if field.field.required %}required{% endif %}
                   >
                     <option value="">Select Value</option>
@@ -340,13 +340,13 @@
           {% for field in form %}
             {% if field.name == 'tags' %}
               <div>
-                <label for="id_{{ field.name }}" class="block text-sm font-semibold text-slate-700 mb-1">
+                <label for="id_{{ field.name }}" class="block text-sm font-semibold text-[var(--color-text-gray)] mb-1">
                   {{ field.label }}{% if field.field.required %} <span class="text-red-500">*</span>{% endif %}
                 </label>
 
                 <div class="relative">
                   <div class="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3">
-                    <svg class="h-4 w-4 text-slate-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <svg class="h-4 w-4 text-[var(--color-text-light-gray)]" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" />
                     </svg>
                   </div>
@@ -355,7 +355,7 @@
                     id="id_{{ field.name }}"
                     name="{{ field.name }}"
                     value="{% if field.value %}{{ field.value|join:", " }}{% endif %}"
-                    class="block w-full rounded-xs px-3 py-2 border border-gray-300 bg-white focus:outline-hidden focus:ring-2 focus:ring-slate-600 focus:border-slate-600 shadow-xs text-sm pl-10 {% if field.errors %}border-red-500 focus:border-red-500 focus:ring-red-200{% endif %}"
+                    class="block w-full rounded-xs px-3 py-2 border border-gray-300 bg-white focus:outline-hidden focus:ring-2 focus:ring-[var(--color-border-dark)] focus:border-[var(--color-border-dark)] shadow-xs text-sm pl-10 {% if field.errors %}border-red-500 focus:border-red-500 focus:ring-red-200{% endif %}"
                     placeholder="Enter comma-separated tags"
                     {% if field.field.required %}required{% endif %}
                   >
@@ -371,8 +371,8 @@
                 {% endif %}
 
                 {% if not field.errors %}
-                  <p class="text-xs text-slate-500 mt-1 flex items-center">
-                    <svg class="w-3 h-3 mr-1 text-slate-400" fill="currentColor" viewBox="0 0 20 20">
+                  <p class="text-xs text-[var(--color-text-light-gray)] mt-1 flex items-center">
+                    <svg class="w-3 h-3 mr-1 text-[var(--color-text-light-gray)]" fill="currentColor" viewBox="0 0 20 20">
                       <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zm-1 9a1 1 0 11-2 0 1 1 0 012 0z" clip-rule="evenodd"></path>
                     </svg>
                     Enter tags separated by commas
@@ -381,13 +381,13 @@
               </div>
             {% elif field.name == 'due_at' %}
               <div>
-                <label for="id_{{ field.name }}" class="block text-sm font-semibold text-slate-700 mb-1">
+                <label for="id_{{ field.name }}" class="block text-sm font-semibold text-[var(--color-text-gray)] mb-1">
                   {{ field.label }}{% if field.field.required %} <span class="text-red-500">*</span>{% endif %}
                 </label>
 
                 <div class="relative">
                   <div class="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3">
-                    <svg class="h-4 w-4 text-slate-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <svg class="h-4 w-4 text-[var(--color-text-light-gray)]" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
                     </svg>
                   </div>
@@ -396,7 +396,7 @@
                     id="id_{{ field.name }}"
                     name="{{ field.name }}"
                     value="{% if field.value %}{{ field.value|date:'Y-m-d' }}{% endif %}"
-                    class="block w-full rounded-xs px-3 py-2 border border-gray-300 bg-white focus:outline-hidden focus:ring-2 focus:ring-slate-600 focus:border-slate-600 shadow-xs text-sm pl-10 {% if field.errors %}border-red-500 focus:border-red-500 focus:ring-red-200{% endif %}"
+                    class="block w-full rounded-xs px-3 py-2 border border-gray-300 bg-white focus:outline-hidden focus:ring-2 focus:ring-[var(--color-border-dark)] focus:border-[var(--color-border-dark)] shadow-xs text-sm pl-10 {% if field.errors %}border-red-500 focus:border-red-500 focus:ring-red-200{% endif %}"
                     {% if field.field.required %}required{% endif %}
                   >
                 </div>
@@ -420,7 +420,7 @@
             {{ field }}
           {% elif field.name != 'title' and field.name != 'description' and field.name != 'status' and field.name != 'priority' and field.name != 'cost_estimate' and field.name != 'effort' and field.name != 'value' and field.name != 'tags' and field.name != 'due_at' %}
             <div class="sm:col-span-4 col-span-full">
-              <label for="id_{{ field.name }}" class="block text-sm font-semibold text-slate-700 mb-1">
+              <label for="id_{{ field.name }}" class="block text-sm font-semibold text-[var(--color-text-gray)] mb-1">
                 {{ field.label }}{% if field.field.required %} <span class="text-red-500">*</span>{% endif %}
               </label>
 
@@ -429,7 +429,7 @@
                 id="id_{{ field.name }}"
                 name="{{ field.name }}"
                 value="{% if field.value %}{{ field.value }}{% endif %}"
-                class="block w-full rounded-xs px-3 py-2 border border-gray-300 bg-white focus:outline-hidden focus:ring-2 focus:ring-slate-600 focus:border-slate-600 shadow-xs text-sm {% if field.errors %}border-red-500 focus:border-red-500 focus:ring-red-200{% endif %}"
+                class="block w-full rounded-xs px-3 py-2 border border-gray-300 bg-white focus:outline-hidden focus:ring-2 focus:ring-[var(--color-border-dark)] focus:border-[var(--color-border-dark)] shadow-xs text-sm {% if field.errors %}border-red-500 focus:border-red-500 focus:ring-red-200{% endif %}"
                 {% if field.field.required %}required{% endif %}
               >
 
@@ -462,7 +462,7 @@
     <button
       type="button"
       id="{{ form_id|default:modal_id|add:'-submit' }}"
-      class="inline-flex w-full items-center justify-center rounded-xs border border-transparent bg-slate-700 px-4 py-2 text-sm font-medium text-white shadow-xs hover:bg-slate-600 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-slate-600 sm:w-auto"
+      class="inline-flex w-full items-center justify-center rounded-xs border border-transparent bg-[var(--color-border-dark)] px-4 py-2 text-sm font-medium text-white shadow-xs hover:bg-[var(--color-text-gray)] focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-[var(--color-border-dark)] sm:w-auto"
       onclick="document.getElementById('{{ form_id|default:modal_id|add:'-form' }}').requestSubmit(); setTimeout(() => { if (!document.querySelector('.field-errors')) this.closest('.modal-container').innerHTML = '' }, 300)"
     >
       <span>{{ submit_text|default:"Submit" }}</span>
@@ -477,10 +477,10 @@
     <button
       type="button"
       id="{{ form_id|default:modal_id|add:'-cancel' }}"
-      class="inline-flex w-full items-center justify-center rounded-xs border border-gray-300 shadow-xs text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-slate-500 px-4 py-2 sm:w-auto"
+      class="inline-flex w-full items-center justify-center rounded-xs border border-gray-300 shadow-xs text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-[var(--color-border-dark)] px-4 py-2 sm:w-auto"
       onclick="this.closest('.modal-container').innerHTML = ''"
     >
-      <svg class="h-4 w-4 mr-1.5 text-slate-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <svg class="h-4 w-4 mr-1.5 text-[var(--color-text-light-gray)]" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
       </svg>
       {{ cancel_text|default:"Cancel" }}
