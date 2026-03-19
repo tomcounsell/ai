@@ -383,19 +383,16 @@ def load_principal_context(condensed: bool = True) -> str:
     # This keeps the worker prompt lean while providing strategic context.
     import re
 
-    sections_to_extract = ["Mission", "Goals.*", "Projects.*"]
+    sections_to_extract = ["Mission", r"Goals[^\n]*", r"Projects[^\n]*"]
     extracted = []
     for pattern in sections_to_extract:
         match = re.search(
-            rf"^## {pattern}\n\n(.*?)(?=\n---|\n## |\Z)",
+            rf"^(## {pattern})\n\n(.*?)(?=\n---|\n## |\Z)",
             content,
             re.MULTILINE | re.DOTALL,
         )
         if match:
-            # Include the section header for clarity
-            header_match = re.search(rf"^(## {pattern})", content, re.MULTILINE)
-            header = header_match.group(1) if header_match else ""
-            extracted.append(f"{header}\n\n{match.group(1).strip()}")
+            extracted.append(f"{match.group(1)}\n\n{match.group(2).strip()}")
 
     if not extracted:
         # Fallback: return first 500 chars if section extraction fails
