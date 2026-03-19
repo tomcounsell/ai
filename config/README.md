@@ -9,13 +9,16 @@ Main configuration file that defines which projects Valor monitors and how it re
 
 **IMPORTANT**: This file is git-ignored because it contains machine-specific paths and settings.
 
-### `projects.json.example` (Template)
-Template file with complete field documentation. Copy this to create your `projects.json`:
+### `projects.example.json` (Template)
+Canonical template with complete field documentation. Copy this to create your `projects.json`:
 
 ```bash
-cp config/projects.json.example config/projects.json
+cp config/projects.example.json config/projects.json
 # Edit config/projects.json with your settings
 ```
+
+### `secrets/` (Git-ignored)
+Directory for sensitive credentials (Google OAuth tokens, etc.). Created automatically by the settings system.
 
 ### `SOUL.md`
 Valor's persona definition and system prompt.
@@ -24,8 +27,8 @@ Valor's persona definition and system prompt.
 
 Every project configuration MUST include:
 
-- **`working_directory`**: Absolute path to the project directory where the agent operates
-  - Example: `"/Users/yourname/src/popoto"`
+- **`working_directory`**: Path to the project directory where the agent operates
+  - Example: `"~/src/popoto"` (tilde is expanded at runtime)
   - This is where the agent will run commands, read/write files, and execute work
   - Missing this field will cause Path(None) errors
 
@@ -33,21 +36,21 @@ Every project configuration MUST include:
 
 1. **Copy the example file**:
    ```bash
-   cp config/projects.json.example config/projects.json
+   cp config/projects.example.json config/projects.json
    ```
 
 2. **Edit working directories**:
-   Update all `working_directory` fields with your actual paths:
+   Update all `working_directory` fields with your actual paths (tilde `~` is expanded at runtime):
    ```json
    {
      "projects": {
        "my-project": {
-         "working_directory": "/Users/yourname/src/my-project",
+         "working_directory": "~/src/my-project",
          ...
        }
      },
      "defaults": {
-       "working_directory": "/Users/yourname/src/ai"
+       "working_directory": "~/src/ai"
      }
    }
    ```
@@ -108,4 +111,4 @@ Restart the bridge after editing `projects.json`:
 
 ## Example Configuration
 
-See `projects.json.example` for a complete, documented example with all available fields.
+See `projects.example.json` for a complete, documented example with all available fields.

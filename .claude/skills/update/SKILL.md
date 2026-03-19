@@ -118,12 +118,12 @@ uv sync --all-extras
 
 ### Missing dependencies after update
 ```bash
-cd /Users/valorengels/src/ai
+cd ~/src/ai
 uv sync --all-extras --reinstall
 ```
 
 ### Calendar integration not working
-1. Check OAuth token: `ls ~/Desktop/claude_code/google_token.json`
+1. Check OAuth token: `ls config/secrets/google_token.json`
 2. Re-run OAuth: `valor-calendar test`
 3. Check deps: `.venv/bin/python -c "import google_auth_oauthlib; print('OK')"`
 

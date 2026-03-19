@@ -164,7 +164,7 @@ Example configuration:
 }
 ```
 
-See `config/projects.json.example` for a complete template with all available fields.
+See `config/projects.example.json` for a complete template with all available fields.
 
 Set which projects this machine monitors:
 ```bash
