@@ -870,7 +870,7 @@ def _render_stage_progress(session) -> str | None:
 
     # Use state machine when stage_states is available (must be a str or dict)
     stage_states = getattr(session, "stage_states", None)
-    if stage_states and isinstance(stage_states, (str, dict)):
+    if stage_states and isinstance(stage_states, str | dict):
         try:
             from bridge.pipeline_state import PipelineStateMachine
 
