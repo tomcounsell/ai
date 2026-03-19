@@ -9,11 +9,11 @@ from pathlib import Path
 
 import pytest
 
-# Project root derived from file location (tests/integration/ -> project root)
-_PROJECT_ROOT = str(Path(__file__).parent.parent.parent)
-
 from agent.job_queue import PRIORITY_RANK, _extract_job_fields, _pop_job
 from models.agent_session import AgentSession
+
+# Project root derived from file location (tests/integration/ -> project root)
+_PROJECT_ROOT = str(Path(__file__).parent.parent.parent)
 
 # === Fixtures ===
 
