@@ -29,7 +29,7 @@ Project and system configuration is scattered across 13+ categories of tech debt
 - One config architecture with clear ownership: `config/settings.py` as the single source of truth for runtime config
 - Zero hardcoded absolute paths — all derived from `Path.home()` or `Path(__file__)`
 - One canonical Telegram session name
-- `~/Desktop/claude_code/` contents migrated to `config/` or `data/` with env var overrides
+- `~/Desktop/claude_code/` fully abandoned — our files live in `~/Desktop/Valor/` (iCloud-synced), no fallback chains
 - `.env.example` complete and accurate
 - `data/` directory documented with cleanup policy
 - Vestigial config files removed
@@ -96,7 +96,7 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/config_consoli
 - **Settings expansion**: Add Redis, Google auth, paths, and model sections to `config/settings.py`
 - **Path resolver**: Utility that derives all paths from `Path.home()` and `Path(__file__).resolve()` — no hardcoded usernames
 - **Session name unification**: Single `TELEGRAM_SESSION_NAME` with `valor_bridge` as canonical default everywhere
-- **Config migration**: Move `~/Desktop/claude_code/` contents into `config/secrets/` (gitignored) with env var overrides
+- **Config migration**: Move our config files from `~/Desktop/claude_code/` to `~/Desktop/Valor/` (iCloud-synced across machines). No fallback chains — single canonical path, fail loudly if missing. Remove `config/secrets/` (unnecessary now). Claude CLI's own files (`claude_oauth_config.json`, `output-styles/`, etc.) stay in `claude_code/` — not ours to move.
 - **Vestigial cleanup**: Remove `telegram_groups.json`, `workspace_config.json`, `projects.json.example` (keep `projects.example.json` as the canonical example)
 - **Env var documentation**: Update `.env.example` with all env vars actually used in code
 - **Data directory policy**: Add `data/README.md` documenting each file/directory and cleanup schedule
@@ -111,8 +111,9 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/config_consoli
 - Create `config/paths.py` with `PROJECT_ROOT = Path(__file__).resolve().parent.parent` and derived paths
 - Replace all `/Users/valorengels` references with path resolver calls
 - Unify session name to `valor_bridge` in `config/settings.py`, `telegram_bridge.py`, `telegram_login.py`, `test_emoji_reactions.py`
-- Move Google auth tokens from `~/Desktop/claude_code/` to `config/secrets/` with `GOOGLE_CREDENTIALS_DIR` env var override
-- Move DM whitelist to `config/dm_whitelist.json` with env var override
+- Move Google auth tokens, DM whitelist, and calendar config from `~/Desktop/claude_code/` to `~/Desktop/Valor/` — no fallback chains
+- `GoogleAuthSettings.credentials_dir` default becomes `~/Desktop/Valor` (env var `GOOGLE_CREDENTIALS_DIR` for override)
+- Remove `config/secrets/` directory — secrets belong in `~/Desktop/Valor/` (iCloud-synced) or `.env`, never in the repo tree
 - Add `REDIS_URL` to settings.py and update `bridge/dedup.py` to use it
 - Add `OLLAMA_VISION_MODEL` to `config/models.py` and update `bridge/media.py`
 - Generate launchd plists from template using `$HOME` instead of hardcoded paths
@@ -127,7 +128,7 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/config_consoli
 ### Empty/Invalid Input Handling
 - [ ] `REDIS_URL=""` should fall back to default, not crash
 - [ ] `TELEGRAM_SESSION_NAME=""` should fall back to `valor_bridge`
-- [ ] Missing `config/secrets/` directory should be auto-created on first access
+- [ ] Missing `~/Desktop/Valor/` directory should raise a clear error pointing to setup instructions
 
 ### Error State Rendering
 - [ ] Bridge startup with missing config should log clear error messages indicating which config is missing
@@ -146,8 +147,8 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/config_consoli
 
 - **Rewriting projects.json schema**: The current schema works. Don't redesign it — just add missing per-project fields (testing credentials, calendar mappings)
 - **Abstracting launchd plist generation**: A simple sed/envsubst template is fine. Don't build a plist generator framework.
-- **Multi-machine config sync**: Out of scope. Each machine has its own `.env` and `config/secrets/`. The `/update` skill handles code sync.
-- **Migrating away from `~/Desktop/claude_code/` for Claude OAuth**: The Claude CLI owns that path. Only migrate files *we* control (Google tokens, DM whitelist, calendar config).
+- **Multi-machine config sync beyond iCloud**: `~/Desktop/Valor/` handles shared secrets via iCloud. Don't build anything more complex.
+- **Migrating Claude CLI's own files**: `claude_oauth_config.json`, `output-styles/`, `tool-hooks/`, `statusline-command.sh` stay in `~/Desktop/claude_code/`. Not ours.
 
 ## Risks
 
@@ -157,7 +158,7 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/config_consoli
 
 ### Risk 2: Google auth breaks after path migration
 **Impact:** Calendar, Gmail, Drive tools stop working
-**Mitigation:** Symlink old path to new location during transition. Add env var override so rollback is a single `.env` change.
+**Mitigation:** `~/Desktop/Valor/` is the single path — no fallback. If missing, code fails loudly with clear error. `GOOGLE_CREDENTIALS_DIR` env var available as override. Update script handles one-time migration from `claude_code/` to `Valor/`.
 
 ### Risk 3: Launchd plists break after template conversion
 **Impact:** Reflections, issue poller, watchdog stop running
@@ -170,8 +171,7 @@ No race conditions identified. Config is loaded at startup and cached. The bridg
 ## No-Gos (Out of Scope)
 
 - Redesigning `projects.json` schema (separate issue)
-- Multi-machine config sync or central config server
-- Migrating Claude CLI's own OAuth config from `~/Desktop/claude_code/`
+- Migrating Claude CLI's own files from `~/Desktop/claude_code/` (their dir, not ours)
 - Cleaning up `data/pipeline/` contents (54 subdirs) — just document the policy
 - Removing `doc_embeddings.json` (46MB) — just document it and add to cleanup schedule
 - Changing the update/deployment architecture
@@ -186,9 +186,8 @@ More importantly: once this plan consolidates the `github.org` and `github.repo`
 ## Update System
 
 The update skill (`scripts/remote-update.sh`) needs changes:
-- After pull, check if `config/secrets/` directory exists; create if missing
-- If migrating from `~/Desktop/claude_code/`, copy Google tokens and DM whitelist to `config/secrets/` on first update
-- Add `config/secrets/` to `.gitignore` (it holds per-machine secrets)
+- Check if `~/Desktop/Valor/` exists; if not, create it and migrate files from `~/Desktop/claude_code/` (google_credentials.json, google_token.json, dm_whitelist.json, calendar_config.json)
+- Remove `config/secrets/` if it exists (migrated to `~/Desktop/Valor/`)
 - Regenerate launchd plists from template after update if paths changed
 
 ## Agent Integration
@@ -212,8 +211,9 @@ No agent integration required — this is infrastructure/config refactoring. The
 - [ ] `grep -rn '/Users/valorengels' --include='*.py' --include='*.sh' | grep -v '.git/' | grep -v node_modules | grep -v __pycache__ | grep -v .venv | grep -v tests/ | grep -v .claude/worktrees` returns 0 results (production code only; test fixtures use `Path.home()`)
 - [ ] `grep -rn '/Users/valorengels' config/projects.json` returns 0 results (paths derived from `$HOME`)
 - [ ] Only one session name default (`valor_bridge`) across the entire codebase
-- [ ] `config/secrets/` exists with Google auth tokens and DM whitelist
-- [ ] `~/Desktop/claude_code/` no longer required for system operation (symlinks OK during transition)
+- [ ] `~/Desktop/Valor/` is the canonical location for shared secrets (Google tokens, DM whitelist, calendar config)
+- [ ] Zero references to `~/Desktop/claude_code/` in our code (except `scripts/update/verify.py` which syncs Claude CLI's own OAuth)
+- [ ] `config/secrets/` directory removed — secrets belong in `~/Desktop/Valor/` or `.env`, not in the repo tree
 - [ ] `.env.example` contains `REDIS_URL`, `OPENROUTER_API_KEY`, `OLLAMA_URL`, `OLLAMA_VISION_MODEL`, `SEMANTIC_ROUTING`, `TELEGRAM_LINK_COLLECTORS`, `CLAUDE_CODE_TASK_LIST_ID`, `GOOGLE_CREDENTIALS_DIR`
 - [ ] `config/telegram_groups.json` and `config/workspace_config.json` deleted
 - [ ] Only one example config: `config/projects.example.json`
@@ -284,17 +284,15 @@ No agent integration required — this is infrastructure/config refactoring. The
 - Update `bridge/media.py` to use `config.models.OLLAMA_VISION_MODEL`
 - Update `config/projects.json` working_directory values to use `~` or remove hardcoded username
 
-### 3. Migrate config files
+### 3. Migrate config files to ~/Desktop/Valor/
 - **Task ID**: build-migration
 - **Depends On**: build-settings
 - **Assigned To**: path-migrator
 - **Agent Type**: builder
 - **Parallel**: true
-- Create `config/secrets/` directory (gitignored)
-- Copy `~/Desktop/claude_code/google_credentials.json` and `google_token.json` to `config/secrets/`
-- Copy `~/Desktop/claude_code/dm_whitelist.json` to `config/dm_whitelist.json`
-- Copy `~/Desktop/claude_code/calendar_config.json` to `config/calendar_config.json`
-- Create symlinks from old locations to new ones for backward compatibility
+- Create `~/Desktop/Valor/` directory on local machine
+- Copy from `~/Desktop/claude_code/` to `~/Desktop/Valor/`: `google_credentials.json`, `google_token.json`, `dm_whitelist.json`, `calendar_config.json`
+- No symlinks, no fallback chains — single canonical location
 
 ### 4. Clean up vestigial config
 - **Task ID**: build-cleanup
@@ -331,32 +329,50 @@ No agent integration required — this is infrastructure/config refactoring. The
 - Update `tests/unit/test_sdk_client.py` to use derived paths
 - Update `tests/integration/test_job_scheduler.py` to use derived paths
 
-### 7. Validate all changes
+### 7. Migrate to ~/Desktop/Valor/ and remove fallback chains
+- **Task ID**: build-valor-dir
+- **Depends On**: build-paths
+- **Assigned To**: path-migrator
+- **Agent Type**: builder
+- **Parallel**: false
+- Update `GoogleAuthSettings.credentials_dir` default to `Path.home() / "Desktop" / "Valor"`
+- Update `tools/google_workspace/auth.py`: remove fallback chain, use single `~/Desktop/Valor/` path from settings
+- Update `tools/telegram_users.py`: remove fallback, read dm_whitelist.json from `~/Desktop/Valor/`
+- Update `tools/valor_calendar.py`: remove fallback, read calendar_config.json from `~/Desktop/Valor/`
+- Update `bridge/telegram_bridge.py`: remove fallback for dm_whitelist, use `~/Desktop/Valor/`
+- Update `scripts/calendar_prompt_hook.sh`: LOCKDIR to `~/Desktop/Valor`
+- Update `scripts/update/cal_integration.py`: base_dir to `~/Desktop/Valor`
+- Note: `scripts/update/verify.py` keeps `claude_code` ref — it syncs Claude CLI's own OAuth, not ours
+- Remove `config/secrets/` directory and its `.gitkeep`
+- Remove `config/dm_whitelist.json` and `config/calendar_config.json` if they exist in repo (canonical location is `~/Desktop/Valor/`)
+
+### 8. Update documentation for ~/Desktop/Valor/
+- **Task ID**: build-valor-docs
+- **Depends On**: build-valor-dir
+- **Assigned To**: config-docs
+- **Agent Type**: documentarian
+- **Parallel**: false
+- Update `docs/features/config-architecture.md`: replace all `config/secrets/` and `~/Desktop/claude_code/` refs with `~/Desktop/Valor/`
+- Update `docs/features/bridge-message-query.md`: 3 refs to `~/Desktop/claude_code/dm_whitelist.json`
+- Update `docs/features/google-calendar-integration.md`: 5 refs to `~/Desktop/claude_code/`
+- Update `.claude/skills/setup/SKILL.md`: setup instructions point to `~/Desktop/Valor/`
+
+### 9. Validate all changes
 - **Task ID**: validate-config
-- **Depends On**: build-cleanup, build-plists, build-tests
+- **Depends On**: build-cleanup, build-plists, build-tests, build-valor-dir, build-valor-docs
 - **Assigned To**: config-validator
 - **Agent Type**: validator
 - **Parallel**: false
 - Run hardcoded path grep — must return 0 results for production code
+- Run `grep -rn 'claude_code' --include='*.py' --include='*.sh' --include='*.md' | grep -v '.git/\|.venv\|scripts/update/verify.py'` — must return 0
 - Verify `.env.example` completeness
-- Verify bridge starts and connects
+- Verify `config/secrets/` does not exist
 - Run `pytest tests/ -x -q`
 - Run `ruff check . && ruff format --check .`
 
-### 8. Documentation
-- **Task ID**: document-feature
-- **Depends On**: validate-config
-- **Assigned To**: config-docs
-- **Agent Type**: documentarian
-- **Parallel**: false
-- Create `docs/features/config-architecture.md`
-- Create `data/README.md`
-- Add entry to `docs/features/README.md` index table
-- Update CLAUDE.md if config patterns section needs refresh
-
-### 9. Final Validation
+### 10. Final Validation
 - **Task ID**: validate-all
-- **Depends On**: document-feature
+- **Depends On**: validate-config
 - **Assigned To**: config-validator
 - **Agent Type**: validator
 - **Parallel**: false
@@ -376,6 +392,9 @@ No agent integration required — this is infrastructure/config refactoring. The
 | Env vars documented | `grep -c 'REDIS_URL\|OPENROUTER_API_KEY\|OLLAMA_URL\|OLLAMA_VISION_MODEL' .env.example` | output > 3 |
 | Vestigial configs gone | `ls config/telegram_groups.json config/workspace_config.json 2>&1 \| grep -c 'No such file'` | output contains 2 |
 | Data README exists | `test -f data/README.md && echo exists` | output contains exists |
+| No claude_code refs in code | `grep -rn 'claude_code' --include='*.py' --include='*.sh' \| grep -v '.git/\|.venv\|__pycache__\|scripts/update/verify.py' \| wc -l` | output contains 0 |
+| No config/secrets dir | `test -d config/secrets && echo exists \|\| echo gone` | output contains gone |
+| Desktop/Valor referenced | `grep -rn 'Desktop/Valor' --include='*.py' tools/google_workspace/auth.py config/settings.py` | matches found |
 
 ---
 
@@ -385,4 +404,6 @@ No agent integration required — this is infrastructure/config refactoring. The
 
 2. **projects.json path format**: Store as relative to `$HOME/src/` (e.g., just `"ai"`, `"popoto"`) and resolve at load time via `config/paths.py`.
 
-3. **`~/Desktop/claude_code/` symlink duration**: One release cycle (2 weeks), then remove.
+3. **`~/Desktop/claude_code/` migration**: No symlinks, no fallbacks. Our files move to `~/Desktop/Valor/`. Claude CLI's files stay in `claude_code/`. Update script handles one-time migration.
+
+4. **Secrets in repo tree**: Only `.env` files. `config/secrets/` removed — shared secrets live in `~/Desktop/Valor/` (iCloud-synced). SOUL.md will eventually move to `~/Desktop/Valor/` too.
