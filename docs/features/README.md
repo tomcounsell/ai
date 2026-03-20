@@ -63,6 +63,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Scale Job Queue (Popoto + Worktrees)](scale-job-queue-with-popoto-and-worktrees.md) | Redis persistence and git worktrees for parallel build execution | Shipped |
 | [SDK Modernization](sdk-modernization.md) | Upgrade to SDK v0.1.35 with programmatic agents, expanded hooks, and cost budgeting | Shipped |
 | [SDLC Enforcement](sdlc-enforcement.md) | Quality gates for code sessions: user-level hooks, pipeline stage model, settings merger, cross-repo enforcement | Shipped |
+| [SDLC Job Playlist](sdlc-job-playlist.md) | Sequential SDLC issue processing via Redis playlist with Observer-driven auto-progression and persona-aware scheduling | Shipped |
 | [SDLC Pipeline Integrity](sdlc-pipeline-integrity.md) | Session continuation hardening, deterministic URL construction, merge guard hook, and MERGE pipeline stage | Shipped |
 | [SDLC-First Routing](sdlc-first-routing.md) | Automatic work request classification (Ollama/Haiku) and orchestrator routing for SDLC vs conversational requests, with cross-repo `gh` resolution via `GH_REPO` env var | Shipped |
 | [Semantic Doc Impact Finder](semantic-doc-impact-finder.md) | Two-stage semantic search (embedding recall + LLM reranking) for finding docs affected by code changes | Shipped |
