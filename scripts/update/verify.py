@@ -608,3 +608,44 @@ def verify_environment(project_dir: Path, check_ollama_model: bool = True) -> Ve
     result.gitignore_issues = check_gitignore_issues()
 
     return result
+
+
+def check_machine_identity(project_dir: Path) -> dict:
+    """Verify this machine's identity against projects.json config.
+
+    Reads ComputerName via scutil, matches against the 'machine' field
+    in ~/Desktop/Valor/projects.json, and returns the matched projects.
+    """
+    import json
+
+    # Get this machine's name
+    try:
+        hostname = subprocess.check_output(["scutil", "--get", "ComputerName"], text=True).strip()
+    except Exception as e:
+        return {"error": f"Could not read ComputerName: {e}"}
+
+    # Find projects.json
+    config_path = Path.home() / "Desktop" / "Valor" / "projects.json"
+    if not config_path.exists():
+        config_path = project_dir / "config" / "projects.json"
+    if not config_path.exists():
+        return {"error": "projects.json not found", "hostname": hostname}
+
+    try:
+        config = json.loads(config_path.read_text())
+    except Exception as e:
+        return {"error": f"Failed to read projects.json: {e}", "hostname": hostname}
+
+    # Match projects by machine field
+    hostname_lower = hostname.lower()
+    matched = []
+    for key, project in config.get("projects", {}).items():
+        machine = project.get("machine", "")
+        if machine.lower() == hostname_lower:
+            matched.append(key)
+
+    return {
+        "hostname": hostname,
+        "projects": matched,
+        "config_path": str(config_path),
+    }
