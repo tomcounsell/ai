@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Approved
 type: feature
 appetite: Medium
 owner: Valor
@@ -21,8 +21,9 @@ The job scheduler tool (`tools/job_scheduler.py`) exists and works, but no perso
 - The summarizer treats the bare word "scheduled" as evidence of real action, without requiring a verifiable artifact like a job ID
 
 **Desired outcome:**
-- A `/sdlc-queue` command that enqueues multiple issues for sequential SDLC processing
+- Playlist operations exposed via `job_scheduler.py` tool that agents invoke directly
 - Observer automatically pops the next issue from the playlist when the current one completes
+- Failed jobs get requeued to run after remaining items (only dependency/child failures block others)
 - Persona-aware scheduling restrictions (teammate cannot schedule SDLC jobs)
 - Each persona's soul file documents the job scheduler tool and its permissions
 - Summarizer requires a verifiable artifact (job ID) not just the word "scheduled"
@@ -35,13 +36,13 @@ No prior issues found related to playlist queuing or persona-aware scheduling. T
 
 ## Data Flow
 
-1. **Entry point**: User sends `/sdlc-queue 440 445 397` in Telegram
-2. **Bridge classifier**: Routes as a slash command, dispatches to the `sdlc-queue` command handler
-3. **Command handler**: Validates all issue numbers via `gh issue view`, creates a Redis list `playlist:{project_key}` containing `[440, 445, 397]`, schedules the first issue via `job_scheduler.py schedule --issue 440`
-4. **Job queue**: Processes the first SDLC job through the full pipeline (Observer steers stages)
-5. **Observer completion hook**: When an SDLC job completes (session status -> completed), checks `playlist:{project_key}` in Redis. If non-empty, pops the next issue number and calls `job_scheduler.py schedule --issue N`
-6. **Repeat**: Steps 4-5 repeat until the playlist is empty
-7. **Output**: Each job's completion is delivered to Telegram. Playlist exhaustion sends a final summary.
+1. **Entry point**: Agent invokes `job_scheduler.py playlist --issues 440 445 397` (or user asks in natural language via Telegram, agent interprets and invokes the tool)
+2. **Tool handler**: Validates all issue numbers via `gh issue view`, creates a Redis list `playlist:{project_key}` containing `[440, 445, 397]`, schedules the first issue via `job_scheduler.py schedule --issue 440`
+3. **Job queue**: Processes the first SDLC job through the full pipeline (Observer steers stages)
+4. **Observer completion hook**: When an SDLC job completes (session status -> completed), checks `playlist:{project_key}` in Redis. If non-empty, pops the next issue number and calls `job_scheduler.py schedule --issue N`
+5. **Failure handling**: When an SDLC job fails, the failed issue is requeued at the end of the playlist and the next issue is popped. Only dependency failures (child jobs) block the parent from proceeding.
+6. **Repeat**: Steps 3-5 repeat until the playlist is empty
+7. **Output**: Each job's completion/failure is delivered to Telegram. Playlist exhaustion sends a final summary.
 
 ## Appetite
 
@@ -62,22 +63,24 @@ No prerequisites — all building blocks (job_scheduler, job_queue, observer, pe
 ### Key Elements
 
 - **Playlist data structure**: Redis list (`playlist:{project_key}`) holding ordered issue numbers
-- **`/sdlc-queue` command**: Slash command that validates issues and populates the playlist, then kicks off the first one
+- **`playlist` subcommand in job_scheduler.py**: Agents invoke this tool directly to enqueue multiple issues; no Telegram slash commands (users speak naturally, agents interpret and invoke)
 - **Observer playlist hook**: After-completion check that pops the next issue from the playlist and enqueues it
-- **Persona gate in job_scheduler**: Reads `PERSONA` env var and rejects SDLC scheduling from teammate
+- **Failure requeue**: Failed jobs are appended to the end of the playlist and the next item is processed. Only dependency (child job) failures block the parent.
+- **Persona gate in job_scheduler**: Reads `PERSONA` env var and rejects SDLC scheduling from teammate. Default is "developer" (permissive) when unset.
 - **Persona soul file updates**: Document job scheduler tool and permissions in each overlay
 - **Summarizer evidence hardening**: Require job ID pattern (e.g., `job-abc123`) alongside "scheduled"
 
 ### Flow
 
-**User** → `/sdlc-queue 440 445 397` → **Command validates issues** → **Redis playlist populated** → **First issue scheduled** → **Observer completes job** → **Playlist pop** → **Next issue scheduled** → ... → **Playlist empty** → **Summary delivered**
+**User (natural language)** → **Agent interprets** → `job_scheduler.py playlist --issues 440 445 397` → **Tool validates issues** → **Redis playlist populated** → **First issue scheduled** → **Observer completes job** → **Playlist pop** → **Next issue scheduled** → ... → **Job fails** → **Requeue to end** → ... → **Playlist empty** → **Summary delivered**
 
 ### Technical Approach
 
 - Playlist stored as a Redis list via `popoto` or raw Redis `LPUSH`/`RPOP` operations. Since `popoto` is the ORM used everywhere else, prefer a simple `PlaylistEntry` model or direct Redis list operations via the existing Redis connection.
 - The Observer completion hook should be added in `agent/job_queue.py` where session status transitions to `completed`, not in `bridge/observer.py` — the observer makes steer/deliver decisions but doesn't own job lifecycle.
-- Persona check uses `os.environ.get("PERSONA", "developer")` which is already set by `sdk_client.py` when spawning workers.
-- The `/sdlc-queue` command lives in `.claude/commands/sdlc-queue.md` as a slash command definition.
+- **Failure requeue**: When a job transitions to `failed`, the Observer hook appends the issue number back to the end of the playlist (RPUSH) and pops the next item. A `retry_count` field on the playlist entry prevents infinite retry loops (max 1 retry per issue).
+- Persona check uses `os.environ.get("PERSONA", "developer")` which is already set by `sdk_client.py` when spawning workers. Default "developer" is intentionally permissive.
+- No Telegram slash commands — agents use `job_scheduler.py playlist` directly. Users communicate in natural language; the agent translates to tool invocations.
 
 ## Failure Path Test Strategy
 
@@ -87,9 +90,9 @@ No prerequisites — all building blocks (job_scheduler, job_queue, observer, pe
 - [ ] Observer playlist hook when `gh issue view` fails for next issue: verify error is logged and reported, not swallowed
 
 ### Empty/Invalid Input Handling
-- [ ] `/sdlc-queue` with no arguments: returns usage help
-- [ ] `/sdlc-queue` with invalid issue numbers (0, -1, "abc"): returns validation error
-- [ ] `/sdlc-queue` with closed issues: skips or warns, does not enqueue
+- [ ] `job_scheduler.py playlist` with no `--issues` flag: returns usage help
+- [ ] `job_scheduler.py playlist --issues 0 -1 abc`: returns validation error
+- [ ] `job_scheduler.py playlist` with closed issues: skips or warns, does not enqueue
 - [ ] Playlist with a mix of valid and invalid issues: enqueues valid ones, reports skipped ones
 
 ### Error State Rendering
@@ -105,7 +108,7 @@ No prerequisites — all building blocks (job_scheduler, job_queue, observer, pe
 
 - **Complex playlist management UI**: Tempting to build reorder, insert-at-position, priority-per-item features. Just support append and sequential pop. Anything fancier is a separate project.
 - **Cross-project playlists**: Each playlist is scoped to a single project_key. Cross-project orchestration is out of scope.
-- **Retry failed playlist items**: If an SDLC job in the playlist fails, the playlist should stop and report, not retry. Retry logic is a separate concern.
+- **Complex retry policies**: Failed items get one requeue to the end of the playlist. No configurable retry counts, backoff strategies, or per-issue retry policies.
 - **Parallel playlist execution**: The playlist is sequential by design. Running multiple SDLC jobs in parallel would conflict on git operations.
 
 ## Risks
@@ -131,7 +134,7 @@ No prerequisites — all building blocks (job_scheduler, job_queue, observer, pe
 
 - Playlist reordering or priority-per-item (just sequential FIFO)
 - Cross-project playlists
-- Automatic retry of failed playlist items
+- Multiple retries of failed playlist items (max 1 requeue per issue)
 - Parallel playlist execution
 - Web UI for playlist management
 - Playlist persistence across Redis flushes (standard Redis persistence handles this)
@@ -142,8 +145,9 @@ No update system changes required — this feature is purely internal to the bri
 
 ## Agent Integration
 
-- **New slash command**: `.claude/commands/sdlc-queue.md` — defines the `/sdlc-queue` command for Claude Code. This is a command definition file, not an MCP tool, so no `.mcp.json` changes needed.
+- **Tool extension**: `job_scheduler.py` gains a `playlist` subcommand. Agents invoke this tool directly — no Telegram slash commands needed. Users speak naturally; the agent interprets intent and invokes the tool.
 - **Bridge integration**: The Observer completion hook in `agent/job_queue.py` calls `job_scheduler.py schedule` directly (subprocess or import). No new MCP exposure needed since the bridge already has access.
+- **Failure requeue**: Observer hook also handles `failed` status by requeuing the issue and popping the next.
 - **Persona soul files**: `~/Desktop/Valor/personas/{developer,project-manager,teammate}.md` are updated with job scheduler documentation. These are read by `sdk_client.py` at worker spawn time.
 - No new MCP servers or `.mcp.json` changes required.
 
@@ -159,8 +163,10 @@ No update system changes required — this feature is purely internal to the bri
 
 ## Success Criteria
 
-- [ ] `/sdlc-queue 440 445` enqueues issues 440 and 445 sequentially; 440 starts immediately
+- [ ] `job_scheduler.py playlist --issues 440 445` enqueues issues 440 and 445 sequentially; 440 starts immediately
 - [ ] When issue 440's SDLC job completes, issue 445 is automatically scheduled
+- [ ] When an SDLC job fails, the failed issue is requeued to end of playlist and next issue proceeds
+- [ ] Only dependency (child job) failures block the parent from proceeding
 - [ ] When the playlist is empty after the last job completes, a summary is delivered to Telegram
 - [ ] `python -m tools.job_scheduler schedule --issue 113` from teammate persona returns a permission error
 - [ ] `python -m tools.job_scheduler schedule --issue 113` from developer/PM persona works normally
@@ -199,17 +205,17 @@ No update system changes required — this feature is purely internal to the bri
 
 ## Step by Step Tasks
 
-### 1. Implement playlist data structure and `/sdlc-queue` command
+### 1. Implement playlist data structure and `playlist` subcommand
 - **Task ID**: build-playlist
 - **Depends On**: none
 - **Validates**: tests/unit/test_sdlc_playlist.py (create)
 - **Assigned To**: playlist-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Create Redis list operations for playlist: `playlist_push(project_key, issue_numbers)`, `playlist_pop(project_key)`, `playlist_status(project_key)`
-- Create `.claude/commands/sdlc-queue.md` slash command that validates issues and populates the playlist
-- Schedule the first issue from the playlist via `job_scheduler.py schedule`
-- Add `playlist` subcommand to `job_scheduler.py` for status inspection
+- Create Redis list operations for playlist: `playlist_push(project_key, issue_numbers)`, `playlist_pop(project_key)`, `playlist_status(project_key)`, `playlist_requeue(project_key, issue_number)`
+- Add `playlist` subcommand to `job_scheduler.py` with `--issues` flag for enqueueing multiple issues
+- Validate issues via `gh issue view`, schedule the first issue via `job_scheduler.py schedule`
+- Track retry count per issue (max 1 requeue on failure)
 
 ### 2. Implement Observer playlist hook
 - **Task ID**: build-observer-hook
@@ -220,6 +226,7 @@ No update system changes required — this feature is purely internal to the bri
 - **Parallel**: false
 - Add completion hook in `agent/job_queue.py` where session transitions to `completed`
 - Hook checks `playlist_pop(project_key)` and if non-empty, calls `job_scheduler.py schedule --issue N`
+- On job failure, requeue the failed issue to end of playlist (if retry_count < 1), then pop next
 - On playlist exhaustion, deliver a summary message to Telegram via the session's `chat_id`
 
 ### 3. Implement persona gate in job_scheduler
@@ -282,7 +289,7 @@ No update system changes required — this feature is purely internal to the bri
 | Tests pass | `pytest tests/ -x -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| Playlist command exists | `test -f .claude/commands/sdlc-queue.md` | exit code 0 |
+| Playlist subcommand exists | `grep -q 'playlist' tools/job_scheduler.py` | exit code 0 |
 | Persona gate function exists | `grep -q '_check_persona_permission' tools/job_scheduler.py` | exit code 0 |
 | Summarizer pattern hardened | `grep -q 'job[_-]\?[a-f0-9]' bridge/summarizer.py` | exit code 0 |
 
@@ -290,8 +297,10 @@ No update system changes required — this feature is purely internal to the bri
 
 ## Open Questions
 
-1. **Playlist failure policy**: When an SDLC job in the playlist fails (e.g., build fails, tests fail after patch attempts), should the playlist stop entirely and report, or should it skip the failed issue and continue to the next one? Current plan assumes stop-and-report.
+All resolved:
 
-2. **Playlist visibility**: Should there be a Telegram-visible command (e.g., `/queue-status`) that shows current playlist state, or is the `job_scheduler status` output sufficient? The current plan only adds a `playlist` subcommand to `job_scheduler.py`.
+1. ~~**Playlist failure policy**~~: Failed jobs get requeued to end of playlist. Only dependency (child) failures block others. (Max 1 retry per issue to prevent loops.)
 
-3. **Persona env var reliability**: The plan assumes `PERSONA` env var is set by `sdk_client.py` when spawning workers. Need to verify this is consistently set for all execution paths (scheduled jobs, push jobs, direct CLI invocations). If not set, the default is "developer" which is permissive — is that the right fallback?
+2. ~~**Playlist visibility**~~: Agents use the `job_scheduler.py playlist` tool directly. No Telegram slash commands — users speak naturally, agents interpret and invoke.
+
+3. ~~**Persona env var reliability**~~: Default "developer" when `PERSONA` is unset is correct and intentionally permissive.
