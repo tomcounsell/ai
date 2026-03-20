@@ -27,9 +27,9 @@ EXCLUDED_PROJECTS="valor"
 PROJECTS_JSON="${PROJECTS_CONFIG_PATH:-$HOME/Desktop/Valor/projects.json}"
 CURRENT_PROJECT=""
 if [ -f "$PROJECTS_JSON" ]; then
-    CURRENT_PROJECT=$(jq -r --arg cwd "$PWD" '
+    CURRENT_PROJECT=$(jq -r --arg cwd "$PWD" --arg home "$HOME" '
         .projects | to_entries[]
-        | select(.value.working_directory == $cwd)
+        | select((.value.working_directory | gsub("^~"; $home)) == $cwd)
         | .key
     ' "$PROJECTS_JSON" 2>/dev/null || true)
 fi
@@ -74,9 +74,9 @@ fi
 PROJECTS_JSON="${PROJECTS_CONFIG_PATH:-$HOME/Desktop/Valor/projects.json}"
 PROJECT=$(basename "$PWD")
 if [ -f "$PROJECTS_JSON" ]; then
-    MATCH=$(jq -r --arg cwd "$PWD" '
+    MATCH=$(jq -r --arg cwd "$PWD" --arg home "$HOME" '
         .projects | to_entries[]
-        | select(.value.working_directory == $cwd)
+        | select((.value.working_directory | gsub("^~"; $home)) == $cwd)
         | .key
     ' "$PROJECTS_JSON" 2>/dev/null || true)
     if [ -n "$MATCH" ]; then
