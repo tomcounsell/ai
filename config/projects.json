@@ -13,6 +13,19 @@
       "soul": "config/personas/project-manager.md",
       "permissions": ["read"],
       "description": "PM persona — reads code, manages GitHub issues/PRs, drafts communications. No code writes."
+    },
+    "team-member": {
+      "name": "Valor",
+      "soul": "config/personas/team-member.md",
+      "permissions": ["read"],
+      "respond_to_unaddressed": false,
+      "description": "Team chat persona — silent unless tagged directly. Answers questions about the codebase. Read-only."
+    },
+    "qa": {
+      "name": "Valor",
+      "soul": "config/personas/qa.md",
+      "permissions": ["read"],
+      "description": "Q&A persona for DMs — answers questions about the ai repo. Read-only, no proactive actions."
     }
   },
 
@@ -24,9 +37,13 @@
       "machine": "Valor the Cowboy",
       "auto_merge": true,
       "telegram": {
-        "groups": {"Dev: Valor": {"persona": "developer"}},
+        "groups": {
+          "Dev: Valor": {"persona": "developer"},
+          "PM: Valor": {"persona": "project-manager"}
+        },
         "respond_to_unaddressed": true,
-        "respond_to_dms": true
+        "respond_to_dms": true,
+        "dm_persona": "qa"
       },
       "github": {
         "org": "tomcounsell",
@@ -203,7 +220,8 @@
       "telegram": {
         "groups": {
           "Dev: PsyOPTIMAL": {"persona": "developer"},
-          "PM: PsyOptimal": {"persona": "project-manager"}
+          "PM: PsyOptimal": {"persona": "project-manager"},
+          "PsyOPTIMAL": {"persona": "team-member"}
         },
         "respond_to_unaddressed": true,
         "respond_to_dms": false
@@ -273,6 +291,7 @@
       "respond_to_all": true,
       "respond_to_mentions": true,
       "respond_to_dms": false,
+      "dm_persona": "qa",
       "mention_triggers": ["@valor", "valor", "hey valor"]
     },
     "response": {
