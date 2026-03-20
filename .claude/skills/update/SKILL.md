@@ -9,6 +9,14 @@ Pull the latest changes from the remote repository, sync dependencies, and resta
 
 ## Instructions
 
+**PREREQUISITE: Must be on latest main branch before running.**
+
+```bash
+cd ~/src/ai && git checkout main && git pull
+```
+
+If there are local changes, stash them first: `git stash`. The update orchestrator also handles this, but being on main is required.
+
 Run the full update orchestrator and report the results:
 
 ```bash

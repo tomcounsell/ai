@@ -10,9 +10,15 @@ Configure this machine to run the Valor Telegram bridge. You do everything excep
 
 ## Prerequisites
 
+**PREREQUISITE: Must be on latest main branch before running.**
+
+```bash
+cd ~/src/ai && git checkout main && git pull
+```
+
 Before starting, confirm the user has:
 - Python 3.11+ installed
-- The `ai` repo cloned at `~/src/ai`
+- The `ai` repo cloned at `~/src/ai` **on the main branch with latest changes pulled**
 - Telegram API credentials (api_id and api_hash from https://my.telegram.org). If they don't have these, pause and explain how to get them before continuing.
 
 ## Step 1: Install uv Package Manager
