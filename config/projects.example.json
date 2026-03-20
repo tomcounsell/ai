@@ -1,5 +1,14 @@
 {
   "$schema": "Project configuration for multi-instance Valor deployment",
+  "_doc": {
+    "overview": "Shared config for all Valor machines (iCloud-synced via ~/Desktop/Valor/). Each machine reads this file and filters projects by the 'machine' field matched against its ComputerName (scutil --get ComputerName).",
+    "personas": "Define soul file paths and permissions for each role. The bridge loads base + persona overlay as the system prompt.",
+    "projects.machine": "Must match the machine's ComputerName exactly (case-insensitive). This is how each machine knows which projects to handle.",
+    "projects.telegram.groups": "Dict mapping group name to persona. Dev: prefix = developer, PM: prefix = project-manager, no prefix = teammate (mention-only).",
+    "projects.telegram.groups.chat_id": "Optional Telegram chat ID. Speeds up group resolution but not required.",
+    "dms": "Global DM config. All DMs use the specified persona regardless of project.",
+    "defaults": "Fallback values for projects that don't specify a field."
+  },
 
   "personas": {
     "developer": {
