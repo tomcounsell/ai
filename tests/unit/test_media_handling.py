@@ -2,6 +2,7 @@
 Tests for media receiving and processing functions.
 """
 
+import os
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -205,27 +206,16 @@ class TestProcessIncomingMedia:
 
 
 class TestDescribeImage:
-    """Tests for describe_image function using real Ollama LLaVA.
+    """Tests for describe_image function using Claude Haiku 4.5 vision.
 
-    These tests use the actual local Ollama installation - no mocking.
-    Local models are free and should always be tested directly.
+    These tests use the actual Anthropic API - no mocking.
     """
 
     @pytest.fixture(autouse=True)
-    def check_ollama(self):
-        """Check if Ollama is available with llama3.2-vision model."""
-        try:
-            import httpx
-
-            response = httpx.get("http://localhost:11434/api/tags", timeout=5.0)
-            if response.status_code != 200:
-                pytest.skip("Ollama not responding")
-            models = response.json().get("models", [])
-            model_names = [m.get("name", "") for m in models]
-            if not any("llama3.2-vision" in name for name in model_names):
-                pytest.skip("llama3.2-vision model not available")
-        except Exception as e:
-            pytest.skip(f"Ollama not available: {e}")
+    def check_api_key(self):
+        """Check if Anthropic API key is available."""
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            pytest.skip("ANTHROPIC_API_KEY not set")
 
     @pytest.fixture
     def sample_image(self, tmp_path):

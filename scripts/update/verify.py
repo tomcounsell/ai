@@ -268,7 +268,7 @@ def check_valor_tools(project_dir: Path) -> list[ToolCheck]:
     return results
 
 
-def check_ollama(model: str = "qwen3:4b") -> ToolCheck:
+def check_ollama(model: str = "qwen3:1.7b") -> ToolCheck:
     """Check if Ollama is available and has the required model."""
     if not shutil.which("ollama"):
         return ToolCheck(name="ollama", available=False, error="Not installed")
@@ -291,7 +291,7 @@ def check_ollama(model: str = "qwen3:4b") -> ToolCheck:
         return ToolCheck(name="ollama", available=False, error=str(e))
 
 
-def pull_ollama_model(model: str = "qwen3:4b") -> bool:
+def pull_ollama_model(model: str = "qwen3:1.7b") -> bool:
     """Pull an Ollama model. Returns True if successful."""
     if not shutil.which("ollama"):
         return False
@@ -600,7 +600,7 @@ def verify_environment(project_dir: Path, check_ollama_model: bool = True) -> Ve
     result.valor_tools = check_valor_tools(project_dir)
 
     if check_ollama_model:
-        ollama_model = os.getenv("OLLAMA_SUMMARIZER_MODEL", "qwen3:4b")
+        ollama_model = os.getenv("OLLAMA_SUMMARIZER_MODEL", "qwen3:1.7b")
         result.ollama = check_ollama(ollama_model)
 
     result.sdk_auth = check_sdk_auth(project_dir)
