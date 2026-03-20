@@ -19,7 +19,7 @@ References where "Valor" is the **persona** that users interact with — the nam
 | `bridge/routing.py` | 171-196 | `get_valor_usernames()`, `is_valor_mentioned()`, `is_directed_to_other()` | Mention routing functions |
 | `bridge/telegram_bridge.py` | 448 | `["@valor", "valor", "hey valor"]` | Default mention triggers |
 | `config/projects.example.json` | 147 | `"mention_triggers": ["@valor", "valor", "hey valor"]` | Config example |
-| `config/projects.json.example` | 30 | Same mention triggers | Config example |
+| `~/Desktop/Valor/projects.json` | 30 | Same mention triggers | Private config (iCloud-synced) |
 
 ### A2. Message Attribution & Conversation Identity
 
@@ -184,7 +184,7 @@ References in prose, test fixtures, and examples. Low runtime impact — these f
 | File | References |
 |------|-----------|
 | `config/projects.example.json` | `"valor"` project key, `"Valor AI"` name, `"VALOR"` team |
-| `config/projects.json.example` | Mention triggers |
+| `~/Desktop/Valor/projects.json` | Mention triggers (private, iCloud-synced) |
 | `bridge/telegram_bridge.py` | 322: `"valor"` default for `ACTIVE_PROJECTS` |
 | `bridge/session_transcript.py` | 57: `"valor"` in docstring example |
 | `bridge/session_logs.py` | 81: `"valor"` in docstring example |
@@ -199,7 +199,7 @@ References in prose, test fixtures, and examples. Low runtime impact — these f
 
 If the goal is **"keep the Valor brand, but make the active persona configurable"**, only **Category A (~35 references in ~15 files)** needs to change. Categories B and C stay as-is.
 
-The key insight: Category A could be driven by a single config value (e.g., `persona.name` in `config/projects.json` or `SOUL.md` metadata) that flows through ~5 source-of-truth constants:
+The key insight: Category A could be driven by a single config value (e.g., `persona.name` in `~/Desktop/Valor/projects.json` or `SOUL.md` metadata) that flows through ~5 source-of-truth constants:
 
 1. `bridge/routing.py` → `VALOR_USERNAMES` (read from config)
 2. `bridge/telegram_bridge.py` → mention triggers (already partially configurable via `projects.json`)

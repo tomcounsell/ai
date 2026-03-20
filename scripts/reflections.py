@@ -163,7 +163,7 @@ def load_local_projects() -> list[dict]:
     """Load projects from projects.json, filtered to those present on this machine.
 
     Loads from ~/Desktop/Valor/projects.json (iCloud-synced, private).
-    Falls back to config/projects.json if the Desktop path doesn't exist.
+    Falls back to legacy config/projects.json if the Desktop path doesn't exist.
 
     Returns:
         List of project dicts, each including a 'slug' key derived from the

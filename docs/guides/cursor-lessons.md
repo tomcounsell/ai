@@ -269,7 +269,7 @@ keywords = ["auth", "telegram_bridge"]
 # Semantic search returns:
 - bridge/telegram_bridge.py (has login logic)
 - tools/telegram_history.py (stores auth sessions)
-- config/projects.json (auth whitelist)
+- ~/Desktop/Valor/projects.json (auth whitelist)
 
 # Pre-attach these to message
 ```

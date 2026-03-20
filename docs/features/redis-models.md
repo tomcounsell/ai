@@ -59,7 +59,7 @@ For sessions created before the migration (no `trigger_message_id`), the job wor
 
 ## project_key
 
-All models carry a `project_key` field for direct project association. This replaces the implicit `chat_id -> project` lookup that previously required loading `config/projects.json` at query time.
+All models carry a `project_key` field for direct project association. This replaces the implicit `chat_id -> project` lookup that previously required loading `~/Desktop/Valor/projects.json` at query time.
 
 Models with project_key:
 - **AgentSession** (existing)
@@ -100,7 +100,7 @@ python scripts/migrate_model_relationships.py --max-age 30
 ```
 
 The script:
-1. Backfills `project_key` on all models using `chat_id -> project` mapping from `config/projects.json`
+1. Backfills `project_key` on all models using `chat_id -> project` mapping from `~/Desktop/Valor/projects.json`
 2. Copies enrichment metadata from AgentSession to TelegramMessage
 3. Sets `trigger_message_id` and `agent_session_id` cross-references
 

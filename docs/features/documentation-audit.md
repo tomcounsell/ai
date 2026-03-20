@@ -58,7 +58,7 @@ The auditor extracts and verifies six categories of references (`scripts/docs_au
 
 | Category | Examples |
 |----------|---------|
-| File paths | `bridge/telegram_bridge.py`, `config/projects.json` |
+| File paths | `bridge/telegram_bridge.py`, `~/Desktop/Valor/projects.json` |
 | Environment variables | `USE_CLAUDE_SDK`, `TELEGRAM_BOT_TOKEN` |
 | Python imports | `from agent.sdk_client import ...`, `import telethon` |
 | Class and function names | `DocsAuditor`, `TelegramBridge`, `handle_new_message` |
