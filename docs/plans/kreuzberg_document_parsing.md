@@ -4,7 +4,7 @@ type: feature
 appetite: Small
 owner: Valor
 created: 2026-03-20
-tracking:
+tracking: https://github.com/yudame/cuttlefish/issues/97
 last_comment_id:
 ---
 
