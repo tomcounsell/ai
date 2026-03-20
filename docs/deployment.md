@@ -13,7 +13,7 @@ This allows multiple machines to run Valor, each monitoring different groups.
 
 ## Setup
 
-### 1. Define projects in config/projects.json
+### 1. Define projects in ~/Desktop/Valor/projects.json
 
 ```json
 {
@@ -104,7 +104,7 @@ Multiple machines can monitor different groups, or one machine can monitor all.
 
 ### Wrong project context
 1. Ensure only one project maps to each Telegram group
-2. Check `config/projects.json` for duplicate group entries
+2. Check `~/Desktop/Valor/projects.json` for duplicate group entries
 
 ### Session isolation issues
 1. Sessions are scoped by project - `tg_{project}_{chat_id}`

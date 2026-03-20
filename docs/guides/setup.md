@@ -119,7 +119,7 @@ Look for:
 
 ### Multi-Project Configuration
 
-Edit `config/projects.json` to configure which Telegram groups each project monitors.
+Edit `~/Desktop/Valor/projects.json` to configure which Telegram groups each project monitors. This file is stored outside the repo (iCloud-synced) to keep sensitive chat IDs private.
 
 **IMPORTANT**: Each project MUST have a `working_directory` field specifying the absolute path to the project directory.
 
@@ -274,5 +274,5 @@ python3 -c "from agent import ValorAgent; print('SDK OK')"
 ## Next Steps
 
 1. **Test the integration** - Send a message via Telegram
-2. **Configure projects** - Edit `config/projects.json` for your groups
+2. **Configure projects** - Edit `~/Desktop/Valor/projects.json` for your groups
 3. **Review migration plan** - See `docs/plans/claude-agent-sdk-migration.md` for Phase 2 plans

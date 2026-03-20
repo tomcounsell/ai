@@ -178,9 +178,9 @@ This provides immediate visual feedback about what type of task is being process
 }
 ```
 
-### Project Routing: `config/projects.json`
+### Project Routing: `~/Desktop/Valor/projects.json`
 
-Project-to-chat mapping is handled by `config/projects.json`. Each project defines its Telegram groups and working directory. See `config/README.md` for full documentation.
+Project-to-chat mapping is handled by `~/Desktop/Valor/projects.json` (falls back to `config/projects.json` for legacy setups). Each project defines its Telegram groups and working directory. See `config/README.md` for full documentation.
 
 ## Debug Commands
 

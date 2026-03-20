@@ -24,7 +24,7 @@ fi
 
 # Skip excluded projects (too noisy for calendar tracking)
 EXCLUDED_PROJECTS="valor"
-PROJECTS_JSON="$HOME/src/ai/config/projects.json"
+PROJECTS_JSON="${PROJECTS_CONFIG_PATH:-$HOME/Desktop/Valor/projects.json}"
 CURRENT_PROJECT=""
 if [ -f "$PROJECTS_JSON" ]; then
     CURRENT_PROJECT=$(jq -r --arg cwd "$PWD" '
@@ -71,7 +71,7 @@ fi
 
 # Resolve project key from projects.json (matches working_directory to key)
 # Falls back to directory basename if no match found
-PROJECTS_JSON="$HOME/src/ai/config/projects.json"
+PROJECTS_JSON="${PROJECTS_CONFIG_PATH:-$HOME/Desktop/Valor/projects.json}"
 PROJECT=$(basename "$PWD")
 if [ -f "$PROJECTS_JSON" ]; then
     MATCH=$(jq -r --arg cwd "$PWD" '

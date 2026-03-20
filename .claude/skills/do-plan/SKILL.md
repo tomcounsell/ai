@@ -198,7 +198,7 @@ gh issue edit $EXISTING_ISSUE --add-label "plan"
 
 **Only create a NEW issue if** the plan was initiated from scratch (not from an existing issue).
 
-Before creating, check `config/projects.json` for the current project:
+Before creating, check `~/Desktop/Valor/projects.json` for the current project:
 - If `notion` key exists -> create a Notion task (use Notion MCP tools)
 - If only `github` key exists -> create a GitHub issue (use `gh` CLI)
 - If neither -> skip tracking, just use the plan doc

@@ -29,6 +29,7 @@ from pathlib import Path
 
 # Add project root to path
 PROJECT_DIR = Path(__file__).parent.parent
+DESKTOP_VALOR_DIR = Path.home() / "Desktop" / "Valor"
 sys.path.insert(0, str(PROJECT_DIR))
 
 logging.basicConfig(
@@ -39,8 +40,11 @@ logger = logging.getLogger(__name__)
 
 
 def load_chat_to_project_map() -> dict[str, str]:
-    """Build a chat_id -> project_key mapping from config/projects.json."""
+    """Build a chat_id -> project_key mapping from projects.json."""
+    # Check PROJECT_DIR first (allows test overrides), then Desktop/Valor
     config_path = PROJECT_DIR / "config" / "projects.json"
+    if not config_path.exists():
+        config_path = DESKTOP_VALOR_DIR / "projects.json"
     if not config_path.exists():
         logger.warning(f"Projects config not found at {config_path}")
         return {}

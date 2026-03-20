@@ -2,7 +2,7 @@
 Claude Agent SDK client wrapper for Valor.
 
 This module provides a wrapper around ClaudeSDKClient configured for Valor's use case:
-- Loads system prompt from SOUL.md
+- Loads system prompt via the configurable persona system
 - Configures permission mode for autonomous operation
 - Handles session management
 - Extracts text response from message stream
@@ -249,8 +249,15 @@ def get_all_active_sessions() -> dict[str, "ClaudeSDKClient"]:
 # Root of the ai/ repository (used as cwd for SDLC-routed requests)
 AI_REPO_ROOT = str(Path(__file__).parent.parent)
 
-# Path to SOUL.md system prompt
+# Path to SOUL.md system prompt (legacy fallback)
 SOUL_PATH = Path(__file__).parent.parent / "config" / "SOUL.md"
+
+# Path to persona base file (stays in repo — not private)
+PERSONAS_BASE_DIR = Path(__file__).parent.parent / "config" / "personas"
+
+# Path to persona overlay files (private, iCloud-synced)
+# Overlays live in ~/Desktop/Valor/personas/ — falls back to config/personas/ for dev
+PERSONAS_OVERLAY_DIR = Path.home() / "Desktop" / "Valor" / "personas"
 
 # Path to PRINCIPAL.md — supervisor's operating context for strategic decisions
 PRINCIPAL_PATH = Path(__file__).parent.parent / "config" / "PRINCIPAL.md"
@@ -401,13 +408,85 @@ def load_principal_context(condensed: bool = True) -> str:
     return "\n\n".join(extracted)
 
 
+def _resolve_overlay_path(persona: str) -> Path:
+    """Resolve persona overlay file path.
+
+    Checks ~/Desktop/Valor/personas/{persona}.md first (private, iCloud-synced),
+    then falls back to config/personas/{persona}.md (in-repo, for development).
+    """
+    overlay_path = PERSONAS_OVERLAY_DIR / f"{persona}.md"
+    if overlay_path.exists():
+        return overlay_path
+
+    # Fallback: in-repo overlay (for development or when Desktop/Valor not available)
+    return PERSONAS_BASE_DIR / f"{persona}.md"
+
+
+def load_persona_prompt(persona: str = "developer") -> str:
+    """Load persona prompt from base + overlay files.
+
+    Base is read from config/personas/_base.md (in-repo, shared).
+    Overlays are read from ~/Desktop/Valor/personas/{persona}.md (private, iCloud-synced).
+    Falls back to config/SOUL.md if persona files are missing.
+
+    Args:
+        persona: Persona name — one of "developer", "project-manager", "teammate".
+            Defaults to "developer".
+
+    Returns:
+        Combined persona prompt (base + overlay).
+
+    Raises:
+        FileNotFoundError: If _base.md is missing (base is required).
+    """
+    base_path = PERSONAS_BASE_DIR / "_base.md"
+
+    # Base is required — fail loudly if missing
+    if not base_path.exists():
+        raise FileNotFoundError(
+            f"Persona base file not found at {base_path}. "
+            "The _base.md file is required for the persona system."
+        )
+
+    base_content = base_path.read_text()
+
+    # Resolve overlay: ~/Desktop/Valor/personas/ first, then config/personas/
+    overlay_path = _resolve_overlay_path(persona)
+
+    # Overlay is optional — fall back to SOUL.md if missing
+    if overlay_path.exists():
+        overlay_content = overlay_path.read_text()
+        logger.info(f"Loaded persona '{persona}' from {overlay_path}")
+        return f"{base_content}\n\n---\n\n{overlay_content}"
+
+    # Invalid persona name — fall back to developer with warning
+    if persona not in ("developer", "project-manager", "teammate"):
+        logger.warning(f"Unknown persona '{persona}', falling back to developer persona")
+        developer_path = _resolve_overlay_path("developer")
+        if developer_path.exists():
+            return f"{base_content}\n\n---\n\n{developer_path.read_text()}"
+
+    # Persona overlay missing — fall back to SOUL.md
+    logger.warning(
+        f"Persona overlay '{persona}' not found at {overlay_path}, falling back to SOUL.md"
+    )
+    if SOUL_PATH.exists():
+        return SOUL_PATH.read_text()
+
+    logger.warning(f"SOUL.md not found at {SOUL_PATH}, using default prompt")
+    return "You are Valor, an AI coworker. Be direct, concise, and helpful."
+
+
 def load_system_prompt() -> str:
-    """Load Valor's system prompt from SOUL.md with worker rules and completion criteria.
+    """Load developer system prompt with worker rules and completion criteria.
+
+    Wraps load_persona_prompt("developer") with WORKER_RULES and additional context.
+    This is the default prompt for AgentSDK coding subprocesses.
 
     System prompt structure:
         [WORKER_RULES — safety rails for the worker, FIRST — takes precedence]
         ---
-        [SOUL.md — persona, attitude, purpose, communication style]
+        [Persona prompt — base + developer overlay]
         ---
         [Principal Context — condensed mission/goals/priorities from PRINCIPAL.md]
         ---
@@ -416,12 +495,15 @@ def load_system_prompt() -> str:
     The Observer Agent (bridge/observer.py) handles pipeline orchestration.
     The worker only receives safety rails — no pipeline stages or /sdlc references.
     """
-    soul_prompt = ""
-    if SOUL_PATH.exists():
-        soul_prompt = SOUL_PATH.read_text()
-    else:
-        logger.warning(f"SOUL.md not found at {SOUL_PATH}, using default prompt")
-        soul_prompt = "You are Valor, an AI coworker. Be direct, concise, and helpful."
+    try:
+        persona_prompt = load_persona_prompt("developer")
+    except FileNotFoundError:
+        # Fallback to legacy SOUL.md if persona system not set up
+        logger.warning("Persona system not available, falling back to SOUL.md")
+        if SOUL_PATH.exists():
+            persona_prompt = SOUL_PATH.read_text()
+        else:
+            persona_prompt = "You are Valor, an AI coworker. Be direct, concise, and helpful."
 
     # Append completion criteria
     criteria = load_completion_criteria()
@@ -432,18 +514,18 @@ def load_system_prompt() -> str:
     principal_section = f"\n\n---\n\n## Principal Context\n\n{principal}" if principal else ""
 
     # Worker rules FIRST — safety rails take precedence over persona
-    return f"{WORKER_RULES}\n\n---\n\n{soul_prompt}{principal_section}{criteria_section}"
+    return f"{WORKER_RULES}\n\n---\n\n{persona_prompt}{principal_section}{criteria_section}"
 
 
 def load_pm_system_prompt(working_directory: str) -> str:
     """Load system prompt for PM (Project Manager) mode channels.
 
-    PM mode skips WORKER_RULES (no branch safety rails) and loads
-    the project-specific CLAUDE.md from the work vault directory if it exists.
-    Falls back to SOUL.md persona only.
+    Uses the project-manager persona (base + PM overlay). PM mode skips
+    WORKER_RULES (no branch safety rails) and loads the project-specific
+    CLAUDE.md from the work vault directory if it exists.
 
     System prompt structure:
-        [SOUL.md — persona, attitude, purpose, communication style]
+        [Persona prompt — base + project-manager overlay]
         ---
         [Work-vault CLAUDE.md — PM-specific instructions for this project]
 
@@ -453,23 +535,25 @@ def load_pm_system_prompt(working_directory: str) -> str:
     Returns:
         Combined system prompt for PM mode.
     """
-    # Load SOUL.md for persona (Valor's attitude/style is valuable in PM mode too)
-    soul_prompt = ""
-    if SOUL_PATH.exists():
-        soul_prompt = SOUL_PATH.read_text()
-    else:
-        logger.warning(f"SOUL.md not found at {SOUL_PATH}, using default prompt")
-        soul_prompt = "You are Valor, an AI coworker. Be direct, concise, and helpful."
+    try:
+        persona_prompt = load_persona_prompt("project-manager")
+    except FileNotFoundError:
+        # Fallback to legacy SOUL.md if persona system not set up
+        logger.warning("Persona system not available for PM, falling back to SOUL.md")
+        if SOUL_PATH.exists():
+            persona_prompt = SOUL_PATH.read_text()
+        else:
+            persona_prompt = "You are Valor, an AI coworker. Be direct, concise, and helpful."
 
     # Try to load project-specific CLAUDE.md from work-vault directory
     project_claude_path = Path(working_directory) / "CLAUDE.md"
     if project_claude_path.exists():
         project_instructions = project_claude_path.read_text()
         logger.info(f"Loaded PM instructions from {project_claude_path}")
-        return f"{soul_prompt}\n\n---\n\n{project_instructions}"
+        return f"{persona_prompt}\n\n---\n\n{project_instructions}"
 
-    logger.info(f"No CLAUDE.md found at {project_claude_path}, using SOUL.md only for PM mode")
-    return soul_prompt
+    logger.info(f"No CLAUDE.md found at {project_claude_path}, using persona only for PM mode")
+    return persona_prompt
 
 
 def _is_code_file(file_path: str) -> bool:
@@ -1132,6 +1216,55 @@ def _build_error_recovery_message(error_text: str) -> str:
     )
 
 
+def _resolve_persona(
+    project: dict | None,
+    chat_title: str | None,
+    is_dm: bool = False,
+) -> str:
+    """Resolve the persona name from project config, chat title, and DM status.
+
+    Resolution order:
+    1. DMs: use project's dm_persona config (default: "teammate")
+    2. Group chats: look up persona from project's telegram.groups[chat_title]
+    3. PM mode projects: "project-manager"
+    4. Default: "developer"
+
+    Args:
+        project: Project configuration dict from projects.json.
+        chat_title: Telegram chat/group title, or None for DMs.
+        is_dm: Whether this is a direct message.
+
+    Returns:
+        Persona name string (e.g., "developer", "project-manager", "teammate").
+    """
+    if not project:
+        return "teammate" if is_dm else "developer"
+
+    telegram_config = project.get("telegram", {})
+
+    # DMs use the dm_persona config
+    if is_dm:
+        return telegram_config.get("dm_persona", "teammate")
+
+    # PM mode projects always use project-manager persona
+    project_mode = project.get("mode", "dev")
+    if project_mode == "pm":
+        return "project-manager"
+
+    # Group chats: look up persona from the groups dict
+    if chat_title:
+        groups = telegram_config.get("groups", {})
+        if isinstance(groups, dict):
+            for group_name, group_config in groups.items():
+                if group_name.lower() in chat_title.lower():
+                    if isinstance(group_config, dict):
+                        persona = group_config.get("persona")
+                        if persona:
+                            return persona
+
+    return "developer"
+
+
 async def get_agent_response_sdk(
     message: str,
     session_id: str,
@@ -1254,8 +1387,10 @@ async def get_agent_response_sdk(
         f"task_list={task_list_id or 'none'}, mode={project_mode}"
     )
     wr_label = "yes" if has_worker_rules else "no (pm mode)"
+    is_dm = chat_title is None
+    persona = _resolve_persona(project, chat_title, is_dm=is_dm)
     logger.info(
-        f"[{request_id}] Context: soul=yes, worker_rules={wr_label}, "
+        f"[{request_id}] Context: persona={persona}, worker_rules={wr_label}, "
         f"workflow_context={'yes' if has_workflow else 'no'}, "
         f"session_id={session_id}"
     )
@@ -1266,10 +1401,20 @@ async def get_agent_response_sdk(
         # Extract message_id from the job context (passed through _execute_job)
         _message_id = None  # message_id not available at this layer
 
-        # PM mode: use PM system prompt (no WORKER_RULES, loads work-vault CLAUDE.md)
-        pm_system_prompt = None
+        logger.info(f"[{request_id}] Resolved persona: {persona}")
+
+        # Build system prompt based on persona and project mode
+        custom_system_prompt = None
         if project_mode == "pm":
-            pm_system_prompt = load_pm_system_prompt(working_dir)
+            # PM mode: use PM system prompt (no WORKER_RULES, loads work-vault CLAUDE.md)
+            custom_system_prompt = load_pm_system_prompt(working_dir)
+        elif persona == "teammate":
+            # Teammate persona: casual mode, no WORKER_RULES
+            try:
+                custom_system_prompt = load_persona_prompt("teammate")
+            except FileNotFoundError:
+                logger.warning("Teammate persona not available, falling back to default")
+        # Developer persona uses default (load_system_prompt via ValorAgent.__init__)
 
         # Determine gh_repo for cross-repo SDLC requests (issue #375).
         # When classification is "sdlc" and the project targets a non-ai repo,
@@ -1292,7 +1437,7 @@ async def get_agent_response_sdk(
 
         agent = ValorAgent(
             working_dir=working_dir,
-            system_prompt=pm_system_prompt,
+            system_prompt=custom_system_prompt,
             workflow_id=workflow_id,
             task_list_id=task_list_id,
             chat_id=chat_id,
