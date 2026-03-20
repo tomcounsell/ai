@@ -261,7 +261,7 @@ def classify_needs_response(text: str) -> bool:
         import ollama
 
         response = ollama.chat(
-            model="llama3.2:3b",
+            model="qwen3:1.7b",
             messages=[
                 {
                     "role": "user",
@@ -431,7 +431,7 @@ def _classify_work_request_llm(text: str) -> str:
         import ollama
 
         response = ollama.chat(
-            model="llama3.2:3b",
+            model="qwen3:1.7b",
             messages=[{"role": "user", "content": prompt}],
             options={"temperature": 0, "num_predict": 10},
         )
