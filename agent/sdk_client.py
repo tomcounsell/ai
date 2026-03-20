@@ -1389,6 +1389,29 @@ async def get_agent_response_sdk(
         from bridge.routing import classify_work_request
 
         classification = classify_work_request(message)
+        # If message references an issue number, mark ISSUE stage complete.
+        # This is the single source of truth for is_sdlc — stage_states.
+        if classification == "sdlc" and session_id:
+            import re as _issue_re
+
+            if _issue_re.search(r"(?:issue|#)\s*(\d+)", message, _issue_re.IGNORECASE):
+                try:
+                    from bridge.pipeline_state import PipelineState
+                    from models.agent_session import AgentSession
+
+                    sessions = list(AgentSession.query.filter(session_id=session_id))
+                    if sessions:
+                        ps = PipelineState(sessions[0])
+                        issue_state = ps.states.get("ISSUE", "pending")
+                        if issue_state in ("pending", "ready"):
+                            ps.start_stage("ISSUE")
+                            ps.complete_stage("ISSUE")
+                            logger.info(
+                                f"[{request_id}] Marked ISSUE stage complete "
+                                f"(issue reference in message)"
+                            )
+                except Exception as e:
+                    logger.debug(f"ISSUE stage upsert failed (non-fatal): {e}")
         if classification == "sdlc" and project_working_dir != AI_REPO_ROOT:
             working_dir = AI_REPO_ROOT
             logger.info(

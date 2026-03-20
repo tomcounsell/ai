@@ -43,7 +43,7 @@ def _make_session(
     session.session_id = "test-session"
     session.job_id = "test-job"
     session.classification_type = classification_type
-    session.is_sdlc_job.return_value = is_sdlc
+    session.is_sdlc = is_sdlc
     session.issue_url = issue_url
     session.pr_url = pr_url
     session.plan_url = plan_url
