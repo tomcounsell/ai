@@ -14,17 +14,11 @@
       "permissions": ["read"],
       "description": "PM persona — reads code, manages GitHub issues/PRs, drafts communications. No code writes."
     },
-    "team-member": {
+    "teammate": {
       "name": "Valor",
-      "soul": "config/personas/team-member.md",
+      "soul": "config/personas/teammate.md",
       "permissions": ["read"],
-      "description": "Team chat persona — silent unless tagged directly. Answers questions about the codebase. Read-only."
-    },
-    "qa": {
-      "name": "Valor",
-      "soul": "config/personas/qa.md",
-      "permissions": ["read"],
-      "description": "Q&A persona for DMs — answers questions about the ai repo. Read-only, no proactive actions."
+      "description": "Casual teammate persona — conversational Q&A, light and helpful. Read-only, no code writes."
     }
   },
 
@@ -42,7 +36,7 @@
         },
         "respond_to_unaddressed": true,
         "respond_to_dms": true,
-        "dm_persona": "qa"
+        "dm_persona": "teammate"
       },
       "github": {
         "org": "tomcounsell",
@@ -230,7 +224,7 @@
         "groups": {
           "Dev: PsyOPTIMAL": {"chat_id": -4897329503, "persona": "developer"},
           "PM: PsyOptimal": {"chat_id": -5283538472, "persona": "project-manager"},
-          "PsyOPTIMAL": {"chat_id": -1002600253717, "persona": "team-member"}
+          "PsyOPTIMAL": {"chat_id": -1002600253717, "persona": "teammate"}
         },
         "respond_to_unaddressed": true,
         "respond_to_dms": false
@@ -295,9 +289,9 @@
   },
 
   "dms": {
-    "persona": "qa",
+    "persona": "teammate",
     "working_directory": "~/src/ai",
-    "description": "All DMs use Q&A persona against the ai repo. Read-only, no code writes."
+    "description": "All DMs use teammate persona against the ai repo. Casual conversation, read-only."
   },
 
   "defaults": {
@@ -306,7 +300,7 @@
       "respond_to_all": true,
       "respond_to_mentions": true,
       "respond_to_dms": false,
-      "dm_persona": "qa",
+      "dm_persona": "teammate",
       "mention_triggers": ["@valor", "valor", "hey valor"]
     },
     "response": {

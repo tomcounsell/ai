@@ -1,10 +1,11 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Medium
 owner: Valor
 created: 2026-03-20
 tracking: https://github.com/tomcounsell/ai/issues/432
+also_closes: https://github.com/tomcounsell/ai/issues/395
 last_comment_id: IC_kwDOEYGa0870G1VV
 ---
 
@@ -12,19 +13,20 @@ last_comment_id: IC_kwDOEYGa0870G1VV
 
 ## Problem
 
-The system has one monolithic `config/SOUL.md` (511 lines) used for all interactions. But the bridge now routes messages through 4 distinct personas (developer, project-manager, team-member, qa) based on which Telegram group the message arrives from. The persona config in `projects.json` already defines soul file paths (`config/personas/developer.md`, etc.) but these files don't exist yet — the bridge still loads the single `SOUL.md` for everything.
+The system has one monolithic `config/SOUL.md` (511 lines) used for all interactions. But the bridge now routes messages through 4 distinct personas (developer, project-manager, teammate) based on which Telegram group the message arrives from. The persona config in `projects.json` already defines soul file paths (`config/personas/developer.md`, etc.) but these files don't exist yet — the bridge still loads the single `SOUL.md` for everything.
 
 **Current behavior:**
 - `agent/sdk_client.py` loads `config/SOUL.md` as the system prompt for all sessions
-- A PM group message gets the same "full system access, YOLO mode" prompt as a dev group
+- The bridge itself and the coding subprocess get the same monolithic prompt
 - A team chat Q&A gets the same autonomous execution instructions as a feature build
 - The `personas` section in `projects.json` has `soul` paths that point to nonexistent files
 
 **Desired outcome:**
 - `config/SOUL.md` split into shared base + per-persona overlays
-- Bridge passes the persona name (from group config) to the SDK client
-- SDK client loads the correct persona soul file
-- Each persona gets appropriate instructions (dev: full access, PM: read-only + GitHub, team-member: Q&A only, qa: Q&A only)
+- The PM persona handles all Telegram messaging (bridge/Observer) — it's the single communication layer
+- The developer persona is loaded when the PM spins up AgentSDK subprocesses for coding work
+- The teammate persona handles DMs and team chats (casual Q&A)
+- Chat group prefix (Dev: vs PM:) determines what work the PM dispatches, not which persona receives the message
 
 ## Prior Art
 
@@ -37,14 +39,18 @@ The system has one monolithic `config/SOUL.md` (511 lines) used for all interact
 
 1. **Telegram message arrives** → bridge determines chat group name
 2. **`bridge/routing.py`** → `find_project_for_chat()` returns project config
-3. **NEW: `get_group_persona()`** → extracts persona name from group config dict
-4. **Bridge passes persona to SDK** → `sdk_client.py` receives persona name alongside project
-5. **`sdk_client.py` loads soul file** → reads `config/personas/{persona}.md` instead of `config/SOUL.md`
-6. **System prompt assembled** → WORKER_RULES + persona soul + principal context + criteria
+3. **Bridge (PM persona) handles message** → always loaded with PM persona soul
+4. **If coding work needed** → PM spins up AgentSDK subprocess with **developer** persona
+5. **If DM or team chat** → bridge uses **teammate** persona
+6. **System prompt assembled** → base + persona overlay + principal context + criteria
+
+The key insight: the bridge IS the PM. It doesn't "select" a persona per message — it always runs as PM. The persona selection only matters for:
+- AgentSDK subprocesses (developer persona for coding)
+- DMs and team chats (teammate persona)
 
 ## Architectural Impact
 
-- **New files**: 4 persona soul files in `config/personas/`
+- **New files**: 3 persona soul files + 1 base in `config/personas/`
 - **Interface changes**: `sdk_client.py` functions gain a `persona` parameter
 - **Coupling**: Decreases — persona behavior decoupled from monolithic SOUL.md
 - **Data ownership**: `projects.json` owns persona selection, `config/personas/*.md` owns persona content
@@ -70,14 +76,22 @@ No prerequisites — uses existing config infrastructure.
 
 ### Key Elements
 
-- **Shared base**: `config/personas/_base.md` — identity, values, communication style (shared across all personas)
-- **Per-persona overlays**: `config/personas/{developer,project-manager,team-member,qa}.md` — each imports the base and adds persona-specific instructions
-- **Persona routing**: Bridge extracts persona from group config and passes to SDK client
-- **SDK loading**: `sdk_client.py` loads persona soul file instead of `SOUL.md`
+- **Shared base**: `config/personas/_base.md` — identity, values, communication style, strategic context
+- **Three persona overlays**: developer, project-manager, teammate — role-specific instructions on top of the base
+- **Bridge = PM persona**: the bridge always runs as PM. It dispatches coding work to developer persona via AgentSDK.
+- **Unified loader**: `load_prompt(persona)` replaces both `load_system_prompt()` and `load_pm_prompt()`
 
-### Flow
+### Architecture
 
-**Message arrives** → routing finds project + group → persona name extracted → passed to SDK → SDK loads `config/personas/{persona}.md` → assembled into system prompt
+```
+Telegram (all groups)
+      ↓
+  Bridge (PM persona) ← always loaded with project-manager soul
+      ├── Dev: X group → dispatches AgentSDK subprocess (developer persona)
+      ├── PM: X group → PM handles directly (issue/PR mgmt, comms)
+      ├── Team chat → teammate persona (casual Q&A, mention-only)
+      └── DMs → teammate persona (casual Q&A)
+```
 
 ### Technical Approach
 
@@ -85,24 +99,37 @@ No prerequisites — uses existing config infrastructure.
 
 | Layer | File | Content |
 |-------|------|---------|
-| Base | `config/personas/_base.md` | Identity, values, communication style, tools reference, wisdom |
+| Base | `config/personas/_base.md` | Identity, values, communication style, tools, strategic context, wisdom |
 | Developer | `config/personas/developer.md` | Full system access, SDLC pipeline, autonomous execution, git operations |
-| PM | `config/personas/project-manager.md` | Read-only code, GitHub issue/PR management, communications drafting |
-| Team member | `config/personas/team-member.md` | Q&A only, concise answers, no proactive actions |
-| QA | `config/personas/qa.md` | Q&A about the ai repo, read-only, no code changes |
+| PM | `config/personas/project-manager.md` | Triage, routing, Observer duties, GitHub management, communications |
+| Teammate | `config/personas/teammate.md` | Casual conversation, Q&A, light and helpful |
 
 **Bridge changes:**
-- `bridge/routing.py` already has `get_group_persona()` (added today) — just needs to be called from the bridge
-- `bridge/telegram_bridge.py` passes persona name when calling SDK
+- Bridge loads PM persona at startup (base + project-manager overlay)
+- `bridge/telegram_bridge.py` uses PM persona for its own reasoning/summarization
+- When spawning AgentSDK coding subprocesses, passes `persona="developer"`
+- DMs and team chats use `persona="teammate"`
 
 **SDK changes:**
-- `agent/sdk_client.py`: `load_system_prompt()` and `load_pm_prompt()` unified into `load_prompt(persona)` that reads from `config/personas/{persona}.md`
-- Fallback: if persona file missing, load `config/SOUL.md` (backward compat)
-- DMs: use `"qa"` persona (from `dms.persona` in projects.json)
+- `agent/sdk_client.py`: unify `load_system_prompt()` and `load_pm_prompt()` into `load_prompt(persona)`
+- `load_prompt(persona)` reads `config/personas/_base.md` + `config/personas/{persona}.md`, concatenates
+- Fallback: if persona file missing, load `config/SOUL.md`
+
+**Strategic context (from #395 TELOS framework):**
+
+The base file carries shared strategic context (from the drafted PRINCIPAL.md in #368):
+- Mission, priority order (Valor > PsyOPTIMAL > Popoto > Templates > Others)
+- Key beliefs and strategies
+- Accumulated lessons
+
+Each persona overlay adds role-specific judgment:
+- Developer: scoping decisions, architecture tradeoffs, effort calibration
+- PM: triage and routing, work prioritization, escalation decisions
+- Teammate: what to answer vs defer, casual helpfulness
 
 **What stays as SOUL.md:**
 - `config/SOUL.md` remains as legacy fallback only — not loaded in normal operation
-- Eventually moved to `~/Desktop/Valor/SOUL.md` (per config consolidation plan)
+- Eventually moved to `~/Desktop/Valor/SOUL.md`
 
 ## Failure Path Test Strategy
 
@@ -112,8 +139,8 @@ No prerequisites — uses existing config infrastructure.
 - [ ] Invalid persona name in config → fall back to developer persona with warning
 
 ### Empty/Invalid Input Handling
-- [ ] Empty persona name from routing → default to "developer"
-- [ ] DM with no project match → use "qa" persona per dms config
+- [ ] Empty persona name from routing → default to "project-manager" (bridge default)
+- [ ] DM with no project match → use "teammate" persona per dms config
 
 ### Error State Rendering
 - [ ] Log which persona was loaded at session start for debugging
@@ -151,6 +178,9 @@ No race conditions identified. Persona is resolved once at message receipt time 
 - Dynamic persona switching within a session
 - Category B (brand) or C (docs) name changes from issue #432
 - Implementing actual permission enforcement (read-only for PM) — that's enforcement logic, this is prompt configuration
+- Memory partitioning by persona (#395 scope — AgentSession.persona field, per-persona memory decay)
+- Persona staleness detection / `/update-persona` command (#395 scope)
+- CTO / Chief of Staff personas (#395 scope — only build the 3 core personas now)
 - souls.directory integration (#189) — separate work after this ships
 
 ## Update System
@@ -176,11 +206,11 @@ No agent integration required — this changes the system prompt loaded by `sdk_
 - [ ] `config/personas/_base.md` exists with shared identity/values/tools content
 - [ ] `config/personas/developer.md` exists with full-access developer instructions
 - [ ] `config/personas/project-manager.md` exists with read-only + GitHub instructions
-- [ ] `config/personas/team-member.md` exists with Q&A-only instructions
-- [ ] `config/personas/qa.md` exists with Q&A-only instructions
-- [ ] `agent/sdk_client.py` loads persona-specific soul file based on persona parameter
-- [ ] Bridge passes persona name from group config to SDK client
-- [ ] DMs use "qa" persona
+- [ ] `config/personas/teammate.md` exists with casual conversation instructions
+- [ ] `agent/sdk_client.py` has unified `load_prompt(persona)` replacing both `load_system_prompt()` and `load_pm_prompt()`
+- [ ] Bridge loads PM persona at startup for its own reasoning
+- [ ] AgentSDK coding subprocesses use developer persona
+- [ ] DMs and team chats use teammate persona
 - [ ] Missing persona file falls back to SOUL.md with warning
 - [ ] `config/SOUL.md` remains as fallback but is not loaded in normal operation
 - [ ] Tests pass
@@ -222,11 +252,10 @@ No agent integration required — this changes the system prompt loaded by `sdk_
 - **Assigned To**: soul-splitter
 - **Agent Type**: builder
 - **Parallel**: true
-- Create `config/personas/_base.md` with: Identity, Values, Communication Style, Tools reference, Wisdom
-- Create `config/personas/developer.md` with: base import + Full System Access, Autonomous Execution, SDLC, Self-Management, Daily Operations
-- Create `config/personas/project-manager.md` with: base import + Read-only instructions, GitHub management, communications focus
-- Create `config/personas/team-member.md` with: base import + Mention-only, Q&A focus, concise answers
-- Create `config/personas/qa.md` with: base import + Q&A only, ai repo context, read-only
+- Create `config/personas/_base.md` with: Identity, Values, Communication Style, Tools reference, Strategic context (from PRINCIPAL.md draft), Wisdom
+- Create `config/personas/developer.md` with: Full System Access, Autonomous Execution, SDLC, Self-Management, Daily Operations
+- Create `config/personas/project-manager.md` with: Triage/routing, Observer duties, GitHub management, communications, escalation decisions
+- Create `config/personas/teammate.md` with: Casual conversation, Q&A, light and helpful, encouraging
 
 ### 2. Wire persona through bridge and SDK
 - **Task ID**: build-wiring
@@ -234,10 +263,11 @@ No agent integration required — this changes the system prompt loaded by `sdk_
 - **Assigned To**: bridge-wirer
 - **Agent Type**: builder
 - **Parallel**: false
-- Update `bridge/telegram_bridge.py` to call `get_group_persona()` and pass result to SDK
-- Update `agent/sdk_client.py`: replace `load_system_prompt()`/`load_pm_prompt()` with `load_prompt(persona)`
-- `load_prompt()` reads `config/personas/{persona}.md`, prepends `_base.md`, falls back to `SOUL.md`
-- DM sessions use `"qa"` persona from `projects.json` dms config
+- Update `agent/sdk_client.py`: unify `load_system_prompt()` and `load_pm_prompt()` into `load_prompt(persona)`
+- `load_prompt(persona)` reads `_base.md` + `{persona}.md`, concatenates, falls back to `SOUL.md`
+- Bridge loads PM persona at startup for its own messaging/summarization
+- AgentSDK coding subprocesses get developer persona
+- DMs and team chats get teammate persona
 
 ### 3. Validate
 - **Task ID**: validate-personas
@@ -278,15 +308,15 @@ No agent integration required — this changes the system prompt loaded by `sdk_
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | Base persona exists | `test -f config/personas/_base.md` | exit code 0 |
-| All personas exist | `ls config/personas/developer.md config/personas/project-manager.md config/personas/team-member.md config/personas/qa.md` | exit code 0 |
+| All personas exist | `ls config/personas/developer.md config/personas/project-manager.md config/personas/teammate.md` | exit code 0 |
 | SOUL.md still exists | `test -f config/SOUL.md` | exit code 0 |
 
 ---
 
-## Open Questions
+## Resolved Questions
 
-1. Should the base file be literally prepended to each persona file at load time (concatenation), or should each persona file include the base content directly (self-contained)? Concatenation keeps files DRY but means persona files read oddly in isolation. Self-contained means duplication but each file is a complete prompt.
+1. **Base + persona concatenation at load time.** `_base.md` is prepended to each persona file. Valor is the same name and same base persona but acting in different roles. DRY wins.
 
-2. Should we keep `load_pm_prompt()` as a separate function or fully unify into `load_prompt(persona)`? The PM prompt currently has different WORKER_RULES — should PM rules also be persona-specific?
+2. **Unify into `load_prompt(persona)`.** Kill `load_pm_prompt()`. One function, one path. Build for simplicity and scale.
 
-3. For the `team-member` and `qa` personas, how minimal should the soul be? Just "answer questions concisely about the codebase" or should it still include Valor's identity/values?
+3. **Merge team-member and qa into one "teammate" persona.** Light and simple — casual conversation on top of the base persona. Not a separate "Q&A mode" with rigid rules.
