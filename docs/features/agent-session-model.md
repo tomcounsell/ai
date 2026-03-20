@@ -33,7 +33,7 @@ Pipeline stage state is stored in the `stage_states` JSON field on AgentSession,
 | `PipelineStateMachine.has_failed_stage()` | `bool` | `True` if any stage has `FAILED` or `ERROR` status |
 | `PipelineStateMachine.get_display_progress()` | `dict` | Maps stage names to status (`completed`, `in_progress`, `pending`, `failed`) |
 
-`is_sdlc_job()` returns `True` if `classification_type == "sdlc"`.
+`is_sdlc` (property) returns `True` if `classification_type == "sdlc"`.
 
 These are used by the [stage-aware auto-continue](bridge-workflow-gaps.md#stage-aware-path-sdlc-jobs) routing in `agent/job_queue.py`.
 
@@ -121,7 +121,7 @@ Each `session_id` has exactly one `AgentSession` at any time. The `AgentSession`
 
 Only four fields change during continuation: `status` (reset to "pending"), `message_text` (coaching message), `auto_continue_count` (incremented), and `priority` (set to "high").
 
-**Fresh reads in routing:** The `send_to_chat` closure in `_execute_job()` re-reads the `AgentSession` from Redis before making routing decisions. This ensures `is_sdlc_job()` and `stage_states` data are current, not the stale in-memory copy captured at job start.
+**Fresh reads in routing:** The `send_to_chat` closure in `_execute_job()` re-reads the `AgentSession` from Redis before making routing decisions. This ensures `is_sdlc` and `stage_states` data are current, not the stale in-memory copy captured at job start.
 
 ### Field Preservation on Status Change
 

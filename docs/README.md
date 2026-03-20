@@ -40,7 +40,7 @@ tail -f logs/bridge.log
 
 | Document | Description |
 |----------|-------------|
-| [Deployment](deployment.md) | Multi-instance deployment configuration |
+| [Deployment](features/deployment.md) | Multi-instance deployment configuration |
 | [Reflections System](features/reflections.md) | Autonomous maintenance process |
 
 ### Features

@@ -263,4 +263,4 @@ See `/add-feature` skill for how to create new tools.
 ## See Also
 
 - Run `/add-feature` for creating new tools
-- Check `~/clawd/skills/` for MCP skill implementations
+- Check `.claude/skills/` for skill implementations

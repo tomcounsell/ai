@@ -15,7 +15,7 @@ Every piece of information on a model must have exactly ONE authoritative source
 
 ### 3. No Redundant State
 
-Two fields that must be kept in sync are a bug waiting to happen. Flag pairs where one could derive from the other. Classic example: a `classification_type` field alongside a method like `is_sdlc_job()` that checks both that field AND inspects history entries -- the field is redundant if the method already knows how to compute the answer.
+Two fields that must be kept in sync are a bug waiting to happen. Flag pairs where one could derive from the other. Classic example: a `classification_type` field alongside a property like `is_sdlc` that derives from that field -- the property pattern is correct here since `is_sdlc` simply checks `classification_type == "sdlc"`.
 
 ### 4. Field Usage Audit
 
