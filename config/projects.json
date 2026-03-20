@@ -38,8 +38,8 @@
       "auto_merge": true,
       "telegram": {
         "groups": {
-          "Dev: Valor": {"persona": "developer"},
-          "PM: Valor": {"persona": "project-manager"}
+          "Dev: Valor": {"chat_id": -5051653062, "persona": "developer"},
+          "PM: Valor": {"chat_id": -4803346924, "persona": "project-manager"}
         },
         "respond_to_unaddressed": true,
         "respond_to_dms": true,
@@ -65,7 +65,9 @@
       "machine": "Valor the Cowboy",
       "auto_merge": false,
       "telegram": {
-        "groups": {"Dev: Popoto": {"persona": "developer"}},
+        "groups": {
+          "Dev: Popoto": {"chat_id": -5294327191, "persona": "developer"}
+        },
         "respond_to_unaddressed": true,
         "respond_to_dms": false
       },
@@ -86,7 +88,9 @@
       "machine": "Valor the Bald",
       "auto_merge": true,
       "telegram": {
-        "groups": {"Dev: Django Template": {"persona": "developer"}},
+        "groups": {
+          "Dev: Django Template": {"chat_id": -5240384240, "persona": "developer"}
+        },
         "respond_to_unaddressed": true,
         "respond_to_dms": false
       },
@@ -107,7 +111,9 @@
       "machine": "Valor the Bald",
       "auto_merge": true,
       "telegram": {
-        "groups": {"Dev: Flutter Template": {"persona": "developer"}},
+        "groups": {
+          "Dev: Flutter Template": {"chat_id": -5132568760, "persona": "developer"}
+        },
         "respond_to_unaddressed": true,
         "respond_to_dms": false
       },
@@ -129,8 +135,8 @@
       "auto_merge": true,
       "telegram": {
         "groups": {
-          "Dev: Cuttlefish": {"persona": "developer"},
-          "PM: Cuttlefish": {"persona": "project-manager"}
+          "Dev: Cuttlefish": {"chat_id": -5295380350, "persona": "developer"},
+          "PM: Cuttlefish": {"chat_id": -5120117217, "persona": "project-manager"}
         },
         "respond_to_unaddressed": true,
         "respond_to_dms": false
@@ -152,7 +158,9 @@
       "machine": "Valor the Bald",
       "auto_merge": true,
       "telegram": {
-        "groups": {"Dev: Yudame Research": {"persona": "developer"}},
+        "groups": {
+          "Dev: Yudame Research": {"chat_id": -5230452487, "persona": "developer"}
+        },
         "respond_to_unaddressed": true,
         "respond_to_dms": false
       },
@@ -173,7 +181,9 @@
       "machine": "Valor the Bald",
       "auto_merge": true,
       "telegram": {
-        "groups": {"Dev: Yuda.me": {"persona": "developer"}},
+        "groups": {
+          "Dev: Yuda.me": {"persona": "developer"}
+        },
         "respond_to_unaddressed": true,
         "respond_to_dms": false
       },
@@ -219,9 +229,9 @@
       "auto_merge": false,
       "telegram": {
         "groups": {
-          "Dev: PsyOPTIMAL": {"persona": "developer"},
-          "PM: PsyOptimal": {"persona": "project-manager"},
-          "PsyOPTIMAL": {"persona": "team-member"}
+          "Dev: PsyOPTIMAL": {"chat_id": -4897329503, "persona": "developer"},
+          "PM: PsyOptimal": {"chat_id": -5283538472, "persona": "project-manager"},
+          "PsyOPTIMAL": {"chat_id": -1002600253717, "persona": "team-member"}
         },
         "respond_to_unaddressed": true,
         "respond_to_dms": false
@@ -269,7 +279,7 @@
       "telegram": {
         "groups": {
           "Dev: SATSOL": {"persona": "developer"},
-          "PM: SATSOL": {"persona": "project-manager"}
+          "PM: SATSOL": {"chat_id": -5136818964, "persona": "project-manager"}
         },
         "respond_to_unaddressed": true,
         "respond_to_dms": false
@@ -283,6 +293,12 @@
         "description": "SATSOL platform development"
       }
     }
+  },
+
+  "dms": {
+    "persona": "qa",
+    "working_directory": "~/src/ai",
+    "description": "All DMs use Q&A persona against the ai repo. Read-only, no code writes."
   },
 
   "defaults": {
