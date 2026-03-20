@@ -2,7 +2,7 @@
 Claude Agent SDK client wrapper for Valor.
 
 This module provides a wrapper around ClaudeSDKClient configured for Valor's use case:
-- Loads system prompt from SOUL.md
+- Loads system prompt via the configurable persona system
 - Configures permission mode for autonomous operation
 - Handles session management
 - Extracts text response from message stream
@@ -1387,9 +1387,10 @@ async def get_agent_response_sdk(
         f"task_list={task_list_id or 'none'}, mode={project_mode}"
     )
     wr_label = "yes" if has_worker_rules else "no (pm mode)"
-    _pre_persona = _resolve_persona(project, chat_title, is_dm=chat_title is None)
+    is_dm = chat_title is None
+    persona = _resolve_persona(project, chat_title, is_dm=is_dm)
     logger.info(
-        f"[{request_id}] Context: persona={_pre_persona}, worker_rules={wr_label}, "
+        f"[{request_id}] Context: persona={persona}, worker_rules={wr_label}, "
         f"workflow_context={'yes' if has_workflow else 'no'}, "
         f"session_id={session_id}"
     )
@@ -1400,9 +1401,6 @@ async def get_agent_response_sdk(
         # Extract message_id from the job context (passed through _execute_job)
         _message_id = None  # message_id not available at this layer
 
-        # Resolve persona from project config, chat title, and DM status
-        is_dm = chat_title is None
-        persona = _resolve_persona(project, chat_title, is_dm=is_dm)
         logger.info(f"[{request_id}] Resolved persona: {persona}")
 
         # Build system prompt based on persona and project mode
