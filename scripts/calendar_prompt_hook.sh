@@ -22,9 +22,9 @@ if echo "$PROMPT" | grep -qE '^\s*/[a-zA-Z0-9_-]+\s*$'; then
     exit 0
 fi
 
-# Skip excluded projects (too noisy for calendar tracking)
-EXCLUDED_PROJECTS="valor"
+# Only track projects that have a calendar mapping (allowlist via calendar_config.json)
 PROJECTS_JSON="${PROJECTS_CONFIG_PATH:-$HOME/Desktop/Valor/projects.json}"
+CALENDAR_JSON="$HOME/Desktop/Valor/calendar_config.json"
 CURRENT_PROJECT=""
 if [ -f "$PROJECTS_JSON" ]; then
     CURRENT_PROJECT=$(jq -r --arg cwd "$PWD" --arg home "$HOME" '
@@ -33,11 +33,18 @@ if [ -f "$PROJECTS_JSON" ]; then
         | .key
     ' "$PROJECTS_JSON" 2>/dev/null || true)
 fi
-for excluded in $EXCLUDED_PROJECTS; do
-    if [ "$CURRENT_PROJECT" = "$excluded" ]; then
+# Skip if project not in calendar_config.json
+if [ -z "$CURRENT_PROJECT" ]; then
+    exit 0
+fi
+if [ -f "$CALENDAR_JSON" ]; then
+    HAS_CALENDAR=$(jq -r --arg proj "$CURRENT_PROJECT" '.calendars[$proj] // empty' "$CALENDAR_JSON" 2>/dev/null || true)
+    if [ -z "$HAS_CALENDAR" ]; then
         exit 0
     fi
-done
+else
+    exit 0
+fi
 
 # Rate limit: skip if same session and called within the last INTERVAL seconds
 # A new session always bypasses the rate limit
