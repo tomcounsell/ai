@@ -422,6 +422,14 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                 if tool.name not in optional_tools:
                     result.warnings.append(f"{tool.name}: {tool.error}")
 
+        # Migrate legacy Desktop/claude_code paths in settings.json
+        log("Migrating settings.json paths...", v)
+        settings_migration = verify.migrate_settings_json_paths()
+        if settings_migration.get("migrated"):
+            log(f"  Settings: {settings_migration.get('reason')}", v, always=True)
+        else:
+            log(f"  Settings: {settings_migration.get('reason')}", v)
+
         # Sync Claude OAuth credentials
         log("Syncing Claude OAuth credentials...", v)
         oauth_sync = verify.sync_claude_oauth(project_dir)
