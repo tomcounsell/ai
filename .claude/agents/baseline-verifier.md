@@ -77,10 +77,11 @@ if [ -f .env ]; then
   cp .env "$BASELINE_DIR/.env"
 fi
 
-# Copy projects.json from its external location (iCloud-synced, not in-repo)
-if [ -f ~/Desktop/Valor/projects.json ]; then
+# Copy projects.json from ~/Desktop/Valor/ (iCloud-synced, private) into baseline
+PROJECTS_SRC=~/Desktop/Valor/projects.json
+if [ -f "$PROJECTS_SRC" ]; then
   mkdir -p "$BASELINE_DIR/config"
-  cp ~/Desktop/Valor/projects.json "$BASELINE_DIR/config/projects.json" 2>/dev/null || true
+  cp "$PROJECTS_SRC" "$BASELINE_DIR/config/" 2>/dev/null || true
 fi
 ```
 
