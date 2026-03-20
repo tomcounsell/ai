@@ -68,7 +68,7 @@ All settings are configurable via environment variables with safe defaults:
 | `STALL_MAX_RETRIES` | 3 | Maximum retry attempts before abandoning |
 | `STALL_BACKOFF_BASE_SECONDS` | 10 | Base delay for exponential backoff |
 | `STALL_BACKOFF_MAX_SECONDS` | 300 | Maximum backoff delay (5 minutes) |
-| `STALL_TIMEOUT_SECONDS` | 600 | Active session stall threshold (overrides hardcoded 10min) |
+| `STALL_TIMEOUT_SECONDS` | 600 | Fallback stall threshold for sessions without in-memory activity tracking (see [Session Watchdog Reliability](session-watchdog-reliability.md)) |
 
 ## Components
 
@@ -82,7 +82,7 @@ Both fields are preserved across the delete-and-recreate pattern via `_JOB_FIELD
 ### Functions (`monitoring/session_watchdog.py`)
 
 - `_compute_stall_backoff(retry_count)`: Computes exponential backoff delay. Handles None (pre-existing sessions without retry_count), negative values, and Popoto Field objects (coerced to int) gracefully.
-- `_kill_stalled_worker(project_key)`: Cancels the asyncio worker task for a project, removing it from `_active_workers`. Returns False if no worker exists or it's already dead.
+- `_kill_stalled_worker(project_key: str | Any)`: Cancels the asyncio worker task for a project, removing it from `_active_workers`. Accepts both plain strings and Popoto DB_key objects (coerced via `str()`). Returns False if no worker exists, it's already dead, or the key is None/empty.
 - `_enqueue_stall_retry(session, stall_reason)`: Re-enqueues a stalled session using the delete-and-recreate pattern with incremented retry_count, stall reason context, and high priority.
 - `_notify_stall_failure(session, stall_reason)`: Sends a Telegram notification via the bridge's registered send callback when retries are exhausted.
 
@@ -154,3 +154,4 @@ In `monitoring/session_watchdog.py`. Called from the watchdog loop after `check_
 - [Session Watchdog](session-watchdog.md): The monitoring loop that runs stall checks
 - [Job Health Monitor](job-health-monitor.md): Complementary liveness monitor for running jobs with dead workers
 - [Bridge Workflow Gaps](bridge-workflow-gaps.md): Auto-continue mechanism that retry builds upon
+- [Session Watchdog Reliability](session-watchdog-reliability.md): Activity-based stall detection and observer circuit breaker

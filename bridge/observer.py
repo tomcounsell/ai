@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import re
+import time
 from typing import Any
 
 import anthropic
@@ -33,6 +34,123 @@ from utils.github_patterns import ISSUE_NUMBER_RE as _ISSUE_NUMBER_RE
 from utils.github_patterns import PR_NUMBER_RE as _PR_NUMBER_RE
 
 logger = logging.getLogger(__name__)
+
+# === Observer Circuit Breaker ===
+# Tracks consecutive failures per session to implement escalating backoff.
+# Retryable errors (API/outage) get exponential backoff before retry.
+# Non-retryable errors (import, config, logic bugs) escalate immediately.
+# Counters reset on success.
+
+# {session_id: consecutive_failure_count}
+_observer_failure_counts: dict[str, int] = {}
+# {session_id: timestamp of last retry attempt}
+_observer_last_retry: dict[str, float] = {}
+
+# Backoff schedule: 30s, 60s, 120s, 240s, 480s
+OBSERVER_BACKOFF_BASE = 30
+OBSERVER_BACKOFF_MAX = 480
+OBSERVER_MAX_RETRIES = 5
+
+
+def _classify_observer_error(error: Exception) -> str:
+    """Classify an observer error as retryable or non-retryable.
+
+    Returns:
+        'retryable' for API/outage errors that may resolve on their own.
+        'non_retryable' for errors requiring human intervention.
+    """
+    error_str = str(error).lower()
+    error_type = type(error).__name__
+
+    # API errors that are typically transient
+    retryable_patterns = [
+        "overloaded",
+        "rate_limit",
+        "rate limit",
+        "timeout",
+        "timed out",
+        "connection",
+        "503",
+        "502",
+        "500",
+        "529",
+        "server error",
+        "temporarily unavailable",
+        "service unavailable",
+    ]
+    retryable_types = [
+        "APIStatusError",
+        "APIConnectionError",
+        "APITimeoutError",
+        "RateLimitError",
+        "InternalServerError",
+        "ConnectionError",
+        "TimeoutError",
+    ]
+
+    if error_type in retryable_types:
+        return "retryable"
+    if any(p in error_str for p in retryable_patterns):
+        return "retryable"
+
+    # Everything else is non-retryable (import errors, config issues, logic bugs)
+    return "non_retryable"
+
+
+def _compute_observer_backoff(failure_count: int) -> float:
+    """Compute backoff delay for observer retries.
+
+    Returns delay in seconds: 30, 60, 120, 240, 480 (capped).
+    """
+    delay = OBSERVER_BACKOFF_BASE * (2 ** (failure_count - 1))
+    return min(delay, OBSERVER_BACKOFF_MAX)
+
+
+def observer_record_success(session_id: str) -> None:
+    """Reset circuit breaker counters on successful observer run."""
+    _observer_failure_counts.pop(session_id, None)
+    _observer_last_retry.pop(session_id, None)
+
+
+def clear_observer_state(session_id: str) -> None:
+    """Remove all circuit breaker state for a completed/abandoned session.
+
+    Should be called when a session reaches a terminal state to prevent
+    memory leaks from accumulated failure counts and retry timestamps.
+    """
+    _observer_failure_counts.pop(session_id, None)
+    _observer_last_retry.pop(session_id, None)
+
+
+def observer_record_failure(session_id: str) -> dict[str, Any]:
+    """Record a failure and return circuit breaker state.
+
+    Returns:
+        Dict with keys: failure_count, should_retry, retry_after, should_escalate
+    """
+    count = _observer_failure_counts.get(session_id, 0) + 1
+    _observer_failure_counts[session_id] = count
+    _observer_last_retry[session_id] = time.time()
+
+    if count >= OBSERVER_MAX_RETRIES:
+        return {
+            "failure_count": count,
+            "should_retry": False,
+            "retry_after": 0,
+            "should_escalate": True,
+        }
+
+    return {
+        "failure_count": count,
+        "should_retry": True,
+        "retry_after": _compute_observer_backoff(count),
+        "should_escalate": False,
+    }
+
+
+def get_observer_failure_count(session_id: str) -> int:
+    """Get the current failure count for a session's observer."""
+    return _observer_failure_counts.get(session_id, 0)
 
 
 def _build_sdlc_context(session: AgentSession) -> dict[str, str]:
@@ -115,17 +233,34 @@ MAX_TOOL_ITERATIONS = 5
 
 
 def _build_observer_system_prompt() -> str:
-    """Build the Observer system prompt with principal context injected."""
-    from agent.sdk_client import load_principal_context
+    """Build the Observer system prompt with principal context injected.
 
-    principal = load_principal_context(condensed=False)
+    Import of load_principal_context is guarded against ImportError —
+    if the import fails (circular import or module not loaded), the
+    prompt is built without principal context and a warning is logged.
+    """
     principal_block = ""
-    if principal:
-        principal_block = (
-            "\n## Principal Context (Supervisor's Strategic Priorities)\n\n"
-            "The following is the supervisor's operating context. Use it for "
-            "prioritization, scoping, and escalation decisions.\n\n"
-            f"{principal}\n\n---\n"
+    try:
+        from agent.sdk_client import load_principal_context
+
+        principal = load_principal_context(condensed=False)
+        if principal:
+            principal_block = (
+                "\n## Principal Context (Supervisor's Strategic Priorities)\n\n"
+                "The following is the supervisor's operating context. Use it for "
+                "prioritization, scoping, and escalation decisions.\n\n"
+                f"{principal}\n\n---\n"
+            )
+    except ImportError:
+        logger.warning(
+            "[observer] Failed to import load_principal_context — "
+            "building prompt without principal context"
+        )
+    except Exception as e:
+        logger.warning(
+            "[observer] Error loading principal context: %s — "
+            "building prompt without principal context",
+            e,
         )
 
     return (
@@ -676,6 +811,9 @@ class Observer:
                 )
                 return {"action": "deliver", "reason": "Observer did not converge", **base}
 
+            # Success — reset circuit breaker
+            observer_record_success(self.session.session_id)
+
             cid = getattr(self.session, "correlation_id", None) or "unknown"
             if self._action_taken == "steer":
                 record_decision(
@@ -703,4 +841,43 @@ class Observer:
             cid = getattr(self.session, "correlation_id", None) or "unknown"
             logger.error(f"{self._log_prefix} Observer failed: {e}", exc_info=True)
             record_decision(self.session.session_id, cid, "error", str(e))
-            return {"action": "deliver", "reason": f"Observer error: {e}", "error": str(e), **base}
+
+            # Circuit breaker: classify error and decide retry vs escalate
+            error_class = _classify_observer_error(e)
+            cb_state = observer_record_failure(self.session.session_id)
+
+            result = {
+                "action": "deliver",
+                "reason": f"Observer error: {e}",
+                "error": str(e),
+                "error_class": error_class,
+                "failure_count": cb_state["failure_count"],
+                **base,
+            }
+
+            if error_class == "retryable" and cb_state["should_retry"]:
+                result["retry_after"] = cb_state["retry_after"]
+                logger.info(
+                    "%s Observer retryable error (count=%d), retry after %.0fs: %s",
+                    self._log_prefix,
+                    cb_state["failure_count"],
+                    cb_state["retry_after"],
+                    e,
+                )
+            elif cb_state["should_escalate"]:
+                result["should_escalate"] = True
+                logger.warning(
+                    "%s Observer circuit breaker tripped (count=%d), escalating: %s",
+                    self._log_prefix,
+                    cb_state["failure_count"],
+                    e,
+                )
+            elif error_class == "non_retryable":
+                result["should_escalate"] = True
+                logger.warning(
+                    "%s Observer non-retryable error, escalating immediately: %s",
+                    self._log_prefix,
+                    e,
+                )
+
+            return result

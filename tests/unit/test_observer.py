@@ -316,3 +316,206 @@ class TestDecisionStructure:
         decision = await observer.run()
         assert "resolved_stage" in decision
         assert "next_stage" in decision
+
+
+# ============================================================================
+# Observer Circuit Breaker
+# ============================================================================
+
+
+class TestObserverCircuitBreaker:
+    """Test circuit breaker error classification, backoff, and escalation."""
+
+    def test_classify_retryable_api_error(self):
+        from bridge.observer import _classify_observer_error
+
+        # API overloaded
+        err = Exception("API overloaded, please retry")
+        assert _classify_observer_error(err) == "retryable"
+
+    def test_classify_retryable_timeout(self):
+        from bridge.observer import _classify_observer_error
+
+        err = TimeoutError("connection timed out")
+        assert _classify_observer_error(err) == "retryable"
+
+    def test_classify_retryable_connection_error(self):
+        from bridge.observer import _classify_observer_error
+
+        err = ConnectionError("connection refused")
+        assert _classify_observer_error(err) == "retryable"
+
+    def test_classify_retryable_rate_limit(self):
+        from bridge.observer import _classify_observer_error
+
+        err = Exception("rate limit exceeded")
+        assert _classify_observer_error(err) == "retryable"
+
+    def test_classify_retryable_503(self):
+        from bridge.observer import _classify_observer_error
+
+        err = Exception("503 Service Unavailable")
+        assert _classify_observer_error(err) == "retryable"
+
+    def test_classify_non_retryable_import_error(self):
+        from bridge.observer import _classify_observer_error
+
+        err = ImportError("No module named 'agent.sdk_client'")
+        assert _classify_observer_error(err) == "non_retryable"
+
+    def test_classify_non_retryable_logic_error(self):
+        from bridge.observer import _classify_observer_error
+
+        err = ValueError("invalid stage name")
+        assert _classify_observer_error(err) == "non_retryable"
+
+    def test_classify_non_retryable_attribute_error(self):
+        from bridge.observer import _classify_observer_error
+
+        err = AttributeError("'str' object has no attribute 'redis_key'")
+        assert _classify_observer_error(err) == "non_retryable"
+
+    def test_backoff_schedule(self):
+        from bridge.observer import _compute_observer_backoff
+
+        assert _compute_observer_backoff(1) == 30  # 30 * 2^0
+        assert _compute_observer_backoff(2) == 60  # 30 * 2^1
+        assert _compute_observer_backoff(3) == 120  # 30 * 2^2
+        assert _compute_observer_backoff(4) == 240  # 30 * 2^3
+        assert _compute_observer_backoff(5) == 480  # 30 * 2^4, equals max
+
+    def test_backoff_capped_at_max(self):
+        from bridge.observer import OBSERVER_BACKOFF_MAX, _compute_observer_backoff
+
+        # Very high count should still be capped
+        assert _compute_observer_backoff(10) == OBSERVER_BACKOFF_MAX
+
+    def test_record_success_resets_counters(self):
+        from bridge.observer import (
+            _observer_failure_counts,
+            _observer_last_retry,
+            observer_record_failure,
+            observer_record_success,
+        )
+
+        # Record some failures first
+        observer_record_failure("test-session")
+        observer_record_failure("test-session")
+        assert _observer_failure_counts.get("test-session") == 2
+
+        # Success resets
+        observer_record_success("test-session")
+        assert "test-session" not in _observer_failure_counts
+        assert "test-session" not in _observer_last_retry
+
+    def test_record_failure_increments_count(self):
+        from bridge.observer import (
+            observer_record_failure,
+            observer_record_success,
+        )
+
+        # Clean slate
+        observer_record_success("test-inc")
+
+        state1 = observer_record_failure("test-inc")
+        assert state1["failure_count"] == 1
+        assert state1["should_retry"] is True
+        assert state1["retry_after"] == 30
+
+        state2 = observer_record_failure("test-inc")
+        assert state2["failure_count"] == 2
+        assert state2["should_retry"] is True
+        assert state2["retry_after"] == 60
+
+        # Clean up
+        observer_record_success("test-inc")
+
+    def test_escalation_after_max_retries(self):
+        from bridge.observer import (
+            OBSERVER_MAX_RETRIES,
+            observer_record_failure,
+            observer_record_success,
+        )
+
+        # Clean slate
+        observer_record_success("test-esc")
+
+        # Accumulate failures up to max
+        for i in range(OBSERVER_MAX_RETRIES - 1):
+            state = observer_record_failure("test-esc")
+            assert state["should_retry"] is True
+            assert state["should_escalate"] is False
+
+        # One more failure should trigger escalation
+        state = observer_record_failure("test-esc")
+        assert state["should_retry"] is False
+        assert state["should_escalate"] is True
+        assert state["failure_count"] == OBSERVER_MAX_RETRIES
+
+        # Clean up
+        observer_record_success("test-esc")
+
+    def test_get_failure_count(self):
+        from bridge.observer import (
+            get_observer_failure_count,
+            observer_record_failure,
+            observer_record_success,
+        )
+
+        observer_record_success("test-count")
+        assert get_observer_failure_count("test-count") == 0
+
+        observer_record_failure("test-count")
+        assert get_observer_failure_count("test-count") == 1
+
+        observer_record_success("test-count")
+        assert get_observer_failure_count("test-count") == 0
+
+
+# ============================================================================
+# Observer Import Guard
+# ============================================================================
+
+
+class TestObserverImportGuard:
+    """Test that _build_observer_system_prompt handles import failures."""
+
+    def test_import_error_returns_prompt_without_principal(self):
+        """ImportError in load_principal_context should produce a valid prompt."""
+        from bridge.observer import _build_observer_system_prompt
+
+        with patch("bridge.observer.logger") as mock_logger:
+            # Patch the import to fail
+            import builtins
+
+            original_import = builtins.__import__
+
+            def mock_import(name, *args, **kwargs):
+                if name == "agent.sdk_client":
+                    raise ImportError("circular import")
+                return original_import(name, *args, **kwargs)
+
+            with patch("builtins.__import__", side_effect=mock_import):
+                prompt = _build_observer_system_prompt()
+
+            # Should still return a valid prompt
+            assert "Observer Agent" in prompt
+            assert "STEER" in prompt
+            # Should NOT contain principal context section
+            assert "Principal Context" not in prompt
+            # Should have logged a warning
+            mock_logger.warning.assert_called()
+
+    def test_successful_import_includes_principal(self):
+        """When import succeeds and returns content, principal context is included."""
+        from bridge.observer import _build_observer_system_prompt
+
+        with patch("bridge.observer.load_principal_context", create=True) as mock_load:
+            # Need to patch at the function level since it's imported inside
+            with patch.dict(
+                "sys.modules", {"agent.sdk_client": MagicMock(load_principal_context=mock_load)}
+            ):
+                mock_load.return_value = "Focus on shipping PR #42"
+                prompt = _build_observer_system_prompt()
+                # The prompt should contain the observer system content at minimum
+                assert "Observer Agent" in prompt

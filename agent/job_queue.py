@@ -1626,6 +1626,45 @@ async def _execute_job(job: Job) -> None:
             f"(transitions={decision.get('transitions_applied', 0)})"
         )
 
+        # Handle circuit breaker retry/escalation from observer errors
+        if decision.get("retry_after"):
+            retry_delay = decision["retry_after"]
+            failure_count = decision.get("failure_count", 0)
+            logger.info(
+                f"[{job.project_key}] Observer circuit breaker: "
+                f"retrying in {retry_delay:.0f}s (failure {failure_count})"
+            )
+            await asyncio.sleep(retry_delay)
+            # Re-run observer after backoff
+            try:
+                decision = await observer.run()
+            except Exception as retry_e:
+                logger.error(
+                    f"[{job.project_key}] Observer retry failed: {retry_e}",
+                    exc_info=True,
+                )
+                await send_cb(job.chat_id, msg, job.message_id, agent_session)
+                chat_state.completion_sent = True
+                return
+
+        if decision.get("should_escalate"):
+            error_msg = decision.get("error", "unknown error")
+            failure_count = decision.get("failure_count", 0)
+            escalation_msg = (
+                f"⚠️ **Observer Error** (session: `{job.session_id}`)\n\n"
+                f"The observer has failed {failure_count} consecutive time(s).\n"
+                f"Error: `{error_msg}`\n\n"
+                f"Delivering raw worker output as fallback."
+            )
+            logger.warning(
+                f"[{job.project_key}] Observer escalation: {error_msg} (failures={failure_count})"
+            )
+            # Send escalation notice followed by raw output
+            await send_cb(job.chat_id, escalation_msg, job.message_id, agent_session)
+            await send_cb(job.chat_id, msg, job.message_id, agent_session)
+            chat_state.completion_sent = True
+            return
+
         # Apply state machine transitions based on Observer decision
         if _state_machine and _is_sdlc:
             try:
@@ -1870,6 +1909,13 @@ async def _execute_job(job: Job) -> None:
             )
             if not chat_state.defer_reaction:
                 complete_transcript(job.session_id, status=final_status)
+                # Clean up observer circuit breaker state for terminal sessions
+                try:
+                    from bridge.observer import clear_observer_state
+
+                    clear_observer_state(job.session_id)
+                except Exception:
+                    pass  # Non-critical cleanup
             else:
                 agent_session.last_activity = time.time()
                 agent_session.save()

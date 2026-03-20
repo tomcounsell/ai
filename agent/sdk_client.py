@@ -60,10 +60,47 @@ _active_clients: dict[str, "ClaudeSDKClient"] = {}
 # In-memory only — cleared when the session finishes.
 _session_stop_reasons: dict[str, str] = {}
 
+# === Activity Tracking ===
+# Tracks the timestamp of the last tool call or log output for each session.
+# Used by the watchdog heartbeat for activity-based stall detection instead
+# of hard wall-clock timeouts. Updated on each tool call callback and log output.
+# In-memory only — reset on crash/reboot (new sessions start fresh).
+_last_activity_timestamps: dict[str, float] = {}
+
+# Configurable inactivity threshold (seconds). Sessions idle longer than this
+# are considered stalled. Active sessions producing tool calls/logs are never
+# interrupted regardless of total runtime.
+SDK_INACTIVITY_TIMEOUT_SECONDS = int(os.environ.get("SDK_INACTIVITY_TIMEOUT_SECONDS", 300))
+
 
 def get_stop_reason(session_id: str) -> str | None:
     """Get and consume the stop_reason for a completed session query."""
     return _session_stop_reasons.pop(session_id, None)
+
+
+def record_session_activity(session_id: str) -> None:
+    """Record that a session produced activity (text output or result message).
+
+    Called on text block output and result messages during SDK query execution.
+    The watchdog uses this to detect stalls based on inactivity rather than
+    wall-clock duration.
+    """
+    _last_activity_timestamps[session_id] = time.time()
+
+
+def get_session_last_activity(session_id: str) -> float | None:
+    """Get the timestamp of the last activity for a session.
+
+    Returns:
+        Unix timestamp of last tool call or log output, or None if
+        no activity has been recorded for this session.
+    """
+    return _last_activity_timestamps.get(session_id)
+
+
+def clear_session_activity(session_id: str) -> None:
+    """Remove activity tracking for a completed/abandoned session."""
+    _last_activity_timestamps.pop(session_id, None)
 
 
 def _get_prior_session_uuid(session_id: str) -> str | None:
@@ -988,10 +1025,11 @@ class ValorAgent:
         _log_system_resources("SDK-init-pre")
 
         try:
-            # Overall timeout: prevent query from blocking a worker forever
-            # if the SDK subprocess hangs during init or response streaming.
-            # 10 minutes is generous — most queries complete in 1-5 minutes.
-            query_timeout = int(os.environ.get("SDK_QUERY_TIMEOUT_SECONDS", 600))
+            # Safety ceiling timeout: prevents query from blocking a worker
+            # forever if the SDK subprocess hangs. Set high (1 hour) because
+            # the watchdog's activity-based stall detection handles real stalls.
+            # This is only a backstop for truly hung processes.
+            query_timeout = int(os.environ.get("SDK_QUERY_TIMEOUT_SECONDS", 3600))
 
             async with asyncio.timeout(query_timeout):
                 async with ClaudeSDKClient(options) as client:
@@ -1004,6 +1042,10 @@ class ValorAgent:
                         _active_clients[session_id] = client
                         logger.debug(f"Registered active client for session {session_id}")
 
+                    # Record initial activity when query starts
+                    if session_id:
+                        record_session_activity(session_id)
+
                     await client.query(message)
 
                     while True:
@@ -1012,7 +1054,13 @@ class ValorAgent:
                                 for block in msg.content:
                                     if isinstance(block, TextBlock):
                                         response_parts.append(block.text)
+                                        # Record activity on each text output
+                                        if session_id:
+                                            record_session_activity(session_id)
                             elif isinstance(msg, ResultMessage):
+                                # Record activity on result messages
+                                if session_id:
+                                    record_session_activity(session_id)
                                 # Bug 1 fix (issue #374): Store Claude Code session UUID
                                 # so continuation sessions resume the correct transcript.
                                 if msg.session_id and session_id:
@@ -1146,6 +1194,8 @@ class ValorAgent:
             # Always unregister client from registry
             if session_id:
                 _active_clients.pop(session_id, None)
+                # Clean up activity tracking — session is done
+                clear_session_activity(session_id)
                 # Note: _session_stop_reasons is NOT cleaned here — it's consumed
                 # by get_stop_reason() in job_queue after query returns. The pop()
                 # in get_stop_reason() handles cleanup. If the Observer never runs
