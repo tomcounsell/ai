@@ -461,9 +461,19 @@ This invokes the cascade skill defined in `.claude/skills/do-docs/SKILL.md`, whi
 
 **Note**: The cascade is best-effort. If it finds nothing to update, that's fine — proceed to plan migration. If it makes edits, those are committed directly to the PR branch.
 
-### Step 8: Report PR Link
+### Step 8: Plan Migration
 
-Include the PR URL prominently in your final response. When running via Telegram bridge, the agent's response (containing the PR link) will be automatically sent back to the chat where the build was initiated. No special action required - just ensure the PR URL is visible in your completion report.
+After PR is successfully created and documentation cascade completes, clean up the completed plan:
+
+```bash
+cd $(git rev-parse --show-toplevel) && python scripts/migrate_completed_plan.py {PLAN_PATH}
+```
+
+This deletes the plan document and closes the tracking issue, completing the lifecycle.
+
+### Step 9: Report PR Link
+
+After plan migration completes, include the PR URL prominently in your final response. When running via Telegram bridge, the agent's response (containing the PR link) will be automatically sent back to the chat where the build was initiated. No special action required - just ensure the PR URL is visible in your completion report.
 
 ## Agent Deployment Context
 
@@ -528,6 +538,7 @@ After all tasks complete:
 - [x] Reviewed: Review passed (no blocking issues)
 - [x] Documented: Docs created after review (validated by docs gate)
 - [x] Quality: Ruff and Black checks pass
+- [x] Plans migrated: Plan moved from docs/plans/ to completed state
 
 ### Task Summary
 | Task | Agent | Status | Test Iterations | Notes |

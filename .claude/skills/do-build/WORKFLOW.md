@@ -125,6 +125,7 @@ When the final `validate-all` task completes, verify Definition of Done criteria
 - [x] **Tested**: All unit tests passing, integration tests passing
 - [x] **Documented**: Documentation created per plan's Documentation section
 - [x] **Quality**: Ruff and Black checks pass, no lint errors
+- [x] **Plans migrated**: Ready to migrate from docs/plans/ to docs/features/
 
 If any criterion is not met, report the issue and do NOT proceed to PR creation.
 

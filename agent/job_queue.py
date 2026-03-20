@@ -1909,6 +1909,13 @@ async def _execute_job(job: Job) -> None:
             )
             if not chat_state.defer_reaction:
                 complete_transcript(job.session_id, status=final_status)
+                # Clean up observer circuit breaker state for terminal sessions
+                try:
+                    from bridge.observer import clear_observer_state
+
+                    clear_observer_state(job.session_id)
+                except Exception:
+                    pass  # Non-critical cleanup
             else:
                 agent_session.last_activity = time.time()
                 agent_session.save()

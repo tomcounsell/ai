@@ -112,6 +112,16 @@ def observer_record_success(session_id: str) -> None:
     _observer_last_retry.pop(session_id, None)
 
 
+def clear_observer_state(session_id: str) -> None:
+    """Remove all circuit breaker state for a completed/abandoned session.
+
+    Should be called when a session reaches a terminal state to prevent
+    memory leaks from accumulated failure counts and retry timestamps.
+    """
+    _observer_failure_counts.pop(session_id, None)
+    _observer_last_retry.pop(session_id, None)
+
+
 def observer_record_failure(session_id: str) -> dict[str, Any]:
     """Record a failure and return circuit breaker state.
 

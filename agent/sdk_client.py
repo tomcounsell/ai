@@ -944,10 +944,11 @@ class ValorAgent:
         _log_system_resources("SDK-init-pre")
 
         try:
-            # Overall timeout: prevent query from blocking a worker forever
-            # if the SDK subprocess hangs during init or response streaming.
-            # 10 minutes is generous — most queries complete in 1-5 minutes.
-            query_timeout = int(os.environ.get("SDK_QUERY_TIMEOUT_SECONDS", 600))
+            # Safety ceiling timeout: prevents query from blocking a worker
+            # forever if the SDK subprocess hangs. Set high (1 hour) because
+            # the watchdog's activity-based stall detection handles real stalls.
+            # This is only a backstop for truly hung processes.
+            query_timeout = int(os.environ.get("SDK_QUERY_TIMEOUT_SECONDS", 3600))
 
             async with asyncio.timeout(query_timeout):
                 async with ClaudeSDKClient(options) as client:

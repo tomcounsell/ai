@@ -260,6 +260,20 @@ def check_stalled_sessions() -> list[dict]:
                 # For active sessions, use last_activity as reference
                 if status_val == "active":
                     last_activity = session.last_activity
+
+                    # Also check in-memory activity tracking from sdk_client,
+                    # which is updated on every tool call and log output.
+                    # Use whichever timestamp is more recent.
+                    try:
+                        from agent.sdk_client import get_session_last_activity
+
+                        inmem_activity = get_session_last_activity(session_id)
+                        if inmem_activity is not None:
+                            if last_activity is None or inmem_activity > last_activity:
+                                last_activity = inmem_activity
+                    except ImportError:
+                        pass
+
                     if last_activity is not None:
                         # If last_activity is recent, session is not stalled
                         activity_age = now - last_activity
