@@ -6,7 +6,7 @@ Project manager mode allows Telegram groups to route to work-vault project folde
 
 ### Project Mode Field
 
-Each project in `config/projects.json` supports an optional `"mode"` field:
+Each project in `~/Desktop/Valor/projects.json` supports an optional `"mode"` field:
 
 - `"dev"` (default): Standard developer mode with SDLC classification, WORKER_RULES, and branch safety rails
 - `"pm"`: Project manager mode that skips SDLC classification and uses work-vault CLAUDE.md for instructions
@@ -32,10 +32,10 @@ If the mode field is missing, the project defaults to `"dev"`. Unknown mode valu
 ### System Prompt Composition
 
 PM mode uses `load_pm_system_prompt()` which:
-- Loads SOUL.md for Valor's persona and communication style
+- Loads the project-manager persona (base + PM overlay via `load_persona_prompt("project-manager")`)
 - Appends the project-specific `CLAUDE.md` from the work-vault directory if it exists
 - Does NOT include WORKER_RULES (no branch safety rails needed for PM work)
-- Falls back to SOUL.md only if no project CLAUDE.md exists
+- Falls back to `config/SOUL.md` only if the persona system is not available
 
 ### What PM Mode Skips
 
@@ -90,12 +90,12 @@ Template structure:
 ## Key Files
 
 - `agent/sdk_client.py`: PM mode detection, classification bypass, `load_pm_system_prompt()`
-- `config/projects.json`: PM project entries with `"mode": "pm"`
+- `~/Desktop/Valor/projects.json`: PM project entries with `"mode": "pm"`
 - `tests/unit/test_pm_channels.py`: Unit tests for PM mode behavior
 
 ## Design Decisions
 
-1. **SOUL.md preserved in PM mode**: The persona (Valor's attitude/style) is valuable even when operating as a PM. Only WORKER_RULES are stripped.
+1. **Persona preserved in PM mode**: The base persona (Valor's identity/style) is valuable even when operating as a PM. PM mode uses the `project-manager` overlay instead of `developer`, and WORKER_RULES are stripped.
 2. **Classification bypass, not a new classification**: PM mode forces `"question"` rather than adding a third classification type, keeping the routing logic simple.
 3. **No new tools**: PM behavior is driven entirely by routing and instructions, not new MCP tools or servers.
 4. **Work-vault CLAUDE.md is optional**: If a project folder lacks CLAUDE.md, the agent still works with just the SOUL.md persona.

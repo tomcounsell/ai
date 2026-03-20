@@ -32,6 +32,33 @@ gws sheets spreadsheets values get --params '{"spreadsheetId": "ID", "range": "S
 
 **Workflows:** `gws workflow +standup-report`, `+meeting-prep`, `+email-to-task`, `+weekly-digest`
 
+## Reading Telegram Messages
+
+Use Telethon directly to read messages from any chat. The bridge session file provides access.
+
+```python
+python -c "
+import asyncio
+from telethon import TelegramClient
+from dotenv import load_dotenv
+import os
+load_dotenv()
+client = TelegramClient('data/valor_bridge', int(os.getenv('TELEGRAM_API_ID')), os.getenv('TELEGRAM_API_HASH'))
+async def main():
+    await client.start(phone=os.getenv('TELEGRAM_PHONE'))
+    async for d in client.iter_dialogs():
+        if 'CHAT_NAME' in (d.name or ''):
+            for m in reversed(await client.get_messages(d.id, limit=10)):
+                sender = 'Valor' if m.out else (getattr(m.sender, 'first_name', None) or 'Unknown')
+                print(f'[{m.date}] {sender}: {(m.text or \"\")[:300]}')
+            break
+    await client.disconnect()
+asyncio.run(main())
+"
+```
+
+Replace `CHAT_NAME` with the group name (e.g. `PM: PsyOptimal`, `Dev: Valor`). This reads real messages from Telegram — the CLI history tool (`valor-history`) only shows messages stored in Redis, which may be incomplete.
+
 ## Quick Commands
 
 | Command | Description |
@@ -226,7 +253,7 @@ The bridge includes automatic crash recovery (see `docs/features/bridge-self-hea
 ### Configuration Files
 
 - `.env` - Environment variables and API keys
-- `config/projects.json` - Multi-project configuration
+- `~/Desktop/Valor/projects.json` - Multi-project configuration (iCloud-synced, private)
 - `.claude/settings.local.json` - Claude Code settings
 
 ## Plan Requirements (This Repo Only)

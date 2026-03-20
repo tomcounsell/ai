@@ -432,7 +432,7 @@ load_dotenv("{PROJECT_DIR}/.env")
 
 async def send():
     client = TelegramClient(
-        "{DATA_DIR}/ai_rebuild_session",
+        "{DATA_DIR}/valor_bridge",
         int(os.getenv("TELEGRAM_API_ID")),
         os.getenv("TELEGRAM_API_HASH"),
     )

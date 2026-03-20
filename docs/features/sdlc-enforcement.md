@@ -149,9 +149,11 @@ Every agent session started by `ValorAgent` receives the mandatory pipeline rule
 The system prompt structure assembled by `load_system_prompt()`:
 
 ```
-[SOUL.md — persona, attitude, purpose, communication style]
+[WORKER_RULES — safety rails for the worker, FIRST — takes precedence]
 ---
-[SDLC_WORKFLOW — mandatory pipeline rules, hardcoded in sdk_client.py]
+[Persona prompt — base + developer overlay from config/personas/]
+---
+[Principal Context — condensed mission/goals/priorities from PRINCIPAL.md]
 ---
 [Work Completion Criteria — from CLAUDE.md]
 ```

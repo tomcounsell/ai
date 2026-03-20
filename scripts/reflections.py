@@ -160,20 +160,31 @@ THRASH_RATIO_THRESHOLD = 0.5
 
 
 def load_local_projects() -> list[dict]:
-    """Load projects from config/projects.json, filtered to those present on this machine.
+    """Load projects from projects.json, filtered to those present on this machine.
+
+    Loads from ~/Desktop/Valor/projects.json (iCloud-synced, private).
+    Falls back to config/projects.json if the Desktop path doesn't exist.
 
     Returns:
         List of project dicts, each including a 'slug' key derived from the
         projects.json key. Only projects whose working_directory exists on disk
         are returned.
     """
-    config_path = AI_ROOT / "config" / "projects.json"
+    config_path = Path(
+        os.environ.get(
+            "PROJECTS_CONFIG_PATH",
+            str(Path.home() / "Desktop" / "Valor" / "projects.json"),
+        )
+    )
+    if not config_path.exists():
+        # Legacy fallback
+        config_path = AI_ROOT / "config" / "projects.json"
     data = json.loads(config_path.read_text())
     projects = []
     for slug, cfg in data.get("projects", {}).items():
-        wd = Path(cfg.get("working_directory", ""))
+        wd = Path(cfg.get("working_directory", "")).expanduser()
         if wd.exists():
-            projects.append({"slug": slug, **cfg})
+            projects.append({"slug": slug, **cfg, "working_directory": str(wd)})
     return projects
 
 

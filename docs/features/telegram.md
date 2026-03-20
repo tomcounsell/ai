@@ -178,28 +178,9 @@ This provides immediate visual feedback about what type of task is being process
 }
 ```
 
-### Workspace Mapping: `config/workspace_config.json`
+### Project Routing: `~/Desktop/Valor/projects.json`
 
-Maps Telegram chats to system workspaces:
-
-```json
-{
-  "workspaces": {
-    "Project Name": {
-      "telegram_chat_ids": ["-123456789"],
-      "working_directory": "/path/to/project",
-      "is_dev_group": true
-    }
-  },
-  "dm_whitelist": {
-    "allowed_users": {
-      "username": {
-        "working_directory": "/path/to/default"
-      }
-    }
-  }
-}
-```
+Project-to-chat mapping is handled by `~/Desktop/Valor/projects.json` (falls back to `config/projects.json` for legacy setups). Each project defines its Telegram groups and working directory. See `config/README.md` for full documentation.
 
 ## Debug Commands
 

@@ -13,21 +13,21 @@
   "personas": {
     "developer": {
       "name": "Valor",
-      "soul": "config/personas/developer.md",
+      "soul": "~/Desktop/Valor/personas/developer.md",
       "permissions": ["read", "write", "execute"],
-      "description": "Full developer persona"
+      "description": "Full developer persona — reads code, writes code, runs tests, creates PRs"
     },
     "project-manager": {
       "name": "Valor",
-      "soul": "config/personas/project-manager.md",
+      "soul": "~/Desktop/Valor/personas/project-manager.md",
       "permissions": ["read"],
-      "description": "PM persona — read-only code, full GitHub access"
+      "description": "PM persona — reads code, manages GitHub issues/PRs, drafts communications. No code writes."
     },
     "teammate": {
       "name": "Valor",
-      "soul": "config/personas/teammate.md",
+      "soul": "~/Desktop/Valor/personas/teammate.md",
       "permissions": ["read"],
-      "description": "Casual teammate — conversational Q&A, read-only"
+      "description": "Casual teammate persona — conversational Q&A, light and helpful. Read-only, no code writes."
     }
   },
 
@@ -36,23 +36,27 @@
       "name": "My Project",
       "description": "Description of the project",
       "working_directory": "~/src/my-project",
-      "machine": "My-Machine-Name",
+      "machine": "Machine Name",
       "auto_merge": false,
       "telegram": {
         "groups": {
-          "Dev: My Project": {"persona": "developer"},
-          "PM: My Project": {"persona": "project-manager"}
+          "Dev: My Project": {"chat_id": -1234567890, "persona": "developer"},
+          "PM: My Project": {"chat_id": -9876543210, "persona": "project-manager"}
         },
         "respond_to_unaddressed": true,
-        "respond_to_dms": false
+        "respond_to_dms": true,
+        "dm_persona": "teammate"
       },
       "github": {
-        "org": "my-org",
-        "repo": "my-repo"
+        "org": "your-org",
+        "repo": "your-repo"
+      },
+      "linear": {
+        "team": "TEAM"
       },
       "context": {
-        "tech_stack": ["Python"],
-        "description": "What the agent should focus on"
+        "tech_stack": ["Python", "Framework"],
+        "description": "Focus areas for this project"
       }
     }
   },

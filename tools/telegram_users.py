@@ -7,6 +7,9 @@ Provides functions to load whitelisted users and resolve usernames to user IDs.
 import json
 from pathlib import Path
 
+# Canonical whitelist location
+WHITELIST_PATH = Path.home() / "Desktop" / "Valor" / "dm_whitelist.json"
+
 
 def get_whitelisted_users() -> dict[str, int]:
     """
@@ -20,9 +23,7 @@ def get_whitelisted_users() -> dict[str, int]:
         FileNotFoundError: If whitelist config file doesn't exist
         json.JSONDecodeError: If config file is invalid JSON
     """
-    whitelist_path = Path.home() / "Desktop/claude_code/dm_whitelist.json"
-
-    with open(whitelist_path) as f:
+    with open(WHITELIST_PATH) as f:
         config = json.load(f)
 
     # Build username -> user_id mapping (case-insensitive)

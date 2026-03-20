@@ -51,7 +51,7 @@ class TestGetAgentResponseSdkGhRepo:
 
     POPOTO_PROJECT = {
         "name": "Popoto",
-        "working_directory": "/Users/valorengels/src/popoto",
+        "working_directory": str(Path.home() / "src/popoto"),
         "github": {"org": "tomcounsell", "repo": "popoto"},
     }
 
@@ -63,7 +63,7 @@ class TestGetAgentResponseSdkGhRepo:
 
     NO_GITHUB_PROJECT = {
         "name": "NoGithub",
-        "working_directory": "/Users/valorengels/src/nogithub",
+        "working_directory": str(Path.home() / "src/nogithub"),
     }
 
     @pytest.fixture
@@ -234,7 +234,7 @@ class TestExecuteJobPassesFullProjectConfig:
 
         full_config = {
             "name": "Popoto",
-            "working_directory": "/Users/valorengels/src/popoto",
+            "working_directory": str(Path.home() / "src/popoto"),
             "_key": "popoto",
             "github": {"org": "tomcounsell", "repo": "popoto"},
             "telegram": {"groups": ["Dev: Popoto"]},
@@ -243,7 +243,7 @@ class TestExecuteJobPassesFullProjectConfig:
 
         retrieved = get_project_config("popoto")
         assert retrieved.get("github") == {"org": "tomcounsell", "repo": "popoto"}
-        assert retrieved.get("working_directory") == "/Users/valorengels/src/popoto"
+        assert retrieved.get("working_directory") == str(Path.home() / "src/popoto")
 
     def test_unregistered_project_returns_empty(self):
         """Unregistered project key returns empty dict (fallback to minimal config)."""

@@ -41,23 +41,52 @@ DEFAULT_MENTIONS = []
 # =============================================================================
 
 
+def _resolve_config_path() -> Path:
+    """Resolve projects.json path from env var or default location.
+
+    Resolution order:
+    1. PROJECTS_CONFIG_PATH env var (explicit override)
+    2. ~/Desktop/Valor/projects.json (iCloud-synced default)
+    3. config/projects.json (legacy in-repo fallback)
+    """
+    import os
+
+    env_path = os.environ.get("PROJECTS_CONFIG_PATH")
+    if env_path:
+        return Path(env_path).expanduser()
+
+    desktop_path = Path.home() / "Desktop" / "Valor" / "projects.json"
+    if desktop_path.exists():
+        return desktop_path
+
+    # Legacy fallback: in-repo config
+    return Path(__file__).parent.parent / "config" / "projects.json"
+
+
 def load_config() -> dict:
-    """Load project configuration from projects.json."""
-    config_path = Path(__file__).parent.parent / "config" / "projects.json"
-    example_path = config_path.with_suffix(".json.example")
+    """Load project configuration from projects.json.
+
+    Loads from ~/Desktop/Valor/projects.json by default (iCloud-synced, private).
+    Override with PROJECTS_CONFIG_PATH env var.
+    Falls back to config/projects.json if ~/Desktop/Valor/ path doesn't exist.
+    """
+    config_path = _resolve_config_path()
 
     if not config_path.exists():
-        if example_path.exists():
-            logger.error(
-                f"Project config not found at {config_path}. "
-                f"Copy the example: cp {example_path} {config_path}"
-            )
-        else:
-            logger.warning(f"Project config not found at {config_path}, using defaults")
+        logger.warning(f"Project config not found at {config_path}, using defaults")
         return {"projects": {}, "defaults": {}}
 
     with open(config_path) as f:
         config = json.load(f)
+
+    # Expand ~ in working_directory values
+    for _proj in config.get("projects", {}).values():
+        wd = _proj.get("working_directory", "")
+        if wd.startswith("~"):
+            _proj["working_directory"] = str(Path(wd).expanduser())
+    _defs = config.get("defaults", {})
+    if _defs.get("working_directory", "").startswith("~"):
+        _defs["working_directory"] = str(Path(_defs["working_directory"]).expanduser())
 
     # Validate defaults section exists and has working_directory
     defaults = config.get("defaults", {})
@@ -65,13 +94,13 @@ def load_config() -> dict:
         logger.warning(
             "No 'defaults' section in projects.json. "
             "Add a defaults section with working_directory and telegram settings. "
-            "See config/projects.json.example for proper setup."
+            "See config/projects.example.json for the expected format."
         )
     elif not defaults.get("working_directory"):
         logger.warning(
             "No 'working_directory' in defaults section of projects.json. "
             "Projects without working_directory will fail. "
-            "See config/projects.json.example for proper setup."
+            "Check ~/Desktop/Valor/projects.json and add a working_directory to defaults."
         )
 
     # Validate each active project
@@ -85,7 +114,7 @@ def load_config() -> dict:
             logger.error(
                 f"Project '{project_key}' has no working_directory and no default set. "
                 "The bridge WILL fail when processing messages for this project. "
-                "Fix: add 'working_directory' to the project in config/projects.json"
+                "Fix: add 'working_directory' to the project in ~/Desktop/Valor/projects.json"
             )
         elif not Path(working_dir).exists():
             logger.warning(
@@ -138,6 +167,13 @@ def find_project_for_chat(chat_title: str | None) -> dict | None:
             return project
 
     return None
+
+
+def is_team_chat(chat_title: str | None) -> bool:
+    """Team chats (no Dev:/PM: prefix) are mention-only."""
+    if not chat_title:
+        return False
+    return not chat_title.startswith(("Dev:", "PM:"))
 
 
 # =============================================================================
@@ -261,7 +297,7 @@ def classify_needs_response(text: str) -> bool:
         import ollama
 
         response = ollama.chat(
-            model="llama3.2:3b",
+            model="qwen3:1.7b",
             messages=[
                 {
                     "role": "user",
@@ -431,7 +467,7 @@ def _classify_work_request_llm(text: str) -> str:
         import ollama
 
         response = ollama.chat(
-            model="llama3.2:3b",
+            model="qwen3:1.7b",
             messages=[{"role": "user", "content": prompt}],
             options={"temperature": 0, "num_predict": 10},
         )
@@ -652,6 +688,14 @@ async def should_respond_async(
                 return True, True
         except Exception as e:
             logger.debug(f"Could not check replied message: {e}")
+
+    # Team chats (no Dev:/PM: prefix) are mention-only
+    if is_team_chat(chat_title):
+        mentions = telegram_config.get("mention_triggers", DEFAULT_MENTIONS)
+        text_lower = text.lower()
+        if any(mention.lower() in text_lower for mention in mentions):
+            return True, False
+        return False, False
 
     # respond_to_all means respond to everything
     if telegram_config.get("respond_to_all", True):

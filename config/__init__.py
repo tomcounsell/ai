@@ -8,17 +8,20 @@ settings, validation, and workspace configuration support.
 from .loader import (
     ConfigLoader,
     ConfigurationError,
-    WorkspaceConfig,
     config_loader,
-    load_workspace_config,
     validate_configuration,
 )
+from .paths import CONFIG_DIR, DATA_DIR, HOME_DIR, LOGS_DIR, PROJECT_ROOT, SRC_DIR, VALOR_DIR
 from .settings import (
     APISettings,
     DatabaseSettings,
+    GoogleAuthSettings,
     LoggingSettings,
     LogLevel,
+    ModelSettings,
+    PathSettings,
     PerformanceSettings,
+    RedisSettings,
     SecuritySettings,
     ServerSettings,
     Settings,
@@ -38,15 +41,25 @@ __all__ = [
     "LoggingSettings",
     "WorkspaceSettings",
     "PerformanceSettings",
+    "RedisSettings",
+    "GoogleAuthSettings",
+    "ModelSettings",
+    "PathSettings",
     "LogLevel",
     # Global settings instance
     "settings",
+    # Path constants
+    "PROJECT_ROOT",
+    "DATA_DIR",
+    "LOGS_DIR",
+    "CONFIG_DIR",
+    "VALOR_DIR",
+    "HOME_DIR",
+    "SRC_DIR",
     # Configuration loader
     "ConfigLoader",
-    "WorkspaceConfig",
     "ConfigurationError",
     "config_loader",
     # Convenience functions
-    "load_workspace_config",
     "validate_configuration",
 ]

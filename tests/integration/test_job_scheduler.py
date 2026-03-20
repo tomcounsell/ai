@@ -5,11 +5,15 @@ import json
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
 from agent.job_queue import PRIORITY_RANK, _extract_job_fields, _pop_job
 from models.agent_session import AgentSession
+
+# Project root derived from file location (tests/integration/ -> project root)
+_PROJECT_ROOT = str(Path(__file__).parent.parent.parent)
 
 # === Fixtures ===
 
@@ -178,10 +182,10 @@ class TestJobSchedulerCLI:
     def test_help(self):
         """Tool responds to --help."""
         result = subprocess.run(
-            ["python", "-m", "tools.job_scheduler", "--help"],
+            [sys.executable, "-m", "tools.job_scheduler", "--help"],
             capture_output=True,
             text=True,
-            cwd="/Users/valorengels/src/ai",
+            cwd=_PROJECT_ROOT,
         )
         assert result.returncode == 0
         assert "schedule" in result.stdout
@@ -190,10 +194,10 @@ class TestJobSchedulerCLI:
     def test_status_command(self):
         """Status command returns valid JSON."""
         result = subprocess.run(
-            ["python", "-m", "tools.job_scheduler", "status", "--project", "test-scheduler"],
+            [sys.executable, "-m", "tools.job_scheduler", "status", "--project", "test-scheduler"],
             capture_output=True,
             text=True,
-            cwd="/Users/valorengels/src/ai",
+            cwd=_PROJECT_ROOT,
         )
         assert result.returncode == 0
         data = json.loads(result.stdout)
@@ -208,7 +212,7 @@ class TestJobSchedulerCLI:
         # Push
         push_result = subprocess.run(
             [
-                "python",
+                sys.executable,
                 "-m",
                 "tools.job_scheduler",
                 "push",
@@ -219,7 +223,7 @@ class TestJobSchedulerCLI:
             ],
             capture_output=True,
             text=True,
-            cwd="/Users/valorengels/src/ai",
+            cwd=_PROJECT_ROOT,
             env={**__import__("os").environ, "PROJECT_KEY": proj},
         )
         assert push_result.returncode == 0
@@ -229,7 +233,7 @@ class TestJobSchedulerCLI:
         # Pop
         pop_result = subprocess.run(
             [
-                "python",
+                sys.executable,
                 "-m",
                 "tools.job_scheduler",
                 "pop",
@@ -238,7 +242,7 @@ class TestJobSchedulerCLI:
             ],
             capture_output=True,
             text=True,
-            cwd="/Users/valorengels/src/ai",
+            cwd=_PROJECT_ROOT,
         )
         assert pop_result.returncode == 0
         pop_data = json.loads(pop_result.stdout)
@@ -249,7 +253,7 @@ class TestJobSchedulerCLI:
         """Scheduling with invalid issue returns error."""
         result = subprocess.run(
             [
-                "python",
+                sys.executable,
                 "-m",
                 "tools.job_scheduler",
                 "schedule",
@@ -260,7 +264,7 @@ class TestJobSchedulerCLI:
             ],
             capture_output=True,
             text=True,
-            cwd="/Users/valorengels/src/ai",
+            cwd=_PROJECT_ROOT,
         )
         # Should fail (exit 1) with error JSON
         assert result.returncode == 1
@@ -271,7 +275,7 @@ class TestJobSchedulerCLI:
         """Cancelling nonexistent job returns error."""
         result = subprocess.run(
             [
-                "python",
+                sys.executable,
                 "-m",
                 "tools.job_scheduler",
                 "cancel",
@@ -280,7 +284,7 @@ class TestJobSchedulerCLI:
             ],
             capture_output=True,
             text=True,
-            cwd="/Users/valorengels/src/ai",
+            cwd=_PROJECT_ROOT,
         )
         assert result.returncode == 1
         data = json.loads(result.stdout)
@@ -290,7 +294,7 @@ class TestJobSchedulerCLI:
         """Bumping nonexistent job returns error."""
         result = subprocess.run(
             [
-                "python",
+                sys.executable,
                 "-m",
                 "tools.job_scheduler",
                 "bump",
@@ -299,7 +303,7 @@ class TestJobSchedulerCLI:
             ],
             capture_output=True,
             text=True,
-            cwd="/Users/valorengels/src/ai",
+            cwd=_PROJECT_ROOT,
         )
         assert result.returncode == 1
         data = json.loads(result.stdout)
@@ -325,7 +329,7 @@ class TestSelfSchedulingProtection:
             ],
             capture_output=True,
             text=True,
-            cwd="/Users/valorengels/src/ai",
+            cwd=_PROJECT_ROOT,
             env={**__import__("os").environ, "PROJECT_KEY": "test-scheduler"},
         )
         assert result.returncode == 0

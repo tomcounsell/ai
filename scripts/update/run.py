@@ -324,6 +324,30 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             else:
                 log("Ollama not installed, skipping", v)
 
+    # Step 4.5: Machine identity verification
+    log("Verifying machine identity...", v)
+    machine_check = verify.check_machine_identity(project_dir)
+    if machine_check.get("error"):
+        log(f"WARN: {machine_check['error']}", v, always=True)
+        result.warnings.append(machine_check["error"])
+    elif machine_check.get("projects"):
+        log(
+            f"Machine: {machine_check['hostname']} -> "
+            f"projects: {', '.join(machine_check['projects'])}",
+            v,
+            always=True,
+        )
+    else:
+        log(
+            f"WARN: No projects assigned to machine '{machine_check.get('hostname', 'unknown')}'",
+            v,
+            always=True,
+        )
+        result.warnings.append(
+            f"No projects in config for machine '{machine_check.get('hostname')}'. "
+            "Check 'machine' field in ~/Desktop/Valor/projects.json"
+        )
+
     # Step 5: Service management
     if config.do_service_restart:
         log("Installing/restarting services...", v)

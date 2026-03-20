@@ -1380,7 +1380,7 @@ async def _execute_job(job: Job) -> None:
     from agent import BackgroundTask, BossMessenger, get_agent_response_sdk
 
     working_dir = Path(job.working_dir)
-    allowed_root = Path("/Users/valorengels/src")
+    allowed_root = Path.home() / "src"
     is_wt = WORKTREES_DIR in str(working_dir)
     working_dir = validate_workspace(working_dir, allowed_root, is_worktree=is_wt)
     branch_name = _session_branch_name(job.session_id)
