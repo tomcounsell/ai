@@ -104,7 +104,7 @@ prompt = load_pm_system_prompt("/path")       # PM persona + work-vault CLAUDE.m
 
 ## Related
 
-- `config/SOUL.md` -- Legacy monolithic prompt (fallback only)
+- `config/SOUL.md` -- Original monolithic prompt (used as fallback when persona files are missing)
 - `docs/features/config-architecture.md` -- Unified config system
 - `docs/features/pm-channels.md` -- PM mode channel routing
 - `agent/sdk_client.py` -- `load_persona_prompt()`, `_resolve_persona()`
