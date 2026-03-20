@@ -5,7 +5,7 @@ Backfills the new model relationship fields introduced by the popoto model
 relationships refactor (issue #295):
 
 1. Populates project_key on TelegramMessage, Link, DeadLetter, Chat,
-   ReflectionRun by deriving it from chat_id using config/projects.json.
+   ReflectionRun by deriving it from chat_id using ~/Desktop/Valor/projects.json.
 2. Copies media/URL/classification fields from AgentSession to the
    corresponding TelegramMessage (matched by chat_id + message_id).
 3. Sets trigger_message_id on AgentSession and agent_session_id on

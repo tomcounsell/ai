@@ -63,7 +63,7 @@ The `gh` CLI supports a `GH_REPO` environment variable that automatically applie
 
 When `get_agent_response_sdk()` detects a cross-repo SDLC request (classification is "sdlc", project working directory differs from the ai repo root, and project mode is not "pm"), it:
 
-1. Extracts `github.org` and `github.repo` from the project config in `config/projects.json`
+1. Extracts `github.org` and `github.repo` from the project config in `~/Desktop/Valor/projects.json`
 2. Passes `gh_repo="org/repo"` to `ValorAgent.__init__()`
 3. `ValorAgent._create_options()` sets `env["GH_REPO"] = self.gh_repo` in the subprocess environment
 

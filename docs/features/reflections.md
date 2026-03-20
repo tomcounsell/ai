@@ -229,14 +229,14 @@ python scripts/reflections.py --ignore "pattern text here" --reason "Intentional
 
 ## Multi-Repo Support
 
-Reflections reads `config/projects.json`, filters to repos present on the current machine via `load_local_projects()`, and runs per-project analysis. A machine with only `ai` checked out analyzes only `ai`; a machine with four repos analyzes all four.
+Reflections reads `~/Desktop/Valor/projects.json`, filters to repos present on the current machine via `load_local_projects()`, and runs per-project analysis. A machine with only `ai` checked out analyzes only `ai`; a machine with four repos analyzes all four.
 
 **Per-project steps**: 2 (Log Review), 4 (Task Cleanup), 11 (GitHub Issues + Telegram)
 **AI-only steps**: Everything else runs once from the AI repo root
 
 ### Configuration
 
-Each project entry in `config/projects.json`:
+Each project entry in `~/Desktop/Valor/projects.json`:
 
 ```json
 {
@@ -378,7 +378,7 @@ The scheduler picks it up on the next tick. No code changes or service restarts 
 | `scripts/reflections_report.py` | GitHub issue creation module |
 | `scripts/install_reflections.sh` | launchd installation script (legacy, kept for migration) |
 | `com.valor.reflections.plist` | launchd schedule definition (legacy, kept for migration) |
-| `config/projects.json` | Multi-repo project registry |
+| `~/Desktop/Valor/projects.json` | Multi-repo project registry |
 | `logs/reflections/` | Local report output directory |
 | `tests/unit/test_reflection_scheduler.py` | Scheduler and registry tests |
 
@@ -391,7 +391,7 @@ The scheduler picks it up on the next tick. No code changes or service restarts 
 | `ANTHROPIC_API_KEY` | Daily maintenance steps 5, 7 | Conditional — LLM reflection and docs audit |
 | `gh` CLI (authenticated) | Daily maintenance steps 4, 8, 10, 14 | Conditional — task cleanup, bug issues |
 | `telethon` | Daily maintenance step 10 | Conditional — Telegram notifications |
-| `config/projects.json` | Multi-repo reflections | Optional — defaults to AI repo only |
+| `~/Desktop/Valor/projects.json` | Multi-repo reflections | Optional — defaults to AI repo only |
 
 ## Troubleshooting
 

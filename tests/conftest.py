@@ -246,7 +246,7 @@ def pytest_collection_modifyitems(items):
 
 @pytest.fixture
 def sample_config():
-    """Sample project configuration matching config/projects.json structure."""
+    """Sample project configuration matching ~/Desktop/Valor/projects.json structure."""
     return {
         "projects": {
             "valor": {
