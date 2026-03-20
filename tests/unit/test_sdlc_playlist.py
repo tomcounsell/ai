@@ -11,9 +11,6 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-import pytest
-
-
 # ---------------------------------------------------------------------------
 # Playlist Redis operation tests (mocked Redis)
 # ---------------------------------------------------------------------------
@@ -164,12 +161,9 @@ class TestObserverPlaylistHook:
 
         with (
             patch("tools.job_scheduler.playlist_pop", return_value=445) as mock_pop,
-            patch("tools.job_scheduler.playlist_status", return_value=[]),
             patch("agent.job_queue.subprocess") as mock_subprocess,
         ):
-            mock_subprocess.run.return_value = SimpleNamespace(
-                returncode=0, stdout="", stderr=""
-            )
+            mock_subprocess.run.return_value = SimpleNamespace(returncode=0, stdout="", stderr="")
 
             asyncio.get_event_loop().run_until_complete(
                 _playlist_hook(
@@ -192,8 +186,7 @@ class TestObserverPlaylistHook:
 
         with (
             patch("tools.job_scheduler.playlist_pop", return_value=None),
-            patch("tools.job_scheduler.playlist_status", return_value=[]),
-            patch("agent.job_queue._deliver_playlist_summary") as mock_summary,
+            patch("agent.job_queue._log_playlist_exhausted") as mock_summary,
         ):
             asyncio.get_event_loop().run_until_complete(
                 _playlist_hook("valor", "12345", None, failed=False)
@@ -208,8 +201,7 @@ class TestObserverPlaylistHook:
         with (
             patch("tools.job_scheduler.playlist_requeue", return_value=True) as mock_requeue,
             patch("tools.job_scheduler.playlist_pop", return_value=None),
-            patch("tools.job_scheduler.playlist_status", return_value=[]),
-            patch("agent.job_queue._deliver_playlist_summary"),
+            patch("agent.job_queue._log_playlist_exhausted"),
         ):
             asyncio.get_event_loop().run_until_complete(
                 _playlist_hook(
@@ -231,12 +223,9 @@ class TestObserverPlaylistHook:
 
         with (
             patch("tools.job_scheduler.playlist_pop", side_effect=lambda _: next(pop_returns)),
-            patch("tools.job_scheduler.playlist_status", return_value=[]),
             patch("agent.job_queue.subprocess") as mock_subprocess,
         ):
-            mock_subprocess.run.return_value = SimpleNamespace(
-                returncode=0, stdout="", stderr=""
-            )
+            mock_subprocess.run.return_value = SimpleNamespace(returncode=0, stdout="", stderr="")
 
             asyncio.get_event_loop().run_until_complete(
                 _playlist_hook(

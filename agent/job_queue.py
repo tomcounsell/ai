@@ -493,7 +493,6 @@ async def _playlist_hook(
         from tools.job_scheduler import (
             playlist_pop,
             playlist_requeue,
-            playlist_status,
         )
     except ImportError:
         logger.warning("[playlist-hook] Could not import playlist functions")
@@ -526,12 +525,8 @@ async def _playlist_hook(
     next_issue = playlist_pop(project_key)
 
     if next_issue is None:
-        # Playlist is empty — check if we had any items at all
-        remaining = playlist_status(project_key)
-        if not remaining:
-            logger.info(f"[playlist-hook] Playlist empty for {project_key}, nothing to schedule")
-            # Deliver summary to Telegram if we just finished a playlist item
-            _deliver_playlist_summary(project_key, chat_id)
+        logger.info(f"[playlist-hook] Playlist empty for {project_key}, nothing to schedule")
+        _log_playlist_exhausted(project_key, chat_id)
         return
 
     # Guard: don't schedule the same issue that just completed
@@ -547,7 +542,7 @@ async def _playlist_hook(
             # Try the next one
             next_issue = playlist_pop(project_key)
             if next_issue is None:
-                _deliver_playlist_summary(project_key, chat_id)
+                _log_playlist_exhausted(project_key, chat_id)
                 return
 
     # Schedule the next issue
@@ -570,30 +565,19 @@ async def _playlist_hook(
             cwd=str(Path(__file__).parent.parent),
         )
         if result.returncode != 0:
-            logger.error(
-                f"[playlist-hook] Failed to schedule issue #{next_issue}: {result.stderr}"
-            )
+            logger.error(f"[playlist-hook] Failed to schedule issue #{next_issue}: {result.stderr}")
         else:
             logger.info(f"[playlist-hook] Successfully scheduled issue #{next_issue}")
     except Exception as e:
         logger.error(f"[playlist-hook] Error scheduling issue #{next_issue}: {e}")
 
 
-def _deliver_playlist_summary(project_key: str, chat_id: str) -> None:
-    """Deliver a summary message when the playlist is exhausted.
+def _log_playlist_exhausted(project_key: str, chat_id: str) -> None:
+    """Log when the playlist is exhausted.
 
-    This is a best-effort notification — failures are logged but not raised.
+    The bridge's normal job completion flow handles any Telegram delivery.
     """
-    try:
-        logger.info(
-            f"[playlist-hook] Playlist exhausted for {project_key}. "
-            f"Would deliver summary to chat {chat_id}."
-        )
-        # The actual Telegram delivery happens through the bridge's send_to_chat
-        # mechanism. We log the event here; the bridge's normal job completion
-        # flow handles message delivery.
-    except Exception as e:
-        logger.warning(f"[playlist-hook] Error delivering playlist summary: {e}")
+    logger.info(f"[playlist-hook] Playlist exhausted for {project_key} (chat {chat_id})")
 
 
 async def _finalize_parent(

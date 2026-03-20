@@ -71,7 +71,7 @@ Pattern: `r"\b(?:scheduled|queued)\b.*\bjob[_-]?[a-f0-9]{6,}\b"`
 | File | Purpose |
 |------|---------|
 | `tools/job_scheduler.py` | Playlist subcommand, persona gate, Redis playlist operations |
-| `agent/job_queue.py` | Observer playlist hook (`_playlist_hook`, `_deliver_playlist_summary`) |
+| `agent/job_queue.py` | Observer playlist hook (`_playlist_hook`, `_log_playlist_exhausted`) |
 | `bridge/summarizer.py` | Hardened evidence pattern for scheduled/queued |
 | `tests/unit/test_sdlc_playlist.py` | Playlist and Observer hook tests |
 | `tests/unit/test_job_scheduler_persona.py` | Persona gate tests |

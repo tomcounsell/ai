@@ -494,7 +494,7 @@ def _detect_empty_promise(text_lower: str) -> bool:
         r"\b(?:saved|written|created)\b.*\bmemory\b",
         r"https?://github\.com/.+/commit/",  # GitHub commit URLs
         r"\brestarted?\b.*\b(?:bridge|service)\b",  # service restart
-        r"\b(?:scheduled|queued)\b.*\bjob[_-]?[a-f0-9]{6,}\b",  # scheduled/queued with job ID artifact
+        r"\b(?:scheduled|queued)\b.*\bjob[_-]?[a-f0-9]{6,}\b",  # job ID
     ]
 
     has_evidence = any(re.search(p, text_lower) for p in evidence_patterns)
@@ -870,7 +870,7 @@ def _render_stage_progress(session) -> str | None:
 
     # Use state machine when stage_states is available (must be a str or dict)
     stage_states = getattr(session, "stage_states", None)
-    if stage_states and isinstance(stage_states, (str, dict)):
+    if stage_states and isinstance(stage_states, str | dict):
         try:
             from bridge.pipeline_state import PipelineStateMachine
 
