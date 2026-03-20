@@ -70,9 +70,7 @@ _last_activity_timestamps: dict[str, float] = {}
 # Configurable inactivity threshold (seconds). Sessions idle longer than this
 # are considered stalled. Active sessions producing tool calls/logs are never
 # interrupted regardless of total runtime.
-SDK_INACTIVITY_TIMEOUT_SECONDS = int(
-    os.environ.get("SDK_INACTIVITY_TIMEOUT_SECONDS", 300)
-)
+SDK_INACTIVITY_TIMEOUT_SECONDS = int(os.environ.get("SDK_INACTIVITY_TIMEOUT_SECONDS", 300))
 
 
 def get_stop_reason(session_id: str) -> str | None:

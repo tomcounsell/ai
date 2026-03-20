@@ -350,7 +350,7 @@ async def _recover_stalled_pending(stalled: list[dict]) -> None:
         return
 
     # Threshold for orphan push-* sessions with no history (1 hour)
-    ORPHAN_PUSH_THRESHOLD = 3600
+    orphan_push_threshold = 3600
 
     for stall_info in pending_stalls:
         project_key = stall_info.get("project_key", "?")
@@ -393,7 +393,7 @@ async def _recover_stalled_pending(stalled: list[dict]) -> None:
             last_history = stall_info.get("last_history", "no history")
             if (
                 session_id.startswith("push-")
-                and duration > ORPHAN_PUSH_THRESHOLD
+                and duration > orphan_push_threshold
                 and last_history == "no history"
             ):
                 saved = _safe_abandon_session(

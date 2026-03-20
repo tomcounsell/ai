@@ -1657,8 +1657,7 @@ async def _execute_job(job: Job) -> None:
                 f"Delivering raw worker output as fallback."
             )
             logger.warning(
-                f"[{job.project_key}] Observer escalation: {error_msg} "
-                f"(failures={failure_count})"
+                f"[{job.project_key}] Observer escalation: {error_msg} (failures={failure_count})"
             )
             # Send escalation notice followed by raw output
             await send_cb(job.chat_id, escalation_msg, job.message_id, agent_session)

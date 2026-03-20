@@ -378,8 +378,8 @@ class TestObserverCircuitBreaker:
     def test_backoff_schedule(self):
         from bridge.observer import _compute_observer_backoff
 
-        assert _compute_observer_backoff(1) == 30   # 30 * 2^0
-        assert _compute_observer_backoff(2) == 60   # 30 * 2^1
+        assert _compute_observer_backoff(1) == 30  # 30 * 2^0
+        assert _compute_observer_backoff(2) == 60  # 30 * 2^1
         assert _compute_observer_backoff(3) == 120  # 30 * 2^2
         assert _compute_observer_backoff(4) == 240  # 30 * 2^3
         assert _compute_observer_backoff(5) == 480  # 30 * 2^4, equals max
@@ -410,7 +410,6 @@ class TestObserverCircuitBreaker:
 
     def test_record_failure_increments_count(self):
         from bridge.observer import (
-            _observer_failure_counts,
             observer_record_failure,
             observer_record_success,
         )
@@ -457,7 +456,11 @@ class TestObserverCircuitBreaker:
         observer_record_success("test-esc")
 
     def test_get_failure_count(self):
-        from bridge.observer import get_observer_failure_count, observer_record_failure, observer_record_success
+        from bridge.observer import (
+            get_observer_failure_count,
+            observer_record_failure,
+            observer_record_success,
+        )
 
         observer_record_success("test-count")
         assert get_observer_failure_count("test-count") == 0
@@ -481,11 +484,10 @@ class TestObserverImportGuard:
         """ImportError in load_principal_context should produce a valid prompt."""
         from bridge.observer import _build_observer_system_prompt
 
-        with patch(
-            "bridge.observer.logger"
-        ) as mock_logger:
+        with patch("bridge.observer.logger") as mock_logger:
             # Patch the import to fail
             import builtins
+
             original_import = builtins.__import__
 
             def mock_import(name, *args, **kwargs):
@@ -510,7 +512,9 @@ class TestObserverImportGuard:
 
         with patch("bridge.observer.load_principal_context", create=True) as mock_load:
             # Need to patch at the function level since it's imported inside
-            with patch.dict("sys.modules", {"agent.sdk_client": MagicMock(load_principal_context=mock_load)}):
+            with patch.dict(
+                "sys.modules", {"agent.sdk_client": MagicMock(load_principal_context=mock_load)}
+            ):
                 mock_load.return_value = "Focus on shipping PR #42"
                 prompt = _build_observer_system_prompt()
                 # The prompt should contain the observer system content at minimum
