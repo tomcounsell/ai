@@ -22,7 +22,7 @@ Persona overlay files (developer.md, project-manager.md, teammate.md) live in `~
 Directory for sensitive credentials (Google OAuth tokens, etc.). Created automatically by the settings system.
 
 ### `SOUL.md`
-Legacy persona definition (fallback when persona system files are missing).
+Base persona definition (fallback when persona overlay files are missing).
 
 ## Private Configuration (~/Desktop/Valor/)
 
