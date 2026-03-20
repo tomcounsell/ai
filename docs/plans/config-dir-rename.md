@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Complete
 type: chore
 appetite: Small
 owner: Valor
