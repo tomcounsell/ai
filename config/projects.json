@@ -1,14 +1,30 @@
 {
   "$schema": "Project configuration for multi-instance Valor deployment",
 
+  "personas": {
+    "developer": {
+      "name": "Valor",
+      "soul": "config/personas/developer.md",
+      "permissions": ["read", "write", "execute"],
+      "description": "Full developer persona — reads code, writes code, runs tests, creates PRs"
+    },
+    "project-manager": {
+      "name": "Valor",
+      "soul": "config/personas/project-manager.md",
+      "permissions": ["read"],
+      "description": "PM persona — reads code, manages GitHub issues/PRs, drafts communications. No code writes."
+    }
+  },
+
   "projects": {
     "valor": {
       "name": "Valor AI",
       "description": "AI coworker system - autonomous agent with agency",
       "working_directory": "~/src/ai",
+      "machine": "Valor the Cowboy",
       "auto_merge": true,
       "telegram": {
-        "groups": ["Dev: Valor"],
+        "groups": {"Dev: Valor": {"persona": "developer"}},
         "respond_to_unaddressed": true,
         "respond_to_dms": true
       },
@@ -25,33 +41,14 @@
       }
     },
 
-    "django-project-template": {
-      "name": "Django Project Template",
-      "description": "A modern Django project template with best practices",
-      "working_directory": "~/src/django-project-template",
-      "auto_merge": true,
-      "telegram": {
-        "groups": ["Dev: Django Template"],
-        "respond_to_unaddressed": true,
-        "respond_to_dms": false
-      },
-      "github": {
-        "org": "tomcounsell",
-        "repo": "django-project-template"
-      },
-      "context": {
-        "tech_stack": ["Django", "PostgreSQL", "Redis"],
-        "description": "Focus on Django best practices, project structure, developer experience, reusable patterns"
-      }
-    },
-
     "popoto": {
       "name": "Popoto",
       "description": "Redis ORM for Python",
       "working_directory": "~/src/popoto",
+      "machine": "Valor the Cowboy",
       "auto_merge": false,
       "telegram": {
-        "groups": ["Dev: Popoto"],
+        "groups": {"Dev: Popoto": {"persona": "developer"}},
         "respond_to_unaddressed": true,
         "respond_to_dms": false
       },
@@ -65,23 +62,24 @@
       }
     },
 
-    "psyoptimal": {
-      "name": "PsyOPTIMAL",
-      "description": "Mental health optimization platform",
-      "working_directory": "~/src/psyoptimal",
-      "auto_merge": false,
+    "django-project-template": {
+      "name": "Django Project Template",
+      "description": "A modern Django project template with best practices",
+      "working_directory": "~/src/django-project-template",
+      "machine": "Valor the Bald",
+      "auto_merge": true,
       "telegram": {
-        "groups": ["Dev: PsyOPTIMAL"],
+        "groups": {"Dev: Django Template": {"persona": "developer"}},
         "respond_to_unaddressed": true,
         "respond_to_dms": false
       },
       "github": {
-        "org": "yudame",
-        "repo": "psyoptimal"
+        "org": "tomcounsell",
+        "repo": "django-project-template"
       },
       "context": {
-        "tech_stack": ["Python", "Django", "PostgreSQL"],
-        "description": "Focus on mental health features, user privacy, clinical accuracy, evidence-based approaches"
+        "tech_stack": ["Django", "PostgreSQL", "Redis"],
+        "description": "Focus on Django best practices, project structure, developer experience, reusable patterns"
       }
     },
 
@@ -89,9 +87,10 @@
       "name": "Flutter Project Template",
       "description": "A modern Flutter project template with best practices",
       "working_directory": "~/src/flutter-project-template",
+      "machine": "Valor the Bald",
       "auto_merge": true,
       "telegram": {
-        "groups": ["Dev: Flutter Template"],
+        "groups": {"Dev: Flutter Template": {"persona": "developer"}},
         "respond_to_unaddressed": true,
         "respond_to_dms": false
       },
@@ -109,9 +108,13 @@
       "name": "Cuttlefish",
       "description": "AI tools and MCP Servers",
       "working_directory": "~/src/cuttlefish",
+      "machine": "Valor the Bald",
       "auto_merge": true,
       "telegram": {
-        "groups": ["Dev: Cuttlefish"],
+        "groups": {
+          "Dev: Cuttlefish": {"persona": "developer"},
+          "PM: Cuttlefish": {"persona": "project-manager"}
+        },
         "respond_to_unaddressed": true,
         "respond_to_dms": false
       },
@@ -129,9 +132,10 @@
       "name": "Yudame Research",
       "description": "Research tools and frameworks for evidence-based analysis",
       "working_directory": "~/src/research",
+      "machine": "Valor the Bald",
       "auto_merge": true,
       "telegram": {
-        "groups": ["Dev: Yudame Research"],
+        "groups": {"Dev: Yudame Research": {"persona": "developer"}},
         "respond_to_unaddressed": true,
         "respond_to_dms": false
       },
@@ -145,78 +149,120 @@
       }
     },
 
-    "pm-cuttlefish": {
-      "name": "PM: Cuttlefish",
-      "description": "Project management for Cuttlefish - AI tools and MCP Servers",
-      "mode": "pm",
-      "working_directory": "~/work-vault/Cuttlefish/",
+    "yuda-me": {
+      "name": "Yuda.me",
+      "description": "Yudame company website",
+      "working_directory": "~/src/yuda.me",
+      "machine": "Valor the Bald",
+      "auto_merge": true,
       "telegram": {
-        "groups": ["PM: Cuttlefish"],
+        "groups": {"Dev: Yuda.me": {"persona": "developer"}},
         "respond_to_unaddressed": true,
         "respond_to_dms": false
       },
+      "github": {
+        "org": "yudame",
+        "repo": "yuda.me"
+      },
       "context": {
-        "description": "Project management for Cuttlefish. Track status, triage issues, draft communications, manage priorities."
+        "tech_stack": ["Web"],
+        "description": "Company website for Yudame"
       }
     },
 
-    "pm-satsol": {
-      "name": "PM: SATSOL",
-      "description": "Project management for SATSOL",
-      "mode": "pm",
-      "working_directory": "~/work-vault/SATSOL/",
+    "mondayflowers": {
+      "name": "Monday Flowers",
+      "description": "Monday Flowers platform",
+      "working_directory": "~/src/mondayflowers",
+      "machine": "Valor the Bald",
+      "auto_merge": false,
       "telegram": {
-        "groups": ["PM: SATSOL"],
+        "groups": {
+          "Dev: Monday Flowers": {"persona": "developer"},
+          "PM: Monday Flowers": {"persona": "project-manager"}
+        },
         "respond_to_unaddressed": true,
         "respond_to_dms": false
       },
+      "github": {
+        "org": "yudame",
+        "repo": "mondayflowers"
+      },
       "context": {
-        "description": "Project management for SATSOL. Track status, triage issues, draft communications, manage priorities."
+        "tech_stack": ["Python"],
+        "description": "Monday Flowers platform development"
       }
     },
 
-    "pm-monday-flowers": {
-      "name": "PM: Monday Flowers",
-      "description": "Project management for Monday Flowers",
-      "mode": "pm",
-      "working_directory": "~/work-vault/Monday Flowers/",
+    "psyoptimal": {
+      "name": "PsyOPTIMAL",
+      "description": "Mental health optimization platform",
+      "working_directory": "~/src/psyoptimal",
+      "machine": "Valor the Captain",
+      "auto_merge": false,
       "telegram": {
-        "groups": ["PM: Monday Flowers"],
+        "groups": {
+          "Dev: PsyOPTIMAL": {"persona": "developer"},
+          "PM: PsyOptimal": {"persona": "project-manager"}
+        },
         "respond_to_unaddressed": true,
         "respond_to_dms": false
       },
+      "github": {
+        "org": "yudame",
+        "repo": "psyoptimal"
+      },
       "context": {
-        "description": "Project management for Monday Flowers. Track status, triage issues, draft communications, manage priorities."
+        "tech_stack": ["Python", "Django", "PostgreSQL"],
+        "description": "Focus on mental health features, user privacy, clinical accuracy, evidence-based approaches"
       }
     },
 
-    "pm-psyoptimal": {
-      "name": "PM: PsyOptimal",
-      "description": "Project management for PsyOptimal - Mental health optimization platform",
-      "mode": "pm",
-      "working_directory": "~/work-vault/PsyOptimal/",
+    "royop": {
+      "name": "Royop",
+      "description": "Royop platform",
+      "working_directory": "~/src/royop",
+      "machine": "Valor the Captain",
+      "auto_merge": false,
       "telegram": {
-        "groups": ["PM: PsyOptimal"],
+        "groups": {
+          "Dev: Royop": {"persona": "developer"},
+          "PM: Royop": {"persona": "project-manager"}
+        },
         "respond_to_unaddressed": true,
         "respond_to_dms": false
       },
+      "github": {
+        "org": "yudame",
+        "repo": "royop"
+      },
       "context": {
-        "description": "Project management for PsyOptimal. Track status, triage issues, draft communications, manage priorities."
+        "tech_stack": ["Python"],
+        "description": "Royop platform development"
       }
     },
 
-    "pm-royop": {
-      "name": "PM: Royop",
-      "description": "Project management for Royop",
-      "mode": "pm",
-      "working_directory": "~/work-vault/Royop/",
+    "satsol": {
+      "name": "SATSOL",
+      "description": "SATSOL platform",
+      "working_directory": "~/src/satsol",
+      "machine": "Valor the Pirate",
+      "auto_merge": false,
       "telegram": {
-        "groups": ["PM: Royop"],
+        "groups": {
+          "Dev: SATSOL": {"persona": "developer"},
+          "PM: SATSOL": {"persona": "project-manager"}
+        },
         "respond_to_unaddressed": true,
         "respond_to_dms": false
       },
+      "github": {
+        "org": "yudame",
+        "repo": "satsol"
+      },
       "context": {
-        "description": "Project management for Royop. Track status, triage issues, draft communications, manage priorities."
+        "tech_stack": ["Python"],
+        "description": "SATSOL platform development"
       }
     }
   },
