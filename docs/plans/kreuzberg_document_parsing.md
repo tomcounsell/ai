@@ -68,7 +68,7 @@ No prerequisites — kreuzberg is a pip-installable pure Python library. Tessera
 
 ### Key Elements
 
-- **Document parser utility**: Standalone async function that accepts a file path and returns extracted text
+- **Document parser utility**: Standalone sync function that accepts a file path and returns extracted text
 - **File research service function**: New `add_file_research()` that parses files before storing as artifacts
 - **Backfill enhancement**: PDF text extraction during episode import instead of URL-only artifacts
 
@@ -78,8 +78,8 @@ No prerequisites — kreuzberg is a pip-installable pure Python library. Tessera
 
 ### Technical Approach
 
-- Use kreuzberg's async API (`kreuzberg.extract_file()`) for all format detection and extraction
-- Create `apps/common/utilities/document_parser.py` with a single `parse_document(path: Path) -> str` function
+- Use kreuzberg's sync API for all format detection and extraction (wrap async with `asyncio.run()` if needed)
+- Create `apps/common/utilities/document_parser.py` with a single sync `parse_document(path: Path) -> str` function
 - Add `add_file_research()` to `apps/podcast/services/research.py` that calls the parser and delegates to existing `add_manual_research()` for storage
 - Update `create_artifacts()` in `_episode_import_utils.py` to extract PDF text via the parser instead of creating empty-content artifacts
 - Graceful fallback: if kreuzberg fails on a file, log warning and fall back to URL-only artifact (current behavior)
@@ -153,6 +153,7 @@ No agent integration required — this is a podcast pipeline internal feature. T
 - [ ] Backfill `create_artifacts()` extracts text from PDF files instead of empty-content URL-only artifacts
 - [ ] PDF parsing tested with a sample document
 - [ ] Graceful error handling for corrupt/unsupported files
+- [ ] Backfill stress test run before merge — validates PDF extraction on real episode data
 - [ ] Tests pass
 - [ ] Documentation updated
 
@@ -188,7 +189,7 @@ No agent integration required — this is a podcast pipeline internal feature. T
 - **Agent Type**: builder
 - **Parallel**: true
 - Run `uv add kreuzberg` to install the dependency
-- Create `apps/common/utilities/document_parser.py` with async `parse_document(path: Path) -> str`
+- Create `apps/common/utilities/document_parser.py` with sync `parse_document(path: Path) -> str`
 - Handle PDF, DOCX, ODT formats via kreuzberg's `extract_file()`
 - Add error handling for missing files, corrupt files, unsupported formats
 - Create tests in `apps/podcast/tests/test_document_parser.py` with a small sample PDF
@@ -259,6 +260,6 @@ No agent integration required — this is a podcast pipeline internal feature. T
 
 ## Open Questions
 
-1. Should `parse_document()` be sync or async? Kreuzberg provides async APIs, but `create_artifacts()` in the backfill command is synchronous. I'm leaning toward providing both `parse_document()` (sync wrapper) and `parse_document_async()` for use in the async research pipeline. Does that sound right, or should we just use sync everywhere?
+~1. **Resolved**: Sync only. Keep it simple — just `parse_document()` as a sync function. No async variant needed.~
 
-2. For the backfill enhancement — should we re-run the backfill on existing episodes to populate PDF content that was previously stored as URL-only? Or is this only for future imports?
+~2. **Resolved**: Run backfill test before merging as a stress test. This validates the PDF extraction path works on real data.~
