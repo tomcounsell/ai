@@ -7,10 +7,6 @@ Runtime state and ephemeral data. This directory is gitignored except for this R
 | Path | Description | Cleanup Policy |
 |------|-------------|----------------|
 | `valor_bridge.session` | Active Telethon session file for the Telegram bridge | Do not delete while bridge is running |
-| `ai_rebuild_session.session` | Previous session file (use `valor_bridge.session` instead) | Safe to delete |
-| `ai_rebuild_session.session.backup` | Backup of old session file | Safe to delete |
-| `telegram_session.session` | Stale test session file | Safe to delete |
-| `test_session.session` | Stale test session file | Safe to delete |
 | `doc_embeddings.json` | Cached document embeddings (~46MB) | Safe to delete; regenerated on next embedding run |
 | `daydream_state.json` | Daydream feature state | Ephemeral; auto-recreated |
 | `best_practices_cache.json` | Cached best practices for reflections | Ephemeral; auto-recreated |
@@ -30,7 +26,7 @@ Runtime state and ephemeral data. This directory is gitignored except for this R
 
 ## Cleanup Policy
 
-- **Weekly**: Delete stale session files (`ai_rebuild_session.*`, `telegram_session.*`, `test_session.*`)
+- **Weekly**: Delete stale session files (any `.session` files other than `valor_bridge.session`)
 - **Monthly**: Prune `experiments/` data older than 30 days, review `sessions/` size
 - **Quarterly**: Archive or delete `sessions/` logs older than 90 days
 - **On demand**: Delete `doc_embeddings.json` to force regeneration (saves ~46MB)
