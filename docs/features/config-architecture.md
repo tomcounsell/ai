@@ -59,6 +59,8 @@ from config.paths import PROJECT_ROOT, DATA_DIR, CONFIG_DIR, VALOR_DIR, LOGS_DIR
 | `config/projects.json` | Per-project config (working dirs, GitHub orgs, Telegram groups) | No (gitignored) |
 | `config/projects.example.json` | Template for projects.json | Yes |
 | `config/models.py` | Model name constants | Yes |
+| `config/personas/_base.md` | Shared persona base (identity, values, tools, philosophy) | Yes |
+| `config/personas/{persona}.md` | Per-persona overlays (developer, project-manager, teammate) | Yes |
 | `~/Desktop/Valor/` | Google OAuth tokens, DM whitelist, calendar config | No (machine-local) |
 
 ### Credentials Location
