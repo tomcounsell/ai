@@ -83,3 +83,5 @@ The Observer has four tools:
 - **Narration gate**: auto-continues when output is pure narration without substance
 - **Auto-continue cap**: MAX_AUTO_CONTINUES_SDLC (10) prevents infinite loops
 - **Human input detection**: regex patterns detect questions and blockers
+- **Circuit breaker**: Observer errors are classified as retryable (API/outage) or non-retryable (import, config). Retryable errors get exponential backoff (30s→480s); after 5 consecutive failures or on non-retryable errors, escalates to Telegram. See [Session Watchdog Reliability](session-watchdog-reliability.md) for details.
+- **Import guard**: `_build_observer_system_prompt()` wraps `load_principal_context` import in try/except; on ImportError, builds prompt without principal context rather than crashing
