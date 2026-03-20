@@ -32,13 +32,11 @@ def test_no_legacy_claude_code_paths():
         files = set(result.stdout.strip().splitlines())
         # Filter out plan docs (they describe the migration)
         unexpected = {
-            f
-            for f in files
-            if f not in ALLOWED_FILES and not f.startswith("docs/plans/")
+            f for f in files if f not in ALLOWED_FILES and not f.startswith("docs/plans/")
         }
         if unexpected:
             raise AssertionError(
-                f"Legacy 'Desktop/claude_code' references found in:\n"
+                "Legacy 'Desktop/claude_code' references found in:\n"
                 + "\n".join(sorted(unexpected))
                 + "\nThese should be updated to 'Desktop/Valor'."
             )
