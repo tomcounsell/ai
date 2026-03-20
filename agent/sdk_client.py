@@ -79,11 +79,11 @@ def get_stop_reason(session_id: str) -> str | None:
 
 
 def record_session_activity(session_id: str) -> None:
-    """Record that a session produced activity (tool call or log output).
+    """Record that a session produced activity (text output or result message).
 
-    Called by tool call callbacks and log output handlers to update the
-    last activity timestamp for a session. The watchdog uses this to
-    detect stalls based on inactivity rather than wall-clock duration.
+    Called on text block output and result messages during SDK query execution.
+    The watchdog uses this to detect stalls based on inactivity rather than
+    wall-clock duration.
     """
     _last_activity_timestamps[session_id] = time.time()
 

@@ -754,7 +754,7 @@ def _compute_stall_backoff(retry_count: int) -> float:
     return min(delay, STALL_BACKOFF_MAX)
 
 
-async def _kill_stalled_worker(project_key) -> bool:
+async def _kill_stalled_worker(project_key: str | Any) -> bool:
     """Kill the worker task and its subprocess for a stalled session's project.
 
     Cancels the asyncio task from _active_workers AND kills the underlying
