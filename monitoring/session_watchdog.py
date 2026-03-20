@@ -42,6 +42,9 @@ ABANDON_THRESHOLD = 1800  # 30 minutes silent = auto-abandon
 STALL_THRESHOLD_PENDING = 300  # 5 minutes
 STALL_THRESHOLD_RUNNING = 2700  # 45 minutes
 # STALL_TIMEOUT_SECONDS env var overrides the default active session stall threshold
+# Note: activity-based stall detection (SDK_INACTIVITY_TIMEOUT_SECONDS in sdk_client.py)
+# takes precedence for sessions with activity tracking. This threshold is a fallback
+# for sessions without activity data.
 STALL_THRESHOLD_ACTIVE = int(os.environ.get("STALL_TIMEOUT_SECONDS", 600))  # 10 min default
 
 STALL_THRESHOLDS = {
@@ -346,11 +349,19 @@ async def _recover_stalled_pending(stalled: list[dict]) -> None:
     if not pending_stalls:
         return
 
+    # Threshold for orphan push-* sessions with no history (1 hour)
+    ORPHAN_PUSH_THRESHOLD = 3600
+
     for stall_info in pending_stalls:
         project_key = stall_info.get("project_key", "?")
         session_id = stall_info.get("session_id", "unknown")
 
-        if project_key == "?":
+        # Coerce project_key to plain string for safe dict lookups
+        # (push-* sessions may have plain string project_key instead of DB_key)
+        if project_key is not None and project_key != "?":
+            project_key = str(project_key)
+
+        if not project_key or project_key == "?":
             logger.warning(
                 "[watchdog] Cannot recover stalled pending session %s — no project_key available",
                 session_id,
@@ -364,6 +375,40 @@ async def _recover_stalled_pending(stalled: list[dict]) -> None:
                 logger.warning(
                     "[watchdog] Stalled pending session %s no longer exists in Redis — skipping",
                     session_id,
+                )
+                continue
+
+            # Guard: if session status changed since stall detection, skip recovery
+            current_status = getattr(session, "status", None)
+            if current_status and current_status != "pending":
+                logger.info(
+                    "[watchdog] Session %s status changed to %s since stall detection — skipping",
+                    session_id,
+                    current_status,
+                )
+                continue
+
+            # Orphan push-* cleanup: sessions stuck >1 hour with no history
+            duration = stall_info.get("duration", 0)
+            last_history = stall_info.get("last_history", "no history")
+            if (
+                session_id.startswith("push-")
+                and duration > ORPHAN_PUSH_THRESHOLD
+                and last_history == "no history"
+            ):
+                saved = _safe_abandon_session(
+                    session,
+                    f"watchdog: orphan push-* session stuck for {duration:.0f}s with no history",
+                )
+                logger.warning(
+                    "[watchdog] Abandoned orphan push-* session %s (stuck %ds, saved=%s)",
+                    session_id,
+                    int(duration),
+                    saved,
+                )
+                await _notify_stall_failure(
+                    session,
+                    f"orphan push-* session stuck for {int(duration)}s with no history",
                 )
                 continue
 
@@ -695,7 +740,7 @@ def _compute_stall_backoff(retry_count: int) -> float:
     return min(delay, STALL_BACKOFF_MAX)
 
 
-async def _kill_stalled_worker(project_key: str) -> bool:
+async def _kill_stalled_worker(project_key) -> bool:
     """Kill the worker task and its subprocess for a stalled session's project.
 
     Cancels the asyncio task from _active_workers AND kills the underlying
@@ -704,6 +749,8 @@ async def _kill_stalled_worker(project_key: str) -> bool:
 
     Args:
         project_key: The project key whose worker should be killed.
+            May be a plain string, a Popoto DB_key object, or None.
+            Coerced to str() for safe dict lookups.
 
     Returns:
         True if a worker was found and cancelled, False otherwise.
@@ -713,6 +760,16 @@ async def _kill_stalled_worker(project_key: str) -> bool:
 
     from agent.job_queue import _active_workers
     from agent.sdk_client import _active_clients
+
+    # Guard: handle None, empty string, and non-string project_key values
+    if project_key is None:
+        logger.info("[stall-retry] Cannot kill worker: project_key is None")
+        return False
+    # Coerce to plain string to avoid AttributeError on Popoto DB_key objects
+    project_key = str(project_key)
+    if not project_key or project_key == "?":
+        logger.info("[stall-retry] Cannot kill worker: project_key is empty or unknown")
+        return False
 
     worker = _active_workers.get(project_key)
     if worker is None or worker.done():
@@ -953,6 +1010,9 @@ async def fix_unhealthy_session(session: AgentSession, assessment: dict[str, Any
     # Get current retry count (treat None as 0 for legacy sessions)
     retry_count = int(session.retry_count or 0)
 
+    # Coerce project_key to str for safe use in dict lookups
+    project_key = str(getattr(session, "project_key", "?"))
+
     # Most common case: session is stuck/silent
     if silence_duration > ABANDON_THRESHOLD:
         stall_reason = f"silent for {int(silence_duration / 60)}min"
@@ -960,7 +1020,7 @@ async def fix_unhealthy_session(session: AgentSession, assessment: dict[str, Any
         # Attempt retry if retries remain
         if retry_count < STALL_MAX_RETRIES:
             # Kill the stalled worker before retrying
-            await _kill_stalled_worker(session.project_key)
+            await _kill_stalled_worker(project_key)
 
             # Compute and wait for backoff
             backoff = _compute_stall_backoff(retry_count)
@@ -1000,7 +1060,7 @@ async def fix_unhealthy_session(session: AgentSession, assessment: dict[str, Any
 
         # Attempt retry if retries remain
         if retry_count < STALL_MAX_RETRIES:
-            await _kill_stalled_worker(session.project_key)
+            await _kill_stalled_worker(project_key)
             backoff = _compute_stall_backoff(retry_count)
             logger.info(
                 "[stall-retry] Backing off %.1fs before retry %d/%d for session %s",
