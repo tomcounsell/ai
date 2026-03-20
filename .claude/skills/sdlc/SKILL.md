@@ -12,7 +12,12 @@ You MUST NOT write code, run tests, or create plans directly -- delegate everyth
 
 ## Cross-Repo Resolution
 
-For cross-project SDLC work, the `GH_REPO` environment variable is automatically set by `sdk_client.py` (e.g., `GH_REPO=tomcounsell/popoto`). The `gh` CLI natively respects this env var, so all `gh` commands automatically target the correct repository. No `--repo` flags or manual parsing needed.
+For cross-project SDLC work, two environment variables are automatically set by `sdk_client.py`:
+
+- `GH_REPO` (e.g., `tomcounsell/popoto`) — The `gh` CLI natively respects this, so all `gh` commands automatically target the correct repository.
+- `SDLC_TARGET_REPO` (e.g., `/Users/valorengels/src/popoto`) — The absolute path to the target project's repo root. Use this for all local filesystem and git operations instead of assuming cwd is the target repo.
+
+**When `SDLC_TARGET_REPO` is set, you MUST use it** for plan lookups, branch listings, and any git commands. The orchestrator's cwd is the ai/ repo, NOT the target project.
 
 ## Step 1: Resolve the Issue or PR
 

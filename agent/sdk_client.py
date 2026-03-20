@@ -783,6 +783,7 @@ class ValorAgent:
         message_id: int | None = None,
         job_id: str | None = None,
         gh_repo: str | None = None,
+        target_repo: str | None = None,
     ):
         """
         Initialize ValorAgent.
@@ -803,6 +804,9 @@ class ValorAgent:
             gh_repo: Optional GitHub repo (org/repo) to set as GH_REPO env var.
                 When set, all `gh` CLI commands in the subprocess automatically
                 target this repo without needing explicit --repo flags.
+            target_repo: Absolute path to the target project's repo root. For
+                cross-repo SDLC builds this differs from working_dir (the
+                orchestrator). Defaults to working_dir when not specified.
         """
         default_dir = Path(__file__).parent.parent
         allowed_root = Path.home() / "src"
@@ -819,6 +823,7 @@ class ValorAgent:
         self.message_id = message_id
         self.job_id = job_id
         self.gh_repo = gh_repo or None  # Normalize empty string to None
+        self.target_repo = target_repo
         self.workflow_state: WorkflowState | None = None
 
         # Load workflow state if workflow_id provided
@@ -952,6 +957,8 @@ class ValorAgent:
         # the deterministic fix -- SKILL.md --repo instructions remain as a safety net.
         if self.gh_repo:
             env["GH_REPO"] = self.gh_repo
+        if self.target_repo:
+            env["SDLC_TARGET_REPO"] = str(self.target_repo)
 
         # SDLC context injection: pre-resolve session fields as env vars so
         # skills can reference $SDLC_PR_NUMBER etc. instead of guessing (issue #420).
@@ -1495,6 +1502,7 @@ async def get_agent_response_sdk(
             message_id=_message_id,
             job_id=job_id,
             gh_repo=_gh_repo,
+            target_repo=project_working_dir,
         )
         response = await agent.query(enriched_message, session_id=session_id)
 
