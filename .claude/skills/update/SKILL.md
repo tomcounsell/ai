@@ -12,7 +12,7 @@ Pull the latest changes from the remote repository, sync dependencies, and resta
 Run the full update orchestrator and report the results:
 
 ```bash
-cd /Users/valorengels/src/ai && .venv/bin/python scripts/update/run.py --full
+cd ~/src/ai && .venv/bin/python scripts/update/run.py --full
 ```
 
 The orchestrator will:
@@ -34,7 +34,7 @@ After running, report the result. If there are warnings or errors, list each one
 After the orchestrator completes, audit Redis for stale or abandoned sessions/jobs. An `/update` implies a soft reset — anything stuck should be surfaced.
 
 ```bash
-cd /Users/valorengels/src/ai && .venv/bin/python -c "
+cd ~/src/ai && .venv/bin/python -c "
 import time
 from models.agent_session import AgentSession
 
@@ -92,25 +92,37 @@ When `pyproject.toml` changes via git pull with critical dep version changes (te
 If `data/upgrade-pending` exists:
 ```bash
 # Check what's pending
-cat /Users/valorengels/src/ai/data/upgrade-pending
+cat ~/src/ai/data/upgrade-pending
 
 # After /update applies the upgrade and verifies the bridge starts:
-rm /Users/valorengels/src/ai/data/upgrade-pending
+rm ~/src/ai/data/upgrade-pending
 ```
 
 ### Verification Only
 
 To check the environment without making changes:
 ```bash
-cd /Users/valorengels/src/ai
+cd ~/src/ai
 .venv/bin/python scripts/update/run.py --verify
 ```
+
+### Reinstall Launchd Services
+
+After update, reinstall launchd plists to pick up any template changes:
+
+```bash
+cd ~/src/ai
+./scripts/install_reflections.sh
+./scripts/install_issue_poller.sh
+```
+
+The install scripts substitute `__PROJECT_DIR__` and `__HOME_DIR__` placeholders with the current machine's paths. This ensures plists work on any machine without hardcoded usernames.
 
 ## Troubleshooting
 
 ### Virtual environment issues
 ```bash
-cd /Users/valorengels/src/ai
+cd ~/src/ai
 rm -rf .venv
 uv venv
 uv sync --all-extras
@@ -118,25 +130,25 @@ uv sync --all-extras
 
 ### Missing dependencies after update
 ```bash
-cd /Users/valorengels/src/ai
+cd ~/src/ai
 uv sync --all-extras --reinstall
 ```
 
 ### Calendar integration not working
-1. Check OAuth token: `ls ~/Desktop/claude_code/google_token.json`
+1. Check OAuth token: `ls ~/Desktop/Valor/google_token.json`
 2. Re-run OAuth: `valor-calendar test`
 3. Check deps: `.venv/bin/python -c "import google_auth_oauthlib; print('OK')"`
 
 ### Bridge won't start
 ```bash
 # Check logs
-tail -50 /Users/valorengels/src/ai/logs/bridge.error.log
+tail -50 ~/src/ai/logs/bridge.error.log
 
 # Manual restart
-/Users/valorengels/src/ai/scripts/valor-service.sh restart
+~/src/ai/scripts/valor-service.sh restart
 
 # Check status
-/Users/valorengels/src/ai/scripts/valor-service.sh status
+~/src/ai/scripts/valor-service.sh status
 ```
 
 ## Module Details

@@ -102,7 +102,7 @@ def load_projects(config_path: Path | None = None) -> list[dict]:
                 "name": proj.get("name", _key),
                 "org": gh["org"],
                 "repo": gh["repo"],
-                "working_directory": proj.get("working_directory", ""),
+                "working_directory": str(Path(proj.get("working_directory", "")).expanduser()),
                 "telegram_groups": proj.get("telegram", {}).get("groups", []),
             }
         )

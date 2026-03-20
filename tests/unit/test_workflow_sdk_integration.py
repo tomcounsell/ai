@@ -58,7 +58,7 @@ class TestWorkflowSDKIntegration:
 
         finally:
             # Clean up
-            state_file = Path(f"/Users/valorengels/src/ai/agents/{wf_id}/state.json")
+            state_file = Path(__file__).parent.parent.parent / f"agents/{wf_id}/state.json"
             if state_file.exists():
                 state_file.unlink()
                 state_file.parent.rmdir()
@@ -95,7 +95,7 @@ class TestWorkflowSDKIntegration:
 
         finally:
             # Clean up
-            state_file = Path(f"/Users/valorengels/src/ai/agents/{wf_id}/state.json")
+            state_file = Path(__file__).parent.parent.parent / f"agents/{wf_id}/state.json"
             if state_file.exists():
                 state_file.unlink()
                 state_file.parent.rmdir()
@@ -132,7 +132,7 @@ class TestWorkflowSDKIntegration:
 
         finally:
             # Clean up
-            state_file = Path(f"/Users/valorengels/src/ai/agents/{wf_id}/state.json")
+            state_file = Path(__file__).parent.parent.parent / f"agents/{wf_id}/state.json"
             if state_file.exists():
                 state_file.unlink()
                 state_file.parent.rmdir()

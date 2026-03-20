@@ -171,9 +171,9 @@ def load_local_projects() -> list[dict]:
     data = json.loads(config_path.read_text())
     projects = []
     for slug, cfg in data.get("projects", {}).items():
-        wd = Path(cfg.get("working_directory", ""))
+        wd = Path(cfg.get("working_directory", "")).expanduser()
         if wd.exists():
-            projects.append({"slug": slug, **cfg})
+            projects.append({"slug": slug, **cfg, "working_directory": str(wd)})
     return projects
 
 

@@ -20,6 +20,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Classification](classification.md) | Auto-classification of messages as bug/feature/chore with immutability and reclassify skill | Shipped |
 | [Code Impact Finder](code-impact-finder.md) | Semantic search for blast radius analysis during /do-plan | Shipped |
 | [Completion Tracking](completion-tracking.md) | Branch-based work tracking and completion token system | Archived |
+| [Config Architecture](config-architecture.md) | Unified config system: Pydantic Settings, path constants, zero hardcoded paths | Shipped |
 | [Context Fidelity Modes](context-fidelity-modes.md) | Right-sized context compression (full/compact/minimal/steering) for sub-agent dispatch | Shipped |
 | [Correlation IDs](correlation-ids.md) | End-to-end request tracing with shared correlation_id from Telegram receipt to response delivery | Shipped |
 | [Deep Plan Analysis](deep-plan-analysis.md) | Prior Art, Data Flow, Failure Analysis, and Architectural Impact investigation sections in /do-plan | Shipped |

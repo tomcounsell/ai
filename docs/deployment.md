@@ -113,5 +113,5 @@ Multiple machines can monitor different groups, or one machine can monitor all.
 ## See Also
 
 - Run `/setup` for full machine configuration
-- See `config/projects.json.example` for template
+- See `config/projects.example.json` for template
 - Check `bridge/telegram_bridge.py` for routing logic

@@ -44,20 +44,22 @@ DEFAULT_MENTIONS = []
 def load_config() -> dict:
     """Load project configuration from projects.json."""
     config_path = Path(__file__).parent.parent / "config" / "projects.json"
-    example_path = config_path.with_suffix(".json.example")
 
     if not config_path.exists():
-        if example_path.exists():
-            logger.error(
-                f"Project config not found at {config_path}. "
-                f"Copy the example: cp {example_path} {config_path}"
-            )
-        else:
-            logger.warning(f"Project config not found at {config_path}, using defaults")
+        logger.warning(f"Project config not found at {config_path}, using defaults")
         return {"projects": {}, "defaults": {}}
 
     with open(config_path) as f:
         config = json.load(f)
+
+    # Expand ~ in working_directory values
+    for _proj in config.get("projects", {}).values():
+        wd = _proj.get("working_directory", "")
+        if wd.startswith("~"):
+            _proj["working_directory"] = str(Path(wd).expanduser())
+    _defs = config.get("defaults", {})
+    if _defs.get("working_directory", "").startswith("~"):
+        _defs["working_directory"] = str(Path(_defs["working_directory"]).expanduser())
 
     # Validate defaults section exists and has working_directory
     defaults = config.get("defaults", {})
@@ -65,13 +67,13 @@ def load_config() -> dict:
         logger.warning(
             "No 'defaults' section in projects.json. "
             "Add a defaults section with working_directory and telegram settings. "
-            "See config/projects.json.example for proper setup."
+            "See config/projects.json for the expected format."
         )
     elif not defaults.get("working_directory"):
         logger.warning(
             "No 'working_directory' in defaults section of projects.json. "
             "Projects without working_directory will fail. "
-            "See config/projects.json.example for proper setup."
+            "Check config/projects.json and add a working_directory to the defaults section."
         )
 
     # Validate each active project

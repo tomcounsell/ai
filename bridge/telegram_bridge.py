@@ -407,11 +407,12 @@ RESPOND_TO_DMS = any(
 )
 
 # DM whitelist - only respond to DMs from these Telegram user IDs
-# Loaded from ~/Desktop/claude_code/dm_whitelist.json, falls back to TELEGRAM_DM_WHITELIST env var
+# Loaded from ~/Desktop/Valor/dm_whitelist.json
+# Falls back to TELEGRAM_DM_WHITELIST env var
 # Format: {"users": {"123456": {"name": "Name", "permissions": "full|qa_only"}}}
 DM_WHITELIST: set[int] = set()
 DM_WHITELIST_CONFIG: dict[int, dict] = {}  # Full config per user for permissions lookup
-_dm_whitelist_path = Path.home() / "Desktop" / "claude_code" / "dm_whitelist.json"
+_dm_whitelist_path = Path.home() / "Desktop" / "Valor" / "dm_whitelist.json"
 if _dm_whitelist_path.exists():
     try:
         _wl_config = json.loads(_dm_whitelist_path.read_text())

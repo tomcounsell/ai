@@ -5,7 +5,7 @@
     "valor": {
       "name": "Valor AI",
       "description": "AI coworker system - autonomous agent with agency",
-      "working_directory": "/Users/valorengels/src/ai",
+      "working_directory": "~/src/ai",
       "auto_merge": true,
       "telegram": {
         "groups": ["Dev: Valor"],
@@ -28,7 +28,7 @@
     "django-project-template": {
       "name": "Django Project Template",
       "description": "A modern Django project template with best practices",
-      "working_directory": "/Users/valorengels/src/django-project-template",
+      "working_directory": "~/src/django-project-template",
       "auto_merge": true,
       "telegram": {
         "groups": ["Dev: Django Template"],
@@ -48,7 +48,7 @@
     "popoto": {
       "name": "Popoto",
       "description": "Redis ORM for Python",
-      "working_directory": "/Users/valorengels/src/popoto",
+      "working_directory": "~/src/popoto",
       "auto_merge": false,
       "telegram": {
         "groups": ["Dev: Popoto"],
@@ -68,7 +68,7 @@
     "psyoptimal": {
       "name": "PsyOPTIMAL",
       "description": "Mental health optimization platform",
-      "working_directory": "/Users/valorengels/src/psyoptimal",
+      "working_directory": "~/src/psyoptimal",
       "auto_merge": false,
       "telegram": {
         "groups": ["Dev: PsyOPTIMAL"],
@@ -88,7 +88,7 @@
     "flutter-project-template": {
       "name": "Flutter Project Template",
       "description": "A modern Flutter project template with best practices",
-      "working_directory": "/Users/valorengels/src/flutter-project-template",
+      "working_directory": "~/src/flutter-project-template",
       "auto_merge": true,
       "telegram": {
         "groups": ["Dev: Flutter Template"],
@@ -108,7 +108,7 @@
     "cuttlefish": {
       "name": "Cuttlefish",
       "description": "AI tools and MCP Servers",
-      "working_directory": "/Users/valorengels/src/cuttlefish",
+      "working_directory": "~/src/cuttlefish",
       "auto_merge": true,
       "telegram": {
         "groups": ["Dev: Cuttlefish"],
@@ -128,7 +128,7 @@
     "yudame-research": {
       "name": "Yudame Research",
       "description": "Research tools and frameworks for evidence-based analysis",
-      "working_directory": "/Users/valorengels/src/research",
+      "working_directory": "~/src/research",
       "auto_merge": true,
       "telegram": {
         "groups": ["Dev: Yudame Research"],
@@ -149,7 +149,7 @@
       "name": "PM: Cuttlefish",
       "description": "Project management for Cuttlefish - AI tools and MCP Servers",
       "mode": "pm",
-      "working_directory": "/Users/valorengels/work-vault/Cuttlefish/",
+      "working_directory": "~/work-vault/Cuttlefish/",
       "telegram": {
         "groups": ["PM: Cuttlefish"],
         "respond_to_unaddressed": true,
@@ -164,7 +164,7 @@
       "name": "PM: SATSOL",
       "description": "Project management for SATSOL",
       "mode": "pm",
-      "working_directory": "/Users/valorengels/work-vault/SATSOL/",
+      "working_directory": "~/work-vault/SATSOL/",
       "telegram": {
         "groups": ["PM: SATSOL"],
         "respond_to_unaddressed": true,
@@ -179,7 +179,7 @@
       "name": "PM: Monday Flowers",
       "description": "Project management for Monday Flowers",
       "mode": "pm",
-      "working_directory": "/Users/valorengels/work-vault/Monday Flowers/",
+      "working_directory": "~/work-vault/Monday Flowers/",
       "telegram": {
         "groups": ["PM: Monday Flowers"],
         "respond_to_unaddressed": true,
@@ -194,7 +194,7 @@
       "name": "PM: PsyOptimal",
       "description": "Project management for PsyOptimal - Mental health optimization platform",
       "mode": "pm",
-      "working_directory": "/Users/valorengels/work-vault/PsyOptimal/",
+      "working_directory": "~/work-vault/PsyOptimal/",
       "telegram": {
         "groups": ["PM: PsyOptimal"],
         "respond_to_unaddressed": true,
@@ -209,7 +209,7 @@
       "name": "PM: Royop",
       "description": "Project management for Royop",
       "mode": "pm",
-      "working_directory": "/Users/valorengels/work-vault/Royop/",
+      "working_directory": "~/work-vault/Royop/",
       "telegram": {
         "groups": ["PM: Royop"],
         "respond_to_unaddressed": true,
@@ -222,7 +222,7 @@
   },
 
   "defaults": {
-    "working_directory": "/Users/valorengels/src",
+    "working_directory": "~/src",
     "telegram": {
       "respond_to_all": true,
       "respond_to_mentions": true,

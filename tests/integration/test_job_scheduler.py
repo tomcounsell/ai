@@ -5,11 +5,15 @@ import json
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
 from agent.job_queue import PRIORITY_RANK, _extract_job_fields, _pop_job
 from models.agent_session import AgentSession
+
+# Project root derived from file location (tests/integration/ -> project root)
+_PROJECT_ROOT = str(Path(__file__).parent.parent.parent)
 
 # === Fixtures ===
 
@@ -181,7 +185,7 @@ class TestJobSchedulerCLI:
             [sys.executable, "-m", "tools.job_scheduler", "--help"],
             capture_output=True,
             text=True,
-            cwd="/Users/valorengels/src/ai",
+            cwd=_PROJECT_ROOT,
         )
         assert result.returncode == 0
         assert "schedule" in result.stdout
@@ -193,7 +197,7 @@ class TestJobSchedulerCLI:
             [sys.executable, "-m", "tools.job_scheduler", "status", "--project", "test-scheduler"],
             capture_output=True,
             text=True,
-            cwd="/Users/valorengels/src/ai",
+            cwd=_PROJECT_ROOT,
         )
         assert result.returncode == 0
         data = json.loads(result.stdout)
@@ -219,7 +223,7 @@ class TestJobSchedulerCLI:
             ],
             capture_output=True,
             text=True,
-            cwd="/Users/valorengels/src/ai",
+            cwd=_PROJECT_ROOT,
             env={**__import__("os").environ, "PROJECT_KEY": proj},
         )
         assert push_result.returncode == 0
@@ -238,7 +242,7 @@ class TestJobSchedulerCLI:
             ],
             capture_output=True,
             text=True,
-            cwd="/Users/valorengels/src/ai",
+            cwd=_PROJECT_ROOT,
         )
         assert pop_result.returncode == 0
         pop_data = json.loads(pop_result.stdout)
@@ -260,7 +264,7 @@ class TestJobSchedulerCLI:
             ],
             capture_output=True,
             text=True,
-            cwd="/Users/valorengels/src/ai",
+            cwd=_PROJECT_ROOT,
         )
         # Should fail (exit 1) with error JSON
         assert result.returncode == 1
@@ -280,7 +284,7 @@ class TestJobSchedulerCLI:
             ],
             capture_output=True,
             text=True,
-            cwd="/Users/valorengels/src/ai",
+            cwd=_PROJECT_ROOT,
         )
         assert result.returncode == 1
         data = json.loads(result.stdout)
@@ -299,7 +303,7 @@ class TestJobSchedulerCLI:
             ],
             capture_output=True,
             text=True,
-            cwd="/Users/valorengels/src/ai",
+            cwd=_PROJECT_ROOT,
         )
         assert result.returncode == 1
         data = json.loads(result.stdout)
@@ -325,7 +329,7 @@ class TestSelfSchedulingProtection:
             ],
             capture_output=True,
             text=True,
-            cwd="/Users/valorengels/src/ai",
+            cwd=_PROJECT_ROOT,
             env={**__import__("os").environ, "PROJECT_KEY": "test-scheduler"},
         )
         assert result.returncode == 0

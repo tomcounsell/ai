@@ -5,7 +5,7 @@
 
 set -e
 
-LOCKDIR="$HOME/Desktop/claude_code"
+LOCKDIR="$HOME/Desktop/Valor"
 STAMPFILE="$LOCKDIR/.calendar_hook_stamp"
 SESSIONFILE="$LOCKDIR/.calendar_hook_session"
 SLUGFILE="$LOCKDIR/.calendar_hook_slug"
