@@ -316,11 +316,47 @@ PHONE = os.getenv("TELEGRAM_PHONE", "")
 PASSWORD = os.getenv("TELEGRAM_PASSWORD", "")
 SESSION_NAME = os.getenv("TELEGRAM_SESSION_NAME", "valor_bridge")
 
-# Active projects on this machine (comma-separated)
-# Example: ACTIVE_PROJECTS=valor,popoto,django-project-template
-ACTIVE_PROJECTS = [
-    p.strip().lower() for p in os.getenv("ACTIVE_PROJECTS", "valor").split(",") if p.strip()
-]
+# Active projects: derived from machine field in projects.json matched against hostname.
+# Each project is handled by exactly one machine — the config is the single source of truth.
+
+
+def _get_active_projects() -> list[str]:
+    """Determine active projects for this machine from config."""
+    config_path = Path(__file__).parent.parent / "config" / "projects.json"
+    if not config_path.exists():
+        return ["valor"]
+
+    with open(config_path) as f:
+        config = json.load(f)
+
+    # Get this machine's hostname (e.g. "Valor-the-Cowboy")
+    try:
+        hostname = subprocess.check_output(["scutil", "--get", "LocalHostName"], text=True).strip()
+    except Exception:
+        hostname = ""
+
+    # Normalize: "Valor-the-Cowboy" -> "valor the cowboy"
+    hostname_normalized = hostname.replace("-", " ").lower()
+
+    # Match projects where machine field matches this hostname
+    matched = []
+    for key, project in config.get("projects", {}).items():
+        machine = project.get("machine", "")
+        if machine.lower() == hostname_normalized:
+            matched.append(key.lower())
+
+    if matched:
+        return matched
+
+    # Fallback to env var if no machine matches (e.g. dev/test)
+    env_val = os.getenv("ACTIVE_PROJECTS", "")
+    if env_val:
+        return [p.strip().lower() for p in env_val.split(",") if p.strip()]
+
+    return ["valor"]
+
+
+ACTIVE_PROJECTS = _get_active_projects()
 
 # =============================================================================
 # Logging Configuration
