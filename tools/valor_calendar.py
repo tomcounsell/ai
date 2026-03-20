@@ -16,14 +16,10 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from config.paths import CONFIG_DIR as _CONFIG_DIR
 from config.paths import DATA_DIR
 
-# Calendar config lives in config/, queue/cache in data/
-_legacy_dir = Path.home() / "Desktop" / "claude_code"
-CALENDAR_CONFIG_PATH = _CONFIG_DIR / "calendar_config.json"
-if not CALENDAR_CONFIG_PATH.exists() and (_legacy_dir / "calendar_config.json").exists():
-    CALENDAR_CONFIG_PATH = _legacy_dir / "calendar_config.json"
+# Calendar config lives in ~/Desktop/Valor/, queue/cache in data/
+CALENDAR_CONFIG_PATH = Path.home() / "Desktop" / "Valor" / "calendar_config.json"
 
 QUEUE_PATH = DATA_DIR / "calendar_queue.jsonl"
 EVENT_ID_CACHE_PATH = DATA_DIR / "calendar_event_ids.json"

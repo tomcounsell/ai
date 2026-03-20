@@ -103,21 +103,21 @@ Set up Google Calendar integration for work time tracking.
 Check if credentials exist:
 
 ```bash
-ls config/secrets/google_credentials.json || ls ~/Desktop/claude_code/google_credentials.json
+ls ~/Desktop/Valor/google_credentials.json
 ```
 
 If missing, ask the user to:
 1. Go to Google Cloud Console (project: Yudame General)
 2. Enable Google Calendar API
 3. Create OAuth 2.0 Client ID (Desktop app)
-4. Download JSON and save to `config/secrets/google_credentials.json`
+4. Download JSON and save to `~/Desktop/Valor/google_credentials.json`
 
 ### 4.2 Run OAuth consent flow
 
 Check if token already exists:
 
 ```bash
-ls config/secrets/google_token.json 2>/dev/null || ls ~/Desktop/claude_code/google_token.json 2>/dev/null
+ls ~/Desktop/Valor/google_token.json 2>/dev/null
 ```
 
 If no token exists, run the OAuth flow:
@@ -139,7 +139,7 @@ print('OAuth flow complete, token saved')
 The user must complete the OAuth consent in their browser. After completion, verify the token was created:
 
 ```bash
-ls config/secrets/google_token.json
+ls ~/Desktop/Valor/google_token.json
 ```
 
 ### 4.3 Create calendar mappings
@@ -397,7 +397,7 @@ uv sync --all-extras
 ```
 
 ### Calendar OAuth fails
-1. Verify credentials file exists: `ls config/secrets/google_credentials.json`
+1. Verify credentials file exists: `ls ~/Desktop/Valor/google_credentials.json`
 2. Ensure Google Calendar API is enabled in Cloud Console
 3. Re-run OAuth: `.venv/bin/valor-calendar test`
 

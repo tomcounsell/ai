@@ -164,7 +164,7 @@ class GoogleAuthSettings(BaseModel):
     """Google OAuth credential settings."""
 
     credentials_dir: Path = Field(
-        default=Path("config/secrets"),
+        default_factory=lambda: Path.home() / "Desktop" / "Valor",
         description="Directory for Google auth credentials (env: GOOGLE_CREDENTIALS_DIR)",
     )
 

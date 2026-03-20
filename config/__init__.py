@@ -11,7 +11,7 @@ from .loader import (
     config_loader,
     validate_configuration,
 )
-from .paths import CONFIG_DIR, DATA_DIR, HOME_DIR, LOGS_DIR, PROJECT_ROOT, SECRETS_DIR, SRC_DIR
+from .paths import CONFIG_DIR, DATA_DIR, HOME_DIR, LOGS_DIR, PROJECT_ROOT, SRC_DIR, VALOR_DIR
 from .settings import (
     APISettings,
     DatabaseSettings,
@@ -53,7 +53,7 @@ __all__ = [
     "DATA_DIR",
     "LOGS_DIR",
     "CONFIG_DIR",
-    "SECRETS_DIR",
+    "VALOR_DIR",
     "HOME_DIR",
     "SRC_DIR",
     # Configuration loader

@@ -410,10 +410,6 @@ data/external/
 # Configuration with secrets
 config/local.py
 config/secrets.py
-config/secrets/*
-!config/secrets/.gitkeep
-config/dm_whitelist.json
-config/calendar_config.json
 secrets/
 .secrets/
 

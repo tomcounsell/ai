@@ -123,7 +123,7 @@ uv sync --all-extras --reinstall
 ```
 
 ### Calendar integration not working
-1. Check OAuth token: `ls config/secrets/google_token.json`
+1. Check OAuth token: `ls ~/Desktop/Valor/google_token.json`
 2. Re-run OAuth: `valor-calendar test`
 3. Check deps: `.venv/bin/python -c "import google_auth_oauthlib; print('OK')"`
 

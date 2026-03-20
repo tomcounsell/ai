@@ -8,9 +8,9 @@ Unified configuration system that eliminates hardcoded paths, scattered env vars
 
 ```
 .env (secrets, overrides)
-  ↓
+  |
 config/settings.py (Pydantic Settings model)
-  ↓
+  |
 Application code: from config.settings import settings
 ```
 
@@ -21,7 +21,7 @@ All code imports `settings` from `config.settings` or path constants from `confi
 `config/paths.py` derives all paths from `Path(__file__)` -- no hardcoded usernames:
 
 ```python
-from config.paths import PROJECT_ROOT, DATA_DIR, CONFIG_DIR, SECRETS_DIR, LOGS_DIR, SRC_DIR
+from config.paths import PROJECT_ROOT, DATA_DIR, CONFIG_DIR, VALOR_DIR, LOGS_DIR, SRC_DIR
 ```
 
 | Constant | Value | Description |
@@ -30,7 +30,7 @@ from config.paths import PROJECT_ROOT, DATA_DIR, CONFIG_DIR, SECRETS_DIR, LOGS_D
 | `DATA_DIR` | `PROJECT_ROOT / "data"` | Runtime state directory |
 | `LOGS_DIR` | `PROJECT_ROOT / "logs"` | Log files |
 | `CONFIG_DIR` | `PROJECT_ROOT / "config"` | Configuration files |
-| `SECRETS_DIR` | `CONFIG_DIR / "secrets"` | Google auth tokens, gitignored |
+| `VALOR_DIR` | `Path.home() / "Desktop" / "Valor"` | Google auth, DM whitelist, calendar config |
 | `HOME_DIR` | `Path.home()` | User home directory |
 | `SRC_DIR` | `HOME_DIR / "src"` | Source code root |
 
@@ -42,7 +42,7 @@ from config.paths import PROJECT_ROOT, DATA_DIR, CONFIG_DIR, SECRETS_DIR, LOGS_D
 |---------|-------|------------|----------|
 | Telegram | `TelegramSettings` | `session_name` (default: `valor_bridge`) | `TELEGRAM_SESSION_NAME` |
 | Redis | `RedisSettings` | `url` (default: `redis://localhost:6379/0`) | `REDIS_URL` |
-| Google Auth | `GoogleAuthSettings` | `credentials_dir` (default: `config/secrets/`) | `GOOGLE_CREDENTIALS_DIR` |
+| Google Auth | `GoogleAuthSettings` | `credentials_dir` (default: `~/Desktop/Valor/`) | `GOOGLE_CREDENTIALS_DIR` |
 | Models | `ModelSettings` | `ollama_vision_model` (default: `llama3.2-vision:11b`) | `OLLAMA_VISION_MODEL` |
 | Paths | `PathSettings` | `project_root`, `data_dir`, `logs_dir`, `config_dir` | -- |
 | Database | `DatabaseSettings` | `path`, `echo`, `pool_size` | -- |
@@ -58,12 +58,21 @@ from config.paths import PROJECT_ROOT, DATA_DIR, CONFIG_DIR, SECRETS_DIR, LOGS_D
 | `config/paths.py` | Path constants derived from `__file__` | Yes |
 | `config/projects.json` | Per-project config (working dirs, GitHub orgs, Telegram groups) | No (gitignored) |
 | `config/projects.example.json` | Template for projects.json | Yes |
-| `config/secrets/` | Google OAuth tokens, DM whitelist | No (gitignored) |
 | `config/models.py` | Model name constants | Yes |
+| `~/Desktop/Valor/` | Google OAuth tokens, DM whitelist, calendar config | No (machine-local) |
 
-### Path Fallback Behavior
+### Credentials Location
 
-Google auth tokens live in `config/secrets/`. If tokens are not found there, the code checks `~/Desktop/claude_code/` as a secondary location. The DM whitelist follows the same pattern: `config/dm_whitelist.json` first, then `~/Desktop/claude_code/dm_whitelist.json`. The secondary path check is temporary (one release cycle).
+All Google auth credentials, DM whitelist, and calendar config live in `~/Desktop/Valor/`:
+
+| File | Purpose |
+|------|---------|
+| `~/Desktop/Valor/google_credentials.json` | OAuth client credentials (from Google Cloud Console) |
+| `~/Desktop/Valor/google_token.json` | OAuth token (auto-generated) |
+| `~/Desktop/Valor/dm_whitelist.json` | Telegram DM whitelist |
+| `~/Desktop/Valor/calendar_config.json` | Calendar project-to-ID mapping |
+
+Override with `GOOGLE_CREDENTIALS_DIR` env var if needed.
 
 ## Adding New Config
 
