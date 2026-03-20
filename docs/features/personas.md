@@ -111,7 +111,7 @@ Project configuration lives at `~/Desktop/Valor/projects.json` (iCloud-synced, p
 ## API
 
 ```python
-from agent.sdk_client import load_persona_prompt, load_system_prompt
+from agent.sdk_client import load_persona_prompt, load_system_prompt, load_pm_system_prompt
 
 # Load specific persona
 prompt = load_persona_prompt("developer")     # base + developer overlay
