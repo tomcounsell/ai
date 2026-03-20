@@ -5,7 +5,7 @@ This directory contains configuration files for the Valor AI system.
 ## Files
 
 ### `projects.example.json` (Template)
-Canonical template with complete field documentation. Copy this to create your projects.json:
+Canonical template with complete field documentation. Copy this to create your private projects.json:
 
 ```bash
 mkdir -p ~/Desktop/Valor
