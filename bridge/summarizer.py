@@ -494,7 +494,7 @@ def _detect_empty_promise(text_lower: str) -> bool:
         r"\b(?:saved|written|created)\b.*\bmemory\b",
         r"https?://github\.com/.+/commit/",  # GitHub commit URLs
         r"\brestarted?\b.*\b(?:bridge|service)\b",  # service restart
-        r"\b(?:scheduled|queued)\b",  # scheduled/queued job (will report back)
+        r"\b(?:scheduled|queued)\b.*\bjob[_-]?[a-f0-9]{6,}\b",  # scheduled/queued with job ID artifact
     ]
 
     has_evidence = any(re.search(p, text_lower) for p in evidence_patterns)
