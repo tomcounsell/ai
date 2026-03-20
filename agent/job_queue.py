@@ -553,8 +553,6 @@ async def _playlist_hook(
     # Schedule the next issue
     logger.info(f"[playlist-hook] Scheduling next playlist issue #{next_issue} for {project_key}")
     try:
-        import subprocess
-
         result = subprocess.run(
             [
                 "python",
