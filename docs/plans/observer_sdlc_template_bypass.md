@@ -1,10 +1,10 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor
 created: 2026-03-20
-tracking:
+tracking: https://github.com/tomcounsell/ai/issues/457
 last_comment_id:
 ---
 
