@@ -342,9 +342,13 @@ After all edits are complete:
    ```
    Documentation changes must be persisted. If this fails (e.g., nothing to commit), that's fine — report "no changes needed."
 
-## Plan Status Update
+## Step 5: Plan Validation and Migration
 
-After documentation is created/updated and committed, update the plan's `status:` frontmatter from "Ready" or "In Progress" to "Complete". This signals to the pipeline that the DOCS stage is done:
+After documentation is committed, validate the delivered work against the plan's success criteria, then migrate the plan.
+
+### 5a: Validate Against Success Criteria
+
+Read the plan document and extract its success criteria / acceptance criteria / Definition of Done. Verify each criterion was met by the PR's actual changes:
 
 ```bash
 # Find the plan file for the current slug
@@ -352,14 +356,34 @@ SLUG=$(git branch --show-current | sed 's|session/||')
 PLAN_PATH="docs/plans/${SLUG}.md"
 
 if [ -f "$PLAN_PATH" ]; then
-    # Update status in frontmatter
+    cat "$PLAN_PATH"
+fi
+```
+
+For each success criterion in the plan:
+1. **Check** whether the delivered code, tests, and docs satisfy it
+2. **Flag** any criterion that was NOT met — create a GitHub issue for unmet criteria rather than silently proceeding
+3. **Only proceed to migration** if all criteria are met (or unmet criteria have been filed as issues)
+
+### 5b: Update Plan Status
+
+```bash
+if [ -f "$PLAN_PATH" ]; then
     sed -i '' 's/^status: .*/status: Complete/' "$PLAN_PATH"
     git add "$PLAN_PATH"
     git commit -m "Mark plan status as Complete after docs update"
 fi
 ```
 
-This ensures the DOCS goal gate can verify documentation was completed by the pipeline.
+### 5c: Migrate Completed Plan
+
+After validation passes, clean up the plan document:
+
+```bash
+cd $(git rev-parse --show-toplevel) && python scripts/migrate_completed_plan.py "$PLAN_PATH"
+```
+
+This deletes the plan document and closes the tracking issue, completing the lifecycle. The plan's value has been absorbed into the code, tests, and feature docs by this point.
 
 ## Edge Cases
 
