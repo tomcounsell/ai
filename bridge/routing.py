@@ -142,6 +142,13 @@ def find_project_for_chat(chat_title: str | None) -> dict | None:
     return None
 
 
+def is_team_chat(chat_title: str | None) -> bool:
+    """Team chats (no Dev:/PM: prefix) are mention-only."""
+    if not chat_title:
+        return False
+    return not chat_title.startswith(("Dev:", "PM:"))
+
+
 # =============================================================================
 # User Permissions
 # =============================================================================
@@ -654,6 +661,14 @@ async def should_respond_async(
                 return True, True
         except Exception as e:
             logger.debug(f"Could not check replied message: {e}")
+
+    # Team chats (no Dev:/PM: prefix) are mention-only
+    if is_team_chat(chat_title):
+        mentions = telegram_config.get("mention_triggers", DEFAULT_MENTIONS)
+        text_lower = text.lower()
+        if any(mention.lower() in text_lower for mention in mentions):
+            return True, False
+        return False, False
 
     # respond_to_all means respond to everything
     if telegram_config.get("respond_to_all", True):

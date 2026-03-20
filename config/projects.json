@@ -18,7 +18,6 @@
       "name": "Valor",
       "soul": "config/personas/team-member.md",
       "permissions": ["read"],
-      "respond_to_unaddressed": false,
       "description": "Team chat persona — silent unless tagged directly. Answers questions about the codebase. Read-only."
     },
     "qa": {
