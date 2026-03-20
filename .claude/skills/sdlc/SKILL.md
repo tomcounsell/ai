@@ -40,16 +40,18 @@ If NO issue or PR number was provided (just a feature description), invoke `/do-
 
 ## Step 2: Assess Current State
 
-Check what already exists for this issue:
+Check what already exists for this issue. Use `$SDLC_TARGET_REPO` for local operations (defaults to `.` for same-repo work):
 
 ```bash
+REPO="${SDLC_TARGET_REPO:-.}"
+
 # Check if a plan doc references this issue
-grep -r "#{issue_number}" docs/plans/ 2>/dev/null
+grep -r "#{issue_number}" "$REPO/docs/plans/" 2>/dev/null
 
-# Check if a feature branch exists
-git branch -a | grep session/
+# Check if a feature branch exists (in the target repo)
+git -C "$REPO" branch -a | grep session/
 
-# Check if a PR already exists
+# Check if a PR already exists (gh uses GH_REPO automatically)
 gh pr list --search "#{issue_number}" --state open
 
 # Check test status (if branch/PR exists)
