@@ -742,3 +742,172 @@ class TestEdgeCases:
 
             mock_kill.assert_called_once()
             mock_retry.assert_called_once()
+
+
+# ===================================================================
+# Test: String project_key and push-* session handling
+# ===================================================================
+
+
+class TestStringProjectKeyRecovery:
+    """Verify that _recover_stalled_pending handles plain string project_keys
+    (common in push-* sessions) without AttributeError."""
+
+    @pytest.mark.asyncio
+    async def test_string_project_key_does_not_raise(self):
+        """A plain string project_key should be coerced safely — no AttributeError."""
+        from monitoring.session_watchdog import _recover_stalled_pending
+
+        session = _make_agent_session(
+            session_id="push-abc123",
+            project_key="plain-string-key",
+            retry_count=0,
+        )
+        stalled = [
+            _make_stall_info(
+                session_id="push-abc123",
+                project_key="plain-string-key",
+                duration=600,
+            )
+        ]
+
+        with (
+            patch("monitoring.session_watchdog.AgentSession") as mock_as_cls,
+            patch(
+                "monitoring.session_watchdog._kill_stalled_worker",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_kill,
+            patch(
+                "monitoring.session_watchdog._enqueue_stall_retry",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch("asyncio.sleep", new_callable=AsyncMock),
+            patch("agent.job_queue._ensure_worker"),
+        ):
+            mock_as_cls.query.get.return_value = session
+            # Should NOT raise AttributeError
+            await _recover_stalled_pending(stalled)
+            mock_kill.assert_called_once_with("plain-string-key")
+
+    @pytest.mark.asyncio
+    async def test_none_project_key_skipped(self):
+        """Session with None project_key should be skipped gracefully."""
+        from monitoring.session_watchdog import _recover_stalled_pending
+
+        stalled = [
+            _make_stall_info(
+                session_id="push-none",
+                project_key=None,
+                duration=600,
+            )
+        ]
+
+        with (
+            patch("monitoring.session_watchdog.AgentSession") as mock_as_cls,
+            patch("agent.job_queue._ensure_worker"),
+        ):
+            await _recover_stalled_pending(stalled)
+            # Should not attempt to load the session
+            mock_as_cls.query.get.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_orphan_push_session_abandoned_after_threshold(self):
+        """push-* session stuck >1 hour with no history should be abandoned."""
+        from monitoring.session_watchdog import _recover_stalled_pending
+
+        session = _make_agent_session(
+            session_id="push-orphan-001",
+            project_key="orphan-project",
+            retry_count=0,
+        )
+        stalled = [
+            {
+                "session_id": "push-orphan-001",
+                "status": "pending",
+                "duration": 4000,  # >3600 threshold
+                "threshold": 300,
+                "project_key": "orphan-project",
+                "last_history": "no history",
+            }
+        ]
+
+        with (
+            patch("monitoring.session_watchdog.AgentSession") as mock_as_cls,
+            patch(
+                "monitoring.session_watchdog._safe_abandon_session",
+                return_value=True,
+            ) as mock_abandon,
+            patch(
+                "monitoring.session_watchdog._notify_stall_failure",
+                new_callable=AsyncMock,
+            ) as mock_notify,
+            patch("agent.job_queue._ensure_worker"),
+        ):
+            mock_as_cls.query.get.return_value = session
+            await _recover_stalled_pending(stalled)
+            mock_abandon.assert_called_once()
+            mock_notify.assert_called_once()
+            # Verify the abandon reason mentions orphan push-*
+            reason = mock_abandon.call_args[0][1]
+            assert "orphan push-*" in reason
+
+    @pytest.mark.asyncio
+    async def test_session_status_changed_skips_recovery(self):
+        """If session status changed since stall detection, skip recovery."""
+        from monitoring.session_watchdog import _recover_stalled_pending
+
+        session = _make_agent_session(
+            session_id="push-changed",
+            project_key="test-project",
+            status="running",  # Changed from pending
+            retry_count=0,
+        )
+        stalled = [
+            _make_stall_info(
+                session_id="push-changed",
+                project_key="test-project",
+            )
+        ]
+
+        with (
+            patch("monitoring.session_watchdog.AgentSession") as mock_as_cls,
+            patch(
+                "monitoring.session_watchdog._kill_stalled_worker",
+                new_callable=AsyncMock,
+            ) as mock_kill,
+            patch("agent.job_queue._ensure_worker"),
+        ):
+            mock_as_cls.query.get.return_value = session
+            await _recover_stalled_pending(stalled)
+            # Should NOT attempt to kill worker since status changed
+            mock_kill.assert_not_called()
+
+
+class TestKillStalledWorkerGuards:
+    """Verify _kill_stalled_worker handles edge cases gracefully."""
+
+    @pytest.mark.asyncio
+    async def test_none_project_key_returns_false(self):
+        """_kill_stalled_worker(None) should return False gracefully."""
+        from monitoring.session_watchdog import _kill_stalled_worker
+
+        result = await _kill_stalled_worker(None)
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_empty_string_returns_false(self):
+        """_kill_stalled_worker('') should return False gracefully."""
+        from monitoring.session_watchdog import _kill_stalled_worker
+
+        result = await _kill_stalled_worker("")
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_question_mark_returns_false(self):
+        """_kill_stalled_worker('?') should return False gracefully."""
+        from monitoring.session_watchdog import _kill_stalled_worker
+
+        result = await _kill_stalled_worker("?")
+        assert result is False
