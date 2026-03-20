@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Small
 owner: Valor
@@ -127,11 +127,7 @@ No existing tests affected for `bridge/media.py:transcribe_voice()` — it has n
 
 ## Risks
 
-### Risk 1: SuperWhisper doesn't accept .ogg files via `open -a`
-**Impact:** Primary backend would fail for all Telegram voice messages (which are .ogg)
-**Mitigation:** Test during implementation. If .ogg isn't supported, convert to .wav first using ffmpeg (already common on macOS). Add format conversion as a lightweight step.
-
-### Risk 2: Polling race — multiple simultaneous voice messages
+### Risk 1: Polling race — multiple simultaneous voice messages
 **Impact:** Could match the wrong recording to the wrong transcription request
 **Mitigation:** For v1, this is acceptable since voice messages are rare and sequential. If it becomes an issue, add a lock or compare audio duration to narrow the match.
 
@@ -259,6 +255,10 @@ No agent integration required — this is a bridge-internal change. The transcri
 
 ## Open Questions
 
-1. **Audio format compatibility**: Will SuperWhisper accept `.ogg` files via `open -a`? Telegram voice messages are `.ogg` format. If not, we'll need to add ffmpeg conversion. Should we test this before committing to the plan, or handle it as a risk during implementation?
+None — all questions resolved:
+- **.ogg compatibility**: Verified. SuperWhisper accepts `.ogg` files via `open -g -a` and transcribes them successfully (tested with a real Telegram voice message, result in ~1.75s).
+- **Recordings cleanup**: Leave recordings for SuperWhisper to manage (per owner decision).
 
-2. **Recordings cleanup**: SuperWhisper will accumulate recordings from programmatic transcriptions in `~/Documents/superwhisper/recordings/`. Should we clean up our recordings after reading the result, or leave them for SuperWhisper to manage?
+## Spike Validation Log
+
+Tested live on 2026-03-20: sent `data/media/voice_20260203_064508_4327.ogg` to SuperWhisper via `open -g -a`. New recording folder appeared in ~1s, `meta.json` populated in ~2s. Transcription: "I need instructions on how to fix this, because as far as I'm aware you're not able to fix this for me." Model: Ultra (Cloud), processing time: 1750ms. Implementation note: must poll for `meta.json` existence (not just folder creation — folder appears before meta.json is written).
