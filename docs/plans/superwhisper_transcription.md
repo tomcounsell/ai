@@ -124,6 +124,7 @@ No existing tests affected for `bridge/media.py:transcribe_voice()` — it has n
 - **Matching audio to recording folder**: Don't try to match by audio content or filename. Just use timing — the newest folder after sending is the result. SuperWhisper processes one file at a time.
 - **Supporting SuperWhisper's LLM modes**: The `llmResult` field is only populated when using AI modes. Ignore this — we just want raw transcription via `result`.
 - **Converting audio formats**: SuperWhisper handles format conversion internally. Don't pre-convert `.ogg` to `.wav`.
+- **Disabling auto-paste globally**: SuperWhisper auto-pastes transcription results to the active window. The paste behavior is not exposed in mode configs (`~/Documents/superwhisper/modes/*.json`) or settings (`~/Documents/superwhisper/settings/settings.json`) — it's controlled in the app's Preferences UI only. For now, accept the side effect since programmatic transcriptions are infrequent. A future option: create a dedicated SuperWhisper mode with a post-processing script that suppresses paste, if the app supports it.
 
 ## Risks
 
