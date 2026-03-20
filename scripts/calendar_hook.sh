@@ -17,7 +17,7 @@ SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 
 # Skip excluded projects (too noisy for calendar tracking)
 EXCLUDED_PROJECTS="valor"
-PROJECTS_JSON_CHECK="$HOME/src/ai/config/projects.json"
+PROJECTS_JSON_CHECK="${PROJECTS_CONFIG_PATH:-$HOME/Desktop/Valor/projects.json}"
 if [ -f "$PROJECTS_JSON_CHECK" ]; then
     CURRENT_PROJECT=$(jq -r --arg cwd "$PWD" '
         .projects | to_entries[]
@@ -38,7 +38,7 @@ if [ -f "$SLUGFILE" ]; then
 fi
 
 # Resolve project key and slug from projects.json
-PROJECTS_JSON="$HOME/src/ai/config/projects.json"
+PROJECTS_JSON="${PROJECTS_CONFIG_PATH:-$HOME/Desktop/Valor/projects.json}"
 SLUG=$(basename "$PWD")
 PROJECT=""
 

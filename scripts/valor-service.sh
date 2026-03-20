@@ -67,9 +67,11 @@ ensure_setup() {
         return 1
     fi
 
-    if [ ! -f "$PROJECT_DIR/config/projects.json" ]; then
-        echo "ERROR: config/projects.json not found."
-        echo "  cp $PROJECT_DIR/config/projects.json.example $PROJECT_DIR/config/projects.json"
+    PROJECTS_JSON="${PROJECTS_CONFIG_PATH:-$HOME/Desktop/Valor/projects.json}"
+    if [ ! -f "$PROJECTS_JSON" ]; then
+        echo "ERROR: projects.json not found at $PROJECTS_JSON"
+        echo "  mkdir -p ~/Desktop/Valor"
+        echo "  cp $PROJECT_DIR/config/projects.example.json ~/Desktop/Valor/projects.json"
         echo "  # Then edit with your project settings"
         return 1
     fi

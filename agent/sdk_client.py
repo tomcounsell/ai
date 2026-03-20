@@ -252,8 +252,12 @@ AI_REPO_ROOT = str(Path(__file__).parent.parent)
 # Path to SOUL.md system prompt (legacy fallback)
 SOUL_PATH = Path(__file__).parent.parent / "config" / "SOUL.md"
 
-# Path to persona overlay files (base + per-persona)
-PERSONAS_DIR = Path(__file__).parent.parent / "config" / "personas"
+# Path to persona base file (stays in repo — not private)
+PERSONAS_BASE_DIR = Path(__file__).parent.parent / "config" / "personas"
+
+# Path to persona overlay files (private, iCloud-synced)
+# Overlays live in ~/Desktop/Valor/personas/ — falls back to config/personas/ for dev
+PERSONAS_OVERLAY_DIR = Path.home() / "Desktop" / "Valor" / "personas"
 
 # Path to PRINCIPAL.md — supervisor's operating context for strategic decisions
 PRINCIPAL_PATH = Path(__file__).parent.parent / "config" / "PRINCIPAL.md"
@@ -404,10 +408,25 @@ def load_principal_context(condensed: bool = True) -> str:
     return "\n\n".join(extracted)
 
 
-def load_persona_prompt(persona: str = "developer") -> str:
-    """Load persona prompt from base + overlay files in config/personas/.
+def _resolve_overlay_path(persona: str) -> Path:
+    """Resolve persona overlay file path.
 
-    Reads config/personas/_base.md and config/personas/{persona}.md, concatenates them.
+    Checks ~/Desktop/Valor/personas/{persona}.md first (private, iCloud-synced),
+    then falls back to config/personas/{persona}.md (in-repo, for development).
+    """
+    overlay_path = PERSONAS_OVERLAY_DIR / f"{persona}.md"
+    if overlay_path.exists():
+        return overlay_path
+
+    # Fallback: in-repo overlay (for development or when Desktop/Valor not available)
+    return PERSONAS_BASE_DIR / f"{persona}.md"
+
+
+def load_persona_prompt(persona: str = "developer") -> str:
+    """Load persona prompt from base + overlay files.
+
+    Base is read from config/personas/_base.md (in-repo, shared).
+    Overlays are read from ~/Desktop/Valor/personas/{persona}.md (private, iCloud-synced).
     Falls back to config/SOUL.md if persona files are missing.
 
     Args:
@@ -420,8 +439,7 @@ def load_persona_prompt(persona: str = "developer") -> str:
     Raises:
         FileNotFoundError: If _base.md is missing (base is required).
     """
-    base_path = PERSONAS_DIR / "_base.md"
-    overlay_path = PERSONAS_DIR / f"{persona}.md"
+    base_path = PERSONAS_BASE_DIR / "_base.md"
 
     # Base is required — fail loudly if missing
     if not base_path.exists():
@@ -432,6 +450,9 @@ def load_persona_prompt(persona: str = "developer") -> str:
 
     base_content = base_path.read_text()
 
+    # Resolve overlay: ~/Desktop/Valor/personas/ first, then config/personas/
+    overlay_path = _resolve_overlay_path(persona)
+
     # Overlay is optional — fall back to SOUL.md if missing
     if overlay_path.exists():
         overlay_content = overlay_path.read_text()
@@ -441,7 +462,7 @@ def load_persona_prompt(persona: str = "developer") -> str:
     # Invalid persona name — fall back to developer with warning
     if persona not in ("developer", "project-manager", "teammate"):
         logger.warning(f"Unknown persona '{persona}', falling back to developer persona")
-        developer_path = PERSONAS_DIR / "developer.md"
+        developer_path = _resolve_overlay_path("developer")
         if developer_path.exists():
             return f"{base_content}\n\n---\n\n{developer_path.read_text()}"
 

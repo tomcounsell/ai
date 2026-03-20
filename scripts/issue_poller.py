@@ -87,7 +87,11 @@ def load_projects(config_path: Path | None = None) -> list[dict]:
     Returns a list of dicts with keys: name, org, repo, working_directory, telegram_groups.
     """
     if config_path is None:
-        config_path = Path(_project_root) / "config" / "projects.json"
+        desktop_path = Path.home() / "Desktop" / "Valor" / "projects.json"
+        if desktop_path.exists():
+            config_path = desktop_path
+        else:
+            config_path = Path(_project_root) / "config" / "projects.json"
 
     with open(config_path) as f:
         config = json.load(f)

@@ -1,12 +1,14 @@
-"""Tests for the persona loading system (config/personas/).
+"""Tests for the persona loading system.
 
 Tests:
-- load_persona_prompt() loads base + overlay for each persona
-- Fallback to SOUL.md when persona overlay is missing
+- load_persona_prompt() loads base from config/personas/ + overlay from ~/Desktop/Valor/personas/
+- Fallback to in-repo overlay when Desktop/Valor overlay is missing
+- Fallback to SOUL.md when both overlay locations are missing
 - Missing _base.md raises FileNotFoundError
 - _resolve_persona() correctly maps project config to persona names
 - load_system_prompt() uses developer persona with WORKER_RULES
 - load_pm_system_prompt() uses project-manager persona
+- _resolve_overlay_path() checks Desktop/Valor first, then config/personas/
 """
 
 import tempfile
@@ -16,13 +18,41 @@ from unittest.mock import patch
 import pytest
 
 from agent.sdk_client import (
-    PERSONAS_DIR,
+    PERSONAS_BASE_DIR,
+    PERSONAS_OVERLAY_DIR,
     SOUL_PATH,
+    _resolve_overlay_path,
     _resolve_persona,
     load_persona_prompt,
     load_pm_system_prompt,
     load_system_prompt,
 )
+
+
+class TestResolveOverlayPath:
+    """Tests for _resolve_overlay_path()."""
+
+    def test_prefers_desktop_valor_when_exists(self):
+        """Should return ~/Desktop/Valor/personas/ path when it exists."""
+        path = _resolve_overlay_path("developer")
+        # On this machine, overlays are in ~/Desktop/Valor/personas/
+        if PERSONAS_OVERLAY_DIR.exists():
+            assert path.parent == PERSONAS_OVERLAY_DIR
+        else:
+            # Fallback to in-repo
+            assert path.parent == PERSONAS_BASE_DIR
+
+    def test_falls_back_to_repo_when_desktop_missing(self):
+        """Should fall back to config/personas/ when ~/Desktop/Valor/ doesn't exist."""
+        fake_dir = Path("/nonexistent/path/personas")
+        with patch("agent.sdk_client.PERSONAS_OVERLAY_DIR", fake_dir):
+            path = _resolve_overlay_path("developer")
+            assert path.parent == PERSONAS_BASE_DIR
+
+    def test_returns_correct_filename(self):
+        """Should use {persona}.md as the filename."""
+        path = _resolve_overlay_path("project-manager")
+        assert path.name == "project-manager.md"
 
 
 class TestLoadPersonaPrompt:
@@ -59,27 +89,39 @@ class TestLoadPersonaPrompt:
 
     def test_missing_base_raises_error(self):
         """Missing _base.md should raise FileNotFoundError."""
-        with patch("agent.sdk_client.PERSONAS_DIR", Path(tempfile.mkdtemp())):
+        with patch("agent.sdk_client.PERSONAS_BASE_DIR", Path(tempfile.mkdtemp())):
             with pytest.raises(FileNotFoundError, match="base file not found"):
                 load_persona_prompt("developer")
 
     def test_missing_overlay_falls_back_to_soul(self):
         """Missing overlay file should fall back to SOUL.md."""
-        # Create a temp dir with only _base.md
         with tempfile.TemporaryDirectory() as tmpdir:
             base_path = Path(tmpdir) / "_base.md"
             base_path.write_text("# Base persona content")
 
-            with patch("agent.sdk_client.PERSONAS_DIR", Path(tmpdir)):
-                # "developer" overlay doesn't exist in tmpdir
+            with (
+                patch("agent.sdk_client.PERSONAS_BASE_DIR", Path(tmpdir)),
+                patch(
+                    "agent.sdk_client.PERSONAS_OVERLAY_DIR",
+                    Path("/nonexistent/overlay"),
+                ),
+            ):
+                # "developer" overlay doesn't exist anywhere
                 prompt = load_persona_prompt("developer")
                 # Should fall back to SOUL.md
                 assert "Valor" in prompt  # SOUL.md contains Valor
 
-    def test_all_persona_files_exist(self):
-        """All expected persona files should exist."""
-        for name in ["_base.md", "developer.md", "project-manager.md", "teammate.md"]:
-            path = PERSONAS_DIR / name
+    def test_base_file_exists_in_repo(self):
+        """The _base.md file should exist in the repo."""
+        base_path = PERSONAS_BASE_DIR / "_base.md"
+        assert base_path.exists(), f"_base.md not found at {base_path}"
+        content = base_path.read_text()
+        assert len(content) > 100, f"_base.md is too short ({len(content)} chars)"
+
+    def test_overlay_files_exist(self):
+        """All persona overlay files should exist in ~/Desktop/Valor/personas/."""
+        for name in ["developer.md", "project-manager.md", "teammate.md"]:
+            path = _resolve_overlay_path(name.replace(".md", ""))
             assert path.exists(), f"{name} not found at {path}"
             content = path.read_text()
             assert len(content) > 100, f"{name} is too short ({len(content)} chars)"

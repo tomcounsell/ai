@@ -6,15 +6,25 @@ Configurable persona system that replaces the monolithic `config/SOUL.md` with l
 
 ### Base + Overlay Architecture
 
+The persona system splits files between the repo (shared) and private storage (iCloud-synced):
+
+**In repo** (`config/personas/`):
 ```
 config/personas/
   _base.md           # Shared identity, values, communication style, tools, philosophy
+```
+
+**Private** (`~/Desktop/Valor/personas/`):
+```
+~/Desktop/Valor/personas/
   developer.md       # Full system access, autonomous execution, self-management
   project-manager.md # Triage, routing, GitHub management, communications
   teammate.md        # Casual conversation, Q&A, helpful and encouraging
 ```
 
-At load time, `load_persona_prompt(persona)` reads `_base.md` and concatenates the named overlay (`{persona}.md`). The result is a complete system prompt.
+The base file stays in the repo because it contains general-purpose identity and philosophy (not private). Overlay files contain role-specific strategic context and capabilities, so they live in `~/Desktop/Valor/` (iCloud-synced, not committed to git).
+
+At load time, `load_persona_prompt(persona)` reads `_base.md` from the repo and concatenates the named overlay (`{persona}.md`) from `~/Desktop/Valor/personas/`. The result is a complete system prompt.
 
 ### Persona Selection
 
@@ -41,22 +51,22 @@ Each mode wraps the persona prompt differently:
 
 | Persona | File | Role | Used By |
 |---------|------|------|---------|
-| `developer` | `config/personas/developer.md` | Full developer with system access, git operations, SDLC pipeline | Dev: groups, AgentSDK subprocesses |
-| `project-manager` | `config/personas/project-manager.md` | Triage, routing, Observer duties, GitHub management | PM: groups, bridge messaging |
-| `teammate` | `config/personas/teammate.md` | Casual Q&A, brainstorming, knowledge sharing | DMs, team chats |
+| `developer` | `~/Desktop/Valor/personas/developer.md` | Full developer with system access, git operations, SDLC pipeline | Dev: groups, AgentSDK subprocesses |
+| `project-manager` | `~/Desktop/Valor/personas/project-manager.md` | Triage, routing, Observer duties, GitHub management | PM: groups, bridge messaging |
+| `teammate` | `~/Desktop/Valor/personas/teammate.md` | Casual Q&A, brainstorming, knowledge sharing | DMs, team chats |
 
 ## Configuration
 
 ### projects.json
 
-Persona selection is configured per-group and for DMs in `config/projects.json`:
+Project configuration lives at `~/Desktop/Valor/projects.json` (iCloud-synced, private). Persona selection is configured per-group and for DMs:
 
 ```json
 {
   "personas": {
-    "developer": {"name": "Valor", "soul": "config/personas/developer.md"},
-    "project-manager": {"name": "Valor", "soul": "config/personas/project-manager.md"},
-    "teammate": {"name": "Valor", "soul": "config/personas/teammate.md"}
+    "developer": {"name": "Valor", "soul": "~/Desktop/Valor/personas/developer.md"},
+    "project-manager": {"name": "Valor", "soul": "~/Desktop/Valor/personas/project-manager.md"},
+    "teammate": {"name": "Valor", "soul": "~/Desktop/Valor/personas/teammate.md"}
   },
   "projects": {
     "valor": {
@@ -72,10 +82,19 @@ Persona selection is configured per-group and for DMs in `config/projects.json`:
 }
 ```
 
+### File Locations
+
+| File | Location | Why |
+|------|----------|-----|
+| `_base.md` | `config/personas/_base.md` (in repo) | Shared identity, not private |
+| Overlay files | `~/Desktop/Valor/personas/` (iCloud) | Private strategic context |
+| `projects.json` | `~/Desktop/Valor/projects.json` (iCloud) | Contains chat IDs, machine names |
+| `projects.example.json` | `config/projects.example.json` (in repo) | Sanitized schema for new setups |
+
 ## Adding a New Persona
 
-1. Create `config/personas/{persona-name}.md` with role-specific instructions
-2. Add the persona entry to `config/projects.json` under `personas`
+1. Create `~/Desktop/Valor/personas/{persona-name}.md` with role-specific instructions
+2. Add the persona entry to `~/Desktop/Valor/projects.json` under `personas`
 3. Reference it in the appropriate group or DM config
 4. The `_base.md` content is automatically prepended -- no need to duplicate shared content
 
@@ -83,7 +102,8 @@ Persona selection is configured per-group and for DMs in `config/projects.json`:
 
 | Scenario | Fallback |
 |----------|----------|
-| Persona overlay file missing | Falls back to `config/SOUL.md` with warning log |
+| Overlay in `~/Desktop/Valor/personas/` missing | Falls back to `config/personas/{persona}.md` (in-repo) |
+| Both overlay locations missing | Falls back to `config/SOUL.md` with warning log |
 | `_base.md` missing | Raises `FileNotFoundError` (base is required) |
 | Unknown persona name | Falls back to `developer` persona with warning |
 | Entire persona system missing | `load_system_prompt()` catches `FileNotFoundError` and falls back to `SOUL.md` |

@@ -73,7 +73,7 @@ Check if `.env` exists. If not:
 cp .env.example .env
 ```
 
-**Ask the user** which project(s) this machine should monitor. The available projects are defined in `config/projects.json` -- check the full list there. Common options:
+**Ask the user** which project(s) this machine should monitor. The available projects are defined in `~/Desktop/Valor/projects.json` -- check the full list there. Common options:
 - Single project: `ACTIVE_PROJECTS=psyoptimal`
 - Multiple: `ACTIVE_PROJECTS=valor,popoto`
 - All: `ACTIVE_PROJECTS=valor,django-project-template,popoto,psyoptimal,flutter-project-template,cuttlefish,yudame-research`
@@ -183,22 +183,25 @@ fi
 
 The SDK spawns Claude Code CLI subprocesses that inherit authentication from the running Claude Desktop app. No separate login command is needed.
 
-## Step 6: Project Configuration (config/projects.json)
+## Step 6: Project Configuration (~/Desktop/Valor/projects.json)
 
-Check if `config/projects.json` exists. If not:
+Project configuration lives in `~/Desktop/Valor/projects.json` (iCloud-synced, private). This directory is shared across machines via iCloud.
+
+Check if `~/Desktop/Valor/projects.json` exists. If not, create from the repo example:
 
 ```bash
-cp config/projects.example.json config/projects.json
+mkdir -p ~/Desktop/Valor
+cp config/projects.example.json ~/Desktop/Valor/projects.json
 ```
 
-Edit `config/projects.json` for this machine's projects.
+Edit `~/Desktop/Valor/projects.json` for this machine's projects.
 
 **Critical rules when editing projects.json:**
 
 1. **Every project MUST have `working_directory`** -- absolute path to the repo on this machine
 2. **Always include the full `defaults` section** -- copy it from the example if missing
 3. **DO NOT set `respond_to_all: false`** -- the default is `true`, which is correct. Omit the field entirely from project-level telegram config.
-4. **Keep project telegram config minimal** -- usually just `"groups": ["Dev: ProjectName"]` is sufficient
+4. **Keep project telegram config minimal** -- usually just `"groups": {"Dev: ProjectName": {"persona": "developer"}}` is sufficient
 5. **Verify paths exist on disk** -- run `ls` on each `working_directory` to confirm
 
 Example minimal project entry:
@@ -210,7 +213,9 @@ Example minimal project entry:
       "name": "My Project",
       "working_directory": "~/src/myproject",
       "telegram": {
-        "groups": ["Dev: My Project"]
+        "groups": {
+          "Dev: My Project": {"persona": "developer"}
+        }
       },
       "github": {
         "org": "orgname",
@@ -239,7 +244,15 @@ Example minimal project entry:
 }
 ```
 
-If the project is already defined in the main repo's `config/projects.json`, copy its entry rather than writing from scratch. The canonical project list is in the main repo on the `main` branch.
+Persona overlay files also live in `~/Desktop/Valor/personas/`. If missing, create them:
+
+```bash
+mkdir -p ~/Desktop/Valor/personas
+# Create developer.md, project-manager.md, teammate.md with role-specific instructions
+# See config/personas/_base.md for the shared identity that gets prepended
+```
+
+If the project is already defined on another machine's `~/Desktop/Valor/projects.json`, copy its entry rather than writing from scratch (iCloud syncs this file across machines).
 
 After editing, verify all working directories exist:
 
