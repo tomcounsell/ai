@@ -182,7 +182,7 @@ class TestJobSchedulerCLI:
     def test_help(self):
         """Tool responds to --help."""
         result = subprocess.run(
-            ["python", "-m", "tools.job_scheduler", "--help"],
+            [sys.executable, "-m", "tools.job_scheduler", "--help"],
             capture_output=True,
             text=True,
             cwd=_PROJECT_ROOT,
@@ -194,7 +194,7 @@ class TestJobSchedulerCLI:
     def test_status_command(self):
         """Status command returns valid JSON."""
         result = subprocess.run(
-            ["python", "-m", "tools.job_scheduler", "status", "--project", "test-scheduler"],
+            [sys.executable, "-m", "tools.job_scheduler", "status", "--project", "test-scheduler"],
             capture_output=True,
             text=True,
             cwd=_PROJECT_ROOT,
@@ -212,7 +212,7 @@ class TestJobSchedulerCLI:
         # Push
         push_result = subprocess.run(
             [
-                "python",
+                sys.executable,
                 "-m",
                 "tools.job_scheduler",
                 "push",
@@ -233,7 +233,7 @@ class TestJobSchedulerCLI:
         # Pop
         pop_result = subprocess.run(
             [
-                "python",
+                sys.executable,
                 "-m",
                 "tools.job_scheduler",
                 "pop",
@@ -253,7 +253,7 @@ class TestJobSchedulerCLI:
         """Scheduling with invalid issue returns error."""
         result = subprocess.run(
             [
-                "python",
+                sys.executable,
                 "-m",
                 "tools.job_scheduler",
                 "schedule",
@@ -275,7 +275,7 @@ class TestJobSchedulerCLI:
         """Cancelling nonexistent job returns error."""
         result = subprocess.run(
             [
-                "python",
+                sys.executable,
                 "-m",
                 "tools.job_scheduler",
                 "cancel",
@@ -294,7 +294,7 @@ class TestJobSchedulerCLI:
         """Bumping nonexistent job returns error."""
         result = subprocess.run(
             [
-                "python",
+                sys.executable,
                 "-m",
                 "tools.job_scheduler",
                 "bump",
