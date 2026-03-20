@@ -55,8 +55,10 @@ No prior issues or PRs found related to social media integration in this repo.
 
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
-| agent-browser installed | `which agent-browser` | Browser automation for posting |
-| Chrome with remote debugging | `curl -s http://localhost:9222/json/version` | Logged-in X/Twitter session |
+| opencli installed | `npx @jackwener/opencli --version` | CLI interface for X/Twitter posting |
+| opencli Chrome extension | Check `chrome://extensions` for OpenCLI | Browser bridge for opencli |
+| agent-browser installed | `which agent-browser` | Fallback for screenshots/visual verification |
+| Chrome running | `pgrep -f Chrome` | Logged-in X/Twitter session |
 | X/Twitter logged in via Chrome | Manual check — open Chrome, navigate to x.com | Valor's account session |
 
 ## Solution
@@ -64,8 +66,10 @@ No prior issues or PRs found related to social media integration in this repo.
 ### Key Elements
 
 - **Social Butterfly Persona** (`config/SOCIAL_BUTTERFLY.md`): Defines Valor's online voice — distinct from his Telegram working voice. This persona is both the gatekeeper (is this tweet-worthy?) and the writer (what's the tweet?).
-- **Social Butterfly Skill** (`.claude/skills/social-butterfly/SKILL.md`): Orchestrates the full flow: evaluate PR, draft tweet, seek approval, post via browser.
+- **Social Butterfly Skill** (`.claude/skills/social-butterfly/SKILL.md`): Orchestrates the full flow: evaluate PR, draft tweet, seek approval, post via opencli.
 - **Do-Merge Hook**: A few lines added to `/do-merge` that invoke the social butterfly skill after successful merge.
+- **opencli (primary)**: `opencli twitter post --text "..."` — single command replaces multi-step browser automation, massive token savings.
+- **agent-browser (fallback)**: Used only for screenshots and visual verification of posted tweets.
 
 ### Flow
 
@@ -82,7 +86,7 @@ No prior issues or PRs found related to social media integration in this repo.
   - 👍 reaction → post as-is
   - Text reply → use the reply as the tweet (edited version)
   - 👎 reaction or "skip" → don't post
-- **Browser posting**: `agent-browser connect 9222` to use Chrome's logged-in session. Navigate to x.com, compose tweet, post. Screenshot the result.
+- **Browser posting**: Primary: `opencli twitter post --text "tweet text"` — single command, uses Chrome's logged-in session via browser bridge. Fallback: `agent-browser connect 9222` for manual browser automation if opencli fails. Screenshot verification via `agent-browser screenshot` after posting.
 - **Failure handling**: If browser posting fails (session expired, X UI changed), send error to Telegram. Never retry autonomously — social media errors need human awareness.
 
 ## Failure Path Test Strategy
@@ -105,7 +109,8 @@ No existing tests affected — this is a greenfield feature with no prior test c
 
 ## Rabbit Holes
 
-- **Twitter API integration**: Tempting but unnecessary. agent-browser with a logged-in Chrome session is simpler and doesn't require API keys, rate limit management, or app approval. The API is a separate project if posting volume ever justifies it.
+- **Twitter API integration**: Tempting but unnecessary. opencli with a logged-in Chrome session is simpler and doesn't require API keys, rate limit management, or app approval. The API is a separate project if posting volume ever justifies it.
+- **Building our own Chrome CLI**: Evaluated but unnecessary for v1. opencli already provides `twitter post`, `reply`, `like`, `follow`, `bookmark`, and more. Only build custom if opencli proves unreliable or if we need cross-site CLI commands it doesn't cover.
 - **Multi-platform posting**: LinkedIn, Bluesky, etc. are future scope. Get one platform working first.
 - **Image/media generation**: Generating screenshots of code, architecture diagrams, etc. for tweets. Cool but not v1.
 - **Analytics/engagement tracking**: Measuring tweet performance. Not needed to ship the core feature.
@@ -113,9 +118,9 @@ No existing tests affected — this is a greenfield feature with no prior test c
 
 ## Risks
 
-### Risk 1: X/Twitter UI changes break agent-browser selectors
+### Risk 1: X/Twitter UI changes break opencli or agent-browser selectors
 **Impact:** Posting fails silently or posts wrong content
-**Mitigation:** Screenshot verification after posting. If the screenshot doesn't show the expected tweet, alert via Telegram. Keep the browser interaction simple (compose + post) to minimize breakage surface.
+**Mitigation:** opencli's `[ui]` commands handle DOM interaction internally — breakage is upstream's problem to fix. agent-browser fallback provides a second path. Screenshot verification after posting catches silent failures. Alert via Telegram on any failure.
 
 ### Risk 2: Chrome session expires
 **Impact:** agent-browser can't authenticate, posting fails
@@ -246,14 +251,12 @@ No update system changes required for the core skill. However:
 - **Assigned To**: browser-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Create the agent-browser interaction sequence in the skill:
-  - `agent-browser connect 9222` (use existing Chrome session)
-  - Navigate to x.com/compose/tweet (or x.com home)
-  - Find compose box, fill with tweet text
-  - Click post button
-  - Wait for confirmation
-  - Screenshot the posted tweet
-- Handle failure cases: session expired, element not found, post failed
+- Implement the posting flow using opencli as primary mechanism:
+  - Primary: `opencli twitter post --text "tweet text"` (single command, ~50 tokens vs ~2000-5000 with agent-browser)
+  - Verify post success from opencli output (JSON format: `opencli twitter post --text "..." -f json`)
+  - Screenshot verification: `agent-browser connect 9222` → navigate to Valor's profile → screenshot latest tweet
+  - Fallback: If opencli fails, fall back to agent-browser multi-step flow (open x.com, snapshot, fill compose, click post)
+- Handle failure cases: opencli bridge not running, session expired, post failed, fallback also failed
 
 ### 4. Add Do-Merge Hook
 - **Task ID**: build-hook
