@@ -1389,6 +1389,19 @@ async def get_agent_response_sdk(
         from bridge.routing import classify_work_request
 
         classification = classify_work_request(message)
+        # Persist classification back to the session so is_sdlc_job() works.
+        # The async classifier in the handler may not have completed before
+        # enqueue_job ran, leaving classification_type=None on the session.
+        if classification == "sdlc" and session_id:
+            try:
+                from models.agent_session import AgentSession
+
+                sessions = list(AgentSession.query.filter(session_id=session_id))
+                if sessions and sessions[0].classification_type != "sdlc":
+                    sessions[0].classification_type = "sdlc"
+                    sessions[0].save()
+            except Exception:
+                pass
         if classification == "sdlc" and project_working_dir != AI_REPO_ROOT:
             working_dir = AI_REPO_ROOT
             logger.info(
