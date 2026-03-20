@@ -10,8 +10,6 @@ Validates:
 
 from unittest.mock import patch
 
-import pytest
-
 from tools.job_scheduler import _check_persona_permission
 
 
