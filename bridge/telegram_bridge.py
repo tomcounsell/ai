@@ -331,14 +331,13 @@ def _get_active_projects() -> list[str]:
     with open(config_path) as f:
         config = json.load(f)
 
-    # Get this machine's hostname (e.g. "Valor-the-Cowboy")
+    # Get this machine's name (e.g. "Valor the Captain")
     try:
-        hostname = subprocess.check_output(["scutil", "--get", "LocalHostName"], text=True).strip()
+        hostname = subprocess.check_output(["scutil", "--get", "ComputerName"], text=True).strip()
     except Exception:
         hostname = ""
 
-    # Normalize: "Valor-the-Cowboy" -> "valor the cowboy"
-    hostname_normalized = hostname.replace("-", " ").lower()
+    hostname_normalized = hostname.lower()
 
     # Match projects where machine field matches this hostname
     matched = []
