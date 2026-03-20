@@ -73,6 +73,7 @@ Note: `bridge/media.py:transcribe_voice()` does NOT call `tools/transcribe/`. It
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
 | SuperWhisper installed | `pgrep -x superwhisper` | Primary transcription backend |
+| SuperWhisper auto-paste disabled | Manual: SuperWhisper → Preferences → Advanced → disable auto-paste | Prevents transcriptions pasting into active window |
 | `OPENAI_API_KEY` (fallback) | `python -c "import os; assert os.environ.get('OPENAI_API_KEY')"` | Whisper API fallback |
 
 ## Solution
@@ -124,7 +125,7 @@ No existing tests affected for `bridge/media.py:transcribe_voice()` — it has n
 - **Matching audio to recording folder**: Don't try to match by audio content or filename. Just use timing — the newest folder after sending is the result. SuperWhisper processes one file at a time.
 - **Supporting SuperWhisper's LLM modes**: The `llmResult` field is only populated when using AI modes. Ignore this — we just want raw transcription via `result`.
 - **Converting audio formats**: SuperWhisper handles format conversion internally. Don't pre-convert `.ogg` to `.wav`.
-- **Disabling auto-paste globally**: SuperWhisper auto-pastes transcription results to the active window. The paste behavior is not exposed in mode configs (`~/Documents/superwhisper/modes/*.json`) or settings (`~/Documents/superwhisper/settings/settings.json`) — it's controlled in the app's Preferences UI only. For now, accept the side effect since programmatic transcriptions are infrequent. A future option: create a dedicated SuperWhisper mode with a post-processing script that suppresses paste, if the app supports it.
+- **Disabling auto-paste via code**: SuperWhisper has an advanced setting in Preferences to toggle off auto-paste. This is a one-time manual toggle — don't try to automate it or work around it in code.
 
 ## Risks
 
