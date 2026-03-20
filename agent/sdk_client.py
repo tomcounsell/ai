@@ -440,17 +440,14 @@ def load_persona_prompt(persona: str = "developer") -> str:
 
     # Invalid persona name — fall back to developer with warning
     if persona not in ("developer", "project-manager", "teammate"):
-        logger.warning(
-            f"Unknown persona '{persona}', falling back to developer persona"
-        )
+        logger.warning(f"Unknown persona '{persona}', falling back to developer persona")
         developer_path = PERSONAS_DIR / "developer.md"
         if developer_path.exists():
             return f"{base_content}\n\n---\n\n{developer_path.read_text()}"
 
     # Persona overlay missing — fall back to SOUL.md
     logger.warning(
-        f"Persona overlay '{persona}' not found at {overlay_path}, "
-        f"falling back to SOUL.md"
+        f"Persona overlay '{persona}' not found at {overlay_path}, falling back to SOUL.md"
     )
     if SOUL_PATH.exists():
         return SOUL_PATH.read_text()

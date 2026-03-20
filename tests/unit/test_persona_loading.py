@@ -109,11 +109,7 @@ class TestResolvePersona:
 
     def test_dev_group_with_persona(self):
         """Dev group with persona config should use that persona."""
-        project = {
-            "telegram": {
-                "groups": {"Dev: Valor": {"chat_id": 123, "persona": "developer"}}
-            }
-        }
+        project = {"telegram": {"groups": {"Dev: Valor": {"chat_id": 123, "persona": "developer"}}}}
         assert _resolve_persona(project, "Dev: Valor", is_dm=False) == "developer"
 
     def test_group_no_project(self):
