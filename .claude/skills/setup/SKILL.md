@@ -12,7 +12,7 @@ Configure this machine to run the Valor Telegram bridge. You do everything excep
 
 Before starting, confirm the user has:
 - Python 3.11+ installed
-- The `ai` repo cloned at `/Users/valorengels/src/ai`
+- The `ai` repo cloned at `~/src/ai`
 - Telegram API credentials (api_id and api_hash from https://my.telegram.org). If they don't have these, pause and explain how to get them before continuing.
 
 ## Step 1: Install uv Package Manager
@@ -34,7 +34,7 @@ uv --version
 ## Step 2: Virtual Environment & Dependencies
 
 ```bash
-cd /Users/valorengels/src/ai
+cd ~/src/ai
 
 # Create virtual environment with uv (auto-creates with pip support)
 uv venv
@@ -92,7 +92,7 @@ Edit `.env` and ensure these are set:
 | `TELEGRAM_SESSION_NAME` | No | Defaults to `valor_bridge` |
 | `TELEGRAM_DM_WHITELIST` | No | Comma-separated names, e.g. `Tom` |
 
-If any required values are placeholder/missing, ask the user to provide them. The shared API keys file at `/Users/valorengels/src/.env` may have `ANTHROPIC_API_KEY` and other keys -- check there first.
+If any required values are placeholder/missing, ask the user to provide them. The shared API keys file at `~/src/.env` may have `ANTHROPIC_API_KEY` and other keys -- check there first.
 
 ## Step 4: Google Calendar Configuration
 
@@ -223,7 +223,7 @@ Example minimal project entry:
     }
   },
   "defaults": {
-    "working_directory": "/Users/valorengels/src/ai",
+    "working_directory": "~/src/ai",
     "telegram": {
       "respond_to_all": true,
       "respond_to_mentions": true,
@@ -245,7 +245,7 @@ After editing, verify all working directories exist:
 
 ```bash
 # For each project's working_directory, confirm it exists
-ls /Users/valorengels/src/<project_dir>
+ls ~/src/<project_dir>
 ```
 
 ## Step 7: Telegram Login (USER ACTION REQUIRED)
@@ -264,7 +264,7 @@ ls data/*.session 2>/dev/null
 >
 > Please run this in a terminal:
 > ```
-> cd /Users/valorengels/src/ai && source .venv/bin/activate && python scripts/telegram_login.py
+> cd ~/src/ai && source .venv/bin/activate && python scripts/telegram_login.py
 > ```
 > Let me know when you're done.
 
@@ -283,7 +283,7 @@ If no session file appeared, something went wrong. Ask the user what happened an
 Install the reflections daily maintenance plist (runs at 6 AM Pacific):
 
 ```bash
-cd /Users/valorengels/src/ai
+cd ~/src/ai
 ./scripts/install_reflections.sh
 ```
 
@@ -294,6 +294,23 @@ launchctl list | grep com.valor.reflections
 ```
 
 If the output shows the `com.valor.reflections` label, the scheduler is installed. It will run `scripts/reflections.py` daily at 6 AM, performing log review, session analysis, LLM reflection, and memory consolidation.
+
+## Step 8b: Install Issue Poller
+
+Install the issue poller plist (polls GitHub every 5 minutes):
+
+```bash
+cd ~/src/ai
+./scripts/install_issue_poller.sh
+```
+
+Verify it loaded:
+
+```bash
+launchctl list | grep com.valor.issue-poller
+```
+
+**Note:** All plist templates use `__PROJECT_DIR__` and `__HOME_DIR__` placeholders. The install scripts substitute these with the actual paths for the current machine via `sed`. This means plists work on any machine without hardcoded usernames.
 
 ## Step 9: Start the Bridge
 
@@ -332,7 +349,7 @@ pgrep -f telegram_bridge.py
 Run a comprehensive health check:
 
 ```bash
-cd /Users/valorengels/src/ai
+cd ~/src/ai
 
 echo "=== System Tools ==="
 claude --version
