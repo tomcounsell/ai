@@ -322,7 +322,9 @@ SESSION_NAME = os.getenv("TELEGRAM_SESSION_NAME", "valor_bridge")
 
 def _get_active_projects() -> list[str]:
     """Determine active projects for this machine from config."""
-    config_path = Path(__file__).parent.parent / "config" / "projects.json"
+    from bridge.routing import _resolve_config_path
+
+    config_path = _resolve_config_path()
     if not config_path.exists():
         return ["valor"]
 
