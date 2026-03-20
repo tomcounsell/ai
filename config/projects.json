@@ -125,6 +125,26 @@
       }
     },
 
+    "satsol": {
+      "name": "SATSOL",
+      "description": "Telecom self-care platform for SATSOL customers in Solomon Islands",
+      "working_directory": "/Users/valorengels/src/satsol",
+      "auto_merge": false,
+      "telegram": {
+        "groups": ["Dev: SATSOL", "PM: SATSOL", "SATSOL - scoping"],
+        "respond_to_unaddressed": true,
+        "respond_to_dms": false
+      },
+      "github": {
+        "org": "yudame",
+        "repo": "satsol"
+      },
+      "context": {
+        "tech_stack": ["Django", "Flutter", "PostgreSQL"],
+        "description": "Focus on telecom self-care, Django API + Flutter mobile app monorepo, Solomon Islands deployment"
+      }
+    },
+
     "yudame-research": {
       "name": "Yudame Research",
       "description": "Research tools and frameworks for evidence-based analysis",
