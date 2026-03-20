@@ -406,11 +406,14 @@ class TestMigrationScript:
         import scripts.migrate_model_relationships as migrate_mod
 
         original_dir = migrate_mod.PROJECT_DIR
+        original_desktop = migrate_mod.DESKTOP_VALOR_DIR
         migrate_mod.PROJECT_DIR = Path("/nonexistent/path")
+        migrate_mod.DESKTOP_VALOR_DIR = Path("/nonexistent/desktop")
         try:
             result = migrate_mod.load_chat_to_project_map()
         finally:
             migrate_mod.PROJECT_DIR = original_dir
+            migrate_mod.DESKTOP_VALOR_DIR = original_desktop
 
         assert result == {}
 

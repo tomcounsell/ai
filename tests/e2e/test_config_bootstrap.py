@@ -14,7 +14,7 @@ from monitoring.health import HealthChecker, HealthStatus
 
 @pytest.mark.e2e
 class TestConfigLoading:
-    """Test config/projects.json loading and parsing."""
+    """Test projects.json loading and parsing."""
 
     def test_load_config_returns_dict(self):
         config = load_config()

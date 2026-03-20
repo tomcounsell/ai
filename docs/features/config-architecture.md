@@ -56,9 +56,11 @@ from config.paths import PROJECT_ROOT, DATA_DIR, CONFIG_DIR, VALOR_DIR, LOGS_DIR
 | `.env.example` | Template documenting all env vars | Yes |
 | `config/settings.py` | Pydantic Settings model (single source of truth) | Yes |
 | `config/paths.py` | Path constants derived from `__file__` | Yes |
-| `config/projects.json` | Per-project config (working dirs, GitHub orgs, Telegram groups) | No (gitignored) |
+| `~/Desktop/Valor/projects.json` | Per-project config (working dirs, GitHub orgs, Telegram groups) | No (external, iCloud-synced) |
 | `config/projects.example.json` | Template for projects.json | Yes |
 | `config/models.py` | Model name constants | Yes |
+| `config/personas/_base.md` | Shared persona base (identity, values, tools, philosophy) | Yes |
+| `config/personas/{persona}.md` | Per-persona overlays (developer, project-manager, teammate) | Yes |
 | `~/Desktop/Valor/` | Google OAuth tokens, DM whitelist, calendar config | No (machine-local) |
 
 ### Credentials Location

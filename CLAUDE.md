@@ -226,7 +226,7 @@ The bridge includes automatic crash recovery (see `docs/features/bridge-self-hea
 ### Configuration Files
 
 - `.env` - Environment variables and API keys
-- `config/projects.json` - Multi-project configuration
+- `~/Desktop/Valor/projects.json` - Multi-project configuration (iCloud-synced, private)
 - `.claude/settings.local.json` - Claude Code settings
 
 ## Plan Requirements (This Repo Only)
