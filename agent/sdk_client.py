@@ -1374,33 +1374,28 @@ async def get_agent_response_sdk(
         working_dir = project_working_dir
         logger.info(f"[{request_id}] PM mode: cwd={working_dir}, skipping SDLC classification")
     else:
-        # Dev mode: classify and route as before
-        from bridge.routing import classify_work_request
+        # Dev mode: use classification from bridge (no re-classification).
+        # The bridge handler already classified via routing.py and stored
+        # classification_type on the AgentSession. Read it from session if
+        # available, otherwise fall back to a simple heuristic.
+        classification = None
+        if session_id:
+            try:
+                from models.agent_session import AgentSession
 
-        classification = classify_work_request(message)
-        # If message references an issue number, mark ISSUE stage complete.
-        # This is the single source of truth for is_sdlc — stage_states.
-        if classification == "sdlc" and session_id:
-            import re as _issue_re
+                sessions = list(AgentSession.query.filter(session_id=session_id))
+                active = [s for s in sessions if s.status in ("running", "active", "pending")]
+                candidates = active if active else sessions
+                if candidates:
+                    candidates.sort(key=lambda s: s.created_at or 0, reverse=True)
+                    classification = candidates[0].classification_type
+            except Exception as e:
+                logger.debug(f"[{request_id}] Could not read classification from session: {e}")
 
-            if _issue_re.search(r"(?:issue|#)\s*(\d+)", message, _issue_re.IGNORECASE):
-                try:
-                    from bridge.pipeline_state import PipelineState
-                    from models.agent_session import AgentSession
+        if not classification:
+            # Fallback: simple heuristic for when no session exists yet
+            classification = "question"
 
-                    sessions = list(AgentSession.query.filter(session_id=session_id))
-                    if sessions:
-                        ps = PipelineState(sessions[0])
-                        issue_state = ps.states.get("ISSUE", "pending")
-                        if issue_state in ("pending", "ready"):
-                            ps.start_stage("ISSUE")
-                            ps.complete_stage("ISSUE")
-                            logger.info(
-                                f"[{request_id}] Marked ISSUE stage complete "
-                                f"(issue reference in message)"
-                            )
-                except Exception as e:
-                    logger.debug(f"ISSUE stage upsert failed (non-fatal): {e}")
         if classification == "sdlc" and project_working_dir != AI_REPO_ROOT:
             working_dir = AI_REPO_ROOT
             logger.info(
