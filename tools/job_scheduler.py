@@ -942,12 +942,8 @@ def main():
     pl = subparsers.add_parser(
         "playlist", help="Enqueue multiple issues for sequential SDLC processing"
     )
-    pl.add_argument(
-        "--issues", type=int, nargs="+", required=True, help="Issue numbers to enqueue"
-    )
-    pl.add_argument(
-        "--priority", choices=["urgent", "high", "normal", "low"], default="normal"
-    )
+    pl.add_argument("--issues", type=int, nargs="+", required=True, help="Issue numbers to enqueue")
+    pl.add_argument("--priority", choices=["urgent", "high", "normal", "low"], default="normal")
     pl.add_argument("--project", help="Project key")
 
     # playlist-status

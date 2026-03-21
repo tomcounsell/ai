@@ -335,9 +335,7 @@ class AgentSession(Model):
         if not self.is_chat:
             return []
         try:
-            return list(
-                AgentSession.query.filter(parent_chat_session_id=self.job_id)
-            )
+            return list(AgentSession.query.filter(parent_chat_session_id=self.job_id))
         except Exception as e:
             logger.warning(f"Failed to query dev sessions for chat {self.job_id}: {e}")
             return []

@@ -256,9 +256,7 @@ class Observer:
                 }
 
             # Unknown stop reason — deliver to human
-            logger.info(
-                f"{self._log_prefix} Unknown stop_reason={self.stop_reason} — delivering"
-            )
+            logger.info(f"{self._log_prefix} Unknown stop_reason={self.stop_reason} — delivering")
             record_decision(
                 self.session.session_id, cid, "deliver", f"unknown_stop: {self.stop_reason}"
             )
@@ -337,9 +335,7 @@ class Observer:
                 logger.info(
                     f"{self._log_prefix} Deterministic: steer to {stage_name} ({skill_cmd})"
                 )
-                record_decision(
-                    self.session.session_id, cid, "steer", f"next_stage: {stage_name}"
-                )
+                record_decision(self.session.session_id, cid, "steer", f"next_stage: {stage_name}")
                 return {
                     "action": "steer",
                     "coaching_message": coaching,
