@@ -248,6 +248,13 @@ _JOB_FIELDS = [
     "claude_session_uuid",
     # Job hierarchy fields — must be preserved across delete-and-recreate
     "parent_job_id",
+    # === ChatSession/DevSession fields ===
+    "session_type",
+    "result_text",
+    "parent_chat_session_id",
+    "sdlc_stages",
+    "slug",
+    "artifacts",
 ]
 
 # Backward compat alias
@@ -292,6 +299,7 @@ async def _push_job(
     scheduling_depth: int = 0,
     parent_job_id: str | None = None,
     trigger_message_id: str | None = None,
+    session_type: str | None = None,
 ) -> int:
     """Create a job in Redis and return the pending queue depth for this project.
 
@@ -320,6 +328,7 @@ async def _push_job(
         priority=priority,
         created_at=time.time(),
         session_id=session_id,
+        session_type=session_type,
         working_dir=working_dir,
         message_text=message_text,
         sender_name=sender_name,
@@ -456,128 +465,7 @@ async def _complete_job(job: Job, *, failed: bool = False) -> None:
             completing_child_status=child_status,
         )
 
-    # Capture fields needed for playlist hook before deletion
-    project_key = job.project_key
-    classification_type = job.classification_type
-    chat_id = job.chat_id
-    issue_url = getattr(job._rj, "issue_url", None)
-
     await job._rj.async_delete()
-
-    # Observer playlist hook: schedule next issue from playlist
-    # Only for SDLC jobs (classification_type == "sdlc")
-    if classification_type == "sdlc":
-        await _playlist_hook(project_key, chat_id, issue_url, failed=failed)
-
-
-async def _playlist_hook(
-    project_key: str,
-    chat_id: str,
-    issue_url: str | None,
-    *,
-    failed: bool = False,
-) -> None:
-    """Observer playlist hook: pop next issue from playlist after SDLC job completes.
-
-    Called after an SDLC job finishes (success or failure). On failure, requeues
-    the failed issue to the end of the playlist (max 1 retry). Then pops the next
-    issue and schedules it. When the playlist is empty, delivers a summary.
-
-    Args:
-        project_key: The project key for playlist scoping.
-        chat_id: The chat ID for Telegram delivery.
-        issue_url: The URL of the just-completed issue (for extracting issue number).
-        failed: Whether the just-completed job failed.
-    """
-    try:
-        from tools.job_scheduler import (
-            playlist_pop,
-            playlist_requeue,
-        )
-    except ImportError:
-        logger.warning("[playlist-hook] Could not import playlist functions")
-        return
-
-    # On failure, try to requeue the failed issue
-    if failed and issue_url:
-        try:
-            # Extract issue number from URL like https://github.com/.../issues/440
-            import re
-
-            match = re.search(r"/issues/(\d+)", issue_url)
-            if match:
-                failed_issue = int(match.group(1))
-                requeued = playlist_requeue(project_key, failed_issue)
-                if requeued:
-                    logger.info(
-                        f"[playlist-hook] Requeued failed issue #{failed_issue} "
-                        f"to end of playlist for {project_key}"
-                    )
-                else:
-                    logger.info(
-                        f"[playlist-hook] Issue #{failed_issue} already retried once, "
-                        f"not requeuing again"
-                    )
-        except Exception as e:
-            logger.warning(f"[playlist-hook] Error requeuing failed issue: {e}")
-
-    # Pop next issue from playlist
-    next_issue = playlist_pop(project_key)
-
-    if next_issue is None:
-        logger.info(f"[playlist-hook] Playlist empty for {project_key}, nothing to schedule")
-        _log_playlist_exhausted(project_key, chat_id)
-        return
-
-    # Guard: don't schedule the same issue that just completed
-    if issue_url:
-        import re
-
-        match = re.search(r"/issues/(\d+)", issue_url)
-        if match and int(match.group(1)) == next_issue:
-            logger.warning(
-                f"[playlist-hook] Next issue #{next_issue} matches just-completed issue, "
-                f"skipping to avoid loop"
-            )
-            # Try the next one
-            next_issue = playlist_pop(project_key)
-            if next_issue is None:
-                _log_playlist_exhausted(project_key, chat_id)
-                return
-
-    # Schedule the next issue
-    logger.info(f"[playlist-hook] Scheduling next playlist issue #{next_issue} for {project_key}")
-    try:
-        result = subprocess.run(
-            [
-                "python",
-                "-m",
-                "tools.job_scheduler",
-                "schedule",
-                "--issue",
-                str(next_issue),
-                "--project",
-                project_key,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            cwd=str(Path(__file__).parent.parent),
-        )
-        if result.returncode != 0:
-            logger.error(f"[playlist-hook] Failed to schedule issue #{next_issue}: {result.stderr}")
-        else:
-            logger.info(f"[playlist-hook] Successfully scheduled issue #{next_issue}")
-    except Exception as e:
-        logger.error(f"[playlist-hook] Error scheduling issue #{next_issue}: {e}")
-
-
-def _log_playlist_exhausted(project_key: str, chat_id: str) -> None:
-    """Log when the playlist is exhausted.
-
-    The bridge's normal job completion flow handles any Telegram delivery.
-    """
-    logger.info(f"[playlist-hook] Playlist exhausted for {project_key} (chat {chat_id})")
 
 
 async def _finalize_parent(
@@ -1229,6 +1117,7 @@ async def enqueue_job(
     scheduling_depth: int = 0,
     parent_job_id: str | None = None,
     trigger_message_id: str | None = None,
+    session_type: str | None = None,
 ) -> int:
     """
     Add a job to Redis and ensure worker is running.
@@ -1266,6 +1155,7 @@ async def enqueue_job(
         scheduling_depth=scheduling_depth,
         parent_job_id=parent_job_id,
         trigger_message_id=trigger_message_id,
+        session_type=session_type,
     )
     _ensure_worker(project_key)
     log_prefix = f"[{correlation_id}]" if correlation_id else f"[{project_key}]"
