@@ -28,12 +28,6 @@ Upgraded `claude-agent-sdk` from 0.1.27 to 0.1.35 with programmatic agent defini
 - **PreCompact**: logs context compaction events
 - All hooks use proper SDK type annotations
 
-## Cost Budgeting
-
-- `max_budget_usd` parameter on `ValorAgent`
-- Default: $5.00 (configurable via `SDK_MAX_BUDGET_USD` env var)
-- Hard limit alongside existing `_COST_WARN_THRESHOLD` soft warning
-
 ## Agent-Addressable Steering
 
 - `target_agent` field added to steering queue messages

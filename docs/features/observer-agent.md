@@ -11,7 +11,6 @@ Worker stops
     |
     v
 Stop Reason Routing (deterministic, no LLM)
-    |  if stop_reason == "budget_exceeded" -> DELIVER with warning
     |  if stop_reason == "rate_limited" -> STEER with backoff
     |  if stop_reason == "end_turn" or None -> fall through
     v

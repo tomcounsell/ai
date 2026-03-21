@@ -355,7 +355,7 @@ class PipelineStateMachine:
 
         Two-tier approach:
         1. stop_reason from SDK: anything other than "end_turn" is a process
-           failure (budget_exceeded, rate_limited, etc.)
+           failure (rate_limited, timeout, etc.)
         2. For "end_turn": deterministic tail patterns scoped to the known stage.
 
         Args:
