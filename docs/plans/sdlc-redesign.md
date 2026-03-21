@@ -8,7 +8,7 @@ tracking: https://github.com/tomcounsell/ai/issues/459
 last_comment_id:
 ---
 
-# SDLC Redesign: Job/Session Split, Single-Session Pipeline, Observer Simplification
+# SDLC Redesign: ChatSession/DevSession Split, Single-Session Pipeline, Observer Simplification
 
 ## Problem
 
@@ -24,13 +24,16 @@ A Telegram message like "SDLC issue 123" passes through 12+ components before pr
 
 **Desired outcome:**
 ```
-Message → Job created → Queue (per chat_id) → Worker →
-  Spawn one AgentSession → Session works full pipeline →
-  Observer nudges between stages → Deliver to Telegram
+Message → ChatSession created (read-only, PM persona) → Queue (per chat_id) →
+  ChatSession reads code, chooses slug, decides what to do →
+  Spawns DevSession (full permissions, Dev persona) →
+  DevSession works full pipeline → ChatSession nudges between stages →
+  ChatSession composes delivery → Telegram
 ```
-- Job represents the human's request. Session represents a Claude Code invocation.
+- Both are Agent SDK sessions sharing an `AgentSession` base class.
+- `ChatSession` (read-only, PM persona) owns the Telegram conversation, orchestrates.
+- `DevSession` (full permissions, Dev persona) does the actual work.
 - Claude Code spawned once per unit of work, not per stage.
-- Observer is a thin deterministic nudger, not an LLM orchestrator.
 - Queues are per chat group.
 
 ## Prior Art
@@ -74,21 +77,23 @@ Message → Job created → Queue (per chat_id) → Worker →
 14. **Summarizer** → formats output
 15. **Delivery** → Telegram message sent
 
-### Target (6 hops)
+### Target (7 hops)
 1. **Telegram** → handler() receives message
-2. **Job created** → Job model in Redis, pushed to per-chat_id queue
-3. **Worker** → pops Job, spawns one AgentSession (Claude Code)
-4. **Session works** → full pipeline executes in single process, Observer nudges between stages via hooks
-5. **Session exits** → output validated, formatted
-6. **Delivery** → Telegram message sent
+2. **ChatSession created** → queued per chat_id
+3. **Worker** → pops ChatSession, starts Agent SDK (read-only, PM persona)
+4. **ChatSession reads code** → understands context, chooses slug, decides approach
+5. **ChatSession spawns DevSession** → Agent SDK (full permissions, Dev persona)
+6. **DevSession works** → full pipeline in single process, ChatSession nudges between stages
+7. **ChatSession composes delivery** → persona-voiced message → Telegram
 
 ## Architectural Impact
 
-- **New model**: `Job` — separates human-request tracking from execution
-- **Refactored model**: `AgentSession` — stripped to execution-only concerns
-- **Interface changes**: Observer shifts from LLM-with-tools to deterministic hook; job_queue splits into job management and session management
-- **Coupling reduction**: Job ↔ Session is a clean parent/child with FK. Observer is a thin layer, not an orchestrator with 4 tools.
-- **Data ownership**: Job owns Telegram conversation state (steering messages, delivery). Session owns execution state (sdlc_stages, slug, artifacts).
+- **New base model**: `AgentSession` — shared fields for any Agent SDK session (session_id, claude_session_uuid, status, created_at)
+- **New model**: `ChatSession(AgentSession)` — read-only Agent SDK session, PM persona. Owns Telegram conversation, orchestrates work.
+- **New model**: `DevSession(AgentSession)` — full-permission Agent SDK session, Dev persona. Does the actual coding work.
+- **Interface changes**: Observer collapses into ChatSession's orchestration logic. Both session types can be steered via steering messages.
+- **Coupling reduction**: ChatSession ↔ DevSession is a clean parent/child. Both steerable.
+- **Data ownership**: ChatSession owns Telegram conversation state (steering messages, delivery). DevSession owns execution state (sdlc_stages, slug, artifacts).
 - **Reversibility**: Medium — model split is the hardest to reverse. Migration must be incremental.
 
 ## Appetite
@@ -105,7 +110,7 @@ Message → Job created → Queue (per chat_id) → Worker →
 
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
-| Redis running | `redis-cli ping` | Job and Session models use Redis via Popoto |
+| Redis running | `redis-cli ping` | AgentSession models use Redis via Popoto |
 | Tests pass on main | `pytest tests/unit/ -x -q` | Clean baseline before refactor |
 | #458 merged first | `gh issue view 458 --json state -q .state` returns CLOSED | Budget removal simplifies Observer |
 
@@ -113,113 +118,131 @@ Message → Job created → Queue (per chat_id) → Worker →
 
 ### Key Elements
 
-- **Job model**: New Popoto model representing a human's request. Owns the queue position, steering messages, and child sessions. Keyed by chat_id for per-group queuing.
-- **AgentSession refactor**: Stripped to execution concerns only. Parent job tracked via FK. SDLC state tracked as `sdlc_stages`. Slug derives branch name, plan path, worktree path.
-- **Single-session SDLC**: Claude Code spawned once with full pipeline instructions. Stages execute sequentially within one process. Sub-skills unchanged.
-- **Observer simplification**: Deterministic nudger. Remaining stages? Steer. Blocked? Deliver. No LLM calls for routing.
+- **AgentSession base**: Shared Popoto model for any Agent SDK session (session_id, claude_session_uuid, status, created_at). Both ChatSession and DevSession inherit from it.
+- **ChatSession**: Read-only Agent SDK session with PM persona. Owns the Telegram conversation, reads code to understand context, chooses slug, decides what to do, spawns/steers DevSessions, composes delivery messages in persona voice.
+- **DevSession**: Full-permission Agent SDK session with Dev persona. Does the actual coding work. Runs full SDLC pipeline if needed. Steered by its parent ChatSession (not by humans directly).
+- **Steering model**: Humans steer ChatSessions (via Telegram replies). ChatSessions steer DevSessions (via the PM persona's orchestration logic — the Observer role is absorbed here).
 - **Per-chat-group queue**: Each Telegram chat_id gets its own serial queue. Different groups run in parallel.
 
 ### Flow
 
-**Message arrives** → Job created (per chat_id queue) → **Worker pops Job** → Spawn AgentSession → **Claude Code works full pipeline** → Observer nudges between stages → **Session completes** → Format + deliver to Telegram → **Job marked complete**
+```
+Message arrives → ChatSession created (per chat_id queue) →
+  ChatSession (read-only, PM persona):
+    reads code, checks issue, chooses slug, decides approach →
+    spawns DevSession (full permissions, Dev persona) →
+  DevSession works full pipeline (ISSUE→PLAN→BUILD→TEST→...→MERGE) →
+  ChatSession monitors, nudges between stages →
+  ChatSession composes delivery message in persona voice → Telegram
+```
 
-Human steers mid-pipeline: **Follow-up message** → Job receives steering message → Routed to active Session
+**Human steers mid-pipeline:** Telegram reply → steering message on ChatSession → ChatSession decides whether/how to steer its active DevSession
+
+**~7-second window:** Rapid follow-up messages within ~7s of ChatSession creation become steering automatically (existing behavior preserved).
 
 ### Technical Approach
 
-#### Phase 1: Model Split
-- Create `Job` model in `models/job.py`
-- Refactor `AgentSession` to remove queue/conversation fields
-- Add `parent_job_id` FK on AgentSession
-- Migrate existing code to use new models
+#### Phase 1: Model Hierarchy
+- Create `AgentSession` base model in `models/agent_session.py`
+- Create `ChatSession(AgentSession)` in `models/chat_session.py`
+- Create `DevSession(AgentSession)` in `models/dev_session.py`
+- Migrate existing AgentSession fields to appropriate subclass
 
 #### Phase 2: Queue Rekey
 - Change queue key from `project_key` to `chat_id`
 - Update worker loop to manage per-chat-group workers
-- Move steering message handling to Job model
+- Steering messages route to ChatSession, not DevSession
 
-#### Phase 3: Single-Session Pipeline
+#### Phase 3: ChatSession as Orchestrator
+- ChatSession is an Agent SDK session (read-only permissions, PM persona)
+- Absorbs Observer's role: reads code, decides approach, spawns DevSessions
+- Composes delivery messages (absorbs summarizer's formatting role into persona voice)
+- Classification happens once inside ChatSession (no double classification)
+
+#### Phase 4: Single-Session DevSession Pipeline
 - Rewrite SDLC prompt: full pipeline spec instead of "invoke /sdlc"
 - Remove re-enqueue loop between stages
-- Add progress hook (PostToolUse) that sends Telegram updates on stage transitions
-- Remove auto-continue caps (no longer needed)
-
-#### Phase 4: Observer Simplification
-- Replace 4-phase LLM Observer with deterministic logic
-- Keep: stop_reason handling, stall detection integration
-- Remove: LLM fallback, tool definitions, coaching message generation
-- Observer reads sdlc_stages from session, decides steer/deliver programmatically
+- Add progress hook (PostToolUse) that ChatSession monitors for stage transitions
+- Remove auto-continue caps (ChatSession manages continuation)
 
 #### Phase 5: Cleanup
-- Remove double classification (classify once at Job creation)
+- Remove old Observer (bridge/observer.py)
 - Remove budget system (#458)
 - Remove delete-and-recreate pattern
+- Remove double classification in sdk_client.py
+- Remove playlist concept — messages start and end with ChatSessions
 - Update all consumers
 
-### Job Model
+### Data Models
 
 ```python
-class Job(Model):
-    job_id = AutoKeyField()
+class AgentSession(Model):
+    """Base: any Agent SDK session."""
+    session_id = AutoKeyField()
+    claude_session_uuid = Field(null=True)  # for resume
+    status = Field()               # running → completed/failed
+    created_at = Field()
+
+class ChatSession(AgentSession):
+    """Read-only Agent SDK session. PM persona. Owns the Telegram conversation."""
     chat_id = Field()              # Telegram chat → queue key
     message_id = Field()           # Telegram message that created this
     sender_name = Field()
     message_text = Field()
     project_key = Field()
-    status = Field()               # pending → running → completed/failed
-    created_at = Field()
-    steering_messages = Field()    # JSON list of human follow-ups
+    steering_messages = Field()    # bounded Redis List of human follow-ups
     result_text = Field(null=True) # what was delivered to Telegram
-    current_session_seq = Field(null=True)  # monotonic counter for active session
+
+class DevSession(AgentSession):
+    """Full-permission Agent SDK session. Dev persona. Does the work."""
+    parent_chat_session_id = Field()  # logical FK → ChatSession
+    sdlc_stages = Field(null=True)    # JSON dict, null if not SDLC
+    slug = Field(null=True)           # derives branch, plan path, worktree
+    artifacts = Field(null=True)      # JSON: {issue_url, plan_url, pr_url}
 ```
 
-Jobs are **never deleted** — they transition to terminal states (`completed`/`failed`) and are garbage-collected by TTL or archival sweep. This prevents orphaned sessions.
-
-### AgentSession Model
-
-```python
-class AgentSession(Model):
-    session_id = AutoKeyField()
-    parent_job_id = Field()        # logical FK → Job (not enforced by Redis)
-    chat_id = Field()              # denormalized from Job for hot-path queries
-    sequence = Field()             # monotonic within parent Job
-    claude_session_uuid = Field(null=True)  # for resume
-    status = Field()               # running → completed/failed
-    sdlc_stages = Field(null=True) # JSON dict, null if not SDLC
-    slug = Field(null=True)        # derives branch, plan path, worktree
-    artifacts = Field(null=True)   # JSON: {issue_url, plan_url, pr_url}
-    created_at = Field()
-```
-
-Derived properties:
+Derived properties on DevSession:
 - `is_sdlc` → `self.sdlc_stages is not None`
 - `current_stage` → first stage with status `in_progress`
 - `branch_name` → `f"session/{self.slug}"`
 - `plan_path` → `f"docs/plans/{self.slug}.md"`
 
+### Steering Model
+
+```
+Human → (Telegram reply) → ChatSession
+  ChatSession → (PM persona orchestration) → DevSession
+```
+
+- **ChatSession steered by:** human messages (Telegram replies within ~7s window, or explicit reply-to)
+- **DevSession steered by:** its parent ChatSession's PM persona (not humans directly)
+- Both use bounded Redis Lists for steering message queues (capped at 10, oldest dropped on overflow)
+
 ### Queue Implementation
 
-Use a **Redis List** keyed as `job_queue:{chat_id}` for the queue (outside Popoto), with the Job model in Popoto for metadata. The list holds job IDs; dequeue is atomic `RPOP job_queue:{chat_id}`, then load `Job.get(job_id)`. This separates ordering (list) from data (hash) cleanly and gives atomic dequeue without application-level locking.
+Use a **Redis List** keyed as `chat_queue:{chat_id}` for the queue (outside Popoto), with the ChatSession model in Popoto for metadata. The list holds session IDs; dequeue is atomic `RPOP chat_queue:{chat_id}`, then load `ChatSession.get(session_id)`. This separates ordering (list) from data (hash) cleanly and gives atomic dequeue without application-level locking.
 
 ### Referential Integrity Strategy
 
 Redis/Popoto has no FK enforcement. Integrity is maintained by convention:
-- `chat_id` is denormalized onto AgentSession for hot-path observer queries (avoids two-step Job→Session lookup)
-- `parent_job_id` is a logical FK; orphan detection runs in the watchdog sweep
-- `current_session_seq` on Job + `sequence` on Session gives O(1) "active session" lookup
-- Jobs are never deleted while sessions reference them (TTL-based cleanup only after terminal state)
+- `parent_chat_session_id` on DevSession is a logical FK; orphan detection runs in the watchdog sweep
+- ChatSessions and DevSessions are never deleted — they transition to terminal states and are garbage-collected by TTL
+- ChatSession queries its DevSessions via `DevSession.query.filter(parent_chat_session_id=self.session_id)`
 
 ### Session Creation Contract
 
-Sessions are created exclusively by the **Job worker** (not by the Observer, not by the bridge handler):
-1. Worker pops Job from queue
-2. Worker creates AgentSession with `parent_job_id=job.job_id`, `sequence=job.current_session_seq + 1`
-3. Worker updates `job.current_session_seq`
-4. Worker spawns Claude Code with session context
+**ChatSessions** are created by the **bridge handler** when a message arrives:
+1. Handler creates ChatSession with chat_id, message_text, sender_name
+2. ChatSession pushed to `chat_queue:{chat_id}`
 
-Human messages arriving mid-session route as **steering messages on the Job**, not as new sessions. The active session reads steering messages from the Job during execution (via hook).
+**DevSessions** are created exclusively by the **ChatSession** (PM persona) during its Agent SDK execution:
+1. ChatSession reads code, understands context, chooses slug
+2. ChatSession spawns DevSession with `parent_chat_session_id=self.session_id`
+3. DevSession runs with full permissions (Dev persona)
 
-If a session crashes and the Job needs to retry, the worker creates a **new** AgentSession with incremented sequence number. The crashed session remains as a completed/failed record.
+Human messages arriving mid-pipeline route as **steering messages on the ChatSession**. The ChatSession decides whether/how to steer its active DevSession.
+
+If a DevSession crashes, the ChatSession can spawn a **new** DevSession to continue from the last completed stage. The crashed DevSession remains as a failed record.
 
 ### Steering Message Safety
 
@@ -229,24 +252,24 @@ Steering messages use a **bounded Redis List** (`LPUSH` + `LTRIM` to cap at 10) 
 
 Long-running sessions must have a liveness mechanism:
 - **Per-API-call timeout**: `asyncio.wait_for` on each Claude SDK call (existing `SDK_INACTIVITY_TIMEOUT_SECONDS`, default 300s)
-- **Session max lifetime**: 60 minutes hard cap; if exceeded, session is killed and Job can retry
+- **Session max lifetime**: 60 minutes hard cap; if exceeded, DevSession is killed and ChatSession can retry
 - **Heartbeat**: Activity-based stall detection (from #440) writes timestamps; watchdog checks for staleness
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
 - [ ] Observer deterministic path: test all stop_reason values produce correct steer/deliver decision
-- [ ] Job queue worker: test session spawn failure → Job marked failed, error delivered to Telegram
-- [ ] Session resume: test crash mid-pipeline → new session spawned by Job, continues from last completed stage
+- [ ] ChatSession worker: test DevSession spawn failure → ChatSession marked failed, error delivered to Telegram
+- [ ] DevSession resume: test crash mid-pipeline → ChatSession spawns new DevSession, continues from last completed stage
 
 ### Empty/Invalid Input Handling
-- [ ] Job with empty message_text → still created, session decides how to handle
+- [ ] ChatSession with empty message_text → still created, PM persona decides how to handle
 - [ ] Session with null sdlc_stages → treated as non-SDLC, no stage nudging
 - [ ] Observer receives empty session output → deliver with "(empty output)" fallback
 
 ### Error State Rendering
-- [ ] Failed session → Job delivers error message to Telegram with context
-- [ ] Stall detection fires → session killed, Job informed, delivers partial output
+- [ ] Failed DevSession → ChatSession delivers error message to Telegram with context
+- [ ] Stall detection fires → DevSession killed, ChatSession informed, delivers partial output
 
 ## Test Impact
 
@@ -261,26 +284,26 @@ Major refactor — nearly all test files touching these components need updates:
 **REPLACE (new interfaces):**
 - [ ] `tests/unit/test_observer.py` (36 tests) — REPLACE: rewrite for deterministic Observer
 - [ ] `tests/unit/test_sdk_client_sdlc.py` (38 tests) — UPDATE: single-session model changes SDK invocation
-- [ ] `tests/unit/test_sdlc_playlist.py` (11 tests) — UPDATE: playlist hooks attach to Job, not AgentSession
-- [ ] `tests/unit/test_work_request_classifier.py` (16 tests) — UPDATE: classification happens once at Job creation
+- [ ] `tests/unit/test_sdlc_playlist.py` (11 tests) — DELETE: playlist concept removed
+- [ ] `tests/unit/test_work_request_classifier.py` (16 tests) — UPDATE: classification happens inside ChatSession
 - [ ] `tests/unit/test_sdlc_env_vars.py` (10 tests) — UPDATE: env vars set once, not per-stage
 - [ ] `tests/unit/test_sdlc_mode.py` (6 tests) — UPDATE: is_sdlc derived from sdlc_stages on session
 
 **UPDATE (model changes):**
-- [ ] `tests/unit/test_session_status.py` (15 tests) — UPDATE: status tracked on Job and Session separately
-- [ ] `tests/unit/test_session_tags.py` (33 tests) — UPDATE: tags may move to Job model
-- [ ] `tests/unit/test_model_relationships.py` (30 tests) — UPDATE: new Job → Session relationship
-- [ ] `tests/unit/test_job_hierarchy.py` (22 tests) — UPDATE: hierarchy uses new Job model
+- [ ] `tests/unit/test_session_status.py` (15 tests) — UPDATE: status tracked on ChatSession and DevSession separately
+- [ ] `tests/unit/test_session_tags.py` (33 tests) — UPDATE: tags may move to ChatSession model
+- [ ] `tests/unit/test_model_relationships.py` (30 tests) — UPDATE: new ChatSession → DevSession relationship
+- [ ] `tests/unit/test_job_hierarchy.py` (22 tests) — REPLACE: hierarchy uses ChatSession/DevSession models
 - [ ] `tests/unit/test_pipeline_state_machine.py` (49 tests) — UPDATE: state machine reads from session.sdlc_stages
 - [ ] `tests/unit/test_pipeline_integrity.py` (30 tests) — UPDATE: integrity checks use new models
-- [ ] `tests/integration/test_agent_session_lifecycle.py` (58 tests) — REPLACE: lifecycle split across Job + Session
+- [ ] `tests/integration/test_agent_session_lifecycle.py` (58 tests) — REPLACE: lifecycle split across ChatSession + DevSession
 - [ ] `tests/integration/test_stage_aware_auto_continue.py` (39 tests) — REPLACE: stage progression is internal, not auto-continue
 - [ ] `tests/integration/test_enqueue_continuation.py` (29 tests) — DELETE: no re-enqueue loop
-- [ ] `tests/integration/test_steering.py` (32 tests) — UPDATE: steering goes through Job, not session directly
+- [ ] `tests/integration/test_steering.py` (32 tests) — UPDATE: steering goes through ChatSession → DevSession
 - [ ] `tests/integration/test_job_queue_race.py` (13 tests) — UPDATE: queue keyed by chat_id
-- [ ] `tests/integration/test_job_scheduler.py` (21 tests) — UPDATE: scheduler uses Job model
+- [ ] `tests/integration/test_job_scheduler.py` (21 tests) — UPDATE: scheduler uses ChatSession model
 - [ ] `tests/e2e/test_message_pipeline.py` (36 tests) — REPLACE: full pipeline flow changed
-- [ ] `tests/e2e/test_session_continuity.py` (12 tests) — UPDATE: continuity via Job + session resume
+- [ ] `tests/e2e/test_session_continuity.py` (12 tests) — UPDATE: continuity via ChatSession + DevSession resume
 
 **Estimated test impact: ~600 tests across 24 files need changes.**
 
@@ -290,7 +313,7 @@ Major refactor — nearly all test files touching these components need updates:
 - **Making the Observer an LLM "sometimes"** — Deterministic only. If it can't decide, deliver to human. No "smart fallback."
 - **Per-stage budget tracking** — Budget is being removed (#458). Don't add per-stage cost tracking.
 - **Rewriting sub-skills** — /do-plan, /do-build, etc. are unchanged. Only the orchestration layer changes.
-- **Multi-session parallelism** — A Job spawning parallel sessions (e.g., BUILD + TEST simultaneously) is a future concern. Keep it serial for now.
+- **Multi-DevSession parallelism** — A ChatSession spawning parallel DevSessions (e.g., BUILD + TEST simultaneously) is a future concern. Keep it serial for now.
 
 ## Risks
 
@@ -312,19 +335,19 @@ Major refactor — nearly all test files touching these components need updates:
 
 ## Race Conditions
 
-### Race 1: Steering message arrives while session is between stages
-**Location:** Job.steering_messages, Observer nudge hook
-**Trigger:** Human sends follow-up at the exact moment Observer is deciding steer/deliver
-**Data prerequisite:** Job.steering_messages must be populated before Observer reads it
-**State prerequisite:** Session must be in running state
-**Mitigation:** Observer reads steering_messages atomically from Job before making decision. Redis operations are single-threaded.
+### Race 1: Steering message arrives while DevSession is between stages
+**Location:** ChatSession.steering_messages, ChatSession's PM orchestration
+**Trigger:** Human sends follow-up at the exact moment ChatSession is deciding next stage
+**Data prerequisite:** Steering message must be in ChatSession's queue before PM reads it
+**State prerequisite:** ChatSession must be in running state
+**Mitigation:** ChatSession reads steering_messages atomically from Redis List before making decisions. Redis operations are single-threaded.
 
 ### Race 2: Two messages from same chat group arrive near-simultaneously
-**Location:** Job queue per chat_id
+**Location:** Chat queue per chat_id
 **Trigger:** User sends two messages in rapid succession
-**Data prerequisite:** First Job must be enqueued before second is created
+**Data prerequisite:** First ChatSession must be enqueued before second is created
 **State prerequisite:** Queue must serialize correctly
-**Mitigation:** Per-chat_id queue with atomic `RPOP`. Second message creates a separate Job that waits in queue. Deduplication logic in handler prevents true duplicates.
+**Mitigation:** Per-chat_id queue with atomic `RPOP`. Second message creates a separate ChatSession that waits in queue. Deduplication logic in handler prevents true duplicates.
 
 ### Race 3: TOCTOU on session lookup + steering injection
 **Location:** Active session registry, steering message injection
@@ -333,12 +356,12 @@ Major refactor — nearly all test files touching these components need updates:
 **State prerequisite:** Session must still be running when steering message is injected
 **Mitigation:** Per-chat_id `asyncio.Lock` guards the check-and-inject as atomic. Session transitions through `ACTIVE → DRAINING → DONE`; messages arriving during DRAINING are re-queued as new Jobs rather than steered.
 
-### Race 4: Concurrent observer ticks dequeue same job
-**Location:** Worker loop, job queue
+### Race 4: Concurrent worker ticks dequeue same ChatSession
+**Location:** Worker loop, chat queue
 **Trigger:** Previous worker tick slow, next fires before completion
-**Data prerequisite:** Job must be in queue
-**State prerequisite:** Only one worker should process a given job
-**Mitigation:** Atomic `RPOP` on Redis List guarantees exactly-once dequeue. Job status transitions from `pending → running` immediately after pop, before any async work begins.
+**Data prerequisite:** ChatSession must be in queue
+**State prerequisite:** Only one worker should process a given ChatSession
+**Mitigation:** Atomic `RPOP` on Redis List guarantees exactly-once dequeue. ChatSession status transitions from `pending → running` immediately after pop, before any async work begins.
 
 ## No-Gos (Out of Scope)
 
@@ -365,7 +388,7 @@ One change the agent will notice: SDLC sessions receive the full pipeline spec i
 
 ## Documentation
 
-- [ ] Create `docs/features/job-session-architecture.md` describing the Job/Session split and lifecycle
+- [ ] Create `docs/features/chat-dev-session-architecture.md` describing the ChatSession/DevSession split and lifecycle
 - [ ] Update `docs/features/observer-agent.md` to reflect deterministic Observer
 - [ ] Update `docs/features/pipeline-graph.md` if Observer integration changes
 - [ ] Update `CLAUDE.md` system architecture diagram
@@ -374,12 +397,13 @@ One change the agent will notice: SDLC sessions receive the full pipeline spec i
 
 ## Success Criteria
 
-- [ ] `Job` model exists and is used for all incoming messages
-- [ ] `AgentSession` has exactly these fields: session_id, parent_job_id, claude_session_uuid, status, sdlc_stages, slug, artifacts, created_at
-- [ ] Job queue is keyed by `chat_id`
-- [ ] Full SDLC pipeline (issue → merge) completes in a single Claude Code session
-- [ ] Observer makes zero LLM calls for routing decisions
-- [ ] Classification happens once per Job
+- [ ] `AgentSession` base model exists with shared fields (session_id, claude_session_uuid, status, created_at)
+- [ ] `ChatSession(AgentSession)` exists with: chat_id, message_id, sender_name, message_text, project_key, steering_messages, result_text
+- [ ] `DevSession(AgentSession)` exists with: parent_chat_session_id, sdlc_stages, slug, artifacts
+- [ ] Chat queue is keyed by `chat_id`
+- [ ] Full SDLC pipeline (issue → merge) completes in a single DevSession
+- [ ] ChatSession (PM persona) orchestrates without a separate Observer component
+- [ ] Classification happens inside ChatSession (no double classification)
 - [ ] Budget system fully removed (#458)
 - [ ] All tests pass (unit, integration, e2e)
 - [ ] Bridge processes messages correctly after deploy
@@ -392,13 +416,13 @@ One change the agent will notice: SDLC sessions receive the full pipeline spec i
 
 - **Builder (models)**
   - Name: model-builder
-  - Role: Create Job model, refactor AgentSession, update FK relationships
+  - Role: Create AgentSession base, ChatSession, DevSession models and relationships
   - Agent Type: builder
   - Resume: true
 
 - **Builder (queue)**
   - Name: queue-builder
-  - Role: Rekey queue to chat_id, update worker loop, move steering to Job
+  - Role: Rekey queue to chat_id, update worker loop, steering routes through ChatSession
   - Agent Type: builder
   - Resume: true
 
@@ -452,77 +476,69 @@ One change the agent will notice: SDLC sessions receive the full pipeline spec i
 - Remove budget_exceeded from Observer
 - Update affected tests
 
-### 2. Create Job model
-- **Task ID**: build-job-model
+### 2. Create model hierarchy
+- **Task ID**: build-models
 - **Depends On**: none
 - **Validates**: `pytest tests/unit/test_model_relationships.py -x -q` (create)
 - **Assigned To**: model-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Create `models/job.py` with Job Popoto model
-- Add fields: job_id, chat_id, message_id, sender_name, message_text, project_key, status, created_at, steering_messages, result_text
-- Add helper methods: add_steering_message(), get_sessions(), mark_complete()
-
-### 3. Refactor AgentSession model
-- **Task ID**: build-session-refactor
-- **Depends On**: build-job-model
-- **Validates**: `pytest tests/unit/test_model_relationships.py tests/unit/test_session_status.py -x -q`
-- **Assigned To**: model-builder
-- **Agent Type**: builder
-- **Parallel**: false
-- Strip AgentSession to: session_id, parent_job_id, claude_session_uuid, status, sdlc_stages, slug, artifacts, created_at
-- Add derived properties: is_sdlc, current_stage, branch_name, plan_path
-- Migrate fields that belong on Job (chat_id, message_text, sender_name, steering_messages) to Job model
+- Create `AgentSession` base model in `models/agent_session.py` with shared fields
+- Create `ChatSession(AgentSession)` in `models/chat_session.py` with conversation fields
+- Create `DevSession(AgentSession)` in `models/dev_session.py` with execution fields
+- Add derived properties on DevSession: is_sdlc, current_stage, branch_name, plan_path
+- Add helper methods: ChatSession.get_dev_sessions(), DevSession.get_parent_chat_session()
 - Update all imports and references
 
 ### 4. Rekey queue to chat_id
 - **Task ID**: build-queue-rekey
-- **Depends On**: build-session-refactor
+- **Depends On**: build-models
 - **Validates**: `pytest tests/integration/test_job_queue_race.py tests/integration/test_job_scheduler.py -x -q`
 - **Assigned To**: queue-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Change queue key from project_key to chat_id in job_queue.py
-- Update _push_job, _pop_job, _worker_loop to use Job model
-- Move steering message handling to Job
-- Remove delete-and-recreate pattern — Jobs are immutable, Sessions are append-only children
+- Change queue key from project_key to chat_id using Redis List (`chat_queue:{chat_id}`)
+- Update worker loop to pop ChatSessions from per-chat_id queues
+- Steering messages route to ChatSession via bounded Redis List
+- Remove delete-and-recreate pattern — sessions transition to terminal states, never deleted
 
-### 5. Implement single-session SDLC
-- **Task ID**: build-single-session
+### 5. Implement ChatSession as orchestrator
+- **Task ID**: build-chat-session-orchestrator
 - **Depends On**: build-queue-rekey
-- **Validates**: `pytest tests/unit/test_sdlc_mode.py tests/unit/test_sdlc_env_vars.py -x -q`
+- **Validates**: `pytest tests/unit/test_observer.py -x -q` (rewritten)
 - **Assigned To**: session-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Rewrite SDLC message: full pipeline spec instead of "invoke /sdlc immediately"
-- Remove re-enqueue loop in _execute_job
-- Add PostToolUse progress hook that detects stage transitions and sends Telegram updates
+- ChatSession spawns as Agent SDK session (read-only, PM persona)
+- Absorbs Observer's role: reads code, decides approach, spawns DevSessions
+- Absorbs summarizer's delivery formatting into persona voice
+- Classification happens inside ChatSession (remove double classification from routing.py + sdk_client.py)
+- Remove old Observer (bridge/observer.py)
 - Remove auto-continue caps (MAX_AUTO_CONTINUES, MAX_AUTO_CONTINUES_SDLC)
-- Remove _enqueue_continuation for SDLC stage progression
 
-### 6. Simplify Observer
-- **Task ID**: build-observer
-- **Depends On**: build-single-session
-- **Validates**: `pytest tests/unit/test_observer.py -x -q` (rewritten)
+### 6. Implement single-DevSession SDLC pipeline
+- **Task ID**: build-single-dev-session
+- **Depends On**: build-chat-session-orchestrator
+- **Validates**: `pytest tests/unit/test_sdlc_mode.py tests/unit/test_sdlc_env_vars.py -x -q`
 - **Assigned To**: observer-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Replace Observer class with deterministic function
-- Logic: check session.sdlc_stages → remaining stages? steer. blocked/complete? deliver.
-- Remove: _run_llm_observer(), _build_tools(), _build_observer_system_prompt()
-- Keep: stop_reason handling, stall detection integration
-- Remove double classification in sdk_client.py
+- Rewrite SDLC prompt: full pipeline spec (via /sdlc skill) instead of "invoke /sdlc immediately" single-stage
+- DevSession works through all stages in single process
+- ChatSession monitors DevSession output, nudges between stages
+- Remove re-enqueue loop and _enqueue_continuation
+- Remove playlist concept
 
 ### 7. Update test suite
 - **Task ID**: build-tests
-- **Depends On**: build-observer
+- **Depends On**: build-single-dev-session
 - **Validates**: `pytest tests/ -x -q`
 - **Assigned To**: test-engineer
 - **Agent Type**: test-engineer
 - **Parallel**: false
-- Delete tests for removed functionality (auto-continue, LLM Observer, enqueue_continuation)
-- Rewrite tests for new Job/Session models
-- Rewrite e2e pipeline tests for single-session flow
+- Delete tests for removed functionality (auto-continue, LLM Observer, enqueue_continuation, playlist)
+- Rewrite tests for ChatSession/DevSession models
+- Rewrite e2e pipeline tests for single-DevSession flow
 - Ensure all 24 affected test files are updated
 
 ### 8. Validate integration
@@ -531,11 +547,11 @@ One change the agent will notice: SDLC sessions receive the full pipeline spec i
 - **Assigned To**: integration-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Verify Job → Session FK relationship works
+- Verify ChatSession → DevSession relationship works
 - Verify per-chat_id queue serialization
-- Verify full SDLC pipeline completes in single session
-- Verify steering messages route through Job to active Session
-- Verify Observer makes zero LLM calls
+- Verify full SDLC pipeline completes in single DevSession
+- Verify steering messages route through ChatSession to active DevSession
+- Verify no separate Observer component exists
 
 ### 9. Documentation
 - **Task ID**: document-feature
@@ -543,8 +559,8 @@ One change the agent will notice: SDLC sessions receive the full pipeline spec i
 - **Assigned To**: docs-writer
 - **Agent Type**: documentarian
 - **Parallel**: false
-- Create `docs/features/job-session-architecture.md`
-- Update `docs/features/observer-agent.md`
+- Create `docs/features/chat-dev-session-architecture.md`
+- Update or remove `docs/features/observer-agent.md` (Observer absorbed into ChatSession)
 - Update `CLAUDE.md` architecture diagram
 - Add entry to `docs/features/README.md`
 
@@ -565,23 +581,23 @@ One change the agent will notice: SDLC sessions receive the full pipeline spec i
 | Tests pass | `pytest tests/ -x -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| Job model exists | `python -c "from models.job import Job; print('ok')"` | output contains ok |
-| Session has slug | `python -c "from models.agent_session import AgentSession; assert hasattr(AgentSession, 'slug')"` | exit code 0 |
+| ChatSession model exists | `python -c "from models.chat_session import ChatSession; print('ok')"` | output contains ok |
+| DevSession has slug | `python -c "from models.dev_session import DevSession; assert hasattr(DevSession, 'slug')"` | exit code 0 |
 | No budget refs | `grep -rn 'max_budget_usd\|budget_exceeded\|COST_WARN' agent/ bridge/ --include='*.py'` | exit code 1 |
 | No double classify | `grep -cn 'classify_work_request' agent/sdk_client.py` | output contains 0 |
-| Observer no LLM | `grep -cn 'ClaudeAPIClient\|claude_client\|anthropic' bridge/observer.py` | output contains 0 |
-| Queue uses chat_id | `grep -n 'chat_id' agent/job_queue.py \| head -1` | output contains chat_id |
+| No separate Observer | `test ! -f bridge/observer.py` | exit code 0 |
+| Queue uses chat_id | `grep -n 'chat_queue' agent/job_queue.py \| head -1` | output contains chat_queue |
 
 ## Migration Strategy
 
 ### In-Flight Session Handling
-On deploy, restart the bridge. Any in-flight sessions are abandoned (existing crash recovery handles this). Old AgentSession records in Redis are harmless — they use different key patterns and won't collide with new Job/Session records. No data migration needed.
+On deploy, restart the bridge. Any in-flight sessions are abandoned (existing crash recovery handles this). Old AgentSession records in Redis are harmless — they use different key patterns and won't collide with new ChatSession/DevSession records. No data migration needed.
 
 ### Queue Cutover
 Old queue keys (`queue:{project_key}`) will be empty after restart since workers drain on shutdown. New queue keys (`job_queue:{chat_id}`) start fresh. No messages lost because the bridge only enqueues after restart.
 
 ### Rollback Path
-If bugs surface after Phase 1 (model split): revert the commit, restart bridge. Old AgentSession code paths still work because the model file is restored. New Job records in Redis are orphaned but harmless (TTL cleanup). Each phase is independently revertable via git revert + restart.
+If bugs surface after Phase 1 (model split): revert the commit, restart bridge. Old AgentSession code paths still work because the model file is restored. New ChatSession/DevSession records in Redis are orphaned but harmless (TTL cleanup). Each phase is independently revertable via git revert + restart.
 
 ## RFC Feedback
 
@@ -595,18 +611,18 @@ If bugs surface after Phase 1 (model split): revert the commit, restart bridge. 
 | CONCERN | async-specialist | Popoto ORM uses synchronous Redis calls blocking event loop | Noted for future: migrate to redis.asyncio. For now, existing pattern works and sessions are I/O-bound on Claude API, not Redis. |
 | CONCERN | async-specialist | Graceful shutdown of long-running sessions on bridge restart | Addressed in Session Liveness: 60-min max lifetime. On restart, sessions are abandoned and can resume via claude_session_uuid. |
 | CONCERN | async-specialist | Memory growth from long Claude sessions | Claude Code handles context compression internally. Sub-agents for heavy tasks keep main context clean. Monitor in practice. |
-| CONCERN | data-architect | job_type must be authoritative on Job, never re-derived from session | Addressed: removed classification from plan entirely. SDLC is a session property (sdlc_stages != null), not a Job property. |
-| CONCERN | data-architect | No session sequence numbering for "current session" lookup | Addressed: added `sequence` field on AgentSession and `current_session_seq` on Job. |
+| CONCERN | data-architect | job_type must be authoritative, never re-derived | Addressed: SDLC is a DevSession property (sdlc_stages != null). ChatSession doesn't pre-classify. |
+| CONCERN | data-architect | No session sequence numbering for "current session" lookup | Addressed: ChatSession queries DevSessions by parent_chat_session_id; latest by created_at. |
 | CONCERN | data-architect | No concurrent-dequeue protection specified | Addressed: atomic `RPOP` on Redis List guarantees exactly-once dequeue. |
 
-## Open Questions
+## Resolved Questions
 
-1. **Should the /sdlc skill be removed entirely?** If the full pipeline spec is in the prompt, /sdlc becomes redundant. But keeping it as a skill means it's versionable and editable without changing Python code. Recommend: keep /sdlc but rewrite it as the full pipeline spec (not a single-stage router).
+1. **Keep /sdlc skill.** It remains the ground truth for the Observer (alongside the pipeline graph). Used manually in Claude Code sessions and by the Observer to steer sessions. Rewritten as full pipeline spec, not single-stage router.
 
-2. **What happens to the playlist feature (#450)?** The playlist hook currently auto-pops the next issue after a job completes. In the new model, this hooks into Job completion rather than AgentSession completion. Should be a straightforward migration but needs explicit handling.
+2. **Remove "playlist" concept entirely.** Messages start and end with Jobs — no remaining connection between Jobs via playlist queues. If an agent needs to send a Telegram message (e.g., to queue the next issue), it uses the Telegram skill like any other tool. The playlist feature (#450) is deprecated by this redesign.
 
-3. **Should the summarizer change?** Currently the summarizer formats SDLC output with stage progress lines. With single-session, the session output already contains all stages. The summarizer may need to extract a final summary rather than format per-stage output. Recommend: keep summarizer for now, adapt formatting to single-session output.
+3. **Summarizer merges with persona message writing.** The summarizer's formatting role is absorbed into the persona's message-writing capability. Each persona (Dev, PM) has its own voice for composing delivery messages. The summarizer as a separate component is deprecated.
 
-4. **Non-SDLC message in SDLC chat**: If "what time is it?" arrives in a chat with an active SDLC Job, should it create a new Job or be treated as steering? Recommend: new Job. The per-chat_id queue serializes it — it waits until the SDLC Job completes, then runs as a simple question.
+4. **Chat messages always spawn new ChatSessions.** Every new message creates a new ChatSession. The ~7-second window after a ChatSession starts allows rapid follow-up messages to become steering automatically (existing behavior). Reply-to messages are always steering for the referenced ChatSession.
 
-5. **Slug deduplication**: If a new message arrives for an existing slug that has a pending Job, should it merge into the existing Job or create a new one? Recommend: new Job. Deduplication is fragile; let the queue serialize and the human can steer if needed.
+5. **Slugs are agent-created, not user-specified.** A message cannot "arrive for an existing slug" — the DevSession agent writes the slug during execution. Reply-to messages are steering for the parent ChatSession, not slug-based routing.
