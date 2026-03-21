@@ -125,9 +125,10 @@ Replace `CHAT_NAME` with the group name (e.g. `PM: PsyOptimal`, `Dev: Valor`). T
 - Do NOT parallelize sequential/dependent work
 - Always aggregate results before reporting
 
-### 9. SDLC IS OBSERVER-STEERED
+### 9. SDLC PIPELINE
+- The **deterministic Observer** routes pipeline progression (no LLM calls for routing)
+- ChatSession (PM persona) orchestrates; DevSession (Dev persona) executes
 - `/sdlc` is a **single-stage router**: it assesses state, invokes ONE sub-skill, and returns
-- The **Observer Agent** handles pipeline progression by re-invoking `/sdlc` after each stage completes
 - NEVER write code, run tests, or create plans directly -- always delegate through sub-skills
 - See `.claude/skills/sdlc/SKILL.md` for the ground truth on pipeline stages
 
@@ -173,14 +174,22 @@ The standard flow from conversation to shipped feature:
 ## System Architecture
 
 ```
-Telegram → Python Bridge (Telethon) → Claude Agent SDK → Claude API
-              (bridge/telegram_bridge.py)    (agent/sdk_client.py)
+Telegram → Python Bridge (Telethon) → ChatSession (read-only, PM persona)
+              (bridge/telegram_bridge.py)     → Deterministic Observer routing
+                                              → Spawns DevSession (full permissions, Dev persona)
+                                                    → Claude Agent SDK → Claude API
+                                                        (agent/sdk_client.py)
 ```
+
+**Session Types** (see `docs/features/chat-dev-session-architecture.md`):
+- **ChatSession** (`session_type="chat"`) - Orchestrates work, PM persona, read-only
+- **DevSession** (`session_type="dev"`) - Does coding work, Dev persona, full permissions
+- **Observer** - Deterministic steer/deliver routing (no LLM calls)
 
 **Key Directories:**
 - `.claude/commands/` - Slash command skills
-- `.claude/agents/` - Subagent definitions
-- `bridge/` - Telegram integration
+- `.claude/agents/` - Subagent definitions (including `dev-session`)
+- `bridge/` - Telegram integration, deterministic Observer
 - `tools/` - Local Python tools
 - `config/` - Configuration files
 

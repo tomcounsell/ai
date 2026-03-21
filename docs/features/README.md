@@ -16,6 +16,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Bridge Workflow Gaps](bridge-workflow-gaps.md) | Auto-continue for status updates, output classification, and session log snapshots | Shipped |
 | [Build Output Verification](build-output-verification.md) | Three-layer verification gates preventing /do-build from silently completing with no code changes | Shipped |
 | [Build Session Reliability](build-session-reliability.md) | Logging propagation, commit-on-exit, worktree isolation, health monitoring | Shipped |
+| [ChatSession/DevSession Architecture](chat-dev-session-architecture.md) | Session type discriminator splitting orchestration (ChatSession) from execution (DevSession) | Shipped |
 | [Classification](classification.md) | Auto-classification of messages as bug/feature/chore with immutability and reclassify skill | Shipped |
 | [Code Impact Finder](code-impact-finder.md) | Semantic search for blast radius analysis during /do-plan | Shipped |
 | [Completion Tracking](completion-tracking.md) | Branch-based work tracking and completion token system | Archived |
