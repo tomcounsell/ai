@@ -36,6 +36,29 @@ Message → ChatSession created (read-only, PM persona) → Queue (per chat_id) 
 - Claude Code spawned once per unit of work, not per stage.
 - Queues are per chat group.
 
+## Spike Results
+
+### spike-1: Can Agent SDK create read-only sessions?
+- **Assumption**: "We can spawn ChatSession as a read-only Claude Code process"
+- **Method**: code-read
+- **Finding**: YES. SDK supports `permission_mode="plan"`, `allowed_tools=[...]`, and `disallowed_tools=[...]`. The validator agent already uses `_READ_ONLY_TOOLS` list. Multiple orthogonal restriction mechanisms available.
+- **Confidence**: high
+- **Impact on plan**: ChatSession can use `permission_mode="plan"` with `disallowed_tools=["Write", "Edit", "NotebookEdit"]`
+
+### spike-2: Does Popoto ORM support model inheritance?
+- **Assumption**: "We can do `class ChatSession(AgentSession)` with Popoto"
+- **Method**: code-read + prototype
+- **Finding**: NO. Popoto's metaclass (`ModelBase`) does not inherit parent fields into child `_meta.field_names`. After save+reload, parent fields are silently lost. The `# todo: handle multiple inheritance` comment at line 366 confirms this is a known limitation.
+- **Confidence**: high
+- **Impact on plan**: BLOCKER resolved — switched to single model with `session_type` discriminator field instead of class inheritance. Factory methods provide type safety at the Python level.
+
+### spike-3: How does ChatSession spawn DevSession?
+- **Assumption**: "A read-only Claude Code session can programmatically spawn a full-permission session"
+- **Method**: code-read
+- **Finding**: YES. Claude Code's built-in Agent tool can invoke agents defined in `agent_definitions.py`. A new `dev-session` agent with `tools=None` (all tools) gives full write permissions. The validator/code-reviewer agents already demonstrate the pattern of tool-restricted agents. ChatSession invokes `@Agent dev-session` which spawns a subprocess with full access.
+- **Confidence**: high
+- **Impact on plan**: DevSession spawning works via existing Agent tool infrastructure. No new bridge tools or MCP servers needed.
+
 ## Prior Art
 
 - **#211**: Dual AgentSession creation per message — identified the symptom of conflated models, fixed by deduplication rather than separation
@@ -88,9 +111,9 @@ Message → ChatSession created (read-only, PM persona) → Queue (per chat_id) 
 
 ## Architectural Impact
 
-- **New base model**: `AgentSession` — shared fields for any Agent SDK session (session_id, claude_session_uuid, status, created_at)
-- **New model**: `ChatSession(AgentSession)` — read-only Agent SDK session, PM persona. Owns Telegram conversation, orchestrates work.
-- **New model**: `DevSession(AgentSession)` — full-permission Agent SDK session, Dev persona. Does the actual coding work.
+- **Refactored model**: `AgentSession` — single Popoto model with `session_type` discriminator ("chat" or "dev"). No inheritance (Popoto limitation). Factory methods `create_chat()` and `create_dev()` enforce field contracts.
+- **ChatSession (session_type="chat")**: Read-only Agent SDK session, PM persona. Owns Telegram conversation, orchestrates work.
+- **DevSession (session_type="dev")**: Full-permission Agent SDK session, Dev persona. Does the actual coding work. Spawned by ChatSession via Agent tool.
 - **Interface changes**: Observer collapses into ChatSession's orchestration logic. Both session types can be steered via steering messages.
 - **Coupling reduction**: ChatSession ↔ DevSession is a clean parent/child. Both steerable.
 - **Data ownership**: ChatSession owns Telegram conversation state (steering messages, delivery). DevSession owns execution state (sdlc_stages, slug, artifacts).
@@ -142,11 +165,11 @@ Message arrives → ChatSession created (per chat_id queue) →
 
 ### Technical Approach
 
-#### Phase 1: Model Hierarchy
-- Create `AgentSession` base model in `models/agent_session.py`
-- Create `ChatSession(AgentSession)` in `models/chat_session.py`
-- Create `DevSession(AgentSession)` in `models/dev_session.py`
-- Migrate existing AgentSession fields to appropriate subclass
+#### Phase 1: Model Refactor
+- Refactor `AgentSession` in `models/agent_session.py` — add `session_type` discriminator, ChatSession/DevSession fields, factory methods
+- No inheritance (Popoto doesn't support it) — single model, discriminated by `session_type`
+- Add derived properties: is_chat, is_dev, is_sdlc, current_stage, branch_name, plan_path
+- Remove fields that moved or are obsolete
 
 #### Phase 2: Queue Rekey
 - Change queue key from `project_key` to `chat_id`
@@ -175,37 +198,82 @@ Message arrives → ChatSession created (per chat_id queue) →
 
 ### Data Models
 
+**Popoto ORM limitation:** Popoto does not support model inheritance — parent fields are lost on reload because they're not in the child's `_meta.field_names`. Instead, we use a **single model with a discriminator field** and Python-level class methods for type-specific behavior.
+
 ```python
 class AgentSession(Model):
-    """Base: any Agent SDK session."""
+    """Single model for all Agent SDK sessions. Discriminated by session_type."""
     session_id = AutoKeyField()
+    session_type = Field()             # "chat" or "dev"
     claude_session_uuid = Field(null=True)  # for resume
-    status = Field()               # running → completed/failed
+    status = Field()                   # pending → running → completed/failed
     created_at = Field()
 
-class ChatSession(AgentSession):
-    """Read-only Agent SDK session. PM persona. Owns the Telegram conversation."""
-    chat_id = Field()              # Telegram chat → queue key
-    message_id = Field()           # Telegram message that created this
-    sender_name = Field()
-    message_text = Field()
-    project_key = Field()
-    steering_messages = Field()    # bounded Redis List of human follow-ups
-    result_text = Field(null=True) # what was delivered to Telegram
+    # ChatSession fields (null when session_type="dev")
+    chat_id = Field(null=True)         # Telegram chat → queue key
+    message_id = Field(null=True)      # Telegram message that created this
+    sender_name = Field(null=True)
+    message_text = Field(null=True)
+    project_key = Field(null=True)
+    result_text = Field(null=True)     # what was delivered to Telegram
 
-class DevSession(AgentSession):
-    """Full-permission Agent SDK session. Dev persona. Does the work."""
-    parent_chat_session_id = Field()  # logical FK → ChatSession
-    sdlc_stages = Field(null=True)    # JSON dict, null if not SDLC
-    slug = Field(null=True)           # derives branch, plan path, worktree
-    artifacts = Field(null=True)      # JSON: {issue_url, plan_url, pr_url}
+    # DevSession fields (null when session_type="chat")
+    parent_chat_session_id = Field(null=True)  # logical FK → ChatSession
+    sdlc_stages = Field(null=True)     # JSON dict, null if not SDLC
+    slug = Field(null=True)            # derives branch, plan path, worktree
+    artifacts = Field(null=True)       # JSON: {issue_url, plan_url, pr_url}
 ```
 
-Derived properties on DevSession:
-- `is_sdlc` → `self.sdlc_stages is not None`
-- `current_stage` → first stage with status `in_progress`
-- `branch_name` → `f"session/{self.slug}"`
-- `plan_path` → `f"docs/plans/{self.slug}.md"`
+**Python-level type helpers** (not ORM inheritance):
+```python
+# Convenience constructors
+ChatSession = AgentSession  # Factory methods: AgentSession.create_chat(...)
+DevSession = AgentSession   # Factory methods: AgentSession.create_dev(...)
+
+# Derived properties
+@property
+def is_chat(self) -> bool:
+    return self.session_type == "chat"
+
+@property
+def is_dev(self) -> bool:
+    return self.session_type == "dev"
+
+@property
+def is_sdlc(self) -> bool:
+    return self.sdlc_stages is not None
+
+@property
+def current_stage(self) -> str | None:
+    # first stage with status "in_progress"
+
+@property
+def branch_name(self) -> str | None:
+    return f"session/{self.slug}" if self.slug else None
+
+@property
+def plan_path(self) -> str | None:
+    return f"docs/plans/{self.slug}.md" if self.slug else None
+```
+
+### How ChatSession Spawns DevSession
+
+ChatSession runs as a Claude Code process with `permission_mode="plan"` (read-only). To spawn a DevSession:
+
+1. Define a `dev-session` agent in `agent/agent_definitions.py` with `tools=None` (all tools, full permissions)
+2. ChatSession invokes it via the **Agent tool** built into Claude Code
+3. The Agent tool spawns a subprocess Claude Code instance with full write access
+4. The bridge registers the DevSession in Redis with `parent_chat_session_id` pointing back
+
+```python
+# In agent_definitions.py
+definitions["dev-session"] = AgentDefinition(
+    description="Full-permission developer session for code changes",
+    prompt=load_dev_session_prompt(),
+    tools=None,  # All tools — full permissions
+    model=None,  # Inherit from parent
+)
+```
 
 ### Steering Model
 
@@ -225,9 +293,10 @@ Use a **Redis List** keyed as `chat_queue:{chat_id}` for the queue (outside Popo
 ### Referential Integrity Strategy
 
 Redis/Popoto has no FK enforcement. Integrity is maintained by convention:
-- `parent_chat_session_id` on DevSession is a logical FK; orphan detection runs in the watchdog sweep
-- ChatSessions and DevSessions are never deleted — they transition to terminal states and are garbage-collected by TTL
-- ChatSession queries its DevSessions via `DevSession.query.filter(parent_chat_session_id=self.session_id)`
+- `parent_chat_session_id` on dev sessions is a logical FK; orphan detection runs in the watchdog sweep
+- Sessions are never deleted — they transition to terminal states and are garbage-collected by TTL
+- ChatSession finds its DevSessions via `AgentSession.query.filter(parent_chat_session_id=self.session_id)`
+- Single model means all sessions are queryable as `AgentSession.query.filter(...)` regardless of type
 
 ### Session Creation Contract
 
@@ -397,9 +466,10 @@ One change the agent will notice: SDLC sessions receive the full pipeline spec i
 
 ## Success Criteria
 
-- [ ] `AgentSession` base model exists with shared fields (session_id, claude_session_uuid, status, created_at)
-- [ ] `ChatSession(AgentSession)` exists with: chat_id, message_id, sender_name, message_text, project_key, steering_messages, result_text
-- [ ] `DevSession(AgentSession)` exists with: parent_chat_session_id, sdlc_stages, slug, artifacts
+- [ ] `AgentSession` model has `session_type` discriminator with factory methods `create_chat()` and `create_dev()`
+- [ ] ChatSession (session_type="chat") fields: chat_id, message_id, sender_name, message_text, project_key, result_text
+- [ ] DevSession (session_type="dev") fields: parent_chat_session_id, sdlc_stages, slug, artifacts
+- [ ] `dev-session` agent defined in `agent_definitions.py` with `tools=None` (full permissions)
 - [ ] Chat queue is keyed by `chat_id`
 - [ ] Full SDLC pipeline (issue → merge) completes in a single DevSession
 - [ ] ChatSession (PM persona) orchestrates without a separate Observer component
@@ -476,19 +546,20 @@ One change the agent will notice: SDLC sessions receive the full pipeline spec i
 - Remove budget_exceeded from Observer
 - Update affected tests
 
-### 2. Create model hierarchy
+### 2. Refactor AgentSession model
 - **Task ID**: build-models
 - **Depends On**: none
 - **Validates**: `pytest tests/unit/test_model_relationships.py -x -q` (create)
 - **Assigned To**: model-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Create `AgentSession` base model in `models/agent_session.py` with shared fields
-- Create `ChatSession(AgentSession)` in `models/chat_session.py` with conversation fields
-- Create `DevSession(AgentSession)` in `models/dev_session.py` with execution fields
-- Add derived properties on DevSession: is_sdlc, current_stage, branch_name, plan_path
-- Add helper methods: ChatSession.get_dev_sessions(), DevSession.get_parent_chat_session()
-- Update all imports and references
+- Add `session_type` discriminator field ("chat" or "dev") to AgentSession
+- Add ChatSession fields (chat_id, message_id, sender_name, etc.) as nullable
+- Add DevSession fields (parent_chat_session_id, sdlc_stages, slug, artifacts) as nullable
+- Add factory methods: `AgentSession.create_chat(...)`, `AgentSession.create_dev(...)`
+- Add derived properties: is_chat, is_dev, is_sdlc, current_stage, branch_name, plan_path
+- Add `dev-session` agent definition in `agent_definitions.py` with `tools=None`
+- Remove obsolete fields from old AgentSession
 
 ### 4. Rekey queue to chat_id
 - **Task ID**: build-queue-rekey
@@ -581,8 +652,9 @@ One change the agent will notice: SDLC sessions receive the full pipeline spec i
 | Tests pass | `pytest tests/ -x -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| ChatSession model exists | `python -c "from models.chat_session import ChatSession; print('ok')"` | output contains ok |
-| DevSession has slug | `python -c "from models.dev_session import DevSession; assert hasattr(DevSession, 'slug')"` | exit code 0 |
+| Model has discriminator | `python -c "from models.agent_session import AgentSession; assert hasattr(AgentSession, 'session_type')"` | exit code 0 |
+| Factory methods exist | `python -c "from models.agent_session import AgentSession; assert hasattr(AgentSession, 'create_chat')"` | exit code 0 |
+| Dev agent defined | `grep -c 'dev-session' agent/agent_definitions.py` | output contains 1 |
 | No budget refs | `grep -rn 'max_budget_usd\|budget_exceeded\|COST_WARN' agent/ bridge/ --include='*.py'` | exit code 1 |
 | No double classify | `grep -cn 'classify_work_request' agent/sdk_client.py` | output contains 0 |
 | No separate Observer | `test ! -f bridge/observer.py` | exit code 0 |
