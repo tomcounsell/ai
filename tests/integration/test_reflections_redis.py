@@ -292,6 +292,13 @@ class TestReflectionsStateSave:
 class TestRedisDataQuality:
     """Tests for step 14: Redis data quality checks."""
 
+    @pytest.fixture(autouse=True)
+    def _ensure_projects_config(self, tmp_path, monkeypatch):
+        """Create minimal projects.json so ReflectionRunner can initialize."""
+        config_file = tmp_path / "projects.json"
+        config_file.write_text('{"projects": {}}')
+        monkeypatch.setenv("PROJECTS_CONFIG_PATH", str(config_file))
+
     def test_step_registered_as_step_13(self):
         """step_redis_data_quality is registered as step 13."""
         from scripts.reflections import ReflectionRunner

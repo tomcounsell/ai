@@ -58,6 +58,37 @@ class TestResolveOverlayPath:
 class TestLoadPersonaPrompt:
     """Tests for load_persona_prompt()."""
 
+    @pytest.fixture(autouse=True)
+    def _mock_overlay_dir(self, tmp_path, monkeypatch):
+        """Create mock overlay files so tests work on any machine.
+
+        Overlay files are private (iCloud-synced to ~/Desktop/Valor/personas/)
+        and may not exist on dev machines. This fixture creates them in a temp dir.
+        """
+        import agent.sdk_client as sdk_mod
+
+        overlay_dir = tmp_path / "personas"
+        overlay_dir.mkdir()
+        (overlay_dir / "developer.md").write_text(
+            "# Developer Persona\n\n"
+            "## Permissions\n\nFull System Access granted. You have unrestricted "
+            "read/write access to all project files and systems.\n\n"
+            "## Guidelines\n\nFocus on shipping quality code with proper testing."
+        )
+        (overlay_dir / "project-manager.md").write_text(
+            "# Project Manager Persona\n\n"
+            "## Responsibilities\n\nTriage incoming work requests and prioritize "
+            "based on impact and urgency.\n\n"
+            "## Guidelines\n\nCoordinate work across team members effectively."
+        )
+        (overlay_dir / "teammate.md").write_text(
+            "# Teammate Persona\n\n"
+            "## Communication Style\n\nKeep it casual and friendly. Use a "
+            "conversational tone without being overly formal.\n\n"
+            "## Guidelines\n\nBe helpful and approachable in all interactions."
+        )
+        monkeypatch.setattr(sdk_mod, "PERSONAS_OVERLAY_DIR", overlay_dir)
+
     def test_developer_persona_loads(self):
         """Developer persona should include base + developer overlay."""
         prompt = load_persona_prompt("developer")
