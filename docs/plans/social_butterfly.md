@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Medium
 owner: Valor Engels
@@ -12,13 +12,13 @@ last_comment_id:
 
 ## Problem
 
-Valor ships features regularly but has zero public presence. Merged PRs disappear into git history with no external visibility. Valor has an X/Twitter account but never posts.
+Valor ships features regularly but has zero public presence. Merged PRs disappear into git history with no external visibility. Valor has an X/Twitter account (@valorengels) but never posts.
 
 **Current behavior:**
 PRs merge silently. No one outside the team knows what Valor is building.
 
 **Desired outcome:**
-When Valor merges a noteworthy PR, a tweet goes out in his voice — building an online presence organically from the work he's already doing.
+When Valor merges a noteworthy PR, a tweet auto-posts in his voice — building an online presence organically from the work he's already doing. No approval gate; fully autonomous.
 
 ## Prior Art
 
@@ -28,15 +28,14 @@ No prior issues or PRs found related to social media integration in this repo.
 
 1. **Entry point**: `/do-merge` completes successfully (PR squash-merged, branch deleted)
 2. **Social Butterfly skill**: Receives PR context (title, body, plan doc if exists, diff stats). The social butterfly persona evaluates newsworthiness.
-3. **Decision gate**: If not noteworthy → done. If noteworthy → draft tweet.
+3. **Decision gate**: If not noteworthy → done silently. If noteworthy → draft tweet.
 4. **Tweet drafting**: Same persona writes the tweet in Valor's online voice.
-5. **Approval**: Draft sent to Telegram. Valor (or Tom) approves with thumbs-up or edits.
-6. **Posting**: `agent-browser` navigates X/Twitter and posts the tweet from Valor's logged-in session.
-7. **Confirmation**: Screenshot of posted tweet sent to Telegram.
+5. **Posting**: `opencli twitter post` sends the tweet via Chrome's logged-in session. `agent-browser` takes a verification screenshot.
+6. **Confirmation**: Screenshot logged. Errors alert via Telegram.
 
 ## Architectural Impact
 
-- **New dependencies**: None (uses existing agent-browser, Telegram bridge)
+- **New dependencies**: opencli (`@jackwener/opencli`) + Chrome extension for browser bridge
 - **Interface changes**: `/do-merge` gains a post-merge hook invocation
 - **Coupling**: Light — social butterfly is a standalone skill invoked after merge. Merge still works if social butterfly fails.
 - **Reversibility**: Fully reversible — remove the hook from do-merge and delete the skill
@@ -45,10 +44,10 @@ No prior issues or PRs found related to social media integration in this repo.
 
 **Size:** Medium
 
-**Team:** Solo dev, PM review of persona voice
+**Team:** Solo dev
 
 **Interactions:**
-- PM check-ins: 1-2 (persona voice calibration, approval flow preferences)
+- PM check-ins: 0-1 (only if persona voice needs calibration after seeing first tweets)
 - Review rounds: 1 (code review)
 
 ## Prerequisites
@@ -57,43 +56,59 @@ No prior issues or PRs found related to social media integration in this repo.
 |-------------|---------------|---------|
 | opencli installed | `npx @jackwener/opencli --version` | CLI interface for X/Twitter posting |
 | opencli Chrome extension | Check `chrome://extensions` for OpenCLI | Browser bridge for opencli |
-| agent-browser installed | `which agent-browser` | Fallback for screenshots/visual verification |
+| agent-browser installed | `which agent-browser` | Screenshots and visual verification |
 | Chrome running | `pgrep -f Chrome` | Logged-in X/Twitter session |
-| X/Twitter logged in via Chrome | Manual check — open Chrome, navigate to x.com | Valor's account session |
+| X/Twitter logged in via Chrome | Manual check — open Chrome, navigate to x.com | @valorengels account session |
 
 ## Solution
 
 ### Key Elements
 
-- **Social Butterfly Persona** (`config/SOCIAL_BUTTERFLY.md`): Defines Valor's online voice — distinct from his Telegram working voice. This persona is both the gatekeeper (is this tweet-worthy?) and the writer (what's the tweet?).
-- **Social Butterfly Skill** (`.claude/skills/social-butterfly/SKILL.md`): Orchestrates the full flow: evaluate PR, draft tweet, seek approval, post via opencli.
+- **Social Butterfly Persona** (`config/SOCIAL_BUTTERFLY.md`): Defines Valor's online voice — distinct from his Telegram working voice. This persona is both the gatekeeper (is this tweet-worthy?) and the writer (what's the tweet?). Voice inspired by Pieter Levels (honest ship updates), Kelsey Hightower (insight framing), swyx (learn in public), and DHH (values-driven takes).
+- **Social Butterfly Skill** (`.claude/skills/social-butterfly/SKILL.md`): Orchestrates the full flow: evaluate PR, draft tweet, post via opencli. Fully autonomous — no approval step.
 - **Do-Merge Hook**: A few lines added to `/do-merge` that invoke the social butterfly skill after successful merge.
 - **opencli (primary)**: `opencli twitter post --text "..."` — single command replaces multi-step browser automation, massive token savings.
-- **agent-browser (fallback)**: Used only for screenshots and visual verification of posted tweets.
+- **agent-browser (fallback)**: Used for screenshots, visual verification, and as fallback if opencli fails.
 
 ### Flow
 
-**PR merges** → do-merge invokes social butterfly → persona evaluates newsworthiness → **if yes**: draft tweet → send draft to Telegram → **await approval** (👍 or edit) → agent-browser posts to X → screenshot confirmation → **done**
+**PR merges** → do-merge invokes social butterfly → persona evaluates newsworthiness → **if yes**: draft tweet → opencli posts to x.com → agent-browser screenshots for verification → **done**
 
-**If not noteworthy**: Social butterfly responds "Not tweet-worthy" and the flow ends silently.
+**If not noteworthy**: Flow ends silently. No Telegram message, no noise.
 
 ### Technical Approach
 
 - **Persona config**: A markdown file (`config/SOCIAL_BUTTERFLY.md`) containing the persona prompt, voice guidelines, and examples of good/bad tweets. This is injected as context when the skill runs.
 - **Newsworthiness evaluation**: The persona receives PR title, body, plan doc (if linked), and diff stats. It makes a vibes-based judgment — no heuristics, no line-count thresholds. The prompt guides what "interesting" means: new capabilities, architectural shifts, things developers would care about. Routine fixes, doc updates, and config changes are not interesting.
 - **Tweet drafting**: Same prompt invocation. If the persona decides it's noteworthy, it drafts the tweet in the same response. Max 280 chars. Focus on "why it matters" not "what changed."
-- **Approval via Telegram**: The draft is sent to the designated Telegram chat. Three possible responses:
-  - 👍 reaction → post as-is
-  - Text reply → use the reply as the tweet (edited version)
-  - 👎 reaction or "skip" → don't post
+- **No approval gate**: Tweets auto-post. Tom is the supervisor but doesn't want to be bothered unless something goes wrong. The persona's judgment is the only gate.
 - **Browser posting**: Primary: `opencli twitter post --text "tweet text"` — single command, uses Chrome's logged-in session via browser bridge. Fallback: `agent-browser connect 9222` for manual browser automation if opencli fails. Screenshot verification via `agent-browser screenshot` after posting.
-- **Failure handling**: If browser posting fails (session expired, X UI changed), send error to Telegram. Never retry autonomously — social media errors need human awareness.
+- **Failure handling**: If posting fails (session expired, X UI changed), send error to Telegram. Never retry autonomously — social media errors need human awareness. Successful posts don't notify Tom.
+
+### Voice Guidelines (for persona config)
+
+The social butterfly persona draws from four tweet archetypes:
+
+1. **The Insight Tweet** (a la swyx/Kelsey): Share what you learned while building, not just what you built. *"Just shipped context-aware routing for the agent pipeline. Turns out the hard part isn't the AI — it's knowing when NOT to call it."*
+
+2. **The Values Tweet** (a la DHH): Connect the technical decision to a principle. *"Built the approval flow but kept the human in the loop. AI should amplify judgment, not replace it."*
+
+3. **The Ship Tweet** (a la Levels): Raw, honest, short. *"New feature: the system now tweets about its own merged PRs. Yes, this tweet was written by the thing it's describing."*
+
+4. **The Human Moment** (a la Cassidy): Show the person behind the code. *"Spent 3 hours on a bug that turned out to be a missing comma. The AI didn't catch it either. Solidarity."*
+
+**Anti-patterns to avoid:**
+- Corporate announcements: *"We're excited to announce..."*
+- Dry changelogs: *"Merged PR #433: Replace inference-based stage tracking"*
+- Hype without substance: *"This changes everything!!!"*
+- Hashtag spam: *"#AI #MachineLearning #DevOps #Coding"*
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] agent-browser connection failure (Chrome not running, port not open) — must report to Telegram, not silently fail
-- [ ] X/Twitter UI changes breaking selectors — must report, not loop
+- [ ] opencli connection failure (Chrome extension not running) — must report to Telegram, not silently fail
+- [ ] agent-browser connection failure (Chrome not running, port not open) — must report to Telegram
+- [ ] X/Twitter UI changes breaking opencli or selectors — must report, not loop
 
 ### Empty/Invalid Input Handling
 - [ ] PR with no body/description — persona should still evaluate based on title and diff stats
@@ -110,34 +125,33 @@ No existing tests affected — this is a greenfield feature with no prior test c
 ## Rabbit Holes
 
 - **Twitter API integration**: Tempting but unnecessary. opencli with a logged-in Chrome session is simpler and doesn't require API keys, rate limit management, or app approval. The API is a separate project if posting volume ever justifies it.
-- **Building our own Chrome CLI**: Evaluated but unnecessary for v1. opencli already provides `twitter post`, `reply`, `like`, `follow`, `bookmark`, and more. Only build custom if opencli proves unreliable or if we need cross-site CLI commands it doesn't cover.
+- **Building our own Chrome CLI**: Evaluated but unnecessary for v1. opencli already provides `twitter post`, `reply`, `like`, `follow`, `bookmark`, and more. Only build custom if opencli proves unreliable.
 - **Multi-platform posting**: LinkedIn, Bluesky, etc. are future scope. Get one platform working first.
 - **Image/media generation**: Generating screenshots of code, architecture diagrams, etc. for tweets. Cool but not v1.
 - **Analytics/engagement tracking**: Measuring tweet performance. Not needed to ship the core feature.
-- **Auto-posting without approval**: Tempting to skip the approval step for high-confidence tweets. Keep the human in the loop for v1 — social media mistakes are public and permanent.
 
 ## Risks
 
 ### Risk 1: X/Twitter UI changes break opencli or agent-browser selectors
 **Impact:** Posting fails silently or posts wrong content
-**Mitigation:** opencli's `[ui]` commands handle DOM interaction internally — breakage is upstream's problem to fix. agent-browser fallback provides a second path. Screenshot verification after posting catches silent failures. Alert via Telegram on any failure.
+**Mitigation:** opencli handles DOM interaction internally — breakage is upstream's problem to fix. agent-browser fallback provides a second path. Screenshot verification after posting catches silent failures. Alert via Telegram on any failure.
 
 ### Risk 2: Chrome session expires
-**Impact:** agent-browser can't authenticate, posting fails
+**Impact:** Posting fails
 **Mitigation:** Detect auth failure (redirected to login page) and alert via Telegram. Re-login is a manual step — don't automate credential entry.
 
-### Risk 3: Social butterfly persona drifts from Valor's voice
-**Impact:** Tweets feel off-brand or inconsistent
-**Mitigation:** Persona config in `config/SOCIAL_BUTTERFLY.md` is the single source of truth. Include example tweets (good and bad) so the voice stays calibrated. Tom can update the config to steer the voice over time.
+### Risk 3: Persona posts something tone-deaf
+**Impact:** Public tweet that doesn't represent Valor well
+**Mitigation:** Persona config includes strong anti-patterns and examples. The newsworthiness bar is high — most PRs won't trigger a tweet. Worst case, delete the tweet manually. Low volume = low risk.
 
 ## Race Conditions
 
-No race conditions identified — this is a sequential post-merge hook with human-gated approval. Only one merge happens at a time in the SDLC pipeline.
+No race conditions identified — this is a sequential post-merge hook. Only one merge happens at a time in the SDLC pipeline.
 
 ## No-Gos (Out of Scope)
 
 - Multi-platform posting (LinkedIn, Bluesky, etc.)
-- Auto-posting without human approval
+- Human approval gate for tweets (auto-post by design)
 - Media/image generation for tweets
 - Engagement analytics or metrics tracking
 - Replying to mentions or DMs on X
@@ -146,24 +160,25 @@ No race conditions identified — this is a sequential post-merge hook with huma
 
 ## Update System
 
-No update system changes required for the core skill. However:
-- The `config/SOCIAL_BUTTERFLY.md` persona file must be propagated to Valor's machine
-- Chrome must be running with `--remote-debugging-port=9222` on the machine that posts
-- This feature only runs on Valor's primary machine (where Chrome is logged into X)
+The update script needs to install opencli on machines that will post tweets:
+- `npm install -g @jackwener/opencli` added to dependency sync
+- opencli Chrome extension must be installed manually (one-time setup per machine)
+- The `config/SOCIAL_BUTTERFLY.md` persona file propagates via git automatically
+- This feature only runs on machines where Chrome is logged into @valorengels on X
 
 ## Agent Integration
 
 - **New skill**: `.claude/skills/social-butterfly/SKILL.md` — invoked by the agent after merge
 - **Do-merge modification**: Add a post-merge step to `.claude/commands/do-merge.md` that invokes the social butterfly skill
-- **No MCP server needed**: This uses existing agent-browser CLI and Telegram tools
+- **No MCP server needed**: This uses opencli CLI, existing agent-browser CLI, and Telegram tools (for error alerts only)
 - **No bridge changes**: The skill is invoked within the existing Claude Code session that runs do-merge
 - **Integration test**: Verify that after a mock merge, the social butterfly skill is invoked and produces a draft tweet
 
 ## Documentation
 
-- [ ] Create `docs/features/social-butterfly.md` describing the feature, persona config, and approval flow
+- [ ] Create `docs/features/social-butterfly.md` describing the feature, persona config, and posting flow
 - [ ] Add entry to `docs/features/README.md` index table
-- [ ] Document Chrome setup requirements (remote debugging port, logged-in X session)
+- [ ] Document Chrome setup requirements (opencli extension, logged-in X session)
 
 ## Success Criteria
 
@@ -171,9 +186,8 @@ No update system changes required for the core skill. However:
 - [ ] Social butterfly skill exists at `.claude/skills/social-butterfly/SKILL.md`
 - [ ] `/do-merge` invokes social butterfly after successful merge
 - [ ] Persona correctly identifies noteworthy vs. routine PRs (manual validation with 5+ example PRs)
-- [ ] Draft tweets are sent to Telegram for approval
-- [ ] 👍 reaction triggers agent-browser to post to X/Twitter
-- [ ] Posted tweet is confirmed with a screenshot sent to Telegram
+- [ ] Noteworthy PRs result in auto-posted tweets to @valorengels
+- [ ] Posted tweet is confirmed with a screenshot
 - [ ] Failed posts alert via Telegram instead of failing silently
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
@@ -196,13 +210,13 @@ No update system changes required for the core skill. However:
 
 - **Builder (browser-flow)**
   - Name: browser-builder
-  - Role: Implement the agent-browser posting flow with approval gate
+  - Role: Implement the opencli posting flow with agent-browser fallback
   - Agent Type: builder
   - Resume: true
 
 - **Validator (end-to-end)**
   - Name: e2e-validator
-  - Role: Validate the full flow from merge → tweet draft → approval → post
+  - Role: Validate the full flow from merge → tweet draft → post
   - Agent Type: validator
   - Resume: true
 
@@ -222,10 +236,11 @@ No update system changes required for the core skill. However:
 - **Agent Type**: builder
 - **Parallel**: true
 - Create `config/SOCIAL_BUTTERFLY.md` with:
-  - Persona identity and purpose
-  - Voice guidelines (distinct from Telegram voice — more public, more punchy, developer-audience-aware)
+  - Persona identity: Valor's public voice on social media
+  - Voice guidelines inspired by Levels (ship updates), Kelsey (insights), swyx (learn in public), DHH (values)
   - Newsworthiness criteria (what makes a PR tweet-worthy)
-  - 5+ example good tweets and 5+ example bad tweets
+  - 5+ example good tweets across the four archetypes
+  - 5+ example bad tweets (anti-patterns)
   - Tweet structure guidelines (max 280 chars, "why it matters" framing)
 
 ### 2. Implement Social Butterfly Skill
@@ -240,11 +255,10 @@ No update system changes required for the core skill. However:
   - Step 1: Load persona from `config/SOCIAL_BUTTERFLY.md`
   - Step 2: Evaluate newsworthiness (return early if not noteworthy)
   - Step 3: Draft tweet
-  - Step 4: Send draft to Telegram for approval
-  - Step 5: On approval, invoke agent-browser to post
-  - Step 6: Screenshot and confirm
+  - Step 4: Post via opencli (fallback: agent-browser)
+  - Step 5: Screenshot and confirm (errors → Telegram alert)
 
-### 3. Implement Browser Posting Flow
+### 3. Implement Posting Flow
 - **Task ID**: build-browser
 - **Depends On**: build-skill
 - **Validates**: `tests/integration/test_social_butterfly.py` (create)
@@ -257,6 +271,7 @@ No update system changes required for the core skill. However:
   - Screenshot verification: `agent-browser connect 9222` → navigate to Valor's profile → screenshot latest tweet
   - Fallback: If opencli fails, fall back to agent-browser multi-step flow (open x.com, snapshot, fill compose, click post)
 - Handle failure cases: opencli bridge not running, session expired, post failed, fallback also failed
+- On failure: send error to Telegram via `valor-telegram send`
 
 ### 4. Add Do-Merge Hook
 - **Task ID**: build-hook
@@ -280,7 +295,7 @@ No update system changes required for the core skill. However:
 - Verify persona config exists and has required sections
 - Verify skill file follows existing skill patterns
 - Verify do-merge includes social butterfly invocation
-- Verify agent-browser commands are correct for X/Twitter
+- Verify opencli and agent-browser commands are correct for X/Twitter
 - Dry-run with a recently merged PR to verify draft generation
 
 ### 6. Documentation
@@ -291,7 +306,7 @@ No update system changes required for the core skill. However:
 - **Parallel**: false
 - Create `docs/features/social-butterfly.md`
 - Add entry to `docs/features/README.md`
-- Document Chrome setup requirements
+- Document Chrome + opencli setup requirements
 
 ### 7. Final Validation
 - **Task ID**: validate-all
@@ -313,12 +328,3 @@ No update system changes required for the core skill. However:
 | Feature docs exist | `test -f docs/features/social-butterfly.md` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-
----
-
-## Open Questions
-
-1. **Valor's X/Twitter handle**: What's the account username? Needed for the agent-browser navigation and persona config.
-2. **Telegram approval chat**: Which Telegram chat should receive tweet drafts for approval? The main "Dev: Valor" chat, or a dedicated channel?
-3. **Persona voice calibration**: The persona config will have example tweets — do you want to provide some examples of the tone you're going for, or should the first draft propose a voice and you'll iterate?
-4. **Chrome session on Valor's machine**: Is Chrome already running with `--remote-debugging-port=9222` on Valor's machine, or does that need to be set up?
