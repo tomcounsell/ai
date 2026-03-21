@@ -256,36 +256,22 @@ Then it implements the plugin across several files:
 - `tests/test_revenue_analytics.py` -- Unit tests for the engine
 - `tests/test_revenue_api.py` -- API endpoint tests
 
-**What could go wrong (budget exceeded mid-build)**: Halfway through implementing the cohort matrix, the Claude API returns `stop_reason: budget_exceeded`. The worker process terminates with partial output.
+**What could go wrong (rate limited mid-build)**: Halfway through implementing the cohort matrix, the Claude API returns `stop_reason: rate_limited`. The worker process is interrupted.
 
-The Observer receives the truncated output with `stop_reason="budget_exceeded"`. The deterministic stop_reason routing catches this before any LLM call:
+The Observer receives the truncated output with `stop_reason="rate_limited"`. The deterministic stop_reason routing catches this before any LLM call and steers with a backoff instruction:
 
 ```python
-# Phase 1.5: Deterministic routing based on stop_reason
-if self.stop_reason == "budget_exceeded":
-    logger.warning(f"{self._log_prefix} Worker stopped: budget_exceeded — delivering")
+# Phase 1: Deterministic routing based on stop_reason
+if self.stop_reason == "rate_limited":
+    logger.warning(f"{self._log_prefix} Worker stopped: rate_limited — steering with backoff")
     return {
-        "action": "deliver",
-        "reason": "Worker budget exceeded. Partial output delivered.",
-        "transitions_applied": transitions_applied,
+        "action": "steer",
+        "coaching_message": "Rate limited by API. Wait briefly and resume.",
         "stop_reason": self.stop_reason,
     }
 ```
 
-**What the human sees**:
-
-```
-Build in progress for Revenue Analytics Plugin but hit the budget
-limit. The MRR engine and API endpoints are implemented. Cohort
-matrix is partially done. I'll need another session to finish.
-
-Completed: engine.py, api.py, 2 test files
-Remaining: cohort matrix logic, dashboard template
-```
-
-Valor replies: "continue"
-
-The worker resumes. The pipeline state file at `data/pipeline/revenue-analytics-plugin/state.json` shows where it left off:
+The worker resumes after the backoff. The pipeline state file at `data/pipeline/revenue-analytics-plugin/state.json` shows where it left off:
 
 ```json
 {
@@ -780,7 +766,7 @@ Here's the complete decision log for this feature, from spark to merge. Each lin
 14:14:58 [obs-a7c3] steer  typed-outcome: ISSUE success
 14:16:42 [obs-a7c3] deliver plan has open questions (LLM judgment)
 14:47:01 [obs-a7c3] steer  deterministic-sdlc-guard: BUILD pending
-15:08:33 [obs-a7c3] deliver stop_reason: budget_exceeded
+15:08:33 [obs-a7c3] steer  stop_reason: rate_limited (backoff)
 15:12:44 [obs-a7c3] steer  deterministic-sdlc-guard: BUILD pending (resumed)
 15:28:16 [obs-a7c3] steer  typed-outcome: BUILD success
 15:29:02 [obs-a7c3] steer  typed-outcome: TEST fail (LLM: fixable, steer to PATCH)
@@ -794,7 +780,7 @@ Here's the complete decision log for this feature, from spark to merge. Each lin
 15:39:12 [obs-a7c3] deliver typed-outcome: MERGE success, pipeline complete
 ```
 
-Sixteen decisions. Three were delivered to the human (plan questions, budget exceeded, final merge readiness). Thirteen were silent steers. The human typed four messages total across 90 minutes: the original request, answers to plan questions, "continue" after the budget limit, and "merge" at the end.
+Sixteen decisions. Two were delivered to the human (plan questions, final merge readiness). Fourteen were silent steers. The human typed three messages total across 90 minutes: the original request, answers to plan questions, and "merge" at the end.
 
 ### The Interplay Between Deterministic Guards and LLM Judgment
 
@@ -802,7 +788,7 @@ The decision log reveals the system's layered architecture:
 
 1. **Typed outcomes** (fastest): When the worker emits a structured `<!-- OUTCOME -->` block, routing is deterministic. No LLM call. This handled 10 of 16 decisions.
 
-2. **Stop reason routing** (fast): When the SDK reports `budget_exceeded` or `rate_limited`, the Observer routes deterministically. This handled 1 decision.
+2. **Stop reason routing** (fast): When the SDK reports `rate_limited`, the Observer routes deterministically with a backoff. This handled 1 decision.
 
 3. **Deterministic SDLC guard** (fast): When stages remain and no safety conditions are triggered, the guard force-steers to the next stage. This handled 3 decisions.
 

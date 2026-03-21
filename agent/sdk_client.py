@@ -299,9 +299,6 @@ PERSONAS_OVERLAY_DIR = Path.home() / "Desktop" / "Valor" / "personas"
 # Path to PRINCIPAL.md — supervisor's operating context for strategic decisions
 PRINCIPAL_PATH = Path(__file__).parent.parent / "config" / "PRINCIPAL.md"
 
-# Log a warning when a single query's equivalent API cost exceeds this
-_COST_WARN_THRESHOLD = float(os.getenv("SDK_COST_WARN_THRESHOLD", "0.50"))
-
 # Worker safety rails injected into every agent session.
 # The Observer Agent (bridge/observer.py) is the sole pipeline controller —
 # it steers the worker one stage at a time via coaching messages.
@@ -777,7 +774,6 @@ class ValorAgent:
         permission_mode: str = "bypassPermissions",
         workflow_id: str | None = None,
         task_list_id: str | None = None,
-        max_budget_usd: float | None = None,
         chat_id: str | None = None,
         project_key: str | None = None,
         message_id: int | None = None,
@@ -795,8 +791,6 @@ class ValorAgent:
             workflow_id: Optional workflow ID for multi-phase workflow tracking.
             task_list_id: Optional task list ID to scope sub-agent Task storage
                 via CLAUDE_CODE_TASK_LIST_ID environment variable.
-            max_budget_usd: Maximum budget in USD for a single agent session.
-                Defaults to SDK_MAX_BUDGET_USD env var or 5.00.
             chat_id: Optional chat ID for routing context injection.
             project_key: Optional project key for routing context injection.
             message_id: Optional message ID for routing context injection.
@@ -817,7 +811,6 @@ class ValorAgent:
         self.permission_mode = permission_mode
         self.workflow_id = workflow_id
         self.task_list_id = task_list_id
-        self.max_budget_usd = max_budget_usd or float(os.getenv("SDK_MAX_BUDGET_USD", "5.00"))
         self.chat_id = chat_id
         self.project_key = project_key
         self.message_id = message_id
@@ -996,7 +989,6 @@ class ValorAgent:
             env=env,
             hooks=build_hooks_config(),
             agents=get_agent_definitions(),
-            max_budget_usd=self.max_budget_usd,
         )
 
     async def query(self, message: str, session_id: str | None = None, max_retries: int = 2) -> str:
@@ -1093,10 +1085,7 @@ class ValorAgent:
                                         f"${cost:.4f} equivalent, "
                                         f"{duration}ms"
                                     )
-                                    if cost >= _COST_WARN_THRESHOLD:
-                                        logger.warning(f"High cost query: {summary}")
-                                    else:
-                                        logger.info(summary)
+                                    logger.info(summary)
                                 if msg.is_error and retries < max_retries:
                                     retries += 1
                                     error_text = msg.result or "(empty)"

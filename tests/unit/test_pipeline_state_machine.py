@@ -429,7 +429,7 @@ class TestClassifyOutcome:
         """Non-end_turn stop_reason is classified as fail."""
         session = _make_session()
         sm = PipelineStateMachine(session)
-        assert sm.classify_outcome("BUILD", "budget_exceeded") == "fail"
+        assert sm.classify_outcome("BUILD", "timeout") == "fail"
         assert sm.classify_outcome("TEST", "rate_limited") == "fail"
 
     def test_end_turn_with_test_pass(self):

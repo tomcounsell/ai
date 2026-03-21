@@ -390,7 +390,7 @@ class Observer:
         auto_continue_count: Current auto-continue count for this session
         send_cb: Async callback to send messages to Telegram
         enqueue_fn: Async function to enqueue a continuation job
-        stop_reason: SDK stop reason for the worker (end_turn, budget_exceeded, etc.)
+        stop_reason: SDK stop reason for the worker (end_turn, rate_limited, etc.)
         model: Override the default model for the Observer LLM
     """
 
@@ -600,29 +600,6 @@ class Observer:
         # Phase 1: Deterministic routing based on stop_reason
         if self.stop_reason and self.stop_reason not in ("end_turn", None):
             cid = getattr(self.session, "correlation_id", None) or "unknown"
-            if self.stop_reason == "budget_exceeded":
-                logger.warning(f"{self._log_prefix} Worker stopped: budget_exceeded — delivering")
-                record_decision(
-                    self.session.session_id,
-                    cid,
-                    "deliver",
-                    "stop_reason: budget_exceeded",
-                )
-                # Mark current stage as failed
-                if sm and current:
-                    try:
-                        sm.fail_stage(current)
-                    except Exception:
-                        pass
-                return {
-                    "action": "deliver",
-                    "reason": "Worker budget exceeded. Partial output delivered.",
-                    "stop_reason": self.stop_reason,
-                    "resolved_stage": None,
-                    "stage_outcome": None,
-                    "next_stage": None,
-                }
-
             if self.stop_reason == "rate_limited":
                 logger.warning(
                     f"{self._log_prefix} Worker stopped: rate_limited — steering with backoff"
@@ -668,7 +645,7 @@ class Observer:
 
         # Phase 3: Deterministic SDLC guard
         # If SDLC with remaining stages: steer to next stage unless blocked
-        stop_is_terminal = self.stop_reason in ("fail", "budget_exceeded")
+        stop_is_terminal = self.stop_reason in ("fail",)
         cap_reached = self.auto_continue_count >= max_continues
         needs_human = _output_needs_human_input(self.worker_output)
 

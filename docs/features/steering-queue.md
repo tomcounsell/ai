@@ -181,7 +181,7 @@ The `_active_clients` registry opens up capabilities beyond steering:
 
 - **Direct health inspection**: Instead of reading transcript files and asking Haiku to judge health (current approach), we could inspect the client's state directly — checking message counts, elapsed time, or the last tool name. This makes the health check simpler and eliminates the Haiku API call for routine checks.
 - **Parallel session inspection**: A monitoring endpoint or diagnostic tool could list all running sessions with their client state (connected, message count, duration) without parsing log files.
-- **Cost tracking in real-time**: `ResultMessage.total_cost_usd` is available on the client's response stream. The registry makes it possible to query accumulated cost for a running session from outside (e.g., to enforce budget limits before the session completes).
+- **Cost tracking in real-time**: `ResultMessage.total_cost_usd` is available on the client's response stream. The registry makes it possible to query accumulated cost for a running session from outside for observability.
 - **Graceful shutdown improvement**: `_graceful_shutdown()` currently resets jobs to pending via Redis. With the registry, it could call `client.interrupt()` on each active client first, giving the agent a chance to save state before the process exits.
 
 #### 5. Steering Queue Functions (new module: `agent/steering.py`)

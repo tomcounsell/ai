@@ -61,7 +61,7 @@ The state machine validates transitions using `PIPELINE_EDGES` from `bridge/pipe
 ## Outcome Classification
 
 `classify_outcome()` uses a two-tier approach:
-1. **SDK stop_reason**: non-`end_turn` reasons (budget_exceeded, rate_limited) are process failures
+1. **SDK stop_reason**: non-`end_turn` reasons (rate_limited, timeout, etc.) are process failures
 2. **Output tail patterns**: stage-specific patterns in the last 500 chars of output
 
 Falls back to `"ambiguous"` for the Observer LLM to handle.

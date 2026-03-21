@@ -2,7 +2,7 @@
 
 ## Overview
 
-Upgraded `claude-agent-sdk` from 0.1.27 to 0.1.35 with programmatic agent definitions, expanded hooks, cost budgeting, and agent-addressable steering.
+Upgraded `claude-agent-sdk` from 0.1.27 to 0.1.35 with programmatic agent definitions, expanded hooks, and agent-addressable steering.
 
 ## Version Upgrade
 
@@ -27,12 +27,6 @@ Upgraded `claude-agent-sdk` from 0.1.27 to 0.1.35 with programmatic agent defini
 - **SubagentStop**: logs subagent completion
 - **PreCompact**: logs context compaction events
 - All hooks use proper SDK type annotations
-
-## Cost Budgeting
-
-- `max_budget_usd` parameter on `ValorAgent`
-- Default: $5.00 (configurable via `SDK_MAX_BUDGET_USD` env var)
-- Hard limit alongside existing `_COST_WARN_THRESHOLD` soft warning
 
 ## Agent-Addressable Steering
 
