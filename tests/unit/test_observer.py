@@ -2,7 +2,7 @@
 
 Tests the Observer's routing decision framework using PipelineStateMachine
 for stage tracking. Covers:
-- Deterministic stop_reason routing (budget_exceeded, rate_limited)
+- Deterministic stop_reason routing (rate_limited)
 - State machine outcome classification integration
 - Deterministic SDLC guard (steer when stages remain)
 - Human input detection bypass
@@ -110,14 +110,6 @@ class TestHumanInputDetection:
 
 class TestStopReasonRouting:
     """Test deterministic routing based on SDK stop_reason."""
-
-    @pytest.mark.asyncio
-    async def test_budget_exceeded_delivers(self):
-        session = _make_session(stage_states=json.dumps({"BUILD": "in_progress"}))
-        observer = _make_observer(session, stop_reason="budget_exceeded")
-        decision = await observer.run()
-        assert decision["action"] == "deliver"
-        assert "budget exceeded" in decision["reason"].lower()
 
     @pytest.mark.asyncio
     async def test_rate_limited_steers(self):
@@ -312,7 +304,7 @@ class TestDecisionStructure:
     @pytest.mark.asyncio
     async def test_deliver_decision_has_stage_fields(self):
         session = _make_session(stage_states=json.dumps({"BUILD": "in_progress"}))
-        observer = _make_observer(session, stop_reason="budget_exceeded")
+        observer = _make_observer(session, stop_reason="fail")
         decision = await observer.run()
         assert "resolved_stage" in decision
         assert "next_stage" in decision

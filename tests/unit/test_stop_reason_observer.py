@@ -2,10 +2,9 @@
 
 Covers:
 1. Observer._handle_read_session() includes stop_reason in output
-2. Observer.run() deterministic routing for budget_exceeded -> DELIVER
-3. Observer.run() deterministic routing for rate_limited -> STEER with backoff
-4. Observer.run() passes through end_turn normally (no short-circuit)
-5. Stop reason registry get/consume semantics
+2. Observer.run() deterministic routing for rate_limited -> STEER with backoff
+3. Observer.run() passes through end_turn normally (no short-circuit)
+4. Stop reason registry get/consume semantics
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -43,10 +42,10 @@ class TestObserverStopReasonRouting:
             auto_continue_count=0,
             send_cb=AsyncMock(),
             enqueue_fn=AsyncMock(),
-            stop_reason="budget_exceeded",
+            stop_reason="rate_limited",
         )
         result = observer._handle_read_session()
-        assert result["stop_reason"] == "budget_exceeded"
+        assert result["stop_reason"] == "rate_limited"
 
     def test_read_session_stop_reason_none_by_default(self, mock_session):
         from bridge.observer import Observer
@@ -60,25 +59,6 @@ class TestObserverStopReasonRouting:
         )
         result = observer._handle_read_session()
         assert result["stop_reason"] is None
-
-    @pytest.mark.asyncio()
-    async def test_budget_exceeded_delivers_with_warning(self, mock_session):
-        """budget_exceeded stop_reason should deliver immediately."""
-        from bridge.observer import Observer
-
-        observer = Observer(
-            session=mock_session,
-            worker_output="partial work done",
-            auto_continue_count=0,
-            send_cb=AsyncMock(),
-            enqueue_fn=AsyncMock(),
-            stop_reason="budget_exceeded",
-        )
-        decision = await observer.run()
-
-        assert decision["action"] == "deliver"
-        assert "budget" in decision["reason"].lower()
-        assert decision["stop_reason"] == "budget_exceeded"
 
     @pytest.mark.asyncio()
     async def test_rate_limited_steers_with_backoff(self, mock_session):
@@ -152,9 +132,9 @@ class TestStopReasonRegistry:
     def test_get_stop_reason_returns_and_clears(self):
         from agent.sdk_client import _session_stop_reasons, get_stop_reason
 
-        _session_stop_reasons["sess-1"] = "budget_exceeded"
+        _session_stop_reasons["sess-1"] = "rate_limited"
         result = get_stop_reason("sess-1")
-        assert result == "budget_exceeded"
+        assert result == "rate_limited"
         # Should be cleared after get
         assert get_stop_reason("sess-1") is None
 
