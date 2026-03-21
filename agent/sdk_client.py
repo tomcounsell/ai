@@ -228,8 +228,8 @@ def _extract_sdlc_env_vars(session_id: str, gh_repo: str | None = None) -> dict[
         if isinstance(branch, str) and branch:
             env["SDLC_PR_BRANCH"] = branch
 
-        # Work item slug
-        slug = getattr(session, "work_item_slug", None)
+        # Work item slug (new DevSessions use session.slug, legacy uses work_item_slug)
+        slug = getattr(session, "slug", None) or getattr(session, "work_item_slug", None)
         if isinstance(slug, str) and slug:
             env["SDLC_SLUG"] = slug
 

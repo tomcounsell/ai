@@ -18,11 +18,9 @@ that ChatSession uses to decide steer vs deliver.
 
 import logging
 import re
-import time
 from typing import Any
 
 from bridge.pipeline_state import PipelineStateMachine
-from bridge.summarizer import extract_artifacts
 from models.agent_session import AgentSession
 from monitoring.telemetry import record_decision, record_interjection
 
