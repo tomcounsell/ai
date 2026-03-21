@@ -2,7 +2,7 @@
 
 ## Overview
 
-Upgraded `claude-agent-sdk` from 0.1.27 to 0.1.35 with programmatic agent definitions, expanded hooks, cost budgeting, and agent-addressable steering.
+Upgraded `claude-agent-sdk` from 0.1.27 to 0.1.35 with programmatic agent definitions, expanded hooks, and agent-addressable steering.
 
 ## Version Upgrade
 
