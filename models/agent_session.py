@@ -1,6 +1,6 @@
 """AgentSession model - unified lifecycle tracking for agent work.
 
-Single Popoto model with session_type discriminator ("chat" or "dev").
+Single Popoto model with session_type discriminator ("chat", "dev", or "simple").
 Popoto does not support model inheritance, so ChatSession and DevSession
 are distinguished by the session_type field with factory methods and
 derived properties providing type-specific behavior.
@@ -40,6 +40,7 @@ SDLC_STAGES = ["ISSUE", "PLAN", "BUILD", "TEST", "REVIEW", "DOCS", "MERGE"]
 # Valid session types
 SESSION_TYPE_CHAT = "chat"
 SESSION_TYPE_DEV = "dev"
+SESSION_TYPE_SIMPLE = "simple"
 
 
 class AgentSession(Model):
@@ -198,6 +199,11 @@ class AgentSession(Model):
         return self.session_type == SESSION_TYPE_DEV
 
     @property
+    def is_simple(self) -> bool:
+        """Whether this is a simple session (Q&A, no orchestration)."""
+        return self.session_type == SESSION_TYPE_SIMPLE
+
+    @property
     def current_stage(self) -> str | None:
         """Return the first SDLC stage with status 'in_progress', or None."""
         stages = self._get_sdlc_stages_dict()
@@ -305,6 +311,39 @@ class AgentSession(Model):
             message_text=message_text,
             slug=slug,
             sdlc_stages=stages_json,
+            created_at=time.time(),
+            **kwargs,
+        )
+        session.save()
+        return session
+
+    @classmethod
+    def create_simple(
+        cls,
+        *,
+        session_id: str,
+        project_key: str,
+        working_dir: str,
+        chat_id: str,
+        message_id: int,
+        message_text: str,
+        sender_name: str | None = None,
+        **kwargs,
+    ) -> "AgentSession":
+        """Create a simple session (Q&A, no orchestration overhead).
+
+        Simple sessions bypass ChatSession/DevSession flow entirely.
+        They handle non-SDLC messages with a single Agent SDK session.
+        """
+        session = cls(
+            session_id=session_id,
+            session_type=SESSION_TYPE_SIMPLE,
+            project_key=project_key,
+            working_dir=working_dir,
+            chat_id=chat_id,
+            message_id=message_id,
+            message_text=message_text,
+            sender_name=sender_name,
             created_at=time.time(),
             **kwargs,
         )
