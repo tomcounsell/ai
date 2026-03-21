@@ -1,0 +1,160 @@
+"""Tests for DevSession registration via PreToolUse and SubagentStop hooks.
+
+Verifies that:
+- PreToolUse detects Agent tool calls with dev-session subagent_type and creates AgentSession
+- SubagentStop logs completion for dev-session agents
+- Non-dev-session agents are ignored by both hooks
+"""
+
+import asyncio
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+
+@pytest.fixture
+def mock_hook_context():
+    """Minimal HookContext mock."""
+    ctx = MagicMock()
+    ctx.session_id = "test-session-123"
+    return ctx
+
+
+@pytest.fixture
+def parent_session_env(monkeypatch):
+    """Set VALOR_SESSION_ID env var to simulate a parent ChatSession."""
+    monkeypatch.setenv("VALOR_SESSION_ID", "parent-chat-session-abc")
+
+
+class TestPreToolUseDevSessionDetection:
+    """PreToolUse hook should detect Agent tool calls spawning dev-sessions."""
+
+    def _make_agent_input(self, subagent_type="dev-session", prompt="Build the feature"):
+        return {
+            "session_id": "sdk-session-1",
+            "transcript_path": "/tmp/transcript.jsonl",
+            "cwd": "/Users/test/src/ai",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Agent",
+            "tool_input": {"type": subagent_type, "prompt": prompt},
+            "tool_use_id": "tool-use-123",
+        }
+
+    def test_detects_agent_tool_with_dev_session_type(self, mock_hook_context, parent_session_env):
+        """When tool_name=Agent and tool_input contains type=dev-session,
+        creates an AgentSession with session_type=dev and correct parent."""
+        from agent.hooks.pre_tool_use import pre_tool_use_hook
+
+        input_data = self._make_agent_input()
+
+        with patch("models.agent_session.AgentSession.create_dev") as mock_create:
+            mock_create.return_value = MagicMock(job_id="dev-job-1")
+
+            result = asyncio.get_event_loop().run_until_complete(
+                pre_tool_use_hook(input_data, "tool-use-123", mock_hook_context)
+            )
+
+            # Should have called create_dev with parent linkage
+            mock_create.assert_called_once()
+            call_kwargs = mock_create.call_args[1]
+            assert call_kwargs["parent_chat_session_id"] == "parent-chat-session-abc"
+            assert call_kwargs["session_type_source"] == "hook"
+
+            # Should not block the tool call
+            assert result.get("decision") != "block"
+
+    def test_ignores_agent_tool_with_non_dev_session_type(
+        self, mock_hook_context, parent_session_env
+    ):
+        """When Agent tool is called with a different subagent type, no DevSession is created."""
+        from agent.hooks.pre_tool_use import pre_tool_use_hook
+
+        input_data = self._make_agent_input(subagent_type="code-reviewer", prompt="Review the PR")
+
+        with patch("models.agent_session.AgentSession.create_dev") as mock_create:
+            result = asyncio.get_event_loop().run_until_complete(
+                pre_tool_use_hook(input_data, "tool-use-456", mock_hook_context)
+            )
+
+            mock_create.assert_not_called()
+            assert result == {}
+
+    def test_ignores_non_agent_tools(self, mock_hook_context, parent_session_env):
+        """Non-Agent tools (Write, Edit, Bash) should not trigger DevSession creation."""
+        from agent.hooks.pre_tool_use import pre_tool_use_hook
+
+        input_data = {
+            "session_id": "sdk-session-1",
+            "transcript_path": "/tmp/transcript.jsonl",
+            "cwd": "/Users/test/src/ai",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Write",
+            "tool_input": {"file_path": "/tmp/test.py", "content": "print('hi')"},
+            "tool_use_id": "tool-use-789",
+        }
+
+        with patch("models.agent_session.AgentSession.create_dev") as mock_create:
+            asyncio.get_event_loop().run_until_complete(
+                pre_tool_use_hook(input_data, "tool-use-789", mock_hook_context)
+            )
+
+            mock_create.assert_not_called()
+
+    def test_no_parent_session_id_skips_registration(self, mock_hook_context, monkeypatch):
+        """When VALOR_SESSION_ID is not set, DevSession registration is skipped."""
+        monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
+
+        from agent.hooks.pre_tool_use import pre_tool_use_hook
+
+        input_data = self._make_agent_input()
+
+        with patch("models.agent_session.AgentSession.create_dev") as mock_create:
+            asyncio.get_event_loop().run_until_complete(
+                pre_tool_use_hook(input_data, "tool-use-000", mock_hook_context)
+            )
+
+            mock_create.assert_not_called()
+
+
+class TestSubagentStopDevSessionCompletion:
+    """SubagentStop hook should log DevSession completion and update status."""
+
+    def _make_stop_input(self, agent_type="dev-session", agent_id="dev-agent-xyz"):
+        return {
+            "session_id": "sdk-session-1",
+            "transcript_path": "/tmp/transcript.jsonl",
+            "cwd": "/Users/test/src/ai",
+            "hook_event_name": "SubagentStop",
+            "stop_hook_active": False,
+            "agent_id": agent_id,
+            "agent_transcript_path": "/tmp/dev-transcript.jsonl",
+            "agent_type": agent_type,
+        }
+
+    def test_calls_register_for_dev_session(self, mock_hook_context, parent_session_env):
+        """When agent_type=dev-session, hook calls _register_dev_session_completion."""
+        from agent.hooks.subagent_stop import subagent_stop_hook
+
+        input_data = self._make_stop_input()
+
+        with patch("agent.hooks.subagent_stop._register_dev_session_completion") as mock_register:
+            result = asyncio.get_event_loop().run_until_complete(
+                subagent_stop_hook(input_data, None, mock_hook_context)
+            )
+
+            mock_register.assert_called_once_with("dev-agent-xyz")
+            assert result == {}
+
+    def test_ignores_non_dev_session_agents(self, mock_hook_context):
+        """When agent_type is not dev-session, no registration occurs."""
+        from agent.hooks.subagent_stop import subagent_stop_hook
+
+        input_data = self._make_stop_input(agent_type="code-reviewer", agent_id="reviewer-abc")
+
+        with patch("agent.hooks.subagent_stop._register_dev_session_completion") as mock_register:
+            result = asyncio.get_event_loop().run_until_complete(
+                subagent_stop_hook(input_data, None, mock_hook_context)
+            )
+
+            mock_register.assert_not_called()
+            assert result == {}
