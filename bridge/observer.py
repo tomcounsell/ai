@@ -102,6 +102,42 @@ def _build_sdlc_context(session: AgentSession) -> dict[str, str]:
     return ctx
 
 
+def _construct_canonical_url(url: str | None, gh_repo: str | None) -> str | None:
+    """Construct a canonical GitHub URL from a worker-provided URL.
+
+    Extracts the issue or PR number from the URL and constructs the canonical
+    URL using the configured GH_REPO, preventing wrong-repo URLs.
+    """
+    from utils.github_patterns import ISSUE_NUMBER_RE as _ISSUE_NUMBER_RE
+    from utils.github_patterns import PR_NUMBER_RE as _PR_NUMBER_RE
+
+    if not url or not isinstance(url, str):
+        return None
+
+    url = url.strip()
+    if not url:
+        return None
+
+    if not gh_repo:
+        logger.warning(
+            f"Cannot construct canonical URL: GH_REPO not configured. Original URL discarded: {url}"
+        )
+        return None
+
+    pr_match = _PR_NUMBER_RE.search(url)
+    if pr_match:
+        number = pr_match.group(1)
+        return f"https://github.com/{gh_repo}/pull/{number}"
+
+    issue_match = _ISSUE_NUMBER_RE.search(url)
+    if issue_match:
+        number = issue_match.group(1)
+        return f"https://github.com/{gh_repo}/issues/{number}"
+
+    logger.warning(f"Cannot extract issue/PR number from URL: {url}. URL discarded.")
+    return None
+
+
 class Observer:
     """Deterministic Observer that makes steer/deliver routing decisions.
 

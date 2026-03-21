@@ -131,6 +131,7 @@ class TestBuildSdlcContext:
         session.pr_url = kwargs.get("pr_url", None)
         session.branch_name = kwargs.get("branch_name", None)
         session.work_item_slug = kwargs.get("work_item_slug", None)
+        session.slug = kwargs.get("slug", kwargs.get("work_item_slug", None))
         session.plan_url = kwargs.get("plan_url", None)
         session.issue_url = kwargs.get("issue_url", None)
         return session
