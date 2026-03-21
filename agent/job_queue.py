@@ -409,6 +409,34 @@ async def _pop_job(project_key: str) -> Job | None:
     except Exception as e:
         logger.warning(f"Failed to log lifecycle transition for job {new_job.job_id}: {e}")
 
+    # Drain-on-start: merge any steering messages queued while the job was pending.
+    # Follow-up messages sent within the PENDING_MERGE_WINDOW attach to the pending
+    # session via push_steering_message(). Now that we're running, prepend them to
+    # message_text so the agent sees the full combined message from the start.
+    try:
+        from agent.steering import pop_all_steering_messages
+
+        pending_messages = pop_all_steering_messages(new_job.session_id)
+        if pending_messages:
+            extra_texts = []
+            for msg in pending_messages:
+                text = msg.get("text", "").strip()
+                if text:
+                    sender = msg.get("sender", "User")
+                    extra_texts.append(f"[Follow-up from {sender}]: {text}")
+            if extra_texts:
+                combined = "\n\n".join(extra_texts)
+                original = new_job.message_text or ""
+                new_job.message_text = f"{original}\n\n{combined}" if original else combined
+                new_job.save()
+                logger.info(
+                    f"[{project_key}] Drain-on-start: prepended {len(extra_texts)} "
+                    f"steering message(s) to job {new_job.job_id}"
+                )
+    except Exception as e:
+        # Drain failure must not crash job start
+        logger.warning(f"[{project_key}] Drain-on-start failed for job {new_job.job_id}: {e}")
+
     return Job(new_job)
 
 

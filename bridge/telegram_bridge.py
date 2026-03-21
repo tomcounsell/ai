@@ -110,6 +110,12 @@ from tools.telegram_history import (  # noqa: E402
 # Shutdown flag - set by signal handlers to stop accepting new messages
 SHUTTING_DOWN = False
 
+# Maximum age (seconds) of a pending session to allow message merge.
+# Follow-up messages arriving within this window attach to the pending session
+# instead of creating a new one. Covers rapid multi-message sends (e.g. forwarded
+# message + comment) without needing Telegram grouped_id detection.
+PENDING_MERGE_WINDOW_SECONDS = 7
+
 # Project directory (for running scripts, checking flags, etc.)
 _BRIDGE_PROJECT_DIR = Path(__file__).parent.parent
 
@@ -1037,11 +1043,38 @@ async def main():
                             session_id=session_id, status="pending"
                         )
                         if pending_sessions:
-                            logger.info(
-                                f"[{project_name}] Steering check found session {session_id} "
-                                f"in 'pending' status -- message will queue normally and be "
-                                f"consumed when the job starts via PostToolUse hook"
-                            )
+                            pending_session = pending_sessions[0]
+                            age = time.time() - (pending_session.created_at or 0)
+                            if age <= PENDING_MERGE_WINDOW_SECONDS:
+                                # Recent pending session -- steer into it
+                                from agent.steering import push_steering_message
+
+                                push_steering_message(
+                                    session_id,
+                                    clean_text,
+                                    sender_name,
+                                )
+                                from bridge.markdown import send_markdown
+
+                                await send_markdown(
+                                    client,
+                                    event.chat_id,
+                                    "Adding to current task",
+                                    reply_to=message.id,
+                                )
+                                logger.info(
+                                    f"[{project_name}] Steered message into "
+                                    f"pending session {session_id} "
+                                    f"(age={age:.1f}s <= {PENDING_MERGE_WINDOW_SECONDS}s)"
+                                )
+                                return
+                            else:
+                                logger.info(
+                                    f"[{project_name}] Pending session {session_id} "
+                                    f"too old for merge (age={age:.1f}s > "
+                                    f"{PENDING_MERGE_WINDOW_SECONDS}s), "
+                                    f"falling through to enqueue"
+                                )
                 except (ConnectionError, OSError) as e:
                     # Redis/DB connection errors -- log at ERROR with traceback
                     logger.error(
@@ -1065,14 +1098,22 @@ async def main():
                 try:
                     from models.agent_session import AgentSession
 
-                    # Find active/running/dormant sessions in this chat
+                    # Find active/running/dormant/pending sessions in this chat
                     active_sessions = []
-                    for check_status in ("running", "active", "dormant"):
+                    for check_status in ("running", "active", "dormant", "pending"):
                         sessions = AgentSession.query.filter(
                             chat_id=telegram_chat_id, status=check_status
                         )
                         if sessions:
-                            active_sessions.extend(sessions)
+                            if check_status == "pending":
+                                # Only include pending sessions within the merge window
+                                now = time.time()
+                                for s in sessions:
+                                    age = now - (s.created_at or 0)
+                                    if age <= PENDING_MERGE_WINDOW_SECONDS:
+                                        active_sessions.append(s)
+                            else:
+                                active_sessions.extend(sessions)
 
                     if active_sessions:
                         # Pick the most recent session (by last_activity or created_at)
@@ -1105,14 +1146,21 @@ async def main():
                             # Re-check session status (Race 1 mitigation: session may
                             # have completed during classification)
                             fresh_session = None
-                            for check_status in ("running", "active"):
+                            for check_status in ("running", "active", "pending"):
                                 sessions = AgentSession.query.filter(
                                     session_id=target_session.session_id,
                                     status=check_status,
                                 )
                                 if sessions:
-                                    fresh_session = sessions[0]
-                                    break
+                                    if check_status == "pending":
+                                        # Only merge into recent pending sessions
+                                        age = time.time() - (sessions[0].created_at or 0)
+                                        if age <= PENDING_MERGE_WINDOW_SECONDS:
+                                            fresh_session = sessions[0]
+                                    else:
+                                        fresh_session = sessions[0]
+                                    if fresh_session:
+                                        break
 
                             if fresh_session:
                                 # Push to AgentSession's queued_steering_messages
