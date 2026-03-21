@@ -312,16 +312,22 @@ async def _push_job(
     """
     # Mark old completed records as superseded to prevent duplicate-record ambiguity
     try:
-        old_completed = [
-            s for s in AgentSession.query.filter(session_id=session_id) if s.status == "completed"
-        ]
-        for old in old_completed:
-            old.status = "superseded"
-            old.save()
-            logger.info(
-                f"Marked old completed session {old.job_id} as superseded "
-                f"for session_id={session_id}"
-            )
+
+        def _mark_superseded():
+            old_completed = [
+                s
+                for s in AgentSession.query.filter(session_id=session_id)
+                if s.status == "completed"
+            ]
+            for old in old_completed:
+                old.status = "superseded"
+                old.save()
+                logger.info(
+                    f"Marked old completed session {old.job_id} as superseded "
+                    f"for session_id={session_id}"
+                )
+
+        await asyncio.to_thread(_mark_superseded)
     except Exception as e:
         logger.warning(f"Failed to mark old sessions as superseded for {session_id}: {e}")
 
@@ -360,9 +366,13 @@ async def _push_job(
 
     # Log lifecycle transition for newly created pending job
     try:
-        sessions = list(AgentSession.query.filter(session_id=session_id, status="pending"))
-        if sessions:
-            sessions[0].log_lifecycle_transition("pending", "job enqueued")
+
+        def _log_lifecycle():
+            sessions = list(AgentSession.query.filter(session_id=session_id, status="pending"))
+            if sessions:
+                sessions[0].log_lifecycle_transition("pending", "job enqueued")
+
+        await asyncio.to_thread(_log_lifecycle)
     except Exception as e:
         logger.warning(f"Failed to log lifecycle transition for session {session_id}: {e}")
 
@@ -438,6 +448,22 @@ async def _remove_by_session(project_key: str, session_id: str) -> bool:
             await j.async_delete()
             removed = True
     return removed
+
+
+async def get_active_session_for_chat(chat_id: str) -> AgentSession | None:
+    """Find the active AgentSession for a given Telegram chat_id.
+
+    Used for routing steering messages to the correct ChatSession.
+    Returns the most recent running AgentSession for this chat.
+    """
+    sessions = await asyncio.to_thread(
+        lambda: list(AgentSession.query.filter(chat_id=chat_id, status="running"))
+    )
+    if not sessions:
+        return None
+    # Most recent first
+    sessions.sort(key=lambda s: s.created_at or 0, reverse=True)
+    return sessions[0]
 
 
 async def _complete_job(job: Job, *, failed: bool = False) -> None:
@@ -1332,7 +1358,9 @@ async def _enqueue_continuation(
     # Uses the same delete-and-recreate pattern as _pop_job() to work
     # around Popoto's KeyField index corruption bug (on_save() adds to
     # new index set but never removes from old one).
-    sessions = list(AgentSession.query.filter(session_id=job.session_id))
+    sessions = await asyncio.to_thread(
+        lambda: list(AgentSession.query.filter(session_id=job.session_id))
+    )
     if not sessions:
         # Diagnose why the session is missing before falling back.
         # Check Redis directly for key existence and TTL to aid debugging.
@@ -1459,6 +1487,11 @@ async def _execute_job(job: Job) -> None:
     except Exception as e:
         logger.debug(f"AgentSession update failed (non-fatal): {e}")
 
+    # Determine session type for routing decisions
+    _session_type = getattr(agent_session, "session_type", None) if agent_session else None
+    is_simple_session = _session_type == "simple"
+    is_chat_session = _session_type == "chat"  # noqa: F841
+
     # Calendar heartbeat at session start
     asyncio.create_task(_calendar_heartbeat(job.project_key, project=job.project_key))
 
@@ -1506,10 +1539,22 @@ async def _execute_job(job: Job) -> None:
             )
             return
 
+        # === Simple session fast-path ===
+        # Simple sessions (Q&A, non-SDLC) bypass the Observer entirely.
+        # Deliver directly to Telegram with no orchestration overhead.
+        if is_simple_session:
+            logger.info(
+                f"[{job.project_key}] Simple session — delivering directly "
+                f"({len(msg)} chars), bypassing Observer"
+            )
+            await send_cb(job.chat_id, msg, job.message_id, agent_session)
+            chat_state.completion_sent = True
+            return
+
         # === Observer-based routing ===
-        # The Observer Agent replaces the fragmented classifier -> coach -> routing
-        # chain with a single Sonnet-powered agent that has full session context.
-        # See bridge/observer.py and docs/plans/observer_agent.md for design.
+        # The deterministic Observer makes steer/deliver decisions for SDLC
+        # pipelines. ChatSessions use this to monitor DevSession progress.
+        # See bridge/observer.py for the decision table.
 
         # Re-read session from Redis for fresh stage data.
         # Bug 3 fix (issue #374): Use deterministic record selection — filter
