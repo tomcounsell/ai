@@ -1291,6 +1291,14 @@ async def main():
                 except Exception as e:
                     logger.debug(f"Classification inheritance lookup failed (non-fatal): {e}")
 
+            # Determine session_type based on classification.
+            # SDLC work gets ChatSession orchestration; everything else is simple.
+            _classification = classification_result.get("type")
+            if _classification == "sdlc":
+                _session_type = "chat"
+            else:
+                _session_type = "simple"
+
             # Build and enqueue the job (normal priority — FIFO within tier)
             depth = await enqueue_job(
                 project_key=project_key,
@@ -1310,9 +1318,10 @@ async def main():
                 non_youtube_urls=non_yt_urls_json,
                 reply_to_msg_id=message.reply_to_msg_id,
                 chat_id_for_enrichment=telegram_chat_id,
-                classification_type=classification_result.get("type"),
+                classification_type=_classification,
                 correlation_id=correlation_id,
                 trigger_message_id=stored_msg_id,
+                session_type=_session_type,
             )
             if depth > 1:
                 from bridge.markdown import send_markdown

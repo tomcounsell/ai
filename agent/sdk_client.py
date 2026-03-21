@@ -1429,7 +1429,20 @@ async def get_agent_response_sdk(
         "work initiated in this specific session. Do not include work, PRs, or "
         "requests from other sessions, other senders, or prior conversation threads."
     )
-    # For SDLC-routed requests, inject target repo context (never for PM mode)
+    # For SDLC-routed requests, inject target repo context (never for PM mode).
+    # ChatSession (session_type="chat") gets full pipeline instructions.
+    # Simple sessions get the legacy "/sdlc immediately" prompt.
+    _session_type = None
+    if session_id:
+        try:
+            from models.agent_session import AgentSession as _AgentSession
+
+            _sessions = list(_AgentSession.query.filter(session_id=session_id))
+            if _sessions:
+                _session_type = getattr(_sessions[0], "session_type", None)
+        except Exception:
+            pass
+
     if project_mode != "pm" and classification == "sdlc" and project_working_dir != AI_REPO_ROOT:
         github_config = project.get("github", {}) if project else {}
         github_org = github_config.get("org", "")
@@ -1439,7 +1452,19 @@ async def get_agent_response_sdk(
         )
         if github_org and github_repo:
             enriched_message += f"\nGITHUB: {github_org}/{github_repo}"
-        enriched_message += "\nInvoke /sdlc immediately."
+
+        if _session_type == "chat":
+            # ChatSession: orchestrate via dev-session subagent for full pipeline
+            enriched_message += (
+                "\n\nYou are the ChatSession orchestrator (PM persona). "
+                "Spawn a dev-session subagent to do the actual work. "
+                "The dev-session agent has full write permissions and will "
+                "execute the complete SDLC pipeline (plan → build → test → "
+                "patch → review → docs → merge). Monitor its progress and "
+                "compose the final delivery message for Telegram."
+            )
+        else:
+            enriched_message += "\nInvoke /sdlc immediately."
     enriched_message += f"\nMESSAGE: {message}"
 
     # Log prompt summary before sending to agent
@@ -1467,9 +1492,18 @@ async def get_agent_response_sdk(
 
         logger.info(f"[{request_id}] Resolved persona: {persona}")
 
-        # Build system prompt based on persona and project mode
+        # Build system prompt based on persona and project mode.
+        # ChatSession (session_type="chat") uses PM persona with read-only permissions.
         custom_system_prompt = None
-        if project_mode == "pm":
+        _permission_mode = "bypassPermissions"  # Default: full permissions
+
+        if _session_type == "chat":
+            # ChatSession: PM persona, read-only permissions.
+            # Orchestrates work via dev-session subagent.
+            custom_system_prompt = load_pm_system_prompt(working_dir)
+            _permission_mode = "plan"  # Read-only: no Write, Edit, NotebookEdit
+            logger.info(f"[{request_id}] ChatSession mode: PM persona, permission_mode=plan")
+        elif project_mode == "pm":
             # PM mode: use PM system prompt (no WORKER_RULES, loads work-vault CLAUDE.md)
             custom_system_prompt = load_pm_system_prompt(working_dir)
         elif persona == "teammate":
@@ -1502,6 +1536,7 @@ async def get_agent_response_sdk(
         agent = ValorAgent(
             working_dir=working_dir,
             system_prompt=custom_system_prompt,
+            permission_mode=_permission_mode,
             workflow_id=workflow_id,
             task_list_id=task_list_id,
             chat_id=chat_id,
