@@ -8,6 +8,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _mock_load_local_projects():
+    """Mock load_local_projects so tests don't require projects.json on disk."""
+    with patch("scripts.reflections.load_local_projects", return_value=[]):
+        yield
+
+
 # --- LLM Reflection Tests (Step 8) ---
 
 

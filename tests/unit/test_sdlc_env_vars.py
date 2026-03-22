@@ -1,7 +1,6 @@
 """Tests for SDLC environment variable extraction (issue #420).
 
-Tests the _extract_sdlc_env_vars function in sdk_client.py and
-the _build_sdlc_context function in observer.py.
+Tests the _extract_sdlc_env_vars function in sdk_client.py.
 """
 
 from unittest.mock import MagicMock, patch
@@ -12,11 +11,12 @@ class TestExtractSdlcEnvVars:
 
     def _make_session(self, **kwargs):
         """Create a mock AgentSession with given fields."""
-        session = MagicMock()
+        session = MagicMock(spec=[])
         session.status = kwargs.get("status", "running")
         session.created_at = kwargs.get("created_at", 1000)
         session.pr_url = kwargs.get("pr_url", None)
         session.branch_name = kwargs.get("branch_name", None)
+        session.slug = kwargs.get("work_item_slug", None)
         session.work_item_slug = kwargs.get("work_item_slug", None)
         session.plan_url = kwargs.get("plan_url", None)
         session.issue_url = kwargs.get("issue_url", None)
@@ -122,59 +122,14 @@ class TestExtractSdlcEnvVars:
         assert "SDLC_REPO" not in result
 
 
-class TestBuildSdlcContext:
-    """Test _build_sdlc_context in bridge/observer.py."""
+class TestObserverRemoved:
+    """Verify bridge/observer.py no longer exists (SDLC Redesign Phase 2)."""
 
-    def _make_session(self, **kwargs):
-        """Create a mock AgentSession."""
-        session = MagicMock()
-        session.pr_url = kwargs.get("pr_url", None)
-        session.branch_name = kwargs.get("branch_name", None)
-        session.work_item_slug = kwargs.get("work_item_slug", None)
-        session.slug = kwargs.get("slug", kwargs.get("work_item_slug", None))
-        session.plan_url = kwargs.get("plan_url", None)
-        session.issue_url = kwargs.get("issue_url", None)
-        return session
+    def test_observer_module_deleted(self):
+        """bridge/observer.py should not exist — Observer replaced by nudge loop."""
+        from pathlib import Path
 
-    def test_all_fields(self):
-        """All session fields produce corresponding context vars."""
-        from bridge.observer import _build_sdlc_context
-
-        session = self._make_session(
-            pr_url="https://github.com/tomcounsell/ai/pull/100",
-            branch_name="session/test-feature",
-            work_item_slug="test-feature",
-            plan_url="https://github.com/x/y/blob/main/docs/plans/test-feature.md",
-            issue_url="https://github.com/tomcounsell/ai/issues/50",
+        observer_path = Path(__file__).parent.parent.parent / "bridge" / "observer.py"
+        assert not observer_path.exists(), (
+            "bridge/observer.py should be deleted — Observer replaced by nudge loop"
         )
-
-        with patch.dict("os.environ", {"GH_REPO": "tomcounsell/ai"}):
-            ctx = _build_sdlc_context(session)
-
-        assert ctx["SDLC_PR_NUMBER"] == "100"
-        assert ctx["SDLC_PR_BRANCH"] == "session/test-feature"
-        assert ctx["SDLC_SLUG"] == "test-feature"
-        assert ctx["SDLC_PLAN_PATH"] == "docs/plans/test-feature.md"
-        assert ctx["SDLC_ISSUE_NUMBER"] == "50"
-        assert ctx["SDLC_REPO"] == "tomcounsell/ai"
-
-    def test_empty_session(self):
-        """Session with no fields returns empty context."""
-        from bridge.observer import _build_sdlc_context
-
-        session = self._make_session()
-        with patch.dict("os.environ", {}, clear=True):
-            ctx = _build_sdlc_context(session)
-
-        assert ctx == {}
-
-    def test_no_gh_repo_env(self):
-        """When GH_REPO is not in env, SDLC_REPO is absent."""
-        from bridge.observer import _build_sdlc_context
-
-        session = self._make_session(pr_url="https://github.com/tomcounsell/ai/pull/5")
-        with patch.dict("os.environ", {}, clear=True):
-            ctx = _build_sdlc_context(session)
-
-        assert "SDLC_REPO" not in ctx
-        assert ctx["SDLC_PR_NUMBER"] == "5"

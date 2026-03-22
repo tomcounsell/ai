@@ -21,7 +21,7 @@ class TestGetActiveSessionForChat:
     def test_returns_none_when_no_sessions(self, mock_agent_session):
         """Should return None if no running sessions exist for chat_id."""
         mock_agent_session.query.filter.return_value = []
-        result = asyncio.get_event_loop().run_until_complete(get_active_session_for_chat("12345"))
+        result = asyncio.run(get_active_session_for_chat("12345"))
         assert result is None
         mock_agent_session.query.filter.assert_called_once_with(chat_id="12345", status="running")
 
@@ -33,7 +33,7 @@ class TestGetActiveSessionForChat:
         newer.created_at = 2000.0
 
         mock_agent_session.query.filter.return_value = [older, newer]
-        result = asyncio.get_event_loop().run_until_complete(get_active_session_for_chat("12345"))
+        result = asyncio.run(get_active_session_for_chat("12345"))
         assert result is newer
 
     def test_returns_single_session(self, mock_agent_session):
@@ -42,7 +42,7 @@ class TestGetActiveSessionForChat:
         session.created_at = 1500.0
 
         mock_agent_session.query.filter.return_value = [session]
-        result = asyncio.get_event_loop().run_until_complete(get_active_session_for_chat("67890"))
+        result = asyncio.run(get_active_session_for_chat("67890"))
         assert result is session
 
     def test_handles_none_created_at(self, mock_agent_session):
@@ -53,7 +53,7 @@ class TestGetActiveSessionForChat:
         with_ts.created_at = 500.0
 
         mock_agent_session.query.filter.return_value = [no_ts, with_ts]
-        result = asyncio.get_event_loop().run_until_complete(get_active_session_for_chat("12345"))
+        result = asyncio.run(get_active_session_for_chat("12345"))
         # with_ts has higher created_at, should be returned
         assert result is with_ts
 
@@ -61,7 +61,7 @@ class TestGetActiveSessionForChat:
         """Verify the sync filter call is wrapped in asyncio.to_thread."""
         mock_agent_session.query.filter.return_value = []
         with patch("agent.job_queue.asyncio.to_thread", wraps=asyncio.to_thread) as mock_to_thread:
-            asyncio.get_event_loop().run_until_complete(get_active_session_for_chat("12345"))
+            asyncio.run(get_active_session_for_chat("12345"))
             # to_thread should have been called (at least once for this function)
             assert mock_to_thread.called
 
@@ -82,7 +82,7 @@ class TestPushJobAsyncWrapping:
         mock_agent_session.query.async_count = AsyncMock(return_value=1)
 
         with patch("agent.job_queue.asyncio.to_thread", wraps=asyncio.to_thread) as mock_to_thread:
-            asyncio.get_event_loop().run_until_complete(
+            asyncio.run(
                 _push_job(
                     project_key="test",
                     session_id="sess-1",
@@ -98,11 +98,11 @@ class TestPushJobAsyncWrapping:
 
 
 class TestEnqueueContinuationAsyncWrapping:
-    """Verify _enqueue_continuation wraps sync filter in asyncio.to_thread."""
+    """Verify _enqueue_nudge wraps sync filter in asyncio.to_thread."""
 
     def test_continuation_filter_uses_to_thread(self, mock_agent_session):
-        """The session lookup in _enqueue_continuation should use to_thread."""
-        from agent.job_queue import Job, _enqueue_continuation
+        """The session lookup in _enqueue_nudge should use to_thread."""
+        from agent.job_queue import Job, _enqueue_nudge
 
         # Create a mock job
         mock_rj = MagicMock()
@@ -118,8 +118,8 @@ class TestEnqueueContinuationAsyncWrapping:
 
         with patch("agent.job_queue.asyncio.to_thread", wraps=asyncio.to_thread) as mock_to_thread:
             with patch("agent.job_queue._ensure_worker"):
-                asyncio.get_event_loop().run_until_complete(
-                    _enqueue_continuation(
+                asyncio.run(
+                    _enqueue_nudge(
                         job=job,
                         branch_name="test-branch",
                         task_list_id="tl-1",

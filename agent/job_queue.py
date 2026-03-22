@@ -57,19 +57,11 @@ RedisJob = AgentSession
 
 MSG_MAX_CHARS = 20_000  # ~5k tokens — reasonable context limit for agent input
 
-# Auto-continue caps removed in SDLC redesign. ChatSession manages continuation
-# via deterministic Observer routing. These are kept as high limits for safety.
-MAX_AUTO_CONTINUES = 50  # Effectively unlimited — deterministic Observer handles routing
-MAX_AUTO_CONTINUES_SDLC = 50  # Same — no artificial cap on pipeline stages
-
-
-def should_guard_empty_output(msg: str, is_sdlc: bool, has_remaining_stages: bool) -> bool:
-    """Check if empty/whitespace output should be guarded (delivered to user, not auto-continued).
-
-    Returns True if the output is empty/whitespace AND this is an SDLC job with remaining stages.
-    This prevents silent auto-continue loops when an agent produces nothing.
-    """
-    return not msg.strip() and is_sdlc and has_remaining_stages
+# Nudge loop: single nudge model for bridge output routing.
+# The bridge has ONE response to any non-completion: nudge.
+# ChatSession owns all SDLC intelligence; the bridge just keeps it working.
+MAX_NUDGE_COUNT = 50  # Safety cap — deliver to Telegram after this many nudges
+NUDGE_MESSAGE = "Keep working — only stop when you need human input or you're done."
 
 
 # Job health check constants
@@ -243,7 +235,7 @@ _JOB_FIELDS = [
     # Stall retry fields — must be preserved across delete-and-recreate
     "retry_count",
     "last_stall_reason",
-    # Observer fields — must be preserved across delete-and-recreate
+    # Steering fields — must be preserved across delete-and-recreate
     "queued_steering_messages",
     # Tracing fields — must be preserved across delete-and-recreate
     "correlation_id",
@@ -304,7 +296,10 @@ async def _push_job(
     trigger_message_id: str | None = None,
     session_type: str | None = None,
 ) -> int:
-    """Create a job in Redis and return the pending queue depth for this project.
+    """Create a job in Redis and return the pending queue depth for this chat.
+
+    Queue is keyed by chat_id so different chat groups for the same project
+    can run in parallel. project_key is preserved on the model for config lookup.
 
     Bug 3 fix (issue #374): When creating a new record for a continuation
     (reply-to-resume), mark old completed records with the same session_id
@@ -376,12 +371,15 @@ async def _push_job(
     except Exception as e:
         logger.warning(f"Failed to log lifecycle transition for session {session_id}: {e}")
 
-    return await AgentSession.query.async_count(project_key=project_key, status="pending")
+    return await AgentSession.query.async_count(chat_id=chat_id, status="pending")
 
 
-async def _pop_job(project_key: str) -> Job | None:
+async def _pop_job(chat_id: str) -> Job | None:
     """
-    Pop the highest priority pending job for a project.
+    Pop the highest priority pending job for a chat.
+
+    Queue is keyed by chat_id so different chat groups for the same project
+    can process jobs in parallel. Within a chat, jobs run sequentially.
 
     Order: urgent > high > normal > low, then within same priority FIFO (oldest first).
     Jobs with scheduled_after in the future are skipped (deferred execution).
@@ -391,7 +389,7 @@ async def _pop_job(project_key: str) -> Job | None:
     status index set but never REMOVEs from the old one, so mutating
     status and calling save() leaves a stale entry in the pending index.
     """
-    pending = await AgentSession.query.async_filter(project_key=project_key, status="pending")
+    pending = await AgentSession.query.async_filter(chat_id=chat_id, status="pending")
     if not pending:
         return None
 
@@ -413,7 +411,7 @@ async def _pop_job(project_key: str) -> Job | None:
     # Both sides are logged so a crash between delete and create is diagnosable.
     fields = _extract_job_fields(chosen)
     logger.info(
-        f"[{project_key}] Deleting job {chosen.job_id} (session {chosen.session_id}) "
+        f"[chat:{chat_id}] Deleting job {chosen.job_id} (session {chosen.session_id}) "
         f"for status change pending->running"
     )
     await chosen.async_delete()
@@ -421,7 +419,7 @@ async def _pop_job(project_key: str) -> Job | None:
     fields["started_at"] = time.time()
     new_job = await AgentSession.async_create(**fields)
     logger.info(
-        f"[{project_key}] Recreated job as {new_job.job_id} (session {new_job.session_id}) "
+        f"[chat:{chat_id}] Recreated job as {new_job.job_id} (session {new_job.session_id}) "
         f"with status=running"
     )
 
@@ -434,14 +432,14 @@ async def _pop_job(project_key: str) -> Job | None:
     return Job(new_job)
 
 
-async def _pending_depth(project_key: str) -> int:
-    """Count of pending jobs for a project."""
-    return await AgentSession.query.async_count(project_key=project_key, status="pending")
+async def _pending_depth(chat_id: str) -> int:
+    """Count of pending jobs for a chat."""
+    return await AgentSession.query.async_count(chat_id=chat_id, status="pending")
 
 
-async def _remove_by_session(project_key: str, session_id: str) -> bool:
+async def _remove_by_session(chat_id: str, session_id: str) -> bool:
     """Remove all pending jobs for a session. Returns True if any removed."""
-    jobs = await AgentSession.query.async_filter(project_key=project_key, status="pending")
+    jobs = await AgentSession.query.async_filter(chat_id=chat_id, status="pending")
     removed = False
     for j in jobs:
         if j.session_id == session_id:
@@ -475,7 +473,7 @@ async def _complete_job(job: Job, *, failed: bool = False) -> None:
     even though the child's Redis status hasn't been updated yet.
 
     After deletion, checks the playlist for the next issue to schedule
-    (Observer playlist hook). On failure, requeues the failed issue to
+    (Playlist hook). On failure, requeues the failed issue to
     the end of the playlist if retry limit allows.
 
     Args:
@@ -842,8 +840,10 @@ async def _job_health_check() -> None:
         checked += 1
         project_key = job.project_key
 
-        # Check if the worker for this project is alive
-        worker = _active_workers.get(project_key)
+        # Check if the worker for this chat is alive
+        # Workers are keyed by chat_id; fall back to project_key for legacy jobs
+        worker_key = job.chat_id or project_key
+        worker = _active_workers.get(worker_key)
         worker_alive = worker is not None and not worker.done()
 
         started_at = getattr(job, "started_at", None)
@@ -902,7 +902,7 @@ async def _job_health_check() -> None:
                 new_job.job_id,
                 project_key,
             )
-            _ensure_worker(project_key)
+            _ensure_worker(job.chat_id or project_key)
             recovered += 1
 
     logger.info(
@@ -1084,12 +1084,13 @@ def _check_restart_flag() -> bool:
     if not _RESTART_FLAG.exists():
         return False
 
-    # Check all projects for running jobs
-    for pkey in list(_active_workers.keys()):
-        running = AgentSession.query.filter(project_key=pkey, status="running")
+    # Check all chats for running jobs
+    for chat_key in list(_active_workers.keys()):
+        running = AgentSession.query.filter(chat_id=chat_key, status="running")
         if running:
             logger.info(
-                f"[{pkey}] Restart requested but {len(running)} job(s) still running — deferring"
+                f"[chat:{chat_key}] Restart requested but "
+                f"{len(running)} job(s) still running — deferring"
             )
             return False
 
@@ -1186,27 +1187,34 @@ async def enqueue_job(
         trigger_message_id=trigger_message_id,
         session_type=session_type,
     )
-    _ensure_worker(project_key)
+    _ensure_worker(chat_id)
     log_prefix = f"[{correlation_id}]" if correlation_id else f"[{project_key}]"
-    logger.info(f"{log_prefix} Enqueued job (priority={priority}, depth={depth})")
+    logger.info(f"{log_prefix} Enqueued job (priority={priority}, depth={depth}, chat={chat_id})")
     return depth
 
 
-def _ensure_worker(project_key: str) -> None:
-    """Start a worker for this project if one isn't already running."""
-    existing = _active_workers.get(project_key)
+def _ensure_worker(chat_id: str) -> None:
+    """Start a worker for this chat if one isn't already running.
+
+    Workers are per-chat so different chat groups (even for the same project)
+    can process jobs in parallel. Within a chat, jobs run sequentially.
+    """
+    existing = _active_workers.get(chat_id)
     if existing and not existing.done():
         return
-    task = asyncio.create_task(_worker_loop(project_key))
-    _active_workers[project_key] = task
-    logger.info(f"[{project_key}] Started job queue worker")
+    task = asyncio.create_task(_worker_loop(chat_id))
+    _active_workers[chat_id] = task
+    logger.info(f"[chat:{chat_id}] Started job queue worker")
 
 
-async def _worker_loop(project_key: str) -> None:
+async def _worker_loop(chat_id: str) -> None:
     """
-    Process jobs sequentially for one project.
+    Process jobs sequentially for one chat.
     Runs until queue is empty, then exits (restarted on next enqueue).
     After each job, checks for a restart flag written by remote-update.sh.
+
+    Workers are per-chat_id so different chat groups can run in parallel.
+    Within a chat, jobs run sequentially to prevent git conflicts.
 
     Includes a drain guard: when the queue appears empty, the worker yields
     to the event loop (sleep 0.1s) and re-checks once before exiting. This
@@ -1214,23 +1222,23 @@ async def _worker_loop(project_key: str) -> None:
     """
     try:
         while True:
-            job = await _pop_job(project_key)
+            job = await _pop_job(chat_id)
             if job is None:
                 # Drain guard: yield to event loop, let in-flight creates finish
                 await asyncio.sleep(0.1)
-                job = await _pop_job(project_key)
+                job = await _pop_job(chat_id)
                 if job is None:
-                    logger.info(f"[{project_key}] Queue empty, worker exiting")
+                    logger.info(f"[chat:{chat_id}] Queue empty, worker exiting")
                     if _check_restart_flag():
                         _trigger_restart()
                     break
-                logger.info(f"[{project_key}] Drain guard caught job that would have been lost")
+                logger.info(f"[chat:{chat_id}] Drain guard caught job that would have been lost")
 
             job_failed = False
             try:
                 await _execute_job(job)
             except Exception as e:
-                logger.error(f"[{project_key}] Job {job.job_id} failed: {e}")
+                logger.error(f"[chat:{chat_id}] Job {job.job_id} failed: {e}")
                 job_failed = True
             finally:
                 await _complete_job(job, failed=job_failed)
@@ -1241,7 +1249,7 @@ async def _worker_loop(project_key: str) -> None:
                 break
 
     finally:
-        _active_workers.pop(project_key, None)
+        _active_workers.pop(chat_id, None)
 
 
 def _find_valor_calendar() -> str:
@@ -1317,7 +1325,7 @@ def _diagnose_missing_session(session_id: str) -> dict:
         return {"error": str(e)}
 
 
-async def _enqueue_continuation(
+async def _enqueue_nudge(
     job: "Job",
     branch_name: str,
     task_list_id: str,
@@ -1325,28 +1333,25 @@ async def _enqueue_continuation(
     output_msg: str,
     coaching_message: str = "continue",
 ) -> None:
-    """Enqueue a continuation job by reusing the existing AgentSession.
+    """Enqueue a nudge by reusing the existing AgentSession.
 
-    Instead of creating a new AgentSession (which orphans the old one and
-    loses metadata like classification_type, history, and links), this
-    function looks up the existing session by session_id, preserves all
-    fields via delete-and-recreate, and updates only status, message_text,
-    auto_continue_count, and priority.
+    The nudge loop uses this to re-enqueue the session with a nudge message
+    ("Keep working") when the agent stops but hasn't completed. This
+    re-spawns Claude Code with the nudge as input.
 
-    This makes AgentSession the single source of truth -- no metadata
-    needs to be manually propagated as function parameters.
+    Preserves all session metadata via delete-and-recreate pattern.
 
     Args:
         job: The current Job being executed.
         branch_name: Git branch name for the session.
         task_list_id: Task list ID for sub-agent isolation.
-        auto_continue_count: Current auto-continue count (already incremented).
-        output_msg: The agent output that triggered auto-continue.
-        coaching_message: Steering message from the Observer agent.
+        auto_continue_count: Current nudge count (already incremented).
+        output_msg: The agent output that triggered the nudge.
+        coaching_message: Nudge message sent to the agent.
     """
 
     logger.info(
-        f"[{job.project_key}] Coaching message (observer) "
+        f"[{job.project_key}] Nudge message "
         f"({len(coaching_message)} chars): {coaching_message[:120]!r}"
     )
 
@@ -1383,7 +1388,7 @@ async def _enqueue_continuation(
         fields["priority"] = "high"
         fields["task_list_id"] = task_list_id
         await AgentSession.async_create(**fields)
-        _ensure_worker(job.project_key)
+        _ensure_worker(job.chat_id)
         logger.info(
             f"[{job.project_key}] Recreated session {job.session_id} from Job metadata "
             f"(fallback path, auto_continue_count={auto_continue_count})"
@@ -1408,7 +1413,7 @@ async def _enqueue_continuation(
     # Recreate with all original metadata intact
     await AgentSession.async_create(**fields)
 
-    _ensure_worker(job.project_key)
+    _ensure_worker(job.chat_id)
     logger.info(
         f"[{job.project_key}] Reused session {job.session_id} for continuation "
         f"(auto_continue_count={auto_continue_count})"
@@ -1506,11 +1511,17 @@ async def _execute_job(job: Job) -> None:
     )
 
     async def send_to_chat(msg: str) -> None:
-        """Route agent output via the Observer Agent.
+        """Route agent output via nudge loop.
 
-        The Observer reads the full AgentSession state (stages, links, history,
-        queued steering messages) and decides to either steer the worker back
-        to work or deliver the output to Telegram. See bridge/observer.py.
+        Simple nudge model: the bridge has ONE response to any non-completion:
+        "Keep working -- only stop when you need human input or you're done."
+        ChatSession owns all SDLC intelligence. The bridge just nudges.
+
+        Completion detection:
+        - stop_reason == "end_turn" AND output is non-empty → deliver
+        - stop_reason == "rate_limited" → wait with backoff, then nudge
+        - Empty output → nudge (not deliver)
+        - Safety cap of MAX_NUDGE_COUNT nudges → deliver regardless
         """
         nonlocal agent_session  # Re-read from Redis for fresh stage data
 
@@ -1518,11 +1529,11 @@ async def _execute_job(job: Job) -> None:
             return
 
         # If this session was already completed (e.g., by a prior duplicate job),
-        # deliver the output but skip auto-continue to prevent chain reactions.
+        # deliver the output but skip nudge to prevent chain reactions.
         if agent_session and agent_session.status == "completed":
             logger.info(
                 f"[{job.project_key}] Session already completed — "
-                f"delivering without auto-continue ({len(msg)} chars)"
+                f"delivering without nudge ({len(msg)} chars)"
             )
             await send_cb(job.chat_id, msg, job.message_id, agent_session)
             chat_state.completion_sent = True
@@ -1533,271 +1544,112 @@ async def _execute_job(job: Job) -> None:
         if chat_state.completion_sent:
             logger.info(
                 f"[{job.project_key}] Dropping suppressed output "
-                f"(completion sent or auto-continued) "
+                f"(completion sent or nudged) "
                 f"({len(msg)} chars): {msg[:100]!r}"
             )
             return
 
         # === Simple session fast-path ===
-        # Simple sessions (Q&A, non-SDLC) bypass the Observer entirely.
-        # Deliver directly to Telegram with no orchestration overhead.
+        # Simple sessions (Q&A, non-SDLC) deliver directly to Telegram.
         if is_simple_session:
             logger.info(
-                f"[{job.project_key}] Simple session — delivering directly "
-                f"({len(msg)} chars), bypassing Observer"
+                f"[{job.project_key}] Simple session — delivering directly ({len(msg)} chars)"
             )
             await send_cb(job.chat_id, msg, job.message_id, agent_session)
             chat_state.completion_sent = True
             return
 
-        # === Observer-based routing ===
-        # The deterministic Observer makes steer/deliver decisions for SDLC
-        # pipelines. ChatSessions use this to monitor DevSession progress.
-        # See bridge/observer.py for the decision table.
-
-        # Re-read session from Redis for fresh stage data.
-        # Bug 3 fix (issue #374): Use deterministic record selection — filter
-        # by active statuses first, fall back to broader filter, sort by
-        # created_at desc to always pick the newest record. This prevents
-        # picking a stale completed record when duplicates exist.
-        if agent_session and agent_session.session_id:
-            try:
-                all_sessions = list(AgentSession.query.filter(session_id=agent_session.session_id))
-                # Prefer running/active records; fall back to any record
-                active = [s for s in all_sessions if s.status in ("running", "active", "pending")]
-                candidates = active if active else all_sessions
-                if candidates:
-                    candidates.sort(key=lambda s: s.created_at or 0, reverse=True)
-                    agent_session = candidates[0]
-                    if len(all_sessions) > 1:
-                        logger.info(
-                            f"[{job.project_key}] Re-read session: selected "
-                            f"status={agent_session.status} from {len(all_sessions)} "
-                            f"records for {agent_session.session_id}"
-                        )
-            except Exception as e:
-                logger.warning(f"Failed to re-read session {agent_session.session_id}: {e}")
-
-        # Empty output guard: deliver immediately to prevent silent loops
-        # Use PipelineStateMachine when stage_states is available; fall back to legacy
-        _is_sdlc = agent_session.is_sdlc if agent_session else False
-        _state_machine = None
-        if _is_sdlc and agent_session:
-            try:
-                from bridge.pipeline_state import PipelineStateMachine
-
-                _state_machine = PipelineStateMachine(agent_session)
-                _sdlc_has_remaining = _state_machine.has_remaining_stages()
-            except Exception:
-                _sdlc_has_remaining = agent_session.has_remaining_stages()
-        else:
-            _sdlc_has_remaining = False
-        if should_guard_empty_output(msg, _is_sdlc, _sdlc_has_remaining):
-            logger.warning(
-                f"[{job.project_key}] Empty output with remaining SDLC stages — "
-                f"delivering to user to prevent silent loop"
-            )
-            await send_cb(job.chat_id, "(empty output)", job.message_id, agent_session)
-            chat_state.completion_sent = True
-            return
-
-        # Narration gate: detect false-promise output before running Observer.
-        # If worker output is pure narration ("Let me check...", "I'll look at...")
-        # with no substantive findings, auto-continue instead of delivering.
-        from bridge.message_quality import (
-            NARRATION_COACHING_MESSAGE,
-            NARRATION_FALLBACK_MESSAGE,
-            is_narration_only,
-        )
-
-        if is_narration_only(msg):
-            effective_max = MAX_AUTO_CONTINUES_SDLC if _is_sdlc else MAX_AUTO_CONTINUES
-            if chat_state.auto_continue_count < effective_max:
-                # Auto-continue: worker announced work but didn't do it
-                chat_state.auto_continue_count += 1
-                logger.info(
-                    f"[{job.project_key}] Narration gate: output is pure narration, "
-                    f"auto-continuing ({chat_state.auto_continue_count}/{effective_max})"
-                )
-                await _enqueue_continuation(
-                    job,
-                    branch_name,
-                    task_list_id,
-                    chat_state.auto_continue_count,
-                    msg,
-                    coaching_message=NARRATION_COACHING_MESSAGE,
-                )
-                chat_state.completion_sent = True
-                chat_state.defer_reaction = True
-                return
-            else:
-                # At cap: send fallback instead of narration
-                logger.warning(
-                    f"[{job.project_key}] Narration gate: output is pure narration "
-                    f"and auto-continue cap reached, sending fallback message"
-                )
-                msg = NARRATION_FALLBACK_MESSAGE
-
-        # Run the Observer Agent for routing decisions
-        if not agent_session:
-            logger.warning(
-                f"[{job.project_key}] No AgentSession available — delivering raw output to Telegram"
-            )
-            await send_cb(job.chat_id, msg, job.message_id, None)
-            chat_state.completion_sent = True
-            return
+        # === Nudge loop ===
+        # For ChatSessions: check if output signals completion, otherwise nudge.
+        # No Observer, no PipelineStateMachine, no SDLC stage awareness.
 
         from agent.sdk_client import get_stop_reason
-        from bridge.observer import Observer
 
-        # Retrieve stop_reason captured during SDK query for this session
         stop_reason = get_stop_reason(job.session_id) if job.session_id else None
 
-        observer = Observer(
-            session=agent_session,
-            worker_output=msg,
-            auto_continue_count=chat_state.auto_continue_count,
-            send_cb=send_cb,
-            enqueue_fn=_enqueue_continuation,
-            stop_reason=stop_reason,
-        )
-
-        try:
-            decision = await observer.run()
-        except Exception as e:
-            # Observer fallback: deliver raw output to Telegram on any error
-            logger.error(
-                f"[{job.project_key}] Observer failed, delivering raw output: {e}",
-                exc_info=True,
-            )
-            await send_cb(job.chat_id, msg, job.message_id, agent_session)
-            chat_state.completion_sent = True
-            return
-
-        logger.info(
-            f"[{job.project_key}] Observer decision: {decision.get('action')} "
-            f"(transitions={decision.get('transitions_applied', 0)})"
-        )
-
-        # Apply state machine transitions based on Observer decision
-        if _state_machine and _is_sdlc:
-            try:
-                resolved_stage = decision.get("resolved_stage")
-                stage_outcome = decision.get("stage_outcome")
-                next_stage = decision.get("next_stage")
-                if resolved_stage:
-                    current = _state_machine.current_stage()
-                    if current == resolved_stage:
-                        if stage_outcome == "fail":
-                            _state_machine.fail_stage(resolved_stage)
-                        else:
-                            _state_machine.complete_stage(resolved_stage)
-                if next_stage:
-                    try:
-                        _state_machine.start_stage(next_stage)
-                    except ValueError:
-                        logger.debug(
-                            f"[{job.project_key}] State machine: cannot start "
-                            f"{next_stage} (ordering constraint)"
-                        )
-            except Exception as e:
-                logger.warning(f"[{job.project_key}] State machine transition failed: {e}")
-
-        if decision["action"] == "steer":
-            # Observer wants to auto-continue — enqueue continuation with coaching
+        # Rate-limited: backoff then nudge
+        if stop_reason == "rate_limited":
             chat_state.auto_continue_count += 1
-            effective_max = MAX_AUTO_CONTINUES_SDLC if _is_sdlc else MAX_AUTO_CONTINUES
-
-            # Log every auto-continue increment so operators can trace
-            # the full sequence, not just the cap-reached event.
-            logger.info(
-                f"[{job.project_key}] Auto-continue "
-                f"{chat_state.auto_continue_count}/{effective_max} "
-                f"for session {job.session_id}"
+            logger.warning(
+                f"[{job.project_key}] Rate limited — backoff then nudge "
+                f"(nudge {chat_state.auto_continue_count}/{MAX_NUDGE_COUNT})"
             )
-
-            # Hard guard: enforce auto-continue cap regardless of Observer decision
-            if chat_state.auto_continue_count > effective_max:
-                logger.warning(
-                    f"[{job.project_key}] Auto-continue cap reached "
-                    f"({chat_state.auto_continue_count}/{effective_max}), "
-                    f"delivering to Telegram instead of steering"
-                )
-                # If output is narration-only at cap, substitute with fallback
-                cap_msg = msg
-                if is_narration_only(msg):
-                    cap_msg = NARRATION_FALLBACK_MESSAGE
-                    logger.info(
-                        f"[{job.project_key}] Cap-forced delivery: substituting "
-                        f"narration-only output with fallback message"
-                    )
-                await send_cb(job.chat_id, cap_msg, job.message_id, agent_session)
-                chat_state.completion_sent = True
-                return
-
-            save_session_snapshot(
-                session_id=job.session_id,
-                event="auto_continue",
-                project_key=job.project_key,
-                branch_name=branch_name,
-                task_summary=(
-                    f"Observer auto-continue ({chat_state.auto_continue_count}/{effective_max})"
-                ),
-                extra_context={
-                    "routing": "observer",
-                    "coaching_message": decision.get("coaching_message", "")[:200],
-                    "message_preview": msg[:200],
-                    "correlation_id": cid,
-                },
-                working_dir=str(working_dir),
-            )
-
-            # Enqueue continuation with Observer's coaching message
-            await _enqueue_continuation(
+            await asyncio.sleep(5)
+            await _enqueue_nudge(
                 job,
                 branch_name,
                 task_list_id,
                 chat_state.auto_continue_count,
                 msg,
-                coaching_message=decision.get("coaching_message", "continue"),
+                coaching_message=NUDGE_MESSAGE,
             )
-
             chat_state.completion_sent = True
             chat_state.defer_reaction = True
             return
 
-        # Observer decided to deliver to Telegram
-        # Completion guard: check state machine for incomplete stages
-        if _is_sdlc and _state_machine and _state_machine.has_remaining_stages():
-            progress = _state_machine.get_display_progress()
-            incomplete = [
-                f"  - {stage}: {status}"
-                for stage, status in progress.items()
-                if status not in ("completed",)
-            ]
-            if incomplete:
-                gate_warning = "\n\n⚠️ **Incomplete pipeline stages:**\n" + "\n".join(incomplete)
-                msg = msg + gate_warning
+        # Empty/whitespace output: nudge instead of delivering nothing
+        if not msg or not msg.strip():
+            chat_state.auto_continue_count += 1
+            if chat_state.auto_continue_count <= MAX_NUDGE_COUNT:
                 logger.info(
-                    f"[{job.project_key}] State machine completion guard: "
-                    f"{len(incomplete)} incomplete stages"
+                    f"[{job.project_key}] Empty output — nudging "
+                    f"(nudge {chat_state.auto_continue_count}/{MAX_NUDGE_COUNT})"
                 )
+                await _enqueue_nudge(
+                    job,
+                    branch_name,
+                    task_list_id,
+                    chat_state.auto_continue_count,
+                    msg,
+                    coaching_message=NUDGE_MESSAGE,
+                )
+                chat_state.completion_sent = True
+                chat_state.defer_reaction = True
+                return
+            else:
+                # Safety cap reached on empty output
+                logger.warning(
+                    f"[{job.project_key}] Empty output and nudge cap reached — delivering fallback"
+                )
+                await send_cb(
+                    job.chat_id,
+                    "The task completed but produced no output. "
+                    "Please re-trigger if you expected results.",
+                    job.message_id,
+                    agent_session,
+                )
+                chat_state.completion_sent = True
+                return
 
-        # Use message_for_user from Observer if provided (curated user-facing text),
-        # otherwise fall back to raw worker output. The reason is internal-only.
-        delivery_msg = decision.get("message_for_user", msg)
-        # Guard: if delivery message is empty/whitespace, use a fallback
-        if not delivery_msg or not delivery_msg.strip():
-            delivery_msg = (
-                "The task completed but produced no output. "
-                "Please re-trigger if you expected results."
+        # Safety cap: if we've nudged too many times, deliver regardless
+        if chat_state.auto_continue_count >= MAX_NUDGE_COUNT:
+            logger.warning(
+                f"[{job.project_key}] Nudge safety cap reached "
+                f"({chat_state.auto_continue_count}/{MAX_NUDGE_COUNT}) — "
+                f"delivering to Telegram"
             )
-        await send_cb(job.chat_id, delivery_msg, job.message_id, agent_session)
-        chat_state.completion_sent = True
+            await send_cb(job.chat_id, msg, job.message_id, agent_session)
+            chat_state.completion_sent = True
+            return
+
+        # Completion detection: end_turn with substantial output → deliver
+        # This is the primary heuristic. ChatSession decides when it's done
+        # by producing a final message and stopping naturally.
+        if stop_reason in ("end_turn", None) and len(msg.strip()) > 0:
+            await send_cb(job.chat_id, msg, job.message_id, agent_session)
+            chat_state.completion_sent = True
+            logger.info(
+                f"[{job.project_key}] Delivered to Telegram "
+                f"(stop_reason={stop_reason}, {len(msg)} chars)"
+            )
+            return
+
+        # Unknown stop reason or other case — deliver to human
         logger.info(
-            f"[{job.project_key}] Observer delivered to Telegram: "
-            f"{decision.get('reason', 'no reason')}"
+            f"[{job.project_key}] Delivering output (stop_reason={stop_reason}, {len(msg)} chars)"
         )
+        await send_cb(job.chat_id, msg, job.message_id, agent_session)
+        chat_state.completion_sent = True
 
     messenger = BossMessenger(
         _send_callback=send_to_chat,
@@ -1923,13 +1775,6 @@ async def _execute_job(job: Job) -> None:
             )
             if not chat_state.defer_reaction:
                 complete_transcript(job.session_id, status=final_status)
-                # Clean up observer circuit breaker state for terminal sessions
-                try:
-                    from bridge.observer import clear_observer_state
-
-                    clear_observer_state(job.session_id)
-                except Exception:
-                    pass  # Non-critical cleanup
             else:
                 agent_session.last_activity = time.time()
                 agent_session.save()
@@ -2276,15 +2121,16 @@ def _cli_show_status() -> None:
     # Group by project_key
     by_project: dict[str, list] = {}
     for job in all_jobs:
-        key = job.project_key
+        key = job.chat_id or job.project_key
         if key not in by_project:
             by_project[key] = []
         by_project[key].append(job)
 
     now = time.time()
-    for project_key, jobs in sorted(by_project.items()):
-        print(f"\n=== {project_key} ===")
-        worker = _active_workers.get(project_key)
+    for queue_key, jobs in sorted(by_project.items()):
+        project_key = jobs[0].project_key if jobs else queue_key
+        print(f"\n=== {project_key} (chat: {queue_key}) ===")
+        worker = _active_workers.get(queue_key)
         worker_status = "alive" if (worker and not worker.done()) else "DEAD/missing"
         print(f"  Worker: {worker_status}")
 
@@ -2316,11 +2162,15 @@ def _cli_flush_stuck() -> None:
 
     recovered = 0
     for job in running:
-        worker = _active_workers.get(job.project_key)
+        worker_key = job.chat_id or job.project_key
+        worker = _active_workers.get(worker_key)
         is_alive = worker and not worker.done()
 
         if not is_alive:
-            print(f"Recovering orphaned job {job.job_id} (project={job.project_key})")
+            print(
+                f"Recovering orphaned job {job.job_id} "
+                f"(project={job.project_key}, chat={worker_key})"
+            )
             _cli_recover_single_job(job)
             recovered += 1
         else:

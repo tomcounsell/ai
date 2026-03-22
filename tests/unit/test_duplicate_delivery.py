@@ -146,7 +146,7 @@ class TestCompletedSessionGuard:
     """Fix 3: Auto-continue skips when session is already completed."""
 
     def test_completed_session_skips_auto_continue(self):
-        """When agent_session.status == 'completed', output is delivered without auto-continue."""
+        """When agent_session.status == 'completed', output is delivered without nudge."""
         # Verify the guard exists in the code
         from pathlib import Path
 
@@ -154,25 +154,23 @@ class TestCompletedSessionGuard:
 
         # The guard should check agent_session.status == "completed"
         assert 'agent_session.status == "completed"' in job_queue_code
-        # It should deliver to chat
-        assert "delivering without auto-continue" in job_queue_code
+        # It should deliver to chat without nudge
+        assert "delivering without nudge" in job_queue_code
 
-    def test_guard_is_before_observer_routing(self):
-        """The completed-session guard must come before the Observer-based routing."""
+    def test_guard_is_before_nudge_routing(self):
+        """The completed-session guard must come before the nudge routing logic."""
         from pathlib import Path
 
         job_queue_code = Path("agent/job_queue.py").read_text()
 
         # Find positions
         guard_pos = job_queue_code.find("Session already completed")
-        observer_pos = job_queue_code.find("Observer-based routing")
+        nudge_pos = job_queue_code.find("await _enqueue_nudge(")
 
-        # Guard should be BEFORE observer routing logic
+        # Guard should be BEFORE the nudge call site
         assert guard_pos > 0, "completed-session guard not found in job_queue.py"
-        assert observer_pos > 0, "Observer-based routing not found in job_queue.py"
-        assert guard_pos < observer_pos, (
-            "completed-session guard should be before Observer-based routing"
-        )
+        assert nudge_pos > 0, "await _enqueue_nudge() call not found in job_queue.py"
+        assert guard_pos < nudge_pos, "completed-session guard should be before nudge call"
 
 
 class TestCatchupCodeStructure:

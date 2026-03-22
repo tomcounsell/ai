@@ -115,7 +115,7 @@ class TestPopJobDeleteAndRecreate:
         assert len(pending_before) == 1
 
         # Pop the job
-        job = await _pop_job("test")
+        job = await _pop_job("123")
         assert job is not None
 
         # The old pending entry should be gone
@@ -129,7 +129,7 @@ class TestPopJobDeleteAndRecreate:
     @pytest.mark.asyncio
     async def test_pop_job_returns_none_on_empty_queue(self):
         """_pop_job should return None when no pending jobs exist."""
-        result = await _pop_job("test")
+        result = await _pop_job("123")
         assert result is None
 
     @pytest.mark.asyncio
@@ -141,7 +141,7 @@ class TestPopJobDeleteAndRecreate:
             auto_continue_count=3,
         )
 
-        job = await _pop_job("test")
+        job = await _pop_job("123")
         assert job is not None
         assert job.session_id == "preserve_test"
         assert job.sender_name == "FieldCheck"
@@ -163,7 +163,7 @@ class TestPopJobDeleteAndRecreate:
             created_at=time.time() + 1,
         )
 
-        job = await _pop_job("test")
+        job = await _pop_job("123")
         assert job is not None
         assert job.message_text == "high priority"
 
@@ -256,22 +256,22 @@ class TestDrainGuard:
         this by creating a job just before the second _pop_job call.
         """
         # First call: no jobs
-        result1 = await _pop_job("test")
+        result1 = await _pop_job("123")
         assert result1 is None
 
         # Simulate a late-arriving job (created during the sleep window)
         _create_test_job(message_text="late arrival")
 
         # Second call: should find the job
-        result2 = await _pop_job("test")
+        result2 = await _pop_job("123")
         assert result2 is not None
         assert result2.message_text == "late arrival"
 
     @pytest.mark.asyncio
     async def test_drain_guard_exits_when_truly_empty(self):
         """When queue is truly empty, both checks should return None."""
-        result1 = await _pop_job("test")
+        result1 = await _pop_job("123")
         assert result1 is None
 
-        result2 = await _pop_job("test")
+        result2 = await _pop_job("123")
         assert result2 is None

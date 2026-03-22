@@ -11,7 +11,7 @@ import os
 import subprocess
 import sys
 
-from bridge.observer import _construct_canonical_url
+from utils.github_patterns import construct_canonical_url as _construct_canonical_url
 
 
 class TestCanonicalUrlConstruction:

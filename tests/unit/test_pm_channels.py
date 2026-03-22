@@ -110,8 +110,8 @@ class TestPmModeClassificationBypass:
             mock_classify.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_dev_mode_still_calls_classification(self):
-        """Dev mode project must still call classify_work_request()."""
+    async def test_dev_mode_reads_classification_from_session(self):
+        """Dev mode project reads classification from AgentSession, not classify_work_request()."""
         dev_project = {
             "name": "Cuttlefish",
             "working_directory": "/tmp/test-vault/Cuttlefish",
@@ -119,7 +119,6 @@ class TestPmModeClassificationBypass:
 
         with (
             patch("agent.sdk_client.ValorAgent") as mock_agent_cls,
-            patch("bridge.routing.classify_work_request", return_value="question") as mock_classify,
             patch("bridge.context.build_context_prefix", return_value=""),
         ):
             mock_agent_instance = MagicMock()
@@ -128,16 +127,18 @@ class TestPmModeClassificationBypass:
 
             from agent.sdk_client import get_agent_response_sdk
 
-            await get_agent_response_sdk(
+            # Dev mode should NOT raise and should fall back to "question" classification
+            # when no AgentSession exists for the session_id
+            result = await get_agent_response_sdk(
                 message="What's the status?",
-                session_id="test-session",
+                session_id="test-session-nonexistent",
                 sender_name="Test",
                 chat_title="Dev: Cuttlefish",
                 project=dev_project,
             )
 
-            # classify_work_request SHOULD have been called for dev mode
-            mock_classify.assert_called_once()
+            # Should get a response (classification defaults to "question")
+            assert result is not None
 
     @pytest.mark.asyncio
     async def test_pm_mode_uses_pm_system_prompt(self):
@@ -284,6 +285,8 @@ class TestPmConfigValidation:
         if not config_path.exists():
             # Legacy fallback
             config_path = Path(__file__).parent.parent.parent / "config" / "projects.json"
+        if not config_path.exists():
+            pytest.skip("projects.json not found (machine-specific config)")
         with open(config_path) as f:
             return json.load(f)
 

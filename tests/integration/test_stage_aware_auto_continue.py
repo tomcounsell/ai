@@ -19,7 +19,7 @@ Tests use Redis db=1 via the autouse redis_test_db fixture in conftest.py.
 
 # claude_agent_sdk mock is centralized in conftest.py
 
-from agent.job_queue import MAX_AUTO_CONTINUES, MAX_AUTO_CONTINUES_SDLC
+from agent.job_queue import MAX_NUDGE_COUNT
 from models.agent_session import AgentSession
 
 # === AgentSession helper method tests ===
@@ -234,7 +234,7 @@ class TestStageAwareDecisionMatrix:
 
         # Decision: auto-continue (stages remaining, no classifier needed)
         auto_continue_count = 0
-        effective_max = MAX_AUTO_CONTINUES_SDLC
+        effective_max = MAX_NUDGE_COUNT
 
         should_auto_continue = (
             session.is_sdlc
@@ -294,7 +294,7 @@ class TestStageAwareDecisionMatrix:
         assert session.is_sdlc is False
 
         # Decision: use classifier (not an SDLC job)
-        effective_max = MAX_AUTO_CONTINUES  # ChatSession manages routing; cap is safety backstop
+        effective_max = MAX_NUDGE_COUNT  # ChatSession manages routing; cap is safety backstop
         assert effective_max == 50
 
     def test_sdlc_safety_cap_prevents_infinite_loop(self):
@@ -309,8 +309,8 @@ class TestStageAwareDecisionMatrix:
         assert session.has_remaining_stages() is True
 
         # Simulate having hit the SDLC safety cap
-        auto_continue_count = MAX_AUTO_CONTINUES_SDLC
-        effective_max = MAX_AUTO_CONTINUES_SDLC
+        auto_continue_count = MAX_NUDGE_COUNT
+        effective_max = MAX_NUDGE_COUNT
 
         should_auto_continue = (
             session.is_sdlc
@@ -327,22 +327,22 @@ class TestMaxAutoContinuesConstants:
 
     def test_max_auto_continues_value(self):
         """Both caps are 50 (ChatSession manages continuation, caps are safety backstops)."""
-        assert MAX_AUTO_CONTINUES == 50
+        assert MAX_NUDGE_COUNT == 50
 
     def test_max_auto_continues_sdlc_value(self):
         """Both caps are 50 (ChatSession manages continuation, caps are safety backstops)."""
-        assert MAX_AUTO_CONTINUES_SDLC == 50
+        assert MAX_NUDGE_COUNT == 50
 
     def test_sdlc_cap_equal_to_standard(self):
         """Both caps are equal — ChatSession handles routing, not auto-continue logic."""
-        assert MAX_AUTO_CONTINUES_SDLC == MAX_AUTO_CONTINUES
+        assert MAX_NUDGE_COUNT == MAX_NUDGE_COUNT
 
     def test_both_caps_positive(self):
         """Both caps must be positive integers."""
-        assert isinstance(MAX_AUTO_CONTINUES, int)
-        assert isinstance(MAX_AUTO_CONTINUES_SDLC, int)
-        assert MAX_AUTO_CONTINUES > 0
-        assert MAX_AUTO_CONTINUES_SDLC > 0
+        assert isinstance(MAX_NUDGE_COUNT, int)
+        assert isinstance(MAX_NUDGE_COUNT, int)
+        assert MAX_NUDGE_COUNT > 0
+        assert MAX_NUDGE_COUNT > 0
 
 
 class TestGetStageProgressWithFailures:
@@ -411,20 +411,20 @@ class TestEffectiveMaxSelection:
     """Tests verifying the correct max is chosen based on job type."""
 
     def test_sdlc_job_gets_higher_cap(self):
-        """SDLC jobs should use MAX_AUTO_CONTINUES_SDLC."""
+        """SDLC jobs should use MAX_NUDGE_COUNT."""
         session = AgentSession()
         session.history = ["[stage] ISSUE COMPLETED"]
         is_sdlc = session.is_sdlc
-        effective_max = MAX_AUTO_CONTINUES_SDLC if is_sdlc else MAX_AUTO_CONTINUES
-        assert effective_max == MAX_AUTO_CONTINUES_SDLC
+        effective_max = MAX_NUDGE_COUNT if is_sdlc else MAX_NUDGE_COUNT
+        assert effective_max == MAX_NUDGE_COUNT
 
     def test_non_sdlc_job_gets_standard_cap(self):
-        """Non-SDLC jobs should use MAX_AUTO_CONTINUES."""
+        """Non-SDLC jobs should use MAX_NUDGE_COUNT."""
         session = AgentSession()
         session.history = ["[user] Hello"]
         is_sdlc = session.is_sdlc
-        effective_max = MAX_AUTO_CONTINUES_SDLC if is_sdlc else MAX_AUTO_CONTINUES
-        assert effective_max == MAX_AUTO_CONTINUES
+        effective_max = MAX_NUDGE_COUNT if is_sdlc else MAX_NUDGE_COUNT
+        assert effective_max == MAX_NUDGE_COUNT
 
 
 # ============================================================================

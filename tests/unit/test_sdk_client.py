@@ -55,10 +55,29 @@ def test_valor_agent_custom_permission_mode():
     assert agent.permission_mode == "default"
 
 
+def _sdk_available():
+    """Check if the real Claude Agent SDK binary is usable (not just importable)."""
+    import shutil
+
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        return False
+    if not shutil.which("claude"):
+        return False
+    try:
+        import claude_agent_sdk
+
+        # If it's a MagicMock (from conftest), not the real SDK
+        if not hasattr(claude_agent_sdk, "create_session"):
+            return False
+    except ImportError:
+        return False
+    return True
+
+
 @pytest.mark.asyncio
-@pytest.mark.skipif(not os.getenv("ANTHROPIC_API_KEY"), reason="ANTHROPIC_API_KEY not set")
+@pytest.mark.skipif(not _sdk_available(), reason="Claude Agent SDK binary not available")
 async def test_sdk_query_simple():
-    """Test a simple SDK query (requires API key)."""
+    """Test a simple SDK query (requires API key and claude CLI)."""
     agent = ValorAgent()
     response = await agent.query("What is 2 + 2? Reply with just the number.")
     assert response is not None
@@ -66,9 +85,9 @@ async def test_sdk_query_simple():
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(not os.getenv("ANTHROPIC_API_KEY"), reason="ANTHROPIC_API_KEY not set")
+@pytest.mark.skipif(not _sdk_available(), reason="Claude Agent SDK binary not available")
 async def test_get_agent_response_sdk():
-    """Test the bridge-compatible function (requires API key)."""
+    """Test the bridge-compatible function (requires API key and claude CLI)."""
     from agent.sdk_client import get_agent_response_sdk
 
     response = await get_agent_response_sdk(

@@ -50,9 +50,7 @@ class TestPreToolUseDevSessionDetection:
         with patch("models.agent_session.AgentSession.create_dev") as mock_create:
             mock_create.return_value = MagicMock(job_id="dev-job-1")
 
-            result = asyncio.get_event_loop().run_until_complete(
-                pre_tool_use_hook(input_data, "tool-use-123", mock_hook_context)
-            )
+            result = asyncio.run(pre_tool_use_hook(input_data, "tool-use-123", mock_hook_context))
 
             # Should have called create_dev with parent linkage
             mock_create.assert_called_once()
@@ -71,9 +69,7 @@ class TestPreToolUseDevSessionDetection:
         input_data = self._make_agent_input(subagent_type="code-reviewer", prompt="Review the PR")
 
         with patch("models.agent_session.AgentSession.create_dev") as mock_create:
-            result = asyncio.get_event_loop().run_until_complete(
-                pre_tool_use_hook(input_data, "tool-use-456", mock_hook_context)
-            )
+            result = asyncio.run(pre_tool_use_hook(input_data, "tool-use-456", mock_hook_context))
 
             mock_create.assert_not_called()
             assert result == {}
@@ -93,9 +89,7 @@ class TestPreToolUseDevSessionDetection:
         }
 
         with patch("models.agent_session.AgentSession.create_dev") as mock_create:
-            asyncio.get_event_loop().run_until_complete(
-                pre_tool_use_hook(input_data, "tool-use-789", mock_hook_context)
-            )
+            asyncio.run(pre_tool_use_hook(input_data, "tool-use-789", mock_hook_context))
 
             mock_create.assert_not_called()
 
@@ -108,9 +102,7 @@ class TestPreToolUseDevSessionDetection:
         input_data = self._make_agent_input()
 
         with patch("models.agent_session.AgentSession.create_dev") as mock_create:
-            asyncio.get_event_loop().run_until_complete(
-                pre_tool_use_hook(input_data, "tool-use-000", mock_hook_context)
-            )
+            asyncio.run(pre_tool_use_hook(input_data, "tool-use-000", mock_hook_context))
 
             mock_create.assert_not_called()
 
@@ -137,9 +129,7 @@ class TestSubagentStopDevSessionCompletion:
         input_data = self._make_stop_input()
 
         with patch("agent.hooks.subagent_stop._register_dev_session_completion") as mock_register:
-            result = asyncio.get_event_loop().run_until_complete(
-                subagent_stop_hook(input_data, None, mock_hook_context)
-            )
+            result = asyncio.run(subagent_stop_hook(input_data, None, mock_hook_context))
 
             mock_register.assert_called_once_with("dev-agent-xyz")
             assert result == {}
@@ -151,9 +141,7 @@ class TestSubagentStopDevSessionCompletion:
         input_data = self._make_stop_input(agent_type="code-reviewer", agent_id="reviewer-abc")
 
         with patch("agent.hooks.subagent_stop._register_dev_session_completion") as mock_register:
-            result = asyncio.get_event_loop().run_until_complete(
-                subagent_stop_hook(input_data, None, mock_hook_context)
-            )
+            result = asyncio.run(subagent_stop_hook(input_data, None, mock_hook_context))
 
             mock_register.assert_not_called()
             assert result == {}

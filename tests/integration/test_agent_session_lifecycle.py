@@ -774,7 +774,7 @@ class TestSDLCClassificationTypeLifecycle:
     async def test_sdlc_classified_continuation_retains_type(self, redis_test_db):
         """Continuation session with classification_type='sdlc' still renders correctly.
 
-        Simulates what happens after _enqueue_continuation propagates the type:
+        Simulates what happens after _enqueue_nudge propagates the type:
         a new AgentSession is created with classification_type='sdlc' and the
         stage history from the original session.
         """

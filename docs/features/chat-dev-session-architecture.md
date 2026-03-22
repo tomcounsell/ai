@@ -65,25 +65,36 @@ Single Popoto model (`AgentSession`) with discriminator field. Popoto ORM does n
 - `derived_branch_name` -- `session/{slug}` if slug exists
 - `plan_path` -- `docs/plans/{slug}.md` if slug exists
 
-## Deterministic Observer
+## Nudge Loop (Bridge Output Routing)
 
-The Observer Agent has been replaced with fully deterministic routing logic. No LLM calls are made for routing decisions.
+The bridge uses a single nudge model for all output routing. No Observer, no SDLC stage awareness, no PipelineStateMachine in the bridge layer.
 
-### Routing Rules (in order)
-1. **Rate limited** -> steer with backoff message
-2. **Timeout** -> deliver to human
-3. **Unknown stop reason** -> deliver to human
-4. **Non-SDLC job** -> deliver immediately
-5. **Output needs human input** (questions, fatal errors) -> deliver
-6. **Failed pipeline stage** -> deliver
-7. **Remaining stages exist** -> steer to next stage
-8. **Pipeline complete** -> deliver
+### How It Works
 
-If the rules cannot determine an action, the output is delivered to the human. There is no LLM fallback.
+The bridge has ONE response to any non-completion: "Keep working -- only stop when you need human input or you're done."
+
+ChatSession owns all SDLC intelligence. The bridge just keeps it working.
+
+### Completion Detection
+1. **Rate limited** -> wait with backoff, then nudge
+2. **Empty output** -> nudge (not deliver)
+3. **end_turn + substantial output** -> deliver to Telegram
+4. **Safety cap (50 nudges)** -> deliver regardless
+5. **Simple sessions** -> deliver directly (no nudge loop)
+
+### Key Constants
+- `MAX_NUDGE_COUNT = 50` -- safety cap
+- `NUDGE_MESSAGE` -- the single nudge text
 
 ## Queue Architecture
 
-Jobs are queued per `project_key` (existing) with `session_type` passed through the queue. The queue supports both ChatSession and DevSession jobs.
+Jobs are queued per `chat_id` so different chat groups (even for the same project) can process jobs in parallel. Within a chat, jobs run sequentially to prevent git conflicts.
+
+### Per-Chat Workers
+- `_ensure_worker(chat_id)` -- starts a worker per chat
+- `_worker_loop(chat_id)` -- processes jobs for a chat
+- `_pop_job(chat_id)` -- pops by chat_id
+- Callbacks remain per `project_key` (Telegram client is project-scoped)
 
 ### Steering Messages
 Human replies during active pipelines are buffered as steering messages on the ChatSession. The buffer is bounded at 10 messages (oldest dropped on overflow).
@@ -101,8 +112,7 @@ The `dev-session` agent is defined in `agent/agent_definitions.py`:
 |------|---------|
 | `models/agent_session.py` | AgentSession model with session_type discriminator |
 | `agent/agent_definitions.py` | Agent registry including dev-session |
-| `bridge/observer.py` | Deterministic steer/deliver router |
-| `agent/job_queue.py` | Queue with session_type support |
+| `agent/job_queue.py` | Queue with nudge loop and per-chat workers |
 | `agent/sdk_client.py` | SDK client (classification from session, not re-classified) |
 
 ## Migration
@@ -110,4 +120,4 @@ The `dev-session` agent is defined in `agent/agent_definitions.py`:
 - Old AgentSession records in Redis are compatible (session_type will be null, treated as legacy)
 - No data migration needed -- old records are harmless
 - Factory methods enforce field contracts for new sessions
-- The Observer's circuit breaker functions are no-ops (backward compatible stubs)
+- Workers auto-adapt: jobs with chat_id use per-chat routing; legacy jobs fall back to project_key

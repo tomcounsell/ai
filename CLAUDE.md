@@ -126,8 +126,8 @@ Replace `CHAT_NAME` with the group name (e.g. `PM: PsyOptimal`, `Dev: Valor`). T
 - Always aggregate results before reporting
 
 ### 9. SDLC PIPELINE
-- The **deterministic Observer** routes pipeline progression (no LLM calls for routing)
 - ChatSession (PM persona) orchestrates; DevSession (Dev persona) executes
+- Bridge uses nudge loop for output routing (no SDLC awareness in bridge)
 - `/sdlc` is a **single-stage router**: it assesses state, invokes ONE sub-skill, and returns
 - NEVER write code, run tests, or create plans directly -- always delegate through sub-skills
 - See `.claude/skills/sdlc/SKILL.md` for the ground truth on pipeline stages
@@ -148,7 +148,7 @@ The standard flow from conversation to shipped feature:
 - If it's a real piece of work: create a GitHub issue
 
 ### Phase 2: SDLC (triggered by work request)
-- The Observer Agent steers the pipeline by invoking `/sdlc` one stage at a time
+- ChatSession steers the pipeline, invoking `/sdlc` skills as needed
 - `/sdlc` assesses current state, invokes ONE sub-skill, and returns
 - Stages: Plan -> Build -> Test -> Patch -> Review -> Patch -> Docs -> Merge
 - See `.claude/skills/sdlc/SKILL.md` for the ground truth on stage definitions
@@ -162,7 +162,7 @@ The standard flow from conversation to shipped feature:
 - If there is no question -- just a status update -- the summarizer auto-sends "continue"
 - Status updates without questions or signs of completion are NOT stopping points
 - The agent keeps working until the phase is complete or it's genuinely blocked
-- **SDLC jobs**: The deterministic Observer steers pipeline progression between stages
+- **SDLC jobs**: ChatSession steers pipeline progression between stages
 - **ChatSession** orchestrates DevSession work; **simple sessions** deliver directly
 - Auto-continue caps are set to 50 as safety backstops (ChatSession manages actual routing)
 - The auto-continue counter resets when the human sends a new message
@@ -176,7 +176,7 @@ The standard flow from conversation to shipped feature:
 
 ```
 Telegram → Python Bridge (Telethon) → ChatSession (read-only, PM persona)
-              (bridge/telegram_bridge.py)     → Deterministic Observer routing
+              (bridge/telegram_bridge.py)     → Nudge loop (bridge has no SDLC awareness)
                                               → Spawns DevSession (full permissions, Dev persona)
                                                     → Claude Agent SDK → Claude API
                                                         (agent/sdk_client.py)
@@ -185,12 +185,12 @@ Telegram → Python Bridge (Telethon) → ChatSession (read-only, PM persona)
 **Session Types** (see `docs/features/chat-dev-session-architecture.md`):
 - **ChatSession** (`session_type="chat"`) - Orchestrates work, PM persona, read-only
 - **DevSession** (`session_type="dev"`) - Does coding work, Dev persona, full permissions
-- **Observer** - Deterministic steer/deliver routing (no LLM calls)
+- **Nudge loop** - Bridge output routing (deliver or nudge, no SDLC awareness)
 
 **Key Directories:**
 - `.claude/commands/` - Slash command skills
 - `.claude/agents/` - Subagent definitions (including `dev-session`)
-- `bridge/` - Telegram integration, deterministic Observer
+- `bridge/` - Telegram integration, nudge loop
 - `tools/` - Local Python tools
 - `config/` - Configuration files
 
