@@ -833,8 +833,8 @@ async def main():
                     )
                     if matched_id:
                         # Check if matched session is active (running/active).
-                        # If so, queue the message for the Observer instead of
-                        # creating a competing job. (#318)
+                        # If so, queue the message as a steering message instead
+                        # of creating a competing job. (#318)
                         try:
                             from models.agent_session import AgentSession
 
@@ -1116,7 +1116,7 @@ async def main():
 
                             if fresh_session:
                                 # Push to AgentSession's queued_steering_messages
-                                # for Observer to read
+                                # for ChatSession to read
                                 fresh_session.push_steering_message(clean_text)
                                 from bridge.markdown import send_markdown
 

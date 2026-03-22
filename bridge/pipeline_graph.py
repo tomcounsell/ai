@@ -1,7 +1,7 @@
 """Canonical pipeline graph for SDLC stage routing.
 
 This module defines the single source of truth for pipeline stage transitions.
-All routing code (Observer, SDLC skill, stage detector display) derives from
+All routing code (SDLC skill, stage detector display) derives from
 this graph. The graph supports cycles for test-failure and review-feedback loops.
 
 Graph structure:

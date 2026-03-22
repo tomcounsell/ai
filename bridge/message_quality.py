@@ -1,4 +1,4 @@
-"""Message quality filters for the observer delivery path.
+"""Message quality filters for the nudge loop delivery path.
 
 Provides heuristics to detect when worker output is non-substantive
 (pure process narration, false promises) and should not be delivered
@@ -50,11 +50,11 @@ def is_narration_only(text: str) -> bool:
       file paths, tracebacks)
 
     Examples that return True:
-        "Let me check how the observer is configured."
+        "Let me check how the routing is configured."
         "Let me look at the code. Now let me examine the tests."
 
     Examples that return False:
-        "Let me check the config. Found the issue in bridge/observer.py line 42."
+        "Let me check the config. Found the issue in agent/job_queue.py line 42."
         "Let me look at the logs.\n```\nERROR: connection refused\n```"
         "" (empty string)
 

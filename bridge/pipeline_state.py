@@ -12,7 +12,7 @@ The state machine wraps pipeline_graph.py and manages stage statuses:
 - failed: stage finished with failure
 
 State is persisted as a JSON dict on AgentSession.stage_states.
-Each Observer run creates a fresh state machine from the session.
+Each ChatSession run creates a fresh state machine from the session.
 
 Usage:
     from bridge.pipeline_state import PipelineStateMachine
@@ -364,7 +364,7 @@ class PipelineStateMachine:
             output_tail: Last ~500 chars of worker output.
 
         Returns:
-            "success", "fail", or "ambiguous" (for Observer LLM fallback).
+            "success", "fail", or "ambiguous".
         """
         # Tier 1: SDK stop_reason
         if stop_reason and stop_reason != "end_turn":

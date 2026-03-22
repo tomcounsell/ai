@@ -70,9 +70,9 @@ class TestWorkerRulesConstant:
         assert ".md" in WORKER_RULES or "doc" in WORKER_RULES.lower()
         assert ".py" in WORKER_RULES or ".js" in WORKER_RULES or ".ts" in WORKER_RULES
 
-    def test_references_observer_agent(self):
-        """Must reference the Observer Agent as the pipeline controller."""
-        assert "Observer" in WORKER_RULES
+    def test_references_pipeline_controller(self):
+        """Must reference the ChatSession as the pipeline controller."""
+        assert "ChatSession" in WORKER_RULES
 
 
 # ---------------------------------------------------------------------------

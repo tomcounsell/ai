@@ -307,7 +307,7 @@ PRINCIPAL_PATH = Path(__file__).parent.parent / "config" / "PRINCIPAL.md"
 WORKER_RULES = """\
 ## Worker Safety Rails
 
-Execute the task given to you. The Observer Agent controls pipeline progression — \
+Execute the task given to you. The ChatSession controls pipeline progression — \
 you do not need to manage stages or orchestrate the pipeline yourself.
 
 ### Hard rules:
@@ -399,7 +399,7 @@ def load_principal_context(condensed: bool = True) -> str:
 
     Provides strategic context for decision-making: mission, goals, project
     priorities, and operating assumptions. Used by workers (condensed) and
-    the Observer (full) to ground autonomous decisions.
+    the ChatSession (full) to ground autonomous decisions.
 
     Args:
         condensed: If True, return only Mission + Goals + Projects sections
@@ -1064,7 +1064,7 @@ class ValorAgent:
                                 # so continuation sessions resume the correct transcript.
                                 if msg.session_id and session_id:
                                     _store_claude_session_uuid(session_id, msg.session_id)
-                                # Capture stop_reason for Observer routing decisions
+                                # Capture stop_reason for nudge loop routing decisions
                                 if msg.stop_reason and session_id:
                                     _session_stop_reasons[session_id] = msg.stop_reason
                                     logger.info(
@@ -1194,7 +1194,7 @@ class ValorAgent:
                 clear_session_activity(session_id)
                 # Note: _session_stop_reasons is NOT cleaned here — it's consumed
                 # by get_stop_reason() in job_queue after query returns. The pop()
-                # in get_stop_reason() handles cleanup. If the Observer never runs
+                # in get_stop_reason() handles cleanup. If the nudge loop never runs
                 # (crash), entries are tiny (session_id -> str) and cleared on restart.
                 logger.debug(f"Unregistered active client for session {session_id}")
 
