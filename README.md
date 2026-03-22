@@ -59,11 +59,7 @@ pip install -e .
 cp .env.example .env
 # Edit .env with your API keys and Telegram credentials
 
-# 3. Enable Claude Agent SDK (recommended)
-# In .env:
-USE_CLAUDE_SDK=true
-
-# 4. Start the bridge
+# 3. Start the bridge
 ./scripts/start_bridge.sh
 ```
 

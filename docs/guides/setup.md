@@ -71,9 +71,6 @@ TELEGRAM_API_HASH=your_api_hash_here
 TELEGRAM_PHONE=+1234567890
 TELEGRAM_PASSWORD=your_2fa_password  # if enabled
 
-# Agent Backend (recommended: true)
-USE_CLAUDE_SDK=true
-
 # Bridge Configuration
 TELEGRAM_SESSION_NAME=valor_bridge
 ACTIVE_PROJECTS=valor

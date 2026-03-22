@@ -89,7 +89,6 @@ Edit `.env` and ensure these are set:
 | Variable | Required | Notes |
 |----------|----------|-------|
 | `ACTIVE_PROJECTS` | Yes | Comma-separated project keys |
-| `USE_CLAUDE_SDK` | Yes | Must be `true` |
 | `ANTHROPIC_API_KEY` | Yes | Starts with `sk-ant-` |
 | `TELEGRAM_API_ID` | Yes | Numeric, from my.telegram.org |
 | `TELEGRAM_API_HASH` | Yes | Hex string, from my.telegram.org |

@@ -66,7 +66,7 @@ REFERENCE TYPES TO EXTRACT:
 - CLI commands (e.g., "./scripts/start_bridge.sh", "valor-telegram", "python scripts/reflections.py")
 - Environment variables (e.g., "ANTHROPIC_API_KEY", "TELEGRAM_API_ID")
 - Package/module names (e.g., "telethon", "anthropic", "claude-agent-sdk")
-- Config file keys (e.g., "USE_CLAUDE_SDK", "SENTRY_DSN")
+- Config file keys (e.g., "SENTRY_DSN", "ACTIVE_PROJECTS")
 - Script names in scripts/ directory
 
 VERIFICATION STEPS (use Glob, Grep, Read, Bash tools):
