@@ -300,7 +300,7 @@ PERSONAS_OVERLAY_DIR = Path.home() / "Desktop" / "Valor" / "personas"
 PRINCIPAL_PATH = Path(__file__).parent.parent / "config" / "PRINCIPAL.md"
 
 # Worker safety rails injected into every agent session.
-# The Observer Agent (bridge/observer.py) is the sole pipeline controller —
+# ChatSession is the sole pipeline controller —
 # it steers the worker one stage at a time via coaching messages.
 # This constant provides only the safety rails the worker needs; it does NOT
 # contain pipeline orchestration or /sdlc invocation instructions.
@@ -526,7 +526,7 @@ def load_system_prompt() -> str:
         ---
         [Work Completion Criteria — from CLAUDE.md]
 
-    The Observer Agent (bridge/observer.py) handles pipeline orchestration.
+    ChatSession handles pipeline orchestration via nudge loop.
     The worker only receives safety rails — no pipeline stages or /sdlc references.
     """
     try:

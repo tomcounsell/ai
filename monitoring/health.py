@@ -223,42 +223,17 @@ class HealthChecker:
             )
 
     def check_observer_telemetry(self) -> HealthCheckResult:
-        """Check observer health via telemetry metrics.
+        """No-op — Observer removed in SDLC Redesign Phase 2.
 
-        Reads decision counters from Redis and checks error rate thresholds.
-
-        Returns:
-            HealthCheckResult for observer telemetry.
+        Kept for backward compatibility with health check callers.
+        Returns healthy status since nudge loop has no telemetry to check.
         """
-        try:
-            from monitoring.telemetry import check_observer_health
-
-            health = check_observer_health()
-            status_map = {
-                "ok": HealthStatus.HEALTHY,
-                "degraded": HealthStatus.DEGRADED,
-                "unhealthy": HealthStatus.UNHEALTHY,
-            }
-            h_status = status_map.get(health["status"], HealthStatus.UNKNOWN)
-            message = (
-                f"Observer: {health['total_decisions']} decisions, "
-                f"error_rate={health['error_rate']:.1%}"
-            )
-            if health["violations"]:
-                message += f" [{', '.join(health['violations'])}]"
-            return HealthCheckResult(
-                component="observer_telemetry",
-                status=h_status,
-                message=message,
-                details=health,
-            )
-        except Exception as e:
-            return HealthCheckResult(
-                component="observer_telemetry",
-                status=HealthStatus.UNKNOWN,
-                message=f"Observer telemetry unavailable: {e}",
-                details={"error": str(e)},
-            )
+        return HealthCheckResult(
+            component="observer_telemetry",
+            status=HealthStatus.HEALTHY,
+            message="Observer removed — nudge loop active (no telemetry)",
+            details={},
+        )
 
     def get_overall_health(self) -> OverallHealth:
         """Run all health checks and return overall status.

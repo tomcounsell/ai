@@ -57,7 +57,7 @@ RedisJob = AgentSession
 
 MSG_MAX_CHARS = 20_000  # ~5k tokens — reasonable context limit for agent input
 
-# Nudge loop: single nudge model replaces Observer-based routing.
+# Nudge loop: single nudge model for bridge output routing.
 # The bridge has ONE response to any non-completion: nudge.
 # ChatSession owns all SDLC intelligence; the bridge just keeps it working.
 MAX_NUDGE_COUNT = 50  # Safety cap — deliver to Telegram after this many nudges
@@ -235,7 +235,7 @@ _JOB_FIELDS = [
     # Stall retry fields — must be preserved across delete-and-recreate
     "retry_count",
     "last_stall_reason",
-    # Observer fields — must be preserved across delete-and-recreate
+    # Steering fields — must be preserved across delete-and-recreate
     "queued_steering_messages",
     # Tracing fields — must be preserved across delete-and-recreate
     "correlation_id",
@@ -473,7 +473,7 @@ async def _complete_job(job: Job, *, failed: bool = False) -> None:
     even though the child's Redis status hasn't been updated yet.
 
     After deletion, checks the playlist for the next issue to schedule
-    (Observer playlist hook). On failure, requeues the failed issue to
+    (Playlist hook). On failure, requeues the failed issue to
     the end of the playlist if retry limit allows.
 
     Args:
@@ -1324,7 +1324,7 @@ def _diagnose_missing_session(session_id: str) -> dict:
         return {"error": str(e)}
 
 
-async def _enqueue_continuation(
+async def _enqueue_nudge(
     job: "Job",
     branch_name: str,
     task_list_id: str,
@@ -1332,28 +1332,25 @@ async def _enqueue_continuation(
     output_msg: str,
     coaching_message: str = "continue",
 ) -> None:
-    """Enqueue a continuation job by reusing the existing AgentSession.
+    """Enqueue a nudge by reusing the existing AgentSession.
 
-    Instead of creating a new AgentSession (which orphans the old one and
-    loses metadata like classification_type, history, and links), this
-    function looks up the existing session by session_id, preserves all
-    fields via delete-and-recreate, and updates only status, message_text,
-    auto_continue_count, and priority.
+    The nudge loop uses this to re-enqueue the session with a nudge message
+    ("Keep working") when the agent stops but hasn't completed. This
+    re-spawns Claude Code with the nudge as input.
 
-    This makes AgentSession the single source of truth -- no metadata
-    needs to be manually propagated as function parameters.
+    Preserves all session metadata via delete-and-recreate pattern.
 
     Args:
         job: The current Job being executed.
         branch_name: Git branch name for the session.
         task_list_id: Task list ID for sub-agent isolation.
-        auto_continue_count: Current auto-continue count (already incremented).
-        output_msg: The agent output that triggered auto-continue.
-        coaching_message: Steering message from the Observer agent.
+        auto_continue_count: Current nudge count (already incremented).
+        output_msg: The agent output that triggered the nudge.
+        coaching_message: Nudge message sent to the agent.
     """
 
     logger.info(
-        f"[{job.project_key}] Coaching message (observer) "
+        f"[{job.project_key}] Nudge message "
         f"({len(coaching_message)} chars): {coaching_message[:120]!r}"
     )
 
@@ -1578,7 +1575,7 @@ async def _execute_job(job: Job) -> None:
                 f"(nudge {chat_state.auto_continue_count}/{MAX_NUDGE_COUNT})"
             )
             # Nudge via continuation
-            await _enqueue_continuation(
+            await _enqueue_nudge(
                 job,
                 branch_name,
                 task_list_id,
@@ -1598,7 +1595,7 @@ async def _execute_job(job: Job) -> None:
                     f"[{job.project_key}] Empty output — nudging "
                     f"(nudge {chat_state.auto_continue_count}/{MAX_NUDGE_COUNT})"
                 )
-                await _enqueue_continuation(
+                await _enqueue_nudge(
                     job,
                     branch_name,
                     task_list_id,
