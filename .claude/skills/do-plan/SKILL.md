@@ -37,6 +37,16 @@ For cross-project work, the `GH_REPO` environment variable is automatically set 
 
 ## Quick Start Workflow
 
+### Phase 0: Validate Recon (ISSUE → PLAN gate)
+
+Before planning, verify the source issue has reconnaissance evidence:
+
+```bash
+python .claude/hooks/validators/validate_issue_recon.py ISSUE_NUMBER
+```
+
+If this fails, the issue needs a `## Recon Summary` section added via `/do-issue` Step 3 (the reconnaissance routine). Do not proceed with planning until recon is validated — plans built on unverified assumptions produce rework.
+
 ### Phase 1: Flesh Out at High Level
 
 1. **Understand the request** - What's being asked?

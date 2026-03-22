@@ -2,6 +2,14 @@
 
 Run every check before creating the issue. Fix failures — do not skip items.
 
+## Reconnaissance Checks
+
+- [ ] **Recon performed** — The reconnaissance routine (Step 3) was executed: broad scan completed, concerns identified, parallel fan-out agents dispatched, and findings synthesized. Skip only for trivially simple issues (typo fixes, config changes).
+
+- [ ] **Recon summary present** — The issue body contains a `## Recon Summary` section with the four buckets (Confirmed, Revised, Pre-requisites, Dropped) and at least one concrete item. OR it contains a `## Recon: Skipped` section with justification for why recon was unnecessary.
+
+- [ ] **Scope reflects recon** — The Solution Sketch and Acceptance Criteria reflect recon findings. Items flagged as "already done" or "dropped" are not in scope. Items flagged as "pre-requisites" are called out as blockers.
+
 ## Readability Checks
 
 - [ ] **Stranger test** — Could someone with general software experience but zero knowledge of this codebase understand the issue? Read the title and first paragraph as if you've never seen this repo.
