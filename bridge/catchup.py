@@ -183,7 +183,6 @@ async def scan_for_missed_messages(
                     chat_title=chat_title,
                     priority="low",  # Lower priority than real-time messages
                     sender_id=sender_id,
-                    workflow_id=None,
                 )
 
                 # Record in Redis dedup to prevent re-enqueue on next scan

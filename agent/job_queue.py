@@ -130,10 +130,6 @@ class Job:
         return self._rj.created_at
 
     @property
-    def workflow_id(self) -> str | None:
-        return self._rj.workflow_id
-
-    @property
     def work_item_slug(self) -> str | None:
         return self._rj.work_item_slug
 
@@ -200,7 +196,6 @@ _JOB_FIELDS = [
     "message_id",
     "chat_title",
     "revival_context",
-    "workflow_id",
     "work_item_slug",
     "task_list_id",
     "has_media",
@@ -278,7 +273,6 @@ async def _push_job(
     priority: str = "normal",
     revival_context: str | None = None,
     sender_id: int | None = None,
-    workflow_id: str | None = None,
     work_item_slug: str | None = None,
     task_list_id: str | None = None,
     has_media: bool = False,
@@ -294,7 +288,7 @@ async def _push_job(
     scheduling_depth: int = 0,
     parent_job_id: str | None = None,
     trigger_message_id: str | None = None,
-    session_type: str | None = None,
+    session_type: str = "chat",
 ) -> int:
     """Create a job in Redis and return the pending queue depth for this chat.
 
@@ -341,7 +335,6 @@ async def _push_job(
         message_id=message_id,
         chat_title=chat_title,
         revival_context=revival_context,
-        workflow_id=workflow_id,
         work_item_slug=work_item_slug,
         task_list_id=task_list_id,
         has_media=has_media,
@@ -1131,7 +1124,6 @@ async def enqueue_job(
     priority: str = "normal",
     revival_context: str | None = None,
     sender_id: int | None = None,
-    workflow_id: str | None = None,
     work_item_slug: str | None = None,
     task_list_id: str | None = None,
     has_media: bool = False,
@@ -1147,7 +1139,7 @@ async def enqueue_job(
     scheduling_depth: int = 0,
     parent_job_id: str | None = None,
     trigger_message_id: str | None = None,
-    session_type: str | None = None,
+    session_type: str = "chat",
 ) -> int:
     """
     Add a job to Redis and ensure worker is running.
@@ -1167,7 +1159,6 @@ async def enqueue_job(
         chat_id=chat_id,
         message_id=message_id,
         chat_title=chat_title,
-        workflow_id=workflow_id,
         priority=priority,
         revival_context=revival_context,
         work_item_slug=work_item_slug,
@@ -1494,7 +1485,6 @@ async def _execute_job(job: Job) -> None:
 
     # Determine session type for routing decisions
     _session_type = getattr(agent_session, "session_type", None) if agent_session else None
-    is_simple_session = _session_type == "simple"
 
     # Calendar heartbeat at session start
     asyncio.create_task(_calendar_heartbeat(job.project_key, project=job.project_key))
@@ -1549,18 +1539,8 @@ async def _execute_job(job: Job) -> None:
             )
             return
 
-        # === Simple session fast-path ===
-        # Simple sessions (Q&A, non-SDLC) deliver directly to Telegram.
-        if is_simple_session:
-            logger.info(
-                f"[{job.project_key}] Simple session — delivering directly ({len(msg)} chars)"
-            )
-            await send_cb(job.chat_id, msg, job.message_id, agent_session)
-            chat_state.completion_sent = True
-            return
-
         # === Nudge loop ===
-        # For ChatSessions: check if output signals completion, otherwise nudge.
+        # Check if output signals completion, otherwise nudge.
         # No Observer, no PipelineStateMachine, no SDLC stage awareness.
 
         from agent.sdk_client import get_stop_reason
@@ -1745,7 +1725,6 @@ async def _execute_job(job: Job) -> None:
             project_config,
             job.chat_id,
             job.sender_id,
-            job.workflow_id,
             task_list_id,
             cid,
             job.job_id,

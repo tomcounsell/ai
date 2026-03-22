@@ -9,28 +9,37 @@ The AgentSession model uses a **session_type discriminator** to distinguish betw
 
 This replaces the previous architecture where a single undifferentiated AgentSession handled both orchestration and execution, with an external LLM-based Observer Agent making routing decisions between pipeline stages.
 
+## Routing
+
+Messages are routed to session types based on chat title prefix:
+
+- **"Dev: X" groups** -> `session_type="dev"` (DevSession, full permissions, dev persona). The classifier is skipped — Dev groups always get a DevSession directly.
+- **Everything else** -> `session_type="chat"` (ChatSession, PM persona). This includes both SDLC work and Q&A. The ChatSession decides whether to spawn a DevSession.
+
+There are exactly two session types: `chat` and `dev`. The previous `simple` session type has been removed — all messages route through ChatSession, which is intelligent enough to handle Q&A directly.
+
 ## Architecture
 
 ```
 Telegram Message
     |
     v
-ChatSession created (session_type="chat")
-    |-- Queued per chat_id
-    |-- Read-only, PM persona
-    |-- Reads code, understands context
+Route by chat_title prefix
     |
-    v
-Spawns DevSession (session_type="dev")
-    |-- Full permissions, Dev persona
-    |-- Works full SDLC pipeline
-    |-- Steered by ChatSession
+    |-- "Dev: X" → DevSession (session_type="dev")
+    |       |-- Full permissions, Dev persona
+    |       |-- Direct execution
     |
-    v
-ChatSession composes delivery
-    |-- Persona-voiced message
-    v
-Telegram Response
+    |-- Everything else → ChatSession (session_type="chat")
+            |-- Queued per chat_id
+            |-- Read-only, PM persona
+            |-- May spawn DevSession for SDLC work
+            |
+            v
+        ChatSession composes delivery
+            |-- Persona-voiced message
+            v
+        Telegram Response
 ```
 
 ## Data Model
@@ -80,7 +89,7 @@ ChatSession owns all SDLC intelligence. The bridge just keeps it working.
 2. **Empty output** -> nudge (not deliver)
 3. **end_turn + substantial output** -> deliver to Telegram
 4. **Safety cap (50 nudges)** -> deliver regardless
-5. **Simple sessions** -> deliver directly (no nudge loop)
+5. **Already-completed session** -> deliver without nudge
 
 ### Key Constants
 - `MAX_NUDGE_COUNT = 50` -- safety cap

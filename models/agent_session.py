@@ -1,6 +1,6 @@
 """AgentSession model - unified lifecycle tracking for agent work.
 
-Single Popoto model with session_type discriminator ("chat", "dev", or "simple").
+Single Popoto model with session_type discriminator ("chat" or "dev").
 Popoto does not support model inheritance, so ChatSession and DevSession
 are distinguished by the session_type field with factory methods and
 derived properties providing type-specific behavior.
@@ -40,7 +40,6 @@ SDLC_STAGES = ["ISSUE", "PLAN", "BUILD", "TEST", "REVIEW", "DOCS", "MERGE"]
 # Valid session types
 SESSION_TYPE_CHAT = "chat"
 SESSION_TYPE_DEV = "dev"
-SESSION_TYPE_SIMPLE = "simple"
 
 
 class AgentSession(Model):
@@ -89,7 +88,6 @@ class AgentSession(Model):
     message_id = Field(type=int, null=True)
     chat_title = Field(null=True)
     revival_context = Field(null=True, max_length=MSG_MAX_CHARS)
-    workflow_id = Field(null=True)
     work_item_slug = Field(null=True)
     task_list_id = Field(null=True)
     # === Message metadata (deprecated - now lives on TelegramMessage) ===
@@ -197,11 +195,6 @@ class AgentSession(Model):
     def is_dev(self) -> bool:
         """Whether this is a DevSession (Dev persona, full permissions)."""
         return self.session_type == SESSION_TYPE_DEV
-
-    @property
-    def is_simple(self) -> bool:
-        """Whether this is a simple session (Q&A, no orchestration)."""
-        return self.session_type == SESSION_TYPE_SIMPLE
 
     @property
     def current_stage(self) -> str | None:
@@ -315,41 +308,6 @@ class AgentSession(Model):
             message_text=message_text,
             slug=slug,
             sdlc_stages=stages_json,
-            created_at=time.time(),
-            **kwargs,
-        )
-        session.save()
-        return session
-
-    @classmethod
-    def create_simple(
-        cls,
-        *,
-        session_id: str,
-        project_key: str,
-        working_dir: str,
-        chat_id: str,
-        message_id: int,
-        message_text: str,
-        sender_name: str | None = None,
-        **kwargs,
-    ) -> "AgentSession":
-        """Create a simple session (Q&A, no orchestration overhead).
-
-        Simple sessions bypass ChatSession/DevSession flow entirely.
-        They handle non-SDLC messages with a single Agent SDK session.
-
-        Wired into bridge handler via enqueue_job(session_type=...).
-        """
-        session = cls(
-            session_id=session_id,
-            session_type=SESSION_TYPE_SIMPLE,
-            project_key=project_key,
-            working_dir=working_dir,
-            chat_id=chat_id,
-            message_id=message_id,
-            message_text=message_text,
-            sender_name=sender_name,
             created_at=time.time(),
             **kwargs,
         )

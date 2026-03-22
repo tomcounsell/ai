@@ -7,7 +7,7 @@ with `except Exception: pass`.
 The 7 critical locations are:
 - _push_job: lifecycle transition logging
 - _pop_job: lifecycle transition logging
-- _enqueue_nudge: plan file resolution from WorkflowState
+- _enqueue_nudge: plan file resolution from session context
 - _execute_job: session re-read from Redis
 - _load_cooldowns: file read
 - _save_cooldowns: file write
@@ -144,7 +144,6 @@ class TestEnqueueContinuationSessionLookupLogging:
         mock_job.message_id = 3
         mock_job.work_item_slug = None
         mock_job.task_list_id = None
-        mock_job.workflow_id = None
         mock_job.classification_type = None
 
         from unittest.mock import AsyncMock as _AsyncMock

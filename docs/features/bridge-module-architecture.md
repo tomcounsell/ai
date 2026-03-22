@@ -8,7 +8,7 @@ The Telegram bridge (`bridge/telegram_bridge.py`) is organized into focused sub-
 | `bridge/routing.py` | Message routing, project config, mention/response classification |
 | `bridge/context.py` | Context building, conversation history, reply chains |
 | `bridge/response.py` | Message formatting, reactions, file extraction, sending |
-| `bridge/agents.py` | Agent invocation, retry logic, self-healing |
+| `bridge/catchup.py` | Abandoned session revival and re-enqueueing |
 
 ## telegram_bridge.py
 

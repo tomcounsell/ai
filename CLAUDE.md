@@ -163,7 +163,7 @@ The standard flow from conversation to shipped feature:
 - Status updates without questions or signs of completion are NOT stopping points
 - The agent keeps working until the phase is complete or it's genuinely blocked
 - **SDLC jobs**: ChatSession steers pipeline progression between stages
-- **ChatSession** orchestrates DevSession work; **simple sessions** deliver directly
+- **ChatSession** orchestrates DevSession work; all messages route through ChatSession
 - Auto-continue caps are set to 50 as safety backstops (ChatSession manages actual routing)
 - The auto-continue counter resets when the human sends a new message
 
@@ -245,7 +245,7 @@ See `docs/features/session-isolation.md` for the full technical design.
 
 - **Bridge Issues**: `./scripts/valor-service.sh restart`
 - **Telegram Auth**: `python scripts/telegram_login.py`
-- **SDK Issues**: Check `USE_CLAUDE_SDK=true` in `.env`
+- **SDK Issues**: Check SDK configuration in `.env`
 
 ### Self-Healing System
 
