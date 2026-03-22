@@ -288,7 +288,7 @@ async def _push_job(
     scheduling_depth: int = 0,
     parent_job_id: str | None = None,
     trigger_message_id: str | None = None,
-    session_type: str | None = None,
+    session_type: str = "chat",
 ) -> int:
     """Create a job in Redis and return the pending queue depth for this chat.
 
@@ -1139,7 +1139,7 @@ async def enqueue_job(
     scheduling_depth: int = 0,
     parent_job_id: str | None = None,
     trigger_message_id: str | None = None,
-    session_type: str | None = None,
+    session_type: str = "chat",
 ) -> int:
     """
     Add a job to Redis and ensure worker is running.

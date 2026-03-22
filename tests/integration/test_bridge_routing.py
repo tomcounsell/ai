@@ -147,17 +147,18 @@ class TestRoutingToSessionCreation:
         assert session.is_chat is False
 
     @pytest.mark.asyncio
-    async def test_none_session_type_defaults_gracefully(self):
-        """_push_job(session_type=None) stores None — no crash, is_chat/is_dev both False."""
-        kwargs = _default_push_kwargs(session_type=None)
+    async def test_default_session_type_is_chat(self):
+        """_push_job without explicit session_type defaults to 'chat'."""
+        kwargs = _default_push_kwargs()
+        # Don't pass session_type — should default to "chat"
+        kwargs.pop("session_type", None)
         await _push_job(**kwargs)
 
         sessions = list(AgentSession.query.filter(session_id=kwargs["session_id"]))
         assert len(sessions) >= 1
         session = sessions[0]
-        # None session_type means neither is_chat nor is_dev
-        assert session.is_chat is False
-        assert session.is_dev is False
+        assert session.session_type == "chat"
+        assert session.is_chat is True
 
 
 class TestEnqueueJobSessionTypeFlow:
