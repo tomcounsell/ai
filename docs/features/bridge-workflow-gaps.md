@@ -44,8 +44,8 @@ All routing decisions — SDLC and non-SDLC — are now made by the [Observer Ag
 ### Safety Limits
 
 - **Error bypass (crash guard)** -- If output is classified as `ERROR`, auto-continue is skipped entirely and the error is sent straight to Telegram. This prevents cascading retry loops when the SDK crashes.
-- **MAX_AUTO_CONTINUES = 3** -- Safety cap for non-SDLC jobs. After 3 auto-continues, the next status update goes to Telegram.
-- **MAX_AUTO_CONTINUES_SDLC = 10** -- Higher safety cap for SDLC jobs where stage progress is the primary termination signal.
+- **MAX_AUTO_CONTINUES = 50** -- Safety backstop for all sessions. ChatSession's deterministic Observer handles actual routing decisions; the cap only prevents runaway loops.
+- **MAX_AUTO_CONTINUES_SDLC = 50** -- Same safety backstop for SDLC jobs. Both caps are equal since the deterministic Observer (not auto-continue logic) manages pipeline progression.
 - **Counter resets on human reply** -- When the human sends a new message to the session, the auto-continue counter resets to zero.
 - **Steering queue integration** -- Auto-continue uses the same steering queue mechanism as manual human input, so the agent sees it as a normal continuation signal.
 - **Merge gate** -- After REVIEW + DOCS stages complete, the SDLC pipeline checks auto-merge eligibility (no open questions, clean review with 0 issues, all tests pass, diff < 150 lines). Eligible PRs are auto-merged; all others stop and wait for explicit human instruction. Tech debt and nits from reviews are patched before docs (not skipped).
