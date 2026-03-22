@@ -114,10 +114,12 @@ class TestDevSessionCompletion:
             else:
                 os.environ.pop("VALOR_SESSION_ID", None)
 
-        # Reload and verify
-        reloaded = list(AgentSession.query.filter(session_id=f"dev-{parent_sid}"))
-        assert len(reloaded) >= 1
-        assert reloaded[0].status == "completed"
+        # Reload and verify — Popoto keeps old status records as KeyField,
+        # so filter for the specific completed status
+        completed = list(
+            AgentSession.query.filter(session_id=f"dev-{parent_sid}", status="completed")
+        )
+        assert len(completed) >= 1
 
     def test_status_guard_failed_not_overwritten(self):
         """A 'failed' DevSession should not be overwritten to 'completed'."""
@@ -156,9 +158,15 @@ class TestDevSessionCompletion:
             else:
                 os.environ.pop("VALOR_SESSION_ID", None)
 
-        reloaded = list(AgentSession.query.filter(session_id=f"dev-{parent_sid}"))
-        assert len(reloaded) >= 1
-        assert reloaded[0].status == "failed"  # NOT overwritten
+        # Should still be failed, not overwritten to completed
+        failed = list(
+            AgentSession.query.filter(session_id=f"dev-{parent_sid}", status="failed")
+        )
+        completed = list(
+            AgentSession.query.filter(session_id=f"dev-{parent_sid}", status="completed")
+        )
+        assert len(failed) >= 1
+        assert len(completed) == 0
 
     def test_multiple_dev_sessions_under_one_parent(self):
         """Multiple DevSessions can exist under one parent ChatSession."""
@@ -205,9 +213,11 @@ class TestDevSessionCompletion:
             else:
                 os.environ.pop("VALOR_SESSION_ID", None)
 
-        # All running devs should now be completed
-        reloaded = list(
-            AgentSession.query.filter(parent_chat_session_id=parent_sid)
-        )
-        for dev in reloaded:
-            assert dev.status == "completed"
+        # All running devs should now be completed — check each by session_id
+        for i in range(3):
+            completed = list(
+                AgentSession.query.filter(
+                    session_id=f"dev-{parent_sid}-{i}", status="completed"
+                )
+            )
+            assert len(completed) >= 1, f"dev-{parent_sid}-{i} should be completed"
