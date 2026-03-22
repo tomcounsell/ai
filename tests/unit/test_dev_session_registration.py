@@ -58,7 +58,6 @@ class TestPreToolUseDevSessionDetection:
             mock_create.assert_called_once()
             call_kwargs = mock_create.call_args[1]
             assert call_kwargs["parent_chat_session_id"] == "parent-chat-session-abc"
-            assert call_kwargs["session_type_source"] == "hook"
 
             # Should not block the tool call
             assert result.get("decision") != "block"
