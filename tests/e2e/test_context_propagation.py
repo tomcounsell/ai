@@ -13,7 +13,6 @@ import pytest
 from models.agent_session import (
     SESSION_TYPE_CHAT,
     SESSION_TYPE_DEV,
-    SESSION_TYPE_SIMPLE,
     AgentSession,
 )
 
@@ -156,7 +155,7 @@ class TestDerivedPaths:
 
     def test_no_slug_falls_back_to_branch_name(self):
         ts = int(time.time())
-        session = AgentSession.create_simple(
+        session = AgentSession.create_chat(
             session_id=f"nosluq_{ts}",
             project_key="valor",
             working_dir="/tmp/test",
@@ -196,18 +195,18 @@ class TestSDLCStagesPropagation:
         assert reloaded.is_sdlc is True
         assert reloaded.current_stage == "BUILD"
 
-    def test_simple_session_is_not_sdlc(self):
+    def test_chat_session_without_sdlc_stages(self):
         ts = int(time.time())
-        simple = AgentSession.create_simple(
-            session_id=f"simple_{ts}",
+        chat = AgentSession.create_chat(
+            session_id=f"nosdlc_{ts}",
             project_key="valor",
             working_dir="/tmp/test",
-            chat_id="simple_chat",
+            chat_id="chat_no_sdlc",
             message_id=1,
             message_text="what time is it?",
         )
-        assert simple.is_sdlc is False
-        assert simple.current_stage is None
+        assert chat.is_sdlc is False
+        assert chat.current_stage is None
 
 
 @pytest.mark.e2e
@@ -232,18 +231,9 @@ class TestSessionTypeDiscriminator:
             parent_chat_session_id=chat.job_id,
             message_text="build",
         )
-        simple = AgentSession.create_simple(
-            session_id=f"type_simple_{ts}",
-            project_key="valor",
-            working_dir="/tmp",
-            chat_id="ts",
-            message_id=2,
-            message_text="q",
-        )
 
-        assert chat.is_chat and not chat.is_dev and not chat.is_simple
-        assert dev.is_dev and not dev.is_chat and not dev.is_simple
-        assert simple.is_simple and not simple.is_chat and not simple.is_dev
+        assert chat.is_chat and not chat.is_dev
+        assert dev.is_dev and not dev.is_chat
 
     def test_session_type_queryable(self):
         ts = int(time.time())
@@ -255,21 +245,20 @@ class TestSessionTypeDiscriminator:
             message_id=1,
             message_text="hi",
         )
-        AgentSession.create_simple(
-            session_id=f"qt_simple_{ts}",
+        AgentSession.create_dev(
+            session_id=f"qt_dev_{ts}",
             project_key="query_test",
             working_dir="/tmp",
-            chat_id="qt2",
-            message_id=2,
-            message_text="q",
+            parent_chat_session_id="parent_x",
+            message_text="build",
         )
 
         chats = list(AgentSession.query.filter(session_type=SESSION_TYPE_CHAT))
-        simples = list(AgentSession.query.filter(session_type=SESSION_TYPE_SIMPLE))
+        devs = list(AgentSession.query.filter(session_type=SESSION_TYPE_DEV))
 
         chat_ids = {s.session_id for s in chats}
-        simple_ids = {s.session_id for s in simples}
+        dev_ids = {s.session_id for s in devs}
 
         assert f"qt_chat_{ts}" in chat_ids
-        assert f"qt_simple_{ts}" in simple_ids
-        assert f"qt_chat_{ts}" not in simple_ids
+        assert f"qt_dev_{ts}" in dev_ids
+        assert f"qt_chat_{ts}" not in dev_ids

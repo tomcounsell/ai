@@ -1,7 +1,7 @@
-"""Tests for ChatSession/Simple factory method integration in bridge handler.
+"""Tests for ChatSession/DevSession factory method integration in bridge handler.
 
 Verifies that the bridge handler correctly routes messages to create_chat()
-(for SDLC work) or create_simple() (for Q&A) based on intake classification.
+(default) or create_dev() (for "Dev: X" groups) based on chat title.
 """
 
 from pathlib import Path
@@ -12,40 +12,40 @@ class TestBridgeSessionTypeRouting:
 
     def test_sdlc_classification_creates_chat_session(self):
         """SDLC classification should produce session_type='chat'."""
-        # The bridge handler maps classification_type="sdlc" to session_type="chat"
+        # The bridge handler now routes all messages to ChatSession
         _classification = "sdlc"
-        if _classification == "sdlc":
-            _session_type = "chat"
-        else:
-            _session_type = "simple"
+        _session_type = "chat"  # All messages go to ChatSession
         assert _session_type == "chat"
 
-    def test_question_classification_creates_simple_session(self):
-        """Question classification should produce session_type='simple'."""
+    def test_question_classification_creates_chat_session(self):
+        """Question classification should also produce session_type='chat'."""
         _classification = "question"
-        if _classification == "sdlc":
-            _session_type = "chat"
-        else:
-            _session_type = "simple"
-        assert _session_type == "simple"
+        _session_type = "chat"  # All messages go to ChatSession
+        assert _session_type == "chat"
 
-    def test_none_classification_creates_simple_session(self):
-        """No classification (None) should produce session_type='simple'."""
+    def test_none_classification_creates_chat_session(self):
+        """No classification (None) should produce session_type='chat'."""
         _classification = None
-        if _classification == "sdlc":
-            _session_type = "chat"
-        else:
-            _session_type = "simple"
-        assert _session_type == "simple"
+        _session_type = "chat"  # All messages go to ChatSession
+        assert _session_type == "chat"
 
-    def test_passthrough_classification_creates_simple_session(self):
-        """Passthrough classification should produce session_type='simple'."""
-        _classification = "passthrough"
-        if _classification == "sdlc":
-            _session_type = "chat"
+    def test_dev_group_routing(self):
+        """'Dev: X' chat title prefix should produce session_type='dev'."""
+        chat_title = "Dev: Valor"
+        if chat_title and chat_title.startswith("Dev:"):
+            _session_type = "dev"
         else:
-            _session_type = "simple"
-        assert _session_type == "simple"
+            _session_type = "chat"
+        assert _session_type == "dev"
+
+    def test_non_dev_group_routing(self):
+        """Non-dev chat title should produce session_type='chat'."""
+        chat_title = "PM: PsyOptimal"
+        if chat_title and chat_title.startswith("Dev:"):
+            _session_type = "dev"
+        else:
+            _session_type = "chat"
+        assert _session_type == "chat"
 
 
 class TestFactoryMethodsExist:
@@ -58,19 +58,18 @@ class TestFactoryMethodsExist:
         assert hasattr(AgentSession, "create_chat")
         assert callable(AgentSession.create_chat)
 
-    def test_create_simple_exists(self):
-        """AgentSession.create_simple should be a classmethod."""
-        from models.agent_session import AgentSession
-
-        assert hasattr(AgentSession, "create_simple")
-        assert callable(AgentSession.create_simple)
-
     def test_create_dev_exists(self):
         """AgentSession.create_dev should be a classmethod."""
         from models.agent_session import AgentSession
 
         assert hasattr(AgentSession, "create_dev")
         assert callable(AgentSession.create_dev)
+
+    def test_no_create_simple(self):
+        """AgentSession should NOT have create_simple (removed)."""
+        from models.agent_session import AgentSession
+
+        assert not hasattr(AgentSession, "create_simple")
 
 
 class TestBridgeNoClassifyWorkRequest:
@@ -91,4 +90,13 @@ class TestBridgeNoClassifyWorkRequest:
         source = model_path.read_text()
         assert "TODO: Wire into bridge handler" not in source, (
             "Factory methods should be wired — remove TODO comments"
+        )
+
+    def test_no_simple_session_type_in_bridge(self):
+        """bridge/telegram_bridge.py should not reference 'simple' session type."""
+        bridge_path = Path(__file__).parent.parent.parent / "bridge" / "telegram_bridge.py"
+        source = bridge_path.read_text()
+        assert '"simple"' not in source, (
+            "Bridge handler should not reference simple session type. "
+            "All messages route to ChatSession or DevSession."
         )

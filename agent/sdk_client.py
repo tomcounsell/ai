@@ -1327,7 +1327,7 @@ async def get_agent_response_sdk(
     )
     # For SDLC-routed requests, inject target repo context (never for PM mode).
     # ChatSession (session_type="chat") gets full pipeline instructions.
-    # Simple sessions get the legacy "/sdlc immediately" prompt.
+    # All sessions are ChatSessions — orchestrate via dev-session subagent
     _session_type = None
     if session_id:
         try:
@@ -1349,18 +1349,15 @@ async def get_agent_response_sdk(
         if github_org and github_repo:
             enriched_message += f"\nGITHUB: {github_org}/{github_repo}"
 
-        if _session_type == "chat":
-            # ChatSession: orchestrate via dev-session subagent for full pipeline
-            enriched_message += (
-                "\n\nYou are the ChatSession orchestrator (PM persona). "
-                "Spawn a dev-session subagent to do the actual work. "
-                "The dev-session agent has full write permissions and will "
-                "execute the complete SDLC pipeline (plan → build → test → "
-                "patch → review → docs → merge). Monitor its progress and "
-                "compose the final delivery message for Telegram."
-            )
-        else:
-            enriched_message += "\nInvoke /sdlc immediately."
+        # ChatSession: orchestrate via dev-session subagent for full pipeline
+        enriched_message += (
+            "\n\nYou are the ChatSession orchestrator (PM persona). "
+            "Spawn a dev-session subagent to do the actual work. "
+            "The dev-session agent has full write permissions and will "
+            "execute the complete SDLC pipeline (plan → build → test → "
+            "patch → review → docs → merge). Monitor its progress and "
+            "compose the final delivery message for Telegram."
+        )
     enriched_message += f"\nMESSAGE: {message}"
 
     # Log prompt summary before sending to agent

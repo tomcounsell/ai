@@ -47,8 +47,8 @@ class TestSessionCreationFromMessage:
         assert session.sender_name == "Tom"
         assert session.chat_id == str(event.chat_id)
 
-    def test_simple_session_for_non_work_message(self, make_telegram_event):
-        """Non-SDLC messages should create simple sessions."""
+    def test_chat_session_for_non_work_message(self, make_telegram_event):
+        """Non-SDLC messages should also create ChatSessions (no more simple)."""
         event = make_telegram_event(
             chat_id=-1002222222,
             message_id=202,
@@ -56,7 +56,7 @@ class TestSessionCreationFromMessage:
         )
 
         ts = int(time.time())
-        session = AgentSession.create_simple(
+        session = AgentSession.create_chat(
             session_id=f"tg_valor_{event.chat_id}_{event.message.id}_{ts}",
             project_key="valor",
             working_dir="/Users/test/src/ai",
@@ -65,7 +65,7 @@ class TestSessionCreationFromMessage:
             message_text=event.message.text,
         )
 
-        assert session.is_simple
+        assert session.is_chat
         assert session.message_text == "what is the weather?"
 
 
