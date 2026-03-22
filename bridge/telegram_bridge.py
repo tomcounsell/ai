@@ -1263,14 +1263,19 @@ async def main():
             except Exception as e:
                 logger.debug(f"Classification inheritance lookup failed (non-fatal): {e}")
 
-        # Determine session_type: all messages go through ChatSession.
-        # The intake classifier determines routing; ChatSession then owns
-        # all SDLC intelligence. No work-type classification in this path.
+        # Determine session_type based on chat title prefix.
+        # "Dev: X" groups → DevSession (full permissions, dev persona)
+        # Everything else → ChatSession (PM persona, orchestrates DevSessions)
         _classification = classification_result.get("type")
-        _session_type = "chat"  # ChatSession — PM persona, handles both SDLC and Q&A
+        if chat_title and chat_title.startswith("Dev:"):
+            _session_type = "dev"  # DevSession — Dev persona, full permissions
+            logger.info(
+                f"[{project_name}] Dev group detected: {chat_title!r} → session_type=dev"
+            )
+        else:
+            _session_type = "chat"  # ChatSession — PM persona, handles both SDLC and Q&A
 
-        # Enqueue via factory-aware path: session_type drives ChatSession
-        # vs Simple creation. The queue worker reads session_type to route.
+        # Enqueue: session_type drives ChatSession vs DevSession creation.
         depth = await enqueue_job(
             project_key=project_key,
             session_id=session_id,
