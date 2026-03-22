@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Medium
 owner: Valor
@@ -14,13 +14,13 @@ tracking: https://github.com/tomcounsell/ai/issues/467
 After the ChatSession/DevSession redesign (PRs #464, #466), the codebase carries dead code and a vestigial session type that contradict the new architecture. Writing e2e tests against the current code would encode wrong behavior.
 
 **Current behavior:**
-1. `bridge/agents.py` contains ~190 lines of dead retry/self-healing code (lines 1-193) that nothing calls — the bridge imports `get_agent_response()` which is a thin passthrough to `sdk_client.get_agent_response_sdk()`. The file also contains ~190 lines of live tracked-work-detection code (lines 195-387) that the bridge actively uses.
+1. `bridge/agents.py` (387 lines) is mostly dead: lines 1-193 define retry/self-healing code nothing calls (`get_agent_response()` is a passthrough to `sdk_client.get_agent_response_sdk()`). Lines 195-387 define tracked-work-detection functions that feed `WorkflowState` — a file-based SDLC phase tracker (`agent/workflow_state.py`, `agent/workflow_types.py`) that duplicates what `AgentSession.sdlc_stages` already handles in Redis.
 2. Three session types exist (`chat`, `dev`, `simple`) but `simple` serves no distinct purpose. The bridge routes non-SDLC messages to `simple`, then `sdk_client.py` tells simple sessions to "Invoke /sdlc immediately" — contradicting the direct-delivery intent.
 3. No "Dev: X" chat group → DevSession routing exists. Currently all messages go through the classifier → ChatSession or simple path.
 4. Phase 2 e2e tests (hook integration, nudge loop, session isolation) don't exist.
 
 **Desired outcome:**
-- Dead code deleted, live code relocated
+- Dead code and redundant state tracking deleted entirely (not relocated)
 - Two session types only: `chat` (default) and `dev` ("Dev: X" groups)
 - E2e tests that verify pipeline behavior at boundaries without coupling to internals
 
@@ -47,9 +47,10 @@ After this change, the message routing simplifies to:
 
 ## Architectural Impact
 
-- **Interface changes**: `AgentSession.create_simple()` removed; bridge routing simplified from classifier-based to chat_title-based for Dev groups
-- **Coupling**: Decreases — removes the simple/chat/dev three-way branch in sdk_client.py, replaces with two-way
-- **Data ownership**: No change — AgentSession model still owns session state in Redis
+- **Interface changes**: `AgentSession.create_simple()` removed; `workflow_id` field removed from AgentSession; bridge routing simplified from classifier-based to chat_title-based for Dev groups
+- **Coupling**: Decreases — removes the simple/chat/dev three-way branch in sdk_client.py, removes file-based WorkflowState in favor of existing Redis-backed `sdlc_stages`
+- **New dependencies**: None
+- **Data ownership**: No change — AgentSession model still owns session state in Redis. SDLC phase tracking consolidates on `AgentSession.sdlc_stages` (already exists)
 - **Reversibility**: High — if we need a third session type later, add it back with a factory method
 
 ## Appetite
@@ -70,15 +71,16 @@ No prerequisites — this work has no external dependencies. Requires only Redis
 
 ### Key Elements
 
-- **Dead code removal**: Delete retry/self-healing functions from `bridge/agents.py`, relocate live tracked-work functions to `bridge/tracked_work.py`
+- **Dead code + redundant state deletion**: Delete `bridge/agents.py` entirely, delete `agent/workflow_state.py` and `agent/workflow_types.py`, remove `workflow_id` field from AgentSession and job queue pipeline
 - **Simple session removal**: Delete `create_simple()`, `is_simple`, `SESSION_TYPE_SIMPLE` from model; update bridge routing and sdk_client branching
 - **Dev group routing**: "Dev: X" chat title prefix → `session_type="dev"` in bridge, bypassing classifier
+- **Inline SDK call**: Replace `bridge.agents.get_agent_response()` passthrough with direct `get_agent_response_sdk()` call in bridge
 - **E2E tests**: Three new test files verifying behavior at system boundaries
 
 ### Flow
 
 **Cleanup flow:**
-`bridge/agents.py` dead code deleted → live code moved to `bridge/tracked_work.py` → imports updated in `telegram_bridge.py` → simple session references removed from model/bridge/sdk_client/job_queue → "Dev: X" routing added to bridge
+Delete `bridge/agents.py`, `agent/workflow_state.py`, `agent/workflow_types.py` → inline `get_agent_response_sdk()` call in bridge → remove `workflow_id` from AgentSession/job_queue/sdk_client → remove simple session type → add "Dev: X" routing
 
 **Test flow:**
 Hook test: simulate PreToolUse input → verify DevSession exists in Redis with parent linkage → simulate SubagentStop → verify status is "completed"
@@ -89,14 +91,15 @@ Isolation test: enqueue two sessions on same chat → first session fails → se
 
 ### Technical Approach
 
-- Relocate tracked-work code to its own module rather than leaving in a gutted `bridge/agents.py` — the file name "agents" no longer describes what's in it
-- For "Dev: X" routing: detect at bridge level before classifier runs, set `session_type="dev"` directly. The classifier is irrelevant for dev groups — they always get a DevSession
+- Delete tracked-work detection entirely — it exists solely to feed WorkflowState, which is redundant with `AgentSession.sdlc_stages`. No relocation needed.
+- Inline `get_agent_response_sdk()` call directly in `telegram_bridge.py` — remove the one-hop passthrough
+- For "Dev: X" routing: detect at bridge level before classifier runs, set `session_type="dev"` directly. The classifier is irrelevant for dev groups — they always get a DevSession. Skip classifier for Dev groups.
 - For e2e tests: mock only `get_agent_response_sdk` (Claude API boundary) and Telegram client. Use real Redis. Verify outcomes not internals.
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `bridge/agents.py` deletion removes dead exception handlers — no new ones introduced
+- [ ] Deletion of `bridge/agents.py`, `agent/workflow_state.py`, `agent/workflow_types.py` removes dead exception handlers — no new ones introduced
 - [ ] SubagentStop hook has `try/except` that swallows errors — existing unit test covers this
 
 ### Empty/Invalid Input Handling
@@ -113,6 +116,8 @@ Isolation test: enqueue two sessions on same chat → first session fails → se
 - [ ] `tests/e2e/test_context_propagation.py` — UPDATE: remove 4 simple-session tests, update type discrimination to chat/dev only
 - [ ] `tests/unit/test_nudge_loop.py` — UPDATE: remove any simple-session references
 - [ ] `tests/integration/test_silent_failures.py` — UPDATE: if it references `bridge.agents` imports
+- [ ] `tests/unit/test_workflow_sdk_integration.py` — DELETE: tests WorkflowState integration which is being removed
+- [ ] `tests/integration/test_job_queue_race.py` — UPDATE: if it references `workflow_id`
 
 ## Rabbit Holes
 
@@ -122,9 +127,9 @@ Isolation test: enqueue two sessions on same chat → first session fails → se
 
 ## Risks
 
-### Risk 1: `bridge/agents.py` has live code mixed with dead code
-**Impact:** Deleting the whole file breaks tracked-work detection used by the bridge
-**Mitigation:** Relocate live functions (`detect_tracked_work`, `create_workflow_for_tracked_work`, `_match_plan_by_name`, `_detect_issue_number`, `_get_github_repo_url`) to `bridge/tracked_work.py` before deleting the original file. Update imports in `telegram_bridge.py`.
+### Risk 1: Deleting tracked-work detection removes plan-file matching
+**Impact:** The bridge currently auto-detects when a message references a plan file + issue number, and threads a `workflow_id` through the pipeline. Deleting this means the bridge no longer auto-links messages to plans.
+**Mitigation:** This functionality is redundant. The ChatSession PM persona already has access to `docs/plans/` via file tools, and SDLC stage tracking uses `AgentSession.sdlc_stages` in Redis. The auto-detection was a convenience, not load-bearing.
 
 ### Risk 2: Removing simple sessions may break the bridge for non-SDLC messages
 **Impact:** Q&A messages that previously got simple sessions could fail or route incorrectly
@@ -157,8 +162,8 @@ No agent integration required — this changes bridge-internal routing and model
 
 ## Success Criteria
 
-- [ ] `bridge/agents.py` does not exist
-- [ ] `bridge/tracked_work.py` exists with relocated live functions
+- [ ] `bridge/agents.py`, `agent/workflow_state.py`, `agent/workflow_types.py` do not exist
+- [ ] No references to `workflow_id` in production code (`models/`, `agent/`, `bridge/`) except as comments
 - [ ] No references to `simple` session type in production code (`models/`, `agent/`, `bridge/`)
 - [ ] "Dev: X" chat groups route to `session_type="dev"`
 - [ ] All other messages route to `session_type="chat"`
@@ -199,17 +204,21 @@ No agent integration required — this changes bridge-internal routing and model
 
 ## Step by Step Tasks
 
-### 1. Relocate tracked-work code and delete bridge/agents.py
-- **Task ID**: build-cleanup-agents
+### 1. Delete bridge/agents.py and WorkflowState infrastructure
+- **Task ID**: build-cleanup-dead-code
 - **Depends On**: none
-- **Validates**: `python -c "from bridge.tracked_work import detect_tracked_work, create_workflow_for_tracked_work"` succeeds; `bridge/agents.py` does not exist
+- **Validates**: `test ! -f bridge/agents.py && test ! -f agent/workflow_state.py && test ! -f agent/workflow_types.py`
 - **Assigned To**: cleanup-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Create `bridge/tracked_work.py` with functions: `detect_tracked_work`, `create_workflow_for_tracked_work`, `_match_plan_by_name`, `_detect_issue_number`, `_get_github_repo_url` (and their imports)
-- Move `get_agent_response` passthrough to `bridge/telegram_bridge.py` inline or remove if only called once
-- Update all imports in `bridge/telegram_bridge.py` to point to `bridge.tracked_work`
-- Delete `bridge/agents.py`
+- Delete `bridge/agents.py` entirely
+- Delete `agent/workflow_state.py` and `agent/workflow_types.py`
+- In `bridge/telegram_bridge.py`: replace `from bridge.agents import get_agent_response` with direct `from agent import get_agent_response_sdk` call; remove all other `bridge.agents` imports; remove `create_workflow_for_tracked_work()` call and `workflow_id` variable
+- In `agent/job_queue.py`: remove `workflow_id` parameter from `enqueue_job()`, `_push_job()`, Job property; remove from `_JOB_FIELDS`
+- In `agent/sdk_client.py`: remove `workflow_id` parameter from `get_agent_response_sdk()` and `ValorAgent.__init__()`; remove `WorkflowState` import, `_build_workflow_context()`, `update_workflow_state()`, `get_workflow_data()`; remove workflow context injection from system prompt
+- In `models/agent_session.py`: remove `workflow_id` field
+- Delete `tests/unit/test_workflow_sdk_integration.py`
+- Remove any remaining imports of deleted modules
 
 ### 2. Remove simple session type
 - **Task ID**: build-remove-simple
@@ -276,13 +285,12 @@ No agent integration required — this changes bridge-internal routing and model
 
 ### 7. Validate cleanup
 - **Task ID**: validate-cleanup
-- **Depends On**: build-cleanup-agents, build-remove-simple, build-dev-routing
+- **Depends On**: build-cleanup-dead-code, build-remove-simple, build-dev-routing
 - **Assigned To**: final-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Verify `bridge/agents.py` does not exist
-- Verify `bridge/tracked_work.py` exists and is importable
-- Verify no `simple` session type references in production code
+- Verify `bridge/agents.py`, `agent/workflow_state.py`, `agent/workflow_types.py` do not exist
+- Verify no `workflow_id`, `simple` session type, or `WorkflowState` references in production code
 - Verify "Dev: X" routing works
 - Run `pytest tests/ -x -q`
 
@@ -314,15 +322,15 @@ No agent integration required — this changes bridge-internal routing and model
 | Tests pass | `pytest tests/ -x -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| No bridge/agents.py | `test ! -f bridge/agents.py` | exit code 0 |
+| No dead files | `test ! -f bridge/agents.py && test ! -f agent/workflow_state.py && test ! -f agent/workflow_types.py` | exit code 0 |
 | No simple session refs | `grep -rn "SESSION_TYPE_SIMPLE\|create_simple\|is_simple" models/ agent/ bridge/ --include="*.py"` | exit code 1 |
-| tracked_work importable | `python -c "from bridge.tracked_work import detect_tracked_work"` | exit code 0 |
+| No workflow_id refs | `grep -rn "workflow_id" models/ agent/ bridge/ --include="*.py" \| grep -v "^#" \| grep -v "# "` | exit code 1 |
 | E2E tests pass | `pytest tests/e2e/ -x -q` | exit code 0 |
 
-## Open Questions
+## Resolved Questions
 
-1. **`get_agent_response` passthrough** — `bridge/agents.py` defines `get_agent_response()` which just calls `get_agent_response_sdk()`. The bridge imports it. Should we inline this call in `telegram_bridge.py` (removing the indirection), or keep the wrapper somewhere? My recommendation: inline it — one less hop.
+1. **`get_agent_response` passthrough** — Remove entirely. Inline the `get_agent_response_sdk()` call directly in the bridge. The system should be as simple as possible.
 
-2. **"Dev: X" routing vs classifier** — For Dev groups, should we skip the classifier entirely (just set `session_type="dev"` and enqueue), or still run it for metadata? My recommendation: skip it — Dev groups always get a DevSession, classification adds no value there.
+2. **"Dev: X" routing vs classifier** — Skip classifier for Dev groups. They always go straight to DevSession. Steering and SDLC adherence is possible but not guaranteed via Dev chats.
 
-3. **WorkflowState** — The tracked-work code depends on `agent/workflow_state.py`. Is WorkflowState still actively used, or is it also dead? If dead, we could delete the tracked-work code entirely instead of relocating it.
+3. **WorkflowState** — Delete entirely along with all tracked-work detection code. File-based state tracking is redundant with Redis-backed `AgentSession.sdlc_stages`. Only Agent SDK session logs (raw conversation transcripts) should be file-based.
