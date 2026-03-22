@@ -294,8 +294,8 @@ class TestStageAwareDecisionMatrix:
         assert session.is_sdlc is False
 
         # Decision: use classifier (not an SDLC job)
-        effective_max = MAX_AUTO_CONTINUES  # Non-SDLC gets lower cap
-        assert effective_max == 3
+        effective_max = MAX_AUTO_CONTINUES  # ChatSession manages routing; cap is safety backstop
+        assert effective_max == 50
 
     def test_sdlc_safety_cap_prevents_infinite_loop(self):
         """SDLC auto-continue respects the safety cap even with stages remaining."""
@@ -326,16 +326,16 @@ class TestMaxAutoContinuesConstants:
     """Tests for the auto-continue constants."""
 
     def test_max_auto_continues_value(self):
-        """Non-SDLC cap is 3."""
-        assert MAX_AUTO_CONTINUES == 3
+        """Both caps are 50 (ChatSession manages continuation, caps are safety backstops)."""
+        assert MAX_AUTO_CONTINUES == 50
 
     def test_max_auto_continues_sdlc_value(self):
-        """SDLC cap is 10."""
-        assert MAX_AUTO_CONTINUES_SDLC == 10
+        """Both caps are 50 (ChatSession manages continuation, caps are safety backstops)."""
+        assert MAX_AUTO_CONTINUES_SDLC == 50
 
-    def test_sdlc_cap_higher_than_standard(self):
-        """SDLC cap must be higher than the standard cap."""
-        assert MAX_AUTO_CONTINUES_SDLC > MAX_AUTO_CONTINUES
+    def test_sdlc_cap_equal_to_standard(self):
+        """Both caps are equal — ChatSession handles routing, not auto-continue logic."""
+        assert MAX_AUTO_CONTINUES_SDLC == MAX_AUTO_CONTINUES
 
     def test_both_caps_positive(self):
         """Both caps must be positive integers."""

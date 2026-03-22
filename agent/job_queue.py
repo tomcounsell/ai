@@ -56,8 +56,11 @@ class SendToChatResult:
 RedisJob = AgentSession
 
 MSG_MAX_CHARS = 20_000  # ~5k tokens — reasonable context limit for agent input
-MAX_AUTO_CONTINUES = 3  # Max status updates to auto-continue before sending to chat
-MAX_AUTO_CONTINUES_SDLC = 10  # Higher cap for SDLC jobs (stage progress is real signal)
+
+# Auto-continue caps removed in SDLC redesign. ChatSession manages continuation
+# via deterministic Observer routing. These are kept as high limits for safety.
+MAX_AUTO_CONTINUES = 50  # Effectively unlimited — deterministic Observer handles routing
+MAX_AUTO_CONTINUES_SDLC = 50  # Same — no artificial cap on pipeline stages
 
 
 def should_guard_empty_output(msg: str, is_sdlc: bool, has_remaining_stages: bool) -> bool:
@@ -248,6 +251,13 @@ _JOB_FIELDS = [
     "claude_session_uuid",
     # Job hierarchy fields — must be preserved across delete-and-recreate
     "parent_job_id",
+    # === ChatSession/DevSession fields ===
+    "session_type",
+    "result_text",
+    "parent_chat_session_id",
+    "sdlc_stages",
+    "slug",
+    "artifacts",
 ]
 
 # Backward compat alias
@@ -292,6 +302,7 @@ async def _push_job(
     scheduling_depth: int = 0,
     parent_job_id: str | None = None,
     trigger_message_id: str | None = None,
+    session_type: str | None = None,
 ) -> int:
     """Create a job in Redis and return the pending queue depth for this project.
 
@@ -301,16 +312,22 @@ async def _push_job(
     """
     # Mark old completed records as superseded to prevent duplicate-record ambiguity
     try:
-        old_completed = [
-            s for s in AgentSession.query.filter(session_id=session_id) if s.status == "completed"
-        ]
-        for old in old_completed:
-            old.status = "superseded"
-            old.save()
-            logger.info(
-                f"Marked old completed session {old.job_id} as superseded "
-                f"for session_id={session_id}"
-            )
+
+        def _mark_superseded():
+            old_completed = [
+                s
+                for s in AgentSession.query.filter(session_id=session_id)
+                if s.status == "completed"
+            ]
+            for old in old_completed:
+                old.status = "superseded"
+                old.save()
+                logger.info(
+                    f"Marked old completed session {old.job_id} as superseded "
+                    f"for session_id={session_id}"
+                )
+
+        await asyncio.to_thread(_mark_superseded)
     except Exception as e:
         logger.warning(f"Failed to mark old sessions as superseded for {session_id}: {e}")
 
@@ -320,6 +337,7 @@ async def _push_job(
         priority=priority,
         created_at=time.time(),
         session_id=session_id,
+        session_type=session_type,
         working_dir=working_dir,
         message_text=message_text,
         sender_name=sender_name,
@@ -348,9 +366,13 @@ async def _push_job(
 
     # Log lifecycle transition for newly created pending job
     try:
-        sessions = list(AgentSession.query.filter(session_id=session_id, status="pending"))
-        if sessions:
-            sessions[0].log_lifecycle_transition("pending", "job enqueued")
+
+        def _log_lifecycle():
+            sessions = list(AgentSession.query.filter(session_id=session_id, status="pending"))
+            if sessions:
+                sessions[0].log_lifecycle_transition("pending", "job enqueued")
+
+        await asyncio.to_thread(_log_lifecycle)
     except Exception as e:
         logger.warning(f"Failed to log lifecycle transition for session {session_id}: {e}")
 
@@ -428,6 +450,22 @@ async def _remove_by_session(project_key: str, session_id: str) -> bool:
     return removed
 
 
+async def get_active_session_for_chat(chat_id: str) -> AgentSession | None:
+    """Find the active AgentSession for a given Telegram chat_id.
+
+    Used for routing steering messages to the correct ChatSession.
+    Returns the most recent running AgentSession for this chat.
+    """
+    sessions = await asyncio.to_thread(
+        lambda: list(AgentSession.query.filter(chat_id=chat_id, status="running"))
+    )
+    if not sessions:
+        return None
+    # Most recent first
+    sessions.sort(key=lambda s: s.created_at or 0, reverse=True)
+    return sessions[0]
+
+
 async def _complete_job(job: Job, *, failed: bool = False) -> None:
     """Mark a running job as completed and delete it from Redis.
 
@@ -456,128 +494,7 @@ async def _complete_job(job: Job, *, failed: bool = False) -> None:
             completing_child_status=child_status,
         )
 
-    # Capture fields needed for playlist hook before deletion
-    project_key = job.project_key
-    classification_type = job.classification_type
-    chat_id = job.chat_id
-    issue_url = getattr(job._rj, "issue_url", None)
-
     await job._rj.async_delete()
-
-    # Observer playlist hook: schedule next issue from playlist
-    # Only for SDLC jobs (classification_type == "sdlc")
-    if classification_type == "sdlc":
-        await _playlist_hook(project_key, chat_id, issue_url, failed=failed)
-
-
-async def _playlist_hook(
-    project_key: str,
-    chat_id: str,
-    issue_url: str | None,
-    *,
-    failed: bool = False,
-) -> None:
-    """Observer playlist hook: pop next issue from playlist after SDLC job completes.
-
-    Called after an SDLC job finishes (success or failure). On failure, requeues
-    the failed issue to the end of the playlist (max 1 retry). Then pops the next
-    issue and schedules it. When the playlist is empty, delivers a summary.
-
-    Args:
-        project_key: The project key for playlist scoping.
-        chat_id: The chat ID for Telegram delivery.
-        issue_url: The URL of the just-completed issue (for extracting issue number).
-        failed: Whether the just-completed job failed.
-    """
-    try:
-        from tools.job_scheduler import (
-            playlist_pop,
-            playlist_requeue,
-        )
-    except ImportError:
-        logger.warning("[playlist-hook] Could not import playlist functions")
-        return
-
-    # On failure, try to requeue the failed issue
-    if failed and issue_url:
-        try:
-            # Extract issue number from URL like https://github.com/.../issues/440
-            import re
-
-            match = re.search(r"/issues/(\d+)", issue_url)
-            if match:
-                failed_issue = int(match.group(1))
-                requeued = playlist_requeue(project_key, failed_issue)
-                if requeued:
-                    logger.info(
-                        f"[playlist-hook] Requeued failed issue #{failed_issue} "
-                        f"to end of playlist for {project_key}"
-                    )
-                else:
-                    logger.info(
-                        f"[playlist-hook] Issue #{failed_issue} already retried once, "
-                        f"not requeuing again"
-                    )
-        except Exception as e:
-            logger.warning(f"[playlist-hook] Error requeuing failed issue: {e}")
-
-    # Pop next issue from playlist
-    next_issue = playlist_pop(project_key)
-
-    if next_issue is None:
-        logger.info(f"[playlist-hook] Playlist empty for {project_key}, nothing to schedule")
-        _log_playlist_exhausted(project_key, chat_id)
-        return
-
-    # Guard: don't schedule the same issue that just completed
-    if issue_url:
-        import re
-
-        match = re.search(r"/issues/(\d+)", issue_url)
-        if match and int(match.group(1)) == next_issue:
-            logger.warning(
-                f"[playlist-hook] Next issue #{next_issue} matches just-completed issue, "
-                f"skipping to avoid loop"
-            )
-            # Try the next one
-            next_issue = playlist_pop(project_key)
-            if next_issue is None:
-                _log_playlist_exhausted(project_key, chat_id)
-                return
-
-    # Schedule the next issue
-    logger.info(f"[playlist-hook] Scheduling next playlist issue #{next_issue} for {project_key}")
-    try:
-        result = subprocess.run(
-            [
-                "python",
-                "-m",
-                "tools.job_scheduler",
-                "schedule",
-                "--issue",
-                str(next_issue),
-                "--project",
-                project_key,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            cwd=str(Path(__file__).parent.parent),
-        )
-        if result.returncode != 0:
-            logger.error(f"[playlist-hook] Failed to schedule issue #{next_issue}: {result.stderr}")
-        else:
-            logger.info(f"[playlist-hook] Successfully scheduled issue #{next_issue}")
-    except Exception as e:
-        logger.error(f"[playlist-hook] Error scheduling issue #{next_issue}: {e}")
-
-
-def _log_playlist_exhausted(project_key: str, chat_id: str) -> None:
-    """Log when the playlist is exhausted.
-
-    The bridge's normal job completion flow handles any Telegram delivery.
-    """
-    logger.info(f"[playlist-hook] Playlist exhausted for {project_key} (chat {chat_id})")
 
 
 async def _finalize_parent(
@@ -1229,6 +1146,7 @@ async def enqueue_job(
     scheduling_depth: int = 0,
     parent_job_id: str | None = None,
     trigger_message_id: str | None = None,
+    session_type: str | None = None,
 ) -> int:
     """
     Add a job to Redis and ensure worker is running.
@@ -1266,6 +1184,7 @@ async def enqueue_job(
         scheduling_depth=scheduling_depth,
         parent_job_id=parent_job_id,
         trigger_message_id=trigger_message_id,
+        session_type=session_type,
     )
     _ensure_worker(project_key)
     log_prefix = f"[{correlation_id}]" if correlation_id else f"[{project_key}]"
@@ -1439,7 +1358,9 @@ async def _enqueue_continuation(
     # Uses the same delete-and-recreate pattern as _pop_job() to work
     # around Popoto's KeyField index corruption bug (on_save() adds to
     # new index set but never removes from old one).
-    sessions = list(AgentSession.query.filter(session_id=job.session_id))
+    sessions = await asyncio.to_thread(
+        lambda: list(AgentSession.query.filter(session_id=job.session_id))
+    )
     if not sessions:
         # Diagnose why the session is missing before falling back.
         # Check Redis directly for key existence and TTL to aid debugging.
@@ -1566,6 +1487,10 @@ async def _execute_job(job: Job) -> None:
     except Exception as e:
         logger.debug(f"AgentSession update failed (non-fatal): {e}")
 
+    # Determine session type for routing decisions
+    _session_type = getattr(agent_session, "session_type", None) if agent_session else None
+    is_simple_session = _session_type == "simple"
+
     # Calendar heartbeat at session start
     asyncio.create_task(_calendar_heartbeat(job.project_key, project=job.project_key))
 
@@ -1613,10 +1538,22 @@ async def _execute_job(job: Job) -> None:
             )
             return
 
+        # === Simple session fast-path ===
+        # Simple sessions (Q&A, non-SDLC) bypass the Observer entirely.
+        # Deliver directly to Telegram with no orchestration overhead.
+        if is_simple_session:
+            logger.info(
+                f"[{job.project_key}] Simple session — delivering directly "
+                f"({len(msg)} chars), bypassing Observer"
+            )
+            await send_cb(job.chat_id, msg, job.message_id, agent_session)
+            chat_state.completion_sent = True
+            return
+
         # === Observer-based routing ===
-        # The Observer Agent replaces the fragmented classifier -> coach -> routing
-        # chain with a single Sonnet-powered agent that has full session context.
-        # See bridge/observer.py and docs/plans/observer_agent.md for design.
+        # The deterministic Observer makes steer/deliver decisions for SDLC
+        # pipelines. ChatSessions use this to monitor DevSession progress.
+        # See bridge/observer.py for the decision table.
 
         # Re-read session from Redis for fresh stage data.
         # Bug 3 fix (issue #374): Use deterministic record selection — filter
@@ -1741,45 +1678,6 @@ async def _execute_job(job: Job) -> None:
             f"[{job.project_key}] Observer decision: {decision.get('action')} "
             f"(transitions={decision.get('transitions_applied', 0)})"
         )
-
-        # Handle circuit breaker retry/escalation from observer errors
-        if decision.get("retry_after"):
-            retry_delay = decision["retry_after"]
-            failure_count = decision.get("failure_count", 0)
-            logger.info(
-                f"[{job.project_key}] Observer circuit breaker: "
-                f"retrying in {retry_delay:.0f}s (failure {failure_count})"
-            )
-            await asyncio.sleep(retry_delay)
-            # Re-run observer after backoff
-            try:
-                decision = await observer.run()
-            except Exception as retry_e:
-                logger.error(
-                    f"[{job.project_key}] Observer retry failed: {retry_e}",
-                    exc_info=True,
-                )
-                await send_cb(job.chat_id, msg, job.message_id, agent_session)
-                chat_state.completion_sent = True
-                return
-
-        if decision.get("should_escalate"):
-            error_msg = decision.get("error", "unknown error")
-            failure_count = decision.get("failure_count", 0)
-            escalation_msg = (
-                f"⚠️ **Observer Error** (session: `{job.session_id}`)\n\n"
-                f"The observer has failed {failure_count} consecutive time(s).\n"
-                f"Error: `{error_msg}`\n\n"
-                f"Delivering raw worker output as fallback."
-            )
-            logger.warning(
-                f"[{job.project_key}] Observer escalation: {error_msg} (failures={failure_count})"
-            )
-            # Send escalation notice followed by raw output
-            await send_cb(job.chat_id, escalation_msg, job.message_id, agent_session)
-            await send_cb(job.chat_id, msg, job.message_id, agent_session)
-            chat_state.completion_sent = True
-            return
 
         # Apply state machine transitions based on Observer decision
         if _state_machine and _is_sdlc:

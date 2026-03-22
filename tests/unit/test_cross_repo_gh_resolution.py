@@ -79,13 +79,20 @@ class TestGetAgentResponseSdkGhRepo:
     def mock_dependencies(self):
         """Patch all dependencies of get_agent_response_sdk.
 
-        classify_work_request and build_context_prefix are imported locally
-        inside the function body, so we patch them at their source modules.
+        Since classification is now read from the session (not re-classified),
+        we mock AgentSession.query.filter to return a session with the
+        desired classification_type.
         """
+        # Create a mock session that returns "sdlc" classification
+        mock_session = MagicMock()
+        mock_session.classification_type = "sdlc"
+        mock_session.status = "running"
+        mock_session.created_at = 1000.0
+
         patches = {
             "classify": patch(
-                "bridge.routing.classify_work_request",
-                return_value="sdlc",
+                "models.agent_session.AgentSession.query",
+                **{"filter.return_value": [mock_session]},
             ),
             "context": patch(
                 "bridge.context.build_context_prefix",
@@ -97,6 +104,8 @@ class TestGetAgentResponseSdkGhRepo:
             ),
         }
         started = {k: p.start() for k, p in patches.items()}
+        # Store mock_session for tests that need to change classification
+        started["_mock_session"] = mock_session
         yield started
         for p in patches.values():
             p.stop()
@@ -140,7 +149,7 @@ class TestGetAgentResponseSdkGhRepo:
         self, mock_agent_class, mock_dependencies
     ):
         """When classification is not sdlc (e.g., question), gh_repo should NOT be set."""
-        mock_dependencies["classify"].return_value = "question"
+        mock_dependencies["_mock_session"].classification_type = "question"
 
         from agent.sdk_client import get_agent_response_sdk
 

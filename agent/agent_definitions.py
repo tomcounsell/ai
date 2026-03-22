@@ -100,4 +100,36 @@ def get_agent_definitions() -> dict[str, AgentDefinition]:
         model=None,  # Inherits model from parent
     )
 
+    # --- dev-session ---
+    # Full-permission developer session for code changes.
+    # Spawned by ChatSession (PM persona) to do actual work.
+    # tools=None means all tools available — full write permissions.
+    definitions["dev-session"] = AgentDefinition(
+        description="Full-permission developer session for code changes",
+        prompt=_load_dev_session_prompt(),
+        tools=None,  # All tools — full permissions
+        model=None,  # Inherit from parent
+    )
+
     return definitions
+
+
+def _load_dev_session_prompt() -> str:
+    """Load the dev-session agent prompt.
+
+    Falls back to a minimal prompt if the markdown file doesn't exist yet.
+    """
+    dev_session_md = _AGENTS_DIR / "dev-session.md"
+    if dev_session_md.exists():
+        try:
+            data = _parse_agent_markdown(dev_session_md)
+            return str(data["body"])
+        except (ValueError, KeyError):
+            pass
+
+    return (
+        "You are a Developer agent with full permissions to read, write, and execute code.\n\n"
+        "You are spawned by a ChatSession (PM persona) to do the actual coding work.\n"
+        "Follow the SDLC pipeline stages as directed by your parent ChatSession.\n"
+        "Commit at logical checkpoints as you work.\n"
+    )
