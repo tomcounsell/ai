@@ -183,7 +183,7 @@ No agent integration required — this changes bridge-internal routing and model
 
 - **Builder (cleanup)**
   - Name: cleanup-builder
-  - Role: Delete dead code, relocate tracked-work functions, remove simple sessions, add Dev group routing
+  - Role: Delete dead code (bridge/agents.py, WorkflowState, workflow_id), remove simple sessions, add Dev group routing
   - Agent Type: builder
   - Resume: true
 
@@ -214,7 +214,7 @@ No agent integration required — this changes bridge-internal routing and model
 - **Assigned To**: cleanup-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Delete `bridge/agents.py` entirely
+- Delete `bridge/agents.py` entirely — `get_agent_response()` is a passthrough (inline the `get_agent_response_sdk` call); `get_agent_response_with_retry()`, `attempt_self_healing()`, `create_failure_plan()` are dead code never called by any active code path (session watchdog in `monitoring/session_watchdog.py` handles retry/recovery); tracked-work functions exist solely to feed WorkflowState which is also being deleted
 - Delete `agent/workflow_state.py` and `agent/workflow_types.py`
 - In `bridge/telegram_bridge.py`: replace `from bridge.agents import get_agent_response` with direct `from agent import get_agent_response_sdk` call; remove all other `bridge.agents` imports; remove `create_workflow_for_tracked_work()` call and `workflow_id` variable
 - In `agent/job_queue.py`: remove `workflow_id` parameter from `enqueue_job()`, `_push_job()`, Job property; remove from `_JOB_FIELDS`. No replacement needed — `session_id` handles identity, `work_item_slug` handles plan context
@@ -227,11 +227,11 @@ No agent integration required — this changes bridge-internal routing and model
 
 ### 2. Remove simple session type
 - **Task ID**: build-remove-simple
-- **Depends On**: none
+- **Depends On**: build-cleanup-dead-code (both touch agent/job_queue.py and agent/sdk_client.py)
 - **Validates**: `grep -rn "simple" models/agent_session.py agent/ bridge/ | grep -v __pycache__` returns no session-type references
 - **Assigned To**: cleanup-builder
 - **Agent Type**: builder
-- **Parallel**: true (with task 1)
+- **Parallel**: false
 - Delete `create_simple()`, `is_simple`, `SESSION_TYPE_SIMPLE` from `models/agent_session.py`
 - Update `bridge/telegram_bridge.py`: replace `_session_type = "simple"` with `_session_type = "chat"`
 - Update `agent/sdk_client.py`: remove the simple-session "Invoke /sdlc" enrichment branch
