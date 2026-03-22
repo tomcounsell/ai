@@ -32,18 +32,14 @@ class TestNudgeMessageContent:
         """Nudge message should NOT contain SDLC stage names."""
         sdlc_terms = ["ISSUE", "PLAN", "BUILD", "TEST", "PATCH", "REVIEW", "DOCS", "MERGE"]
         for term in sdlc_terms:
-            assert term not in NUDGE_MESSAGE, (
-                f"Nudge message should not contain SDLC term '{term}'"
-            )
+            assert term not in NUDGE_MESSAGE, f"Nudge message should not contain SDLC term '{term}'"
 
     def test_nudge_message_not_pipeline_aware(self):
         """Nudge message should NOT reference pipeline or Observer concepts."""
         forbidden = ["pipeline", "observer", "stage", "steer"]
         msg_lower = NUDGE_MESSAGE.lower()
         for term in forbidden:
-            assert term not in msg_lower, (
-                f"Nudge message should not contain '{term}'"
-            )
+            assert term not in msg_lower, f"Nudge message should not contain '{term}'"
 
 
 class TestObserverRemoval:
@@ -91,6 +87,4 @@ class TestObserverRemoval:
             stripped = line.strip()
             if stripped.startswith("MAX_AUTO_CONTINUES") and "=" in stripped:
                 if not stripped.startswith("#"):
-                    assert False, (
-                        f"MAX_AUTO_CONTINUES assignment should be removed: {stripped}"
-                    )
+                    assert False, f"MAX_AUTO_CONTINUES assignment should be removed: {stripped}"

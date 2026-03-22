@@ -50,9 +50,7 @@ class TestDevSessionCreation:
         assert dev.status == "pending"
 
         # Verify we can find it via parent lookup
-        dev_sessions = list(
-            AgentSession.query.filter(parent_chat_session_id=parent_session_id)
-        )
+        dev_sessions = list(AgentSession.query.filter(parent_chat_session_id=parent_session_id))
         assert len(dev_sessions) >= 1
         found = [d for d in dev_sessions if d.session_id == f"dev-{parent_session_id}"]
         assert len(found) == 1
@@ -159,9 +157,7 @@ class TestDevSessionCompletion:
                 os.environ.pop("VALOR_SESSION_ID", None)
 
         # Should still be failed, not overwritten to completed
-        failed = list(
-            AgentSession.query.filter(session_id=f"dev-{parent_sid}", status="failed")
-        )
+        failed = list(AgentSession.query.filter(session_id=f"dev-{parent_sid}", status="failed"))
         completed = list(
             AgentSession.query.filter(session_id=f"dev-{parent_sid}", status="completed")
         )
@@ -195,9 +191,7 @@ class TestDevSessionCompletion:
             dev.save()
 
         # All should be findable by parent
-        all_devs = list(
-            AgentSession.query.filter(parent_chat_session_id=parent_sid)
-        )
+        all_devs = list(AgentSession.query.filter(parent_chat_session_id=parent_sid))
         assert len(all_devs) >= 3
 
         # Complete them
@@ -216,8 +210,6 @@ class TestDevSessionCompletion:
         # All running devs should now be completed — check each by session_id
         for i in range(3):
             completed = list(
-                AgentSession.query.filter(
-                    session_id=f"dev-{parent_sid}-{i}", status="completed"
-                )
+                AgentSession.query.filter(session_id=f"dev-{parent_sid}-{i}", status="completed")
             )
             assert len(completed) >= 1, f"dev-{parent_sid}-{i} should be completed"

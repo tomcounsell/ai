@@ -923,9 +923,7 @@ async def main():
         # (stateless: read the replied-to message)
         if message.reply_to_msg_id:
             try:
-                replied_msg = await client.get_messages(
-                    event.chat_id, ids=message.reply_to_msg_id
-                )
+                replied_msg = await client.get_messages(event.chat_id, ids=message.reply_to_msg_id)
                 if (
                     replied_msg
                     and replied_msg.text
@@ -976,9 +974,7 @@ async def main():
                 # Both represent "agent is currently working" for steering purposes.
                 matching_session = None
                 for check_status in ("running", "active"):
-                    sessions = AgentSession.query.filter(
-                        session_id=session_id, status=check_status
-                    )
+                    sessions = AgentSession.query.filter(session_id=session_id, status=check_status)
                     if sessions:
                         matching_session = sessions[0]
                         break
@@ -995,9 +991,7 @@ async def main():
                         sender_name,
                         is_abort=is_abort,
                     )
-                    ack_text = (
-                        "Stopping current task." if is_abort else "Adding to current task"
-                    )
+                    ack_text = "Stopping current task." if is_abort else "Adding to current task"
                     from bridge.markdown import send_markdown
 
                     await send_markdown(client, event.chat_id, ack_text, reply_to=message.id)
@@ -1169,8 +1163,7 @@ async def main():
                 )
             except Exception as e:
                 logger.warning(
-                    f"[{project_name}] Intake classifier failed, "
-                    f"falling through to enqueue: {e}"
+                    f"[{project_name}] Intake classifier failed, falling through to enqueue: {e}"
                 )
 
         # Lightweight revival check (no SDK agent, just git state)
@@ -1195,9 +1188,7 @@ async def main():
 
             await send_markdown(client, event.chat_id, revival_msg)
             record_revival_cooldown(telegram_chat_id)
-            logger.info(
-                f"[{project_name}] Sent revival prompt for branch {revival_info['branch']}"
-            )
+            logger.info(f"[{project_name}] Sent revival prompt for branch {revival_info['branch']}")
 
             # Mark the stale work as dormant so it doesn't re-trigger.
             # A reply to the revival message will re-queue via branch name in the text.
@@ -1244,11 +1235,7 @@ async def main():
         # from the original session. This prevents the race condition where
         # enqueue_job gets classification_type=None because the async task
         # hasn't finished. See issue #375 Bug 2.
-        if (
-            is_reply_to_valor
-            and message.reply_to_msg_id
-            and not classification_result.get("type")
-        ):
+        if is_reply_to_valor and message.reply_to_msg_id and not classification_result.get("type"):
             try:
                 from models.agent_session import AgentSession
 
@@ -1269,9 +1256,7 @@ async def main():
         _classification = classification_result.get("type")
         if chat_title and chat_title.startswith("Dev:"):
             _session_type = "dev"  # DevSession — Dev persona, full permissions
-            logger.info(
-                f"[{project_name}] Dev group detected: {chat_title!r} → session_type=dev"
-            )
+            logger.info(f"[{project_name}] Dev group detected: {chat_title!r} → session_type=dev")
         else:
             _session_type = "chat"  # ChatSession — PM persona, handles both SDLC and Q&A
 
@@ -1417,9 +1402,7 @@ async def main():
 
         # Create send callback that uses the Telegram client
         async def _make_send_cb(_client=client):
-            async def _send(
-                chat_id: str, text: str, reply_to_msg_id: int, session=None
-            ) -> None:
+            async def _send(chat_id: str, text: str, reply_to_msg_id: int, session=None) -> None:
                 try:
                     filtered = filter_tool_logs(text)
                     if filtered:
@@ -1522,9 +1505,7 @@ async def main():
             logger.info(f"[{_pkey}] Recovered {orphans} orphaned job(s)")
         pending_jobs = _get_pending_jobs_sync(_pkey)
         if pending_jobs:
-            logger.info(
-                f"[{_pkey}] Found {len(pending_jobs)} persisted job(s), restarting worker"
-            )
+            logger.info(f"[{_pkey}] Found {len(pending_jobs)} persisted job(s), restarting worker")
             _ensure_worker(_pkey)
 
     # Scan for missed messages during downtime (catchup) -- run concurrently
