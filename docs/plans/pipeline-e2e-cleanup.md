@@ -71,7 +71,7 @@ No prerequisites — this work has no external dependencies. Requires only Redis
 
 ### Key Elements
 
-- **Dead code + redundant state deletion**: Delete `bridge/agents.py` entirely, delete `agent/workflow_state.py` and `agent/workflow_types.py`, remove `workflow_id` field from AgentSession and job queue pipeline
+- **Dead code + redundant state deletion**: Delete `bridge/agents.py` entirely, delete `agent/workflow_state.py` and `agent/workflow_types.py`, remove `workflow_id` field from AgentSession and job queue pipeline. Nothing replaces `workflow_id` — its purposes are already served by existing AgentSession fields: identity (`session_id`/`job_id`), plan path (derived from `work_item_slug`), tracking URL (`session.get_links()["issue"]`), phase/stage (`session.sdlc_stages`/`session.current_stage`)
 - **Simple session removal**: Delete `create_simple()`, `is_simple`, `SESSION_TYPE_SIMPLE` from model; update bridge routing and sdk_client branching
 - **Dev group routing**: "Dev: X" chat title prefix → `session_type="dev"` in bridge, bypassing classifier
 - **Inline SDK call**: Replace `bridge.agents.get_agent_response()` passthrough with direct `get_agent_response_sdk()` call in bridge
@@ -117,7 +117,10 @@ Isolation test: enqueue two sessions on same chat → first session fails → se
 - [ ] `tests/unit/test_nudge_loop.py` — UPDATE: remove any simple-session references
 - [ ] `tests/integration/test_silent_failures.py` — UPDATE: if it references `bridge.agents` imports
 - [ ] `tests/unit/test_workflow_sdk_integration.py` — DELETE: tests WorkflowState integration which is being removed
-- [ ] `tests/integration/test_job_queue_race.py` — UPDATE: if it references `workflow_id`
+- [ ] `tests/integration/test_job_queue_race.py` — UPDATE: remove `workflow_id="wf123456"` from enqueue calls and field assertions
+- [ ] `tests/integration/test_silent_failures.py` — UPDATE: remove `mock_job.workflow_id = None` and WorkflowState comment
+- [ ] `bridge/coach.py` — UPDATE: remove WorkflowState.phase comment reference (line 39)
+- [ ] `bridge/catchup.py` — UPDATE: remove `workflow_id=None` from enqueue call (line 186)
 
 ## Rabbit Holes
 
@@ -214,9 +217,11 @@ No agent integration required — this changes bridge-internal routing and model
 - Delete `bridge/agents.py` entirely
 - Delete `agent/workflow_state.py` and `agent/workflow_types.py`
 - In `bridge/telegram_bridge.py`: replace `from bridge.agents import get_agent_response` with direct `from agent import get_agent_response_sdk` call; remove all other `bridge.agents` imports; remove `create_workflow_for_tracked_work()` call and `workflow_id` variable
-- In `agent/job_queue.py`: remove `workflow_id` parameter from `enqueue_job()`, `_push_job()`, Job property; remove from `_JOB_FIELDS`
-- In `agent/sdk_client.py`: remove `workflow_id` parameter from `get_agent_response_sdk()` and `ValorAgent.__init__()`; remove `WorkflowState` import, `_build_workflow_context()`, `update_workflow_state()`, `get_workflow_data()`; remove workflow context injection from system prompt
-- In `models/agent_session.py`: remove `workflow_id` field
+- In `agent/job_queue.py`: remove `workflow_id` parameter from `enqueue_job()`, `_push_job()`, Job property; remove from `_JOB_FIELDS`. No replacement needed — `session_id` handles identity, `work_item_slug` handles plan context
+- In `agent/sdk_client.py`: remove `workflow_id` parameter from `get_agent_response_sdk()` and `ValorAgent.__init__()`; remove `WorkflowState` import, `_build_workflow_context()`, `update_workflow_state()`, `get_workflow_data()`; remove workflow context injection from system prompt. Plan/phase context already available via `AgentSession.sdlc_stages` and `current_stage`
+- In `models/agent_session.py`: remove `workflow_id` field. Identity covered by `session_id`/`job_id`; plan path derived from `work_item_slug`; tracking URL via `get_links()`
+- In `bridge/coach.py`: update comment referencing `WorkflowState.phase` — coaching reads phase from `AgentSession.current_stage` instead
+- In `bridge/catchup.py`: remove `workflow_id=None` from enqueue call
 - Delete `tests/unit/test_workflow_sdk_integration.py`
 - Remove any remaining imports of deleted modules
 
