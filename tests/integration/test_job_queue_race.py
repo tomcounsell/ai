@@ -46,7 +46,6 @@ class TestExtractJobFields:
             sender_id=42,
             chat_title="Test Chat",
             revival_context="some context",
-            workflow_id="wf123456",
             work_item_slug="my-feature",
             task_list_id="thread-123-456",
             has_media=True,
@@ -78,7 +77,6 @@ class TestExtractJobFields:
         assert fields["message_id"] == 1
         assert fields["chat_title"] == "Test Chat"
         assert fields["revival_context"] == "some context"
-        assert fields["workflow_id"] == "wf123456"
         assert fields["work_item_slug"] == "my-feature"
         assert fields["task_list_id"] == "thread-123-456"
         assert fields["has_media"] is True

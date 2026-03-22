@@ -89,7 +89,6 @@ class AgentSession(Model):
     message_id = Field(type=int, null=True)
     chat_title = Field(null=True)
     revival_context = Field(null=True, max_length=MSG_MAX_CHARS)
-    workflow_id = Field(null=True)
     work_item_slug = Field(null=True)
     task_list_id = Field(null=True)
     # === Message metadata (deprecated - now lives on TelegramMessage) ===

@@ -10,7 +10,6 @@ Domain-specific logic has been extracted into sub-modules:
   - bridge.routing: Message routing, project config, mention/response classification
   - bridge.context: Context building, conversation history, reply chains
   - bridge.response: Message formatting, reactions, file extraction, sending
-  - bridge.agents: Agent invocation, retry logic, self-healing
 
 Backward-compatible imports are maintained here so existing code that imports
 from bridge.telegram_bridge continues to work, but new code should import
@@ -41,8 +40,7 @@ from dotenv import load_dotenv  # noqa: E402
 env_path = Path(__file__).parent.parent / ".env"
 load_dotenv(env_path)
 
-# Feature flag for Claude Agent SDK (always true, kept for backward compatibility)
-USE_CLAUDE_SDK = os.getenv("USE_CLAUDE_SDK", "true").lower() == "true"
+# Claude Agent SDK is always used (legacy mode removed)
 
 # Local tool imports for message and link storage
 from telethon import TelegramClient, events  # noqa: E402
@@ -499,26 +497,6 @@ _context_module._BRIDGE_PROJECT_DIR = _BRIDGE_PROJECT_DIR
 # Re-export LINK_COLLECTORS from context module (used by handler)
 LINK_COLLECTORS = _context_module.LINK_COLLECTORS
 
-# Propagate config to agents module so imported functions work correctly
-import bridge.agents as _agents_module  # noqa: E402
-
-_agents_module.CONFIG = CONFIG
-_agents_module.DEFAULTS = DEFAULTS
-_agents_module._BRIDGE_PROJECT_DIR = _BRIDGE_PROJECT_DIR
-
-from bridge.agents import (  # noqa: E402
-    MAX_RETRIES,  # noqa: F401
-    RETRY_DELAYS,  # noqa: F401
-    _detect_issue_number,  # noqa: F401
-    _get_github_repo_url,  # noqa: F401
-    _match_plan_by_name,  # noqa: F401
-    attempt_self_healing,  # noqa: F401
-    create_failure_plan,  # noqa: F401
-    create_workflow_for_tracked_work,
-    detect_tracked_work,  # noqa: F401
-    get_agent_response,  # noqa: F401
-    get_agent_response_with_retry,
-)
 from bridge.update import (  # noqa: E402
     handle_force_update_command,
     handle_update_command,
@@ -930,482 +908,412 @@ async def main():
         # Start intent classification (don't await)
         asyncio.create_task(classify_and_update_reaction())
 
-        # === SDK MODE: Job queue with per-session branching ===
-        if USE_CLAUDE_SDK:
-            import re as _re
+        # === Job queue with per-session branching ===
+        import re as _re
 
-            from agent.job_queue import (
-                check_revival,
-                enqueue_job,
-                queue_revival_job,
-                record_revival_cooldown,
-            )
-            from agent.steering import push_steering_message
+        from agent.job_queue import (
+            check_revival,
+            enqueue_job,
+            queue_revival_job,
+            record_revival_cooldown,
+        )
+        from agent.steering import push_steering_message
 
-            # Check if this is a reply to a revival notification
-            # (stateless: read the replied-to message)
-            if message.reply_to_msg_id:
-                try:
-                    replied_msg = await client.get_messages(
-                        event.chat_id, ids=message.reply_to_msg_id
-                    )
-                    if (
-                        replied_msg
-                        and replied_msg.text
-                        and replied_msg.text.startswith("Unfinished work detected")
-                    ):
-                        branch_match = _re.search(r"`([^`]+)`", replied_msg.text)
-                        if branch_match:
-                            revival_branch = branch_match.group(1)
-                            working_dir_str = ""
-                            if project:
-                                working_dir_str = project.get(
-                                    "working_directory",
-                                    DEFAULTS.get("working_directory", ""),
-                                )
-                            if not working_dir_str:
-                                working_dir_str = str(Path(__file__).parent.parent)
-                            revival_info = {
-                                "branch": revival_branch,
-                                "project_key": project_key,
-                                "session_id": session_id,
-                                "working_dir": working_dir_str,
-                            }
-                            logger.info(
-                                f"[{project_name}] Reply to revival "
-                                "notification, queuing revival with context"
-                            )
-                            await queue_revival_job(
-                                revival_info=revival_info,
-                                chat_id=telegram_chat_id,
-                                message_id=message.id,
-                                additional_context=clean_text,
-                            )
-                            await set_reaction(client, event.chat_id, message.id, REACTION_RECEIVED)
-                            return
-                except Exception as e:
-                    logger.debug(f"Revival reply check error: {e}")
-
-            # === STEERING CHECK: Reply to running session → inject, don't queue ===
-            # This is the FAST PATH for direct Telegram replies to running sessions.
-            # The intake classifier (below) handles non-reply interjections.
-            if is_reply_to_valor and message.reply_to_msg_id:
-                try:
-                    from models.agent_session import AgentSession
-
-                    # Check both "running" and "active" statuses -- "running" is the
-                    # primary status during agent execution (set by _pop_job), while
-                    # "active" is set later by _execute_job for auto-continue deferral.
-                    # Both represent "agent is currently working" for steering purposes.
-                    matching_session = None
-                    for check_status in ("running", "active"):
-                        sessions = AgentSession.query.filter(
-                            session_id=session_id, status=check_status
-                        )
-                        if sessions:
-                            matching_session = sessions[0]
-                            break
-
-                    if matching_session:
-                        # Route to steering queue instead of job queue.
-                        # push_steering_message auto-detects abort keywords.
-                        from agent.steering import ABORT_KEYWORDS
-
-                        is_abort = clean_text.strip().lower() in ABORT_KEYWORDS
-                        push_steering_message(
-                            session_id,
-                            clean_text,
-                            sender_name,
-                            is_abort=is_abort,
-                        )
-                        ack_text = (
-                            "Stopping current task." if is_abort else "Adding to current task"
-                        )
-                        from bridge.markdown import send_markdown
-
-                        await send_markdown(client, event.chat_id, ack_text, reply_to=message.id)
-                        action = "abort" if is_abort else "steer"
-                        logger.info(
-                            f"[{project_name}] Steered message into "
-                            f"{matching_session.status} session "
-                            f"{session_id} ({action})"
-                        )
-                        return
-                    else:
-                        # No running/active session found -- check for pending (race window)
-                        pending_sessions = AgentSession.query.filter(
-                            session_id=session_id, status="pending"
-                        )
-                        if pending_sessions:
-                            logger.info(
-                                f"[{project_name}] Steering check found session {session_id} "
-                                f"in 'pending' status -- message will queue normally and be "
-                                f"consumed when the job starts via PostToolUse hook"
-                            )
-                except (ConnectionError, OSError) as e:
-                    # Redis/DB connection errors -- log at ERROR with traceback
-                    logger.error(
-                        f"[{project_name}] Steering check failed due to connection error, "
-                        f"falling through to queue: {e}",
-                        exc_info=True,
-                    )
-                except Exception as e:
-                    # Unexpected errors -- log at ERROR with traceback for visibility
-                    logger.error(
-                        f"[{project_name}] Steering check failed unexpectedly, "
-                        f"falling through to queue: {e}",
-                        exc_info=True,
-                    )
-
-            # === INTAKE CLASSIFIER: Haiku triage for non-reply messages (#320) ===
-            # Runs on messages that didn't hit the reply-to fast path above.
-            # Classifies intent as interjection/new_work/acknowledgment to decide routing.
-            # This catches follow-up messages sent WITHOUT using Telegram's reply feature.
-            if not (is_reply_to_valor and message.reply_to_msg_id):
-                try:
-                    from models.agent_session import AgentSession
-
-                    # Find active/running/dormant sessions in this chat
-                    active_sessions = []
-                    for check_status in ("running", "active", "dormant"):
-                        sessions = AgentSession.query.filter(
-                            chat_id=telegram_chat_id, status=check_status
-                        )
-                        if sessions:
-                            active_sessions.extend(sessions)
-
-                    if active_sessions:
-                        # Pick the most recent session (by last_activity or created_at)
-                        target_session = max(
-                            active_sessions,
-                            key=lambda s: s.last_activity or s.created_at or 0,
-                        )
-
-                        # Classify message intent with Haiku
-                        from tools.classifier import classify_message_intent_async
-
-                        intent_result = await classify_message_intent_async(
-                            message=clean_text,
-                            session_context=target_session.context_summary or "",
-                            session_expectations=target_session.expectations or "",
-                            session_status=target_session.status or "",
-                        )
-
-                        intent = intent_result.get("intent", "new_work")
-                        confidence = intent_result.get("confidence", 0.0)
-                        reason = intent_result.get("reason", "")
-
-                        logger.info(
-                            f"[{project_name}] Intake classifier: intent={intent} "
-                            f"confidence={confidence:.2f} reason={reason!r} "
-                            f"target_session={target_session.session_id}"
-                        )
-
-                        if intent == "interjection":
-                            # Re-check session status (Race 1 mitigation: session may
-                            # have completed during classification)
-                            fresh_session = None
-                            for check_status in ("running", "active"):
-                                sessions = AgentSession.query.filter(
-                                    session_id=target_session.session_id,
-                                    status=check_status,
-                                )
-                                if sessions:
-                                    fresh_session = sessions[0]
-                                    break
-
-                            if fresh_session:
-                                # Push to AgentSession's queued_steering_messages
-                                # for ChatSession to read
-                                fresh_session.push_steering_message(clean_text)
-                                from bridge.markdown import send_markdown
-
-                                await send_markdown(
-                                    client,
-                                    event.chat_id,
-                                    "Adding to current task",
-                                    reply_to=message.id,
-                                )
-                                logger.info(
-                                    f"[{project_name}] Intake classifier routed "
-                                    f"interjection to session "
-                                    f"{fresh_session.session_id}"
-                                )
-                                # Also push to Redis steering queue so the
-                                # PostToolUse hook picks it up immediately
-                                push_steering_message(
-                                    fresh_session.session_id,
-                                    clean_text,
-                                    sender_name,
-                                )
-                                # Record as processed and return
-                                from bridge.dedup import record_message_processed
-
-                                await record_message_processed(event.chat_id, message.id)
-                                return
-                            else:
-                                logger.info(
-                                    f"[{project_name}] Intake classifier: session "
-                                    f"{target_session.session_id} no longer "
-                                    f"running/active, falling through to enqueue"
-                                )
-
-                        elif intent == "acknowledgment":
-                            # Only acknowledge dormant sessions with expectations
-                            if target_session.status == "dormant" and target_session.expectations:
-                                target_session.status = "completed"
-                                target_session.log_lifecycle_transition(
-                                    "completed",
-                                    f"Acknowledged by {sender_name}: {clean_text[:80]}",
-                                )
-                                target_session.save()
-                                await set_reaction(
-                                    client,
-                                    event.chat_id,
-                                    message.id,
-                                    REACTION_COMPLETE,
-                                )
-                                logger.info(
-                                    f"[{project_name}] Intake classifier: "
-                                    f"acknowledged session "
-                                    f"{target_session.session_id} as complete"
-                                )
-                                from bridge.dedup import record_message_processed
-
-                                await record_message_processed(event.chat_id, message.id)
-                                return
-                            else:
-                                logger.info(
-                                    f"[{project_name}] Intake classifier: "
-                                    f"acknowledgment but session is "
-                                    f"{target_session.status} (not dormant with "
-                                    f"expectations), falling through to enqueue"
-                                )
-
-                        # intent == "new_work" or fallthrough: continue to enqueue
-
-                except (ConnectionError, OSError) as e:
-                    logger.error(
-                        f"[{project_name}] Intake classifier failed due to "
-                        f"connection error, falling through to enqueue: {e}",
-                        exc_info=True,
-                    )
-                except Exception as e:
-                    logger.warning(
-                        f"[{project_name}] Intake classifier failed, "
-                        f"falling through to enqueue: {e}"
-                    )
-
-            # Lightweight revival check (no SDK agent, just git state)
-            working_dir_str = ""
-            if project:
-                working_dir_str = project.get(
-                    "working_directory", DEFAULTS.get("working_directory", "")
-                )
-            if not working_dir_str:
-                working_dir_str = str(Path(__file__).parent.parent)
-
-            revival_info = check_revival(project_key, working_dir_str, telegram_chat_id)
-            if revival_info:
-                revival_msg = f"Unfinished work detected on branch `{revival_info['branch']}`"
-                checkpoint_ctx = revival_info.get("checkpoint_context", "")
-                if checkpoint_ctx:
-                    revival_msg += f"\n\n{checkpoint_ctx}"
-                elif revival_info.get("plan_context"):
-                    revival_msg += f"\n\n> {revival_info['plan_context']}"
-                revival_msg += "\n\nReply to this message to resume."
-                from bridge.markdown import send_markdown
-
-                await send_markdown(client, event.chat_id, revival_msg)
-                record_revival_cooldown(telegram_chat_id)
-                logger.info(
-                    f"[{project_name}] Sent revival prompt for branch {revival_info['branch']}"
-                )
-
-                # Mark the stale work as dormant so it doesn't re-trigger.
-                # A reply to the revival message will re-queue via branch name in the text.
-                try:
-                    from agent.branch_manager import mark_work_done
-
-                    mark_work_done(Path(working_dir_str), revival_info["branch"])
-                    logger.info(
-                        f"[{project_name}] Marked stale branch {revival_info['branch']} as dormant"
-                    )
-                except Exception as e:
-                    logger.warning(f"[{project_name}] Failed to mark stale work dormant: {e}")
-
-            # Check if this is tracked work and create workflow if needed
-            workflow_id = create_workflow_for_tracked_work(
-                clean_text, working_dir_str, telegram_chat_id
-            )
-
-            # Serialize enrichment metadata for the job worker
-            yt_urls_json = json.dumps(youtube_urls) if youtube_urls else None
-            non_yt_urls_json = json.dumps(non_youtube_urls) if non_youtube_urls else None
-
-            # Update TelegramMessage with URL/classification metadata
-            # (has_media, media_type, reply_to_msg_id were set at store_message time)
-            if stored_msg_id and (yt_urls_json or non_yt_urls_json):
-                try:
-                    from models.telegram import TelegramMessage
-
-                    stored_msgs = list(TelegramMessage.query.filter(msg_id=stored_msg_id))
-                    if stored_msgs:
-                        tm = stored_msgs[0]
-                        if yt_urls_json:
-                            tm.youtube_urls = yt_urls_json
-                        if non_yt_urls_json:
-                            tm.non_youtube_urls = non_yt_urls_json
-                        tm.save()
-                except Exception as e:
-                    logger.debug(f"Failed to update TelegramMessage with URL metadata: {e}")
-
-            # Generate correlation ID for end-to-end request tracing
-            correlation_id = uuid.uuid4().hex[:12]
-            logger.info(
-                f"[{correlation_id}] Message received from {sender_name} "
-                f"in {chat_title or 'DM'} (session={session_id})"
-            )
-
-            # Classification inheritance: if this is a reply-to continuation and
-            # the async classifier hasn't completed yet, inherit classification_type
-            # from the original session. This prevents the race condition where
-            # enqueue_job gets classification_type=None because the async task
-            # hasn't finished. See issue #375 Bug 2.
-            if (
-                is_reply_to_valor
-                and message.reply_to_msg_id
-                and not classification_result.get("type")
-            ):
-                try:
-                    from models.agent_session import AgentSession
-
-                    existing_sessions = list(AgentSession.query.filter(session_id=session_id))
-                    if existing_sessions and existing_sessions[0].classification_type:
-                        classification_result["type"] = existing_sessions[0].classification_type
-                        logger.info(
-                            f"[routing] Inherited classification_type="
-                            f"{classification_result['type']} from existing session "
-                            f"{session_id}"
-                        )
-                except Exception as e:
-                    logger.debug(f"Classification inheritance lookup failed (non-fatal): {e}")
-
-            # Determine session_type: ChatSession (PM) or Simple.
-            # The intake classifier determines routing; ChatSession then owns
-            # all SDLC intelligence. No work-type classification in this path.
-            _classification = classification_result.get("type")
-            if _classification == "sdlc":
-                _session_type = "chat"  # ChatSession — PM persona, orchestrates DevSessions
-            else:
-                _session_type = "simple"  # Simple session — direct delivery, no orchestration
-
-            # Enqueue via factory-aware path: session_type drives ChatSession
-            # vs Simple creation. The queue worker reads session_type to route.
-            depth = await enqueue_job(
-                project_key=project_key,
-                session_id=session_id,
-                working_dir=working_dir_str,
-                message_text=clean_text,
-                sender_name=sender_name,
-                chat_id=telegram_chat_id,
-                message_id=message.id,
-                chat_title=chat_title,
-                priority="normal",
-                sender_id=sender_id,
-                workflow_id=workflow_id,
-                has_media=has_media,
-                media_type=media_type,
-                youtube_urls=yt_urls_json,
-                non_youtube_urls=non_yt_urls_json,
-                reply_to_msg_id=message.reply_to_msg_id,
-                chat_id_for_enrichment=telegram_chat_id,
-                classification_type=_classification,
-                correlation_id=correlation_id,
-                trigger_message_id=stored_msg_id,
-                session_type=_session_type,
-            )
-            if depth > 1:
-                from bridge.markdown import send_markdown
-
-                await send_markdown(
-                    client,
-                    event.chat_id,
-                    f"Queued (position {depth}). Working on a previous task first.",
-                    reply_to=message.id,
-                )
-
-            logger.info(
-                f"[{project_name}] Queued job for {sender_name} (msg {message_id}, depth={depth})"
-            )
-
-            # Record message as processed (dedup for catch_up replays)
-            from bridge.dedup import record_message_processed
-
-            await record_message_processed(event.chat_id, message.id)
-
-        # === LEGACY MODE: Synchronous with retry ===
-        else:
+        # Check if this is a reply to a revival notification
+        # (stateless: read the replied-to message)
+        if message.reply_to_msg_id:
             try:
-                agent_task = asyncio.create_task(
-                    get_agent_response_with_retry(
-                        clean_text,
-                        session_id,
-                        sender_name,
-                        chat_title,
-                        project,
-                        telegram_chat_id,
-                        client,
-                        message.id,
-                        sender_id,
-                    )
+                replied_msg = await client.get_messages(
+                    event.chat_id, ids=message.reply_to_msg_id
                 )
-
-                # Wait for response (legacy blocking mode)
-                response = await agent_task
-
-                # Send response if there's content (files or text)
-                sent_response = await send_response_with_files(client, event, response)
-
-                # 👍 Thumbs up = Completed successfully
-                await set_reaction(client, event.chat_id, message.id, REACTION_SUCCESS)
-
-                if sent_response:
-                    logger.info(f"[{project_name}] Replied to {sender_name} (msg {message_id})")
-                else:
-                    logger.info(
-                        f"[{project_name}] Processed message from "
-                        f"{sender_name} (msg {message_id}) - no response needed"
-                    )
-
-                # Store in history (full content, no truncation)
-                try:
-                    filtered_for_history = filter_tool_logs(response)
-                    if filtered_for_history:
-                        store_message(
-                            chat_id=telegram_chat_id,
-                            content=filtered_for_history,
-                            sender="Valor",
-                            timestamp=datetime.now(),
-                            message_type="response",
+                if (
+                    replied_msg
+                    and replied_msg.text
+                    and replied_msg.text.startswith("Unfinished work detected")
+                ):
+                    branch_match = _re.search(r"`([^`]+)`", replied_msg.text)
+                    if branch_match:
+                        revival_branch = branch_match.group(1)
+                        working_dir_str = ""
+                        if project:
+                            working_dir_str = project.get(
+                                "working_directory",
+                                DEFAULTS.get("working_directory", ""),
+                            )
+                        if not working_dir_str:
+                            working_dir_str = str(Path(__file__).parent.parent)
+                        revival_info = {
+                            "branch": revival_branch,
+                            "project_key": project_key,
+                            "session_id": session_id,
+                            "working_dir": working_dir_str,
+                        }
+                        logger.info(
+                            f"[{project_name}] Reply to revival "
+                            "notification, queuing revival with context"
                         )
-                except Exception as e:
-                    logger.warning(f"Failed to store response in history: {e}")
+                        await queue_revival_job(
+                            revival_info=revival_info,
+                            chat_id=telegram_chat_id,
+                            message_id=message.id,
+                            additional_context=clean_text,
+                        )
+                        await set_reaction(client, event.chat_id, message.id, REACTION_RECEIVED)
+                        return
+            except Exception as e:
+                logger.debug(f"Revival reply check error: {e}")
 
-                # Log reply event
-                log_event(
-                    "reply_sent",
-                    message_id=message_id,
-                    project=project_name,
-                    sender=sender_name,
-                    response_length=len(response),
+        # === STEERING CHECK: Reply to running session → inject, don't queue ===
+        # This is the FAST PATH for direct Telegram replies to running sessions.
+        # The intake classifier (below) handles non-reply interjections.
+        if is_reply_to_valor and message.reply_to_msg_id:
+            try:
+                from models.agent_session import AgentSession
+
+                # Check both "running" and "active" statuses -- "running" is the
+                # primary status during agent execution (set by _pop_job), while
+                # "active" is set later by _execute_job for auto-continue deferral.
+                # Both represent "agent is currently working" for steering purposes.
+                matching_session = None
+                for check_status in ("running", "active"):
+                    sessions = AgentSession.query.filter(
+                        session_id=session_id, status=check_status
+                    )
+                    if sessions:
+                        matching_session = sessions[0]
+                        break
+
+                if matching_session:
+                    # Route to steering queue instead of job queue.
+                    # push_steering_message auto-detects abort keywords.
+                    from agent.steering import ABORT_KEYWORDS
+
+                    is_abort = clean_text.strip().lower() in ABORT_KEYWORDS
+                    push_steering_message(
+                        session_id,
+                        clean_text,
+                        sender_name,
+                        is_abort=is_abort,
+                    )
+                    ack_text = (
+                        "Stopping current task." if is_abort else "Adding to current task"
+                    )
+                    from bridge.markdown import send_markdown
+
+                    await send_markdown(client, event.chat_id, ack_text, reply_to=message.id)
+                    action = "abort" if is_abort else "steer"
+                    logger.info(
+                        f"[{project_name}] Steered message into "
+                        f"{matching_session.status} session "
+                        f"{session_id} ({action})"
+                    )
+                    return
+                else:
+                    # No running/active session found -- check for pending (race window)
+                    pending_sessions = AgentSession.query.filter(
+                        session_id=session_id, status="pending"
+                    )
+                    if pending_sessions:
+                        logger.info(
+                            f"[{project_name}] Steering check found session {session_id} "
+                            f"in 'pending' status -- message will queue normally and be "
+                            f"consumed when the job starts via PostToolUse hook"
+                        )
+            except (ConnectionError, OSError) as e:
+                # Redis/DB connection errors -- log at ERROR with traceback
+                logger.error(
+                    f"[{project_name}] Steering check failed due to connection error, "
+                    f"falling through to queue: {e}",
+                    exc_info=True,
+                )
+            except Exception as e:
+                # Unexpected errors -- log at ERROR with traceback for visibility
+                logger.error(
+                    f"[{project_name}] Steering check failed unexpectedly, "
+                    f"falling through to queue: {e}",
+                    exc_info=True,
                 )
 
+        # === INTAKE CLASSIFIER: Haiku triage for non-reply messages (#320) ===
+        # Runs on messages that didn't hit the reply-to fast path above.
+        # Classifies intent as interjection/new_work/acknowledgment to decide routing.
+        # This catches follow-up messages sent WITHOUT using Telegram's reply feature.
+        if not (is_reply_to_valor and message.reply_to_msg_id):
+            try:
+                from models.agent_session import AgentSession
+
+                # Find active/running/dormant sessions in this chat
+                active_sessions = []
+                for check_status in ("running", "active", "dormant"):
+                    sessions = AgentSession.query.filter(
+                        chat_id=telegram_chat_id, status=check_status
+                    )
+                    if sessions:
+                        active_sessions.extend(sessions)
+
+                if active_sessions:
+                    # Pick the most recent session (by last_activity or created_at)
+                    target_session = max(
+                        active_sessions,
+                        key=lambda s: s.last_activity or s.created_at or 0,
+                    )
+
+                    # Classify message intent with Haiku
+                    from tools.classifier import classify_message_intent_async
+
+                    intent_result = await classify_message_intent_async(
+                        message=clean_text,
+                        session_context=target_session.context_summary or "",
+                        session_expectations=target_session.expectations or "",
+                        session_status=target_session.status or "",
+                    )
+
+                    intent = intent_result.get("intent", "new_work")
+                    confidence = intent_result.get("confidence", 0.0)
+                    reason = intent_result.get("reason", "")
+
+                    logger.info(
+                        f"[{project_name}] Intake classifier: intent={intent} "
+                        f"confidence={confidence:.2f} reason={reason!r} "
+                        f"target_session={target_session.session_id}"
+                    )
+
+                    if intent == "interjection":
+                        # Re-check session status (Race 1 mitigation: session may
+                        # have completed during classification)
+                        fresh_session = None
+                        for check_status in ("running", "active"):
+                            sessions = AgentSession.query.filter(
+                                session_id=target_session.session_id,
+                                status=check_status,
+                            )
+                            if sessions:
+                                fresh_session = sessions[0]
+                                break
+
+                        if fresh_session:
+                            # Push to AgentSession's queued_steering_messages
+                            # for ChatSession to read
+                            fresh_session.push_steering_message(clean_text)
+                            from bridge.markdown import send_markdown
+
+                            await send_markdown(
+                                client,
+                                event.chat_id,
+                                "Adding to current task",
+                                reply_to=message.id,
+                            )
+                            logger.info(
+                                f"[{project_name}] Intake classifier routed "
+                                f"interjection to session "
+                                f"{fresh_session.session_id}"
+                            )
+                            # Also push to Redis steering queue so the
+                            # PostToolUse hook picks it up immediately
+                            push_steering_message(
+                                fresh_session.session_id,
+                                clean_text,
+                                sender_name,
+                            )
+                            # Record as processed and return
+                            from bridge.dedup import record_message_processed
+
+                            await record_message_processed(event.chat_id, message.id)
+                            return
+                        else:
+                            logger.info(
+                                f"[{project_name}] Intake classifier: session "
+                                f"{target_session.session_id} no longer "
+                                f"running/active, falling through to enqueue"
+                            )
+
+                    elif intent == "acknowledgment":
+                        # Only acknowledge dormant sessions with expectations
+                        if target_session.status == "dormant" and target_session.expectations:
+                            target_session.status = "completed"
+                            target_session.log_lifecycle_transition(
+                                "completed",
+                                f"Acknowledged by {sender_name}: {clean_text[:80]}",
+                            )
+                            target_session.save()
+                            await set_reaction(
+                                client,
+                                event.chat_id,
+                                message.id,
+                                REACTION_COMPLETE,
+                            )
+                            logger.info(
+                                f"[{project_name}] Intake classifier: "
+                                f"acknowledged session "
+                                f"{target_session.session_id} as complete"
+                            )
+                            from bridge.dedup import record_message_processed
+
+                            await record_message_processed(event.chat_id, message.id)
+                            return
+                        else:
+                            logger.info(
+                                f"[{project_name}] Intake classifier: "
+                                f"acknowledgment but session is "
+                                f"{target_session.status} (not dormant with "
+                                f"expectations), falling through to enqueue"
+                            )
+
+                    # intent == "new_work" or fallthrough: continue to enqueue
+
+            except (ConnectionError, OSError) as e:
+                logger.error(
+                    f"[{project_name}] Intake classifier failed due to "
+                    f"connection error, falling through to enqueue: {e}",
+                    exc_info=True,
+                )
             except Exception as e:
-                # ❌ Error = Something went wrong
-                await set_reaction(client, event.chat_id, message.id, REACTION_ERROR)
-                logger.error(f"[{project_name}] Error processing message from {sender_name}: {e}")
-                raise
+                logger.warning(
+                    f"[{project_name}] Intake classifier failed, "
+                    f"falling through to enqueue: {e}"
+                )
+
+        # Lightweight revival check (no SDK agent, just git state)
+        working_dir_str = ""
+        if project:
+            working_dir_str = project.get(
+                "working_directory", DEFAULTS.get("working_directory", "")
+            )
+        if not working_dir_str:
+            working_dir_str = str(Path(__file__).parent.parent)
+
+        revival_info = check_revival(project_key, working_dir_str, telegram_chat_id)
+        if revival_info:
+            revival_msg = f"Unfinished work detected on branch `{revival_info['branch']}`"
+            checkpoint_ctx = revival_info.get("checkpoint_context", "")
+            if checkpoint_ctx:
+                revival_msg += f"\n\n{checkpoint_ctx}"
+            elif revival_info.get("plan_context"):
+                revival_msg += f"\n\n> {revival_info['plan_context']}"
+            revival_msg += "\n\nReply to this message to resume."
+            from bridge.markdown import send_markdown
+
+            await send_markdown(client, event.chat_id, revival_msg)
+            record_revival_cooldown(telegram_chat_id)
+            logger.info(
+                f"[{project_name}] Sent revival prompt for branch {revival_info['branch']}"
+            )
+
+            # Mark the stale work as dormant so it doesn't re-trigger.
+            # A reply to the revival message will re-queue via branch name in the text.
+            try:
+                from agent.branch_manager import mark_work_done
+
+                mark_work_done(Path(working_dir_str), revival_info["branch"])
+                logger.info(
+                    f"[{project_name}] Marked stale branch {revival_info['branch']} as dormant"
+                )
+            except Exception as e:
+                logger.warning(f"[{project_name}] Failed to mark stale work dormant: {e}")
+
+        # Serialize enrichment metadata for the job worker
+        yt_urls_json = json.dumps(youtube_urls) if youtube_urls else None
+        non_yt_urls_json = json.dumps(non_youtube_urls) if non_youtube_urls else None
+
+        # Update TelegramMessage with URL/classification metadata
+        # (has_media, media_type, reply_to_msg_id were set at store_message time)
+        if stored_msg_id and (yt_urls_json or non_yt_urls_json):
+            try:
+                from models.telegram import TelegramMessage
+
+                stored_msgs = list(TelegramMessage.query.filter(msg_id=stored_msg_id))
+                if stored_msgs:
+                    tm = stored_msgs[0]
+                    if yt_urls_json:
+                        tm.youtube_urls = yt_urls_json
+                    if non_yt_urls_json:
+                        tm.non_youtube_urls = non_yt_urls_json
+                    tm.save()
+            except Exception as e:
+                logger.debug(f"Failed to update TelegramMessage with URL metadata: {e}")
+
+        # Generate correlation ID for end-to-end request tracing
+        correlation_id = uuid.uuid4().hex[:12]
+        logger.info(
+            f"[{correlation_id}] Message received from {sender_name} "
+            f"in {chat_title or 'DM'} (session={session_id})"
+        )
+
+        # Classification inheritance: if this is a reply-to continuation and
+        # the async classifier hasn't completed yet, inherit classification_type
+        # from the original session. This prevents the race condition where
+        # enqueue_job gets classification_type=None because the async task
+        # hasn't finished. See issue #375 Bug 2.
+        if (
+            is_reply_to_valor
+            and message.reply_to_msg_id
+            and not classification_result.get("type")
+        ):
+            try:
+                from models.agent_session import AgentSession
+
+                existing_sessions = list(AgentSession.query.filter(session_id=session_id))
+                if existing_sessions and existing_sessions[0].classification_type:
+                    classification_result["type"] = existing_sessions[0].classification_type
+                    logger.info(
+                        f"[routing] Inherited classification_type="
+                        f"{classification_result['type']} from existing session "
+                        f"{session_id}"
+                    )
+            except Exception as e:
+                logger.debug(f"Classification inheritance lookup failed (non-fatal): {e}")
+
+        # Determine session_type: ChatSession (PM) or Simple.
+        # The intake classifier determines routing; ChatSession then owns
+        # all SDLC intelligence. No work-type classification in this path.
+        _classification = classification_result.get("type")
+        if _classification == "sdlc":
+            _session_type = "chat"  # ChatSession — PM persona, orchestrates DevSessions
+        else:
+            _session_type = "simple"  # Simple session — direct delivery, no orchestration
+
+        # Enqueue via factory-aware path: session_type drives ChatSession
+        # vs Simple creation. The queue worker reads session_type to route.
+        depth = await enqueue_job(
+            project_key=project_key,
+            session_id=session_id,
+            working_dir=working_dir_str,
+            message_text=clean_text,
+            sender_name=sender_name,
+            chat_id=telegram_chat_id,
+            message_id=message.id,
+            chat_title=chat_title,
+            priority="normal",
+            sender_id=sender_id,
+            has_media=has_media,
+            media_type=media_type,
+            youtube_urls=yt_urls_json,
+            non_youtube_urls=non_yt_urls_json,
+            reply_to_msg_id=message.reply_to_msg_id,
+            chat_id_for_enrichment=telegram_chat_id,
+            classification_type=_classification,
+            correlation_id=correlation_id,
+            trigger_message_id=stored_msg_id,
+            session_type=_session_type,
+        )
+        if depth > 1:
+            from bridge.markdown import send_markdown
+
+            await send_markdown(
+                client,
+                event.chat_id,
+                f"Queued (position {depth}). Working on a previous task first.",
+                reply_to=message.id,
+            )
+
+        logger.info(
+            f"[{project_name}] Queued job for {sender_name} (msg {message_id}, depth={depth})"
+        )
+
+        # Record message as processed (dedup for catch_up replays)
+        from bridge.dedup import record_message_processed
+
+        await record_message_processed(event.chat_id, message.id)
 
     # Register signal handlers for graceful shutdown
     loop = asyncio.get_event_loop()
@@ -1420,28 +1328,27 @@ async def main():
 
     async def _graceful_shutdown(tg_client):
         """Reset in-flight jobs, kill SDK subprocesses, and disconnect."""
-        if USE_CLAUDE_SDK:
-            from agent.job_queue import _active_workers, _reset_running_jobs
+        from agent.job_queue import _active_workers, _reset_running_jobs
 
-            # Cancel all worker asyncio tasks
-            for _pkey, worker_task in list(_active_workers.items()):
-                if worker_task and not worker_task.done():
-                    worker_task.cancel()
-                    logger.info(f"[{_pkey}] Cancelled worker task")
-            _active_workers.clear()
+        # Cancel all worker asyncio tasks
+        for _pkey, worker_task in list(_active_workers.items()):
+            if worker_task and not worker_task.done():
+                worker_task.cancel()
+                logger.info(f"[{_pkey}] Cancelled worker task")
+        _active_workers.clear()
 
-            for _pkey in ACTIVE_PROJECTS:
-                try:
-                    reset = await _reset_running_jobs(_pkey)
-                    if reset:
-                        logger.info(f"[{_pkey}] Reset {reset} running job(s) to pending")
-                except Exception as e:
-                    logger.error(f"[{_pkey}] Failed to reset running jobs: {e}")
+        for _pkey in ACTIVE_PROJECTS:
+            try:
+                reset = await _reset_running_jobs(_pkey)
+                if reset:
+                    logger.info(f"[{_pkey}] Reset {reset} running job(s) to pending")
+            except Exception as e:
+                logger.error(f"[{_pkey}] Failed to reset running jobs: {e}")
 
-            # Kill SDK subprocesses so they don't survive as orphans
-            orphans = _cleanup_orphaned_claude_processes()
-            if orphans:
-                logger.info(f"Killed {orphans} SDK subprocess(es) during shutdown")
+        # Kill SDK subprocesses so they don't survive as orphans
+        orphans = _cleanup_orphaned_claude_processes()
+        if orphans:
+            logger.info(f"Killed {orphans} SDK subprocess(es) during shutdown")
 
         logger.info("Waiting 2s for in-flight tasks to finish...")
         await asyncio.sleep(2)
@@ -1493,156 +1400,152 @@ async def main():
         logger.error(f"Dead letter replay failed: {e}")
 
     # Register job queue callbacks for each project
-    if USE_CLAUDE_SDK:
-        from agent.job_queue import (
-            cleanup_stale_branches,
-            register_project_config,
-        )
-        from agent.job_queue import register_callbacks as register_queue_callbacks
+    from agent.job_queue import (
+        cleanup_stale_branches,
+        register_project_config,
+    )
+    from agent.job_queue import register_callbacks as register_queue_callbacks
 
-        for _pkey, _pconfig in CONFIG.get("projects", {}).items():
-            # Register project config so job queue can read auto_merge etc.
-            register_project_config(_pkey, _pconfig)
-            _wd = _pconfig.get("working_directory", DEFAULTS.get("working_directory", ""))
-            if not _wd:
-                continue
+    for _pkey, _pconfig in CONFIG.get("projects", {}).items():
+        # Register project config so job queue can read auto_merge etc.
+        register_project_config(_pkey, _pconfig)
+        _wd = _pconfig.get("working_directory", DEFAULTS.get("working_directory", ""))
+        if not _wd:
+            continue
 
-            # Create send callback that uses the Telegram client
-            async def _make_send_cb(_client=client):
-                async def _send(
-                    chat_id: str, text: str, reply_to_msg_id: int, session=None
-                ) -> None:
-                    try:
-                        filtered = filter_tool_logs(text)
-                        if filtered:
-                            sent = await send_response_with_files(
-                                _client,
-                                None,
-                                filtered,
-                                chat_id=int(chat_id),
-                                reply_to=reply_to_msg_id,
-                                session=session,
-                            )
-                            if sent:
-                                try:
-                                    store_message(
-                                        chat_id=chat_id,
-                                        content=filtered,  # full content, no truncation
-                                        sender="Valor",
-                                        timestamp=datetime.now(),
-                                        message_type="response",
-                                    )
-                                except Exception:
-                                    pass
-                            elif filtered:
-                                logger.error(
-                                    f"Job queue send returned False for chat {chat_id} "
-                                    f"({len(filtered)} chars)"
-                                )
-                    except Exception as e:
-                        logger.error(
-                            f"Job queue _send callback failed for chat {chat_id}: {e}",
-                            exc_info=True,
+        # Create send callback that uses the Telegram client
+        async def _make_send_cb(_client=client):
+            async def _send(
+                chat_id: str, text: str, reply_to_msg_id: int, session=None
+            ) -> None:
+                try:
+                    filtered = filter_tool_logs(text)
+                    if filtered:
+                        sent = await send_response_with_files(
+                            _client,
+                            None,
+                            filtered,
+                            chat_id=int(chat_id),
+                            reply_to=reply_to_msg_id,
+                            session=session,
                         )
+                        if sent:
+                            try:
+                                store_message(
+                                    chat_id=chat_id,
+                                    content=filtered,  # full content, no truncation
+                                    sender="Valor",
+                                    timestamp=datetime.now(),
+                                    message_type="response",
+                                )
+                            except Exception:
+                                pass
+                        elif filtered:
+                            logger.error(
+                                f"Job queue send returned False for chat {chat_id} "
+                                f"({len(filtered)} chars)"
+                            )
+                except Exception as e:
+                    logger.error(
+                        f"Job queue _send callback failed for chat {chat_id}: {e}",
+                        exc_info=True,
+                    )
 
-                return _send
+            return _send
 
-            async def _make_react_cb(_client=client):
-                async def _react(chat_id: str, msg_id: int, emoji: str | None) -> None:
-                    await set_reaction(_client, int(chat_id), msg_id, emoji)
+        async def _make_react_cb(_client=client):
+            async def _react(chat_id: str, msg_id: int, emoji: str | None) -> None:
+                await set_reaction(_client, int(chat_id), msg_id, emoji)
 
-                return _react
+            return _react
 
-            register_queue_callbacks(
-                _pkey,
-                await _make_send_cb(),
-                await _make_react_cb(),
-            )
-            logger.info(f"[{_pkey}] Registered job queue callbacks")
-
-            # Clean up stale session branches on startup
-            cleaned = await cleanup_stale_branches(_wd)
-            if cleaned:
-                logger.info(f"[{_pkey}] Cleaned {len(cleaned)} stale session branches")
-
-        # Register "dm" callback so DM responses actually get sent
         register_queue_callbacks(
-            "dm",
+            _pkey,
             await _make_send_cb(),
             await _make_react_cb(),
         )
-        logger.info("[dm] Registered job queue callbacks")
+        logger.info(f"[{_pkey}] Registered job queue callbacks")
+
+        # Clean up stale session branches on startup
+        cleaned = await cleanup_stale_branches(_wd)
+        if cleaned:
+            logger.info(f"[{_pkey}] Cleaned {len(cleaned)} stale session branches")
+
+    # Register "dm" callback so DM responses actually get sent
+    register_queue_callbacks(
+        "dm",
+        await _make_send_cb(),
+        await _make_react_cb(),
+    )
+    logger.info("[dm] Registered job queue callbacks")
 
     # Clear stale restart flag from previous update (bridge has already restarted with new code)
-    if USE_CLAUDE_SDK:
-        from agent.job_queue import clear_restart_flag
+    from agent.job_queue import clear_restart_flag
 
-        if clear_restart_flag():
-            logger.info("Cleared stale restart flag from previous update")
+    if clear_restart_flag():
+        logger.info("Cleared stale restart flag from previous update")
 
     # Recover interrupted jobs and restart workers for any persisted jobs
-    if USE_CLAUDE_SDK:
-        from agent.job_queue import (
-            _ensure_worker,
-            _get_pending_jobs_sync,
-            _recover_interrupted_jobs,
-            _recover_orphaned_jobs,
-        )
+    from agent.job_queue import (
+        _ensure_worker,
+        _get_pending_jobs_sync,
+        _recover_interrupted_jobs,
+        _recover_orphaned_jobs,
+    )
 
-        # Clean up stale Redis keys with invalid job_id format (e.g. 60-char
-        # keys from old data). This silences the popoto "auto key value is length
-        # N" validation errors that spam the error log on every query.
-        # Temporarily suppress popoto's "{clean} is for debugging" warning.
+    # Clean up stale Redis keys with invalid job_id format (e.g. 60-char
+    # keys from old data). This silences the popoto "auto key value is length
+    # N" validation errors that spam the error log on every query.
+    # Temporarily suppress popoto's "{clean} is for debugging" warning.
+    try:
+        from models.agent_session import AgentSession
+
+        _popoto_keys_logger = logging.getLogger("POPOTO.Query")
+        _prev_level = _popoto_keys_logger.level
+        _popoto_keys_logger.setLevel(logging.ERROR)
         try:
-            from models.agent_session import AgentSession
+            AgentSession.query.keys(clean=True)
+        finally:
+            _popoto_keys_logger.setLevel(_prev_level)
+        logger.info("Cleaned stale Redis keys for AgentSession")
+    except Exception as _clean_err:
+        logger.warning(f"Redis key cleanup failed (non-fatal): {_clean_err}")
 
-            _popoto_keys_logger = logging.getLogger("POPOTO.Query")
-            _prev_level = _popoto_keys_logger.level
-            _popoto_keys_logger.setLevel(logging.ERROR)
-            try:
-                AgentSession.query.keys(clean=True)
-            finally:
-                _popoto_keys_logger.setLevel(_prev_level)
-            logger.info("Cleaned stale Redis keys for AgentSession")
-        except Exception as _clean_err:
-            logger.warning(f"Redis key cleanup failed (non-fatal): {_clean_err}")
-
-        for _pkey in ACTIVE_PROJECTS:
-            recovered = _recover_interrupted_jobs(_pkey)
-            if recovered:
-                logger.info(f"[{_pkey}] Recovered {recovered} interrupted job(s)")
-            orphans = _recover_orphaned_jobs(_pkey)
-            if orphans:
-                logger.info(f"[{_pkey}] Recovered {orphans} orphaned job(s)")
-            pending_jobs = _get_pending_jobs_sync(_pkey)
-            if pending_jobs:
-                logger.info(
-                    f"[{_pkey}] Found {len(pending_jobs)} persisted job(s), restarting worker"
-                )
-                _ensure_worker(_pkey)
+    for _pkey in ACTIVE_PROJECTS:
+        recovered = _recover_interrupted_jobs(_pkey)
+        if recovered:
+            logger.info(f"[{_pkey}] Recovered {recovered} interrupted job(s)")
+        orphans = _recover_orphaned_jobs(_pkey)
+        if orphans:
+            logger.info(f"[{_pkey}] Recovered {orphans} orphaned job(s)")
+        pending_jobs = _get_pending_jobs_sync(_pkey)
+        if pending_jobs:
+            logger.info(
+                f"[{_pkey}] Found {len(pending_jobs)} persisted job(s), restarting worker"
+            )
+            _ensure_worker(_pkey)
 
     # Scan for missed messages during downtime (catchup) -- run concurrently
-    if USE_CLAUDE_SDK:
 
-        async def _run_catchup():
-            logger.info("Starting catchup scan for missed messages...")
-            try:
-                from agent.job_queue import enqueue_job as _enqueue_job
-                from bridge.catchup import scan_for_missed_messages
+    async def _run_catchup():
+        logger.info("Starting catchup scan for missed messages...")
+        try:
+            from agent.job_queue import enqueue_job as _enqueue_job
+            from bridge.catchup import scan_for_missed_messages
 
-                caught_up = await scan_for_missed_messages(
-                    client=client,
-                    monitored_groups=ALL_MONITORED_GROUPS,
-                    projects_config=CONFIG,
-                    should_respond_fn=should_respond_async,
-                    enqueue_job_fn=_enqueue_job,
-                    find_project_fn=find_project_for_chat,
-                )
-                logger.info(f"Catchup scan complete: {caught_up} message(s) queued")
-            except Exception as e:
-                logger.error(f"Catchup scan failed: {e}", exc_info=True)
+            caught_up = await scan_for_missed_messages(
+                client=client,
+                monitored_groups=ALL_MONITORED_GROUPS,
+                projects_config=CONFIG,
+                should_respond_fn=should_respond_async,
+                enqueue_job_fn=_enqueue_job,
+                find_project_fn=find_project_for_chat,
+            )
+            logger.info(f"Catchup scan complete: {caught_up} message(s) queued")
+        except Exception as e:
+            logger.error(f"Catchup scan failed: {e}", exc_info=True)
 
-        asyncio.create_task(_run_catchup())
+    asyncio.create_task(_run_catchup())
 
     # Start session watchdog
     try:
@@ -1654,23 +1557,22 @@ async def main():
         logger.error(f"Failed to start session watchdog: {e}")
 
     # Start unified reflection scheduler (subsumes job health monitor and all recurring tasks)
-    if USE_CLAUDE_SDK:
+    try:
+        from agent.reflection_scheduler import ReflectionScheduler
+
+        _reflection_scheduler = ReflectionScheduler()
+        asyncio.create_task(_reflection_scheduler.start())
+        logger.info("Reflection scheduler started (replaces standalone health monitor)")
+    except Exception as e:
+        logger.error(f"Failed to start reflection scheduler: {e}")
+        # Fall back to standalone health monitor
         try:
-            from agent.reflection_scheduler import ReflectionScheduler
+            from agent.job_queue import _job_health_loop
 
-            _reflection_scheduler = ReflectionScheduler()
-            asyncio.create_task(_reflection_scheduler.start())
-            logger.info("Reflection scheduler started (replaces standalone health monitor)")
-        except Exception as e:
-            logger.error(f"Failed to start reflection scheduler: {e}")
-            # Fall back to standalone health monitor
-            try:
-                from agent.job_queue import _job_health_loop
-
-                asyncio.create_task(_job_health_loop())
-                logger.info("Fell back to standalone job health monitor")
-            except Exception as e2:
-                logger.error(f"Failed to start fallback health monitor: {e2}")
+            asyncio.create_task(_job_health_loop())
+            logger.info("Fell back to standalone job health monitor")
+        except Exception as e2:
+            logger.error(f"Failed to start fallback health monitor: {e2}")
 
     # Start message query polling loop
     async def message_query_loop():

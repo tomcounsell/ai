@@ -130,10 +130,6 @@ class Job:
         return self._rj.created_at
 
     @property
-    def workflow_id(self) -> str | None:
-        return self._rj.workflow_id
-
-    @property
     def work_item_slug(self) -> str | None:
         return self._rj.work_item_slug
 
@@ -200,7 +196,6 @@ _JOB_FIELDS = [
     "message_id",
     "chat_title",
     "revival_context",
-    "workflow_id",
     "work_item_slug",
     "task_list_id",
     "has_media",
@@ -278,7 +273,6 @@ async def _push_job(
     priority: str = "normal",
     revival_context: str | None = None,
     sender_id: int | None = None,
-    workflow_id: str | None = None,
     work_item_slug: str | None = None,
     task_list_id: str | None = None,
     has_media: bool = False,
@@ -341,7 +335,6 @@ async def _push_job(
         message_id=message_id,
         chat_title=chat_title,
         revival_context=revival_context,
-        workflow_id=workflow_id,
         work_item_slug=work_item_slug,
         task_list_id=task_list_id,
         has_media=has_media,
@@ -1131,7 +1124,6 @@ async def enqueue_job(
     priority: str = "normal",
     revival_context: str | None = None,
     sender_id: int | None = None,
-    workflow_id: str | None = None,
     work_item_slug: str | None = None,
     task_list_id: str | None = None,
     has_media: bool = False,
@@ -1167,7 +1159,6 @@ async def enqueue_job(
         chat_id=chat_id,
         message_id=message_id,
         chat_title=chat_title,
-        workflow_id=workflow_id,
         priority=priority,
         revival_context=revival_context,
         work_item_slug=work_item_slug,
@@ -1745,7 +1736,6 @@ async def _execute_job(job: Job) -> None:
             project_config,
             job.chat_id,
             job.sender_id,
-            job.workflow_id,
             task_list_id,
             cid,
             job.job_id,

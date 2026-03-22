@@ -38,8 +38,6 @@ from claude_agent_sdk import (
 
 from agent.agent_definitions import get_agent_definitions
 from agent.hooks import build_hooks_config
-from agent.workflow_state import WorkflowState
-from agent.workflow_types import WorkflowStateData
 from agent.worktree_manager import WORKTREES_DIR, validate_workspace
 from utils.github_patterns import ISSUE_NUMBER_RE as _ISSUE_NUMBER_RE
 from utils.github_patterns import PR_NUMBER_RE as _PR_NUMBER_RE
@@ -772,7 +770,6 @@ class ValorAgent:
         working_dir: str | Path | None = None,
         system_prompt: str | None = None,
         permission_mode: str = "bypassPermissions",
-        workflow_id: str | None = None,
         task_list_id: str | None = None,
         chat_id: str | None = None,
         project_key: str | None = None,
@@ -788,7 +785,6 @@ class ValorAgent:
             working_dir: Working directory for the agent. Defaults to ai/ repo root.
             system_prompt: Custom system prompt. Defaults to SOUL.md contents.
             permission_mode: Permission mode for tool use. Default: "bypassPermissions".
-            workflow_id: Optional workflow ID for multi-phase workflow tracking.
             task_list_id: Optional task list ID to scope sub-agent Task storage
                 via CLAUDE_CODE_TASK_LIST_ID environment variable.
             chat_id: Optional chat ID for routing context injection.
@@ -809,7 +805,6 @@ class ValorAgent:
         self.working_dir = validate_workspace(raw_path, allowed_root, is_worktree=is_wt)
         self.system_prompt = system_prompt or load_system_prompt()
         self.permission_mode = permission_mode
-        self.workflow_id = workflow_id
         self.task_list_id = task_list_id
         self.chat_id = chat_id
         self.project_key = project_key
@@ -817,96 +812,6 @@ class ValorAgent:
         self.job_id = job_id
         self.gh_repo = gh_repo or None  # Normalize empty string to None
         self.target_repo = target_repo
-        self.workflow_state: WorkflowState | None = None
-
-        # Load workflow state if workflow_id provided
-        if self.workflow_id:
-            try:
-                self.workflow_state = WorkflowState.load(self.workflow_id)
-                phase = self.workflow_state.data.phase if self.workflow_state.data else None
-                logger.info(f"Loaded workflow state: {self.workflow_id} (phase={phase})")
-            except FileNotFoundError:
-                logger.warning(
-                    f"Workflow ID {self.workflow_id} provided but no state file found. "
-                    "Continuing without workflow state."
-                )
-            except Exception as e:
-                logger.error(f"Failed to load workflow state for {self.workflow_id}: {e}")
-                # Continue without workflow state rather than failing initialization
-
-    def _build_workflow_context(self) -> str:
-        """Build workflow context string for system prompt.
-
-        Returns:
-            Formatted workflow context including ID, phase, status, and plan file.
-        """
-        if not self.workflow_state or not self.workflow_state.data:
-            return ""
-
-        data = self.workflow_state.data
-        context_parts = [
-            "---",
-            "WORKFLOW CONTEXT:",
-            f"- Workflow ID: {data.workflow_id}",
-            f"- Plan: {data.plan_file}",
-        ]
-
-        if data.phase:
-            context_parts.append(f"- Current Phase: {data.phase}")
-        if data.status:
-            context_parts.append(f"- Status: {data.status}")
-        if data.branch_name:
-            context_parts.append(f"- Branch: {data.branch_name}")
-        if data.tracking_url:
-            context_parts.append(f"- Tracking: {data.tracking_url}")
-
-        context_parts.append("---")
-        return "\n".join(context_parts)
-
-    def update_workflow_state(
-        self, phase: str | None = None, status: str | None = None, **kwargs
-    ) -> None:
-        """Update workflow state and persist to disk.
-
-        Args:
-            phase: Optional workflow phase to update
-            status: Optional workflow status to update
-            **kwargs: Additional state fields to update
-
-        Raises:
-            ValueError: If no workflow_state is loaded
-        """
-        if not self.workflow_state:
-            raise ValueError(
-                "Cannot update workflow state - no workflow_id provided at initialization"
-            )
-
-        # Build update dict
-        update_dict = {}
-        if phase is not None:
-            update_dict["phase"] = phase
-        if status is not None:
-            update_dict["status"] = status
-        update_dict.update(kwargs)
-
-        # Update and save
-        self.workflow_state.update(**update_dict)
-        self.workflow_state.save()
-        logger.info(
-            f"Updated workflow state: {self.workflow_id} "
-            f"(phase={self.workflow_state.data.phase if self.workflow_state.data else None}, "
-            f"status={self.workflow_state.data.status if self.workflow_state.data else None})"
-        )
-
-    def get_workflow_data(self) -> WorkflowStateData | None:
-        """Get current workflow state data.
-
-        Returns:
-            WorkflowStateData if workflow state is loaded, None otherwise
-        """
-        if self.workflow_state:
-            return self.workflow_state.data
-        return None
 
     def _create_options(self, session_id: str | None = None) -> ClaudeAgentOptions:
         """Create ClaudeAgentOptions configured for Valor with full permissions.
@@ -960,12 +865,7 @@ class ValorAgent:
             sdlc_env = _extract_sdlc_env_vars(session_id, self.gh_repo)
             env.update(sdlc_env)
 
-        # Build system prompt with workflow context if workflow_id is present
         system_prompt = self.system_prompt
-        if self.workflow_id and self.workflow_state and self.workflow_state.data:
-            workflow_context = self._build_workflow_context()
-            system_prompt += f"\n\n{workflow_context}"
-            logger.debug(f"Including workflow context in system prompt: {self.workflow_id}")
 
         # Only continue a conversation if we have evidence of a prior session.
         # Without this check, fresh sessions set continue_conversation=True which
@@ -1319,7 +1219,6 @@ async def get_agent_response_sdk(
     project: dict | None,
     chat_id: str | None = None,
     sender_id: int | None = None,
-    workflow_id: str | None = None,
     task_list_id: str | None = None,
     correlation_id: str | None = None,
     job_id: str | None = None,
@@ -1338,7 +1237,6 @@ async def get_agent_response_sdk(
         project: Project configuration dict
         chat_id: Chat ID (unused, for compatibility)
         sender_id: Telegram user ID (for permission checking)
-        workflow_id: Optional 8-char workflow identifier for tracked work
         task_list_id: Optional task list ID to scope sub-agent Task storage
         correlation_id: Optional end-to-end tracing ID from the bridge
         job_id: Optional job ID for child job spawning (issue #359)
@@ -1418,8 +1316,6 @@ async def get_agent_response_sdk(
     enriched_message += f"\n\nFROM: {sender_name}"
     if chat_title:
         enriched_message += f" in {chat_title}"
-    if workflow_id:
-        enriched_message += f"\nWORKFLOW_ID: {workflow_id}"
     enriched_message += f"\nSESSION_ID: {session_id}"
     if task_list_id:
         enriched_message += f"\nTASK_SCOPE: {task_list_id}"
@@ -1468,11 +1364,10 @@ async def get_agent_response_sdk(
     enriched_message += f"\nMESSAGE: {message}"
 
     # Log prompt summary before sending to agent
-    has_workflow = bool(workflow_id)
     has_worker_rules = project_mode != "pm"
     logger.info(
         f"[{request_id}] Sending to agent: {len(enriched_message)} chars, "
-        f"classification={classification}, has_workflow={has_workflow}, "
+        f"classification={classification}, "
         f"task_list={task_list_id or 'none'}, mode={project_mode}"
     )
     wr_label = "yes" if has_worker_rules else "no (pm mode)"
@@ -1480,7 +1375,6 @@ async def get_agent_response_sdk(
     persona = _resolve_persona(project, chat_title, is_dm=is_dm)
     logger.info(
         f"[{request_id}] Context: persona={persona}, worker_rules={wr_label}, "
-        f"workflow_context={'yes' if has_workflow else 'no'}, "
         f"session_id={session_id}"
     )
 
@@ -1537,7 +1431,6 @@ async def get_agent_response_sdk(
             working_dir=working_dir,
             system_prompt=custom_system_prompt,
             permission_mode=_permission_mode,
-            workflow_id=workflow_id,
             task_list_id=task_list_id,
             chat_id=chat_id,
             project_key=_project_key,
