@@ -264,6 +264,8 @@ class AgentSession(Model):
 
         ChatSessions are created by the bridge handler when a message arrives.
         They own the Telegram conversation and orchestrate DevSessions.
+
+        TODO: Wire into bridge handler when it migrates to factory methods.
         """
         session = cls(
             session_id=session_id,
@@ -300,6 +302,8 @@ class AgentSession(Model):
 
         DevSessions are created exclusively by ChatSessions during orchestration.
         They do the actual coding work and run SDLC pipeline stages.
+
+        TODO: Wire into bridge handler when it migrates to factory methods.
         """
         stages_json = _json.dumps(sdlc_stages) if isinstance(sdlc_stages, dict) else sdlc_stages
         session = cls(
@@ -334,6 +338,8 @@ class AgentSession(Model):
 
         Simple sessions bypass ChatSession/DevSession flow entirely.
         They handle non-SDLC messages with a single Agent SDK session.
+
+        TODO: Wire into bridge handler when it migrates to factory methods.
         """
         session = cls(
             session_id=session_id,

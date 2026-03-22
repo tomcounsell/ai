@@ -1490,7 +1490,6 @@ async def _execute_job(job: Job) -> None:
     # Determine session type for routing decisions
     _session_type = getattr(agent_session, "session_type", None) if agent_session else None
     is_simple_session = _session_type == "simple"
-    is_chat_session = _session_type == "chat"  # noqa: F841
 
     # Calendar heartbeat at session start
     asyncio.create_task(_calendar_heartbeat(job.project_key, project=job.project_key))

@@ -78,7 +78,6 @@ def _maybe_register_dev_session(tool_input: dict[str, Any]) -> None:
             working_dir=os.getcwd(),
             parent_chat_session_id=parent_session_id,
             message_text=prompt_text,
-            session_type_source="hook",
         )
         logger.info(
             f"[pre_tool_use] Registered DevSession {dev_session.job_id} parent={parent_session_id}"
