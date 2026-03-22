@@ -301,7 +301,7 @@ class TestJobQueueLifecycleLogging:
             message_id=1,
         )
 
-        job = await _pop_job("test")
+        job = await _pop_job("100")
         assert job is not None
 
         # The running session should have a lifecycle entry

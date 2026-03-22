@@ -7,7 +7,7 @@ with `except Exception: pass`.
 The 7 critical locations are:
 - _push_job: lifecycle transition logging
 - _pop_job: lifecycle transition logging
-- _enqueue_continuation: plan file resolution from WorkflowState
+- _enqueue_nudge: plan file resolution from WorkflowState
 - _execute_job: session re-read from Redis
 - _load_cooldowns: file read
 - _save_cooldowns: file write
@@ -112,7 +112,7 @@ class TestPopJobLogging:
         ):
             from agent.job_queue import _pop_job
 
-            job = await _pop_job("test-pop-project")
+            job = await _pop_job("chat_2")
 
         # Job should still be returned (failure is non-fatal)
         assert job is not None
@@ -127,7 +127,7 @@ class TestPopJobLogging:
 
 
 class TestEnqueueContinuationSessionLookupLogging:
-    """Tests that _enqueue_continuation handles missing session gracefully."""
+    """Tests that _enqueue_nudge handles missing session gracefully."""
 
     @pytest.mark.asyncio
     async def test_missing_session_logs_error_and_falls_back(self, caplog, redis_test_db):
@@ -153,9 +153,9 @@ class TestEnqueueContinuationSessionLookupLogging:
             caplog.at_level(logging.ERROR, logger="agent.job_queue"),
             patch("agent.job_queue.enqueue_job", new_callable=_AsyncMock),
         ):
-            from agent.job_queue import _enqueue_continuation
+            from agent.job_queue import _enqueue_nudge
 
-            await _enqueue_continuation(
+            await _enqueue_nudge(
                 job=mock_job,
                 branch_name="session/test",
                 task_list_id="tl",
@@ -279,7 +279,7 @@ class TestNoSilentPassRemaining:
         import inspect
 
         from agent.job_queue import (
-            _enqueue_continuation,
+            _enqueue_nudge,
             _execute_job,
             _load_cooldowns,
             _pop_job,
@@ -291,7 +291,7 @@ class TestNoSilentPassRemaining:
         critical_functions = [
             _push_job,
             _pop_job,
-            _enqueue_continuation,
+            _enqueue_nudge,
             _execute_job,
             _load_cooldowns,
             _save_cooldowns,

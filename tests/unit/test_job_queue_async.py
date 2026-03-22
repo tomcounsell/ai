@@ -98,11 +98,11 @@ class TestPushJobAsyncWrapping:
 
 
 class TestEnqueueContinuationAsyncWrapping:
-    """Verify _enqueue_continuation wraps sync filter in asyncio.to_thread."""
+    """Verify _enqueue_nudge wraps sync filter in asyncio.to_thread."""
 
     def test_continuation_filter_uses_to_thread(self, mock_agent_session):
-        """The session lookup in _enqueue_continuation should use to_thread."""
-        from agent.job_queue import Job, _enqueue_continuation
+        """The session lookup in _enqueue_nudge should use to_thread."""
+        from agent.job_queue import Job, _enqueue_nudge
 
         # Create a mock job
         mock_rj = MagicMock()
@@ -119,7 +119,7 @@ class TestEnqueueContinuationAsyncWrapping:
         with patch("agent.job_queue.asyncio.to_thread", wraps=asyncio.to_thread) as mock_to_thread:
             with patch("agent.job_queue._ensure_worker"):
                 asyncio.get_event_loop().run_until_complete(
-                    _enqueue_continuation(
+                    _enqueue_nudge(
                         job=job,
                         branch_name="test-branch",
                         task_list_id="tl-1",

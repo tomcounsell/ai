@@ -54,7 +54,7 @@ class TestStartedAtField:
         """When _pop_job transitions a job to running, started_at should be set."""
         _create_test_job()
         before = time.time()
-        job = await _pop_job("test")
+        job = await _pop_job("123")
         after = time.time()
 
         assert job is not None
