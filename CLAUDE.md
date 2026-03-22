@@ -162,8 +162,9 @@ The standard flow from conversation to shipped feature:
 - If there is no question -- just a status update -- the summarizer auto-sends "continue"
 - Status updates without questions or signs of completion are NOT stopping points
 - The agent keeps working until the phase is complete or it's genuinely blocked
-- **SDLC jobs**: The Observer Agent steers pipeline progression by re-invoking `/sdlc` after each stage
-- **Non-SDLC jobs** use classifier-based routing with `MAX_AUTO_CONTINUES = 3`
+- **SDLC jobs**: The deterministic Observer steers pipeline progression between stages
+- **ChatSession** orchestrates DevSession work; **simple sessions** deliver directly
+- Auto-continue caps are set to 50 as safety backstops (ChatSession manages actual routing)
 - The auto-continue counter resets when the human sends a new message
 
 ### Session Continuity
