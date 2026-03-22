@@ -11,11 +11,12 @@ class TestExtractSdlcEnvVars:
 
     def _make_session(self, **kwargs):
         """Create a mock AgentSession with given fields."""
-        session = MagicMock()
+        session = MagicMock(spec=[])
         session.status = kwargs.get("status", "running")
         session.created_at = kwargs.get("created_at", 1000)
         session.pr_url = kwargs.get("pr_url", None)
         session.branch_name = kwargs.get("branch_name", None)
+        session.slug = kwargs.get("work_item_slug", None)
         session.work_item_slug = kwargs.get("work_item_slug", None)
         session.plan_url = kwargs.get("plan_url", None)
         session.issue_url = kwargs.get("issue_url", None)

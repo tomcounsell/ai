@@ -17,6 +17,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+
+@pytest.fixture
+def mock_load_projects():
+    """Mock load_local_projects so tests don't require projects.json on disk."""
+    with patch("scripts.reflections.load_local_projects", return_value=[]):
+        yield
+
+
 # --- load_local_projects() tests ---
 
 
@@ -136,6 +144,7 @@ class TestLoadLocalProjects:
 # --- ReflectionRunner.projects attribute ---
 
 
+@pytest.mark.usefixtures("mock_load_projects")
 class TestReflectionRunnerProjects:
     """Tests that ReflectionRunner loads self.projects on init."""
 
@@ -161,6 +170,7 @@ class TestReflectionRunnerProjects:
 # --- step_clean_legacy bug fix ---
 
 
+@pytest.mark.usefixtures("mock_load_projects")
 class TestStepCleanLegacyBugFix:
     """Tests that step_clean_legacy no longer crashes with undefined cache_dirs/pyc_files."""
 
@@ -202,6 +212,7 @@ class TestStepCleanLegacyBugFix:
 # --- step_review_logs multi-repo ---
 
 
+@pytest.mark.usefixtures("mock_load_projects")
 class TestStepReviewLogsMultiRepo:
     """Tests for per-project log review."""
 
@@ -278,6 +289,7 @@ class TestStepReviewLogsMultiRepo:
 # --- step_clean_tasks multi-repo ---
 
 
+@pytest.mark.usefixtures("mock_load_projects")
 class TestStepCleanTasksMultiRepo:
     """Tests for per-project task cleanup."""
 
@@ -381,6 +393,7 @@ class TestStepCleanTasksMultiRepo:
 # --- step_create_github_issue multi-repo ---
 
 
+@pytest.mark.usefixtures("mock_load_projects")
 class TestStepCreateGithubIssueMultiRepo:
     """Tests for per-project GitHub issue creation."""
 
@@ -472,6 +485,7 @@ class TestStepCreateGithubIssueMultiRepo:
 # --- step_post_to_telegram ---
 
 
+@pytest.mark.usefixtures("mock_load_projects")
 class TestStepPostToTelegram:
     """Tests for per-project Telegram posting."""
 
