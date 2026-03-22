@@ -16,12 +16,12 @@ Several classes of bugs can pass all existing tests while silently degrading the
 
 ### Gap 1: Exception Logging (agent/job_queue.py)
 
-Replaced 7 `except Exception: pass` blocks in critical job queue functions with `except Exception as e: logger.warning(...)` calls. Each warning includes identifying context (session_id, file path, workflow_id) for debugging.
+Replaced 7 `except Exception: pass` blocks in critical job queue functions with `except Exception as e: logger.warning(...)` calls. Each warning includes identifying context (session_id, file path) for debugging.
 
 **Functions covered:**
 - `_push_job` -- lifecycle transition logging
 - `_pop_job` -- lifecycle transition logging
-- `_enqueue_continuation` -- plan file resolution from WorkflowState
+- `_enqueue_continuation` -- plan file resolution
 - `_execute_job` -- session re-read from Redis
 - `_load_cooldowns` -- file read
 - `_save_cooldowns` -- file write
