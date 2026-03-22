@@ -29,7 +29,7 @@ After the ChatSession/DevSession redesign (PRs #464, #466), the codebase carries
 - **PR #464**: ChatSession/DevSession split — introduced session_type discriminator, factory methods
 - **PR #466**: Nudge loop + Observer deletion — replaced Observer with nudge loop, deleted `bridge/observer.py`
 - **PR #431**: Organized test suite with feature markers and e2e structure
-- **PR #327**: Removed dead SDLC stage-tracking code from hook files — precedent for dead code cleanup
+- **PR #327**: Removed dead SDLC stage-tracking code from hook files — precedent for dead code cleanup. That cleanup was partial: it removed hook-level stage tracking but left `workflow_state.py`, `workflow_types.py`, and the tracked-work detection in `bridge/agents.py`. This plan finishes the job.
 
 ## Data Flow
 
@@ -119,8 +119,6 @@ Isolation test: enqueue two sessions on same chat → first session fails → se
 - [ ] `tests/unit/test_workflow_sdk_integration.py` — DELETE: tests WorkflowState integration which is being removed
 - [ ] `tests/integration/test_job_queue_race.py` — UPDATE: remove `workflow_id="wf123456"` from enqueue calls and field assertions
 - [ ] `tests/integration/test_silent_failures.py` — UPDATE: remove `mock_job.workflow_id = None` and WorkflowState comment
-- [ ] `bridge/coach.py` — UPDATE: remove WorkflowState.phase comment reference (line 39)
-- [ ] `bridge/catchup.py` — UPDATE: remove `workflow_id=None` from enqueue call (line 186)
 
 ## Rabbit Holes
 
@@ -216,7 +214,12 @@ No agent integration required — this changes bridge-internal routing and model
 - **Parallel**: true
 - Delete `bridge/agents.py` entirely — `get_agent_response()` is a passthrough (inline the `get_agent_response_sdk` call); `get_agent_response_with_retry()`, `attempt_self_healing()`, `create_failure_plan()` are dead code never called by any active code path (session watchdog in `monitoring/session_watchdog.py` handles retry/recovery); tracked-work functions exist solely to feed WorkflowState which is also being deleted
 - Delete `agent/workflow_state.py` and `agent/workflow_types.py`
-- In `bridge/telegram_bridge.py`: replace `from bridge.agents import get_agent_response` with direct `from agent import get_agent_response_sdk` call; remove all other `bridge.agents` imports; remove `create_workflow_for_tracked_work()` call and `workflow_id` variable
+- In `bridge/telegram_bridge.py`:
+  - Delete the legacy code path: remove `USE_CLAUDE_SDK` flag (line 45), the `# === LEGACY MODE ===` else branch (line 1347-end of that block), and all `if USE_CLAUDE_SDK:` guards (lines 934, 1423, 1496, 1577, 1584, 1625, 1657) — unwrap the SDK path as the only path
+  - Delete config injection into agents module (lines 503-507: `_agents_module.CONFIG`, etc.)
+  - Delete all imports from `bridge.agents` (lines 509-521: `MAX_RETRIES`, `RETRY_DELAYS`, `attempt_self_healing`, `create_failure_plan`, `detect_tracked_work`, `get_agent_response`, `get_agent_response_with_retry`, `create_workflow_for_tracked_work`, etc.)
+  - Inline `get_agent_response_sdk()` call where `get_agent_response()` was used
+  - Remove `create_workflow_for_tracked_work()` call and `workflow_id` variable
 - In `agent/job_queue.py`: remove `workflow_id` parameter from `enqueue_job()`, `_push_job()`, Job property; remove from `_JOB_FIELDS`. No replacement needed — `session_id` handles identity, `work_item_slug` handles plan context
 - In `agent/sdk_client.py`: remove `workflow_id` parameter from `get_agent_response_sdk()` and `ValorAgent.__init__()`; remove `WorkflowState` import, `_build_workflow_context()`, `update_workflow_state()`, `get_workflow_data()`; remove workflow context injection from system prompt. Plan/phase context already available via `AgentSession.sdlc_stages` and `current_stage`
 - In `models/agent_session.py`: remove `workflow_id` field. Identity covered by `session_id`/`job_id`; plan path derived from `work_item_slug`; tracking URL via `get_links()`
@@ -228,7 +231,7 @@ No agent integration required — this changes bridge-internal routing and model
 ### 2. Remove simple session type
 - **Task ID**: build-remove-simple
 - **Depends On**: build-cleanup-dead-code (both touch agent/job_queue.py and agent/sdk_client.py)
-- **Validates**: `grep -rn "simple" models/agent_session.py agent/ bridge/ | grep -v __pycache__` returns no session-type references
+- **Validates**: `grep -rn "SESSION_TYPE_SIMPLE\|create_simple\|is_simple\|session_type.*simple\|_session_type.*simple" models/agent_session.py agent/ bridge/ --include="*.py"` returns no matches
 - **Assigned To**: cleanup-builder
 - **Agent Type**: builder
 - **Parallel**: false
