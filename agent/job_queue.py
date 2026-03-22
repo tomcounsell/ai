@@ -57,19 +57,11 @@ RedisJob = AgentSession
 
 MSG_MAX_CHARS = 20_000  # ~5k tokens — reasonable context limit for agent input
 
-# Auto-continue caps removed in SDLC redesign. ChatSession manages continuation
-# via deterministic Observer routing. These are kept as high limits for safety.
-MAX_AUTO_CONTINUES = 50  # Effectively unlimited — deterministic Observer handles routing
-MAX_AUTO_CONTINUES_SDLC = 50  # Same — no artificial cap on pipeline stages
-
-
-def should_guard_empty_output(msg: str, is_sdlc: bool, has_remaining_stages: bool) -> bool:
-    """Check if empty/whitespace output should be guarded (delivered to user, not auto-continued).
-
-    Returns True if the output is empty/whitespace AND this is an SDLC job with remaining stages.
-    This prevents silent auto-continue loops when an agent produces nothing.
-    """
-    return not msg.strip() and is_sdlc and has_remaining_stages
+# Nudge loop: single nudge model replaces Observer-based routing.
+# The bridge has ONE response to any non-completion: nudge.
+# ChatSession owns all SDLC intelligence; the bridge just keeps it working.
+MAX_NUDGE_COUNT = 50  # Safety cap — deliver to Telegram after this many nudges
+NUDGE_MESSAGE = "Keep working — only stop when you need human input or you're done."
 
 
 # Job health check constants
@@ -1506,11 +1498,17 @@ async def _execute_job(job: Job) -> None:
     )
 
     async def send_to_chat(msg: str) -> None:
-        """Route agent output via the Observer Agent.
+        """Route agent output via nudge loop.
 
-        The Observer reads the full AgentSession state (stages, links, history,
-        queued steering messages) and decides to either steer the worker back
-        to work or deliver the output to Telegram. See bridge/observer.py.
+        Simple nudge model: the bridge has ONE response to any non-completion:
+        "Keep working -- only stop when you need human input or you're done."
+        ChatSession owns all SDLC intelligence. The bridge just nudges.
+
+        Completion detection:
+        - stop_reason == "end_turn" AND output is non-empty → deliver
+        - stop_reason == "rate_limited" → wait with backoff, then nudge
+        - Empty output → nudge (not deliver)
+        - Safety cap of MAX_NUDGE_COUNT nudges → deliver regardless
         """
         nonlocal agent_session  # Re-read from Redis for fresh stage data
 
@@ -1518,11 +1516,11 @@ async def _execute_job(job: Job) -> None:
             return
 
         # If this session was already completed (e.g., by a prior duplicate job),
-        # deliver the output but skip auto-continue to prevent chain reactions.
+        # deliver the output but skip nudge to prevent chain reactions.
         if agent_session and agent_session.status == "completed":
             logger.info(
                 f"[{job.project_key}] Session already completed — "
-                f"delivering without auto-continue ({len(msg)} chars)"
+                f"delivering without nudge ({len(msg)} chars)"
             )
             await send_cb(job.chat_id, msg, job.message_id, agent_session)
             chat_state.completion_sent = True
@@ -1533,91 +1531,57 @@ async def _execute_job(job: Job) -> None:
         if chat_state.completion_sent:
             logger.info(
                 f"[{job.project_key}] Dropping suppressed output "
-                f"(completion sent or auto-continued) "
+                f"(completion sent or nudged) "
                 f"({len(msg)} chars): {msg[:100]!r}"
             )
             return
 
         # === Simple session fast-path ===
-        # Simple sessions (Q&A, non-SDLC) bypass the Observer entirely.
-        # Deliver directly to Telegram with no orchestration overhead.
+        # Simple sessions (Q&A, non-SDLC) deliver directly to Telegram.
         if is_simple_session:
             logger.info(
                 f"[{job.project_key}] Simple session — delivering directly "
-                f"({len(msg)} chars), bypassing Observer"
+                f"({len(msg)} chars)"
             )
             await send_cb(job.chat_id, msg, job.message_id, agent_session)
             chat_state.completion_sent = True
             return
 
-        # === Observer-based routing ===
-        # The deterministic Observer makes steer/deliver decisions for SDLC
-        # pipelines. ChatSessions use this to monitor DevSession progress.
-        # See bridge/observer.py for the decision table.
+        # === Nudge loop ===
+        # For ChatSessions: check if output signals completion, otherwise nudge.
+        # No Observer, no PipelineStateMachine, no SDLC stage awareness.
 
-        # Re-read session from Redis for fresh stage data.
-        # Bug 3 fix (issue #374): Use deterministic record selection — filter
-        # by active statuses first, fall back to broader filter, sort by
-        # created_at desc to always pick the newest record. This prevents
-        # picking a stale completed record when duplicates exist.
-        if agent_session and agent_session.session_id:
-            try:
-                all_sessions = list(AgentSession.query.filter(session_id=agent_session.session_id))
-                # Prefer running/active records; fall back to any record
-                active = [s for s in all_sessions if s.status in ("running", "active", "pending")]
-                candidates = active if active else all_sessions
-                if candidates:
-                    candidates.sort(key=lambda s: s.created_at or 0, reverse=True)
-                    agent_session = candidates[0]
-                    if len(all_sessions) > 1:
-                        logger.info(
-                            f"[{job.project_key}] Re-read session: selected "
-                            f"status={agent_session.status} from {len(all_sessions)} "
-                            f"records for {agent_session.session_id}"
-                        )
-            except Exception as e:
-                logger.warning(f"Failed to re-read session {agent_session.session_id}: {e}")
+        from agent.sdk_client import get_stop_reason
 
-        # Empty output guard: deliver immediately to prevent silent loops
-        # Use PipelineStateMachine when stage_states is available; fall back to legacy
-        _is_sdlc = agent_session.is_sdlc if agent_session else False
-        _state_machine = None
-        if _is_sdlc and agent_session:
-            try:
-                from bridge.pipeline_state import PipelineStateMachine
+        stop_reason = get_stop_reason(job.session_id) if job.session_id else None
 
-                _state_machine = PipelineStateMachine(agent_session)
-                _sdlc_has_remaining = _state_machine.has_remaining_stages()
-            except Exception:
-                _sdlc_has_remaining = agent_session.has_remaining_stages()
-        else:
-            _sdlc_has_remaining = False
-        if should_guard_empty_output(msg, _is_sdlc, _sdlc_has_remaining):
+        # Rate-limited: wait with backoff, then nudge
+        if stop_reason == "rate_limited":
+            chat_state.auto_continue_count += 1
             logger.warning(
-                f"[{job.project_key}] Empty output with remaining SDLC stages — "
-                f"delivering to user to prevent silent loop"
+                f"[{job.project_key}] Rate limited — backoff then nudge "
+                f"(nudge {chat_state.auto_continue_count}/{MAX_NUDGE_COUNT})"
             )
-            await send_cb(job.chat_id, "(empty output)", job.message_id, agent_session)
+            # Nudge via continuation
+            await _enqueue_continuation(
+                job,
+                branch_name,
+                task_list_id,
+                chat_state.auto_continue_count,
+                msg,
+                coaching_message=NUDGE_MESSAGE,
+            )
             chat_state.completion_sent = True
+            chat_state.defer_reaction = True
             return
 
-        # Narration gate: detect false-promise output before running Observer.
-        # If worker output is pure narration ("Let me check...", "I'll look at...")
-        # with no substantive findings, auto-continue instead of delivering.
-        from bridge.message_quality import (
-            NARRATION_COACHING_MESSAGE,
-            NARRATION_FALLBACK_MESSAGE,
-            is_narration_only,
-        )
-
-        if is_narration_only(msg):
-            effective_max = MAX_AUTO_CONTINUES_SDLC if _is_sdlc else MAX_AUTO_CONTINUES
-            if chat_state.auto_continue_count < effective_max:
-                # Auto-continue: worker announced work but didn't do it
-                chat_state.auto_continue_count += 1
+        # Empty/whitespace output: nudge instead of delivering nothing
+        if not msg or not msg.strip():
+            chat_state.auto_continue_count += 1
+            if chat_state.auto_continue_count <= MAX_NUDGE_COUNT:
                 logger.info(
-                    f"[{job.project_key}] Narration gate: output is pure narration, "
-                    f"auto-continuing ({chat_state.auto_continue_count}/{effective_max})"
+                    f"[{job.project_key}] Empty output — nudging "
+                    f"(nudge {chat_state.auto_continue_count}/{MAX_NUDGE_COUNT})"
                 )
                 await _enqueue_continuation(
                     job,
@@ -1625,179 +1589,64 @@ async def _execute_job(job: Job) -> None:
                     task_list_id,
                     chat_state.auto_continue_count,
                     msg,
-                    coaching_message=NARRATION_COACHING_MESSAGE,
+                    coaching_message=NUDGE_MESSAGE,
                 )
                 chat_state.completion_sent = True
                 chat_state.defer_reaction = True
                 return
             else:
-                # At cap: send fallback instead of narration
+                # Safety cap reached on empty output
                 logger.warning(
-                    f"[{job.project_key}] Narration gate: output is pure narration "
-                    f"and auto-continue cap reached, sending fallback message"
+                    f"[{job.project_key}] Empty output and nudge cap reached — "
+                    f"delivering fallback"
                 )
-                msg = NARRATION_FALLBACK_MESSAGE
+                await send_cb(
+                    job.chat_id,
+                    "The task completed but produced no output. "
+                    "Please re-trigger if you expected results.",
+                    job.message_id,
+                    agent_session,
+                )
+                chat_state.completion_sent = True
+                return
 
-        # Run the Observer Agent for routing decisions
-        if not agent_session:
+        # Safety cap: if we've nudged too many times, deliver regardless
+        if chat_state.auto_continue_count >= MAX_NUDGE_COUNT:
             logger.warning(
-                f"[{job.project_key}] No AgentSession available — delivering raw output to Telegram"
-            )
-            await send_cb(job.chat_id, msg, job.message_id, None)
-            chat_state.completion_sent = True
-            return
-
-        from agent.sdk_client import get_stop_reason
-        from bridge.observer import Observer
-
-        # Retrieve stop_reason captured during SDK query for this session
-        stop_reason = get_stop_reason(job.session_id) if job.session_id else None
-
-        observer = Observer(
-            session=agent_session,
-            worker_output=msg,
-            auto_continue_count=chat_state.auto_continue_count,
-            send_cb=send_cb,
-            enqueue_fn=_enqueue_continuation,
-            stop_reason=stop_reason,
-        )
-
-        try:
-            decision = await observer.run()
-        except Exception as e:
-            # Observer fallback: deliver raw output to Telegram on any error
-            logger.error(
-                f"[{job.project_key}] Observer failed, delivering raw output: {e}",
-                exc_info=True,
+                f"[{job.project_key}] Nudge safety cap reached "
+                f"({chat_state.auto_continue_count}/{MAX_NUDGE_COUNT}) — "
+                f"delivering to Telegram"
             )
             await send_cb(job.chat_id, msg, job.message_id, agent_session)
             chat_state.completion_sent = True
             return
 
-        logger.info(
-            f"[{job.project_key}] Observer decision: {decision.get('action')} "
-            f"(transitions={decision.get('transitions_applied', 0)})"
-        )
-
-        # Apply state machine transitions based on Observer decision
-        if _state_machine and _is_sdlc:
-            try:
-                resolved_stage = decision.get("resolved_stage")
-                stage_outcome = decision.get("stage_outcome")
-                next_stage = decision.get("next_stage")
-                if resolved_stage:
-                    current = _state_machine.current_stage()
-                    if current == resolved_stage:
-                        if stage_outcome == "fail":
-                            _state_machine.fail_stage(resolved_stage)
-                        else:
-                            _state_machine.complete_stage(resolved_stage)
-                if next_stage:
-                    try:
-                        _state_machine.start_stage(next_stage)
-                    except ValueError:
-                        logger.debug(
-                            f"[{job.project_key}] State machine: cannot start "
-                            f"{next_stage} (ordering constraint)"
-                        )
-            except Exception as e:
-                logger.warning(f"[{job.project_key}] State machine transition failed: {e}")
-
-        if decision["action"] == "steer":
-            # Observer wants to auto-continue — enqueue continuation with coaching
-            chat_state.auto_continue_count += 1
-            effective_max = MAX_AUTO_CONTINUES_SDLC if _is_sdlc else MAX_AUTO_CONTINUES
-
-            # Log every auto-continue increment so operators can trace
-            # the full sequence, not just the cap-reached event.
-            logger.info(
-                f"[{job.project_key}] Auto-continue "
-                f"{chat_state.auto_continue_count}/{effective_max} "
-                f"for session {job.session_id}"
-            )
-
-            # Hard guard: enforce auto-continue cap regardless of Observer decision
-            if chat_state.auto_continue_count > effective_max:
-                logger.warning(
-                    f"[{job.project_key}] Auto-continue cap reached "
-                    f"({chat_state.auto_continue_count}/{effective_max}), "
-                    f"delivering to Telegram instead of steering"
+        # Completion detection: end_turn with substantial output → deliver
+        # This is the primary heuristic. ChatSession decides when it's done
+        # by producing a final message and stopping naturally.
+        if stop_reason in ("end_turn", None) and len(msg.strip()) > 0:
+            # Guard: if delivery message is empty/whitespace, use a fallback
+            delivery_msg = msg
+            if not delivery_msg.strip():
+                delivery_msg = (
+                    "The task completed but produced no output. "
+                    "Please re-trigger if you expected results."
                 )
-                # If output is narration-only at cap, substitute with fallback
-                cap_msg = msg
-                if is_narration_only(msg):
-                    cap_msg = NARRATION_FALLBACK_MESSAGE
-                    logger.info(
-                        f"[{job.project_key}] Cap-forced delivery: substituting "
-                        f"narration-only output with fallback message"
-                    )
-                await send_cb(job.chat_id, cap_msg, job.message_id, agent_session)
-                chat_state.completion_sent = True
-                return
-
-            save_session_snapshot(
-                session_id=job.session_id,
-                event="auto_continue",
-                project_key=job.project_key,
-                branch_name=branch_name,
-                task_summary=(
-                    f"Observer auto-continue ({chat_state.auto_continue_count}/{effective_max})"
-                ),
-                extra_context={
-                    "routing": "observer",
-                    "coaching_message": decision.get("coaching_message", "")[:200],
-                    "message_preview": msg[:200],
-                    "correlation_id": cid,
-                },
-                working_dir=str(working_dir),
-            )
-
-            # Enqueue continuation with Observer's coaching message
-            await _enqueue_continuation(
-                job,
-                branch_name,
-                task_list_id,
-                chat_state.auto_continue_count,
-                msg,
-                coaching_message=decision.get("coaching_message", "continue"),
-            )
-
+            await send_cb(job.chat_id, delivery_msg, job.message_id, agent_session)
             chat_state.completion_sent = True
-            chat_state.defer_reaction = True
+            logger.info(
+                f"[{job.project_key}] Delivered to Telegram "
+                f"(stop_reason={stop_reason}, {len(msg)} chars)"
+            )
             return
 
-        # Observer decided to deliver to Telegram
-        # Completion guard: check state machine for incomplete stages
-        if _is_sdlc and _state_machine and _state_machine.has_remaining_stages():
-            progress = _state_machine.get_display_progress()
-            incomplete = [
-                f"  - {stage}: {status}"
-                for stage, status in progress.items()
-                if status not in ("completed",)
-            ]
-            if incomplete:
-                gate_warning = "\n\n⚠️ **Incomplete pipeline stages:**\n" + "\n".join(incomplete)
-                msg = msg + gate_warning
-                logger.info(
-                    f"[{job.project_key}] State machine completion guard: "
-                    f"{len(incomplete)} incomplete stages"
-                )
-
-        # Use message_for_user from Observer if provided (curated user-facing text),
-        # otherwise fall back to raw worker output. The reason is internal-only.
-        delivery_msg = decision.get("message_for_user", msg)
-        # Guard: if delivery message is empty/whitespace, use a fallback
-        if not delivery_msg or not delivery_msg.strip():
-            delivery_msg = (
-                "The task completed but produced no output. "
-                "Please re-trigger if you expected results."
-            )
-        await send_cb(job.chat_id, delivery_msg, job.message_id, agent_session)
-        chat_state.completion_sent = True
+        # Unknown stop reason or other case — deliver to human
         logger.info(
-            f"[{job.project_key}] Observer delivered to Telegram: "
-            f"{decision.get('reason', 'no reason')}"
+            f"[{job.project_key}] Delivering output "
+            f"(stop_reason={stop_reason}, {len(msg)} chars)"
         )
+        await send_cb(job.chat_id, msg, job.message_id, agent_session)
+        chat_state.completion_sent = True
 
     messenger = BossMessenger(
         _send_callback=send_to_chat,
@@ -1923,13 +1772,6 @@ async def _execute_job(job: Job) -> None:
             )
             if not chat_state.defer_reaction:
                 complete_transcript(job.session_id, status=final_status)
-                # Clean up observer circuit breaker state for terminal sessions
-                try:
-                    from bridge.observer import clear_observer_state
-
-                    clear_observer_state(job.session_id)
-                except Exception:
-                    pass  # Non-critical cleanup
             else:
                 agent_session.last_activity = time.time()
                 agent_session.save()
