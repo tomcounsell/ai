@@ -18,9 +18,7 @@ from scripts.autoexperiment import (
     ExperimentRunner,
     ExperimentTarget,
     call_openrouter,
-    extract_observer_prompt,
     extract_summarizer_prompt,
-    inject_observer_prompt,
     inject_summarizer_prompt,
     load_jsonl,
 )
@@ -28,28 +26,6 @@ from scripts.autoexperiment import (
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
-
-SAMPLE_OBSERVER_FILE = '''\
-"""Observer module."""
-
-def _build_observer_system_prompt(principal_context: str = "") -> str:
-    """Build the full observer system prompt dynamically."""
-    return "You are the Observer.\\n" + OBSERVER_SYSTEM_PROMPT_BODY
-
-OBSERVER_SYSTEM_PROMPT_BODY = """\
-Your job is to decide what happens next with the worker output.
-
-## Decision Framework
-### STEER when:
-- Pipeline stages remain incomplete
-- The worker needs redirection
-### DELIVER when:
-- The output is ready for the human
-"""
-
-class Observer:
-    pass
-'''
 
 SAMPLE_SUMMARIZER_FILE = '''\
 """Summarizer module."""
@@ -85,9 +61,9 @@ def sample_target(tmp_dir):
 
     return ExperimentTarget(
         name="test-target",
-        file_path=str(tmp_dir / "observer.py"),
-        extract_fn=extract_observer_prompt,
-        inject_fn=inject_observer_prompt,
+        file_path=str(tmp_dir / "summarizer.py"),
+        extract_fn=extract_summarizer_prompt,
+        inject_fn=inject_summarizer_prompt,
         eval_fn=lambda: 0.75,
         metric_direction="higher",
         description="Test target",
@@ -118,19 +94,6 @@ class TestExperimentTarget:
 
 
 class TestExtractInject:
-    def test_extract_observer_prompt(self):
-        prompt = extract_observer_prompt(SAMPLE_OBSERVER_FILE)
-        assert "Your job is to decide what happens next" in prompt
-        assert "Decision Framework" in prompt
-
-    def test_inject_observer_prompt(self):
-        new_prompt = "You are the NEW Observer Agent.\nDo something different."
-        result = inject_observer_prompt(SAMPLE_OBSERVER_FILE, new_prompt)
-        assert "NEW Observer Agent" in result
-        assert "class Observer:" in result  # Surrounding code preserved
-        # Original prompt replaced
-        assert "Your job is to decide what happens next" not in result
-
     def test_extract_summarizer_prompt(self):
         prompt = extract_summarizer_prompt(SAMPLE_SUMMARIZER_FILE)
         assert "condense messages" in prompt
@@ -142,12 +105,11 @@ class TestExtractInject:
         assert "New summarizer instructions" in result
         assert "async def summarize():" in result
 
-    def test_roundtrip_observer(self):
+    def test_roundtrip_summarizer(self):
         """Extract then inject should preserve the prompt."""
-        prompt = extract_observer_prompt(SAMPLE_OBSERVER_FILE)
-        result = inject_observer_prompt(SAMPLE_OBSERVER_FILE, prompt)
-        # Should be identical (roundtrip)
-        assert extract_observer_prompt(result) == prompt
+        prompt = extract_summarizer_prompt(SAMPLE_SUMMARIZER_FILE)
+        result = inject_summarizer_prompt(SAMPLE_SUMMARIZER_FILE, prompt)
+        assert extract_summarizer_prompt(result) == prompt
 
 
 # ---------------------------------------------------------------------------
@@ -230,7 +192,7 @@ class TestBudgetEnforcement:
 
         # Write a fake source file
         source = Path(sample_target.file_path)
-        source.write_text(SAMPLE_OBSERVER_FILE)
+        source.write_text(SAMPLE_SUMMARIZER_FILE)
 
         runner = ExperimentRunner(
             target=sample_target,
@@ -248,7 +210,7 @@ class TestBudgetEnforcement:
         mock_call.return_value = ("No change.", 0.001)
 
         source = Path(sample_target.file_path)
-        source.write_text(SAMPLE_OBSERVER_FILE)
+        source.write_text(SAMPLE_SUMMARIZER_FILE)
 
         runner = ExperimentRunner(
             target=sample_target,
@@ -273,7 +235,7 @@ class TestStopSentinel:
         mock_call.return_value = ("test", 0.001)
 
         source = Path(sample_target.file_path)
-        source.write_text(SAMPLE_OBSERVER_FILE)
+        source.write_text(SAMPLE_SUMMARIZER_FILE)
 
         # Create STOP sentinel
         stop_file = tmp_dir / "STOP"
@@ -301,7 +263,7 @@ class TestDryRun:
         mock_call.return_value = ("Improved prompt text here.", 0.001)
 
         source = Path(sample_target.file_path)
-        source.write_text(SAMPLE_OBSERVER_FILE)
+        source.write_text(SAMPLE_SUMMARIZER_FILE)
 
         runner = ExperimentRunner(
             target=sample_target,

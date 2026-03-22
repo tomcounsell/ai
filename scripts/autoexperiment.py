@@ -13,7 +13,7 @@ Budget: Configurable ceiling (default $2.00) to prevent runaway spending.
 Safety: Git branch isolation, auto-revert on regression, STOP sentinel file.
 
 Usage:
-    python scripts/autoexperiment.py --target observer --iterations 50 --budget 2.0
+    python scripts/autoexperiment.py --target summarizer --iterations 50 --budget 2.0
     python scripts/autoexperiment.py --target summarizer --dry-run
     python scripts/autoexperiment.py --list-targets
 """
@@ -201,20 +201,6 @@ def _inject_prompt_var(file_content: str, var_name: str, new_prompt: str) -> str
     return file_content[: match.start()] + replacement + file_content[match.end() :]
 
 
-def extract_observer_prompt(file_content: str) -> str:
-    """Extract OBSERVER_SYSTEM_PROMPT_BODY from observer.py content.
-
-    Only the static body template is an experiment target. The dynamic
-    prompt construction logic (_build_observer_system_prompt) is off-limits.
-    """
-    return _extract_prompt_var(file_content, "OBSERVER_SYSTEM_PROMPT_BODY")
-
-
-def inject_observer_prompt(file_content: str, new_prompt: str) -> str:
-    """Inject a new OBSERVER_SYSTEM_PROMPT_BODY into observer.py content."""
-    return _inject_prompt_var(file_content, "OBSERVER_SYSTEM_PROMPT_BODY", new_prompt)
-
-
 def extract_summarizer_prompt(file_content: str) -> str:
     """Extract SUMMARIZER_SYSTEM_PROMPT from summarizer.py content."""
     return _extract_prompt_var(file_content, "SUMMARIZER_SYSTEM_PROMPT")
@@ -228,72 +214,6 @@ def inject_summarizer_prompt(file_content: str, new_prompt: str) -> str:
 # ---------------------------------------------------------------------------
 # Eval functions
 # ---------------------------------------------------------------------------
-
-
-def eval_observer(corpus_path: str | None = None) -> float:
-    """Evaluate observer routing accuracy against eval corpus.
-
-    Loads eval_corpus.jsonl, runs each scenario through the observer prompt
-    using a cheap LLM, checks if the decision matches expected.
-
-    Returns accuracy as float 0-1.
-    """
-    if corpus_path is None:
-        corpus_path = "data/experiments/observer/eval_corpus.jsonl"
-
-    corpus = load_jsonl(corpus_path)
-    if not corpus:
-        logger.warning("Observer eval corpus is empty")
-        return 0.0
-
-    # Read current observer prompt
-    observer_path = "bridge/observer.py"
-    with open(observer_path) as f:
-        file_content = f.read()
-    prompt_text = extract_observer_prompt(file_content)
-
-    correct = 0
-    total = 0
-
-    for scenario in corpus:
-        input_data = scenario.get("input", {})
-        expected = scenario.get("expected", "")
-
-        # Build eval prompt
-        if isinstance(input_data, dict):
-            message = input_data.get("message", "")
-            session_state = json.dumps(input_data.get("session_state", {}))
-            eval_prompt = (
-                f"Given this system prompt:\n{prompt_text}\n\n"
-                f"Worker output:\n{message}\n\n"
-                f"Session state:\n{session_state}\n\n"
-                f"What should the decision be? Reply with exactly one word: STEER or DELIVER"
-            )
-        else:
-            eval_prompt = (
-                f"Given this system prompt:\n{prompt_text}\n\n"
-                f"Input:\n{input_data}\n\n"
-                f"What should the decision be? Reply with exactly one word: STEER or DELIVER"
-            )
-
-        try:
-            response, cost = call_openrouter(eval_prompt, model=OPENROUTER_HAIKU, max_tokens=10)
-            _eval_cost_accumulator.append(cost)
-            decision = response.strip().upper()
-            # Extract just STEER or DELIVER from response
-            if "STEER" in decision:
-                decision = "STEER"
-            elif "DELIVER" in decision:
-                decision = "DELIVER"
-
-            if decision == expected.upper():
-                correct += 1
-            total += 1
-        except Exception as e:
-            logger.warning(f"Observer eval error for scenario: {e}")
-            total += 1
-
-    return correct / total if total > 0 else 0.0
 
 
 def eval_summarizer(corpus_path: str | None = None) -> float:
@@ -640,18 +560,6 @@ class ExperimentRunner:
 def get_targets() -> dict[str, ExperimentTarget]:
     """Return all registered experiment targets."""
     return {
-        "observer": ExperimentTarget(
-            name="observer",
-            file_path="bridge/observer.py",
-            extract_fn=extract_observer_prompt,
-            inject_fn=inject_observer_prompt,
-            eval_fn=eval_observer,
-            metric_direction="higher",
-            description=(
-                "Observer routing accuracy: decides STEER vs DELIVER for SDLC pipeline. "
-                "Higher accuracy means fewer false deliveries and fewer missed steers."
-            ),
-        ),
         "summarizer": ExperimentTarget(
             name="summarizer",
             file_path="bridge/summarizer.py",

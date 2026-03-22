@@ -876,7 +876,7 @@ async def _enqueue_stall_retry(
 ) -> bool:
     """Re-enqueue a stalled session for retry with context.
 
-    Uses the same delete-and-recreate pattern as _enqueue_continuation()
+    Uses the same delete-and-recreate pattern as _enqueue_nudge()
     in job_queue.py. Increments retry_count, sets the stall reason, and
     re-enqueues as pending with high priority.
 

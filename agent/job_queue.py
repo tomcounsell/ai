@@ -1089,7 +1089,8 @@ def _check_restart_flag() -> bool:
         running = AgentSession.query.filter(chat_id=chat_key, status="running")
         if running:
             logger.info(
-                f"[chat:{chat_key}] Restart requested but {len(running)} job(s) still running — deferring"
+                f"[chat:{chat_key}] Restart requested but "
+                f"{len(running)} job(s) still running — deferring"
             )
             return False
 
@@ -1552,8 +1553,7 @@ async def _execute_job(job: Job) -> None:
         # Simple sessions (Q&A, non-SDLC) deliver directly to Telegram.
         if is_simple_session:
             logger.info(
-                f"[{job.project_key}] Simple session — delivering directly "
-                f"({len(msg)} chars)"
+                f"[{job.project_key}] Simple session — delivering directly ({len(msg)} chars)"
             )
             await send_cb(job.chat_id, msg, job.message_id, agent_session)
             chat_state.completion_sent = True
@@ -1567,14 +1567,14 @@ async def _execute_job(job: Job) -> None:
 
         stop_reason = get_stop_reason(job.session_id) if job.session_id else None
 
-        # Rate-limited: wait with backoff, then nudge
+        # Rate-limited: backoff then nudge
         if stop_reason == "rate_limited":
             chat_state.auto_continue_count += 1
             logger.warning(
                 f"[{job.project_key}] Rate limited — backoff then nudge "
                 f"(nudge {chat_state.auto_continue_count}/{MAX_NUDGE_COUNT})"
             )
-            # Nudge via continuation
+            await asyncio.sleep(5)
             await _enqueue_nudge(
                 job,
                 branch_name,
@@ -1609,8 +1609,7 @@ async def _execute_job(job: Job) -> None:
             else:
                 # Safety cap reached on empty output
                 logger.warning(
-                    f"[{job.project_key}] Empty output and nudge cap reached — "
-                    f"delivering fallback"
+                    f"[{job.project_key}] Empty output and nudge cap reached — delivering fallback"
                 )
                 await send_cb(
                     job.chat_id,
@@ -1637,14 +1636,7 @@ async def _execute_job(job: Job) -> None:
         # This is the primary heuristic. ChatSession decides when it's done
         # by producing a final message and stopping naturally.
         if stop_reason in ("end_turn", None) and len(msg.strip()) > 0:
-            # Guard: if delivery message is empty/whitespace, use a fallback
-            delivery_msg = msg
-            if not delivery_msg.strip():
-                delivery_msg = (
-                    "The task completed but produced no output. "
-                    "Please re-trigger if you expected results."
-                )
-            await send_cb(job.chat_id, delivery_msg, job.message_id, agent_session)
+            await send_cb(job.chat_id, msg, job.message_id, agent_session)
             chat_state.completion_sent = True
             logger.info(
                 f"[{job.project_key}] Delivered to Telegram "
@@ -1654,8 +1646,7 @@ async def _execute_job(job: Job) -> None:
 
         # Unknown stop reason or other case — deliver to human
         logger.info(
-            f"[{job.project_key}] Delivering output "
-            f"(stop_reason={stop_reason}, {len(msg)} chars)"
+            f"[{job.project_key}] Delivering output (stop_reason={stop_reason}, {len(msg)} chars)"
         )
         await send_cb(job.chat_id, msg, job.message_id, agent_session)
         chat_state.completion_sent = True
@@ -2176,7 +2167,10 @@ def _cli_flush_stuck() -> None:
         is_alive = worker and not worker.done()
 
         if not is_alive:
-            print(f"Recovering orphaned job {job.job_id} (project={job.project_key}, chat={worker_key})")
+            print(
+                f"Recovering orphaned job {job.job_id} "
+                f"(project={job.project_key}, chat={worker_key})"
+            )
             _cli_recover_single_job(job)
             recovered += 1
         else:
