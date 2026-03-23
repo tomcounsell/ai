@@ -918,6 +918,20 @@ async def main():
         # Start intent classification (don't await)
         asyncio.create_task(classify_and_update_reaction())
 
+        # Synchronous fast-path: PR/issue references always mean SDLC work.
+        # The async classifier above may not finish before enqueue_job runs,
+        # causing classification_type=None → default "question". This fast-path
+        # guarantees correct classification for PR/issue messages. See issue #478 postmortem.
+        import re as _re_cls
+
+        if _re_cls.search(
+            r"(?:issue|pr|pull request)\s+#?\d+", clean_text.lower()
+        ) or _re_cls.match(r"^#\d+$", clean_text.strip().lower()):
+            classification_result["type"] = "sdlc"
+            logger.info(
+                f"[routing] Fast-path SDLC classification (PR/issue reference): {clean_text[:120]}"
+            )
+
         # === Job queue with per-session branching ===
         import re as _re
 

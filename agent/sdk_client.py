@@ -1307,8 +1307,20 @@ async def get_agent_response_sdk(
                 logger.debug(f"[{request_id}] Could not read classification from session: {e}")
 
         if not classification:
-            # Fallback: simple heuristic for when no session exists yet
-            classification = "question"
+            # Fallback: check for PR/issue references before defaulting to question.
+            # The async classifier can lose the race with job pickup, so this
+            # fast-path catches messages like "Complete PR 478" that must be SDLC.
+            import re as _re_cls
+
+            if _re_cls.search(
+                r"(?:issue|pr|pull request)\s+#?\d+", message.lower()
+            ) or _re_cls.match(r"^#\d+$", message.strip().lower()):
+                classification = "sdlc"
+                logger.info(
+                    f"[{request_id}] Fast-path SDLC classification (PR/issue reference in message)"
+                )
+            else:
+                classification = "question"
 
         if classification == "sdlc" and project_working_dir != AI_REPO_ROOT:
             working_dir = AI_REPO_ROOT
