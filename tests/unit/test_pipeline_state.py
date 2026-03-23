@@ -154,6 +154,22 @@ def test_advance_stage_raises_for_unknown_stage():
         ps.advance_stage("bad-stage", "nonexistent-stage")
 
 
+def test_advance_stage_critique_is_valid():
+    """critique is a valid stage that can be advanced to."""
+    ps.initialize("crit", "session/crit", ".worktrees/crit")
+    state = ps.advance_stage("crit", "critique")
+    assert state["stage"] == "critique"
+    assert "plan" in state["completed_stages"]
+
+
+def test_critique_in_stages_list():
+    """critique must be present in the STAGES list."""
+    assert "critique" in ps.STAGES
+    # critique should come after plan and before branch
+    assert ps.STAGES.index("critique") > ps.STAGES.index("plan")
+    assert ps.STAGES.index("critique") < ps.STAGES.index("branch")
+
+
 # ---------------------------------------------------------------------------
 # Atomic write safety
 # ---------------------------------------------------------------------------
