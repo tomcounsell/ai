@@ -133,7 +133,7 @@ def _check_persona_permission(action_type: str) -> dict | None:
     Reads persona from PERSONA env var (default: "developer" — permissive).
 
     Args:
-        action_type: The action being attempted (e.g., "schedule", "playlist").
+        action_type: The action being attempted (e.g., "schedule").
 
     Returns:
         None if allowed, or a dict with error details if blocked.
