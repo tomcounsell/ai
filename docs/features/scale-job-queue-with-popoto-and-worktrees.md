@@ -78,7 +78,7 @@ depth = Job.query.count(project_key="valor", status="pending")
 **How it works**:
 
 ```
-/Users/valorengels/src/ai/                    # Main worktree (main branch, always clean)
+~/src/ai/                    # Main worktree (main branch, always clean)
   .git/worktrees/                             # Git manages these
   .worktrees/                                 # Our convention for worktree dirs
     session-tg_valor_12345_678/               # Job 1's isolated working tree

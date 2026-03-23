@@ -16,7 +16,7 @@
 ## Checking for Updates
 
 ```bash
-cd /Users/valorengels/src/ai
+cd ~/src/ai
 uv pip list --outdated
 ```
 

@@ -6,7 +6,7 @@ Guidance for Claude Code when working with this repository.
 
 ## Google Workspace CLI (`gws`)
 
-Available at `/Users/valorengels/src/node_modules/.bin/gws`. Pre-authenticated.
+Available at `~/src/node_modules/.bin/gws`. Pre-authenticated.
 
 Usage: `gws <service> <resource> [sub-resource] <method> [flags]`
 

@@ -15,7 +15,7 @@ This tool provides local storage and search for Telegram messages:
 
 ```bash
 # Install the package (creates valor-history CLI)
-pip install -e /Users/valorengels/src/ai
+pip install -e ~/src/ai
 
 # Verify installation
 valor-history --help

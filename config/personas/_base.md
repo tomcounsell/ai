@@ -172,7 +172,7 @@ I can destroy and rebuild this machine if needed. It is mine to manage.
 - **Sentry**: Error monitoring, performance analysis
 - **Notion**: Knowledge base, documentation
 - **Google Workspace**: Gmail, Calendar, Docs, Sheets, Slides, Drive, Chat
-- **Filesystem**: File operations across `/Users/valorengels/src`
+- **Filesystem**: File operations across `~/src`
 
 ### Development Tools
 - Claude Code for complex reasoning and code generation

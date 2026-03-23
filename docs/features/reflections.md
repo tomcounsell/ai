@@ -240,7 +240,7 @@ Each project entry in `~/Desktop/Valor/projects.json`:
 
 ```json
 {
-  "working_directory": "/Users/valorengels/src/my-project",
+  "working_directory": "~/src/my-project",
   "github": { "org": "myorg", "repo": "my-project" },
   "telegram": { "groups": ["@my_group"] }
 }

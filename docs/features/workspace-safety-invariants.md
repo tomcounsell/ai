@@ -22,7 +22,7 @@ The directory must exist and be an actual directory (not a file or broken symlin
 
 ### Invariant 2: Path Containment
 
-The resolved path must be within the allowed root (`/Users/valorengels/src`). Uses `Path.resolve()` to follow symlinks before checking, so a symlink pointing outside the root is correctly rejected.
+The resolved path must be within the allowed root (`~/src`). Uses `Path.resolve()` to follow symlinks before checking, so a symlink pointing outside the root is correctly rejected.
 
 **Why second**: After confirming the path exists, we need to know it's in bounds. This prevents directory traversal attacks (paths containing `..`) and misconfigured project paths. Resolution before comparison means the check operates on the real filesystem location, not the symbolic one.
 
@@ -30,7 +30,7 @@ The resolved path must be within the allowed root (`/Users/valorengels/src`). Us
 
 For worktree paths only: the slug component (the directory name under `.worktrees/`) must match the `VALID_SLUG_RE` pattern (`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`). This reuses the existing slug regex from `worktree_manager.py`.
 
-**Why last**: This is the most specific check and only applies to worktree paths. Regular project paths like `/Users/valorengels/src/ai` contain characters that wouldn't pass slug validation, so this check is gated behind the `is_worktree` flag.
+**Why last**: This is the most specific check and only applies to worktree paths. Regular project paths like `~/src/ai` contain characters that wouldn't pass slug validation, so this check is gated behind the `is_worktree` flag.
 
 **Why only worktrees**: Worktree slugs are derived from user input (issue titles, branch names) and flow into filesystem paths. Regular project directories are defined in `~/Desktop/Valor/projects.json` by the system operator and don't need runtime slug validation.
 
@@ -39,7 +39,7 @@ For worktree paths only: the slug component (the directory name under `.worktree
 On any invariant violation, `validate_workspace()`:
 
 1. Logs a warning with the invalid path and the specific reason for rejection
-2. Returns `allowed_root` (`/Users/valorengels/src`) as a safe fallback
+2. Returns `allowed_root` (`~/src`) as a safe fallback
 
 The function never raises an exception. This is a deliberate design choice: a validation failure should degrade gracefully (agent launches in a safe default directory) rather than kill the session entirely. The agent can still do useful work from the fallback directory, and the warning logs make the issue diagnosable.
 

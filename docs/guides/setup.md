@@ -23,7 +23,7 @@ The system uses the Claude Agent SDK as its agent backend, providing Claude Code
 
 ```bash
 # 1. Clone and enter directory
-cd /Users/valorengels/src/ai
+cd ~/src/ai
 
 # 2. Install dependencies
 pip install -e .
@@ -41,7 +41,7 @@ cp .env.example .env
 ### 1. Install Python Dependencies
 
 ```bash
-cd /Users/valorengels/src/ai
+cd ~/src/ai
 pip install -e .
 ```
 
@@ -219,18 +219,18 @@ Or manually create `~/Library/LaunchAgents/com.valor.bridge.plist`:
     <key>ProgramArguments</key>
     <array>
         <string>/usr/bin/python3</string>
-        <string>/Users/valorengels/src/ai/bridge/telegram_bridge.py</string>
+        <string>~/src/ai/bridge/telegram_bridge.py</string>
     </array>
     <key>WorkingDirectory</key>
-    <string>/Users/valorengels/src/ai</string>
+    <string>~/src/ai</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>/Users/valorengels/src/ai/logs/bridge.log</string>
+    <string>~/src/ai/logs/bridge.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/valorengels/src/ai/logs/bridge.error.log</string>
+    <string>~/src/ai/logs/bridge.error.log</string>
 </dict>
 </plist>
 ```
