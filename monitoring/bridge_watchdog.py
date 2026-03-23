@@ -429,6 +429,8 @@ from dotenv import load_dotenv
 import os
 
 load_dotenv("{PROJECT_DIR}/.env")
+from pathlib import Path as _P
+load_dotenv(_P.home() / "Desktop" / "Valor" / ".env")
 
 async def send():
     client = TelegramClient(

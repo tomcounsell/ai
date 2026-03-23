@@ -256,6 +256,7 @@ def generate_calendar_config(project_dir: Path) -> CalendarConfigResult:
     from dotenv import load_dotenv
 
     load_dotenv(project_dir / ".env")
+    load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")
     active_projects = [p.strip() for p in os.getenv("ACTIVE_PROJECTS", "").split(",") if p.strip()]
 
     # Match each project to a calendar

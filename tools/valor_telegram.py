@@ -183,6 +183,7 @@ def cmd_send(args: argparse.Namespace) -> int:
     from dotenv import load_dotenv
 
     load_dotenv()
+    load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")
 
     chat_id = resolve_chat(args.chat)
     if not chat_id:

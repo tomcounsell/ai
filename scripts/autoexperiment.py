@@ -586,6 +586,7 @@ def main():
         from dotenv import load_dotenv
 
         load_dotenv()
+        load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")
     except ImportError:
         pass  # dotenv optional; env vars may be set directly
 

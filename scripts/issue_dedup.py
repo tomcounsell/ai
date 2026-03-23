@@ -56,6 +56,11 @@ def _get_anthropic_client() -> anthropic.Anthropic:
             if env_path.exists():
                 env = dotenv_values(env_path)
                 api_key = env.get("ANTHROPIC_API_KEY")
+            if not api_key:
+                valor_env = Path.home() / "Desktop" / "Valor" / ".env"
+                if valor_env.exists():
+                    env = dotenv_values(valor_env)
+                    api_key = env.get("ANTHROPIC_API_KEY")
         except ImportError:
             pass
 

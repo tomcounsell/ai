@@ -39,6 +39,7 @@ from dotenv import load_dotenv  # noqa: E402
 # Load environment variables FIRST before any env checks
 env_path = Path(__file__).parent.parent / ".env"
 load_dotenv(env_path)
+load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")
 
 # Initialize Sentry error tracking (skip gracefully if DSN not configured)
 _sentry_dsn = os.getenv("SENTRY_DSN")

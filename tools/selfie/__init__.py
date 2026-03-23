@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 load_dotenv()
+load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")
 
 # Canonical appearance description derived from Valor's profile photo
 VALOR_APPEARANCE = (

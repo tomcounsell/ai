@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 # Load shared API keys from parent env file
 load_dotenv(Path.home() / "src" / ".env")
 load_dotenv()
+load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")
 
 
 @pytest.fixture
