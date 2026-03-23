@@ -176,5 +176,5 @@ No special batch API needed.
 ## Related
 
 - [Job Queue](job-queue.md) -- Core queue infrastructure
-- [Observer Agent](observer-agent.md) -- Steers SDLC pipeline for scheduled jobs
+- [Chat Dev Session Architecture](chat-dev-session-architecture.md) -- ChatSession orchestrates SDLC pipeline for scheduled jobs
 - `/queue-status` skill -- Telegram-accessible queue management

@@ -9,7 +9,7 @@ All operational log lines use a consistent prefix tag enclosed in brackets. Filt
 | Tag | Source File | What It Logs |
 |-----|------------|--------------|
 | `[routing]` | `bridge/routing.py`, `bridge/telegram_bridge.py` | Classification result (sdlc/question/passthrough), session continuity decision, semantic routing match/miss |
-| `[observer]` | `bridge/observer.py` | Session context summary, each tool-use iteration (tool name + result preview), final decision (steer/deliver) with reason |
+| `[nudge]` | `agent/job_queue.py` | Nudge loop routing decisions (deliver or nudge) with reason |
 | `[enrichment]` | `bridge/enrichment.py` | Single summary line after all enrichment steps: media, youtube, links, reply chain counts, result length, failed steps |
 | `[prompt-summary]` | `agent/sdk_client.py` | Message length, classification, workflow presence, task list ID, session context sections |
 
@@ -52,7 +52,7 @@ INFO [observer] Decision: steer (reason: Good progress on the plan. Continue wit
 
 | File | Changes |
 |------|---------|
-| `bridge/observer.py` | Session context log at run start, iteration logging in tool-use loop, decision logging with reason |
+| `agent/job_queue.py` | Nudge loop routing decision logging |
 | `bridge/routing.py` | Classification result logging for all paths (fast-path slash commands, acknowledgments, issue refs, LLM classification) |
 | `bridge/telegram_bridge.py` | Session ID logging upgraded from DEBUG to INFO with `[routing]` prefix, semantic routing match/miss logging |
 | `bridge/enrichment.py` | Failed step tracking, single `[enrichment]` summary line at end with all step counts |

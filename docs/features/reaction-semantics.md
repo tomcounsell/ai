@@ -46,19 +46,19 @@ Reactions interact with the auto-continue system. When auto-continue is active, 
 
 ### Flow
 
-1. Agent completes a turn. The [Observer Agent](observer-agent.md) decides whether to **STEER** (auto-continue) or **DELIVER** (send to Telegram).
+1. Agent completes a turn. The nudge loop in `agent/job_queue.py` decides whether to **nudge** (auto-continue) or **deliver** (send to Telegram).
 2. If Observer decides **STEER**: suppress the output, re-enqueue with coaching message, defer reaction.
 3. If Observer decides **DELIVER**: send the response and set the appropriate reaction based on content.
 4. The auto-continue counter resets when the human sends a new message.
 
-### Observer Decision to Reaction Mapping
+### Routing Decision to Reaction Mapping
 
-| Observer Decision | Content Signal | Reaction |
-|-------------------|---------------|----------|
-| DELIVER | Completion with evidence | `REACTION_COMPLETE` (verified via `has_communicated()`) |
-| STEER | Status update, stages remain | Deferred (no emoji until final resolution) |
-| DELIVER | Question for human | None (awaiting human reply) |
-| DELIVER | Error/blocker | `REACTION_ERROR` |
+| Routing Decision | Content Signal | Reaction |
+|------------------|---------------|----------|
+| Deliver | Completion with evidence | `REACTION_COMPLETE` (verified via `has_communicated()`) |
+| Nudge | Status update, stages remain | Deferred (no emoji until final resolution) |
+| Deliver | Question for human | None (awaiting human reply) |
+| Deliver | Error/blocker | `REACTION_ERROR` |
 
 ### Why Job Re-Enqueue Instead of Steering Queue
 
@@ -95,7 +95,7 @@ Three paths to silent text loss have been identified and guarded:
 | `bridge/response.py` | Reaction constants, OutputType enum, MAX_AUTO_CONTINUES, filter_tool_logs |
 | `agent/job_queue.py` | Reaction selection logic, auto-continue re-enqueue, has_communicated() check |
 | `agent/messenger.py` | BossMessenger with `has_communicated()` tracking, BackgroundTask with internal health watchdog |
-| `bridge/observer.py` | Observer Agent: unified routing decisions (replaced classify_output) |
+| `agent/job_queue.py` | Nudge loop: output routing decisions via `classify_nudge_action()` |
 | `tests/test_reply_delivery.py` | Tests for steering drain, reaction selection, filter fallback |
 
 ## See Also

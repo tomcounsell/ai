@@ -122,7 +122,7 @@ Domain-Specific Tools & MCP Servers
 - **Security**: Granular permissions per subagent/tool
 - **Flexibility**: Multiple execution paths (Claude Code + Gemini CLI)
 
-See [Subagent System Design](subagent-mcp-system.md) for details.
+See [Chat Dev Session Architecture](chat-dev-session-architecture.md) for the current session architecture.
 
 ## Design Principles
 
@@ -180,45 +180,28 @@ See [Subagent System Design](subagent-mcp-system.md) for details.
 
 ## Technology Stack
 
-### Core Framework
-- **FastAPI** (v0.104.0+): Async web framework
-  - **Why**: Production-ready, high performance, built-in OpenAPI docs
-  - **Benefits**: Type safety, dependency injection, async support
-
 ### AI Integration
-- **PydanticAI** (v0.0.13+): Type-safe agent framework
-  - **Why**: Structured outputs, tool integration, testing support
-  - **Benefits**: Context management, validation, clean architecture
+- **Claude Agent SDK**: Agent backend for orchestrating Claude Code sessions
+  - **Why**: Native Python integration with Claude Code's tool ecosystem
+  - **Benefits**: Same tools as Claude Code, programmatic session management
 
 - **Anthropic Claude**: Primary AI reasoning engine
   - **Why**: Advanced reasoning, code understanding, long context
   - **Benefits**: High quality outputs, reliable performance
 
 ### External Services
-- **Telegram Bot API**: Primary user interface
+- **Telegram** (Telethon, user account): Primary user interface
   - **Why**: Rich features, global availability, no custom app
   - **Benefits**: Media support, reactions, persistent history
-
-- **OpenAI API**: Vision and image generation
-  - **Why**: Best-in-class vision (GPT-4o) and image generation (DALL-E 3)
-  - **Benefits**: High quality outputs, reliable service
 
 - **Perplexity API**: Web search integration
   - **Why**: AI-synthesized search results
   - **Benefits**: Current information, concise summaries
 
-- **Notion API**: Project management
-  - **Why**: Flexible database, team adoption
-  - **Benefits**: Real-time updates, rich data models
-
 ### Infrastructure
-- **SQLite with WAL Mode**: Primary database
-  - **Why**: Zero configuration, excellent concurrency
-  - **Benefits**: ACID compliance, embedded, atomic deployments
-
-- **Huey**: Task queue system
-  - **Why**: Lightweight, SQLite-backed, simple
-  - **Benefits**: No Redis dependency, reliable execution
+- **Redis** (Popoto ORM): Primary data store for all session, job, and message state
+  - **Why**: Fast, atomic operations, real-time querying via Popoto Django-like syntax
+  - **Benefits**: No SQL, crash-safe, supports sorted sets for priority queues
 
 - **MCP (Model Context Protocol)**: Tool standardization
   - **Why**: Future-proof LLM tool standard
@@ -230,7 +213,7 @@ See [Subagent System Design](subagent-mcp-system.md) for details.
   - **Benefits**: Reproducible builds, dependency resolution
 
 - **Ollama**: Local LLM inference
-  - **Why**: Privacy-preserving intent recognition
+  - **Why**: Privacy-preserving intent classification and image description
   - **Benefits**: No API costs, fast inference
 
 ## Performance Characteristics

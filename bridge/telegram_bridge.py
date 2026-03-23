@@ -1307,16 +1307,6 @@ async def main():
             trigger_message_id=stored_msg_id,
             session_type=_session_type,
         )
-        if depth > 1:
-            from bridge.markdown import send_markdown
-
-            await send_markdown(
-                client,
-                event.chat_id,
-                f"Queued (position {depth}). Working on a previous task first.",
-                reply_to=message.id,
-            )
-
         logger.info(
             f"[{project_name}] Queued job for {sender_name} (msg {message_id}, depth={depth})"
         )

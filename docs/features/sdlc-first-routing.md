@@ -107,4 +107,4 @@ After fetching an issue, the SDLC skill verifies the issue URL matches the expec
 
 - [SDLC Enforcement](sdlc-enforcement.md) -- Quality gates and pipeline stage model
 - [Summarizer Format](summarizer-format.md) -- Process narration stripping added alongside routing
-- [Observer Agent](observer-agent.md) -- Output classification and routing decisions
+- [Chat Dev Session Architecture](chat-dev-session-architecture.md) -- Session routing and orchestration

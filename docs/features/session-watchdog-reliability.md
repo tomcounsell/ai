@@ -86,5 +86,5 @@ Observer Error Path
 
 - [Session Watchdog](session-watchdog.md) - Base watchdog implementation
 - [Stall Retry](stall-retry.md) - Retry mechanism for stalled sessions
-- [Observer Agent](observer-agent.md) - Observer routing logic
+- [Chat Dev Session Architecture](chat-dev-session-architecture.md) - Session routing architecture
 - [Bridge Self-Healing](bridge-self-healing.md) - Broader crash recovery system

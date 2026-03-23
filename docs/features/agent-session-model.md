@@ -41,18 +41,9 @@ These are used by the [stage-aware auto-continue](bridge-workflow-gaps.md#stage-
 
 `set_link(kind, url)` stores issue, plan, and PR URLs as each SDLC stage completes. `get_links()` returns all tracked links.
 
-## CLI Tool
+## Stage Tracking
 
-`tools/session_progress.py` updates stage progress and links from Bash:
-
-```bash
-python -m tools.session_progress --session-id $ID --stage BUILD --status completed
-python -m tools.session_progress --session-id $ID --pr-url https://github.com/.../pull/42
-```
-
-### SDLC Skill Wiring
-
-Each SDLC skill calls `session_progress.py` to record stage transitions. The SESSION_ID is extracted from the `SESSION_ID: xxx` line injected by `sdk_client.py` into enriched messages.
+Stage transitions are managed by the `PipelineStateMachine` in `bridge/pipeline_state.py`. Stage status is set programmatically at transition points (`start_stage()`, `complete_stage()`, `fail_stage()`) rather than via a CLI tool.
 
 | Skill | Stage | Transitions | Links Set |
 |-------|-------|-------------|-----------|
@@ -62,8 +53,6 @@ Each SDLC skill calls `session_progress.py` to record stage transitions. The SES
 | `/do-test` | TEST | `in_progress` → `completed` or `failed` | — |
 | `/do-pr-review` | REVIEW | `in_progress` → `completed` | — |
 | `/do-docs` | DOCS | `in_progress` → `completed` | — |
-
-All calls use `2>/dev/null || true` for fire-and-forget behavior — stage tracking failures never block pipeline work.
 
 ### Session Lookup Chain
 

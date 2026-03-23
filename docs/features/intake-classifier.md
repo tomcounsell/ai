@@ -89,7 +89,7 @@ This prevents "ok" from accidentally completing a running session (Risk 3).
 | `bridge/telegram_bridge.py` | Calls `classify_message_intent_async()` after the reply-to fast path |
 | `models/agent_session.py` | `push_steering_message()` buffers interjections for Observer |
 | `agent/steering.py` | `push_steering_message()` pushes to Redis for PostToolUse hook |
-| `bridge/observer.py` | Reads `queued_steering_messages` populated by the intake classifier |
+| `agent/job_queue.py` | Nudge loop processes `queued_steering_messages` populated by the intake classifier |
 
 ## Testing
 

@@ -19,33 +19,32 @@ The old system categorized output into five types (`QUESTION`, `STATUS_UPDATE`, 
 
 The bridge uses a two-path auto-continue strategy based on whether the job is an SDLC pipeline job or a casual/ad-hoc job.
 
-### Observer-Driven Routing (Current)
+### Nudge Loop Routing (Current)
 
-All routing decisions — SDLC and non-SDLC — are now made by the [Observer Agent](observer-agent.md):
+All output routing decisions are made by the nudge loop in `agent/job_queue.py`:
 
 1. Worker agent produces output
 2. **Pipeline State Machine** (`bridge/pipeline_state.py`) tracks stage transitions on `AgentSession.stage_states`
-3. **Observer Agent** (Sonnet) reads full session state and makes a unified decision:
-   - **STEER**: Re-enqueue with a coaching message directing the worker to the next stage
-   - **DELIVER**: Send output to Telegram for human review
-4. **Hard guard** in `job_queue.py`: auto-continue cap enforced regardless of Observer decision
+3. **Nudge loop** evaluates the output and session state:
+   - **Nudge**: Re-enqueue with a continuation message to keep the agent working
+   - **Deliver**: Send output to Telegram for human review
+4. **Hard guard** in `job_queue.py`: nudge cap enforced
 
 ### Decision Matrix
 
-| Session state | Worker output | Observer decision |
+| Session state | Worker output | Routing decision |
 |---|---|---|
-| Stages remaining | Status update (no question) | STEER with coaching |
-| Stages remaining | Genuine question for human | DELIVER |
-| Stages remaining | Error/blocker | DELIVER |
-| All stages done | Completion with evidence | DELIVER |
-| Non-SDLC job | Any output | DELIVER (Observer recognizes non-pipeline context) |
-| Cap reached (10 SDLC / 3 non-SDLC) | Any | DELIVER (hard guard) |
+| Stages remaining | Status update (no question) | Nudge to keep working |
+| Stages remaining | Genuine question for human | Deliver |
+| Stages remaining | Error/blocker | Deliver |
+| All stages done | Completion with evidence | Deliver |
+| Non-SDLC job | Any output | Deliver |
+| Cap reached (50 nudges) | Any | Deliver (hard guard) |
 
 ### Safety Limits
 
 - **Error bypass (crash guard)** -- If output is classified as `ERROR`, auto-continue is skipped entirely and the error is sent straight to Telegram. This prevents cascading retry loops when the SDK crashes.
-- **MAX_AUTO_CONTINUES = 50** -- Safety backstop for all sessions. ChatSession's deterministic Observer handles actual routing decisions; the cap only prevents runaway loops.
-- **MAX_AUTO_CONTINUES_SDLC = 50** -- Same safety backstop for SDLC jobs. Both caps are equal since the deterministic Observer (not auto-continue logic) manages pipeline progression.
+- **MAX_NUDGE_COUNT = 50** -- Safety backstop for all sessions. The nudge cap prevents runaway loops.
 - **Counter resets on human reply** -- When the human sends a new message to the session, the auto-continue counter resets to zero.
 - **Steering queue integration** -- Auto-continue uses the same steering queue mechanism as manual human input, so the agent sees it as a normal continuation signal.
 - **Merge gate** -- After REVIEW + DOCS stages complete, the SDLC pipeline checks auto-merge eligibility (no open questions, clean review with 0 issues, all tests pass, diff < 150 lines). Eligible PRs are auto-merged; all others stop and wait for explicit human instruction. Tech debt and nits from reviews are patched before docs (not skipped).
@@ -92,7 +91,7 @@ The thumbs-up emoji reaction (👍) in Telegram serves as a **human-to-human** c
 
 | File | Purpose |
 |---|---|
-| `bridge/observer.py` | Observer Agent: unified routing decisions with session context |
+| `agent/job_queue.py` | Nudge loop: output routing decisions (deliver or nudge) |
 | `bridge/pipeline_state.py` | Pipeline state machine for stage tracking |
 | `bridge/session_logs.py` | `save_session_snapshot()`, `cleanup_old_snapshots()` |
 | `agent/job_queue.py` | Observer wiring in `send_to_chat`, hard cap enforcement, `mark_work_done()` |

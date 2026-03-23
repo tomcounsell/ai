@@ -68,7 +68,7 @@ Falls back to `"ambiguous"` for the Observer LLM to handle.
 
 ## Integration Points
 
-- **Observer** (`bridge/observer.py`): Creates a state machine per run, uses it for stage queries and outcome classification
+- **ChatSession**: Uses state machine for stage queries and outcome classification
 - **Job Queue** (`agent/job_queue.py`): Creates state machine in `send_to_chat()`, applies transitions from Observer decisions
 - **Summarizer** (`bridge/summarizer.py`): Reads `get_display_progress()` for Telegram stage rendering
 
