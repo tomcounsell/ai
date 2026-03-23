@@ -87,13 +87,13 @@ fi
 
 ### Step 4: Run Failing Tests Against Main
 
-Run ONLY the failing tests -- not the full suite:
+Run ONLY the failing tests -- not the full suite. Use `--junitxml` for deterministic result parsing:
 
 ```bash
-cd "$BASELINE_DIR" && python -m pytest <space-separated-test-ids> -v --tb=short --no-header 2>&1
+cd "$BASELINE_DIR" && python -m pytest <space-separated-test-ids> -v --tb=short --no-header --junitxml=/tmp/baseline-results.xml 2>&1
 ```
 
-Capture both the output and the exit code.
+Capture both the console output and the exit code. The console output goes into `raw_output`; the junitxml file is used for deterministic classification in Step 5.
 
 **Exit code interpretation:**
 - `0` = All specified tests passed on main (they are regressions on the branch)
@@ -101,15 +101,60 @@ Capture both the output and the exit code.
 - `2` = pytest encountered an error (e.g., collection error, import error) -- classify affected tests as inconclusive
 - `5` = No tests collected (test files may not exist on main) -- classify as inconclusive
 
-### Step 5: Parse Results and Classify
+### Step 5: Parse Results Deterministically (junitxml)
 
-Parse the pytest verbose output to determine per-test status on main. Each test will show one of:
-- `PASSED` -- the test passes on main
-- `FAILED` -- the test fails on main
-- `ERROR` -- the test errored on main
-- `SKIPPED` -- the test was skipped on main
+**Do NOT parse pytest console output with LLM interpretation.** Instead, parse the structured junitxml file using Python's standard library:
 
-**Classification Rules (deterministic, no LLM judgment):**
+```bash
+python3 -c "
+import xml.etree.ElementTree as ET
+import sys
+
+try:
+    tree = ET.parse('/tmp/baseline-results.xml')
+except (FileNotFoundError, ET.ParseError) as e:
+    print(f'PARSE_ERROR: {e}', file=sys.stderr)
+    sys.exit(1)
+
+for tc in tree.findall('.//testcase'):
+    classname = tc.get('classname', '')
+    name = tc.get('name', '')
+    # Convert junitxml classname (dot-separated) to pytest node ID (slash-separated)
+    # e.g. 'tests.unit.test_foo.TestBar' + 'test_baz' -> 'tests/unit/test_foo.py::TestBar::test_baz'
+    # e.g. 'tests.unit.test_foo' + 'test_baz' -> 'tests/unit/test_foo.py::test_baz'
+    parts = classname.split('.')
+    module_parts = []
+    class_parts = []
+    found_module = False
+    for part in reversed(parts):
+        if not found_module and part and part[0].isupper():
+            class_parts.insert(0, part)
+        else:
+            found_module = True
+            module_parts.insert(0, part)
+    module_path = '/'.join(module_parts) + '.py'
+    if class_parts:
+        test_id = module_path + '::' + '::'.join(class_parts) + '::' + name
+    else:
+        test_id = module_path + '::' + name
+    failure = tc.find('failure')
+    error = tc.find('error')
+    skipped = tc.find('skipped')
+    if failure is not None:
+        status = 'FAILED'
+    elif error is not None:
+        status = 'ERROR'
+    elif skipped is not None:
+        status = 'SKIPPED'
+    else:
+        status = 'PASSED'
+    print(f'{status} {test_id}')
+"
+```
+
+If the junitxml file is missing or malformed (exit code 1 from the parser), classify ALL tests as **inconclusive** with note "junitxml parse failure".
+
+**Apply the classification rules to the parsed output (deterministic, no LLM judgment):**
 
 | Branch Status | Main Status | Classification | Meaning |
 |--------------|-------------|----------------|---------|
@@ -120,6 +165,18 @@ Parse the pytest verbose output to determine per-test status on main. Each test 
 | FAILED | NOT FOUND | **inconclusive** | Test does not exist on main |
 
 **Important:** Do NOT apply any subjective judgment. If a test FAILED on the branch and PASSED on main, it is a regression -- period. Do not speculate about flakiness, environment differences, or timing issues.
+
+### Step 5.5: Completeness Validation
+
+After classification, verify that **every input test ID** appears in exactly one classification bucket:
+
+1. Let `classified_ids = set(regressions + pre_existing + inconclusive)`
+2. Let `input_ids = set(failing_test_ids)`
+3. **Missing IDs** = `input_ids - classified_ids` → add each to `inconclusive` with note "not found in baseline results"
+4. **Extra IDs** = `classified_ids - input_ids` → log a warning but do not fail
+5. **Duplicate IDs** across buckets → keep in the highest-severity bucket (regression > pre_existing > inconclusive), remove from others
+
+This ensures no test ID is silently dropped from the classification output.
 
 ### Step 6: Clean Up Worktree
 
