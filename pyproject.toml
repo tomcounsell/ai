@@ -24,6 +24,7 @@ dependencies = [
     "openai>=1.0.0", # Embedding API for semantic doc impact finder
     "pyyaml>=6.0.3",
     "rich>=13.0.0", # Required by pydantic logfire plugin
+    "sentry-sdk>=2.0.0", # Error monitoring and performance tracing
 ]
 
 [project.optional-dependencies]

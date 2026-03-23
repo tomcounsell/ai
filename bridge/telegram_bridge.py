@@ -40,6 +40,17 @@ from dotenv import load_dotenv  # noqa: E402
 env_path = Path(__file__).parent.parent / ".env"
 load_dotenv(env_path)
 
+# Initialize Sentry error tracking (skip gracefully if DSN not configured)
+_sentry_dsn = os.getenv("SENTRY_DSN")
+if _sentry_dsn:
+    import sentry_sdk  # noqa: E402
+
+    sentry_sdk.init(
+        dsn=_sentry_dsn,
+        traces_sample_rate=0.1,
+        environment=os.getenv("SENTRY_ENVIRONMENT", "production"),
+    )
+
 # Claude Agent SDK is always used (legacy mode removed)
 
 # Local tool imports for message and link storage
@@ -66,9 +77,7 @@ from bridge.media import (  # noqa: E402
 from bridge.response import (  # noqa: E402
     FILE_MARKER_PATTERN,  # noqa: F401
     REACTION_COMPLETE,
-    REACTION_ERROR,
     REACTION_RECEIVED,
-    REACTION_SUCCESS,
     clean_message,
     extract_files_from_response,  # noqa: F401
     filter_tool_logs,
