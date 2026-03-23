@@ -119,7 +119,24 @@ except (FileNotFoundError, ET.ParseError) as e:
 for tc in tree.findall('.//testcase'):
     classname = tc.get('classname', '')
     name = tc.get('name', '')
-    test_id = f'{classname}::{name}'
+    # Convert junitxml classname (dot-separated) to pytest node ID (slash-separated)
+    # e.g. 'tests.unit.test_foo.TestBar' + 'test_baz' -> 'tests/unit/test_foo.py::TestBar::test_baz'
+    # e.g. 'tests.unit.test_foo' + 'test_baz' -> 'tests/unit/test_foo.py::test_baz'
+    parts = classname.split('.')
+    module_parts = []
+    class_parts = []
+    found_module = False
+    for part in reversed(parts):
+        if not found_module and part and part[0].isupper():
+            class_parts.insert(0, part)
+        else:
+            found_module = True
+            module_parts.insert(0, part)
+    module_path = '/'.join(module_parts) + '.py'
+    if class_parts:
+        test_id = module_path + '::' + '::'.join(class_parts) + '::' + name
+    else:
+        test_id = module_path + '::' + name
     failure = tc.find('failure')
     error = tc.find('error')
     skipped = tc.find('skipped')
