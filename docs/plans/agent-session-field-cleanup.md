@@ -118,7 +118,17 @@ Each phase is a separate commit. Phase 2 requires a migration script. Phase 3 re
 
 ### Risk 3: Bridge downtime during migration
 **Impact:** Active sessions could fail if model changes while bridge is running.
-**Mitigation:** Deploy Phase 1 (removals only) first since they're safe. For Phase 2 renames, keep old fields readable during transition. Restart bridge only after migration script completes.
+**Mitigation:** Strict deploy sequencing for Phase 2 renames:
+1. Stop bridge (`./scripts/valor-service.sh stop`)
+2. Deploy new code (with both old and new field definitions + property aliases)
+3. Run migration script (`python scripts/migrate_agent_session_fields.py`)
+4. Start bridge (`./scripts/valor-service.sh start`)
+
+Phase 1 (removals of unused fields) is safe to deploy without stopping the bridge.
+
+### Risk 4: Orphaned Redis hash fields after rename
+**Impact:** Old field names remain in Redis hashes, wasting memory and causing confusion during debugging.
+**Mitigation:** Migration script includes a cleanup step that `HDEL`s old field names from each session hash after copying values to new field names. Cleanup runs only after verification that new fields are populated.
 
 ## Race Conditions
 
@@ -134,14 +144,17 @@ No race conditions identified — field renames are schema-level changes deploye
 
 ## Update System
 
-No update system changes required — this is a model-internal refactor. The migration script must be run on each deployment after code update but before bridge restart:
+The `/update` skill must include migration commands in its post-pull sequence for one release cycle. Deploy sequencing for Phase 2:
 
 ```bash
-python scripts/migrate_agent_session_fields.py        # Phase 2 migration
-python scripts/migrate_model_relationships.py          # Phase 3 prerequisite (if not already run)
+./scripts/valor-service.sh stop                        # 1. Stop bridge
+git pull && pip install -r requirements.txt             # 2. Deploy new code
+python scripts/migrate_agent_session_fields.py          # 3. Run field rename migration
+python scripts/migrate_model_relationships.py           # 4. Phase 3 prerequisite (if not already run)
+./scripts/valor-service.sh start                        # 5. Restart bridge
 ```
 
-The `/update` skill should include these migration commands in its post-pull sequence for one release cycle.
+Phase 1 (dead weight removal) does not require bridge stop — removed fields are unused.
 
 ## Agent Integration
 
@@ -162,6 +175,7 @@ No agent integration required — AgentSession is not exposed through any MCP se
 - [ ] `grep -rn 'message_id' models/agent_session.py` shows only `tg_message_id` and `telegram_message_key`
 - [ ] `grep -rn 'chat_id_for_enrichment' .` returns zero results
 - [ ] `grep -rn 'has_media\|media_type\|youtube_urls\|non_youtube_urls' models/agent_session.py` returns zero results (Phase 3)
+- [ ] New test verifies all `_JOB_FIELDS` entries are valid AgentSession field names (prevents silent drift)
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 
