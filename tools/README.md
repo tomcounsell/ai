@@ -111,7 +111,7 @@ print(f"Pass: {result['pass_fail']}")
 
 ## Configuration
 
-API keys are stored in the shared location `/Users/valorengels/src/.env`. Tools automatically load from this file.
+API keys are stored in the shared location `~/src/.env`. Tools automatically load from this file.
 
 Required keys:
 - `OPENROUTER_API_KEY` - For vision, tagging, embeddings

@@ -422,7 +422,7 @@ tools/<name>/
 
 ### Dependencies
 
-Shared `.env` location: `/Users/valorengels/src/.env`
+Shared `.env` location: `~/src/.env`
 - OPENROUTER_API_KEY
 - PERPLEXITY_API_KEY
 - ANTHROPIC_API_KEY

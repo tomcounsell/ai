@@ -20,7 +20,7 @@ This allows multiple machines to run Valor, each monitoring different groups.
   "projects": {
     "myproject": {
       "name": "MyProject",
-      "working_directory": "/Users/valorengels/src/myproject",
+      "working_directory": "~/src/myproject",
       "telegram": {
         "groups": ["Dev: MyProject"]
       },
@@ -32,7 +32,7 @@ This allows multiple machines to run Valor, each monitoring different groups.
     }
   },
   "defaults": {
-    "working_directory": "/Users/valorengels/src/ai",
+    "working_directory": "~/src/ai",
     "telegram": {
       "respond_to_all": true,
       "respond_to_mentions": true,
