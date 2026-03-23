@@ -312,34 +312,11 @@ fi
 
 **If no tracking issue or no comments**: Skip this step.
 
-### Phase 2.8: RFC Review
+### Phase 3: Enumerate Questions
 
-After the plan is drafted, spawn specialist critic agents to review it for structural flaws.
+Plan critique is handled separately by `/do-plan-critique` (war room). This phase focuses only on surfacing questions that need human input before the critique step.
 
-1. **Select critics** based on plan characteristics:
-   - All plans: `code-reviewer` (always included)
-   - Async/concurrent work: `async-specialist`
-   - External API integration: `api-integration-specialist`
-   - Security-sensitive changes: `security-reviewer`
-   - Data model changes: `data-architect`
-2. **Dispatch critics in parallel** - Each critic receives the full plan document and returns structured feedback:
-   ```
-   - BLOCKER: [must change before build — architectural flaw, missing error path, etc.]
-   - CONCERN: [worth reconsidering — tradeoff the plan didn't acknowledge]
-   - QUESTION: [ambiguity the plan doesn't address]
-   ```
-3. **Aggregate feedback**:
-   - BLOCKERs: Incorporate into the plan immediately (update Solution, add Risks, etc.)
-   - CONCERNs: Add to the `## RFC Feedback` section for the human to weigh in on
-   - QUESTIONs: Merge into Open Questions
-
-**Skip if:** Small appetite plans — the overhead of RFC review exceeds the value for small changes.
-
-### Phase 3: Critique and Enumerate Questions
-
-1. **Review assumptions** - What did I assume that might be wrong?
-2. **Identify gaps** - What's unclear or risky?
-3. **Enumerate questions** - List all questions needing supervisor input
+1. **Enumerate questions** - List all questions needing supervisor input
 4. **Add questions to plan** - Append to "Open Questions" section
 5. **Pre-send checklist**:
    - [ ] Plan committed AND pushed (to `main` or `plan/{slug}` branch if main is protected)
