@@ -31,19 +31,16 @@ class TestCheckSdlcStageProgress:
         spec.loader.exec_module(mod)
         return mod._check_sdlc_stage_progress
 
-    def _make_session(self, classification_type=None, sdlc_stages=None, stage_states=None):
+    def _make_session(self, classification_type=None, stage_states=None):
         """Create a mock AgentSession."""
         session = MagicMock()
         session.classification_type = classification_type
-        session.sdlc_stages = sdlc_stages
         session.stage_states = stage_states
         return session
 
     def test_sdlc_no_stages_emits_warning(self, capsys):
         """SDLC-classified session with no stage progress emits a warning."""
-        session = self._make_session(
-            classification_type="sdlc", sdlc_stages=None, stage_states=None
-        )
+        session = self._make_session(classification_type="sdlc", stage_states=None)
 
         with patch("models.agent_session.AgentSession") as mock_cls:
             mock_cls.query.filter.return_value = [session]
@@ -55,12 +52,11 @@ class TestCheckSdlcStageProgress:
         assert "test-session-123" in captured.err
         assert "no stage progress" in captured.err
 
-    def test_sdlc_with_stages_no_warning(self, capsys):
+    def test_sdlc_with_stage_states_populated_no_warning(self, capsys):
         """SDLC-classified session with stage progress emits no warning."""
         session = self._make_session(
             classification_type="sdlc",
-            sdlc_stages={"plan": "completed", "build": "in_progress"},
-            stage_states=None,
+            stage_states={"plan": {"status": "completed"}, "build": {"status": "in_progress"}},
         )
 
         with patch("models.agent_session.AgentSession") as mock_cls:
@@ -71,11 +67,10 @@ class TestCheckSdlcStageProgress:
         captured = capsys.readouterr()
         assert "SDLC WARNING" not in captured.err
 
-    def test_sdlc_with_stage_states_no_warning(self, capsys):
+    def test_sdlc_with_stage_states_done_no_warning(self, capsys):
         """SDLC session with stage_states populated emits no warning."""
         session = self._make_session(
             classification_type="sdlc",
-            sdlc_stages=None,
             stage_states={"plan": {"status": "done"}},
         )
 
@@ -89,9 +84,7 @@ class TestCheckSdlcStageProgress:
 
     def test_non_sdlc_no_warning(self, capsys):
         """Non-SDLC session emits no warning regardless of stage state."""
-        session = self._make_session(
-            classification_type="question", sdlc_stages=None, stage_states=None
-        )
+        session = self._make_session(classification_type="question", stage_states=None)
 
         with patch("models.agent_session.AgentSession") as mock_cls:
             mock_cls.query.filter.return_value = [session]
@@ -127,7 +120,7 @@ class TestCheckSdlcStageProgress:
 
     def test_empty_dicts_emit_warning(self, capsys):
         """SDLC session with empty dicts (not None) still triggers warning."""
-        session = self._make_session(classification_type="sdlc", sdlc_stages={}, stage_states={})
+        session = self._make_session(classification_type="sdlc", stage_states={})
 
         with patch("models.agent_session.AgentSession") as mock_cls:
             mock_cls.query.filter.return_value = [session]

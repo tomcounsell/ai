@@ -210,7 +210,7 @@ class TestMergeStageTracking:
         assert "MERGE" in STAGE_TO_SKILL
         assert STAGE_TO_SKILL["MERGE"] == "/do-merge"
 
-    def test_merge_in_sdlc_stages(self):
+    def test_merge_in_stage_constants(self):
         from models.agent_session import SDLC_STAGES
 
         assert "MERGE" in SDLC_STAGES

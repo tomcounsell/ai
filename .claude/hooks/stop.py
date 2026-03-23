@@ -38,14 +38,11 @@ def _check_sdlc_stage_progress(session_id: str) -> None:
         if classification != "sdlc":
             return
 
-        # Check for stage progress
-        sdlc_stages = getattr(session, "sdlc_stages", None)
+        # Check for stage progress via stage_states
         stage_states = getattr(session, "stage_states", None)
-
-        has_stages = sdlc_stages and (isinstance(sdlc_stages, dict) and len(sdlc_stages) > 0)
         has_state = stage_states and (isinstance(stage_states, dict) and len(stage_states) > 0)
 
-        if not has_stages and not has_state:
+        if not has_state:
             print(
                 f"SDLC WARNING: Session {session_id} classified as SDLC "
                 f"but completed with no stage progress",
