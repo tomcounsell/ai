@@ -4,11 +4,7 @@ Tests the send_to_chat nudge behavior: completion detection, rate-limit
 backoff, max nudge safety cap, and empty output handling.
 """
 
-from unittest.mock import AsyncMock, MagicMock, patch
-
-import pytest
-
-from agent.job_queue import MAX_NUDGE_COUNT, NUDGE_MESSAGE, SendToChatResult
+from agent.job_queue import MAX_NUDGE_COUNT, NUDGE_MESSAGE, classify_nudge_action
 
 
 class TestNudgeConstants:
@@ -95,91 +91,103 @@ class TestObserverRemoval:
 
 
 class TestNonSdlcDelivery:
-    """Verify non-SDLC Q&A messages deliver via send_cb without nudging.
+    """Verify non-SDLC Q&A messages deliver via classify_nudge_action without nudging.
 
-    After PR #470 removed the is_simple_session fast-path, all messages go
-    through the full nudge logic. This test confirms that a Q&A message with
-    stop_reason="end_turn" still delivers correctly (calls send_cb) instead
-    of being nudged.
+    Tests the actual classify_nudge_action function from job_queue.py rather than
+    replicating send_to_chat logic inline. This ensures tests stay in sync with
+    the real routing decisions.
     """
 
-    def _make_job(self, session_id="test_session", project_key="valor"):
-        """Create a minimal Job-like mock for send_to_chat testing."""
-        job = MagicMock()
-        job.project_key = project_key
-        job.session_id = session_id
-        job.chat_id = "12345"
-        job.message_id = 100
-        job.auto_continue_count = 0
-        return job
-
-    @pytest.mark.asyncio
-    async def test_end_turn_delivers_via_send_cb(self):
-        """Q&A message with stop_reason='end_turn' should call send_cb, not nudge."""
-        job = self._make_job()
-        send_cb = AsyncMock()
-        chat_state = SendToChatResult(auto_continue_count=0)
-        agent_session = MagicMock()
-        agent_session.status = "running"
-
-        # Simulate what send_to_chat does for end_turn with non-empty output
-        msg = "Here is the answer to your question about Python decorators."
-
-        with patch("agent.sdk_client.get_stop_reason", return_value="end_turn"):
-            from agent.sdk_client import get_stop_reason
-
-            stop_reason = get_stop_reason(job.session_id)
-
-            # Replicate the core send_to_chat logic:
-            # end_turn + non-empty output = deliver
-            assert stop_reason == "end_turn"
-            assert len(msg.strip()) > 0
-
-            # This is the delivery path (line 1614-1621 in job_queue.py)
-            await send_cb(job.chat_id, msg, job.message_id, agent_session)
-            chat_state.completion_sent = True
-
-        send_cb.assert_called_once_with(job.chat_id, msg, job.message_id, agent_session)
-        assert chat_state.completion_sent is True
-        assert chat_state.auto_continue_count == 0, (
-            "auto_continue_count should stay 0 — no nudges for clean end_turn delivery"
+    def test_end_turn_delivers(self):
+        """Q&A message with stop_reason='end_turn' should deliver, not nudge."""
+        action = classify_nudge_action(
+            msg="Here is the answer to your question about Python decorators.",
+            stop_reason="end_turn",
+            auto_continue_count=0,
+            max_nudge_count=MAX_NUDGE_COUNT,
+            session_status="running",
         )
+        assert action == "deliver"
 
-    @pytest.mark.asyncio
-    async def test_end_turn_does_not_nudge(self):
-        """Q&A completion should NOT trigger _enqueue_nudge."""
-        job = self._make_job()
+    def test_end_turn_does_not_nudge(self):
+        """Q&A completion should return deliver, not any nudge action."""
+        action = classify_nudge_action(
+            msg="The answer is 42.",
+            stop_reason="end_turn",
+            auto_continue_count=0,
+            max_nudge_count=MAX_NUDGE_COUNT,
+        )
+        assert "nudge" not in action
 
-        msg = "The answer is 42."
+    def test_auto_continue_count_unaffected_by_delivery(self):
+        """Delivery action means auto_continue_count stays at 0 in send_to_chat."""
+        action = classify_nudge_action(
+            msg="Django uses the MTV pattern.",
+            stop_reason="end_turn",
+            auto_continue_count=0,
+            max_nudge_count=MAX_NUDGE_COUNT,
+        )
+        # deliver action does not increment auto_continue_count in send_to_chat
+        assert action == "deliver"
 
-        with patch("agent.sdk_client.get_stop_reason", return_value="end_turn"):
-            from agent.sdk_client import get_stop_reason
+    def test_rate_limited_nudges(self):
+        """Rate-limited stop reason should nudge, not deliver."""
+        action = classify_nudge_action(
+            msg="partial output",
+            stop_reason="rate_limited",
+            auto_continue_count=0,
+            max_nudge_count=MAX_NUDGE_COUNT,
+        )
+        assert action == "nudge_rate_limited"
 
-            stop_reason = get_stop_reason(job.session_id)
+    def test_empty_output_nudges(self):
+        """Empty output should nudge when under cap."""
+        action = classify_nudge_action(
+            msg="",
+            stop_reason="end_turn",
+            auto_continue_count=0,
+            max_nudge_count=MAX_NUDGE_COUNT,
+        )
+        assert action == "nudge_empty"
 
-            # With end_turn and non-empty output, the nudge path is never reached.
-            # The code goes directly to the delivery branch.
-            should_nudge = stop_reason == "rate_limited" or not msg or not msg.strip()
-            assert not should_nudge, "end_turn with content should not trigger nudge"
+    def test_empty_output_at_cap_delivers_fallback(self):
+        """Empty output at nudge cap should deliver fallback."""
+        action = classify_nudge_action(
+            msg="",
+            stop_reason="end_turn",
+            auto_continue_count=MAX_NUDGE_COUNT,
+            max_nudge_count=MAX_NUDGE_COUNT,
+        )
+        assert action == "deliver_fallback"
 
-    @pytest.mark.asyncio
-    async def test_auto_continue_count_stays_zero_after_delivery(self):
-        """After delivering a Q&A answer, auto_continue_count must remain 0."""
-        chat_state = SendToChatResult(auto_continue_count=0)
-        send_cb = AsyncMock()
+    def test_completed_session_delivers(self):
+        """Already-completed session should deliver without nudge."""
+        action = classify_nudge_action(
+            msg="final output",
+            stop_reason="end_turn",
+            auto_continue_count=0,
+            max_nudge_count=MAX_NUDGE_COUNT,
+            session_status="completed",
+        )
+        assert action == "deliver_already_completed"
 
-        msg = "Django uses the MTV pattern."
+    def test_completion_already_sent_drops(self):
+        """If completion was already sent, subsequent output is dropped."""
+        action = classify_nudge_action(
+            msg="more output",
+            stop_reason="end_turn",
+            auto_continue_count=0,
+            max_nudge_count=MAX_NUDGE_COUNT,
+            completion_sent=True,
+        )
+        assert action == "drop"
 
-        with patch("agent.sdk_client.get_stop_reason", return_value="end_turn"):
-            from agent.sdk_client import get_stop_reason
-
-            stop_reason = get_stop_reason("any_session")
-
-            # Delivery path: no increment to auto_continue_count
-            if stop_reason in ("end_turn", None) and len(msg.strip()) > 0:
-                await send_cb("chat", msg, 1, None)
-                chat_state.completion_sent = True
-
-        assert chat_state.auto_continue_count == 0
-        assert chat_state.completion_sent is True
-        send_cb.assert_called_once()
+    def test_nudge_cap_forces_delivery(self):
+        """At nudge safety cap with content, should deliver."""
+        action = classify_nudge_action(
+            msg="substantial output after many nudges",
+            stop_reason="end_turn",
+            auto_continue_count=MAX_NUDGE_COUNT,
+            max_nudge_count=MAX_NUDGE_COUNT,
+        )
+        assert action == "deliver"

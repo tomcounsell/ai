@@ -52,6 +52,41 @@ class SendToChatResult:
     auto_continue_count: int = 0
 
 
+def classify_nudge_action(
+    msg: str,
+    stop_reason: str | None,
+    auto_continue_count: int,
+    max_nudge_count: int,
+    session_status: str | None = None,
+    completion_sent: bool = False,
+) -> str:
+    """Pure function: decide what send_to_chat should do with agent output.
+
+    Returns one of:
+        "deliver"       — send to Telegram
+        "deliver_fallback" — send fallback message (empty output, cap reached)
+        "nudge_rate_limited" — backoff then nudge (rate limited)
+        "nudge_empty"   — nudge (empty output)
+        "drop"          — drop output (completion already sent)
+        "deliver_already_completed" — deliver without nudge (session already done)
+    """
+    if session_status == "completed":
+        return "deliver_already_completed"
+    if completion_sent:
+        return "drop"
+    if stop_reason == "rate_limited":
+        return "nudge_rate_limited"
+    if not msg or not msg.strip():
+        if auto_continue_count + 1 <= max_nudge_count:
+            return "nudge_empty"
+        return "deliver_fallback"
+    if auto_continue_count >= max_nudge_count:
+        return "deliver"
+    if stop_reason in ("end_turn", None) and len(msg.strip()) > 0:
+        return "deliver"
+    return "deliver"
+
+
 # Backward compatibility alias
 RedisJob = AgentSession
 
@@ -1514,37 +1549,36 @@ async def _execute_job(job: Job) -> None:
         if not send_cb:
             return
 
-        # If this session was already completed (e.g., by a prior duplicate job),
-        # deliver the output but skip nudge to prevent chain reactions.
-        if agent_session and agent_session.status == "completed":
+        from agent.sdk_client import get_stop_reason
+
+        stop_reason = get_stop_reason(job.session_id) if job.session_id else None
+        session_status = agent_session.status if agent_session else None
+
+        action = classify_nudge_action(
+            msg=msg,
+            stop_reason=stop_reason,
+            auto_continue_count=chat_state.auto_continue_count,
+            max_nudge_count=MAX_NUDGE_COUNT,
+            session_status=session_status,
+            completion_sent=chat_state.completion_sent,
+        )
+
+        if action == "deliver_already_completed":
             logger.info(
                 f"[{job.project_key}] Session already completed — "
                 f"delivering without nudge ({len(msg)} chars)"
             )
             await send_cb(job.chat_id, msg, job.message_id, agent_session)
             chat_state.completion_sent = True
-            return
 
-        # If we already sent a completion, drop all subsequent outputs.
-        # The work is done — further messages are noise that spams the chat.
-        if chat_state.completion_sent:
+        elif action == "drop":
             logger.info(
                 f"[{job.project_key}] Dropping suppressed output "
                 f"(completion sent or nudged) "
                 f"({len(msg)} chars): {msg[:100]!r}"
             )
-            return
 
-        # === Nudge loop ===
-        # Check if output signals completion, otherwise nudge.
-        # No Observer, no PipelineStateMachine, no SDLC stage awareness.
-
-        from agent.sdk_client import get_stop_reason
-
-        stop_reason = get_stop_reason(job.session_id) if job.session_id else None
-
-        # Rate-limited: backoff then nudge
-        if stop_reason == "rate_limited":
+        elif action == "nudge_rate_limited":
             chat_state.auto_continue_count += 1
             logger.warning(
                 f"[{job.project_key}] Rate limited — backoff then nudge "
@@ -1561,71 +1595,44 @@ async def _execute_job(job: Job) -> None:
             )
             chat_state.completion_sent = True
             chat_state.defer_reaction = True
-            return
 
-        # Empty/whitespace output: nudge instead of delivering nothing
-        if not msg or not msg.strip():
+        elif action == "nudge_empty":
             chat_state.auto_continue_count += 1
-            if chat_state.auto_continue_count <= MAX_NUDGE_COUNT:
-                logger.info(
-                    f"[{job.project_key}] Empty output — nudging "
-                    f"(nudge {chat_state.auto_continue_count}/{MAX_NUDGE_COUNT})"
-                )
-                await _enqueue_nudge(
-                    job,
-                    branch_name,
-                    task_list_id,
-                    chat_state.auto_continue_count,
-                    msg,
-                    coaching_message=NUDGE_MESSAGE,
-                )
-                chat_state.completion_sent = True
-                chat_state.defer_reaction = True
-                return
-            else:
-                # Safety cap reached on empty output
-                logger.warning(
-                    f"[{job.project_key}] Empty output and nudge cap reached — delivering fallback"
-                )
-                await send_cb(
-                    job.chat_id,
-                    "The task completed but produced no output. "
-                    "Please re-trigger if you expected results.",
-                    job.message_id,
-                    agent_session,
-                )
-                chat_state.completion_sent = True
-                return
-
-        # Safety cap: if we've nudged too many times, deliver regardless
-        if chat_state.auto_continue_count >= MAX_NUDGE_COUNT:
-            logger.warning(
-                f"[{job.project_key}] Nudge safety cap reached "
-                f"({chat_state.auto_continue_count}/{MAX_NUDGE_COUNT}) — "
-                f"delivering to Telegram"
+            logger.info(
+                f"[{job.project_key}] Empty output — nudging "
+                f"(nudge {chat_state.auto_continue_count}/{MAX_NUDGE_COUNT})"
             )
-            await send_cb(job.chat_id, msg, job.message_id, agent_session)
+            await _enqueue_nudge(
+                job,
+                branch_name,
+                task_list_id,
+                chat_state.auto_continue_count,
+                msg,
+                coaching_message=NUDGE_MESSAGE,
+            )
             chat_state.completion_sent = True
-            return
+            chat_state.defer_reaction = True
 
-        # Completion detection: end_turn with substantial output → deliver
-        # This is the primary heuristic. ChatSession decides when it's done
-        # by producing a final message and stopping naturally.
-        if stop_reason in ("end_turn", None) and len(msg.strip()) > 0:
+        elif action == "deliver_fallback":
+            logger.warning(
+                f"[{job.project_key}] Empty output and nudge cap reached — delivering fallback"
+            )
+            await send_cb(
+                job.chat_id,
+                "The task completed but produced no output. "
+                "Please re-trigger if you expected results.",
+                job.message_id,
+                agent_session,
+            )
+            chat_state.completion_sent = True
+
+        elif action == "deliver":
             await send_cb(job.chat_id, msg, job.message_id, agent_session)
             chat_state.completion_sent = True
             logger.info(
                 f"[{job.project_key}] Delivered to Telegram "
                 f"(stop_reason={stop_reason}, {len(msg)} chars)"
             )
-            return
-
-        # Unknown stop reason or other case — deliver to human
-        logger.info(
-            f"[{job.project_key}] Delivering output (stop_reason={stop_reason}, {len(msg)} chars)"
-        )
-        await send_cb(job.chat_id, msg, job.message_id, agent_session)
-        chat_state.completion_sent = True
 
     messenger = BossMessenger(
         _send_callback=send_to_chat,

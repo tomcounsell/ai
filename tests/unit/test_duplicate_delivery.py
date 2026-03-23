@@ -152,8 +152,8 @@ class TestCompletedSessionGuard:
 
         job_queue_code = Path("agent/job_queue.py").read_text()
 
-        # The guard should check agent_session.status == "completed"
-        assert 'agent_session.status == "completed"' in job_queue_code
+        # The guard should check session_status == "completed" (in classify_nudge_action)
+        assert 'session_status == "completed"' in job_queue_code
         # It should deliver to chat without nudge
         assert "delivering without nudge" in job_queue_code
 
