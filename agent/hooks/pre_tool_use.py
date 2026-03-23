@@ -1,13 +1,21 @@
-"""PreToolUse hook: blocks writes to sensitive files and registers DevSessions."""
+"""PreToolUse hook: blocks sensitive writes, enforces PM restrictions, registers DevSessions."""
 
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 from claude_agent_sdk import HookContext, PreToolUseHookInput
 
 logger = logging.getLogger(__name__)
+
+# Paths the PM (ChatSession) is allowed to write to.
+# Everything else is blocked for PM sessions.
+PM_ALLOWED_WRITE_PREFIXES = (
+    "docs/",
+    "/docs/",
+)
 
 # Files that should never be written to by the agent
 SENSITIVE_PATHS = frozenset(
@@ -28,6 +36,26 @@ SENSITIVE_FRAGMENTS = (
     "/.ssh/",
     "/private_key",
 )
+
+
+def _is_pm_session() -> bool:
+    """Check if the current session is a PM (ChatSession)."""
+    return os.environ.get("SESSION_TYPE") == "chat"
+
+
+def _is_pm_allowed_write(file_path: str) -> bool:
+    """Check if the PM is allowed to write to this path.
+
+    PM sessions can only write to docs/ directories.
+    """
+    if not file_path:
+        return False
+    normalized = file_path.replace("\\", "/")
+    # Check against allowed prefixes (relative and absolute)
+    for prefix in PM_ALLOWED_WRITE_PREFIXES:
+        if prefix in normalized:
+            return True
+    return False
 
 
 def _is_sensitive_path(file_path: str) -> bool:
@@ -119,6 +147,17 @@ async def pre_tool_use_hook(
                 "reason": (
                     f"Blocked: writing to sensitive file '{file_path}' is not allowed. "
                     "Sensitive files (.env, credentials, secrets) must be managed manually."
+                ),
+            }
+        # PM sessions can only write to docs/
+        if _is_pm_session() and not _is_pm_allowed_write(file_path):
+            logger.warning(f"[pre_tool_use] PM blocked from writing to: {file_path}")
+            return {
+                "decision": "block",
+                "reason": (
+                    f"Blocked: PM session cannot write to '{file_path}'. "
+                    "PM can only write to docs/ directories. "
+                    "Spawn a dev-session subagent for code changes."
                 ),
             }
 

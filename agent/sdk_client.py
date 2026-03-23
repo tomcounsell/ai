@@ -777,6 +777,7 @@ class ValorAgent:
         job_id: str | None = None,
         gh_repo: str | None = None,
         target_repo: str | None = None,
+        session_type: str | None = None,
     ):
         """
         Initialize ValorAgent.
@@ -797,6 +798,8 @@ class ValorAgent:
             target_repo: Absolute path to the target project's repo root. For
                 cross-repo SDLC builds this differs from working_dir (the
                 orchestrator). Defaults to working_dir when not specified.
+            session_type: Session type ("chat" for PM, None for dev). Injected as
+                SESSION_TYPE env var so hooks can enforce write restrictions.
         """
         default_dir = Path(__file__).parent.parent
         allowed_root = Path.home() / "src"
@@ -812,6 +815,7 @@ class ValorAgent:
         self.job_id = job_id
         self.gh_repo = gh_repo or None  # Normalize empty string to None
         self.target_repo = target_repo
+        self.session_type = session_type
 
     def _create_options(self, session_id: str | None = None) -> ClaudeAgentOptions:
         """Create ClaudeAgentOptions configured for Valor with full permissions.
@@ -857,6 +861,8 @@ class ValorAgent:
             env["GH_REPO"] = self.gh_repo
         if self.target_repo:
             env["SDLC_TARGET_REPO"] = str(self.target_repo)
+        if self.session_type:
+            env["SESSION_TYPE"] = self.session_type
 
         # SDLC context injection: pre-resolve session fields as env vars so
         # skills can reference $SDLC_PR_NUMBER etc. instead of guessing (issue #420).
@@ -1351,13 +1357,12 @@ async def get_agent_response_sdk(
 
         # ChatSession: orchestrate via dev-session subagent for full pipeline
         enriched_message += (
-            "\n\nYou are the ChatSession orchestrator (PM persona). "
-            "You are in READ-ONLY mode — you cannot write code or edit files. "
-            "To do coding work, use the Agent tool: "
+            "\n\nYou are the PM. Gather context (check issue/PR state), "
+            "then dispatch coding work via: "
             'Agent(subagent_type="dev-session", description="<short desc>", '
             'prompt="<full context including issue/PR URLs and what to do>"). '
-            "The dev-session has full write permissions and executes the SDLC pipeline. "
-            "Wait for its result, then compose the delivery message for Telegram."
+            "The dev-session executes the SDLC pipeline. "
+            "Wait for its result, then compose the delivery message."
         )
     enriched_message += f"\nMESSAGE: {message}"
 
@@ -1390,11 +1395,10 @@ async def get_agent_response_sdk(
         _permission_mode = "bypassPermissions"  # Default: full permissions
 
         if _session_type == "chat":
-            # ChatSession: PM persona, read-only permissions.
-            # Orchestrates work via dev-session subagent.
+            # ChatSession: PM persona, full permissions but hook-restricted.
+            # Can write to docs/ and use gh CLI. Code writes blocked by pre_tool_use hook.
             custom_system_prompt = load_pm_system_prompt(working_dir)
-            _permission_mode = "plan"  # Read-only: no Write, Edit, NotebookEdit
-            logger.info(f"[{request_id}] ChatSession mode: PM persona, permission_mode=plan")
+            logger.info(f"[{request_id}] ChatSession mode: PM persona, bypassPermissions")
         elif project_mode == "pm":
             # PM mode: use PM system prompt (no WORKER_RULES, loads work-vault CLAUDE.md)
             custom_system_prompt = load_pm_system_prompt(working_dir)
@@ -1436,6 +1440,7 @@ async def get_agent_response_sdk(
             job_id=job_id,
             gh_repo=_gh_repo,
             target_repo=project_working_dir,
+            session_type=_session_type,
         )
         response = await agent.query(enriched_message, session_id=session_id)
 
