@@ -4,11 +4,23 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Any
 
 from claude_agent_sdk import HookContext, PreToolUseHookInput
 
 logger = logging.getLogger(__name__)
+
+# Known SDLC stages for extraction from dev-session prompts
+_SDLC_STAGE_NAMES = frozenset(
+    {"ISSUE", "PLAN", "CRITIQUE", "BUILD", "TEST", "PATCH", "REVIEW", "DOCS", "MERGE"}
+)
+
+# Pattern: "Stage: BUILD", "Stage to execute -- BUILD", "Stage to execute: BUILD"
+_STAGE_PATTERN = re.compile(
+    r"Stage(?:\s+to\s+execute)?[\s:\-]+(\b(?:" + "|".join(_SDLC_STAGE_NAMES) + r")\b)",
+    re.IGNORECASE,
+)
 
 # Paths the PM (ChatSession) is allowed to write to.
 # Everything else is blocked for PM sessions.
@@ -79,6 +91,63 @@ def _is_sensitive_path(file_path: str) -> bool:
     return False
 
 
+def _extract_stage_from_prompt(prompt: str) -> str | None:
+    """Extract an SDLC stage name from a dev-session prompt.
+
+    The PM includes the stage assignment in the prompt when dispatching
+    dev-sessions (e.g., "Stage: BUILD", "Stage to execute -- PLAN").
+    Returns the uppercase stage name or None if no stage is found.
+    """
+    if not prompt:
+        return None
+
+    # Try structured pattern first (e.g., "Stage: BUILD")
+    match = _STAGE_PATTERN.search(prompt)
+    if match:
+        return match.group(1).upper()
+
+    # Fallback: scan for standalone stage names near "stage" keyword
+    prompt_upper = prompt.upper()
+    if "STAGE" in prompt_upper:
+        for stage in _SDLC_STAGE_NAMES:
+            if stage in prompt_upper:
+                return stage
+
+    return None
+
+
+def _start_pipeline_stage(parent_session_id: str, stage: str) -> None:
+    """Start an SDLC stage on the parent ChatSession's PipelineStateMachine.
+
+    Loads the parent AgentSession from Redis, creates a PipelineStateMachine,
+    and calls start_stage(). This marks the stage as in_progress so that
+    subagent_stop can later find and complete it.
+
+    Failures are logged but never raised -- this must not block the Agent tool.
+    """
+    try:
+        from bridge.pipeline_state import PipelineStateMachine
+        from models.agent_session import AgentSession
+
+        parent_sessions = list(AgentSession.query.filter(session_id=parent_session_id))
+        if not parent_sessions:
+            logger.warning(
+                f"[pre_tool_use] Parent session {parent_session_id} not found, "
+                f"skipping start_stage({stage})"
+            )
+            return
+
+        parent = parent_sessions[0]
+        sm = PipelineStateMachine(parent)
+        sm.start_stage(stage)
+        logger.info(f"[pre_tool_use] Started pipeline stage {stage} on session {parent_session_id}")
+    except Exception as e:
+        logger.warning(
+            f"[pre_tool_use] Failed to start pipeline stage {stage} "
+            f"on session {parent_session_id}: {e}"
+        )
+
+
 def _maybe_register_dev_session(tool_input: dict[str, Any]) -> None:
     """Register a DevSession in Redis when the Agent tool spawns a dev-session.
 
@@ -112,6 +181,18 @@ def _maybe_register_dev_session(tool_input: dict[str, Any]) -> None:
         )
     except Exception as e:
         logger.warning(f"[pre_tool_use] Failed to register DevSession: {e}")
+
+    # Wire PipelineStateMachine.start_stage() so subagent_stop can later
+    # find the in_progress stage and mark it completed.
+    full_prompt = tool_input.get("prompt", "")
+    stage = _extract_stage_from_prompt(full_prompt)
+    if stage:
+        _start_pipeline_stage(parent_session_id, stage)
+    else:
+        logger.debug(
+            f"[pre_tool_use] No SDLC stage found in dev-session prompt, "
+            f"skipping start_stage (prompt[:100]={full_prompt[:100]!r})"
+        )
 
 
 async def pre_tool_use_hook(

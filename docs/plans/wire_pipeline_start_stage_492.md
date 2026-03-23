@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: Complete
 type: bug
 appetite: Small
 owner: Valor
