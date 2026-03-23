@@ -20,6 +20,7 @@ from pathlib import Path
 # "patch" may be re-entered multiple times (tracked via patch_iterations).
 STAGES = [
     "plan",
+    "critique",
     "branch",
     "implement",
     "test",
