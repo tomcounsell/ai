@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agent.hooks.subagent_stop import (
-    _get_sdlc_stages,
+    _get_stage_states,
     _register_dev_session_completion,
     subagent_stop_hook,
 )
@@ -123,40 +123,23 @@ class TestRegisterDevSessionCompletion:
 
 
 class TestGetSdlcStages:
-    """Test _get_sdlc_stages helper."""
+    """Test _get_stage_states helper."""
 
     def test_returns_stage_data_as_string(self):
         """Should return parsed stage data when available."""
         stage_data = {"PLAN": "done", "BUILD": "pending"}
         mock_session = MagicMock()
-        mock_session.sdlc_stages = json.dumps(stage_data)
-        mock_session.stage_states = None
-
-        mock_module = MagicMock()
-        mock_module.AgentSession.query.filter.return_value = [mock_session]
-
-        with patch.dict("sys.modules", {"models.agent_session": mock_module}):
-            result = _get_sdlc_stages("session-1")
-
-        assert result is not None
-        assert "PLAN" in result
-        assert "done" in result
-
-    def test_falls_back_to_stage_states(self):
-        """Should use stage_states when sdlc_stages is None."""
-        stage_data = {"BUILD": "in_progress"}
-        mock_session = MagicMock()
-        mock_session.sdlc_stages = None
         mock_session.stage_states = json.dumps(stage_data)
 
         mock_module = MagicMock()
         mock_module.AgentSession.query.filter.return_value = [mock_session]
 
         with patch.dict("sys.modules", {"models.agent_session": mock_module}):
-            result = _get_sdlc_stages("session-1")
+            result = _get_stage_states("session-1")
 
         assert result is not None
-        assert "BUILD" in result
+        assert "PLAN" in result
+        assert "done" in result
 
     def test_returns_none_when_no_sessions(self):
         """Should return None when no sessions found."""
@@ -164,21 +147,20 @@ class TestGetSdlcStages:
         mock_module.AgentSession.query.filter.return_value = []
 
         with patch.dict("sys.modules", {"models.agent_session": mock_module}):
-            result = _get_sdlc_stages("nonexistent")
+            result = _get_stage_states("nonexistent")
 
         assert result is None
 
     def test_returns_none_when_no_stage_data(self):
         """Should return None when session has no stage data."""
         mock_session = MagicMock()
-        mock_session.sdlc_stages = None
         mock_session.stage_states = None
 
         mock_module = MagicMock()
         mock_module.AgentSession.query.filter.return_value = [mock_session]
 
         with patch.dict("sys.modules", {"models.agent_session": mock_module}):
-            result = _get_sdlc_stages("session-1")
+            result = _get_stage_states("session-1")
 
         assert result is None
 
@@ -186,14 +168,13 @@ class TestGetSdlcStages:
         """Should handle stage data that is already a dict (not JSON string)."""
         stage_data = {"TEST": "passed"}
         mock_session = MagicMock()
-        mock_session.sdlc_stages = stage_data
-        mock_session.stage_states = None
+        mock_session.stage_states = stage_data
 
         mock_module = MagicMock()
         mock_module.AgentSession.query.filter.return_value = [mock_session]
 
         with patch.dict("sys.modules", {"models.agent_session": mock_module}):
-            result = _get_sdlc_stages("session-1")
+            result = _get_stage_states("session-1")
 
         assert result is not None
         assert "TEST" in result
@@ -201,7 +182,7 @@ class TestGetSdlcStages:
     def test_handles_import_error(self):
         """Should return None on import error."""
         with patch.dict("sys.modules", {"models.agent_session": None}):
-            result = _get_sdlc_stages("session-1")
+            result = _get_stage_states("session-1")
         assert result is None
 
     def test_handles_query_error(self):
@@ -210,7 +191,7 @@ class TestGetSdlcStages:
         mock_module.AgentSession.query.filter.side_effect = RuntimeError("Redis down")
 
         with patch.dict("sys.modules", {"models.agent_session": mock_module}):
-            result = _get_sdlc_stages("session-1")
+            result = _get_stage_states("session-1")
 
         assert result is None
 
@@ -226,7 +207,7 @@ class TestSubagentStopHookDevSession:
         with (
             patch("agent.hooks.subagent_stop._register_dev_session_completion") as mock_reg,
             patch(
-                "agent.hooks.subagent_stop._get_sdlc_stages",
+                "agent.hooks.subagent_stop._get_stage_states",
                 return_value="{'PLAN': 'done', 'BUILD': 'done'}",
             ) as mock_stages,
         ):
@@ -256,7 +237,7 @@ class TestSubagentStopHookDevSession:
 
         with (
             patch("agent.hooks.subagent_stop._register_dev_session_completion"),
-            patch("agent.hooks.subagent_stop._get_sdlc_stages", return_value=None),
+            patch("agent.hooks.subagent_stop._get_stage_states", return_value=None),
         ):
             input_data = {"agent_type": "dev-session", "agent_id": "dev-3"}
             result = await subagent_stop_hook(input_data, None, None)

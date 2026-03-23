@@ -854,98 +854,6 @@ def _parse_classification_response(raw: str) -> ClassificationResult | None:
     return result
 
 
-def _render_stage_progress(session) -> str | None:
-    """Render SDLC stage progress line from session state.
-
-    Uses PipelineStateMachine as the single source of truth for stage state.
-
-    Returns two lines like:
-        ISSUE 243 → ☑ PLAN → ▶ BUILD
-        ☐ TEST → ☐ REVIEW → ☐ DOCS
-    Returns None if no stage data is available.
-    """
-    if not session:
-        return None
-
-    from bridge.pipeline_state import PipelineStateMachine
-
-    sm = PipelineStateMachine(session)
-    progress = sm.get_display_progress()
-
-    # Only render if at least one stage has progressed beyond pending/ready
-    if all(v in ("pending", "ready") for v in progress.values()):
-        return None
-
-    from models.agent_session import SDLC_STAGES
-
-    # Extract issue number from session links for the ISSUE stage label
-    issue_number = None
-    links = session.get_links() if hasattr(session, "get_links") else {}
-    if links and "issue" in links:
-        match = re.search(r"/issues/(\d+)", links["issue"])
-        if match:
-            issue_number = match.group(1)
-
-    parts = []
-    for stage in SDLC_STAGES:
-        status = progress.get(stage, "pending")
-        # Build the label — ISSUE stage gets the issue number appended
-        if stage == "ISSUE" and issue_number:
-            label = f"ISSUE {issue_number}"
-        else:
-            label = stage
-
-        if stage == "ISSUE":
-            # ISSUE has no checkbox — just label (with optional number)
-            if status == "in_progress":
-                parts.append(f"▶ {label}")
-            else:
-                parts.append(label)
-        elif status == "completed":
-            parts.append(f"☑ {label}")
-        elif status == "in_progress":
-            parts.append(f"▶ {label}")
-        elif status == "failed":
-            parts.append(f"✗ {label}")
-        else:
-            # pending or ready
-            parts.append(f"☐ {label}")
-
-    line1 = " → ".join(parts[:3])
-    line2 = " → ".join(parts[3:])
-    return f"{line1}\n{line2}"
-
-
-def _render_link_footer(session) -> str | None:
-    """Render link footer from session's tracked links.
-
-    Returns a line like: Issue #168 | PR #176
-    with markdown links. Plan links are excluded — only issue and PR links
-    are rendered. Returns None if no links exist.
-    """
-    if not session:
-        return None
-
-    links = session.get_links()
-    if not links:
-        return None
-
-    parts = []
-    for kind, url in links.items():
-        if kind == "issue":
-            # Extract issue number from URL
-            match = re.search(r"/issues/(\d+)", url)
-            label = f"Issue #{match.group(1)}" if match else "Issue"
-            parts.append(f"[{label}]({url})")
-        elif kind == "pr":
-            match = re.search(r"/pull/(\d+)", url)
-            label = f"PR #{match.group(1)}" if match else "PR"
-            parts.append(f"[{label}]({url})")
-        # Plan links are intentionally excluded
-
-    return " | ".join(parts) if parts else None
-
-
 def _linkify_references(text: str, session) -> str:
     """Convert plain PR #N and Issue #N references to markdown links.
 
@@ -1397,17 +1305,6 @@ def _compose_structured_summary(summary_text: str, session=None, is_completion: 
     emoji = _get_status_emoji(session, is_completion)
     parts.append(emoji)
 
-    # Stage progress line — mandatory for SDLC, optional for others
-    stage_line = _render_stage_progress(session)
-    if stage_line:
-        parts.append(stage_line)
-        logger.info(
-            f"Rendered stage progress for session "
-            f"{session.session_id if session else 'N/A'}: {stage_line}"
-        )
-    elif session and hasattr(session, "is_sdlc") and session.is_sdlc:
-        logger.warning(f"SDLC session {session.session_id} has no stage progress to render")
-
     # Summary text (bullets or prose)
     parts.append(bullets.strip())
 
@@ -1415,11 +1312,6 @@ def _compose_structured_summary(summary_text: str, session=None, is_completion: 
     if questions:
         parts.append("")  # blank line separator
         parts.append(questions)
-
-    # Link footer — mandatory for SDLC jobs
-    link_footer = _render_link_footer(session)
-    if link_footer:
-        parts.append(link_footer)
 
     # Linkify PR #N and Issue #N references
     result = "\n".join(parts)

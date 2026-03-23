@@ -3,7 +3,7 @@
 Covers the gaps identified in PR #180 review:
 1. AgentSession history tracking (append_history, cap at 20, get_stage_progress)
 2. AgentSession link tracking (set_link, get_links)
-3. Summarizer composition (_compose_structured_summary, _render_stage_progress, _render_link_footer)
+3. Summarizer composition (_compose_structured_summary)
 4. Summarizer with session context (summarize_response with session param)
 5. Markdown send (send_markdown fallback behavior)
 6. Backward compat (SessionLog shim, RedisJob alias, sender property)
@@ -243,87 +243,6 @@ class TestLinkTracking:
 # ── Summarizer Composition ────────────────────────────────────────────────────
 
 
-class TestRenderStageProgress:
-    """Tests for _render_stage_progress."""
-
-    def test_no_session(self):
-        from bridge.summarizer import _render_stage_progress
-
-        assert _render_stage_progress(None) is None
-
-    def test_no_progress(self, session):
-        from bridge.summarizer import _render_stage_progress
-
-        assert _render_stage_progress(session) is None
-
-    def test_full_completion(self, sdlc_session):
-        from bridge.summarizer import _render_stage_progress
-
-        line = _render_stage_progress(sdlc_session)
-        assert line is not None
-        assert "ISSUE 177" in line
-        assert "☑ DOCS" in line
-        assert "\u2192" in line
-        # ISSUE has no checkbox
-        assert "☑ ISSUE" not in line
-        assert "☐ ISSUE" not in line
-
-    def test_partial_progress(self, session):
-        from bridge.summarizer import _render_stage_progress
-
-        session.stage_states = _make_stage_states(
-            completed=["ISSUE", "PLAN"],
-            in_progress="BUILD",
-        )
-        session.save()
-        # Need issue link for issue number embedding
-        session.set_link("issue", "https://github.com/tomcounsell/ai/issues/177")
-        line = _render_stage_progress(session)
-        assert "ISSUE 177" in line
-        assert "☑ PLAN" in line
-        assert "▶ BUILD" in line
-        assert "☐ TEST" in line
-
-
-class TestRenderLinkFooter:
-    """Tests for _render_link_footer."""
-
-    def test_no_session(self):
-        from bridge.summarizer import _render_link_footer
-
-        assert _render_link_footer(None) is None
-
-    def test_no_links(self, session):
-        from bridge.summarizer import _render_link_footer
-
-        assert _render_link_footer(session) is None
-
-    def test_issue_link_extracts_number(self, session):
-        from bridge.summarizer import _render_link_footer
-
-        session.set_link("issue", "https://github.com/org/repo/issues/177")
-        footer = _render_link_footer(session)
-        assert "Issue #177" in footer
-        assert "[Issue #177]" in footer
-
-    def test_pr_link_extracts_number(self, session):
-        from bridge.summarizer import _render_link_footer
-
-        session.set_link("pr", "https://github.com/org/repo/pull/180")
-        footer = _render_link_footer(session)
-        assert "PR #180" in footer
-
-    def test_all_links_pipe_separated(self, sdlc_session):
-        from bridge.summarizer import _render_link_footer
-
-        footer = _render_link_footer(sdlc_session)
-        assert " | " in footer
-        assert "Issue #177" in footer
-        assert "PR #180" in footer
-        # Plan links are excluded from the footer
-        assert "Plan" not in footer
-
-
 class TestGetStatusEmoji:
     """Tests for _get_status_emoji."""
 
@@ -387,18 +306,8 @@ class TestComposeStructuredSummary:
         lines = result.split("\n")
         # Line 1: emoji only (no message echo)
         assert "\u2705" in lines[0]
-        # Stage progress line includes issue number
-        assert "ISSUE 177" in result
-        assert "DOCS" in result
-        # Completed stages show checkmark, no pending unchecked (all stages are completed)
-        assert "\u2611 PLAN" in result
-        assert "\u2610" not in result
         # Bullets present
         assert "\u2022 Unified AgentSession model" in result
-        # Link footer (no plan link)
-        assert "Issue #177" in result
-        assert "PR #180" in result
-        assert "Plan" not in result
 
     def test_qa_session_no_stages(self, qa_session):
         from bridge.summarizer import _compose_structured_summary
@@ -480,13 +389,6 @@ class TestSummarizeWithSession:
             result = await summarize_response(long_text, session=sdlc_session)
 
         assert result.was_summarized is True
-        # Structured composition adds stage progress and links (new format)
-        assert "ISSUE 177" in result.text
-        assert "Issue #177" in result.text
-        assert "PR #180" in result.text
-        # Completed stages show checkmark, no pending unchecked (all stages completed)
-        assert "\u2611 PLAN" in result.text
-        assert "\u2610" not in result.text
         # The haiku output is included
         assert "Built the feature" in result.text
 
@@ -505,8 +407,7 @@ class TestSummarizeWithSession:
             result = await summarize_response(long_text, session=qa_session)
 
         assert result.was_summarized is True
-        # No stage progress for Q&A
-        assert "☑" not in result.text
+        # No stage-related content for Q&A
         assert "FILO" in result.text
 
     @pytest.mark.asyncio
@@ -720,22 +621,15 @@ class TestSDLCLifecycle:
             is_completion=True,
         )
 
-        # Verify full structured output -- completed stages show checkmark, no pending
-        assert "ISSUE 177" in result
-        assert "DOCS" in result
-        assert "\u2611 PLAN" in result
-        assert "\u2610" not in result
+        # Verify structured output has emoji and content
         assert "\u2022 Unified AgentSession model" in result
-        assert "Issue #177" in result
-        assert "PR #180" in result
 
 
 class TestSDLCClassificationTypeLifecycle:
     """Simulate SDLC session using classification_type='sdlc' (issue #276 fix).
 
     Verifies that sessions classified as 'sdlc' by the classifier render
-    with the structured SDLC template (stage progress line + link footer),
-    even before any [stage] history entries are added.
+    with the structured summary template.
     """
 
     @pytest.mark.asyncio
@@ -774,13 +668,6 @@ class TestSDLCClassificationTypeLifecycle:
             is_completion=False,
         )
 
-        # Stage progress should render
-        assert "ISSUE 276" in result
-        assert "\u2611 PLAN" in result
-        assert "\u25b6 BUILD" in result
-        assert "\u2610 TEST" in result
-        # Link footer should render
-        assert "Issue #276" in result
         # Content should be present
         assert "Fixed classifier" in result
 
@@ -825,12 +712,8 @@ class TestSDLCClassificationTypeLifecycle:
             is_completion=True,
         )
 
-        # Full SDLC template should render
-        assert "ISSUE 276" in result
-        assert "\u2611 DOCS" in result
-        assert "Issue #276" in result
-        assert "PR #277" in result
-        assert "\u2610" not in result  # No pending stages
+        # Content should be present
+        assert "All stages complete" in result
 
 
 class TestQALifecycle:
