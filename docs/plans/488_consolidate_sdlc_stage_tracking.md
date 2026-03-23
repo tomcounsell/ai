@@ -44,19 +44,21 @@ Retire `sdlc_stages` field, consolidate to `stage_states` only, and wire Pipelin
 - [x] Add a `record_stage_completion(session, stage)` helper function in `bridge/pipeline_state.py` that calls `start_stage()` then `complete_stage()` in one shot (for skills that complete atomically)
 - [x] Wire stage recording into each SDLC skill's completion path: update `.claude/skills/sdlc/SKILL.md` to instruct DevSession agents to call `PipelineStateMachine.complete_stage()` at the end of each stage
 - [x] Update `AgentSession.has_remaining_stages()` and `has_failed_stage()` to use `stage_states` via PipelineStateMachine instead of history parsing
-- [ ] Remove `get_stage_progress()` history-parsing method (replaced by PipelineStateMachine.get_display_progress())
-- [ ] Update `/do-merge` gate check to read `stage_states` via PipelineStateMachine and report incomplete stages as a strong recommendation
+- [x] Remove `get_stage_progress()` history-parsing method — refactored to delegate to PipelineStateMachine.get_display_progress() (history parsing logic removed, method kept as thin public API wrapper)
+- [x] Update `/do-merge` gate check to read `stage_states` via PipelineStateMachine — `.claude/commands/do-merge.md` already uses PipelineStateMachine
 
 ### Phase 2: Eliminate naming conflict
 
 - [x] Rename `agent/pipeline_state.py` to `agent/build_pipeline.py`
 - [x] Update all imports referencing `agent.pipeline_state` (grep for `from agent.pipeline_state` and `import agent.pipeline_state`)
 
-### Phase 3: Remove dead enrichment fields
+### Phase 3: Remove dead enrichment fields — DESCOPED
 
-- [ ] Remove fields from AgentSession: `has_media`, `media_type`, `youtube_urls`, `non_youtube_urls`, `reply_to_msg_id`, `chat_id_for_enrichment`
-- [ ] Remove the "deprecated" comment block (lines 93-101)
-- [ ] Audit `tools/telegram_history/` and any remaining readers of these fields; update to read from TelegramMessage instead
+> **Descoped:** Fields are actively used by the bridge enrichment pipeline (8+ consumers including bridge/enrichment.py, bridge/media.py, bridge/routing.py, bridge/telegram_bridge.py, agent/job_queue.py, agent/sdk_client.py, bridge/catchup.py, bridge/context.py). Original recon incorrectly identified these as dead. The comment was corrected from "deprecated" to document actual usage.
+
+- ~~Remove fields from AgentSession: `has_media`, `media_type`, `youtube_urls`, `non_youtube_urls`, `reply_to_msg_id`, `chat_id_for_enrichment`~~ N/A
+- ~~Remove the "deprecated" comment block (lines 93-101)~~ N/A — comment corrected to reflect actual usage
+- ~~Audit `tools/telegram_history/` and any remaining readers of these fields~~ N/A — fields are actively read
 
 ### Phase 4: Clean up Observer remnants
 
@@ -70,7 +72,7 @@ Retire `sdlc_stages` field, consolidate to `stage_states` only, and wire Pipelin
 
 - [x] Remove `last_transition_at` field from AgentSession
 - [x] Update `log_lifecycle_transition()` to derive duration from the last history entry timestamp instead
-- [ ] Remove dual `get_stage_progress()` path in summarizer -- use only PipelineStateMachine.get_display_progress()
+- [x] Remove dual `get_stage_progress()` path in summarizer — `_render_stage_progress()` now uses only PipelineStateMachine.get_display_progress()
 
 ### Phase 6: Add legacy cruft auditor to /do-pr-review
 
@@ -144,13 +146,13 @@ No new MCP server exposure needed. The changes are internal to the bridge and mo
 
 ## Success Criteria
 
-- [ ] One field for stage state (`stage_states`), no `sdlc_stages` field, no fallback chains
-- [ ] Each SDLC skill records stage completion via PipelineStateMachine
-- [ ] `/do-merge` checks stage_states and reports missing stages
-- [ ] No dead enrichment fields, no orphaned Observer code, no deprecated `last_transition_at`
-- [ ] `agent/pipeline_state.py` renamed to `agent/build_pipeline.py` (no naming collision)
-- [ ] `/do-pr-review` includes a legacy cruft audit subsection
-- [ ] All affected tests updated, passing
+- [x] One field for stage state (`stage_states`), no `sdlc_stages` field, no fallback chains
+- [x] Each SDLC skill records stage completion via PipelineStateMachine
+- [x] `/do-merge` checks stage_states and reports missing stages
+- [x] No orphaned Observer code, no deprecated `last_transition_at` (enrichment fields descoped — see Phase 3)
+- [x] `agent/pipeline_state.py` renamed to `agent/build_pipeline.py` (no naming collision)
+- [x] `/do-pr-review` includes a legacy cruft audit subsection
+- [x] All affected tests updated, passing
 
 ## Documentation
 
