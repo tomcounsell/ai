@@ -1515,8 +1515,14 @@ async def main():
             logger.info(f"[{_pkey}] Recovered {orphans} orphaned job(s)")
         pending_jobs = _get_pending_jobs_sync(_pkey)
         if pending_jobs:
-            logger.info(f"[{_pkey}] Found {len(pending_jobs)} persisted job(s), restarting worker")
-            _ensure_worker(_pkey)
+            logger.info(f"[{_pkey}] Found {len(pending_jobs)} persisted job(s), restarting workers")
+            # Start a worker for each unique chat_id that has pending jobs
+            started_chats = set()
+            for _job in pending_jobs:
+                _cid = _job.chat_id or _pkey
+                if _cid not in started_chats:
+                    _ensure_worker(_cid)
+                    started_chats.add(_cid)
 
     # Scan for missed messages during downtime (catchup) -- run concurrently
 
@@ -1586,9 +1592,36 @@ async def main():
 
     async def heartbeat_loop():
         while True:
-            await asyncio.sleep(120)
+            await asyncio.sleep(30)
             uptime_min = int((time.time() - _bridge_start_time) / 60)
-            logger.info(f"[heartbeat] Bridge alive (uptime={uptime_min}m)")
+
+            # Check for orphaned pending jobs when no workers are active
+            from agent.job_queue import _active_workers
+
+            active_count = sum(1 for w in _active_workers.values() if not w.done())
+            if active_count == 0:
+                try:
+                    from models.agent_session import AgentSession
+
+                    for _pkey in ACTIVE_PROJECTS:
+                        pending = await AgentSession.query.async_filter(
+                            project_key=_pkey, status="pending"
+                        )
+                        for job in pending:
+                            cid = job.chat_id or _pkey
+                            _ensure_worker(cid)
+                            logger.info(
+                                f"[heartbeat] Started worker for orphaned job "
+                                f"{job.job_id} (chat={cid})"
+                            )
+                except Exception as e:
+                    logger.debug(f"[heartbeat] Job poll error: {e}")
+
+            # Log heartbeat every 4th tick (~2min) for watchdog
+            if uptime_min > 0 and uptime_min % 2 == 0:
+                logger.info(
+                    f"[heartbeat] Bridge alive (uptime={uptime_min}m, workers={active_count})"
+                )
 
     asyncio.create_task(heartbeat_loop())
 
