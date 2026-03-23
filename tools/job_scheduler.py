@@ -837,9 +837,7 @@ def cmd_kill(args: argparse.Namespace) -> int:
                         break
 
             if not targets:
-                _output(
-                    {"status": "error", "message": f"Job {args.job_id} not found."}
-                )
+                _output({"status": "error", "message": f"Job {args.job_id} not found."})
                 return 1
 
         elif args.session_id:
@@ -855,13 +853,14 @@ def cmd_kill(args: argparse.Namespace) -> int:
                     break
 
             if not targets:
-                _output(
-                    {"status": "error", "message": f"Session {args.session_id} not found."}
-                )
+                _output({"status": "error", "message": f"Session {args.session_id} not found."})
                 return 1
         else:
             _output(
-                {"status": "error", "message": "One of --job-id, --session-id, or --all is required."}
+                {
+                    "status": "error",
+                    "message": "One of --job-id, --session-id, or --all is required.",
+                }
             )
             return 1
 
@@ -872,11 +871,13 @@ def cmd_kill(args: argparse.Namespace) -> int:
             kill_result = _kill_job(job, skip_process_kill=skip_process)
             results.append(kill_result)
 
-        _output({
-            "status": "killed",
-            "count": len(results),
-            "jobs": results,
-        })
+        _output(
+            {
+                "status": "killed",
+                "count": len(results),
+                "jobs": results,
+            }
+        )
         return 0
 
     except Exception as e:
