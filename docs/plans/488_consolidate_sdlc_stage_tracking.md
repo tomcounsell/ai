@@ -37,20 +37,20 @@ Six phases, ordered by criticality. Each phase is independently shippable.
 
 Retire `sdlc_stages` field, consolidate to `stage_states` only, and wire PipelineStateMachine into each skill's completion path.
 
-- [ ] Remove `sdlc_stages` field from AgentSession model
-- [ ] Update `create_dev()` factory to stop accepting/populating `sdlc_stages`; pass initial stage state via `stage_states` instead
-- [ ] Simplify `_get_sdlc_stages_dict()` to read only `stage_states` (remove fallback to `sdlc_stages`)
-- [ ] Simplify `is_sdlc` property: check only `stage_states` content and `classification_type == "sdlc"` (remove 4-tier cascade to 2 checks)
-- [ ] Add a `record_stage_completion(session, stage)` helper function in `bridge/pipeline_state.py` that calls `start_stage()` then `complete_stage()` in one shot (for skills that complete atomically)
-- [ ] Wire stage recording into each SDLC skill's completion path: update `.claude/skills/sdlc/SKILL.md` to instruct DevSession agents to call `PipelineStateMachine.complete_stage()` at the end of each stage
-- [ ] Update `AgentSession.has_remaining_stages()` and `has_failed_stage()` to use `stage_states` via PipelineStateMachine instead of history parsing
+- [x] Remove `sdlc_stages` field from AgentSession model
+- [x] Update `create_dev()` factory to stop accepting/populating `sdlc_stages`; pass initial stage state via `stage_states` instead
+- [x] Simplify `_get_sdlc_stages_dict()` to read only `stage_states` (remove fallback to `sdlc_stages`)
+- [x] Simplify `is_sdlc` property: check only `stage_states` content and `classification_type == "sdlc"` (remove 4-tier cascade to 2 checks)
+- [x] Add a `record_stage_completion(session, stage)` helper function in `bridge/pipeline_state.py` that calls `start_stage()` then `complete_stage()` in one shot (for skills that complete atomically)
+- [x] Wire stage recording into each SDLC skill's completion path: update `.claude/skills/sdlc/SKILL.md` to instruct DevSession agents to call `PipelineStateMachine.complete_stage()` at the end of each stage
+- [x] Update `AgentSession.has_remaining_stages()` and `has_failed_stage()` to use `stage_states` via PipelineStateMachine instead of history parsing
 - [ ] Remove `get_stage_progress()` history-parsing method (replaced by PipelineStateMachine.get_display_progress())
 - [ ] Update `/do-merge` gate check to read `stage_states` via PipelineStateMachine and report incomplete stages as a strong recommendation
 
 ### Phase 2: Eliminate naming conflict
 
-- [ ] Rename `agent/pipeline_state.py` to `agent/build_pipeline.py`
-- [ ] Update all imports referencing `agent.pipeline_state` (grep for `from agent.pipeline_state` and `import agent.pipeline_state`)
+- [x] Rename `agent/pipeline_state.py` to `agent/build_pipeline.py`
+- [x] Update all imports referencing `agent.pipeline_state` (grep for `from agent.pipeline_state` and `import agent.pipeline_state`)
 
 ### Phase 3: Remove dead enrichment fields
 
@@ -60,23 +60,23 @@ Retire `sdlc_stages` field, consolidate to `stage_states` only, and wire Pipelin
 
 ### Phase 4: Clean up Observer remnants
 
-- [ ] Delete `monitoring/telemetry.py`
-- [ ] Remove `check_observer_telemetry()` stub from `monitoring/health.py`
-- [ ] Remove the call to `check_observer_telemetry()` from `get_overall_health()`
-- [ ] Fix "Observer / Steering fields" comment on AgentSession line 154 to just "Steering fields"
-- [ ] Remove `tests/unit/test_telemetry.py`
+- [x] Delete `monitoring/telemetry.py`
+- [x] Remove `check_observer_telemetry()` stub from `monitoring/health.py`
+- [x] Remove the call to `check_observer_telemetry()` from `get_overall_health()`
+- [x] Fix "Observer / Steering fields" comment on AgentSession line 154 to just "Steering fields"
+- [x] Remove `tests/unit/test_telemetry.py`
 
 ### Phase 5: Remove deprecated fields and dual progress path
 
-- [ ] Remove `last_transition_at` field from AgentSession
-- [ ] Update `log_lifecycle_transition()` to derive duration from the last history entry timestamp instead
+- [x] Remove `last_transition_at` field from AgentSession
+- [x] Update `log_lifecycle_transition()` to derive duration from the last history entry timestamp instead
 - [ ] Remove dual `get_stage_progress()` path in summarizer -- use only PipelineStateMachine.get_display_progress()
 
 ### Phase 6: Add legacy cruft auditor to /do-pr-review
 
-- [ ] Create a new subagent spec at `.claude/agents/cruft-auditor.md` that scans PR diffs for legacy patterns: deprecated fields still being read/written, fallback chains, dual implementations, dead imports, stale comments referencing deleted systems
-- [ ] Update `/do-pr-review` skill to dispatch the cruft auditor subagent alongside existing review steps
-- [ ] Include findings as a "Legacy Cruft" subsection in PR review output (alongside blockers, tech debt, nits)
+- [x] Create a new subagent spec at `.claude/agents/cruft-auditor.md` that scans PR diffs for legacy patterns: deprecated fields still being read/written, fallback chains, dual implementations, dead imports, stale comments referencing deleted systems
+- [x] Update `/do-pr-review` skill to dispatch the cruft auditor subagent alongside existing review steps
+- [x] Include findings as a "Legacy Cruft" subsection in PR review output (alongside blockers, tech debt, nits)
 
 ## Prerequisites
 
