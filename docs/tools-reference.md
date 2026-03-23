@@ -101,6 +101,11 @@ python -m tools.job_scheduler status
 python -m tools.job_scheduler bump --job-id <JOB_ID>
 python -m tools.job_scheduler pop --project valor
 python -m tools.job_scheduler cancel --job-id <JOB_ID>
+
+# Kill a running or pending job (terminates subprocess, sets status="killed")
+python -m tools.job_scheduler kill --job-id <JOB_ID>
+python -m tools.job_scheduler kill --session-id <SESSION_ID>
+python -m tools.job_scheduler kill --all
 ```
 
 See `docs/features/job-scheduling.md` for full documentation.
