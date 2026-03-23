@@ -75,7 +75,14 @@ STAGE_TO_SKILL: dict[str, str] = {
 # PATCH is intentionally excluded -- it's a routing concept, not a display stage.
 # Used by PipelineStateMachine.get_display_progress() and summarizer rendering.
 DISPLAY_STAGES: list[str] = [
-    "ISSUE", "PLAN", "CRITIQUE", "BUILD", "TEST", "REVIEW", "DOCS", "MERGE",
+    "ISSUE",
+    "PLAN",
+    "CRITIQUE",
+    "BUILD",
+    "TEST",
+    "REVIEW",
+    "DOCS",
+    "MERGE",
 ]
 
 

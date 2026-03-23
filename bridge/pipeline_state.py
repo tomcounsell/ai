@@ -276,9 +276,7 @@ class PipelineStateMachine:
             self.critique_cycle_count += 1
 
         # Mark next stage based on failure edge
-        next_info = get_next_stage(
-            stage, "fail", self.patch_cycle_count, self.critique_cycle_count
-        )
+        next_info = get_next_stage(stage, "fail", self.patch_cycle_count, self.critique_cycle_count)
         if next_info:
             next_stage = next_info[0]
             next_current = self.states.get(next_stage, "pending")

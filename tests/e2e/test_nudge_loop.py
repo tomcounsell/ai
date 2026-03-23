@@ -8,7 +8,7 @@ Uses real Redis, mocks only Claude API and Telegram send.
 
 import asyncio
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 

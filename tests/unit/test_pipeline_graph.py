@@ -148,21 +148,15 @@ class TestMaxCycleLimit:
         assert MAX_PATCH_CYCLES == 3
 
     def test_critique_within_limit(self):
-        result = get_next_stage(
-            "CRITIQUE", "fail", critique_cycle_count=MAX_CRITIQUE_CYCLES - 1
-        )
+        result = get_next_stage("CRITIQUE", "fail", critique_cycle_count=MAX_CRITIQUE_CYCLES - 1)
         assert result == ("PLAN", "/do-plan")
 
     def test_critique_at_limit_returns_none(self):
-        result = get_next_stage(
-            "CRITIQUE", "fail", critique_cycle_count=MAX_CRITIQUE_CYCLES
-        )
+        result = get_next_stage("CRITIQUE", "fail", critique_cycle_count=MAX_CRITIQUE_CYCLES)
         assert result is None
 
     def test_critique_over_limit_returns_none(self):
-        result = get_next_stage(
-            "CRITIQUE", "fail", critique_cycle_count=MAX_CRITIQUE_CYCLES + 1
-        )
+        result = get_next_stage("CRITIQUE", "fail", critique_cycle_count=MAX_CRITIQUE_CYCLES + 1)
         assert result is None
 
     def test_max_critique_cycles_is_2(self):

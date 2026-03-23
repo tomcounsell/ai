@@ -576,9 +576,7 @@ class TestClassifyOutcome:
         """CRITIQUE with 'ready to build' pattern is success."""
         session = _make_session()
         sm = PipelineStateMachine(session)
-        result = sm.classify_outcome(
-            "CRITIQUE", "end_turn", "Verdict: READY TO BUILD"
-        )
+        result = sm.classify_outcome("CRITIQUE", "end_turn", "Verdict: READY TO BUILD")
         assert result == "success"
 
     def test_critique_needs_revision_is_fail(self):
@@ -594,9 +592,7 @@ class TestClassifyOutcome:
         """CRITIQUE with 'major rework' pattern is ambiguous (escalate to human)."""
         session = _make_session()
         sm = PipelineStateMachine(session)
-        result = sm.classify_outcome(
-            "CRITIQUE", "end_turn", "Verdict: MAJOR REWORK required"
-        )
+        result = sm.classify_outcome("CRITIQUE", "end_turn", "Verdict: MAJOR REWORK required")
         assert result == "ambiguous"
 
 
