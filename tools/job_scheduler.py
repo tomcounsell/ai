@@ -243,6 +243,9 @@ def cmd_schedule(args: argparse.Namespace) -> int:
     session_id = f"scheduled-{args.issue}-{uuid.uuid4().hex[:8]}"
     priority = args.priority or "normal"
 
+    # Session type: explicit flag > default (chat for issue-based work)
+    session_type = getattr(args, "session_type", None) or "chat"
+
     # Parent job inheritance
     parent_job_id = getattr(args, "parent_job", None)
     parent_session = None
@@ -301,6 +304,7 @@ def cmd_schedule(args: argparse.Namespace) -> int:
             chat_id=inherited_chat_id,
             message_id=int(ctx["message_id"]) if ctx["message_id"] else 0,
             classification_type=inherited_classification_type,
+            session_type=session_type,
             scheduled_after=scheduled_after,
             scheduling_depth=depth + 1,
             issue_url=issue_url,
@@ -694,6 +698,12 @@ def main():
     sched.add_argument("--priority", choices=["urgent", "high", "normal", "low"], default="normal")
     sched.add_argument("--project", help="Project key (default: from env or 'valor')")
     sched.add_argument("--after", help="Defer execution until this ISO 8601 datetime")
+    sched.add_argument(
+        "--session-type",
+        choices=["chat", "dev"],
+        help="Session type: chat (PM orchestrates) or dev (direct execution). "
+        "Default: chat for issue/PR work, dev for hotfixes.",
+    )
     sched.add_argument(
         "--parent-job",
         help="Parent job ID — creates this as a child job inheriting parent fields",
