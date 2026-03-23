@@ -1355,6 +1355,7 @@ async def get_agent_response_sdk(
         except Exception:
             pass
 
+    # Cross-repo SDLC: inject target repo context
     if project_mode != "pm" and classification == "sdlc" and project_working_dir != AI_REPO_ROOT:
         github_config = project.get("github", {}) if project else {}
         github_org = github_config.get("org", "")
@@ -1365,14 +1366,19 @@ async def get_agent_response_sdk(
         if github_org and github_repo:
             enriched_message += f"\nGITHUB: {github_org}/{github_repo}"
 
-        # ChatSession: orchestrate via dev-session subagent for full pipeline
+    # ChatSession PM dispatch: always inject for chat sessions regardless of
+    # classification or repo. The PM persona has detailed instructions, but
+    # this reinforcement ensures the Agent tool is used instead of Skill tool.
+    if _session_type == "chat":
         enriched_message += (
-            "\n\nYou are the PM. Gather context (check issue/PR state), "
-            "then dispatch coding work via: "
+            "\n\nIMPORTANT: You are the PM. For any coding work, you MUST use "
+            "the Agent tool to spawn a dev-session — do NOT use the Skill tool "
+            "or run /do-build, /do-test, /do-plan, etc. directly.\n"
             'Agent(subagent_type="dev-session", description="<short desc>", '
-            'prompt="<full context including issue/PR URLs and what to do>"). '
-            "The dev-session executes the SDLC pipeline. "
-            "Wait for its result, then compose the delivery message."
+            'prompt="<full context: issue/PR URLs, current SDLC stage, '
+            'acceptance criteria, what to do>")\n'
+            "The dev-session has full write permissions and executes the SDLC "
+            "pipeline. Wait for its result, then compose the delivery message."
         )
     enriched_message += f"\nMESSAGE: {message}"
 
