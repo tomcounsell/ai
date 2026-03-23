@@ -4,7 +4,7 @@ type: feature
 appetite: Medium
 owner: Valor
 created: 2026-03-23
-tracking:
+tracking: https://github.com/tomcounsell/ai/issues/463
 last_comment_id:
 ---
 
