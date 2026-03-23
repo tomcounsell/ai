@@ -41,7 +41,7 @@ The CRITIQUE -> PLAN -> CRITIQUE revision loop is capped at `MAX_CRITIQUE_CYCLES
 | `bridge/pipeline_graph.py` | CRITIQUE edges in PIPELINE_EDGES, STAGE_TO_SKILL, DISPLAY_STAGES |
 | `bridge/pipeline_state.py` | CRITIQUE in ALL_STAGES, classify_outcome patterns, critique_cycle_count |
 | `models/agent_session.py` | CRITIQUE in SDLC_STAGES |
-| `agent/pipeline_state.py` | "critique" in STAGES list |
+| `agent/build_pipeline.py` | "critique" in STAGES list |
 | `.claude/skills/do-plan-critique/SKILL.md` | Step 1.5 for SOURCE_FILES extraction |
 | `.claude/skills/do-plan-critique/CRITICS.md` | SOURCE_FILES block in critic prompt template |
 | `.claude/skills/sdlc/SKILL.md` | CRITIQUE row in dispatch table |

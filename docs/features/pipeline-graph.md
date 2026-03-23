@@ -14,7 +14,7 @@ Before this feature, pipeline routing was defined in three places that disagreed
 |----------|-----------|
 | SDLC `SKILL.md` dispatch table | 9 stages including PATCH |
 | Observer `_STAGE_TO_SKILL` | 6 stages without PATCH |
-| `pipeline_state.py` stage tracking | 6 stages without PATCH |
+| `build_pipeline.py` stage tracking | 6 stages without PATCH |
 
 The Observer's `_next_sdlc_skill()` walked stages linearly and could not model cycles (TEST fail -> PATCH -> TEST). Cycles happened via ad-hoc LLM decisions rather than being encoded in the routing logic.
 
