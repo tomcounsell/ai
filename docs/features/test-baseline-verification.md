@@ -11,12 +11,14 @@ During `/do-test`, when tests fail on a feature branch, the agent would claim "t
 ### Verification Flow
 
 1. **do-test detects failures** -- pytest returns exit code 1 with failing test node IDs
-2. **Dispatch baseline-verifier** -- do-test sends failing test IDs to the `baseline-verifier` subagent
-3. **Subagent creates worktree** -- temporary worktree at main HEAD (`/tmp/baseline-verify-<timestamp>`)
-4. **Run failing tests against main** -- only the failing tests, not the full suite
-5. **Classify each failure** -- deterministic rules, no LLM judgment
-6. **Return structured JSON** -- `regressions`, `pre_existing`, `inconclusive` arrays
-7. **do-test integrates results** -- verified classification table replaces vague claims
+2. **Flaky filter (Step 0.5)** -- retry failing tests once on the feature branch; tests that pass on retry are classified as `FLAKY` and excluded from baseline verification (see [Flaky Filter](test-reliability-flaky-filter.md))
+3. **Dispatch baseline-verifier** -- do-test sends remaining (non-flaky) failing test IDs to the `baseline-verifier` subagent
+4. **Subagent creates worktree** -- temporary worktree at main HEAD (`/tmp/baseline-verify-<timestamp>`)
+5. **Run failing tests against main** -- with `--junitxml=/tmp/baseline-results.xml` for structured output
+6. **Parse results deterministically** -- `xml.etree.ElementTree` parses the junitxml file; no LLM interpretation of console output
+7. **Completeness validation (Step 5.5)** -- ensures every input test ID appears in exactly one classification bucket; missing IDs go to `inconclusive`, duplicates resolve by severity (regression > pre_existing > inconclusive)
+8. **Return structured JSON** -- `regressions`, `pre_existing`, `inconclusive` arrays plus `baseline_commit`
+9. **do-test integrates results** -- verified classification table replaces vague claims
 
 ### Classification Rules
 
@@ -51,6 +53,9 @@ To prevent infinite test-patch-test loops when regression fixes are not convergi
 - **Subagent isolation**: The baseline-verifier runs in its own context to avoid polluting do-test's context window with worktree operations and raw pytest output
 - **Only failing tests**: Only the specific failing tests are run against main, not the full suite. This keeps verification fast
 - **Deterministic classification**: No LLM judgment in the classification step. The rules are mechanical: if it fails on both, it is pre-existing; if it passes on main, it is a regression
+- **junitxml over console parsing**: Pytest's `--junitxml` flag produces structured XML that is parsed with `xml.etree.ElementTree`. This eliminates vulnerabilities to output truncation, test ID format mismatches, status keywords in test names, and traceback interleaving
+- **Flaky filter pre-step**: A single retry on the feature branch catches the most common intermittent failures before incurring the cost of baseline verification (worktree creation + test re-run on main)
+- **Completeness validation**: Every input test ID must appear in exactly one classification bucket. Missing or duplicate IDs are caught and resolved deterministically
 - **Additive OUTCOME fields**: New artifact fields (`regressions`, `pre_existing`, etc.) are additive to the existing OUTCOME contract. Consumers that do not read these fields are unaffected
 
 ## Files
@@ -67,4 +72,9 @@ Baseline verification runs when ALL conditions are true:
 - Current branch is not `main`
 - Fewer than 50 tests failed
 
-Skipped when: all tests pass, running on main, or more than 50 failures (systemic issue).
+Skipped when: all tests pass, running on main, more than 50 failures (systemic issue), or all failures were classified as flaky by the Step 0.5 retry.
+
+## Related
+
+- [Test Reliability: Flaky Filter](test-reliability-flaky-filter.md) -- Flaky filter, junitxml parsing, and completeness validation details
+- [Do-Test](do-test.md) -- The orchestration skill that dispatches baseline verification
