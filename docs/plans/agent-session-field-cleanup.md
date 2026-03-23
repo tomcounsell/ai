@@ -64,15 +64,15 @@ Each phase is a separate commit. Phase 2 requires a migration script. Phase 3 re
 
 - Popoto derives Redis keys from field names, so renames require: add new field alongside old, write a migration script to copy data, update all code references, remove old field
 - Phase 1 fields are safe to remove directly (no reads, or consolidation)
-- For Phase 2 renames, add temporary property aliases on old names that log deprecation warnings, to catch any missed references
-- Phase 3 depends on `scripts/migrate_model_relationships.py` having been run — verify first
+- No backward-compat aliases — we own all consumers, so rename completely in one pass
+- Phase 3 runs `scripts/migrate_model_relationships.py` during the build if not already run
 
 **Rename mapping (Phase 2):**
 
 | Current | New | Rationale |
 |---------|-----|-----------|
-| `message_id` | `tg_message_id` | Clarifies it's a Telegram message ID |
-| `reply_to_msg_id` | `tg_reply_to_msg_id` | Consistent prefix, clarifies Telegram origin |
+| `message_id` | `telegram_message_id` | Clarifies it's a Telegram message ID, not a generic one |
+| `reply_to_msg_id` | `telegram_reply_to_message_id` | Full spelling, consistent prefix, clarifies Telegram origin |
 | `trigger_message_id` | `telegram_message_key` | Clarifies it's a Popoto key to TelegramMessage, not an integer ID |
 | `chat_id_for_enrichment` | `media_source_chat_id` | Describes what the field actually represents |
 
@@ -114,7 +114,7 @@ Each phase is a separate commit. Phase 2 requires a migration script. Phase 3 re
 
 ### Risk 2: Missed code references after rename
 **Impact:** Runtime AttributeError on first access to old field name.
-**Mitigation:** Add temporary `@property` deprecation aliases that log warnings. Run full test suite. Grep for old field names across entire codebase before removing aliases.
+**Mitigation:** Complete rename in one pass — grep for old field names across entire codebase and update all references before committing. Run full test suite. No aliases needed since we own all consumers.
 
 ### Risk 3: Bridge downtime during migration
 **Impact:** Active sessions could fail if model changes while bridge is running.
@@ -172,7 +172,7 @@ No agent integration required — AgentSession is not exposed through any MCP se
 - [ ] `claude_code_session_id` field does not exist in `models/agent_session.py`
 - [ ] `sdlc_stages` field does not exist; `create_dev()` writes to `stage_states`
 - [ ] `last_transition_at` has no "Deprecated" comment
-- [ ] `grep -rn 'message_id' models/agent_session.py` shows only `tg_message_id` and `telegram_message_key`
+- [ ] `grep -rn 'message_id' models/agent_session.py` shows only `telegram_message_id`, `telegram_reply_to_message_id`, and `telegram_message_key`
 - [ ] `grep -rn 'chat_id_for_enrichment' .` returns zero results
 - [ ] `grep -rn 'has_media\|media_type\|youtube_urls\|non_youtube_urls' models/agent_session.py` returns zero results (Phase 3)
 - [ ] New test verifies all `_JOB_FIELDS` entries are valid AgentSession field names (prevents silent drift)
@@ -252,11 +252,11 @@ No agent integration required — AgentSession is not exposed through any MCP se
 - **Assigned To**: rename-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Add new fields alongside old: `tg_message_id`, `tg_reply_to_msg_id`, `telegram_message_key`, `media_source_chat_id`
-- Write migration script `scripts/migrate_agent_session_fields.py` to copy old field values to new fields for all existing records
+- Add new fields alongside old: `telegram_message_id`, `telegram_reply_to_message_id`, `telegram_message_key`, `media_source_chat_id`
+- Write migration script `scripts/migrate_agent_session_fields.py` to copy old field values to new fields and `HDEL` old field names from Redis hashes
 - Update all code references in `agent/`, `bridge/`, `tools/`, `models/`, `scripts/`, `monitoring/` to use new field names
 - Update all test files (24 files) to use new field names
-- Add temporary `@property` aliases for old field names with `logger.warning("Deprecated field name")` for safety
+- Remove old field definitions entirely — no aliases, no backward compat (we own all consumers)
 - Commit: "Rename AgentSession message ID fields and chat_id_for_enrichment for clarity"
 
 ### 4. Validate Phase 2
@@ -265,8 +265,8 @@ No agent integration required — AgentSession is not exposed through any MCP se
 - **Assigned To**: field-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Old field names only appear in `@property` deprecation aliases, not in active code
-- Migration script handles None values and logs counts
+- Zero references to old field names (`message_id`, `reply_to_msg_id`, `trigger_message_id`, `chat_id_for_enrichment`) in any `.py` file
+- Migration script handles None values, logs counts, and `HDEL`s old hash field names
 - Full test suite passes: `pytest tests/ -x -q`
 - Lint passes: `python -m ruff check .`
 
@@ -285,21 +285,9 @@ No agent integration required — AgentSession is not exposed through any MCP se
 - Update tests that reference these deprecated fields
 - Commit: "Remove deprecated media fields from AgentSession after TelegramMessage migration"
 
-### 6. Phase 2 Cleanup — Remove Deprecation Aliases
-- **Task ID**: build-cleanup
-- **Depends On**: build-phase-3
-- **Validates**: `pytest tests/ -x -q`
-- **Assigned To**: rename-builder
-- **Agent Type**: builder
-- **Parallel**: false
-- Remove old field definitions (`message_id`, `reply_to_msg_id`, `trigger_message_id`, `chat_id_for_enrichment`)
-- Remove `@property` deprecation aliases added in Phase 2
-- Final grep: no references to old field names in any `.py` file
-- Commit: "Remove deprecated field aliases after migration"
-
-### 7. Documentation
+### 6. Documentation
 - **Task ID**: document-feature
-- **Depends On**: build-cleanup
+- **Depends On**: build-phase-3
 - **Assigned To**: docs-updater
 - **Agent Type**: documentarian
 - **Parallel**: false
@@ -308,7 +296,7 @@ No agent integration required — AgentSession is not exposed through any MCP se
 - Update `docs/features/steering-queue.md`
 - Update field comments in `models/agent_session.py`
 
-### 8. Final Validation
+### 7. Final Validation
 - **Task ID**: validate-all
 - **Depends On**: document-feature
 - **Assigned To**: field-validator
@@ -325,7 +313,7 @@ No agent integration required — AgentSession is not exposed through any MCP se
 | Tests pass | `pytest tests/ -x -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| No old message_id | `grep -rn '\.message_id\b' models/agent_session.py \| grep -v tg_message_id \| grep -v telegram_message_key` | exit code 1 |
+| No old message_id | `grep -rn '\.message_id\b' models/agent_session.py \| grep -v telegram_message_id \| grep -v telegram_reply_to_message_id \| grep -v telegram_message_key` | exit code 1 |
 | No claude_code_session_id | `grep -rn 'claude_code_session_id' . --include='*.py'` | exit code 1 |
 | No sdlc_stages | `grep -rn 'sdlc_stages' . --include='*.py'` | exit code 1 |
 | No chat_id_for_enrichment | `grep -rn 'chat_id_for_enrichment' . --include='*.py'` | exit code 1 |
