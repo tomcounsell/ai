@@ -5,9 +5,9 @@
 The AgentSession model uses a **session_type discriminator** to distinguish between two session roles:
 
 - **ChatSession** (`session_type="chat"`): Read-only Agent SDK session with PM persona. Owns the Telegram conversation, orchestrates work, and spawns DevSessions.
-- **DevSession** (`session_type="dev"`): Full-permission Agent SDK session with Dev persona. Does the actual coding work and runs SDLC pipeline stages.
+- **DevSession** (`session_type="dev"`): Full-permission Agent SDK session with Dev persona. Executes a single assigned SDLC stage and reports the result back to the PM.
 
-This replaces the previous architecture where a single undifferentiated AgentSession handled both orchestration and execution, with an external LLM-based Observer Agent making routing decisions between pipeline stages.
+This replaces the previous architecture where a single undifferentiated AgentSession handled both orchestration and execution. The PM (ChatSession) now orchestrates the pipeline stage-by-stage, spawning one DevSession per stage.
 
 ## Routing
 
@@ -33,7 +33,13 @@ Route by chat_title prefix
     |-- Everything else → ChatSession (session_type="chat")
             |-- Queued per chat_id
             |-- Read-only, PM persona
-            |-- May spawn DevSession for SDLC work
+            |-- Stage-by-stage SDLC orchestration
+            |
+            v
+        ChatSession assesses current stage
+            |-- Spawns one DevSession per stage
+            |-- Verifies result before progressing
+            |-- Repeats until pipeline complete
             |
             v
         ChatSession composes delivery
@@ -108,11 +114,35 @@ Jobs are queued per `chat_id` so different chat groups (even for the same projec
 ### Steering Messages
 Human replies during active pipelines are buffered as steering messages on the ChatSession. The buffer is bounded at 10 messages (oldest dropped on overflow).
 
+## Stage-by-Stage Orchestration
+
+The PM (ChatSession) orchestrates SDLC work by spawning one DevSession per pipeline stage, rather than delegating the entire pipeline to a single DevSession.
+
+### Flow
+
+1. **PM assesses current stage** -- uses read-only Bash commands (gh, grep) to check what exists (issue, plan, PR, test status, review state)
+2. **PM spawns one DevSession** -- dispatches a single-stage assignment with the Agent tool, including stage name, issue/PR URLs, current state, and acceptance criteria
+3. **DevSession executes the assigned stage** -- runs the appropriate skill (/do-plan, /do-build, /do-test, etc.) and reports the result
+4. **PM verifies the result** -- checks that the stage completed successfully
+5. **PM repeats** -- assesses the next stage, spawns another DevSession, until the pipeline is complete or human input is needed
+
+### Why Stage-by-Stage
+
+- **Accountability**: Each stage result is verified before progressing
+- **Visibility**: The PM can report intermediate progress to stakeholders
+- **Recovery**: If a stage fails, the PM can re-dispatch or escalate without losing prior work
+- **Judgment**: The PM decides whether trivial/docs-only work warrants the full pipeline
+
+### Completion Warning
+
+The stop hook (`.claude/hooks/stop.py`) includes a warning for SDLC-classified sessions that complete without any stage progress. This catches cases where the DevSession bypasses the pipeline. The warning is logged to stderr and is non-fatal.
+
 ## Agent Definitions
 
 The `dev-session` agent is defined in `agent/agent_definitions.py`:
 - `tools=None` (all tools, full write permissions)
 - `model=None` (inherits from parent session)
+- Single-stage executor: receives a stage assignment from the PM, executes it, reports result
 - Spawned by ChatSession via the Agent tool
 
 ## Key Files
