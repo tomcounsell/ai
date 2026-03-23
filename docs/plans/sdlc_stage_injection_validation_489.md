@@ -5,7 +5,7 @@ appetite: Small
 owner: Valor
 created: 2026-03-23
 tracking: https://github.com/tomcounsell/ai/issues/489
-last_comment_id:
+last_comment_id: 4110267149
 ---
 
 # Validate SDLC Stage Injection and Watchdog Kill Mechanism
