@@ -6,7 +6,7 @@ Guidance for Claude Code when working with this repository.
 
 ## Google Workspace CLI (`gws`)
 
-Available at `/Users/valorengels/src/node_modules/.bin/gws`. Pre-authenticated.
+Available at `~/src/node_modules/.bin/gws`. Pre-authenticated.
 
 Usage: `gws <service> <resource> [sub-resource] <method> [flags]`
 
@@ -85,6 +85,9 @@ Replace `CHAT_NAME` with the group name (e.g. `PM: PsyOptimal`, `Dev: Valor`). T
 | `python scripts/autoexperiment.py --target summarizer --dry-run` | Dry-run autoexperiment on summarizer |
 | `python scripts/autoexperiment.py --list-targets` | List autoexperiment targets |
 | `./scripts/install_autoexperiment.sh` | Install autoexperiment nightly schedule |
+| `python -m tools.job_scheduler kill --job-id <ID>` | Kill a running or pending job by ID |
+| `python -m tools.job_scheduler kill --session-id <ID>` | Kill a job by session ID |
+| `python -m tools.job_scheduler kill --all` | Kill all running and pending jobs |
 
 ## Development Principles
 
