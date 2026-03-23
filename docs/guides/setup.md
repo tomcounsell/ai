@@ -219,18 +219,18 @@ Or manually create `~/Library/LaunchAgents/com.valor.bridge.plist`:
     <key>ProgramArguments</key>
     <array>
         <string>/usr/bin/python3</string>
-        <string>~/src/ai/bridge/telegram_bridge.py</string>
+        <string>$HOME/src/ai/bridge/telegram_bridge.py</string>
     </array>
     <key>WorkingDirectory</key>
-    <string>~/src/ai</string>
+    <string>$HOME/src/ai</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>~/src/ai/logs/bridge.log</string>
+    <string>$HOME/src/ai/logs/bridge.log</string>
     <key>StandardErrorPath</key>
-    <string>~/src/ai/logs/bridge.error.log</string>
+    <string>$HOME/src/ai/logs/bridge.error.log</string>
 </dict>
 </plist>
 ```
