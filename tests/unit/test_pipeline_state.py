@@ -9,7 +9,7 @@ import json
 
 import pytest
 
-import agent.pipeline_state as ps
+import agent.build_pipeline as ps
 
 
 @pytest.fixture(autouse=True)

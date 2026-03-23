@@ -89,7 +89,7 @@ def _get_sdlc_stages(session_id: str) -> str | None:
         sessions = list(AgentSession.query.filter(session_id=session_id))
         if not sessions:
             return None
-        raw = sessions[0].sdlc_stages or sessions[0].stage_states
+        raw = sessions[0].stage_states
         if not raw:
             return None
         return str(json.loads(raw) if isinstance(raw, str) else raw)

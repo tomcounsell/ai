@@ -221,7 +221,6 @@ _JOB_FIELDS = [
     # Session-phase fields preserved across delete-and-recreate
     "last_activity",
     "completed_at",
-    "last_transition_at",
     "turn_count",
     "tool_call_count",
     "log_path",
@@ -251,7 +250,6 @@ _JOB_FIELDS = [
     "session_type",
     "result_text",
     "parent_chat_session_id",
-    "sdlc_stages",
     "slug",
     "artifacts",
 ]

@@ -42,12 +42,8 @@ def _check_sdlc_stage_progress(session_id: str) -> None:
         sdlc_stages = getattr(session, "sdlc_stages", None)
         stage_states = getattr(session, "stage_states", None)
 
-        has_stages = sdlc_stages and (
-            isinstance(sdlc_stages, dict) and len(sdlc_stages) > 0
-        )
-        has_state = stage_states and (
-            isinstance(stage_states, dict) and len(stage_states) > 0
-        )
+        has_stages = sdlc_stages and (isinstance(sdlc_stages, dict) and len(sdlc_stages) > 0)
+        has_state = stage_states and (isinstance(stage_states, dict) and len(stage_states) > 0)
 
         if not has_stages and not has_state:
             print(

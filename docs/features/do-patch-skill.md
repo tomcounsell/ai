@@ -73,12 +73,12 @@ Capped at **3 patch→test→review iterations**. After 3 cycles, emits a struct
 
 When `/do-patch` fixes a test failure:
 ```bash
-python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}', 'review')"
+python -c "from agent.build_pipeline import advance_stage; advance_stage('{slug}', 'review')"
 ```
 
 When `/do-patch` fixes review blockers:
 ```bash
-python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}', 'document')"
+python -c "from agent.build_pipeline import advance_stage; advance_stage('{slug}', 'document')"
 ```
 
 ## Related

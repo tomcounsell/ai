@@ -262,6 +262,14 @@ Before posting, verify every blocker and tech_debt finding:
 
 This step exists because of issue #181: a prior review hallucinated two "blocker" findings citing functions and files that did not exist.
 
+### 5.6. Legacy Cruft Audit
+
+Run the cruft auditor on the PR diff to identify legacy patterns (deprecated fields
+still read/written, fallback chains, dual implementations, dead imports, stale comments).
+
+Include any findings as a "Legacy Cruft" subsection in the review output.
+Cruft findings are advisory, not blockers. See `.claude/agents/cruft-auditor.md`.
+
 ### 6. Post Review
 
 **First, detect if this is a self-authored PR:**

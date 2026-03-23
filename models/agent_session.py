@@ -102,7 +102,7 @@ class AgentSession(Model):
     # === Session fields (from SessionLog) ===
     last_activity = Field(type=float, null=True)
     completed_at = Field(type=float, null=True)
-    last_transition_at = Field(type=float, null=True)  # Deprecated: derive from history instead
+    # last_transition_at removed: duration now derived from history entries
     turn_count = IntField(default=0)
     tool_call_count = IntField(default=0)
     log_path = Field(null=True, max_length=1000)
@@ -142,7 +142,7 @@ class AgentSession(Model):
     context_summary = Field(null=True, max_length=200)  # What this session is about
     expectations = Field(null=True, max_length=500)  # What the agent needs from the human
 
-    # === Observer / Steering fields ===
+    # === Steering fields ===
     # Buffered human replies during active pipelines
     queued_steering_messages = ListField(null=True)
 
@@ -151,7 +151,6 @@ class AgentSession(Model):
 
     # === DevSession fields (null when session_type="chat") ===
     parent_chat_session_id = KeyField(null=True)  # Logical FK -> ChatSession
-    sdlc_stages = Field(null=True)  # JSON dict of stage -> status, null if not SDLC
     slug = Field(null=True)  # Derives branch, plan path, worktree
     artifacts = Field(null=True)  # JSON: {issue_url, plan_url, pr_url, ...}
 
@@ -214,8 +213,8 @@ class AgentSession(Model):
         return f"docs/plans/{s}.md" if s else None
 
     def _get_sdlc_stages_dict(self) -> dict | None:
-        """Parse sdlc_stages or stage_states into a dict, or None."""
-        raw = self.sdlc_stages or self.stage_states
+        """Parse stage_states into a dict, or None."""
+        raw = self.stage_states
         if not raw:
             return None
         if isinstance(raw, dict):
@@ -282,7 +281,7 @@ class AgentSession(Model):
         parent_chat_session_id: str,
         message_text: str,
         slug: str | None = None,
-        sdlc_stages: dict | None = None,
+        stage_states: dict | None = None,
         **kwargs,
     ) -> "AgentSession":
         """Create a DevSession (Dev persona, full permissions).
@@ -292,7 +291,7 @@ class AgentSession(Model):
 
         Wired into bridge handler via enqueue_job(session_type=...).
         """
-        stages_json = _json.dumps(sdlc_stages) if isinstance(sdlc_stages, dict) else sdlc_stages
+        stages_json = _json.dumps(stage_states) if isinstance(stage_states, dict) else stage_states
         session = cls(
             session_id=session_id,
             session_type=SESSION_TYPE_DEV,
@@ -301,7 +300,7 @@ class AgentSession(Model):
             parent_chat_session_id=parent_chat_session_id,
             message_text=message_text,
             slug=slug,
-            sdlc_stages=stages_json,
+            stage_states=stages_json,
             created_at=time.time(),
             **kwargs,
         )
@@ -421,8 +420,8 @@ class AgentSession(Model):
         old_status = self.status or "none"
         now = time.time()
 
-        # Calculate duration in previous state
-        prev_time = self.last_transition_at or self.started_at or self.created_at
+        # Calculate duration from session start
+        prev_time = self.started_at or self.created_at
         duration = now - prev_time if prev_time else 0
 
         # Structured log entry
@@ -431,9 +430,6 @@ class AgentSession(Model):
             f"job_id={self.job_id} project={self.project_key} "
             f"duration_in_prev_state={duration:.1f}s" + (f' context="{context}"' if context else "")
         )
-
-        # Update fields
-        self.last_transition_at = now
 
         # Append to history
         self.append_history(
@@ -453,26 +449,15 @@ class AgentSession(Model):
         return links
 
     def get_stage_progress(self) -> dict[str, str]:
-        """Parse history entries to determine SDLC stage completion status.
+        """Return SDLC stage completion status via PipelineStateMachine.
 
         Returns:
-            Dict mapping stage name to status: 'completed', 'in_progress', 'failed', or 'pending'
+            Dict mapping stage name to status string.
         """
-        progress = {stage: "pending" for stage in SDLC_STAGES}
-        for entry in self._get_history_list():
-            if not isinstance(entry, str) or "[stage]" not in entry.lower():
-                continue
-            entry_upper = entry.upper()
-            for stage in SDLC_STAGES:
-                if stage in entry_upper:
-                    if "FAILED" in entry_upper or "ERROR" in entry_upper:
-                        progress[stage] = "failed"
-                    elif "COMPLETED" in entry_upper or "☑" in entry:
-                        progress[stage] = "completed"
-                    elif "IN_PROGRESS" in entry_upper or "▶" in entry:
-                        progress[stage] = "in_progress"
-        logger.debug(f"get_stage_progress() on session {self.session_id}: {progress}")
-        return progress
+        from bridge.pipeline_state import PipelineStateMachine
+
+        sm = PipelineStateMachine(self)
+        return sm.get_display_progress()
 
     # === Stage-aware auto-continue helpers ===
 
@@ -480,40 +465,16 @@ class AgentSession(Model):
     def is_sdlc(self) -> bool:
         """Whether this session is an SDLC pipeline job.
 
-        Derives SDLC status from observable state (single source of truth)
-        rather than a stored classification flag. Checks in priority order:
-
-        1. sdlc_stages — new DevSession field (JSON dict of stage -> status)
-        2. stage_states — legacy field, if any stage is in_progress/completed/failed
-        3. History [stage] entries — legacy fallback
-        4. classification_type == "sdlc" — tertiary for fresh sessions
+        Two checks:
+        1. stage_states has any non-pending/non-ready stage
+        2. classification_type == "sdlc" for freshly-classified sessions
         """
-        # Primary: check new sdlc_stages field
+        # Primary: check stage_states for any active/completed/failed stage
         stages = self._get_sdlc_stages_dict()
         if stages and any(v not in ("pending", "ready") for v in stages.values()):
             return True
 
-        # Secondary: check legacy stage_states for any non-pending stage
-        if self.stage_states and not self.sdlc_stages:
-            try:
-                states = (
-                    _json.loads(self.stage_states)
-                    if isinstance(self.stage_states, str)
-                    else self.stage_states
-                )
-                if isinstance(states, dict) and any(
-                    v not in ("pending", "ready") for v in states.values()
-                ):
-                    return True
-            except (_json.JSONDecodeError, TypeError, AttributeError):
-                pass
-
-        # Tertiary: check for [stage] entries in history
-        for entry in self._get_history_list():
-            if isinstance(entry, str) and "[stage]" in entry.lower():
-                return True
-
-        # Quaternary: classification_type for freshly-classified sessions
+        # Secondary: classification_type for freshly-classified sessions
         if self.classification_type == "sdlc":
             return True
 
@@ -522,9 +483,7 @@ class AgentSession(Model):
     def has_remaining_stages(self) -> bool:
         """Check if any SDLC stages are not yet completed.
 
-        Uses the pipeline graph to determine remaining stages rather than
-        a flat check. Finds the last completed/failed stage and calls
-        get_next_stage() to see if a non-terminal next stage exists.
+        Uses PipelineStateMachine to determine remaining stages.
 
         Returns True if pipeline progression should continue.
         Returns False when the pipeline is complete (MERGE reached or
@@ -533,60 +492,22 @@ class AgentSession(Model):
         Used by stage-aware auto-continue to decide whether to keep
         going (stages remain) or consult the classifier (all done).
         """
-        from bridge.pipeline_graph import get_next_stage
+        from bridge.pipeline_state import PipelineStateMachine
 
-        progress = self.get_stage_progress()
-
-        # Find the last completed or failed stage in pipeline order
-        last_completed = None
-        last_outcome = "success"
-        for stage in SDLC_STAGES:
-            status = progress.get(stage, "pending")
-            if status == "completed":
-                last_completed = stage
-                last_outcome = "success"
-            elif status == "failed":
-                last_completed = stage
-                last_outcome = "fail"
-
-        # If no stage has completed, there are definitely remaining stages
-        if last_completed is None:
-            return True
-
-        # Use the graph to check if a next stage exists
-        next_info = get_next_stage(last_completed, last_outcome)
-        if next_info is None:
-            # No transition from current stage — pipeline is complete (MERGE terminal)
-            return False
-
-        # Walk the graph forward from the last completed stage.
-        # If every reachable stage is already completed, the pipeline is done.
-        current = last_completed
-        outcome = last_outcome
-        while True:
-            next_info = get_next_stage(current, outcome)
-            if next_info is None:
-                # Reached terminal (MERGE) — no remaining stages
-                return False
-            next_stage = next_info[0]
-            next_status = progress.get(next_stage, "pending")
-            if next_status != "completed":
-                # Found a stage that still needs work
-                return True
-            # This stage is done, keep walking
-            current = next_stage
-            outcome = "success"
+        sm = PipelineStateMachine(self)
+        return sm.has_remaining_stages()
 
     def has_failed_stage(self) -> bool:
         """Check if any SDLC stage has failed.
 
-        Returns True if a [stage] history entry contains FAILED or
-        ERROR for any stage. Failed stages are a hard stop signal --
-        the output should be delivered to the user immediately rather
-        than auto-continued.
+        Uses PipelineStateMachine to check stage_states. Failed stages
+        are a hard stop signal -- the output should be delivered to the
+        user immediately rather than auto-continued.
         """
-        progress = self.get_stage_progress()
-        return any(status == "failed" for status in progress.values())
+        from bridge.pipeline_state import PipelineStateMachine
+
+        sm = PipelineStateMachine(self)
+        return sm.has_failed_stage()
 
     # === Queued steering message helpers ===
 

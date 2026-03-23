@@ -79,7 +79,6 @@ def start_transcript(
             s = existing[0]
             s.log_path = log_path
             s.last_activity = now
-            s.last_transition_at = now
             if sender:
                 s.sender_name = sender
             if branch_name:
@@ -109,7 +108,6 @@ def start_transcript(
                 created_at=now,
                 started_at=now,
                 last_activity=now,
-                last_transition_at=now,
                 turn_count=0,
                 tool_call_count=0,
                 log_path=log_path,

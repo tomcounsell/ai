@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from agent.pipeline_state import initialize, load
+from agent.build_pipeline import initialize, load
 from agent.worktree_manager import resolve_repo_root
 
 

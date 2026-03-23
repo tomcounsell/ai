@@ -857,8 +857,7 @@ def _parse_classification_response(raw: str) -> ClassificationResult | None:
 def _render_stage_progress(session) -> str | None:
     """Render SDLC stage progress line from session state.
 
-    Uses PipelineStateMachine when stage_states is available, falls back
-    to legacy get_stage_progress() for sessions without state machine data.
+    Uses PipelineStateMachine as the single source of truth for stage state.
 
     Returns two lines like:
         ISSUE 243 → ☑ PLAN → ▶ BUILD
@@ -868,18 +867,10 @@ def _render_stage_progress(session) -> str | None:
     if not session:
         return None
 
-    # Use state machine when stage_states is available (must be a str or dict)
-    stage_states = getattr(session, "stage_states", None)
-    if stage_states and isinstance(stage_states, str | dict):
-        try:
-            from bridge.pipeline_state import PipelineStateMachine
+    from bridge.pipeline_state import PipelineStateMachine
 
-            sm = PipelineStateMachine(session)
-            progress = sm.get_display_progress()
-        except Exception:
-            progress = session.get_stage_progress()
-    else:
-        progress = session.get_stage_progress()
+    sm = PipelineStateMachine(session)
+    progress = sm.get_display_progress()
 
     # Only render if at least one stage has progressed beyond pending/ready
     if all(v in ("pending", "ready") for v in progress.values()):
