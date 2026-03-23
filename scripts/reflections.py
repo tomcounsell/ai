@@ -175,10 +175,13 @@ def load_local_projects() -> list[dict]:
             "PROJECTS_CONFIG_PATH",
             str(Path.home() / "Desktop" / "Valor" / "projects.json"),
         )
-    )
+    ).expanduser()
     if not config_path.exists():
         # Legacy fallback
         config_path = AI_ROOT / "config" / "projects.json"
+    if not config_path.exists():
+        logger.warning(f"Project config not found at {config_path}, returning empty")
+        return []
     data = json.loads(config_path.read_text())
     projects = []
     for slug, cfg in data.get("projects", {}).items():
