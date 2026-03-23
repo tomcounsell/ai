@@ -2,7 +2,13 @@
 
 Registers as a PostToolUse hook that fires every CHECK_INTERVAL tool calls.
 Reads the recent transcript and asks Haiku whether the agent is making
-meaningful progress or is stuck in a loop. Returns a block decision if unhealthy.
+meaningful progress or is stuck in a loop.
+
+Kill mechanism: PostToolUse hooks cannot stop CLI execution (continue_: False
+is ignored). Instead, the watchdog sets watchdog_unhealthy on the AgentSession
+model. The nudge loop in job_queue.py checks this field before auto-continuing.
+When flagged unhealthy, the nudge loop delivers output to Telegram instead of
+sending "Keep working".
 """
 
 from __future__ import annotations
@@ -27,6 +33,52 @@ CHECK_INTERVAL = 20
 # Keyed by bridge session ID (VALOR_SESSION_ID env var) when available,
 # falling back to Claude Code's internal session ID. See issue #374 Bug 2.
 _tool_counts: dict[str, int] = {}
+
+
+def _set_unhealthy(session_id: str, reason: str) -> None:
+    """Flag a session as unhealthy on the AgentSession model."""
+    try:
+        from models.agent_session import AgentSession
+
+        sessions = AgentSession.query.filter(session_id=session_id)
+        if sessions:
+            sessions[0].watchdog_unhealthy = reason
+            sessions[0].save()
+            logger.info(f"[health_check] Set unhealthy flag for {session_id}")
+    except Exception as e:
+        logger.error(f"[health_check] Failed to set unhealthy flag: {e}")
+
+
+def is_session_unhealthy(session_id: str) -> str | None:
+    """Check if a session has been flagged unhealthy by the watchdog.
+
+    Called by the nudge loop in job_queue.py before auto-continuing.
+
+    Returns:
+        The reason string if unhealthy, None if healthy.
+    """
+    try:
+        from models.agent_session import AgentSession
+
+        sessions = AgentSession.query.filter(session_id=session_id)
+        if sessions:
+            return sessions[0].watchdog_unhealthy
+        return None
+    except Exception:
+        return None
+
+
+def clear_unhealthy(session_id: str) -> None:
+    """Clear the unhealthy flag (e.g., when a session is manually restarted)."""
+    try:
+        from models.agent_session import AgentSession
+
+        sessions = AgentSession.query.filter(session_id=session_id)
+        if sessions:
+            sessions[0].watchdog_unhealthy = None
+            sessions[0].save()
+    except Exception:
+        pass
 
 
 def reset_session_count(session_id: str) -> None:
@@ -193,10 +245,17 @@ async def _handle_steering(session_id: str) -> dict[str, Any] | None:
         if msg.get("is_abort"):
             sender = msg.get("sender", "supervisor")
             logger.warning(f"[steering] ABORT from {sender} for session {session_id}")
+            # PostToolUse can't enforce continue_: False, but inject a strong
+            # stop directive via additionalContext so Claude sees it.
             return {
-                "decision": "block",
-                "continue_": False,
-                "stopReason": f"Aborted by {sender}: {msg.get('text', 'stop')}",
+                "hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "additionalContext": (
+                        f"ABORT from {sender}: {msg.get('text', 'stop')}. "
+                        "You MUST stop immediately. Output a brief summary of "
+                        "what you found and end your turn. No more tool calls."
+                    ),
+                },
             }
 
     # Combine all steering messages into one injection
@@ -261,12 +320,7 @@ async def watchdog_hook(
     try:
         steering_result = await _handle_steering(session_id)
         if steering_result is not None:
-            # Steering took action — return its result
-            # (either abort or continue with injected message)
-            if not steering_result.get("continue_", True):
-                return steering_result
-            # If steering injected a message but wants to continue,
-            # still do the rest of the hook (tracking, health check)
+            return steering_result
     except Exception as e:
         logger.error(f"[steering] Error in steering check: {e}")
         # Never block due to steering bug
@@ -307,10 +361,20 @@ async def watchdog_hook(
             return {"continue_": True}
         else:
             logger.warning(f"[health_check] UNHEALTHY at #{count}: {reason}")
+            # Two-pronged kill:
+            # 1. Set flag on AgentSession so nudge loop won't auto-continue
+            # 2. Inject additionalContext telling Claude to stop immediately
+            _set_unhealthy(session_id, reason)
             return {
-                "decision": "block",
-                "continue_": False,
-                "stopReason": f"Watchdog: {reason}",
+                "hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "additionalContext": (
+                        "WATCHDOG ALERT: You have been flagged as stuck in a "
+                        "repetitive loop. STOP what you are doing. Output a brief "
+                        "summary of what you found and what blocked you, then end "
+                        "your turn. Do NOT make any more tool calls."
+                    ),
+                },
             }
 
     except Exception as e:

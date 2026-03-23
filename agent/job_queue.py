@@ -59,6 +59,7 @@ def classify_nudge_action(
     max_nudge_count: int,
     session_status: str | None = None,
     completion_sent: bool = False,
+    watchdog_unhealthy: str | None = None,
 ) -> str:
     """Pure function: decide what send_to_chat should do with agent output.
 
@@ -74,6 +75,9 @@ def classify_nudge_action(
         return "deliver_already_completed"
     if completion_sent:
         return "drop"
+    # Watchdog flagged this session as stuck — deliver instead of nudging
+    if watchdog_unhealthy:
+        return "deliver" if msg and msg.strip() else "deliver_fallback"
     if stop_reason == "rate_limited":
         return "nudge_rate_limited"
     if not msg or not msg.strip():
@@ -1549,10 +1553,17 @@ async def _execute_job(job: Job) -> None:
         if not send_cb:
             return
 
+        from agent.health_check import is_session_unhealthy
         from agent.sdk_client import get_stop_reason
 
         stop_reason = get_stop_reason(job.session_id) if job.session_id else None
         session_status = agent_session.status if agent_session else None
+        unhealthy_reason = is_session_unhealthy(job.session_id) if job.session_id else None
+
+        if unhealthy_reason:
+            logger.warning(
+                f"[{job.project_key}] Watchdog flagged session unhealthy: {unhealthy_reason}"
+            )
 
         action = classify_nudge_action(
             msg=msg,
@@ -1561,6 +1572,7 @@ async def _execute_job(job: Job) -> None:
             max_nudge_count=MAX_NUDGE_COUNT,
             session_status=session_status,
             completion_sent=chat_state.completion_sent,
+            watchdog_unhealthy=unhealthy_reason,
         )
 
         if action == "deliver_already_completed":

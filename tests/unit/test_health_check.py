@@ -138,20 +138,26 @@ class TestWatchdogHook:
 
     @pytest.mark.asyncio
     async def test_blocks_on_unhealthy(self):
-        """Hook should block when judge says unhealthy."""
+        """Hook should inject stop directive and set unhealthy flag when judge says unhealthy."""
         transcript = _make_transcript(
             [("Bash", {"command": "git status"}) for _ in range(CHECK_INTERVAL)]
         )
         input_data = {"session_id": "test-3", "transcript_path": str(transcript)}
         _tool_counts["test-3"] = CHECK_INTERVAL - 1
 
-        with patch("agent.health_check._judge_health", new_callable=AsyncMock) as mock_judge:
+        with (
+            patch("agent.health_check._judge_health", new_callable=AsyncMock) as mock_judge,
+            patch("agent.health_check._set_unhealthy") as mock_set,
+        ):
             mock_judge.return_value = {"healthy": False, "reason": "stuck in loop"}
             result = await watchdog_hook(input_data, None, None)
 
-        assert result.get("continue_") is False
-        assert "block" in result.get("decision", "")
-        assert "stuck in loop" in result.get("stopReason", "")
+        # PostToolUse can't block, so we inject additionalContext instead
+        hook_output = result.get("hookSpecificOutput", {})
+        assert hook_output.get("hookEventName") == "PostToolUse"
+        assert "STOP" in hook_output.get("additionalContext", "")
+        # Unhealthy flag set on model so nudge loop won't auto-continue
+        mock_set.assert_called_once_with("test-3", "stuck in loop")
         transcript.unlink()
 
     @pytest.mark.asyncio
