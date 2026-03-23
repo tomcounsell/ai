@@ -253,7 +253,82 @@ No agent integration required — this modifies the prompts that agents receive,
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Critique date:** 2026-03-23
+**Critics**: Skeptic, Operator, Archaeologist, Adversary, Simplifier, User
+**Findings**: 7 total (2 blockers, 3 concerns, 2 nits)
+
+### Blockers
+
+#### 1. Stop hook has no stage-progress validation (Task 4 has no implementation target)
+- **Severity**: BLOCKER
+- **Critics**: Skeptic, Operator
+- **Location**: Task 4 (build-completion-warning), `.claude/hooks/stop.py`
+- **Finding**: Task 4 says "In stop hook or session completion path, log warning when SDLC session has no stage_states." But the stop hook (`stop.py`) has zero stage awareness -- it only copies transcripts and saves metadata. The plan does not specify WHERE in the stop hook to add this check, how to access AgentSession from the hook context (the hook receives `hook_input` dict, not a session object), or how to determine if a session was SDLC-classified from the hook's limited context. The validates field points to `tests/unit/test_pipeline_integrity.py` which currently tests URL construction and merge guards -- unrelated to completion warnings.
+- **Suggestion**: Specify the exact implementation: (a) the stop hook must read `VALOR_SESSION_ID` from env, (b) query AgentSession from Redis, (c) check `is_sdlc` and whether any stages progressed, (d) log the warning. Add a new test file or clearly new test class, not a vague reference to an existing unrelated test file.
+
+#### 2. SKILL.md contradiction -- plan changes dev-session but not the SDLC skill that defines stage routing
+- **Severity**: BLOCKER
+- **Critics**: Archaeologist, Skeptic
+- **Location**: Solution section, `.claude/skills/sdlc/SKILL.md`
+- **Finding**: The plan rewrites `dev-session.md` as a "single-stage executor" but does not address `.claude/skills/sdlc/SKILL.md`, which is the actual stage router the dev-session invokes. SKILL.md line 9 says "The Observer Agent handles pipeline progression" (Observer was deleted in PR #466). SKILL.md line 91 says "NEVER loop -- invoke one sub-skill, then return. The Observer handles progression." The Observer no longer exists. If dev-session becomes a single-stage executor that returns to the PM, but SKILL.md still references a deleted Observer for progression, the pipeline will stall after the first stage.
+- **Suggestion**: Add a task to audit and update SKILL.md: remove Observer references (replaced by PM orchestration), ensure stage routing instructions align with the new PM-orchestrates-stage-by-stage model. This is the same root cause pattern from prior art: correct architecture built, but agent instructions left unchanged.
+
+### Concerns
+
+#### 3. Positive language pass scope is unbounded
+- **Severity**: CONCERN
+- **Critics**: Simplifier, Skeptic
+- **Location**: Task 5 (build-positive-language)
+- **Finding**: Task 5 says "Grep all prompt files for NEVER, do NOT, don't, cannot" and rewrite each. But SKILL.md alone has 7 NEVER patterns (lines 85-91), many of which are legitimate safety rails (e.g., "NEVER commit to main"). Blindly rewriting safety-critical negative instructions as positive framing risks weakening them. The plan also doesn't define which files are "all prompt files" -- does it include CLAUDE.md, all skill files, persona files?
+- **Suggestion**: Scope this task explicitly: only rewrite negatives in `dev-session.md` and the PM injection in `sdk_client.py` (the two files being rewritten). Leave SKILL.md safety rails as-is or mark them as intentional exceptions. Add acceptance criteria for what "positive language" means vs. legitimate prohibitions.
+
+#### 4. PM prompt injection has no stage context to pass
+- **Severity**: CONCERN
+- **Critics**: Adversary, Operator
+- **Location**: Task 2 (build-pm-injection), `sdk_client.py:1384-1394`
+- **Finding**: The plan instructs the PM to "assess current stage" and "spawn one dev-session per stage." But the PM injection at sdk_client.py:1384 runs at message construction time -- the PM has no pre-loaded context about what SDLC stage the work is in. The PM would need to run shell commands (gh pr list, grep plans, etc.) before spawning a dev-session. The plan assumes the PM can do stage assessment but doesn't specify how. Current PM is read-only (pre_tool_use.py blocks non-docs writes) and can only use the Agent tool for code work -- can it run Bash commands for `gh pr list`?
+- **Suggestion**: Clarify in the plan that the PM can execute read-only Bash commands (gh, grep) for stage assessment without hitting the write guard. Verify pre_tool_use.py allows Bash reads for PM sessions. If not, the PM injection must include explicit instructions on using Bash for assessment before spawning.
+
+#### 5. Four tasks lack validation commands
+- **Severity**: CONCERN
+- **Critics**: Operator
+- **Location**: Tasks 3, 5, 6, 7
+- **Finding**: Tasks build-persona-audit, build-positive-language, validate-all, and document-feature have no `Validates` field. The plan's Verification table at the bottom provides some checks, but these are not linked to specific tasks. A builder agent would not know how to verify task 3 (persona audit) is done correctly.
+- **Suggestion**: Add explicit validates to each task. Task 3: `grep -c "stage" ~/Desktop/Valor/personas/project-manager.md` returns > 0. Task 5: `grep -c "NEVER\|do NOT" .claude/agents/dev-session.md` returns 0. Task 6: `pytest tests/ -x -q` exit 0. Task 7: `test -f docs/features/chat-dev-session-architecture.md` (already exists, so validate updated content).
+
+### Nits
+
+#### 6. Line references may drift
+- **Severity**: NIT
+- **Critics**: Operator
+- **Location**: Solution, Task 2
+- **Finding**: Plan references `sdk_client.py:1384-1394` and `sdk_client.py:1343-1395` by line number. These will drift as the file is edited. The current PM injection is at lines 1384-1394 as stated, but any preceding edit would shift these.
+- **Suggestion**: Reference the code by content marker (e.g., "the `if _session_type == 'chat':` block in sdk_client.py") rather than line numbers, or accept the drift risk since this is a single-session task.
+
+#### 7. Test Impact section is thin
+- **Severity**: NIT
+- **Critics**: User
+- **Location**: Test Impact section
+- **Finding**: The Test Impact section lists two test files with vague dispositions ("may need updating"). Since the plan changes prompt text and adds a completion warning (Python logic), `test_pipeline_integrity.py` will likely need a new test class for the warning, not just "may need" updating. The section also doesn't mention potential impact on integration tests that exercise the full SDLC flow.
+- **Suggestion**: Be specific: "ADD new test class in test_pipeline_integrity.py for completion warning" and check if any integration tests exercise the PM-spawns-dev-session flow that would be affected by prompt changes.
+
+### Structural Check Results
+
+| Check | Status | Detail |
+|-------|--------|--------|
+| Required sections | PASS | Documentation, Update System, Agent Integration, Test Impact all present and non-empty |
+| Task numbering | PASS | Tasks 1-7 sequential, no gaps |
+| Dependencies valid | PASS | All Depends On references resolve to valid task IDs |
+| File paths exist | PASS | 10 of 10 referenced files exist |
+| Prerequisites met | PASS | Plan states no prerequisites |
+| Cross-references | PASS | No-Gos do not conflict with Solution; all 7 success criteria map to tasks |
+
+### Verdict
+
+**NEEDS REVISION** -- 2 blockers must be resolved before build:
+
+1. Task 4 (completion warning) needs a concrete implementation spec for the stop hook, not a vague "log warning" instruction
+2. SKILL.md must be added to the audit scope -- it references a deleted Observer and contradicts the new PM-orchestration model
 
 ---
 
