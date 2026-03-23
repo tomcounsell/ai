@@ -85,7 +85,7 @@ No checkbox icons are used. The ISSUE stage label includes the issue number when
 - `bridge/summarizer.py`: `summarize_response()` (always-summarize entry point), `_strip_process_narration()` (pre-summarization cleanup), `_compose_structured_summary()` (template renderer), `_parse_summary_and_questions()` (question extractor), `_render_stage_progress()`, `_render_link_footer()`, `_linkify_references()` (auto-link PR/Issue refs)
 - `bridge/response.py`: Always calls summarizer for non-empty text, passes `AgentSession` via `session=` kwarg
 - `bridge/telegram_bridge.py`: `_send` callback accepts and forwards `session` parameter
-- `agent/job_queue.py`: `SendCallback` type includes session parameter, `send_to_chat()` passes `agent_session`
+- `agent/job_queue.py`: `SendCallback` type includes session parameter, `send_to_chat()` uses `classify_nudge_action()` for routing decisions and passes `agent_session`
 - `bridge/markdown.py`: `send_markdown()` with plain-text fallback
 
 ## Session Freshness
