@@ -41,49 +41,19 @@ def _register_dev_session_completion(agent_id: str) -> None:
         logger.warning(f"[subagent_stop] Failed to register DevSession completion: {e}")
 
 
-def _build_sdlc_stage_summary(session_id: str) -> str | None:
-    """Build a human-readable SDLC stage status from the AgentSession.
-
-    Reads stage_states or sdlc_stages from the session and formats them
-    so the PM sees which stages are done vs pending.
-
-    Returns None if not an SDLC session or no stage data exists.
-    """
+def _get_sdlc_stages(session_id: str) -> str | None:
+    """Return the SDLC stage_states dict as a string, or None."""
     try:
-        from models.agent_session import SDLC_STAGES, AgentSession
+        from models.agent_session import AgentSession
 
         sessions = list(AgentSession.query.filter(session_id=session_id))
         if not sessions:
             return None
-
-        session = sessions[0]
-        raw = session.sdlc_stages or session.stage_states
+        raw = sessions[0].sdlc_stages or sessions[0].stage_states
         if not raw:
             return None
-
-        stages = json.loads(raw) if isinstance(raw, str) else raw
-        if not isinstance(stages, dict):
-            return None
-
-        # Build status line for each stage
-        lines = []
-        for stage in SDLC_STAGES:
-            status = stages.get(stage, stages.get(stage.lower(), "pending"))
-            if status == "completed":
-                lines.append(f"  {stage}: DONE")
-            elif status in ("in_progress", "running"):
-                lines.append(f"  {stage}: IN PROGRESS")
-            elif status == "failed":
-                lines.append(f"  {stage}: FAILED")
-            elif status == "skipped":
-                lines.append(f"  {stage}: SKIPPED")
-            else:
-                lines.append(f"  {stage}: pending")
-
-        return "SDLC Pipeline State:\n" + "\n".join(lines)
-
-    except Exception as e:
-        logger.debug(f"[subagent_stop] Could not build stage summary: {e}")
+        return str(json.loads(raw) if isinstance(raw, str) else raw)
+    except Exception:
         return None
 
 
@@ -111,14 +81,9 @@ async def subagent_stop_hook(
         # Inject SDLC stage state back to PM so it knows what's actually done
         session_id = os.environ.get("VALOR_SESSION_ID")
         if session_id:
-            summary = _build_sdlc_stage_summary(session_id)
-            if summary:
-                logger.info(f"[subagent_stop] Injecting SDLC stage state for {session_id}")
-                return {
-                    "reason": (
-                        f"Dev-session completed. Current pipeline state "
-                        f"(verify artifacts before marking stages done):\n\n{summary}"
-                    ),
-                }
+            stages = _get_sdlc_stages(session_id)
+            if stages:
+                logger.info(f"[subagent_stop] Injecting stage state for {session_id}")
+                return {"reason": f"Pipeline state: {stages}"}
 
     return {}
