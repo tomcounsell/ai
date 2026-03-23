@@ -35,7 +35,7 @@ HISTORY_MAX_ENTRIES = 20
 STEERING_QUEUE_MAX = 10  # Max buffered steering messages per session
 
 # SDLC stages in pipeline order
-SDLC_STAGES = ["ISSUE", "PLAN", "BUILD", "TEST", "REVIEW", "DOCS", "MERGE"]
+SDLC_STAGES = ["ISSUE", "PLAN", "CRITIQUE", "BUILD", "TEST", "REVIEW", "DOCS", "MERGE"]
 
 # Valid session types
 SESSION_TYPE_CHAT = "chat"

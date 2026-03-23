@@ -66,7 +66,9 @@ Based on the assessment, invoke exactly ONE sub-skill and return.
 | State | Invoke | Reason |
 |-------|--------|--------|
 | No plan exists | `/do-plan {slug}` | Cannot build without a plan |
-| Plan exists, no branch/PR | `/do-build` with plan path | Plan is ready, implement it |
+| Plan exists, not yet critiqued | `/do-plan-critique` with plan path | Plan must pass critique before build |
+| Plan critiqued (READY TO BUILD), no branch/PR | `/do-build` with plan path | Critique passed, implement it |
+| Plan critiqued (NEEDS REVISION) | `/do-plan {slug}` | Revise plan based on critique findings |
 | Branch exists, no PR | `/do-build` with plan path | Build must create the PR — resume build |
 | Tests failing | `/do-patch` then `/do-test` | Fix what is broken |
 | PR exists, no review | `/do-pr-review {pr_number}` | Code is ready for review |
@@ -94,8 +96,9 @@ The canonical pipeline graph is defined in `bridge/pipeline_graph.py`. All routi
 derives from that module. The table below is for human readability only.
 
 ```
-Happy path: ISSUE -> PLAN -> BUILD -> TEST -> REVIEW -> DOCS -> MERGE
-Cycles:     TEST(fail) -> PATCH -> TEST
+Happy path: ISSUE -> PLAN -> CRITIQUE -> BUILD -> TEST -> REVIEW -> DOCS -> MERGE
+Cycles:     CRITIQUE(fail) -> PLAN -> CRITIQUE (max 2 cycles)
+            TEST(fail) -> PATCH -> TEST
             REVIEW(fail|partial) -> PATCH -> TEST -> REVIEW
 ```
 
@@ -103,6 +106,7 @@ Cycles:     TEST(fail) -> PATCH -> TEST
 |-------|-------|-------|
 | ISSUE | /do-issue | Or already exists |
 | PLAN | /do-plan {slug} | |
+| CRITIQUE | /do-plan-critique | Validates plan before build |
 | BUILD | /do-build {plan or issue} | |
 | TEST | /do-test | |
 | PATCH | /do-patch | Routing-only; not a display stage |
