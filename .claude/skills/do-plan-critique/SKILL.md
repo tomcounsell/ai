@@ -63,6 +63,28 @@ fi
    gh pr view N --json title,state,mergedAt --jq '{title, state, mergedAt}'
    ```
 
+### Step 1.5: Extract and Bundle Source Files
+
+Extract all file paths referenced in the plan and read their contents. This prevents critics from hallucinating file contents by giving them verified source code.
+
+1. Extract file paths from the plan text using regex patterns like `path/to/file.py`, backtick-quoted paths, and paths in code blocks
+2. For each extracted path, attempt to read the file:
+   - If the file exists: include its full contents in the SOURCE_FILES block
+   - If the file does not exist: note it as `[FILE NOT FOUND: path/to/file.py]` -- do NOT ask critics to discover it
+3. Bundle all contents into a `SOURCE_FILES` context block formatted as:
+
+```
+SOURCE_FILES:
+--- path/to/file1.py ---
+{file contents}
+--- path/to/file2.py ---
+{file contents}
+--- path/to/missing.py ---
+[FILE NOT FOUND]
+```
+
+This SOURCE_FILES block is passed to every critic in Step 3.
+
 ### Step 2: Structural Checks (Automated)
 
 Run these checks directly — no LLM needed:
@@ -106,6 +128,7 @@ Read [CRITICS.md](CRITICS.md) for the full critic definitions and prompt templat
 
 Spawn **six critics in parallel** using the Agent tool. Each critic gets:
 - The full plan text
+- The SOURCE_FILES block (verified file contents from Step 1.5)
 - The issue context (if available)
 - Prior art summaries (if fetched)
 - Their specific lens and instructions from CRITICS.md
@@ -199,4 +222,5 @@ The skill returns a structured verdict that the SDLC pipeline can use:
 
 ## Version history
 
+- v1.1.0 (2026-03-23): Add SOURCE_FILES inline context to prevent critic hallucination (Step 1.5)
 - v1.0.0 (2026-03-21): Initial — war room critique with six parallel critics + structural checks
