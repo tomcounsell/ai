@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Medium
 owner: Valor
@@ -321,16 +321,4 @@ No agent integration required — AgentSession is not exposed through any MCP se
 
 ---
 
-## Open Questions
-
-1. **Should Phase 2 renames keep the old Popoto fields alive permanently as read-only aliases?** The plan proposes temporary `@property` aliases removed in Phase 2 cleanup. But if external tools or Redis inspection scripts reference old field names, they'd silently break. Is there anything outside this codebase that reads AgentSession Redis keys directly?
-
-2. **Should we run `scripts/migrate_model_relationships.py` as a pre-requisite before starting this work?** The recon found it was never executed. Running it now would let Phase 3 proceed immediately. Or should Phase 3 be deferred to a follow-up issue?
-
-3. **Are the proposed new names correct?** The rename mapping is:
-   - `message_id` → `tg_message_id`
-   - `reply_to_msg_id` → `tg_reply_to_msg_id`
-   - `trigger_message_id` → `telegram_message_key`
-   - `chat_id_for_enrichment` → `media_source_chat_id`
-
-   Do any of these feel wrong or could be clearer?
+*Open questions resolved — plan is ready for build.*
