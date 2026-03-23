@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor
@@ -259,5 +259,6 @@ No agent integration required — this modifies the prompts that agents receive,
 
 ## Open Questions
 
-1. Should the PM have a maximum number of stage iterations before escalating to the human? (e.g., 3 TEST↔PATCH cycles)
-2. For trivial work (docs-only, typo fixes), should the PM be allowed to skip stages? If so, what criteria define "trivial"?
+Resolved — PM decides both:
+1. ~~Max stage iterations~~ — PM uses judgment on when to escalate vs keep iterating
+2. ~~Stage skipping for trivial work~~ — PM assesses whether full pipeline is warranted
