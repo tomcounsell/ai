@@ -393,21 +393,20 @@ def classify_work_request(message: str) -> str:
             logger.info(f"[routing] Classified as passthrough (slash command): {text[:120]}")
             return "passthrough"
 
+    # Fast path: any message containing an issue or PR reference → SDLC
+    # This takes priority over acknowledgment matching because "continue issue 463"
+    # is SDLC work, not a bare "continue" passthrough.
+    if re.search(r"(?:issue|pr|pull request)\s+#?\d+", text_lower) or re.match(
+        r"^#\d+$", text_lower
+    ):
+        logger.info(f"[routing] Classified as sdlc (issue/PR reference): {text[:120]}")
+        return "sdlc"
+
     # Fast path: short acknowledgments / continuation commands
     first_word = text_lower.split()[0] if text_lower.split() else ""
     if first_word in _PASSTHROUGH_EXACT or text_lower.rstrip("!.,") in _PASSTHROUGH_EXACT:
         logger.info(f"[routing] Classified as passthrough (acknowledgment): {text[:120]}")
         return "passthrough"
-
-    # Fast path: bare "#N" → question (Telegram eats # as hashtag, too ambiguous for SDLC)
-    if re.match(r"^#\d+$", text_lower):
-        logger.info(f"[routing] Classified as question (bare hash reference): {text[:120]}")
-        return "question"
-
-    # Fast path: issue/PR references like "issue 123", "pr 363", "pull request 363"
-    if re.match(r"^(?:issue|pr|pull request)\s+#?\d+$", text_lower):
-        logger.info(f"[routing] Classified as sdlc (issue/PR reference): {text[:120]}")
-        return "sdlc"
 
     # Use Ollama for nuanced classification with Haiku fallback
     try:
@@ -453,10 +452,12 @@ def _classify_work_request_llm(text: str) -> str:
 
     prompt = (
         'Classify this message. Reply with ONLY one word: "sdlc" or "question".\n\n'
-        '- "sdlc" = work request: fix bug, add feature, implement, refactor,\n'
-        "  investigate issue, create/update codebase, deploy, resolve problem\n"
-        '- "question" = asking for info, explanation, opinion, status check,\n'
+        '- "sdlc" = work request that could result in code changes or a PR:\n'
+        "  fix bug, add feature, implement, refactor, investigate issue,\n"
+        "  create/update codebase, deploy, resolve problem, continue/resume work\n"
+        '- "question" = purely asking for info, explanation, opinion,\n'
         "  how does X work, what is Y, conversational/social\n\n"
+        "If in doubt, classify as sdlc.\n\n"
         f"{principal_hint}"
         f"Message: {text[:300]}\n\n"
         "Classification:"

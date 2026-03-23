@@ -82,9 +82,23 @@ class TestFastPathSdlc:
             "#999",
         ],
     )
-    def test_bare_hash_references_not_sdlc(self, message):
-        """Bare #N should NOT match as sdlc fast path (Telegram eats # as hashtag)."""
-        assert classify_work_request(message) != "sdlc"
+    def test_bare_hash_references_sdlc(self, message):
+        """Bare #N should match as sdlc — any issue/PR reference is work."""
+        assert classify_work_request(message) == "sdlc"
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "continue sdlc on issue 463",
+            "finish work on pr 255",
+            "resume issue 100",
+            "what's the status of issue 42?",
+            "check pr 88",
+        ],
+    )
+    def test_messages_with_issue_pr_references_sdlc(self, message):
+        """Any message mentioning an issue or PR number should be SDLC."""
+        assert classify_work_request(message) == "sdlc"
 
 
 class TestLlmClassification:
