@@ -22,6 +22,43 @@ from hook_utils.constants import (  # noqa: E402
 )
 
 
+def _check_sdlc_stage_progress(session_id: str) -> None:
+    """Warn if an SDLC-classified session completed with no stage progress."""
+    try:
+        from models.agent_session import AgentSession
+
+        sessions = list(AgentSession.query.filter(session_id=session_id))
+        if not sessions:
+            return
+
+        session = sessions[0]
+
+        # Check if this was an SDLC-classified session
+        classification = getattr(session, "classification_type", None)
+        if classification != "sdlc":
+            return
+
+        # Check for stage progress
+        sdlc_stages = getattr(session, "sdlc_stages", None)
+        stage_states = getattr(session, "stage_states", None)
+
+        has_stages = sdlc_stages and (
+            isinstance(sdlc_stages, dict) and len(sdlc_stages) > 0
+        )
+        has_state = stage_states and (
+            isinstance(stage_states, dict) and len(stage_states) > 0
+        )
+
+        if not has_stages and not has_state:
+            print(
+                f"SDLC WARNING: Session {session_id} classified as SDLC "
+                f"but completed with no stage progress",
+                file=sys.stderr,
+            )
+    except Exception:
+        pass  # Non-fatal: hook must not break on Redis/model errors
+
+
 def _update_agent_session_log_path(session_id: str, jsonl_path: str) -> None:
     """Store the JSONL backup path in AgentSession.log_path."""
     try:
@@ -60,6 +97,9 @@ def main():
         "stop_reason": hook_input.get("stop_reason", "unknown"),
     }
     write_json_log(session_dir, "stop.json", metadata)
+
+    # Check for SDLC sessions that completed without stage progress
+    _check_sdlc_stage_progress(session_id)
 
     # Back up JSONL transcript (always, regardless of --chat flag)
     transcript_path = hook_input.get("transcript_path")

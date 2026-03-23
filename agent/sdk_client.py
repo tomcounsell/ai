@@ -1383,14 +1383,25 @@ async def get_agent_response_sdk(
     # this reinforcement ensures the Agent tool is used instead of Skill tool.
     if _session_type == "chat":
         enriched_message += (
-            "\n\nIMPORTANT: You are the PM. For any coding work, you MUST use "
-            "the Agent tool to spawn a dev-session — do NOT use the Skill tool "
-            "or run /do-build, /do-test, /do-plan, etc. directly.\n"
-            'Agent(subagent_type="dev-session", description="<short desc>", '
-            'prompt="<full context: issue/PR URLs, current SDLC stage, '
-            'acceptance criteria, what to do>")\n'
-            "The dev-session has full write permissions and executes the SDLC "
-            "pipeline. Wait for its result, then compose the delivery message."
+            "\n\nYou are the PM. Orchestrate SDLC work stage-by-stage:\n"
+            "1. **Assess the current stage** — use read-only Bash commands "
+            "(gh issue view, gh pr view, gh pr list, grep) to determine "
+            "where work stands. You can run Bash for reads freely.\n"
+            "2. **Spawn one dev-session for the next stage** — use the Agent tool "
+            "to dispatch exactly one stage at a time:\n"
+            '   Agent(subagent_type="dev-session", description="<stage>: <short desc>", '
+            'prompt="Stage: <PLAN|BUILD|TEST|PATCH|REVIEW|DOCS>\\n'
+            "Issue: <URL>\\nPR: <URL if exists>\\n"
+            "Current state: <what's already done>\\n"
+            'Acceptance criteria: <what done looks like>")\n'
+            "3. **Verify the result** — check that the stage completed successfully "
+            "before progressing to the next one.\n"
+            "4. **Repeat** — assess, spawn, verify until the pipeline is complete "
+            "or you need human input.\n\n"
+            "For trivial or docs-only work, use your judgment on whether the full "
+            "pipeline is warranted.\n"
+            "Use the Agent tool for all coding work — slash commands like /do-build "
+            "and /do-test are the dev-session's internal tools."
         )
     enriched_message += f"\nMESSAGE: {message}"
 

@@ -1,12 +1,12 @@
 ---
 name: sdlc
-description: "Single-stage router for development work. Assesses current state, dispatches ONE sub-skill, then returns. The Observer handles pipeline progression."
+description: "Single-stage router for development work. Assesses current state, dispatches ONE sub-skill, then returns. The PM (ChatSession) handles pipeline progression."
 context: fork
 ---
 
 # SDLC — Single-Stage Router
 
-This skill is a **router**, not an orchestrator. It assesses where work stands, invokes ONE sub-skill, and returns. The Observer Agent handles pipeline progression by re-invoking `/sdlc` after each stage completes.
+This skill is a **router**, not an orchestrator. It assesses where work stands, invokes ONE sub-skill, and returns. The PM (ChatSession) handles pipeline progression by re-invoking `/sdlc` after each stage completes.
 
 You MUST NOT write code, run tests, or create plans directly -- delegate everything to sub-skills.
 
@@ -74,7 +74,7 @@ Based on the assessment, invoke exactly ONE sub-skill and return.
 | PR exists, no review | `/do-pr-review {pr_number}` | Code is ready for review |
 | PR review has blockers or nits | `/do-patch` | Address review feedback |
 | Review clean, docs not updated | `/do-docs` | Last step before merge |
-| All stages complete | Report done | Observer delivers to human |
+| All stages complete | Report done | PM delivers to human |
 
 **CRITICAL**: Before dispatching `/do-pr-review`, verify a PR actually exists by checking the output of `gh pr list`. If no PR exists for this branch, dispatch `/do-build` instead — it handles PR creation. Never send `/do-pr-review` without a real PR number.
 
@@ -88,7 +88,7 @@ Do NOT restart from scratch if prior stages are already complete.
 4. **NEVER skip the issue** -- every piece of work needs a GitHub issue
 5. **NEVER skip the plan** -- every code change needs a plan doc first
 6. **NEVER commit to main** -- all code goes to `session/{slug}` branches
-7. **NEVER loop** -- invoke one sub-skill, then return. The Observer handles progression.
+7. **NEVER loop** -- invoke one sub-skill, then return. The PM (ChatSession) handles progression.
 
 ## Pipeline Stages Reference
 
@@ -112,6 +112,6 @@ Cycles:     CRITIQUE(fail) -> PLAN -> CRITIQUE (max 2 cycles)
 | PATCH | /do-patch | Routing-only; not a display stage |
 | REVIEW | /do-pr-review | |
 | DOCS | /do-docs | |
-| MERGE | — | Human decision (Observer reports completion) |
+| MERGE | — | Human decision (PM reports completion) |
 
 This list is for reference only. This skill does NOT advance through stages -- it picks the right one and returns.
