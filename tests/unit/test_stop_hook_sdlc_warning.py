@@ -8,8 +8,6 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 # The stop hook uses sys.path manipulation. We replicate the import setup.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -33,9 +31,7 @@ class TestCheckSdlcStageProgress:
         spec.loader.exec_module(mod)
         return mod._check_sdlc_stage_progress
 
-    def _make_session(
-        self, classification_type=None, sdlc_stages=None, stage_states=None
-    ):
+    def _make_session(self, classification_type=None, sdlc_stages=None, stage_states=None):
         """Create a mock AgentSession."""
         session = MagicMock()
         session.classification_type = classification_type
@@ -49,9 +45,7 @@ class TestCheckSdlcStageProgress:
             classification_type="sdlc", sdlc_stages=None, stage_states=None
         )
 
-        with patch(
-            "models.agent_session.AgentSession"
-        ) as mock_cls:
+        with patch("models.agent_session.AgentSession") as mock_cls:
             mock_cls.query.filter.return_value = [session]
             check_fn = self._import_check_fn()
             check_fn("test-session-123")
@@ -69,9 +63,7 @@ class TestCheckSdlcStageProgress:
             stage_states=None,
         )
 
-        with patch(
-            "models.agent_session.AgentSession"
-        ) as mock_cls:
+        with patch("models.agent_session.AgentSession") as mock_cls:
             mock_cls.query.filter.return_value = [session]
             check_fn = self._import_check_fn()
             check_fn("test-session-456")
@@ -87,9 +79,7 @@ class TestCheckSdlcStageProgress:
             stage_states={"plan": {"status": "done"}},
         )
 
-        with patch(
-            "models.agent_session.AgentSession"
-        ) as mock_cls:
+        with patch("models.agent_session.AgentSession") as mock_cls:
             mock_cls.query.filter.return_value = [session]
             check_fn = self._import_check_fn()
             check_fn("test-session-789")
@@ -103,9 +93,7 @@ class TestCheckSdlcStageProgress:
             classification_type="question", sdlc_stages=None, stage_states=None
         )
 
-        with patch(
-            "models.agent_session.AgentSession"
-        ) as mock_cls:
+        with patch("models.agent_session.AgentSession") as mock_cls:
             mock_cls.query.filter.return_value = [session]
             check_fn = self._import_check_fn()
             check_fn("test-session-abc")
@@ -129,9 +117,7 @@ class TestCheckSdlcStageProgress:
 
     def test_no_session_found_no_warning(self, capsys):
         """If no AgentSession exists for the session_id, no warning."""
-        with patch(
-            "models.agent_session.AgentSession"
-        ) as mock_cls:
+        with patch("models.agent_session.AgentSession") as mock_cls:
             mock_cls.query.filter.return_value = []
             check_fn = self._import_check_fn()
             check_fn("test-session-missing")
@@ -141,13 +127,9 @@ class TestCheckSdlcStageProgress:
 
     def test_empty_dicts_emit_warning(self, capsys):
         """SDLC session with empty dicts (not None) still triggers warning."""
-        session = self._make_session(
-            classification_type="sdlc", sdlc_stages={}, stage_states={}
-        )
+        session = self._make_session(classification_type="sdlc", sdlc_stages={}, stage_states={})
 
-        with patch(
-            "models.agent_session.AgentSession"
-        ) as mock_cls:
+        with patch("models.agent_session.AgentSession") as mock_cls:
             mock_cls.query.filter.return_value = [session]
             check_fn = self._import_check_fn()
             check_fn("test-session-empty")
