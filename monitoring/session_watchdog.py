@@ -384,7 +384,9 @@ async def _recover_stalled_pending(stalled: list[dict]) -> None:
 
         try:
             # Load full session from Redis to check retry state
-            session = AgentSession.query.get(session_id)
+            # session_id is a Field (not KeyField), so use filter() not get()
+            matches = list(AgentSession.query.filter(session_id=session_id))
+            session = matches[0] if matches else None
             if session is None:
                 logger.warning(
                     "[watchdog] Stalled pending session %s no longer exists in Redis — skipping",
