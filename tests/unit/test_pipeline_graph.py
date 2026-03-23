@@ -11,7 +11,7 @@ from bridge.pipeline_graph import (
 
 
 class TestHappyPath:
-    """Verify the happy path: ISSUE -> PLAN -> CRITIQUE -> BUILD -> TEST -> REVIEW -> DOCS -> MERGE."""
+    """Verify the happy path: ISSUE -> PLAN -> CRITIQUE -> BUILD -> ... -> MERGE."""
 
     def test_issue_to_plan(self):
         result = get_next_stage("ISSUE", "success")

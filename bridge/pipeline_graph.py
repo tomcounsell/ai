@@ -74,19 +74,22 @@ STAGE_TO_SKILL: dict[str, str] = {
 # Display-only linear stage list for progress templates and PM-facing messages.
 # PATCH is intentionally excluded -- it's a routing concept, not a display stage.
 # Used by PipelineStateMachine.get_display_progress() and summarizer rendering.
-DISPLAY_STAGES: list[str] = ["ISSUE", "PLAN", "CRITIQUE", "BUILD", "TEST", "REVIEW", "DOCS", "MERGE"]
+DISPLAY_STAGES: list[str] = [
+    "ISSUE", "PLAN", "CRITIQUE", "BUILD", "TEST", "REVIEW", "DOCS", "MERGE",
+]
 
 
 def get_next_stage(
     current_stage: str | None,
     outcome: str | None = "success",
     cycle_count: int = 0,
+    critique_cycle_count: int = 0,
 ) -> tuple[str, str] | None:
     """Determine the next pipeline stage based on current stage and outcome.
 
     Uses the canonical PIPELINE_EDGES graph to resolve transitions. Supports
-    cycles (TEST -> PATCH -> TEST) with a max-cycle counter to prevent
-    infinite loops.
+    cycles (TEST -> PATCH -> TEST, CRITIQUE -> PLAN -> CRITIQUE) with
+    max-cycle counters to prevent infinite loops.
 
     Args:
         current_stage: The stage that just completed (e.g., "TEST", "BUILD").
@@ -97,6 +100,9 @@ def get_next_stage(
         cycle_count: Number of PATCH -> TEST cycles already completed in this
             session. When this reaches MAX_PATCH_CYCLES, returns None to
             escalate to human review.
+        critique_cycle_count: Number of CRITIQUE -> PLAN -> CRITIQUE cycles
+            already completed. When this reaches MAX_CRITIQUE_CYCLES, returns
+            None to escalate to human review.
 
     Returns:
         Tuple of (stage_name, skill_command) for the next stage, or None if:
@@ -111,9 +117,13 @@ def get_next_stage(
         outcome = "success"
 
     # Check cycle limit for CRITIQUE stages (CRITIQUE -> PLAN -> CRITIQUE loop)
-    if current_stage == "CRITIQUE" and outcome == "fail" and cycle_count >= MAX_CRITIQUE_CYCLES:
+    if (
+        current_stage == "CRITIQUE"
+        and outcome == "fail"
+        and critique_cycle_count >= MAX_CRITIQUE_CYCLES
+    ):
         logger.warning(
-            f"Max critique cycle limit reached ({cycle_count}/{MAX_CRITIQUE_CYCLES}). "
+            f"Max critique cycle limit reached ({critique_cycle_count}/{MAX_CRITIQUE_CYCLES}). "
             f"Escalating to human review."
         )
         return None
