@@ -1,6 +1,7 @@
 """Tests for bridge.summarizer — response summarization and classification."""
 
-from unittest.mock import AsyncMock, patch
+import json
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -21,6 +22,23 @@ from bridge.summarizer import (
     extract_artifacts,
     summarize_response,
 )
+from models.agent_session import SDLC_STAGES
+
+
+def _mock_session_with_stages(stage_dict, links=None):
+    """Create a MagicMock session with proper stage_states for PipelineStateMachine."""
+    session = MagicMock()
+    # Build full stage_states from partial dict
+    all_stages = {stage: "pending" for stage in SDLC_STAGES}
+    all_stages.update(stage_dict)
+    session.stage_states = json.dumps(all_stages)
+    session.session_id = "mock-session"
+    session.get_links = MagicMock(return_value=links or {})
+    # Provide issue/plan/pr URL fields for get_links fallback
+    session.issue_url = (links or {}).get("issue")
+    session.plan_url = (links or {}).get("plan")
+    session.pr_url = (links or {}).get("pr")
+    return session
 
 
 class TestExtractArtifacts:
@@ -1162,107 +1180,62 @@ class TestRenderStageProgress:
 
     def test_all_pending_returns_none(self):
         """No stage progress means nothing to render."""
-        from unittest.mock import MagicMock
-
-        session = MagicMock()
-        session.get_stage_progress.return_value = {
-            "ISSUE": "pending",
-            "PLAN": "pending",
-            "BUILD": "pending",
-            "TEST": "pending",
-            "REVIEW": "pending",
-            "DOCS": "pending",
-        }
+        session = _mock_session_with_stages({})
         assert _render_stage_progress(session) is None
 
     def test_mixed_progress_renders_correctly(self):
         """Completed, in-progress, and pending stages render with checkboxes."""
-        from unittest.mock import MagicMock
-
-        session = MagicMock()
-        session.get_stage_progress.return_value = {
-            "ISSUE": "completed",
-            "PLAN": "completed",
-            "BUILD": "in_progress",
-            "TEST": "pending",
-            "REVIEW": "pending",
-            "DOCS": "pending",
-        }
-        session.get_links.return_value = {}
+        session = _mock_session_with_stages(
+            {
+                "ISSUE": "completed",
+                "PLAN": "completed",
+                "BUILD": "in_progress",
+            }
+        )
         result = _render_stage_progress(session)
         # ISSUE has no checkbox
-        assert "☑ ISSUE" not in result
-        assert "☐ ISSUE" not in result
-        # Completed stages show ☑
-        assert "☑ PLAN" in result
-        # In-progress shows ▶ prefix
-        assert "▶ BUILD" in result
-        # Pending stages show ☐
-        assert "☐ TEST" in result
+        assert "\u2611 ISSUE" not in result
+        assert "\u2610 ISSUE" not in result
+        # Completed stages show checkmark
+        assert "\u2611 PLAN" in result
+        # In-progress shows play prefix
+        assert "\u25b6 BUILD" in result
+        # Pending stages show unchecked
+        assert "\u2610 TEST" in result
         # Stages joined with arrows
-        assert "→" in result
+        assert "\u2192" in result
 
     def test_all_completed(self):
-        from unittest.mock import MagicMock
-
-        session = MagicMock()
-        session.get_stage_progress.return_value = {
-            "ISSUE": "completed",
-            "PLAN": "completed",
-            "CRITIQUE": "completed",
-            "BUILD": "completed",
-            "TEST": "completed",
-            "REVIEW": "completed",
-            "DOCS": "completed",
-            "MERGE": "completed",
-        }
-        session.get_links.return_value = {}
+        session = _mock_session_with_stages({stage: "completed" for stage in SDLC_STAGES})
         result = _render_stage_progress(session)
         assert result is not None
-        assert "☐" not in result  # No pending stages
-        assert "▶" not in result  # No in-progress stages
-        assert "☑ PLAN" in result
-        assert "☑ DOCS" in result
-        assert "☑ MERGE" in result
+        assert "\u2610" not in result  # No pending stages
+        assert "\u25b6" not in result  # No in-progress stages
+        assert "\u2611 PLAN" in result
+        assert "\u2611 DOCS" in result
+        assert "\u2611 MERGE" in result
 
     def test_issue_number_embedded_in_label(self):
         """ISSUE stage shows the issue number when available in session links."""
-        from unittest.mock import MagicMock
-
-        session = MagicMock()
-        session.get_stage_progress.return_value = {
-            "ISSUE": "completed",
-            "PLAN": "completed",
-            "BUILD": "in_progress",
-            "TEST": "pending",
-            "REVIEW": "pending",
-            "DOCS": "pending",
-        }
-        session.get_links.return_value = {"issue": "https://github.com/org/repo/issues/243"}
+        session = _mock_session_with_stages(
+            {"ISSUE": "completed", "PLAN": "completed", "BUILD": "in_progress"},
+            links={"issue": "https://github.com/org/repo/issues/243"},
+        )
         result = _render_stage_progress(session)
         assert "ISSUE 243" in result
-        assert "☑ PLAN" in result
-        assert "▶ BUILD" in result
-        assert "☐ TEST" in result
+        assert "\u2611 PLAN" in result
+        assert "\u25b6 BUILD" in result
+        assert "\u2610 TEST" in result
 
     def test_no_issue_number_without_links(self):
         """ISSUE stage shows plain 'ISSUE' when no issue link exists."""
-        from unittest.mock import MagicMock
-
-        session = MagicMock()
-        session.get_stage_progress.return_value = {
-            "ISSUE": "completed",
-            "PLAN": "in_progress",
-            "BUILD": "pending",
-            "TEST": "pending",
-            "REVIEW": "pending",
-            "DOCS": "pending",
-        }
-        session.get_links.return_value = {}
+        session = _mock_session_with_stages(
+            {"ISSUE": "completed", "PLAN": "in_progress"},
+        )
         result = _render_stage_progress(session)
         # Should start with plain "ISSUE" not "ISSUE None" or similar
-        assert result.startswith("ISSUE →")
-        assert "▶ PLAN" in result
+        assert result.startswith("ISSUE \u2192")
+        assert "\u25b6 PLAN" in result
 
 
 class TestRenderLinkFooter:
@@ -1338,47 +1311,37 @@ class TestComposeStructuredSummaryWithSession:
 
     def test_sdlc_session_with_stage_progress_and_links(self):
         """Full SDLC session gets stage line, link footer, and original request label."""
-        from unittest.mock import MagicMock
-
-        session = MagicMock()
-        session._get_history_list.return_value = [
-            "[user] /sdlc 190",
-            "[stage] ISSUE completed",
-            "[stage] PLAN completed",
-            "[stage] BUILD in_progress",
-        ]
-        session.message_text = "continue"
-        session.status = "running"
-        session.get_stage_progress.return_value = {
-            "ISSUE": "completed",
-            "PLAN": "completed",
-            "BUILD": "in_progress",
-            "TEST": "pending",
-            "REVIEW": "pending",
-            "DOCS": "pending",
-        }
-        session.get_links.return_value = {
+        links = {
             "issue": "https://github.com/org/repo/issues/190",
             "pr": "https://github.com/org/repo/pull/191",
         }
+        session = _mock_session_with_stages(
+            {"ISSUE": "completed", "PLAN": "completed", "BUILD": "in_progress"},
+            links=links,
+        )
+        session._get_history_list.return_value = [
+            "[user] /sdlc 190",
+        ]
+        session.message_text = "continue"
+        session.status = "running"
 
         result = _compose_structured_summary(
-            "• Implemented the bypass\n• 135 tests passing",
+            "\u2022 Implemented the bypass\n\u2022 135 tests passing",
             session=session,
             is_completion=True,
         )
 
         # First line is emoji only (no message echo)
         first_line = result.split("\n")[0]
-        assert first_line.strip() in ("✅", "⏳", "❌")
+        assert first_line.strip() in ("\u2705", "\u23f3", "\u274c")
         assert "continue" not in first_line
         # Stage progress line with checkboxes (ISSUE has none)
         assert "ISSUE 190" in result
-        assert "☑ PLAN" in result
-        assert "▶ BUILD" in result
-        assert "☐ TEST" in result
+        assert "\u2611 PLAN" in result
+        assert "\u25b6 BUILD" in result
+        assert "\u2610 TEST" in result
         # Bullets present
-        assert "• Implemented the bypass" in result
+        assert "\u2022 Implemented the bypass" in result
         # Link footer present (no plan link)
         assert "Issue #190" in result
         assert "PR #191" in result
@@ -1386,21 +1349,10 @@ class TestComposeStructuredSummaryWithSession:
 
     def test_non_sdlc_session_no_stage_line(self):
         """Non-SDLC session skips stage progress line."""
-        from unittest.mock import MagicMock
-
-        session = MagicMock()
+        session = _mock_session_with_stages({})  # All pending
         session._get_history_list.return_value = ["[user] What time is it?"]
         session.message_text = "What time is it?"
         session.status = "running"
-        session.get_stage_progress.return_value = {
-            "ISSUE": "pending",
-            "PLAN": "pending",
-            "BUILD": "pending",
-            "TEST": "pending",
-            "REVIEW": "pending",
-            "DOCS": "pending",
-        }
-        session.get_links.return_value = {}
 
         result = _compose_structured_summary("It's 3pm UTC+7", session=session, is_completion=True)
 
@@ -1408,7 +1360,7 @@ class TestComposeStructuredSummaryWithSession:
         assert "ISSUE" not in result
         assert "BUILD" not in result
         # No echo of user message (Telegram reply-to provides context)
-        assert result.split("\n")[0].strip() in ("✅", "⏳", "❌")
+        assert result.split("\n")[0].strip() in ("\u2705", "\u23f3", "\u274c")
 
 
 class TestSummarizationBypass:
@@ -1775,30 +1727,16 @@ class TestErrorStateRendering:
 
     def test_failed_session_renders_error_emoji(self):
         """Failed session should render with X emoji."""
-        from unittest.mock import MagicMock
-
-        session = MagicMock()
+        session = _mock_session_with_stages(
+            {"ISSUE": "completed", "PLAN": "completed", "BUILD": "failed"},
+            links={"issue": "https://github.com/org/repo/issues/200"},
+        )
         session._get_history_list.return_value = [
             "[user] /sdlc 200",
-            "[stage] ISSUE completed",
-            "[stage] PLAN completed",
-            "[stage] BUILD failed",
         ]
         session.message_text = "continue"
         session.status = "failed"
         session.is_sdlc = True
-        session.session_id = "test-error-rendering"
-        session.get_stage_progress.return_value = {
-            "ISSUE": "completed",
-            "PLAN": "completed",
-            "BUILD": "failed",
-            "TEST": "pending",
-            "REVIEW": "pending",
-            "DOCS": "pending",
-        }
-        session.get_links.return_value = {
-            "issue": "https://github.com/org/repo/issues/200",
-        }
 
         result = _compose_structured_summary(
             "• Build failed: pytest returned exit code 1\n• 3 tests failing",
@@ -1811,23 +1749,13 @@ class TestErrorStateRendering:
         assert first_line.strip() == "❌"
 
     def test_failed_session_with_completion_flag_still_shows_error(self):
-        """Failed status overrides is_completion=True — error emoji takes priority."""
-        from unittest.mock import MagicMock
-
-        session = MagicMock()
+        """Failed status overrides is_completion=True -- error emoji takes priority."""
+        session = _mock_session_with_stages(
+            {"ISSUE": "completed", "PLAN": "completed", "BUILD": "completed", "TEST": "failed"},
+        )
         session._get_history_list.return_value = ["[user] test"]
         session.message_text = "test"
         session.status = "failed"
-        session.session_id = "test-error-override"
-        session.get_stage_progress.return_value = {
-            "ISSUE": "completed",
-            "PLAN": "completed",
-            "BUILD": "completed",
-            "TEST": "failed",
-            "REVIEW": "pending",
-            "DOCS": "pending",
-        }
-        session.get_links.return_value = {}
 
         result = _compose_structured_summary(
             "• Tests failed",
@@ -1841,30 +1769,16 @@ class TestErrorStateRendering:
     def test_failed_stage_shows_in_progress(self):
         """Failed stage progress should render the failure point visibly.
 
-        Note: The stage progress renderer does not currently distinguish
-        'failed' from 'in_progress' — both render as '▶'. This test
-        documents the current behavior and ensures the stage line is
-        present for failed sessions.
+        The stage progress renderer shows failed stages with a cross mark.
+        This test ensures the stage line is present for failed sessions.
         """
-        from unittest.mock import MagicMock
-
-        session = MagicMock()
-        session._get_history_list.return_value = [
-            "[stage] BUILD failed",
-        ]
+        session = _mock_session_with_stages(
+            {"ISSUE": "completed", "PLAN": "completed", "BUILD": "failed"},
+        )
+        session._get_history_list.return_value = []
         session.message_text = "continue"
         session.status = "failed"
-        session.session_id = "test-failed-stage"
         session.is_sdlc = True
-        session.get_stage_progress.return_value = {
-            "ISSUE": "completed",
-            "PLAN": "completed",
-            "BUILD": "failed",
-            "TEST": "pending",
-            "REVIEW": "pending",
-            "DOCS": "pending",
-        }
-        session.get_links.return_value = {}
 
         result = _compose_structured_summary(
             "• Build failed at test stage",
@@ -1879,22 +1793,10 @@ class TestErrorStateRendering:
 
     def test_error_message_propagated_to_output(self):
         """Error messages in the summary text should reach the rendered output."""
-        from unittest.mock import MagicMock
-
-        session = MagicMock()
+        session = _mock_session_with_stages({})  # All pending
         session._get_history_list.return_value = []
         session.message_text = "continue"
         session.status = "failed"
-        session.session_id = "test-error-message"
-        session.get_stage_progress.return_value = {
-            "ISSUE": "pending",
-            "PLAN": "pending",
-            "BUILD": "pending",
-            "TEST": "pending",
-            "REVIEW": "pending",
-            "DOCS": "pending",
-        }
-        session.get_links.return_value = {}
 
         error_text = "Error: ModuleNotFoundError: No module named 'foo'"
         result = _compose_structured_summary(
@@ -1908,27 +1810,14 @@ class TestErrorStateRendering:
 
     def test_failed_session_with_link_footer(self):
         """Failed session should still render link footer with issue reference."""
-        from unittest.mock import MagicMock
-
-        session = MagicMock()
-        session._get_history_list.return_value = [
-            "[stage] BUILD failed",
-        ]
+        session = _mock_session_with_stages(
+            {"ISSUE": "completed", "PLAN": "completed", "BUILD": "failed"},
+            links={"issue": "https://github.com/org/repo/issues/200"},
+        )
+        session._get_history_list.return_value = []
         session.message_text = "continue"
         session.status = "failed"
-        session.session_id = "test-failed-links"
         session.is_sdlc = True
-        session.get_stage_progress.return_value = {
-            "ISSUE": "completed",
-            "PLAN": "completed",
-            "BUILD": "failed",
-            "TEST": "pending",
-            "REVIEW": "pending",
-            "DOCS": "pending",
-        }
-        session.get_links.return_value = {
-            "issue": "https://github.com/org/repo/issues/200",
-        }
 
         result = _compose_structured_summary(
             "• Build failed: 3 tests failing",
@@ -1954,25 +1843,16 @@ class TestErrorStateRendering:
 
     def test_render_stage_progress_with_failed_stage(self):
         """Stage progress rendering with a failed stage should not crash."""
-        from unittest.mock import MagicMock
-
-        session = MagicMock()
-        session.get_stage_progress.return_value = {
-            "ISSUE": "completed",
-            "PLAN": "completed",
-            "BUILD": "failed",
-            "TEST": "pending",
-            "REVIEW": "pending",
-            "DOCS": "pending",
-        }
-        session.get_links.return_value = {}
+        session = _mock_session_with_stages(
+            {"ISSUE": "completed", "PLAN": "completed", "BUILD": "failed"},
+        )
 
         result = _render_stage_progress(session)
         assert result is not None
         # Should have completed stages
-        assert "☑ PLAN" in result
+        assert "\u2611 PLAN" in result
         # Pending stages still show
-        assert "☐ TEST" in result
+        assert "\u2610 TEST" in result
 
 
 class TestLinkifyReferences:

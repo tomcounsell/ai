@@ -10,12 +10,24 @@ Covers the gaps identified in PR #180 review:
 7. Full lifecycle simulations (SDLC, Q&A, chit-chat)
 """
 
+import json
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from models.agent_session import HISTORY_MAX_ENTRIES, SDLC_STAGES, AgentSession
+
+
+def _make_stage_states(completed=None, in_progress=None):
+    """Helper to build stage_states JSON for test fixtures."""
+    states = {stage: "pending" for stage in SDLC_STAGES}
+    for stage in completed or []:
+        states[stage] = "completed"
+    if in_progress:
+        states[in_progress] = "in_progress"
+    return json.dumps(states)
+
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -40,7 +52,8 @@ def session(redis_test_db):
 
 @pytest.fixture
 def sdlc_session(redis_test_db):
-    """Create an AgentSession with SDLC stage history and links."""
+    """Create an AgentSession with SDLC stage states and links."""
+    all_completed = _make_stage_states(completed=SDLC_STAGES)
     s = AgentSession.create(
         session_id="sdlc-lifecycle-1",
         project_key="test",
@@ -55,15 +68,9 @@ def sdlc_session(redis_test_db):
         branch_name="session/summarizer-bullet-format",
         turn_count=15,
         tool_call_count=42,
+        stage_states=all_completed,
     )
     s.append_history("user", "SDLC 177")
-    s.append_history("stage", "ISSUE completed ☑")
-    s.append_history("stage", "PLAN completed ☑")
-    s.append_history("stage", "BUILD completed ☑")
-    s.append_history("stage", "TEST completed ☑")
-    s.append_history("stage", "REVIEW completed ☑")
-    s.append_history("stage", "DOCS completed ☑")
-    s.append_history("stage", "MERGE completed ☑")
     s.set_link("issue", "https://github.com/tomcounsell/ai/issues/177")
     s.set_link("plan", "https://github.com/tomcounsell/ai/blob/main/docs/plans/summarizer.md")
     s.set_link("pr", "https://github.com/tomcounsell/ai/pull/180")
@@ -154,12 +161,16 @@ class TestHistoryTracking:
 
 
 class TestStageProgress:
-    """Tests for get_stage_progress parsing history into SDLC stages."""
+    """Tests for get_stage_progress using PipelineStateMachine via stage_states."""
 
-    def test_no_history_all_pending(self, session):
+    def test_no_stage_states_defaults(self, session):
         progress = session.get_stage_progress()
-        assert all(v == "pending" for v in progress.values())
-        assert set(progress.keys()) == set(SDLC_STAGES)
+        # ISSUE defaults to "ready" when no stage_states set
+        assert progress["ISSUE"] == "ready"
+        # All others default to "pending"
+        for stage in SDLC_STAGES:
+            if stage != "ISSUE":
+                assert progress[stage] == "pending", f"{stage} should be pending"
 
     def test_completed_stages(self, sdlc_session):
         progress = sdlc_session.get_stage_progress()
@@ -167,9 +178,11 @@ class TestStageProgress:
             assert progress[stage] == "completed", f"{stage} should be completed"
 
     def test_partial_progress(self, session):
-        session.append_history("stage", "ISSUE completed ☑")
-        session.append_history("stage", "PLAN completed ☑")
-        session.append_history("stage", "BUILD in_progress ▶")
+        session.stage_states = _make_stage_states(
+            completed=["ISSUE", "PLAN"],
+            in_progress="BUILD",
+        )
+        session.save()
         progress = session.get_stage_progress()
         assert progress["ISSUE"] == "completed"
         assert progress["PLAN"] == "completed"
@@ -179,17 +192,15 @@ class TestStageProgress:
         assert progress["DOCS"] == "pending"
         assert progress["MERGE"] == "pending"
 
-    def test_non_stage_entries_ignored(self, session):
-        session.append_history("user", "SDLC 177")
-        session.append_history("classify", "feature")
-        session.append_history("summary", "Did some BUILD work")
+    def test_no_stage_states_build_stays_pending(self, session):
+        # Without stage_states, all non-ISSUE stages remain pending
         progress = session.get_stage_progress()
-        # "summary" entries don't have [stage] so BUILD stays pending
         assert progress["BUILD"] == "pending"
 
-    def test_stage_overwrite_latest_wins(self, session):
-        session.append_history("stage", "BUILD in_progress ▶")
-        session.append_history("stage", "BUILD completed ☑")
+    def test_stage_states_overwrite(self, session):
+        # Set BUILD to in_progress then to completed
+        session.stage_states = _make_stage_states(completed=["BUILD"])
+        session.save()
         progress = session.get_stage_progress()
         assert progress["BUILD"] == "completed"
 
@@ -252,7 +263,7 @@ class TestRenderStageProgress:
         assert line is not None
         assert "ISSUE 177" in line
         assert "☑ DOCS" in line
-        assert "→" in line
+        assert "\u2192" in line
         # ISSUE has no checkbox
         assert "☑ ISSUE" not in line
         assert "☐ ISSUE" not in line
@@ -260,9 +271,11 @@ class TestRenderStageProgress:
     def test_partial_progress(self, session):
         from bridge.summarizer import _render_stage_progress
 
-        session.append_history("stage", "ISSUE completed ☑")
-        session.append_history("stage", "PLAN completed ☑")
-        session.append_history("stage", "BUILD in_progress ▶")
+        session.stage_states = _make_stage_states(
+            completed=["ISSUE", "PLAN"],
+            in_progress="BUILD",
+        )
+        session.save()
         # Need issue link for issue number embedding
         session.set_link("issue", "https://github.com/tomcounsell/ai/issues/177")
         line = _render_stage_progress(session)
@@ -367,21 +380,21 @@ class TestComposeStructuredSummary:
         from bridge.summarizer import _compose_structured_summary
 
         result = _compose_structured_summary(
-            "• Unified AgentSession model\n• Bullet-point summarizer",
+            "\u2022 Unified AgentSession model\n\u2022 Bullet-point summarizer",
             session=sdlc_session,
             is_completion=True,
         )
         lines = result.split("\n")
         # Line 1: emoji only (no message echo)
-        assert "✅" in lines[0]
+        assert "\u2705" in lines[0]
         # Stage progress line includes issue number
         assert "ISSUE 177" in result
         assert "DOCS" in result
-        # Completed stages show ☑, no pending ☐ (all stages are completed)
-        assert "☑ PLAN" in result
-        assert "☐" not in result
+        # Completed stages show checkmark, no pending unchecked (all stages are completed)
+        assert "\u2611 PLAN" in result
+        assert "\u2610" not in result
         # Bullets present
-        assert "• Unified AgentSession model" in result
+        assert "\u2022 Unified AgentSession model" in result
         # Link footer (no plan link)
         assert "Issue #177" in result
         assert "PR #180" in result
@@ -458,7 +471,7 @@ class TestSummarizeWithSession:
         mock_haiku = AsyncMock(
             return_value=StructuredSummary(
                 context_summary="Building feature",
-                response="• Built the feature\n• Tests passing",
+                response="\u2022 Built the feature\n\u2022 Tests passing",
                 expectations=None,
             )
         )
@@ -471,9 +484,9 @@ class TestSummarizeWithSession:
         assert "ISSUE 177" in result.text
         assert "Issue #177" in result.text
         assert "PR #180" in result.text
-        # Completed stages show ☑, no pending ☐ (all stages completed in sdlc_session fixture)
-        assert "☑ PLAN" in result.text
-        assert "☐" not in result.text
+        # Completed stages show checkmark, no pending unchecked (all stages completed)
+        assert "\u2611 PLAN" in result.text
+        assert "\u2610" not in result.text
         # The haiku output is included
         assert "Built the feature" in result.text
 
@@ -663,7 +676,7 @@ class TestSDLCLifecycle:
         )
         assert s.status == "pending"
 
-        # 2. Simulate job pickup — delete and recreate as running
+        # 2. Simulate job pickup -- delete and recreate as running
         fields = {
             "session_id": s.session_id,
             "project_key": s.project_key,
@@ -677,11 +690,13 @@ class TestSDLCLifecycle:
         s = AgentSession.create(status="running", started_at=time.time(), **fields)
         assert s.status == "running"
 
-        # 3. Track SDLC stages
+        # 3. Track SDLC stages via stage_states
         s.append_history("user", "SDLC 177")
-        s.append_history("stage", "ISSUE completed ☑")
-        s.append_history("stage", "PLAN completed ☑")
-        s.append_history("stage", "BUILD in_progress ▶")
+        s.stage_states = _make_stage_states(
+            completed=["ISSUE", "PLAN"],
+            in_progress="BUILD",
+        )
+        s.save()
 
         progress = s.get_stage_progress()
         assert progress["ISSUE"] == "completed"
@@ -693,27 +708,24 @@ class TestSDLCLifecycle:
         s.set_link("issue", "https://github.com/org/repo/issues/177")
         s.set_link("plan", "https://example.com/plan.md")
 
-        # 5. Complete build, test, review, docs, merge
-        s.append_history("stage", "BUILD completed ☑")
-        s.append_history("stage", "TEST completed ☑")
-        s.append_history("stage", "REVIEW completed ☑")
-        s.append_history("stage", "DOCS completed ☑")
-        s.append_history("stage", "MERGE completed ☑")
+        # 5. Complete all stages
+        s.stage_states = _make_stage_states(completed=SDLC_STAGES)
+        s.save()
         s.set_link("pr", "https://github.com/org/repo/pull/180")
 
         # 6. Compose structured summary
         result = _compose_structured_summary(
-            "• Unified AgentSession model\n• Tests passing",
+            "\u2022 Unified AgentSession model\n\u2022 Tests passing",
             session=s,
             is_completion=True,
         )
 
-        # Verify full structured output — completed stages show ☑, no pending ☐
+        # Verify full structured output -- completed stages show checkmark, no pending
         assert "ISSUE 177" in result
         assert "DOCS" in result
-        assert "☑ PLAN" in result
-        assert "☐" not in result
-        assert "• Unified AgentSession model" in result
+        assert "\u2611 PLAN" in result
+        assert "\u2610" not in result
+        assert "\u2022 Unified AgentSession model" in result
         assert "Issue #177" in result
         assert "PR #180" in result
 
@@ -748,23 +760,25 @@ class TestSDLCClassificationTypeLifecycle:
         # Verify is_sdlc works via classification_type alone
         assert s.is_sdlc is True
 
-        # Add stage progress and links
-        s.append_history("stage", "ISSUE completed ☑")
-        s.append_history("stage", "PLAN completed ☑")
-        s.append_history("stage", "BUILD in_progress ▶")
+        # Add stage progress via stage_states and links
+        s.stage_states = _make_stage_states(
+            completed=["ISSUE", "PLAN"],
+            in_progress="BUILD",
+        )
+        s.save()
         s.set_link("issue", "https://github.com/valorengels/ai/issues/276")
 
         result = _compose_structured_summary(
-            "• Fixed classifier to support sdlc type\n• Fixed auto-continue propagation",
+            "\u2022 Fixed classifier to support sdlc type\n\u2022 Fixed auto-continue propagation",
             session=s,
             is_completion=False,
         )
 
         # Stage progress should render
         assert "ISSUE 276" in result
-        assert "☑ PLAN" in result
-        assert "▶ BUILD" in result
-        assert "☐ TEST" in result
+        assert "\u2611 PLAN" in result
+        assert "\u25b6 BUILD" in result
+        assert "\u2610 TEST" in result
         # Link footer should render
         assert "Issue #276" in result
         # Content should be present
@@ -796,32 +810,27 @@ class TestSDLCClassificationTypeLifecycle:
 
         # The continuation session starts fresh but has classification_type
         assert s.is_sdlc is True
-        # Even without stage history, is_sdlc returns True via classification_type
+        # Even without stage_states, is_sdlc returns True via classification_type
         assert s._get_history_list() == []
 
-        # Add stage progress as the session progresses
-        s.append_history("stage", "ISSUE completed ☑")
-        s.append_history("stage", "PLAN completed ☑")
-        s.append_history("stage", "BUILD completed ☑")
-        s.append_history("stage", "TEST completed ☑")
-        s.append_history("stage", "REVIEW completed ☑")
-        s.append_history("stage", "DOCS completed ☑")
-        s.append_history("stage", "MERGE completed ☑")
+        # Add stage progress via stage_states
+        s.stage_states = _make_stage_states(completed=SDLC_STAGES)
+        s.save()
         s.set_link("issue", "https://github.com/valorengels/ai/issues/276")
         s.set_link("pr", "https://github.com/valorengels/ai/pull/277")
 
         result = _compose_structured_summary(
-            "• All stages complete\n• PR created",
+            "\u2022 All stages complete\n\u2022 PR created",
             session=s,
             is_completion=True,
         )
 
         # Full SDLC template should render
         assert "ISSUE 276" in result
-        assert "☑ DOCS" in result
+        assert "\u2611 DOCS" in result
         assert "Issue #276" in result
         assert "PR #277" in result
-        assert "☐" not in result  # No pending stages
+        assert "\u2610" not in result  # No pending stages
 
 
 class TestQALifecycle:

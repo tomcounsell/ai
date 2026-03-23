@@ -71,7 +71,7 @@ class TestPipelineStateTargetRepo:
     def test_initialize_without_target_repo(self, tmp_path, monkeypatch):
         """initialize() works without target_repo (backward compatible)."""
         # Redirect state storage to tmp
-        monkeypatch.setattr("agent.pipeline_state._STATE_ROOT", tmp_path / "pipeline")
+        monkeypatch.setattr("agent.build_pipeline._STATE_ROOT", tmp_path / "pipeline")
 
         state = initialize("test-slug", "session/test-slug", ".worktrees/test-slug")
         assert "target_repo" not in state
@@ -79,7 +79,7 @@ class TestPipelineStateTargetRepo:
 
     def test_initialize_with_target_repo(self, tmp_path, monkeypatch):
         """initialize() stores target_repo when provided."""
-        monkeypatch.setattr("agent.pipeline_state._STATE_ROOT", tmp_path / "pipeline")
+        monkeypatch.setattr("agent.build_pipeline._STATE_ROOT", tmp_path / "pipeline")
 
         state = initialize(
             "test-slug",
@@ -92,7 +92,7 @@ class TestPipelineStateTargetRepo:
 
     def test_target_repo_persisted_to_disk(self, tmp_path, monkeypatch):
         """target_repo is saved and loadable from disk."""
-        monkeypatch.setattr("agent.pipeline_state._STATE_ROOT", tmp_path / "pipeline")
+        monkeypatch.setattr("agent.build_pipeline._STATE_ROOT", tmp_path / "pipeline")
 
         initialize(
             "persist-test",

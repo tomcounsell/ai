@@ -137,5 +137,5 @@ class TestHealthChecker:
         checker = HealthChecker()
         overall = checker.get_overall_health()
         assert overall.status is not None
-        assert isinstance(overall.score, (int, float))
+        assert isinstance(overall.score, int | float)
         assert 0.0 <= overall.score <= 100.0

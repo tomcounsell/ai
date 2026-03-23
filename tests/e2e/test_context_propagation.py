@@ -175,7 +175,7 @@ class TestDerivedPaths:
 class TestSDLCStagesPropagation:
     """Verify SDLC stages dict flows correctly on DevSessions."""
 
-    def test_sdlc_stages_persist_as_json(self):
+    def test_stage_states_persist_as_json(self):
         ts = int(time.time())
         stages = {"PLAN": "completed", "BUILD": "in_progress", "TEST": "pending"}
         dev = AgentSession.create_dev(
@@ -184,18 +184,18 @@ class TestSDLCStagesPropagation:
             working_dir="/tmp/test",
             parent_chat_session_id="parent_y",
             message_text="/do-build",
-            sdlc_stages=stages,
+            stage_states=stages,
         )
 
         reloaded = list(AgentSession.query.filter(session_id=dev.session_id))[0]
-        parsed = json.loads(reloaded.sdlc_stages)
+        parsed = json.loads(reloaded.stage_states)
         assert parsed["PLAN"] == "completed"
         assert parsed["BUILD"] == "in_progress"
         assert parsed["TEST"] == "pending"
         assert reloaded.is_sdlc is True
         assert reloaded.current_stage == "BUILD"
 
-    def test_chat_session_without_sdlc_stages(self):
+    def test_chat_session_without_stage_states(self):
         ts = int(time.time())
         chat = AgentSession.create_chat(
             session_id=f"nosdlc_{ts}",
