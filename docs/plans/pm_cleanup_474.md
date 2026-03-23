@@ -58,7 +58,7 @@ No prerequisites — this work has no external dependencies.
 
 ### Technical Approach
 
-- Delete lines 160-368 in `tools/job_scheduler.py` (playlist constants, helper functions, `cmd_playlist`, `cmd_playlist_status`)
+- Delete lines 160-368 in `tools/job_scheduler.py` (playlist constants, `_get_redis()`, helper functions, `cmd_playlist`, `cmd_playlist_status`). Note: `_get_redis()` is only called by playlist functions and should be deleted with them.
 - Remove `"playlist"` from `PERSONA_RESTRICTED_ACTIONS` dict
 - Remove `playlist` and `playlist-status` from argparse subparsers and command dispatch dict
 - Remove playlist references from `~/Desktop/Valor/personas/project-manager.md` (lines 97, 167, 169, 173)
@@ -87,7 +87,7 @@ Remaining tests in `test_job_scheduler_persona.py` (schedule-related) should be 
 
 ## Rabbit Holes
 
-- Don't refactor `_get_redis()` — it's shared with other commands, not playlist-specific
+- Don't refactor other shared utilities (e.g., `_get_project_key()`) — `_get_redis()` itself is playlist-only and should be deleted
 - Don't touch the pipeline state machine integration (item #4) — that's a separate issue
 - Don't verify dev-session dispatch end-to-end (item #3) — needs live Telegram, not code changes
 
