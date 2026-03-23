@@ -256,6 +256,36 @@ Run baseline verification when ALL of these are true:
 - Running on `main` (no baseline to compare against)
 - More than 50 tests failed (likely a systemic issue, not individual regressions)
 
+### Step 0.5: Flaky Filter (Retry Before Baseline)
+
+Before dispatching failures to the baseline verifier, retry ONLY the failing tests once more on the current branch to detect intermittent (flaky) failures:
+
+```bash
+python -m pytest <FAILING_TEST_IDS> -v --tb=short 2>&1
+```
+
+**Classify retry results:**
+- Tests that **PASS on retry** → classify as `FLAKY`. Report them in the results table but they do NOT count as failures or regressions. Do NOT send them to baseline verification.
+- Tests that **still FAIL on retry** → these are consistent failures. Send them to baseline verification as normal.
+- If **ALL** failures pass on retry → skip baseline verification entirely (all are flaky).
+
+**Why this matters:** Flaky tests that fail on the branch but pass on main get misclassified as regressions. A single retry catches the most common intermittent failures (timing-dependent tests, LLM classifier non-determinism, resource contention) without the overhead of a full baseline worktree.
+
+**Add flaky tests to the results table:**
+
+```
+### Flaky Tests (passed on retry)
+
+| Test | Verdict | Notes |
+|------|---------|-------|
+| `tests/unit/test_timing.py::test_stall_detection` | FLAKY | Passed on retry (intermittent) |
+| `tests/unit/test_classifier.py::test_bare_ref` | FLAKY | Passed on retry (LLM non-determinism) |
+
+These tests are intermittently failing and should be investigated, but they do not block the pipeline.
+```
+
+**After the flaky filter**, update `FAILING_TEST_IDS` to contain only the tests that still failed on retry. Proceed to Step 1 with this reduced list.
+
 ### Step 1: Collect Failing Test Node IDs
 
 Parse the pytest output to extract all failing test node IDs. These look like:
