@@ -673,6 +673,8 @@ def _recover_interrupted_jobs(project_key: str) -> int:
     Called at startup to recover jobs orphaned by a previous crash or restart.
     Uses delete-and-recreate to avoid KeyField index corruption.
     Returns the number of recovered jobs.
+
+    Note: Jobs with status="killed" are excluded (query filters on status="running").
     """
     running_jobs = list(AgentSession.query.filter(project_key=project_key, status="running"))
     if not running_jobs:
@@ -702,6 +704,8 @@ async def _reset_running_jobs(project_key: str) -> int:
     Async version: reset running jobs back to pending during graceful shutdown.
     Uses delete-and-recreate to avoid KeyField index corruption.
     Returns the number of reset jobs.
+
+    Note: Jobs with status="killed" are excluded (query filters on status="running").
     """
     running_jobs = await AgentSession.query.async_filter(project_key=project_key, status="running")
     if not running_jobs:
@@ -850,6 +854,8 @@ async def _job_health_check() -> None:
     2. If the job has exceeded its timeout (from started_at), recover it
        regardless of worker state.
     3. Legacy jobs without started_at and no worker are also recovered.
+
+    Note: Jobs with status="killed" are excluded (query filters on status="running").
 
     Recovery follows the same delete-and-recreate pattern as
     _recover_interrupted_jobs(): delete the stuck AgentSession, create a new
