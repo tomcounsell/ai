@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: Building
 type: chore
 appetite: Small
 owner: Valor
