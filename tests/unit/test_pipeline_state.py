@@ -1,4 +1,4 @@
-"""Tests for agent/pipeline_state.py.
+"""Tests for agent/build_pipeline.py (renamed from agent/pipeline_state.py).
 
 Tests cover: load/exists with missing files, initialize schema,
 save/load round-trips, advance_stage transitions, patch_iterations

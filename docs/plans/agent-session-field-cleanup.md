@@ -1,14 +1,17 @@
 ---
-status: Ready
+status: Superseded
 type: chore
 appetite: Medium
 owner: Valor
 created: 2026-03-23
 tracking: https://github.com/tomcounsell/ai/issues/473
 last_comment_id:
+superseded_by: https://github.com/tomcounsell/ai/issues/488
 ---
 
 # AgentSession Field Naming Cleanup
+
+> **Superseded**: The `sdlc_stages` consolidation and `last_transition_at` removal described in this plan were implemented as part of [#488 — Consolidate SDLC stage tracking](https://github.com/tomcounsell/ai/pull/490). The remaining items (message field disambiguation, field naming conventions) are still valid and tracked in issue #473.
 
 ## Problem
 

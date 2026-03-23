@@ -34,10 +34,8 @@ INFO [routing] Semantic routing: no_match
 INFO [enrichment] Summary: media=no, youtube=0, links=0, reply_chain=0 messages, result_length=342
 INFO [prompt-summary] Sending to agent: 1205 chars, classification=sdlc, has_workflow=False, task_list=thread-12345-67890
 INFO [prompt-summary] Context: soul=yes, sdlc_workflow=yes, workflow_context=no, session_id=tg_ai_12345_67890
-INFO [observer] Session tg_ai_12345_67890: is_sdlc=True, auto_continue=0/10, remaining_stages=True
-INFO [observer] Iteration 1/5: tool=read_session, result={"session_id": "tg_ai_12345_67890", "is_sdlc": true, "classi
-INFO [observer] Iteration 2/5: tool=enqueue_continuation, result={"status": "ok", "action": "enqueue_continuation", "
-INFO [observer] Decision: steer (reason: Good progress on the plan. Continue with /do-build.)
+INFO [nudge] Session tg_ai_12345_67890: is_sdlc=True, auto_continue=0/50, remaining_stages=True
+INFO [nudge] Decision: nudge (reason: stages remaining, no question detected)
 ```
 
 ## Design Decisions

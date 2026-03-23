@@ -1,5 +1,5 @@
 ---
-status: In Progress
+status: Complete
 type: refactor
 appetite: Medium
 owner: Valor

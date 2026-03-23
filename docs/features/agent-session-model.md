@@ -33,7 +33,7 @@ Pipeline stage state is stored in the `stage_states` JSON field on AgentSession,
 | `PipelineStateMachine.has_failed_stage()` | `bool` | `True` if any stage has `FAILED` or `ERROR` status |
 | `PipelineStateMachine.get_display_progress()` | `dict` | Maps stage names to status (`completed`, `in_progress`, `pending`, `failed`) |
 
-`is_sdlc` (property) returns `True` if `classification_type == "sdlc"`.
+`is_sdlc` (property) returns `True` if either (1) `stage_states` contains any non-pending/non-ready stage, or (2) `classification_type == "sdlc"` for freshly-classified sessions.
 
 These are used by the [stage-aware auto-continue](bridge-workflow-gaps.md#stage-aware-path-sdlc-jobs) routing in `agent/job_queue.py`.
 

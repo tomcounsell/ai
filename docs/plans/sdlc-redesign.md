@@ -10,6 +10,8 @@ last_comment_id:
 
 # SDLC Redesign: ChatSession/DevSession Split, Single-Session Pipeline, Observer Simplification
 
+> **Note**: References to `sdlc_stages` in this plan are outdated. As of [#488](https://github.com/tomcounsell/ai/pull/490), the `sdlc_stages` field was consolidated into `stage_states`. Any unimplemented items in this plan that reference `sdlc_stages` should use `stage_states` instead.
+
 ## Problem
 
 A Telegram message like "SDLC issue 123" passes through 12+ components before producing a result: Telegram handler → routing classifier → intent classifier → session manager → Redis queue → worker → re-classifier → CWD switch → message enricher → Claude Code spawn → /sdlc skill → sub-skill → Observer (4-phase LLM) → re-enqueue → repeat 7x → summarizer → formatter → Telegram.
