@@ -222,17 +222,23 @@ restart_bridge() {
         if is_running; then
             local pid=$(get_pid)
             echo "Bridge restarted (PID: $pid)"
-            return 0
         else
             echo "Restart failed. Check logs: $LOG_DIR/bridge.error.log"
             return 1
         fi
+    else
+        # Fallback: manual stop/start
+        stop_bridge
+        sleep 1
+        start_bridge
     fi
 
-    # Fallback: manual stop/start
-    stop_bridge
-    sleep 1
-    start_bridge
+    # Also restart the watchdog so it picks up new code
+    if [ -f "$WATCHDOG_PLIST_PATH" ]; then
+        echo "Restarting bridge watchdog..."
+        launchctl kickstart -k "gui/$(id -u)/$WATCHDOG_PLIST_NAME" 2>/dev/null || true
+        echo "Watchdog restarted"
+    fi
 }
 
 status_bridge() {

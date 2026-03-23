@@ -1585,6 +1585,8 @@ async def main():
     _bridge_start_time = time.time()
 
     async def heartbeat_loop():
+        _last_zombie_cleanup = time.time()
+
         while True:
             await asyncio.sleep(30)
             uptime_min = int((time.time() - _bridge_start_time) / 60)
@@ -1610,6 +1612,19 @@ async def main():
                             )
                 except Exception as e:
                     logger.debug(f"[heartbeat] Job poll error: {e}")
+
+            # Periodic zombie cleanup every 5 minutes
+            now = time.time()
+            if now - _last_zombie_cleanup >= 300:
+                _last_zombie_cleanup = now
+                try:
+                    killed = _cleanup_orphaned_claude_processes()
+                    if killed:
+                        logger.warning(
+                            f"[heartbeat] Zombie cleanup killed {killed} orphaned process(es)"
+                        )
+                except Exception as e:
+                    logger.debug(f"[heartbeat] Zombie cleanup error: {e}")
 
             # Log heartbeat every 4th tick (~2min) for watchdog
             if uptime_min > 0 and uptime_min % 2 == 0:
