@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Small
 owner: Valor
@@ -63,7 +63,7 @@ No prerequisites — this work has no external dependencies.
 - Remove `playlist` and `playlist-status` from argparse subparsers and command dispatch dict
 - Remove playlist references from `~/Desktop/Valor/personas/project-manager.md` (lines 97, 167, 169, 173)
 - Remove playlist-specific tests from `tests/unit/test_job_scheduler_persona.py`
-- Update stale comments in `agent/job_queue.py` (lines 468-470)
+- Rewrite the `_complete_job` docstring in `agent/job_queue.py` (lines 468-470) to describe current behavior (parent finalization and deletion) instead of the removed playlist hook
 - Update `docs/features/README.md` to mark playlist as "Deprecated" instead of "Shipped"
 
 ## Failure Path Test Strategy
@@ -107,6 +107,8 @@ No race conditions identified — all operations are synchronous deletions of de
 - Live verification of dev-session dispatch (item #3 — manual testing, not code changes)
 - Routing fix verification (item #2 — already shipped and tested)
 - Refactoring job_scheduler.py beyond playlist removal
+- Editing historical plan docs (`docs/plans/sdlc_job_playlist.md`, `docs/plans/sdlc-redesign.md`) — these are historical records and intentionally retain playlist references
+- Editing `docs/features/sdlc-job-playlist.md` — already has a deprecation notice, serves as historical documentation
 
 ## Update System
 
@@ -126,6 +128,8 @@ No agent integration required — the playlist CLI was registered as an MCP tool
 - [ ] Zero grep hits for "playlist" in `tools/job_scheduler.py`
 - [ ] Zero grep hits for "playlist" in `~/Desktop/Valor/personas/project-manager.md`
 - [ ] Zero grep hits for "playlist" in `agent/job_queue.py`
+- [ ] Zero grep hits for "playlist" in `tests/unit/test_job_scheduler_persona.py` (except import-level references if any)
+- [ ] Codebase-wide check: `grep -rn playlist --include='*.py' --include='*.md' . | grep -v docs/plans/ | grep -v docs/features/sdlc-job-playlist.md` returns zero hits (historical plan docs and the deprecated feature doc are intentionally left as-is)
 - [ ] `pytest tests/unit/test_job_scheduler_persona.py -x -q` passes (schedule tests intact)
 - [ ] `python -m ruff check tools/job_scheduler.py` passes
 - [ ] `docs/features/README.md` shows playlist as "Deprecated"
@@ -156,6 +160,7 @@ No agent integration required — the playlist CLI was registered as an MCP tool
 - **Assigned To**: cleanup-builder
 - **Agent Type**: builder
 - **Parallel**: true
+- Delete `_get_redis()` — only called by playlist functions, safe to remove
 - Delete playlist constants (`PLAYLIST_KEY_PREFIX`, `PLAYLIST_RETRIES_KEY_PREFIX`)
 - Delete playlist helper functions (`_playlist_key`, `_retries_key`)
 - Delete playlist operations (`playlist_push`, `playlist_pop`, `playlist_status`, `playlist_requeue`, `playlist_clear`)
@@ -163,7 +168,7 @@ No agent integration required — the playlist CLI was registered as an MCP tool
 - Remove `"playlist"` from `PERSONA_RESTRICTED_ACTIONS`
 - Remove playlist argparse subparsers and dispatch entries
 - Delete playlist-specific tests from `test_job_scheduler_persona.py`
-- Remove stale playlist comments from `agent/job_queue.py` (lines 468-470)
+- Rewrite `_complete_job` docstring in `agent/job_queue.py` (lines 468-470) to describe current behavior instead of removed playlist hook
 
 ### 2. Clean up external references
 - **Task ID**: build-reference-cleanup
@@ -183,7 +188,7 @@ No agent integration required — the playlist CLI was registered as an MCP tool
 - **Parallel**: false
 - Run `pytest tests/unit/test_job_scheduler_persona.py -x -q`
 - Run `python -m ruff check tools/job_scheduler.py`
-- Grep for "playlist" across codebase to verify zero references in modified files
+- Run codebase-wide grep: `grep -rn playlist --include='*.py' --include='*.md' . | grep -v docs/plans/ | grep -v docs/features/sdlc-job-playlist.md` — must return zero hits
 - Verify all success criteria met
 
 ## Verification
