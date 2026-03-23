@@ -56,8 +56,10 @@ WATCHDOG_INTERVAL = 60  # Check every 60 seconds (hardcoded per plan)
 ZOMBIE_THRESHOLD_SECONDS = 7200  # 2 hours - processes older than this are zombies
 SOFT_INSTANCE_LIMIT = 5  # Warn when more than this many active claude processes
 
-# Process name patterns to scan for zombies
-ZOMBIE_PROCESS_PATTERNS = ("claude", "pyright")
+# Process name patterns to scan for zombies (CLI invocations only)
+# NOTE: "claude" alone matches Claude Desktop app processes (false positives).
+# We match specific CLI patterns instead.
+ZOMBIE_PROCESS_PATTERNS = ("claude --", "pyright")
 
 
 @dataclass
@@ -314,10 +316,20 @@ def check_bridge_health() -> HealthStatus:
     active_claude_count = len(active)
 
     if zombie_count > 0:
-        issues.append(
-            f"{zombie_count} zombie process(es) detected "
-            f"(PIDs: {zombie_pids}, memory: {zombie_memory_mb}MB)"
-        )
+        if running and logs_fresh:
+            # Bridge is healthy — just kill zombies directly, don't restart
+            killed = kill_zombie_processes(zombies)
+            issues.append(
+                f"{zombie_count} zombie process(es) cleaned up "
+                f"({killed} killed, memory freed: {zombie_memory_mb}MB)"
+            )
+            # Do NOT escalate — bridge is fine, zombies are handled
+        else:
+            issues.append(
+                f"{zombie_count} zombie process(es) detected "
+                f"(PIDs: {zombie_pids}, memory: {zombie_memory_mb}MB)"
+            )
+            recovery_level = max(recovery_level, 2)
 
     if active_claude_count > SOFT_INSTANCE_LIMIT:
         logger.warning(
@@ -468,6 +480,10 @@ def _kill_detected_zombies() -> int:
 
 def execute_recovery(level: int, issues: list[str]) -> bool:
     """Execute recovery at the specified escalation level."""
+    if level == 0:
+        logger.warning(f"Recovery called with level 0 (no action needed): {issues}")
+        return True
+
     logger.info(f"Executing recovery level {level}")
 
     # Create recovery lock
