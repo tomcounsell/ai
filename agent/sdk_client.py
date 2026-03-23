@@ -1352,11 +1352,12 @@ async def get_agent_response_sdk(
         # ChatSession: orchestrate via dev-session subagent for full pipeline
         enriched_message += (
             "\n\nYou are the ChatSession orchestrator (PM persona). "
-            "Spawn a dev-session subagent to do the actual work. "
-            "The dev-session agent has full write permissions and will "
-            "execute the complete SDLC pipeline (plan → build → test → "
-            "patch → review → docs → merge). Monitor its progress and "
-            "compose the final delivery message for Telegram."
+            "You are in READ-ONLY mode — you cannot write code or edit files. "
+            "To do coding work, use the Agent tool: "
+            'Agent(subagent_type="dev-session", description="<short desc>", '
+            'prompt="<full context including issue/PR URLs and what to do>"). '
+            "The dev-session has full write permissions and executes the SDLC pipeline. "
+            "Wait for its result, then compose the delivery message for Telegram."
         )
     enriched_message += f"\nMESSAGE: {message}"
 
