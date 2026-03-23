@@ -13,8 +13,6 @@ Usage:
     python -m tools.job_scheduler bump --job-id <job_id>
     python -m tools.job_scheduler pop --project valor
     python -m tools.job_scheduler cancel --job-id <job_id>
-    python -m tools.job_scheduler playlist --issues 440 445 397
-    python -m tools.job_scheduler playlist-status
 """
 
 import argparse
@@ -125,7 +123,7 @@ def _get_parent_session(parent_job_id: str):
 # Persona restrictions: which personas can perform which actions
 # teammate cannot schedule SDLC jobs; all other actions are unrestricted
 PERSONA_RESTRICTED_ACTIONS = {
-    "teammate": {"schedule", "playlist"},
+    "teammate": {"schedule"},
 }
 
 
@@ -135,7 +133,7 @@ def _check_persona_permission(action_type: str) -> dict | None:
     Reads persona from PERSONA env var (default: "developer" — permissive).
 
     Args:
-        action_type: The action being attempted (e.g., "schedule", "playlist").
+        action_type: The action being attempted (e.g., "schedule").
 
     Returns:
         None if allowed, or a dict with error details if blocked.
@@ -155,217 +153,6 @@ def _check_persona_permission(action_type: str) -> dict | None:
             "action": action_type,
         }
     return None
-
-
-# --- Playlist operations (Redis list) ---
-
-PLAYLIST_KEY_PREFIX = "playlist:"
-PLAYLIST_RETRIES_KEY_PREFIX = "playlist_retries:"
-
-
-def _get_redis():
-    """Get the popoto Redis connection."""
-    from popoto.redis_db import POPOTO_REDIS_DB
-
-    return POPOTO_REDIS_DB
-
-
-def _playlist_key(project_key: str) -> str:
-    """Redis key for a project's playlist."""
-    return f"{PLAYLIST_KEY_PREFIX}{project_key}"
-
-
-def _retries_key(project_key: str) -> str:
-    """Redis key for tracking playlist retry counts."""
-    return f"{PLAYLIST_RETRIES_KEY_PREFIX}{project_key}"
-
-
-def playlist_push(project_key: str, issue_numbers: list[int]) -> int:
-    """Append issue numbers to the end of the playlist.
-
-    Args:
-        project_key: The project key for scoping.
-        issue_numbers: List of issue numbers to append.
-
-    Returns:
-        The new length of the playlist.
-    """
-    r = _get_redis()
-    key = _playlist_key(project_key)
-    for num in issue_numbers:
-        r.rpush(key, str(num))
-    return r.llen(key)
-
-
-def playlist_pop(project_key: str) -> int | None:
-    """Pop the next issue number from the front of the playlist.
-
-    Args:
-        project_key: The project key for scoping.
-
-    Returns:
-        The issue number, or None if the playlist is empty.
-    """
-    r = _get_redis()
-    key = _playlist_key(project_key)
-    value = r.lpop(key)
-    if value is None:
-        return None
-    return int(value)
-
-
-def playlist_status(project_key: str) -> list[int]:
-    """Get all issue numbers in the playlist (in order).
-
-    Args:
-        project_key: The project key for scoping.
-
-    Returns:
-        List of issue numbers in playlist order.
-    """
-    r = _get_redis()
-    key = _playlist_key(project_key)
-    items = r.lrange(key, 0, -1)
-    return [int(item) for item in items]
-
-
-def playlist_requeue(project_key: str, issue_number: int) -> bool:
-    """Requeue a failed issue to the end of the playlist (max 1 retry).
-
-    Args:
-        project_key: The project key for scoping.
-        issue_number: The issue number to requeue.
-
-    Returns:
-        True if requeued, False if max retries exceeded.
-    """
-    r = _get_redis()
-    retries_key = _retries_key(project_key)
-
-    # Check retry count
-    current_retries = r.hget(retries_key, str(issue_number))
-    if current_retries is not None and int(current_retries) >= 1:
-        return False
-
-    # Increment retry count and requeue
-    r.hincrby(retries_key, str(issue_number), 1)
-    r.rpush(_playlist_key(project_key), str(issue_number))
-    return True
-
-
-def playlist_clear(project_key: str) -> None:
-    """Clear the playlist and retry counts for a project."""
-    r = _get_redis()
-    r.delete(_playlist_key(project_key))
-    r.delete(_retries_key(project_key))
-
-
-def cmd_playlist(args: argparse.Namespace) -> int:
-    """Enqueue multiple issues for sequential SDLC processing."""
-    # Persona gate
-    perm = _check_persona_permission("playlist")
-    if perm:
-        _output(perm)
-        return 1
-
-    ctx = _get_env_context()
-    project_key = args.project or ctx["project_key"]
-
-    if not args.issues:
-        _output({"status": "error", "message": "No issues provided. Use --issues 440 445 397"})
-        return 1
-
-    # Validate all issue numbers
-    valid_issues = []
-    skipped_issues = []
-    for issue_num in args.issues:
-        if issue_num <= 0:
-            skipped_issues.append({"issue": issue_num, "reason": "invalid issue number"})
-            continue
-
-        issue = _validate_issue(issue_num)
-        if issue is None:
-            skipped_issues.append({"issue": issue_num, "reason": "not found or not accessible"})
-            continue
-        if issue.get("state") == "closed":
-            skipped_issues.append({"issue": issue_num, "reason": "issue is closed"})
-            continue
-
-        valid_issues.append({"number": issue_num, "title": issue.get("title", f"#{issue_num}")})
-
-    if not valid_issues:
-        _output(
-            {
-                "status": "error",
-                "message": "No valid issues to enqueue.",
-                "skipped": skipped_issues,
-            }
-        )
-        return 1
-
-    # Add valid issues to playlist
-    issue_numbers = [v["number"] for v in valid_issues]
-    new_length = playlist_push(project_key, issue_numbers)
-
-    # Schedule the first issue immediately (if nothing is currently running)
-    first_issue = issue_numbers[0]
-
-    # Build a synthetic args namespace for cmd_schedule
-    schedule_args = argparse.Namespace(
-        issue=first_issue,
-        priority=args.priority or "normal",
-        project=project_key,
-        after=None,
-        parent_job=None,
-    )
-
-    # Pop the first issue from playlist since we're scheduling it now
-    playlist_pop(project_key)
-
-    # Schedule the first issue
-    schedule_result = cmd_schedule(schedule_args)
-
-    result = {
-        "status": "playlist_created",
-        "project": project_key,
-        "enqueued": valid_issues,
-        "playlist_remaining": playlist_status(project_key),
-        "playlist_length": new_length - 1,  # minus the one we just scheduled
-        "first_scheduled": first_issue,
-        "schedule_exit_code": schedule_result,
-    }
-
-    if skipped_issues:
-        result["skipped"] = skipped_issues
-
-    _output(result)
-    return 0
-
-
-def cmd_playlist_status(args: argparse.Namespace) -> int:
-    """Show the current playlist status for a project."""
-    ctx = _get_env_context()
-    project_key = args.project or ctx["project_key"]
-
-    issues = playlist_status(project_key)
-
-    r = _get_redis()
-    retries_key = _retries_key(project_key)
-    retries = {}
-    if r.exists(retries_key):
-        raw = r.hgetall(retries_key)
-        retries = {k.decode() if isinstance(k, bytes) else k: int(v) for k, v in raw.items()}
-
-    _output(
-        {
-            "status": "ok",
-            "project": project_key,
-            "playlist": issues,
-            "playlist_length": len(issues),
-            "retry_counts": retries,
-        }
-    )
-    return 0
 
 
 def cmd_schedule(args: argparse.Namespace) -> int:
@@ -938,18 +725,6 @@ def main():
     cancel = subparsers.add_parser("cancel", help="Cancel a specific pending job")
     cancel.add_argument("--job-id", required=True, help="Job ID to cancel")
 
-    # playlist
-    pl = subparsers.add_parser(
-        "playlist", help="Enqueue multiple issues for sequential SDLC processing"
-    )
-    pl.add_argument("--issues", type=int, nargs="+", required=True, help="Issue numbers to enqueue")
-    pl.add_argument("--priority", choices=["urgent", "high", "normal", "low"], default="normal")
-    pl.add_argument("--project", help="Project key")
-
-    # playlist-status
-    pls = subparsers.add_parser("playlist-status", help="Show current playlist status")
-    pls.add_argument("--project", help="Project key")
-
     args = parser.parse_args()
 
     if not args.command:
@@ -964,8 +739,6 @@ def main():
         "pop": cmd_pop,
         "cancel": cmd_cancel,
         "children": cmd_children,
-        "playlist": cmd_playlist,
-        "playlist-status": cmd_playlist_status,
     }
 
     return commands[args.command](args)
