@@ -40,8 +40,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# All known stages including PATCH (routing-only)
-ALL_STAGES = ["ISSUE", "PLAN", "BUILD", "TEST", "PATCH", "REVIEW", "DOCS", "MERGE"]
+# All known stages including PATCH (routing-only) and CRITIQUE
+ALL_STAGES = ["ISSUE", "PLAN", "CRITIQUE", "BUILD", "TEST", "PATCH", "REVIEW", "DOCS", "MERGE"]
 
 # Valid status values
 VALID_STATUSES = frozenset({"pending", "ready", "in_progress", "completed", "failed"})
@@ -58,6 +58,7 @@ class PipelineStateMachine:
         session: The AgentSession this state machine operates on.
         states: Dict mapping stage name to status string.
         patch_cycle_count: Number of PATCH -> TEST cycles completed.
+        critique_cycle_count: Number of CRITIQUE -> PLAN -> CRITIQUE cycles completed.
     """
 
     def __init__(self, session: AgentSession) -> None:
@@ -73,6 +74,7 @@ class PipelineStateMachine:
         self.session = session
         self.states: dict[str, str] = {}
         self.patch_cycle_count: int = 0
+        self.critique_cycle_count: int = 0
 
         # Load existing state from session
         raw = getattr(session, "stage_states", None)
@@ -82,6 +84,7 @@ class PipelineStateMachine:
                 if isinstance(data, dict):
                     self.states = {k: v for k, v in data.items() if k in ALL_STAGES}
                     self.patch_cycle_count = data.get("_patch_cycle_count", 0)
+                    self.critique_cycle_count = data.get("_critique_cycle_count", 0)
             except (json.JSONDecodeError, TypeError):
                 logger.warning(
                     f"Invalid stage_states JSON on session "
@@ -90,6 +93,7 @@ class PipelineStateMachine:
         elif raw and isinstance(raw, dict):
             self.states = {k: v for k, v in raw.items() if k in ALL_STAGES}
             self.patch_cycle_count = raw.get("_patch_cycle_count", 0)
+            self.critique_cycle_count = raw.get("_critique_cycle_count", 0)
 
         # Initialize defaults for any missing stages
         for stage in ALL_STAGES:
@@ -104,6 +108,7 @@ class PipelineStateMachine:
         """Persist state back to the session."""
         data = dict(self.states)
         data["_patch_cycle_count"] = self.patch_cycle_count
+        data["_critique_cycle_count"] = self.critique_cycle_count
         self.session.stage_states = json.dumps(data)
         try:
             self.session.save()
@@ -168,6 +173,12 @@ class PipelineStateMachine:
                 f"nor REVIEW ({review_status}) has completed or failed"
             )
 
+        # For cycle re-entry: PLAN can restart after CRITIQUE fails
+        if stage == "PLAN" and self.states.get("CRITIQUE") in ("failed",):
+            self.states[stage] = "in_progress"
+            self._save()
+            return
+
         # For cycle re-entry: TEST can restart after PATCH completes
         if stage == "TEST" and self.states.get("PATCH") in ("completed", "in_progress"):
             self.states[stage] = "in_progress"
@@ -225,7 +236,9 @@ class PipelineStateMachine:
             self.patch_cycle_count += 1
 
         # Mark next stage as ready
-        next_info = get_next_stage(stage, "success", self.patch_cycle_count)
+        next_info = get_next_stage(
+            stage, "success", self.patch_cycle_count, self.critique_cycle_count
+        )
         if next_info:
             next_stage = next_info[0]
             next_current = self.states.get(next_stage, "pending")
@@ -258,8 +271,14 @@ class PipelineStateMachine:
 
         self.states[stage] = "failed"
 
+        # Track CRITIQUE cycles (incremented on failure since it triggers PLAN revision)
+        if stage == "CRITIQUE":
+            self.critique_cycle_count += 1
+
         # Mark next stage based on failure edge
-        next_info = get_next_stage(stage, "fail", self.patch_cycle_count)
+        next_info = get_next_stage(
+            stage, "fail", self.patch_cycle_count, self.critique_cycle_count
+        )
         if next_info:
             next_stage = next_info[0]
             next_current = self.states.get(next_stage, "pending")
@@ -306,7 +325,9 @@ class PipelineStateMachine:
         """
         current = self.current_stage()
         if current:
-            return get_next_stage(current, outcome, self.patch_cycle_count)
+            return get_next_stage(
+                current, outcome, self.patch_cycle_count, self.critique_cycle_count
+            )
 
         # No stage in_progress — find the last completed stage
         last_completed = None
@@ -315,7 +336,9 @@ class PipelineStateMachine:
                 last_completed = stage
 
         if last_completed:
-            return get_next_stage(last_completed, outcome, self.patch_cycle_count)
+            return get_next_stage(
+                last_completed, outcome, self.patch_cycle_count, self.critique_cycle_count
+            )
 
         # Nothing started yet — return first stage
         return get_next_stage(None)
@@ -377,6 +400,15 @@ class PipelineStateMachine:
         if stage == "ISSUE":
             if "issues/" in tail or "issue created" in tail or "issue #" in tail:
                 return "success"
+        elif stage == "CRITIQUE":
+            if "ready to build" in tail:
+                return "success"
+            if "needs revision" in tail:
+                return "fail"
+            if "major rework" in tail:
+                # Major rework escalates to human — return ambiguous so caller
+                # can inspect and decide (typically escalate rather than auto-loop)
+                return "ambiguous"
         elif stage == "PLAN":
             if "docs/plans/" in tail or "plan created" in tail or "plan finalized" in tail:
                 return "success"
@@ -413,6 +445,7 @@ class PipelineStateMachine:
         return {
             "states": dict(self.states),
             "patch_cycle_count": self.patch_cycle_count,
+            "critique_cycle_count": self.critique_cycle_count,
             "current_stage": self.current_stage(),
             "has_remaining": self.has_remaining_stages(),
         }
