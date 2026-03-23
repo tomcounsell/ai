@@ -864,6 +864,16 @@ class ValorAgent:
         if self.session_type:
             env["SESSION_TYPE"] = self.session_type
 
+        # PM sessions: inject Sentry auth token so sentry-cli works without
+        # manual export. Token is stored in ~/Desktop/Valor/.env (iCloud-synced).
+        if self.session_type == "chat":
+            sentry_env = Path.home() / "Desktop" / "Valor" / ".env"
+            if sentry_env.exists():
+                for line in sentry_env.read_text().splitlines():
+                    if line.startswith("SENTRY_PERSONAL_TOKEN="):
+                        env["SENTRY_AUTH_TOKEN"] = line.split("=", 1)[1]
+                        break
+
         # SDLC context injection: pre-resolve session fields as env vars so
         # skills can reference $SDLC_PR_NUMBER etc. instead of guessing (issue #420).
         # Only set vars when the field is non-None and non-empty.
