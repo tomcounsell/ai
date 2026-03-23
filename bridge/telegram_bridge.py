@@ -281,8 +281,8 @@ def _cleanup_orphaned_claude_processes() -> int:
 
                 ppid = int(ppid_result.stdout.strip())
 
-                # Only kill if orphaned (PPID=1) or child of current bridge
-                if ppid not in (1, current_pid):
+                # Only kill if truly orphaned (PPID=1, meaning parent died)
+                if ppid != 1:
                     continue
 
                 logger.warning(
