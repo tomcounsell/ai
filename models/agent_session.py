@@ -102,7 +102,7 @@ class AgentSession(Model):
     # === Session fields (from SessionLog) ===
     last_activity = Field(type=float, null=True)
     completed_at = Field(type=float, null=True)
-    # last_transition_at removed: duration now derived from history entries
+
     turn_count = IntField(default=0)
     tool_call_count = IntField(default=0)
     log_path = Field(null=True, max_length=1000)

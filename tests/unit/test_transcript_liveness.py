@@ -148,7 +148,6 @@ class TestCheckStalledSessionsWithTranscript:
             created_at=now - 3600,
             last_activity=now - (STALL_THRESHOLD_ACTIVE + 120),
             project_key="test",
-            last_transition_at=None,
         )
         session._get_history_list = lambda: []
 
@@ -198,7 +197,6 @@ class TestCheckStalledSessionsWithTranscript:
             created_at=now - 3600,
             last_activity=now - (STALL_THRESHOLD_ACTIVE + 120),
             project_key="test",
-            last_transition_at=None,
         )
         session._get_history_list = lambda: []
 
@@ -239,7 +237,6 @@ class TestCheckStalledSessionsWithTranscript:
             created_at=now - (STALL_THRESHOLD_PENDING + 60),
             last_activity=now,
             project_key="test",
-            last_transition_at=None,
         )
         session._get_history_list = lambda: []
 

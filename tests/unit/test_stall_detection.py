@@ -60,7 +60,6 @@ def _make_agent_session(
         project_key=project_key,
         chat_id=chat_id,
         message_id=message_id,
-        last_transition_at=None,
         retry_count=retry_count,
         last_stall_reason=last_stall_reason,
         message_text=message_text,
@@ -271,7 +270,7 @@ class TestCheckStalledSessions:
             started_at=now - (STALL_THRESHOLD_RUNNING + 10),
             created_at=now - (STALL_THRESHOLD_RUNNING + 500),
         )
-        # last_transition_at is None, so should use started_at
+
         mock_query = _mock_query_for_sessions({"running": [session]})
         with patch("monitoring.session_watchdog.AgentSession.query", mock_query):
             result = check_stalled_sessions()

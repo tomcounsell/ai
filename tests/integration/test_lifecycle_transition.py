@@ -2,7 +2,7 @@
 
 Covers:
 1. AgentSession.log_lifecycle_transition() emits structured log, appends history
-2. Duration derived from started_at/created_at (not last_transition_at which was removed)
+2. Duration derived from started_at/created_at
 3. session_transcript.py calls log_lifecycle_transition() on start and complete
 4. job_queue.py calls log_lifecycle_transition() at key points
 """

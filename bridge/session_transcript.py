@@ -288,7 +288,7 @@ def complete_transcript(
 
             # status is a KeyField — delete and recreate if changed
             if s.status != status:
-                # Re-read after lifecycle log (it saved history/last_transition_at)
+                # Re-read after lifecycle log (it saved history)
                 sessions = list(AgentSession.query.filter(session_id=session_id))
                 s = sessions[0] if sessions else s
 
