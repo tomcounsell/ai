@@ -156,7 +156,7 @@ The `dev-session` agent is defined in `agent/agent_definitions.py`:
 
 ## Migration
 
-- Old AgentSession records in Redis are compatible (session_type will be null, treated as legacy)
-- No data migration needed -- old records are harmless
+- Older AgentSession records in Redis are compatible (session_type defaults to null)
+- No data migration needed -- prior records are harmless
 - Factory methods enforce field contracts for new sessions
-- Workers auto-adapt: jobs with chat_id use per-chat routing; legacy jobs fall back to project_key
+- Workers auto-adapt: jobs with chat_id use per-chat routing; older jobs fall back to project_key
