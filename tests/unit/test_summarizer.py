@@ -1209,6 +1209,7 @@ class TestRenderStageProgress:
         session.get_stage_progress.return_value = {
             "ISSUE": "completed",
             "PLAN": "completed",
+            "CRITIQUE": "completed",
             "BUILD": "completed",
             "TEST": "completed",
             "REVIEW": "completed",
