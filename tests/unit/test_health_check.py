@@ -109,6 +109,11 @@ class TestWatchdogHook:
         yield
         _tool_counts.clear()
 
+    @pytest.fixture(autouse=True)
+    def _no_env_session(self, monkeypatch):
+        """Ensure VALOR_SESSION_ID env var doesn't override test session IDs."""
+        monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
+
     @pytest.mark.asyncio
     async def test_skips_before_interval(self):
         """Hook should return continue=True without calling judge before interval."""
