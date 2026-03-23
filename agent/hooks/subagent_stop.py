@@ -81,7 +81,7 @@ def _record_stage_on_parent(parent_session_id: str) -> None:
         logger.warning(f"[subagent_stop] Failed to record stage completion: {e}")
 
 
-def _get_sdlc_stages(session_id: str) -> str | None:
+def _get_stage_states(session_id: str) -> str | None:
     """Return the SDLC stage_states dict as a string, or None."""
     try:
         from models.agent_session import AgentSession
@@ -121,7 +121,7 @@ async def subagent_stop_hook(
         # Inject SDLC stage state back to PM so it knows what's actually done
         session_id = os.environ.get("VALOR_SESSION_ID")
         if session_id:
-            stages = _get_sdlc_stages(session_id)
+            stages = _get_stage_states(session_id)
             if stages:
                 logger.info(f"[subagent_stop] Injecting stage state for {session_id}")
                 return {"reason": f"Pipeline state: {stages}"}

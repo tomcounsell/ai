@@ -89,7 +89,7 @@ class TestHasFailedStage:
 
 
 class TestStageAwareDecisionMatrix:
-    def test_sdlc_stages_remaining_auto_continues(self):
+    def test_stage_states_remaining_auto_continues(self):
         session = AgentSession()
         session.stage_states = _make_stages(
             ISSUE="completed", PLAN="completed", BUILD="in_progress"

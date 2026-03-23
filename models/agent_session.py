@@ -192,7 +192,7 @@ class AgentSession(Model):
     @property
     def current_stage(self) -> str | None:
         """Return the first SDLC stage with status 'in_progress', or None."""
-        stages = self._get_sdlc_stages_dict()
+        stages = self._get_stage_states_dict()
         if not stages:
             return None
         for stage in SDLC_STAGES:
@@ -212,7 +212,7 @@ class AgentSession(Model):
         s = self.slug or self.work_item_slug
         return f"docs/plans/{s}.md" if s else None
 
-    def _get_sdlc_stages_dict(self) -> dict | None:
+    def _get_stage_states_dict(self) -> dict | None:
         """Parse stage_states into a dict, or None."""
         raw = self.stage_states
         if not raw:
@@ -470,7 +470,7 @@ class AgentSession(Model):
         2. classification_type == "sdlc" for freshly-classified sessions
         """
         # Primary: check stage_states for any active/completed/failed stage
-        stages = self._get_sdlc_stages_dict()
+        stages = self._get_stage_states_dict()
         if stages and any(v not in ("pending", "ready") for v in stages.values()):
             return True
 
