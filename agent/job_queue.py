@@ -177,30 +177,6 @@ class Job:
         return self._rj.task_list_id
 
     @property
-    def has_media(self) -> bool:
-        return bool(self._rj.has_media)
-
-    @property
-    def media_type(self) -> str | None:
-        return self._rj.media_type
-
-    @property
-    def youtube_urls(self) -> str | None:
-        return self._rj.youtube_urls
-
-    @property
-    def non_youtube_urls(self) -> str | None:
-        return self._rj.non_youtube_urls
-
-    @property
-    def reply_to_msg_id(self) -> int | None:
-        return self._rj.reply_to_msg_id
-
-    @property
-    def chat_id_for_enrichment(self) -> str | None:
-        return self._rj.chat_id_for_enrichment
-
-    @property
     def classification_type(self) -> str | None:
         return self._rj.classification_type
 
@@ -237,12 +213,6 @@ _JOB_FIELDS = [
     "revival_context",
     "work_item_slug",
     "task_list_id",
-    "has_media",
-    "media_type",
-    "youtube_urls",
-    "non_youtube_urls",
-    "reply_to_msg_id",
-    "chat_id_for_enrichment",
     "classification_type",
     "auto_continue_count",
     "started_at",
@@ -314,12 +284,6 @@ async def _push_job(
     sender_id: int | None = None,
     work_item_slug: str | None = None,
     task_list_id: str | None = None,
-    has_media: bool = False,
-    media_type: str | None = None,
-    youtube_urls: str | None = None,
-    non_youtube_urls: str | None = None,
-    reply_to_msg_id: int | None = None,
-    chat_id_for_enrichment: str | None = None,
     classification_type: str | None = None,
     auto_continue_count: int = 0,
     correlation_id: str | None = None,
@@ -376,12 +340,6 @@ async def _push_job(
         revival_context=revival_context,
         work_item_slug=work_item_slug,
         task_list_id=task_list_id,
-        has_media=has_media,
-        media_type=media_type,
-        youtube_urls=youtube_urls,
-        non_youtube_urls=non_youtube_urls,
-        reply_to_msg_id=reply_to_msg_id,
-        chat_id_for_enrichment=chat_id_for_enrichment,
         classification_type=classification_type,
         auto_continue_count=auto_continue_count,
         correlation_id=correlation_id,
@@ -1167,12 +1125,6 @@ async def enqueue_job(
     sender_id: int | None = None,
     work_item_slug: str | None = None,
     task_list_id: str | None = None,
-    has_media: bool = False,
-    media_type: str | None = None,
-    youtube_urls: str | None = None,
-    non_youtube_urls: str | None = None,
-    reply_to_msg_id: int | None = None,
-    chat_id_for_enrichment: str | None = None,
     classification_type: str | None = None,
     auto_continue_count: int = 0,
     correlation_id: str | None = None,
@@ -1204,12 +1156,6 @@ async def enqueue_job(
         revival_context=revival_context,
         work_item_slug=work_item_slug,
         task_list_id=task_list_id,
-        has_media=has_media,
-        media_type=media_type,
-        youtube_urls=youtube_urls,
-        non_youtube_urls=non_youtube_urls,
-        reply_to_msg_id=reply_to_msg_id,
-        chat_id_for_enrichment=chat_id_for_enrichment,
         classification_type=classification_type,
         auto_continue_count=auto_continue_count,
         correlation_id=correlation_id,
@@ -1658,15 +1604,14 @@ async def _execute_job(job: Job) -> None:
         session_id=job.session_id,
     )
 
-    # Deferred enrichment: process media, YouTube, links, reply chain
-    # Prefer reading enrichment params from TelegramMessage (new path),
-    # fall back to AgentSession fields (backward compat for pre-migration sessions).
+    # Deferred enrichment: process media, YouTube, links, reply chain.
+    # Reads enrichment params exclusively from TelegramMessage via trigger_message_id.
     enriched_text = job.message_text
-    enrich_has_media = job.has_media
-    enrich_media_type = job.media_type
-    enrich_youtube_urls = job.youtube_urls
-    enrich_non_youtube_urls = job.non_youtube_urls
-    enrich_reply_to_msg_id = job.reply_to_msg_id
+    enrich_has_media = False
+    enrich_media_type = None
+    enrich_youtube_urls = None
+    enrich_non_youtube_urls = None
+    enrich_reply_to_msg_id = None
 
     if job.trigger_message_id:
         try:
@@ -1687,10 +1632,10 @@ async def _execute_job(job: Job) -> None:
             else:
                 logger.debug(
                     f"[{job.project_key}] trigger_message_id {job.trigger_message_id} "
-                    f"not found, falling back to AgentSession fields"
+                    f"not found, skipping enrichment"
                 )
         except Exception as e:
-            logger.debug(f"[{job.project_key}] TelegramMessage lookup failed, using fallback: {e}")
+            logger.debug(f"[{job.project_key}] TelegramMessage lookup failed: {e}")
 
     if enrich_has_media or enrich_youtube_urls or enrich_non_youtube_urls or enrich_reply_to_msg_id:
         try:
@@ -1706,7 +1651,7 @@ async def _execute_job(job: Job) -> None:
                 youtube_urls=enrich_youtube_urls,
                 non_youtube_urls=enrich_non_youtube_urls,
                 reply_to_msg_id=enrich_reply_to_msg_id,
-                chat_id=job.chat_id_for_enrichment or job.chat_id,
+                chat_id=job.chat_id,
                 sender_name=job.sender_name,
                 message_id=job.message_id,
             )

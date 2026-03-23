@@ -90,15 +90,6 @@ class AgentSession(Model):
     revival_context = Field(null=True, max_length=MSG_MAX_CHARS)
     work_item_slug = Field(null=True)
     task_list_id = Field(null=True)
-    # === Message metadata (deprecated - now lives on TelegramMessage) ===
-    # These fields are retained for backward compatibility during migration.
-    # New code should read from TelegramMessage via trigger_message_id.
-    has_media = Field(type=bool, default=False)
-    media_type = Field(null=True)
-    youtube_urls = Field(null=True)
-    non_youtube_urls = Field(null=True)
-    reply_to_msg_id = Field(type=int, null=True)
-    chat_id_for_enrichment = Field(null=True)
     classification_type = Field(null=True)
     auto_continue_count = Field(type=int, default=0)
     started_at = Field(type=float, null=True)  # Cannot be SortedField because it starts as None

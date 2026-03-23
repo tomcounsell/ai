@@ -48,12 +48,6 @@ class TestExtractJobFields:
             revival_context="some context",
             work_item_slug="my-feature",
             task_list_id="thread-123-456",
-            has_media=True,
-            media_type="photo",
-            youtube_urls='[["url", "id"]]',
-            non_youtube_urls='["https://example.com"]',
-            reply_to_msg_id=99,
-            chat_id_for_enrichment="enrichment_chat",
             classification_type="bug",
             auto_continue_count=2,
         )
@@ -79,12 +73,6 @@ class TestExtractJobFields:
         assert fields["revival_context"] == "some context"
         assert fields["work_item_slug"] == "my-feature"
         assert fields["task_list_id"] == "thread-123-456"
-        assert fields["has_media"] is True
-        assert fields["media_type"] == "photo"
-        assert fields["youtube_urls"] == '[["url", "id"]]'
-        assert fields["non_youtube_urls"] == '["https://example.com"]'
-        assert fields["reply_to_msg_id"] == 99
-        assert fields["chat_id_for_enrichment"] == "enrichment_chat"
         assert fields["classification_type"] == "bug"
         assert fields["auto_continue_count"] == 2
 

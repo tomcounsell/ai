@@ -774,10 +774,6 @@ async def main():
             has_media=bool(message.media),
         )
 
-        # --- Lightweight metadata extraction (enrichment deferred to worker) ---
-        has_media = bool(message.media)
-        media_type = get_media_type(message) if has_media else None
-
         # Clean the message text (no media/YouTube/link enrichment here)
         clean_text = clean_message(text, project)
         if not clean_text:
@@ -1226,11 +1222,11 @@ async def main():
             except Exception as e:
                 logger.warning(f"[{project_name}] Failed to mark stale work dormant: {e}")
 
-        # Serialize enrichment metadata for the job worker
+        # Serialize URL metadata for TelegramMessage storage
         yt_urls_json = json.dumps(youtube_urls) if youtube_urls else None
         non_yt_urls_json = json.dumps(non_youtube_urls) if non_youtube_urls else None
 
-        # Update TelegramMessage with URL/classification metadata
+        # Update TelegramMessage with URL metadata
         # (has_media, media_type, reply_to_msg_id were set at store_message time)
         if stored_msg_id and (yt_urls_json or non_yt_urls_json):
             try:
@@ -1296,12 +1292,6 @@ async def main():
             chat_title=chat_title,
             priority="normal",
             sender_id=sender_id,
-            has_media=has_media,
-            media_type=media_type,
-            youtube_urls=yt_urls_json,
-            non_youtube_urls=non_yt_urls_json,
-            reply_to_msg_id=message.reply_to_msg_id,
-            chat_id_for_enrichment=telegram_chat_id,
             classification_type=_classification,
             correlation_id=correlation_id,
             trigger_message_id=stored_msg_id,

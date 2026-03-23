@@ -14,9 +14,10 @@ logger = logging.getLogger(__name__)
 
 
 def _register_dev_session_completion(agent_id: str) -> None:
-    """Mark a DevSession as completed in Redis.
+    """Mark a DevSession as completed in Redis and record SDLC stage completion.
 
     Looks up the DevSession by parent ChatSession and updates its status.
+    Also records stage completion via PipelineStateMachine if a stage is in_progress.
     Logs the parent -> child completion linkage for observability.
     """
     parent_session_id = os.environ.get("VALOR_SESSION_ID")
@@ -37,8 +38,47 @@ def _register_dev_session_completion(agent_id: str) -> None:
                     f"[subagent_stop] DevSession {dev.job_id} completed "
                     f"(parent={parent_session_id}, agent_id={agent_id})"
                 )
+
+        # Record SDLC stage completion on the parent ChatSession.
+        # The parent session's stage_states tracks which pipeline stage is in_progress.
+        # When the dev-session completes successfully, mark that stage as completed.
+        _record_stage_on_parent(parent_session_id)
     except Exception as e:
         logger.warning(f"[subagent_stop] Failed to register DevSession completion: {e}")
+
+
+def _record_stage_on_parent(parent_session_id: str) -> None:
+    """Record stage completion on the parent ChatSession's PipelineStateMachine.
+
+    Finds the current in_progress stage and marks it completed. This wires
+    PipelineStateMachine.complete_stage() into the SDLC skill completion path.
+    """
+    try:
+        from bridge.pipeline_state import PipelineStateMachine
+        from models.agent_session import AgentSession
+
+        parent_sessions = list(AgentSession.query.filter(session_id=parent_session_id))
+        if not parent_sessions:
+            logger.debug(f"[subagent_stop] Parent session {parent_session_id} not found")
+            return
+
+        parent = parent_sessions[0]
+        sm = PipelineStateMachine(parent)
+        current = sm.current_stage()
+
+        if current:
+            sm.complete_stage(current)
+            logger.info(
+                f"[subagent_stop] Recorded stage completion: {current} "
+                f"on session {parent_session_id}"
+            )
+        else:
+            logger.debug(
+                f"[subagent_stop] No in_progress stage on {parent_session_id}, "
+                f"skipping stage completion"
+            )
+    except Exception as e:
+        logger.warning(f"[subagent_stop] Failed to record stage completion: {e}")
 
 
 def _get_sdlc_stages(session_id: str) -> str | None:
