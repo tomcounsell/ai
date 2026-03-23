@@ -465,10 +465,6 @@ async def _complete_job(job: Job, *, failed: bool = False) -> None:
     passed to _finalize_parent so it can correctly count terminal children
     even though the child's Redis status hasn't been updated yet.
 
-    After deletion, checks the playlist for the next issue to schedule
-    (Playlist hook). On failure, requeues the failed issue to
-    the end of the playlist if retry limit allows.
-
     Args:
         job: The job to complete.
         failed: If True, this job failed (used for parent finalization).
