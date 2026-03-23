@@ -1391,7 +1391,11 @@ async def get_agent_response_sdk(
     )
     wr_label = "yes" if has_worker_rules else "no (pm mode)"
     is_dm = chat_title is None
-    persona = _resolve_persona(project, chat_title, is_dm=is_dm)
+    # ChatSession always uses PM persona; otherwise resolve from config
+    if _session_type == "chat":
+        persona = "project-manager"
+    else:
+        persona = _resolve_persona(project, chat_title, is_dm=is_dm)
     logger.info(
         f"[{request_id}] Context: persona={persona}, worker_rules={wr_label}, "
         f"session_id={session_id}"
