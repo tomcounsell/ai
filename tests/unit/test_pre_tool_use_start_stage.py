@@ -1,0 +1,283 @@
+"""Unit tests for pipeline stage wiring in agent/hooks/pre_tool_use.py.
+
+Tests _extract_stage_from_prompt(), _start_pipeline_stage(), and the
+integration of start_stage() into _maybe_register_dev_session().
+"""
+
+import logging
+from unittest.mock import MagicMock, patch
+
+from agent.hooks.pre_tool_use import (
+    _extract_stage_from_prompt,
+    _maybe_register_dev_session,
+    _start_pipeline_stage,
+)
+
+
+class TestExtractStageFromPrompt:
+    """Test _extract_stage_from_prompt helper."""
+
+    def test_extracts_stage_colon_format(self):
+        assert _extract_stage_from_prompt("Stage: BUILD") == "BUILD"
+
+    def test_extracts_stage_to_execute_dash_format(self):
+        assert _extract_stage_from_prompt("Stage to execute -- PLAN") == "PLAN"
+
+    def test_extracts_stage_to_execute_colon(self):
+        assert _extract_stage_from_prompt("Stage to execute: TEST") == "TEST"
+
+    def test_extracts_stage_case_insensitive_prefix(self):
+        assert _extract_stage_from_prompt("stage: BUILD") == "BUILD"
+
+    def test_extracts_from_longer_prompt(self):
+        prompt = (
+            "You are a Developer agent.\n\n"
+            "Stage: BUILD\n"
+            "Issue: https://github.com/example/repo/issues/42\n"
+            "Plan: docs/plans/some-plan.md"
+        )
+        assert _extract_stage_from_prompt(prompt) == "BUILD"
+
+    def test_returns_none_for_empty_prompt(self):
+        assert _extract_stage_from_prompt("") is None
+
+    def test_returns_none_for_none_prompt(self):
+        assert _extract_stage_from_prompt(None) is None
+
+    def test_returns_none_for_no_stage(self):
+        assert _extract_stage_from_prompt("Just do some work please") is None
+
+    def test_returns_none_for_stage_keyword_without_valid_name(self):
+        assert _extract_stage_from_prompt("This is a stage of development") is None
+
+    def test_extracts_first_stage_when_multiple_present(self):
+        prompt = "Stage: BUILD\nAfter BUILD, run TEST"
+        assert _extract_stage_from_prompt(prompt) == "BUILD"
+
+    def test_all_stage_names(self):
+        for stage in [
+            "ISSUE",
+            "PLAN",
+            "CRITIQUE",
+            "BUILD",
+            "TEST",
+            "PATCH",
+            "REVIEW",
+            "DOCS",
+            "MERGE",
+        ]:
+            assert _extract_stage_from_prompt(f"Stage: {stage}") == stage
+
+    def test_fallback_to_keyword_scan(self):
+        prompt = "Execute the REVIEW stage for this PR"
+        assert _extract_stage_from_prompt(prompt) == "REVIEW"
+
+    def test_fallback_needs_stage_keyword(self):
+        assert _extract_stage_from_prompt("Run the BUILD job now") is None
+
+
+class TestStartPipelineStage:
+    """Test _start_pipeline_stage helper."""
+
+    def _make_mocks(self):
+        """Create mock AgentSession and PipelineStateMachine modules."""
+        mock_session = MagicMock()
+        mock_session.stage_states = None
+        mock_session.session_id = "parent-1"
+
+        mock_sm_instance = MagicMock()
+
+        mock_psm_module = MagicMock()
+        mock_psm_module.PipelineStateMachine.return_value = mock_sm_instance
+
+        mock_as_module = MagicMock()
+        mock_as_module.AgentSession.query.filter.return_value = [mock_session]
+
+        return mock_session, mock_sm_instance, mock_psm_module, mock_as_module
+
+    def test_starts_stage_on_parent_session(self, caplog):
+        mock_session, mock_sm, mock_psm_mod, mock_as_mod = self._make_mocks()
+
+        with (
+            patch.dict(
+                "sys.modules",
+                {
+                    "bridge.pipeline_state": mock_psm_mod,
+                    "models.agent_session": mock_as_mod,
+                },
+            ),
+            caplog.at_level(logging.INFO),
+        ):
+            _start_pipeline_stage("parent-1", "BUILD")
+
+        mock_psm_mod.PipelineStateMachine.assert_called_once_with(mock_session)
+        mock_sm.start_stage.assert_called_once_with("BUILD")
+        assert "Started pipeline stage BUILD" in caplog.text
+
+    def test_logs_warning_when_parent_not_found(self, caplog):
+        mock_as_mod = MagicMock()
+        mock_as_mod.AgentSession.query.filter.return_value = []
+        mock_psm_mod = MagicMock()
+
+        with (
+            patch.dict(
+                "sys.modules",
+                {
+                    "bridge.pipeline_state": mock_psm_mod,
+                    "models.agent_session": mock_as_mod,
+                },
+            ),
+            caplog.at_level(logging.WARNING),
+        ):
+            _start_pipeline_stage("nonexistent", "BUILD")
+
+        assert "Parent session nonexistent not found" in caplog.text
+
+    def test_catches_start_stage_value_error(self, caplog):
+        mock_session, mock_sm, mock_psm_mod, mock_as_mod = self._make_mocks()
+        mock_sm.start_stage.side_effect = ValueError("Cannot start BUILD: no predecessor completed")
+
+        with (
+            patch.dict(
+                "sys.modules",
+                {
+                    "bridge.pipeline_state": mock_psm_mod,
+                    "models.agent_session": mock_as_mod,
+                },
+            ),
+            caplog.at_level(logging.WARNING),
+        ):
+            _start_pipeline_stage("parent-1", "BUILD")
+
+        assert "Failed to start pipeline stage BUILD" in caplog.text
+        assert "no predecessor completed" in caplog.text
+
+    def test_catches_redis_error(self, caplog):
+        mock_as_mod = MagicMock()
+        mock_as_mod.AgentSession.query.filter.side_effect = RuntimeError("Redis down")
+        mock_psm_mod = MagicMock()
+
+        with (
+            patch.dict(
+                "sys.modules",
+                {
+                    "bridge.pipeline_state": mock_psm_mod,
+                    "models.agent_session": mock_as_mod,
+                },
+            ),
+            caplog.at_level(logging.WARNING),
+        ):
+            _start_pipeline_stage("parent-4", "BUILD")
+
+        assert "Failed to start pipeline stage BUILD" in caplog.text
+
+
+class TestMaybeRegisterDevSessionStartStage:
+    """Test that _maybe_register_dev_session calls start_stage wiring."""
+
+    def test_calls_start_stage_for_sdlc_prompt(self, monkeypatch, caplog):
+        monkeypatch.setenv("VALOR_SESSION_ID", "parent-session-10")
+
+        mock_dev = MagicMock()
+        mock_dev.job_id = "job-99"
+        mock_as_mod = MagicMock()
+        mock_as_mod.AgentSession.create_dev.return_value = mock_dev
+
+        tool_input = {
+            "type": "dev-session",
+            "prompt": "Stage: BUILD\nIssue: https://github.com/example/repo/issues/1",
+        }
+
+        with (
+            patch.dict("sys.modules", {"models.agent_session": mock_as_mod}),
+            patch("agent.hooks.pre_tool_use._start_pipeline_stage") as mock_start,
+            caplog.at_level(logging.INFO),
+        ):
+            _maybe_register_dev_session(tool_input)
+
+        mock_start.assert_called_once_with("parent-session-10", "BUILD")
+
+    def test_skips_start_stage_when_no_stage_in_prompt(self, monkeypatch, caplog):
+        monkeypatch.setenv("VALOR_SESSION_ID", "parent-session-11")
+
+        mock_dev = MagicMock()
+        mock_dev.job_id = "job-100"
+        mock_as_mod = MagicMock()
+        mock_as_mod.AgentSession.create_dev.return_value = mock_dev
+
+        tool_input = {
+            "type": "dev-session",
+            "prompt": "Just do some general work",
+        }
+
+        with (
+            patch.dict("sys.modules", {"models.agent_session": mock_as_mod}),
+            patch("agent.hooks.pre_tool_use._start_pipeline_stage") as mock_start,
+            caplog.at_level(logging.DEBUG),
+        ):
+            _maybe_register_dev_session(tool_input)
+
+        mock_start.assert_not_called()
+        assert "No SDLC stage found" in caplog.text
+
+    def test_start_stage_failure_does_not_block_registration(self, monkeypatch, caplog):
+        """start_stage failure should not prevent DevSession registration from completing."""
+        monkeypatch.setenv("VALOR_SESSION_ID", "parent-session-12")
+
+        mock_dev = MagicMock()
+        mock_dev.job_id = "job-101"
+        mock_as_mod = MagicMock()
+        mock_as_mod.AgentSession.create_dev.return_value = mock_dev
+
+        tool_input = {
+            "type": "dev-session",
+            "prompt": "Stage: BUILD\nDo the build",
+        }
+
+        with (
+            patch.dict("sys.modules", {"models.agent_session": mock_as_mod}),
+            patch(
+                "agent.hooks.pre_tool_use._start_pipeline_stage",
+                side_effect=RuntimeError("unexpected"),
+            ),
+            caplog.at_level(logging.INFO),
+        ):
+            # The RuntimeError from _start_pipeline_stage propagates because
+            # it is called AFTER the try/except block for registration.
+            # But _start_pipeline_stage itself catches all exceptions internally,
+            # so we test that the mock side_effect doesn't prevent registration.
+            # Note: since we mock at the function level, the side_effect does raise.
+            # The real _start_pipeline_stage never raises.
+            try:
+                _maybe_register_dev_session(tool_input)
+            except RuntimeError:
+                pass
+
+        # Registration should have happened before start_stage was called
+        mock_as_mod.AgentSession.create_dev.assert_called_once()
+
+    def test_skips_entirely_for_non_dev_session(self, monkeypatch):
+        monkeypatch.setenv("VALOR_SESSION_ID", "parent-session-13")
+
+        tool_input = {
+            "type": "chat-session",
+            "prompt": "Stage: BUILD",
+        }
+
+        with patch("agent.hooks.pre_tool_use._start_pipeline_stage") as mock_start:
+            _maybe_register_dev_session(tool_input)
+
+        mock_start.assert_not_called()
+
+    def test_skips_when_no_valor_session_id(self, monkeypatch):
+        monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
+
+        tool_input = {
+            "type": "dev-session",
+            "prompt": "Stage: BUILD",
+        }
+
+        with patch("agent.hooks.pre_tool_use._start_pipeline_stage") as mock_start:
+            _maybe_register_dev_session(tool_input)
+
+        mock_start.assert_not_called()
