@@ -70,8 +70,9 @@ No prerequisites — this work modifies prompt text and validation logic only.
 - **PM prompt injection rewrite**: Instruct the PM to assess the current SDLC stage, spawn one dev-session for that stage, verify the result, then decide the next stage
 - **dev-session.md rewrite**: Single-stage executor — receives a stage assignment, executes it, reports result
 - **PM persona audit**: Verify the private persona file reinforces stage orchestration
-- **Completion validation**: When an SDLC session completes without stage progress, log a warning
-- **Positive language pass**: Rewrite all "NEVER/do NOT" patterns as instructive "do X" statements
+- **SKILL.md update**: Replace Observer Agent references with PM-orchestrated progression; align with single-stage dev-session model
+- **Completion validation**: When an SDLC session completes without stage progress, log a warning (see Task 4 for implementation spec)
+- **Positive language pass (scoped)**: Rewrite "NEVER/do NOT" patterns in `dev-session.md` and PM injection only. Leave SKILL.md Hard Rules as intentional safety constraints.
 
 ### Flow
 
@@ -79,10 +80,10 @@ No prerequisites — this work modifies prompt text and validation logic only.
 
 ### Technical Approach
 
-- Rewrite `sdk_client.py:1384-1394` PM injection to include stage assessment and single-stage dispatch instructions
+- Rewrite `sdk_client.py` PM injection (the `if _session_type == "chat":` block) to include stage assessment and single-stage dispatch instructions. Clarify that PM can run read-only Bash commands (gh, grep) for stage assessment — `pre_tool_use.py` only blocks Write/Edit to non-docs paths, not Bash reads.
 - Rewrite `.claude/agents/dev-session.md` as single-stage executor
-- Add informational warning in `agent/hooks/pre_tool_use.py` when Bash commands include `gh pr` operations on SDLC sessions without stage completion (soft guidance, not a block)
-- Add completion check in stop hook when SDLC session has no stage_states recorded
+- Update `.claude/skills/sdlc/SKILL.md` — replace Observer Agent references (lines 9, 91) with PM-orchestrated progression model
+- Add completion check in `.claude/hooks/stop.py`: use `get_session_id()` to get session ID, import `load_sdlc_state()` from `post_tool_use` to check sdlc_state.json, load `AgentSession` from Redis (same pattern as `_update_agent_session_log_path`), check `classification_type == "sdlc"` with no stage progress, print warning to stderr
 - Audit `~/Desktop/Valor/personas/project-manager.md` for alignment
 
 ## Failure Path Test Strategy
@@ -99,15 +100,16 @@ No prerequisites — this work modifies prompt text and validation logic only.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_post_tool_use_sdlc.py` — UPDATE: if SDLC state tracking changes, assertions may need updating
-- [ ] `tests/unit/test_pipeline_integrity.py` — UPDATE: may need new assertions for stage-by-stage model
+- [ ] `tests/unit/test_post_tool_use_sdlc.py` — UPDATE: verify `load_sdlc_state` import path works when imported from stop hook
+- [ ] `tests/unit/test_pipeline_integrity.py` — UPDATE: add assertions that SKILL.md no longer references Observer Agent
+- [ ] `tests/unit/test_stop_hook_sdlc_warning.py` — ADD: new test file for the stop hook completion warning. Test cases: (a) SDLC-classified session with no stage progress emits warning, (b) SDLC session with stage progress emits no warning, (c) non-SDLC session emits no warning, (d) Redis unavailable degrades gracefully (no crash)
 
-No major test breakage expected — changes are primarily to prompt text, not Python logic.
+No major test breakage expected for existing tests — changes are primarily to prompt text. The new Python logic (stop hook warning) gets a dedicated test file.
 
 ## Rabbit Holes
 
 - Building a hard-blocking stage gate system — the enforcement should be prompt-level guidance, not infrastructure blocks
-- Rewriting the entire SDLC skill system — only the prompt injection and agent description need changing
+- Rewriting the entire SDLC skill system — only the prompt injection, agent description, and Observer references in SKILL.md need changing. The SKILL.md routing logic and stage table are correct.
 - Adding new pipeline state machine logic — the existing `stage_states` field on AgentSession is sufficient
 
 ## Risks
@@ -149,8 +151,9 @@ No agent integration required — this modifies the prompts that agents receive,
 - [ ] dev-session.md describes a single-stage executor
 - [ ] PM prompt injection at `sdk_client.py:1384` instructs stage-by-stage orchestration
 - [ ] PM persona file reviewed and aligned with stage model
-- [ ] All prompt text uses positive/instructive language (no "NEVER"/"do NOT" patterns)
-- [ ] SDLC sessions that complete without stage progress generate a log warning
+- [ ] SKILL.md Observer references replaced with PM-orchestrated progression
+- [ ] `dev-session.md` and PM injection use positive/instructive language (SKILL.md Hard Rules exempted as safety constraints)
+- [ ] SDLC sessions that complete without stage progress generate a stderr warning
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 
@@ -175,27 +178,30 @@ No agent integration required — this modifies the prompts that agents receive,
 ### 1. Rewrite dev-session agent definition
 - **Task ID**: build-dev-session-prompt
 - **Depends On**: none
-- **Validates**: manual review — agent description matches single-stage model
+- **Validates**: `grep -c "single.stage\|one stage\|assigned stage" .claude/agents/dev-session.md` returns > 0 AND `grep -c "NEVER\|do NOT" .claude/agents/dev-session.md` returns 0
 - **Assigned To**: prompt-builder
 - **Agent Type**: builder
 - **Parallel**: true
 - Rewrite `.claude/agents/dev-session.md` as single-stage executor
 - Remove "complete SDLC pipeline in a single session"
 - Add: receives stage assignment from PM, executes that stage, reports result
+- Use positive/instructive language throughout (no NEVER/do NOT patterns)
 
 ### 2. Rewrite PM prompt injection
 - **Task ID**: build-pm-injection
 - **Depends On**: none
-- **Validates**: `grep -c "one dev-session" agent/sdk_client.py` returns > 0
+- **Validates**: `grep -c "one dev-session\|stage.by.stage\|one stage" agent/sdk_client.py` returns > 0
 - **Assigned To**: prompt-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Rewrite `sdk_client.py:1384-1394` to instruct stage-by-stage orchestration
-- Include: assess current stage, spawn one dev-session per stage, verify result
+- Rewrite the `if _session_type == "chat":` block in `sdk_client.py` to instruct stage-by-stage orchestration
+- Include: use read-only Bash (gh, grep) to assess current stage, spawn one dev-session per stage, verify result before progressing
+- Clarify that PM can run Bash for reads (pre_tool_use.py only blocks Write/Edit to non-docs paths)
 
 ### 3. Audit PM persona file
 - **Task ID**: build-persona-audit
 - **Depends On**: none
+- **Validates**: `grep -c "stage" ~/Desktop/Valor/personas/project-manager.md` returns > 0
 - **Assigned To**: prompt-builder
 - **Agent Type**: builder
 - **Parallel**: true
@@ -203,42 +209,67 @@ No agent integration required — this modifies the prompts that agents receive,
 - Verify stage orchestration is reinforced
 - Add stage guidance if missing
 
-### 4. Add completion warning
+### 4. Add completion warning to stop hook
 - **Task ID**: build-completion-warning
 - **Depends On**: none
-- **Validates**: `tests/unit/test_pipeline_integrity.py`
+- **Validates**: `pytest tests/unit/test_stop_hook_sdlc_warning.py -x -q` passes
 - **Assigned To**: prompt-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- In stop hook or session completion path, log warning when SDLC session has no stage_states
+- Add a new function `_check_sdlc_stage_progress(session_id)` to `.claude/hooks/stop.py`
+- Implementation steps:
+  1. Get `session_id` via existing `get_session_id(hook_input)` (already in stop.py main)
+  2. Import `load_sdlc_state` from `.claude/hooks/post_tool_use` to check if `sdlc_state.json` exists for this session
+  3. Load `AgentSession` from Redis using the same pattern as `_update_agent_session_log_path` (query `AgentSession.query.filter(session_id=session_id)`)
+  4. Check if `classification_type == "sdlc"` on the session
+  5. If SDLC-classified, check `sdlc_stages` and `stage_states` fields. If both are empty/null, print warning to stderr: `"SDLC WARNING: Session {session_id} classified as SDLC but completed with no stage progress"`
+  6. Wrap in try/except (non-fatal, same pattern as `_update_agent_session_log_path`)
+- Create `tests/unit/test_stop_hook_sdlc_warning.py` with 4 test cases: (a) SDLC + no stages = warning, (b) SDLC + stages = no warning, (c) non-SDLC = no warning, (d) Redis unavailable = no crash
 
-### 5. Positive language pass
+### 4.5. Update SKILL.md Observer references
+- **Task ID**: build-skill-md-update
+- **Depends On**: none
+- **Validates**: `grep -c "Observer" .claude/skills/sdlc/SKILL.md` returns 0
+- **Assigned To**: prompt-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- Replace Observer Agent references in SKILL.md with PM-orchestrated progression
+- Line 9: change "The Observer Agent handles pipeline progression by re-invoking `/sdlc`" to "The PM (ChatSession) handles pipeline progression by re-invoking `/sdlc`"
+- Line 91: change "NEVER loop -- invoke one sub-skill, then return. The Observer handles progression." to equivalent PM-based instruction
+- Keep Hard Rules as explicit safety constraints (do not rewrite to positive language — these are router-level prohibitions)
+
+### 5. Positive language pass (scoped)
 - **Task ID**: build-positive-language
 - **Depends On**: build-dev-session-prompt, build-pm-injection
+- **Validates**: `grep -c "NEVER\|do NOT" .claude/agents/dev-session.md` returns 0 AND `grep "NEVER\|do NOT" agent/sdk_client.py | grep -c "session_type"` returns 0
 - **Assigned To**: prompt-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Grep all prompt files for "NEVER", "do NOT", "don't", "cannot"
-- Rewrite each as positive instruction
+- Scope: only `.claude/agents/dev-session.md` and the PM injection block in `agent/sdk_client.py`
+- Rewrite "NEVER X" as "Always Y" / "Use X instead of Y" — convert prohibitions into instructions
+- Explicitly excluded: `.claude/skills/sdlc/SKILL.md` Hard Rules (safety constraints), CLAUDE.md, other skill files
 
 ### 6. Validation
 - **Task ID**: validate-all
-- **Depends On**: build-dev-session-prompt, build-pm-injection, build-persona-audit, build-completion-warning, build-positive-language
+- **Depends On**: build-dev-session-prompt, build-pm-injection, build-persona-audit, build-completion-warning, build-skill-md-update, build-positive-language
+- **Validates**: `pytest tests/ -x -q` exit code 0 AND `python -m ruff check .` exit code 0
 - **Assigned To**: prompt-validator
 - **Agent Type**: validator
 - **Parallel**: false
 - Verify dev-session.md describes single-stage model
 - Verify PM injection includes stage orchestration
-- Verify no "NEVER"/"do NOT" patterns remain in agent prompts
-- Run test suite
+- Verify SKILL.md has no Observer references
+- Verify no "NEVER"/"do NOT" patterns remain in dev-session.md or PM injection
+- Run test suite and linter
 
 ### 7. Documentation
 - **Task ID**: document-feature
 - **Depends On**: validate-all
+- **Validates**: `grep -c "stage-by-stage\|single-stage" docs/features/chat-dev-session-architecture.md` returns > 0
 - **Assigned To**: prompt-builder
 - **Agent Type**: documentarian
 - **Parallel**: false
-- Update `docs/features/chat-dev-session-architecture.md`
+- Update `docs/features/chat-dev-session-architecture.md` to document stage-by-stage orchestration model
 
 ## Verification
 
@@ -250,6 +281,8 @@ No agent integration required — this modifies the prompts that agents receive,
 | No NEVER in dev-session | `grep -c "NEVER\|do NOT" .claude/agents/dev-session.md` | exit code 1 |
 | Single-stage language | `grep -c "single.stage\|one stage\|assigned stage" .claude/agents/dev-session.md` | output > 0 |
 | PM injection has stage | `grep -c "one dev-session\|stage.by.stage\|one stage" agent/sdk_client.py` | output > 0 |
+| No Observer in SKILL.md | `grep -c "Observer" .claude/skills/sdlc/SKILL.md` | output = 0 |
+| Stop hook warning test | `pytest tests/unit/test_stop_hook_sdlc_warning.py -x -q` | exit code 0 |
 
 ## Critique Results
 
@@ -325,10 +358,12 @@ No agent integration required — this modifies the prompts that agents receive,
 
 ### Verdict
 
-**NEEDS REVISION** -- 2 blockers must be resolved before build:
+**NEEDS REVISION** -- 2 blockers resolved in revision:
 
-1. Task 4 (completion warning) needs a concrete implementation spec for the stop hook, not a vague "log warning" instruction
-2. SKILL.md must be added to the audit scope -- it references a deleted Observer and contradicts the new PM-orchestration model
+1. ~~Task 4 (completion warning) needs a concrete implementation spec~~ -- RESOLVED: Task 4 now specifies exact implementation steps (get session_id, import load_sdlc_state, query AgentSession, check classification_type, check stage fields). New test file `test_stop_hook_sdlc_warning.py` added. Old validates reference to unrelated test file replaced.
+2. ~~SKILL.md must be added to audit scope~~ -- RESOLVED: New Task 4.5 (build-skill-md-update) added to replace Observer references with PM-orchestrated progression. SKILL.md added to Scope, Solution, Success Criteria, and Verification sections.
+
+Concerns 3-5 also addressed: positive language pass scoped to 2 files only, PM Bash read capability clarified, all tasks now have Validates fields.
 
 ---
 
