@@ -126,6 +126,16 @@ class TestFindProcessBySessionId:
         with patch("tools.job_scheduler.subprocess.run", side_effect=OSError("fail")):
             assert _find_process_by_session_id("some-session") is None
 
+    def test_handles_subprocess_timeout(self):
+        """pgrep timing out returns None rather than crashing."""
+        import subprocess
+
+        with patch(
+            "tools.job_scheduler.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd="pgrep", timeout=5),
+        ):
+            assert _find_process_by_session_id("some-session") is None
+
 
 # ---------------------------------------------------------------------------
 # _kill_process
@@ -181,6 +191,38 @@ class TestKillProcess:
             result = _kill_process(12345)
         assert result["pid"] == 12345
         assert result["action"] == "terminated_sigkill"
+
+    def test_sigkill_permission_denied(self):
+        """Process survives SIGTERM; SIGKILL gets permission denied."""
+
+        def fake_kill(pid, sig):
+            if sig == signal.SIGTERM:
+                return
+            if sig == 0:
+                return  # Always alive during checks
+            if sig == signal.SIGKILL:
+                raise PermissionError()
+
+        with patch("os.kill", side_effect=fake_kill), patch("time.sleep"):
+            result = _kill_process(12345)
+        assert result["pid"] == 12345
+        assert result["action"] == "permission_denied"
+
+    def test_dies_between_sigterm_and_sigkill(self):
+        """Process dies just as SIGKILL is attempted (race condition)."""
+
+        def fake_kill(pid, sig):
+            if sig == signal.SIGTERM:
+                return
+            if sig == 0:
+                return  # Alive during check window
+            if sig == signal.SIGKILL:
+                raise ProcessLookupError()  # Died right before SIGKILL
+
+        with patch("os.kill", side_effect=fake_kill), patch("time.sleep"):
+            result = _kill_process(12345)
+        assert result["pid"] == 12345
+        assert result["action"] == "terminated_sigterm"
 
 
 # ---------------------------------------------------------------------------
@@ -368,6 +410,52 @@ class TestCmdKill:
         output = json.loads(capsys.readouterr().out)
         assert output["status"] == "error"
         assert "required" in output["message"].lower()
+
+    def test_kill_by_session_id(self, capsys):
+        """cmd_kill --session-id finds and kills the target job."""
+        target = _FakeJob(job_id="job-sess", session_id="target-session", status="running")
+        fake_query = _FakeQuery(jobs_by_status={"running": [target]})
+        created = _FakeJob(job_id="new-sess", status="killed")
+
+        with (
+            patch("models.agent_session.AgentSession.query", fake_query),
+            patch("models.agent_session.AgentSession.create", return_value=created),
+            patch("agent.job_queue._extract_job_fields", return_value={"status": "running"}),
+            patch("tools.job_scheduler._find_process_by_session_id", return_value=None),
+        ):
+            ret = cmd_kill(_make_args(session_id="target-session"))
+
+        assert ret == 0
+        output = json.loads(capsys.readouterr().out)
+        assert output["status"] == "killed"
+        assert output["count"] == 1
+
+    def test_nonexistent_session_id_returns_error(self, capsys):
+        """cmd_kill --session-id with unknown session returns error."""
+        fake_query = _FakeQuery(jobs_by_status={})
+
+        with patch("models.agent_session.AgentSession.query", fake_query):
+            ret = cmd_kill(_make_args(session_id="nonexistent-session"))
+
+        assert ret == 1
+        output = json.loads(capsys.readouterr().out)
+        assert output["status"] == "error"
+        assert "not found" in output["message"]
+
+    def test_kill_handles_redis_exception(self, capsys):
+        """cmd_kill handles unexpected Redis exceptions gracefully."""
+
+        class ExplodingQuery:
+            def filter(self, **kwargs):
+                raise ConnectionError("Redis down")
+
+        with patch("models.agent_session.AgentSession.query", ExplodingQuery()):
+            ret = cmd_kill(_make_args(all=True))
+
+        assert ret == 1
+        output = json.loads(capsys.readouterr().out)
+        assert output["status"] == "error"
+        assert "failed" in output["message"].lower()
 
 
 # ---------------------------------------------------------------------------

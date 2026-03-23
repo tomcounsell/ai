@@ -28,7 +28,7 @@ def cleanup_test_sessions():
 
 def _cleanup():
     """Remove all test sessions from Redis."""
-    for status in ("pending", "running", "completed", "failed"):
+    for status in ("pending", "running", "completed", "failed", "killed"):
         try:
             sessions = AgentSession.query.filter(status=status)
             for s in sessions:
@@ -357,3 +357,278 @@ class TestSelfSchedulingProtection:
             assert depth >= MAX_SCHEDULING_DEPTH
         finally:
             del os.environ["VALOR_SESSION_ID"]
+
+
+# === Kill Command Integration Tests ===
+
+
+class TestKillCommandIntegration:
+    """Integration tests for the kill subcommand using real Redis."""
+
+    def test_kill_cli_help(self):
+        """Kill subcommand shows in help output."""
+        result = subprocess.run(
+            [sys.executable, "-m", "tools.job_scheduler", "--help"],
+            capture_output=True,
+            text=True,
+            cwd=_PROJECT_ROOT,
+        )
+        assert result.returncode == 0
+        assert "kill" in result.stdout
+
+    def test_kill_by_job_id_pending(self):
+        """Kill a pending job by job_id via CLI (push then kill)."""
+        proj = f"test-killid-{time.time_ns()}"
+
+        push_result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "tools.job_scheduler",
+                "push",
+                "--message",
+                "kill-me-pending",
+                "--project",
+                proj,
+            ],
+            capture_output=True,
+            text=True,
+            cwd=_PROJECT_ROOT,
+            env={**__import__("os").environ, "PROJECT_KEY": proj},
+        )
+        assert push_result.returncode == 0
+        push_data = json.loads(push_result.stdout)
+        job_id = push_data["job_id"]
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "tools.job_scheduler",
+                "kill",
+                "--job-id",
+                job_id,
+            ],
+            capture_output=True,
+            text=True,
+            cwd=_PROJECT_ROOT,
+        )
+        assert result.returncode == 0
+        data = json.loads(result.stdout)
+        assert data["status"] == "killed"
+        assert data["count"] == 1
+        assert data["jobs"][0]["previous_status"] == "pending"
+
+    def test_kill_by_session_id(self):
+        """Kill a pending job by session_id via CLI (push then kill)."""
+        proj = f"test-killsess-{time.time_ns()}"
+
+        push_result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "tools.job_scheduler",
+                "push",
+                "--message",
+                "kill-by-session",
+                "--project",
+                proj,
+            ],
+            capture_output=True,
+            text=True,
+            cwd=_PROJECT_ROOT,
+            env={**__import__("os").environ, "PROJECT_KEY": proj},
+        )
+        assert push_result.returncode == 0
+        push_data = json.loads(push_result.stdout)
+        session_id = push_data["session_id"]
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "tools.job_scheduler",
+                "kill",
+                "--session-id",
+                session_id,
+            ],
+            capture_output=True,
+            text=True,
+            cwd=_PROJECT_ROOT,
+        )
+        assert result.returncode == 0
+        data = json.loads(result.stdout)
+        assert data["status"] == "killed"
+        assert data["count"] == 1
+
+    def test_kill_nonexistent_job(self):
+        """Kill with nonexistent job_id returns error."""
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "tools.job_scheduler",
+                "kill",
+                "--job-id",
+                "nonexistent-kill-target",
+            ],
+            capture_output=True,
+            text=True,
+            cwd=_PROJECT_ROOT,
+        )
+        assert result.returncode == 1
+        data = json.loads(result.stdout)
+        assert data["status"] == "error"
+        assert "not found" in data["message"].lower()
+
+    def test_kill_nonexistent_session(self):
+        """Kill with nonexistent session_id returns error."""
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "tools.job_scheduler",
+                "kill",
+                "--session-id",
+                "nonexistent-kill-session",
+            ],
+            capture_output=True,
+            text=True,
+            cwd=_PROJECT_ROOT,
+        )
+        assert result.returncode == 1
+        data = json.loads(result.stdout)
+        assert data["status"] == "error"
+        assert "not found" in data["message"].lower()
+
+    def test_kill_all_with_pending_jobs(self):
+        """Kill --all removes all pending jobs created via CLI."""
+        proj = f"test-killall-{time.time_ns()}"
+
+        for i in range(2):
+            push_result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "tools.job_scheduler",
+                    "push",
+                    "--message",
+                    f"pending-{i}",
+                    "--project",
+                    proj,
+                ],
+                capture_output=True,
+                text=True,
+                cwd=_PROJECT_ROOT,
+                env={**__import__("os").environ, "PROJECT_KEY": proj},
+            )
+            assert push_result.returncode == 0
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "tools.job_scheduler",
+                "kill",
+                "--all",
+            ],
+            capture_output=True,
+            text=True,
+            cwd=_PROJECT_ROOT,
+        )
+        assert result.returncode == 0
+        data = json.loads(result.stdout)
+        assert data["status"] == "killed"
+        assert data["count"] >= 2
+
+    def test_kill_all_empty_queue(self):
+        """Kill --all with no active jobs returns ok."""
+        _cleanup()
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "tools.job_scheduler",
+                "kill",
+                "--all",
+            ],
+            capture_output=True,
+            text=True,
+            cwd=_PROJECT_ROOT,
+        )
+        assert result.returncode == 0
+        data = json.loads(result.stdout)
+        assert data["status"] in ("ok", "killed")
+
+    def test_status_shows_killed_count(self):
+        """Status command includes killed_count after killing a job."""
+        proj = f"test-killstatus-{time.time_ns()}"
+
+        push_result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "tools.job_scheduler",
+                "push",
+                "--message",
+                "to-be-killed",
+                "--project",
+                proj,
+            ],
+            capture_output=True,
+            text=True,
+            cwd=_PROJECT_ROOT,
+            env={**__import__("os").environ, "PROJECT_KEY": proj},
+        )
+        assert push_result.returncode == 0
+        job_id = json.loads(push_result.stdout)["job_id"]
+
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "tools.job_scheduler",
+                "kill",
+                "--job-id",
+                job_id,
+            ],
+            capture_output=True,
+            text=True,
+            cwd=_PROJECT_ROOT,
+        )
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "tools.job_scheduler",
+                "status",
+                "--project",
+                proj,
+            ],
+            capture_output=True,
+            text=True,
+            cwd=_PROJECT_ROOT,
+        )
+        assert result.returncode == 0
+        data = json.loads(result.stdout)
+        assert "killed_count" in data
+        assert data["killed_count"] >= 1
+
+    def test_kill_sets_status_to_killed(self):
+        """Verify _kill_job transitions status from pending to killed in Redis."""
+        from tools.job_scheduler import _kill_job
+
+        session = _create_pending(message="direct-kill-test")
+        original_session_id = session.session_id
+
+        result = _kill_job(session, skip_process_kill=True)
+
+        assert result["status"] == "killed"
+        assert result["previous_status"] == "pending"
+
+        killed = list(AgentSession.query.filter(status="killed"))
+        found = [j for j in killed if j.session_id == original_session_id]
+        assert len(found) == 1
+        assert found[0].completed_at is not None
