@@ -1,33 +1,30 @@
 {
-  "name": "knowledge-search",
+  "name": "knowledge_search",
   "version": "1.0.0",
   "description": "Local knowledge base search with semantic understanding using embeddings",
   "type": "library",
   "status": "stable",
-
   "source": {
     "type": "internal",
     "package": null,
     "repository": null,
     "command": null
   },
-
   "capabilities": [
     "search",
     "embed",
     "read"
   ],
-
   "requires": {
-    "env": ["OPENROUTER_API_KEY"],
+    "env": [
+      "OPENROUTER_API_KEY"
+    ],
     "python": ">=3.10"
   },
-
   "commands": {
     "verify": "python -c \"from tools.knowledge_search import search_knowledge; print('OK')\"",
     "test": "pytest tools/knowledge-search/tests/ -v"
   },
-
   "workflows": [
     {
       "name": "semantic-search",

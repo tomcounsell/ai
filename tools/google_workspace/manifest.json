@@ -1,0 +1,26 @@
+{
+  "name": "google_workspace",
+  "version": "1.0.0",
+  "description": "Google OAuth2 authentication utility used by valor_calendar and other Google API integrations",
+  "type": "library",
+  "status": "internal",
+
+  "source": {
+    "type": "internal",
+    "repository": "https://github.com/tomcounsell/ai"
+  },
+
+  "capabilities": [
+    "auth"
+  ],
+
+  "requires": {
+    "env": ["GOOGLE_CREDENTIALS_DIR"],
+    "python": ">=3.10",
+    "packages": ["google-auth", "google-auth-oauthlib", "google-api-python-client"]
+  },
+
+  "commands": {
+    "verify": "python -c \"from tools.google_workspace.auth import get_calendar_service; print('OK')\""
+  }
+}

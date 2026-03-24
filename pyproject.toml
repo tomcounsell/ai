@@ -45,6 +45,9 @@ valor-selfie = "tools.selfie:main"
 valor-image-analyze = "tools.image_analysis:main"
 valor-search = "tools.web:cli_search"
 valor-fetch = "tools.web:cli_fetch"
+valor-sms-reader = "tools.sms_reader.cli:main"
+valor-image-tagging = "tools.image_tagging:main"
+valor-knowledge-search = "tools.knowledge_search:main"
 
 [tool.hatch.metadata]
 allow-direct-references = true

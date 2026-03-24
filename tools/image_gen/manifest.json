@@ -1,5 +1,5 @@
 {
-  "name": "image-gen",
+  "name": "image_gen",
   "version": "1.0.0",
   "description": "AI image generation via OpenRouter API (Gemini, DALL-E, Flux, etc.)",
   "type": "library",
