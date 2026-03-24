@@ -14,6 +14,7 @@ from popoto import (
     Field,
     IntField,
     KeyField,
+    ListField,
     Model,
 )
 
@@ -33,6 +34,8 @@ class Reflection(Model):
         last_status: Result of last run: 'success', 'error', 'skipped', or 'running'
         last_error: Error message from last failed run (None if last run succeeded)
         last_duration: Duration of last run in seconds
+        run_history: Append-only list of recent run dicts (capped at 200).
+            Each dict: {timestamp, status, duration, error, log_path}
     """
 
     reflection_id = AutoKeyField()
@@ -43,6 +46,9 @@ class Reflection(Model):
     last_status = Field(default="pending")  # pending | running | success | error | skipped
     last_error = Field(null=True, max_length=1000)
     last_duration = Field(type=float, null=True)
+    run_history = ListField(null=True)  # List of run dicts, capped at 200
+
+    RUN_HISTORY_CAP = 200
 
     @classmethod
     def get_or_create(cls, name: str) -> "Reflection":
@@ -69,18 +75,37 @@ class Reflection(Model):
     def mark_completed(self, duration: float, error: str | None = None) -> None:
         """Mark this reflection as completed (success or error).
 
+        Internally appends a run record to run_history (capped at 200 entries).
+        The method signature is unchanged -- existing callers in
+        agent/reflection_scheduler.py require no modifications.
+
         Args:
             duration: How long the run took in seconds
             error: Error message if the run failed, None for success
         """
         self.last_duration = duration
         self.run_count = (self.run_count or 0) + 1
+        status = "error" if error else "success"
         if error:
             self.last_status = "error"
             self.last_error = error[:1000] if error else None
         else:
             self.last_status = "success"
             self.last_error = None
+
+        # Append to run_history (capped at RUN_HISTORY_CAP)
+        run_record = {
+            "timestamp": time.time(),
+            "status": status,
+            "duration": duration,
+            "error": error[:500] if error else None,
+        }
+        history = self.run_history if isinstance(self.run_history, list) else []
+        history.append(run_record)
+        if len(history) > self.RUN_HISTORY_CAP:
+            history = history[-self.RUN_HISTORY_CAP :]
+        self.run_history = history
+
         self.save()
 
     def mark_skipped(self, reason: str = "already running") -> None:
