@@ -1,5 +1,5 @@
 ---
-status: Needs Revision
+status: Ready
 type: feature
 appetite: Large
 owner: Valor
@@ -161,7 +161,10 @@ ui/
 
 ## Test Impact
 
-No existing tests affected — this is a greenfield feature with no prior test coverage. The `ui/` package is entirely new and modifies no existing code. The only existing code change is adding `run_history` to the `Reflection` model, which is additive (new field, no existing behavior changed).
+- [ ] `tests/unit/test_reflection_model.py` (if exists) — UPDATE: verify `mark_completed()` still works with existing callers after `run_history` append logic is added. The `mark_completed()` signature remains unchanged; history append is internal.
+- [ ] Regression test: `agent/reflection_scheduler.py` calls `mark_completed(duration)` and `mark_completed(duration, error=error_msg)` — both must continue to work after the model extension.
+
+No other existing tests affected — the `ui/` package is entirely new. The `Reflection` model extension is additive (new `run_history` ListField, internal append in `mark_completed()`, no signature change).
 
 ## Rabbit Holes
 
@@ -181,7 +184,7 @@ No existing tests affected — this is a greenfield feature with no prior test c
 
 ### Risk 2: Large run_history ListField on Reflection model
 **Impact:** If run_history grows unbounded, Redis memory increases and serialization slows
-**Mitigation:** Cap `run_history` at 30 days worth of entries (varies by reflection interval). Trim oldest on append. Large log content stays on disk as file paths, not inline.
+**Mitigation:** Fixed cap of 200 entries per reflection. Trim oldest on append. Large log content stays on disk as file paths, not inline. At ~200 bytes per entry, this is ~40KB per key — well within Redis comfort zone.
 
 ### Risk 3: HTMX CDN dependency
 **Impact:** If CDN is unreachable, dashboard loses interactivity
@@ -219,6 +222,7 @@ No agent integration required — this is a standalone localhost web server for 
 
 ### Feature Documentation
 - [ ] Create `docs/features/web-ui.md` describing the web UI infrastructure, how to start it, how to add new dashboards
+- [ ] Add Quick Command entry to `CLAUDE.md` for `python -m ui.app` (start UI server)
 - [ ] Create `docs/features/reflections-dashboard.md` documenting the reflections dashboard views and data sources
 - [ ] Create `docs/features/sdlc-observer.md` documenting the SDLC observer views and data sources
 - [ ] Add entries to `docs/features/README.md` index table
@@ -307,7 +311,7 @@ No agent integration required — this is a standalone localhost web server for 
 - **Assigned To**: ui-infra-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add `fastapi`, `uvicorn[standard]`, `jinja2` to `pyproject.toml` and install
+- Add `fastapi`, `uvicorn[standard]`, `jinja2` to `pyproject.toml` dependencies and add `"ui"` to `[tool.hatch.build.targets.wheel] packages` list, then install
 - Create `ui/__init__.py`, `ui/app.py` with FastAPI app factory, Jinja2 configuration, static file mounting
 - Create `ui/templates/base.html` with HTMX CDN script, CSS link, top nav bar, content block
 - Create `ui/templates/index.html` listing mounted dashboards
@@ -324,8 +328,8 @@ No agent integration required — this is a standalone localhost web server for 
 - **Agent Type**: builder
 - **Parallel**: false
 - Extend `Reflection` model: add `run_history` ListField for historical run dicts (timestamp, status, duration, error, log_path)
-- Update `Reflection.mark_completed()` to append to `run_history` (cap at 30 days worth of entries based on reflection interval — e.g., health-check at 5min = ~8640 runs/30d, daily = 30 runs/30d)
-- Create `ui/data/reflections.py`: functions to query all reflections, get run history, get schedule, get ignore patterns, read log file content by path
+- Update `Reflection.mark_completed()` to internally append to `run_history` (fixed cap of 200 entries, trim oldest). Signature remains unchanged — existing callers in `agent/reflection_scheduler.py` require no changes.
+- Create `ui/data/reflections.py`: functions to query all reflections, get run history, get schedule, get ignore patterns, read log file content by path. **Use `def` (sync) functions** — FastAPI runs sync route handlers in a threadpool, avoiding event loop blocking from Popoto's synchronous Redis calls.
 - Load registry from `config/reflections.yaml` for descriptions and intervals
 
 ### 3. Reflections: router and templates
@@ -335,7 +339,7 @@ No agent integration required — this is a standalone localhost web server for 
 - **Assigned To**: reflections-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Create `ui/routers/reflections.py` with routes: overview, schedule, history, detail, ignores
+- Create `ui/routers/reflections.py` with `def` (sync) route handlers: overview, schedule, history, detail, ignores
 - Create HTMX partial routes for drill-down panels (run detail, log viewer, step expansion)
 - Create all templates in `ui/templates/reflections/`: overview, history, detail, schedule, ignores
 - Create HTMX partial templates in `ui/templates/reflections/_partials/`
@@ -348,7 +352,7 @@ No agent integration required — this is a standalone localhost web server for 
 - **Assigned To**: sdlc-builder
 - **Agent Type**: builder
 - **Parallel**: true (parallel with build-reflections-data)
-- Create `ui/data/sdlc.py` with Pydantic models: `StageState`, `PipelineProgress`, `PipelineEvent`
+- Create `ui/data/sdlc.py` with Pydantic models: `StageState`, `PipelineProgress`, `PipelineEvent`. **Use `def` (sync) functions** for data access — Popoto uses synchronous Redis calls.
 - Deserialize `AgentSession.stage_states` JSON into typed Pydantic objects
 - Parse `AgentSession.history` entries to extract stage transition events with timestamps
 - Functions: get active pipelines, get pipeline detail, get recent completions
@@ -361,7 +365,7 @@ No agent integration required — this is a standalone localhost web server for 
 - **Assigned To**: sdlc-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Create `ui/routers/sdlc.py` with routes: active pipelines, pipeline detail, completed
+- Create `ui/routers/sdlc.py` with `def` (sync) route handlers: active pipelines, pipeline detail, completed
 - Create HTMX partial routes for polling refresh
 - Create all templates in `ui/templates/sdlc/`: pipelines, detail, completed
 - Create horizontal stage indicator component (pure HTML/CSS)
@@ -371,6 +375,7 @@ No agent integration required — this is a standalone localhost web server for 
 ### 6. Design polish
 - **Task ID**: design-polish
 - **Depends On**: build-reflections-ui, build-sdlc-ui
+- **Validates**: Visual review via `/do-design-review` on `localhost:8500`
 - **Assigned To**: ui-designer
 - **Agent Type**: designer
 - **Parallel**: false
@@ -395,6 +400,7 @@ No agent integration required — this is a standalone localhost web server for 
 ### 8. Documentation
 - **Task ID**: document-feature
 - **Depends On**: test-suite, design-polish
+- **Validates**: `test -f docs/features/web-ui.md && test -f docs/features/reflections-dashboard.md && test -f docs/features/sdlc-observer.md`
 - **Assigned To**: ui-documentarian
 - **Agent Type**: documentarian
 - **Parallel**: false
