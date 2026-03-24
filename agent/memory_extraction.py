@@ -233,10 +233,13 @@ async def run_post_session_extraction(
         if injected:
             await detect_outcomes_async(injected, response_text)
 
-        # Clean up session state
-        from agent.memory_hook import clear_session
-
-        clear_session(session_id)
-
     except Exception as e:
         logger.warning(f"[memory_extraction] Post-session extraction failed (non-fatal): {e}")
+    finally:
+        # Always clean up session state, even if extraction/detection fails
+        try:
+            from agent.memory_hook import clear_session
+
+            clear_session(session_id)
+        except Exception as e:
+            logger.warning(f"[memory_extraction] Session cleanup failed: {e}")
