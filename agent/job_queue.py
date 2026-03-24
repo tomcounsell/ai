@@ -376,6 +376,49 @@ async def _push_job(
     return await AgentSession.query.async_count(chat_id=chat_id, status="pending")
 
 
+def resolve_branch_for_stage(slug: str | None, stage: str | None) -> tuple[str, bool]:
+    """Determine the correct branch and whether a worktree is needed for a given stage.
+
+    Maps (slug, stage) pairs to deterministic branch names. This replaces
+    implicit branch resolution that previously relied on skill context.
+
+    Args:
+        slug: The work item slug (e.g., 'auth-feature'). None for Q&A/non-SDLC.
+        stage: The SDLC stage (e.g., 'PLAN', 'BUILD', 'TEST'). None for non-SDLC.
+
+    Returns:
+        Tuple of (branch_name, needs_worktree).
+        - branch_name: The git branch to work on.
+        - needs_worktree: Whether a worktree should be created/used.
+    """
+    if not slug:
+        return ("main", False)
+
+    if not stage:
+        return ("main", False)
+
+    stage_upper = stage.upper()
+
+    # PLAN and ISSUE stages work on main (plans committed to main)
+    if stage_upper in ("PLAN", "ISSUE", "CRITIQUE"):
+        return ("main", False)
+
+    # BUILD, TEST, PATCH, REVIEW, DOCS stages use session branch in worktree
+    if stage_upper in ("BUILD", "TEST", "PATCH", "REVIEW", "DOCS"):
+        return (f"session/{slug}", True)
+
+    # MERGE stage uses session branch but no new worktree needed
+    if stage_upper == "MERGE":
+        return (f"session/{slug}", False)
+
+    # Fallback for unknown stages
+    logger.warning(
+        f"[branch-mapping] Unknown stage {stage!r} for slug {slug!r}, "
+        f"falling back to main"
+    )
+    return ("main", False)
+
+
 # Terminal statuses for dependency resolution
 _TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 
@@ -1475,7 +1518,38 @@ async def _execute_job(job: Job) -> None:
     allowed_root = Path.home() / "src"
     is_wt = WORKTREES_DIR in str(working_dir)
     working_dir = validate_workspace(working_dir, allowed_root, is_worktree=is_wt)
-    branch_name = _session_branch_name(job.session_id)
+
+    # Resolve branch: use slug + stage mapping if available, else session-based
+    slug = job.work_item_slug
+    stage = None
+    if slug:
+        # Try to read current stage from the AgentSession
+        try:
+            sessions = list(AgentSession.query.filter(session_id=job.session_id))
+            if sessions:
+                stage = sessions[0].current_stage
+        except Exception:
+            pass
+        resolved_branch, needs_wt = resolve_branch_for_stage(slug, stage)
+        branch_name = resolved_branch
+        # If branch resolution says we need a worktree and working_dir isn't one
+        if needs_wt and WORKTREES_DIR not in str(working_dir):
+            try:
+                from agent.worktree_manager import get_or_create_worktree
+
+                wt_path = get_or_create_worktree(working_dir, slug)
+                working_dir = Path(wt_path)
+                logger.info(
+                    f"[branch-mapping] Resolved worktree for slug={slug} "
+                    f"stage={stage}: {working_dir}"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"[branch-mapping] Failed to create worktree for "
+                    f"slug={slug}: {e} — using original working dir"
+                )
+    else:
+        branch_name = _session_branch_name(job.session_id)
 
     # Compute task list ID for sub-agent task isolation
     # Tier 2: planned work uses the slug directly
