@@ -62,37 +62,37 @@ class TestReflectionsDataLayer:
 
 
 class TestReflectionFormatters:
-    """Tests for formatting utility functions."""
+    """Tests for Jinja2 filter formatting functions (canonical location: ui.app)."""
 
     def test_format_duration(self):
-        from ui.data.reflections import format_duration
+        from ui.app import _filter_format_duration
 
-        assert format_duration(None) == "-"
-        assert format_duration(5.0) == "5.0s"
-        assert format_duration(120.0) == "2.0m"
-        assert format_duration(7200.0) == "2.0h"
+        assert _filter_format_duration(None) == "-"
+        assert _filter_format_duration(5.0) == "5.0s"
+        assert _filter_format_duration(120.0) == "2.0m"
+        assert _filter_format_duration(7200.0) == "2.0h"
 
     def test_format_timestamp(self):
-        from ui.data.reflections import format_timestamp
+        from ui.app import _filter_format_timestamp
 
-        assert format_timestamp(None) == "-"
-        result = format_timestamp(1711000000.0)
+        assert _filter_format_timestamp(None) == "-"
+        result = _filter_format_timestamp(1711000000.0)
         assert "2024" in result
 
     def test_format_interval(self):
-        from ui.data.reflections import format_interval
+        from ui.app import _filter_format_interval
 
-        assert format_interval(300) == "5m"
-        assert format_interval(3600) == "1h"
-        assert format_interval(86400) == "1d"
-        assert format_interval(30) == "30s"
+        assert _filter_format_interval(300) == "5m"
+        assert _filter_format_interval(3600) == "1h"
+        assert _filter_format_interval(86400) == "1d"
+        assert _filter_format_interval(30) == "30s"
 
     def test_format_relative_time(self):
-        from ui.data.reflections import format_relative_time
+        from ui.app import _filter_format_relative
 
-        assert format_relative_time(None) == "-"
-        assert "in" in format_relative_time(300.0)
-        assert "overdue" in format_relative_time(-300.0)
+        assert _filter_format_relative(None) == "-"
+        assert "in" in _filter_format_relative(300.0)
+        assert "overdue" in _filter_format_relative(-300.0)
 
 
 class TestReflectionModelExtension:

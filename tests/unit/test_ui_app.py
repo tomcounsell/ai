@@ -171,6 +171,7 @@ class TestSdlcRoutes:
     def test_completed_returns_200(self, client):
         r = client.get("/sdlc/completed/")
         assert r.status_code == 200
+        assert "not found" not in r.text.lower()
 
     def test_detail_nonexistent_pipeline(self, client):
         r = client.get("/sdlc/nonexistent-id/")
