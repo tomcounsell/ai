@@ -521,9 +521,9 @@ class TestStatusIncludesKilled:
 class TestRecoveryExcludesKilled:
     """Verify that recovery functions query status='running', not killed."""
 
-    def test_recover_interrupted_jobs_filters_running(self):
-        """_recover_interrupted_jobs queries status='running', excluding killed."""
-        from agent.job_queue import _recover_interrupted_jobs
+    def test_recover_interrupted_jobs_startup_filters_running(self):
+        """_recover_interrupted_jobs_startup queries status='running', excluding killed."""
+        from agent.job_queue import _recover_interrupted_jobs_startup
 
         # Mock AgentSession.query.filter to capture the status argument
         calls = []
@@ -535,31 +535,10 @@ class TestRecoveryExcludesKilled:
 
         with patch("agent.job_queue.AgentSession") as mock_cls:
             mock_cls.query = CapturingQuery()
-            result = _recover_interrupted_jobs("valor")
+            result = _recover_interrupted_jobs_startup()
 
         assert result == 0
         # The function should filter on status="running"
         assert any(c.get("status") == "running" for c in calls)
         # No call should filter on status="killed"
-        assert not any(c.get("status") == "killed" for c in calls)
-
-    def test_reset_running_jobs_filters_running(self):
-        """_reset_running_jobs queries status='running', excluding killed."""
-        import asyncio
-
-        from agent.job_queue import _reset_running_jobs
-
-        calls = []
-
-        class CapturingQuery:
-            async def async_filter(self, **kwargs):
-                calls.append(kwargs)
-                return []
-
-        with patch("agent.job_queue.AgentSession") as mock_cls:
-            mock_cls.query = CapturingQuery()
-            result = asyncio.run(_reset_running_jobs("valor"))
-
-        assert result == 0
-        assert any(c.get("status") == "running" for c in calls)
         assert not any(c.get("status") == "killed" for c in calls)
