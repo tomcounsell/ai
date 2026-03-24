@@ -217,12 +217,79 @@ All use `POPOTO_REDIS_DB` directly with `RPUSH`, `LPOP`, and `DEL` on key `steer
 **Impact:** If the user sends several corrections in quick succession, they all queue up. The agent processes them one at a time (one per tool call), which could be confusing.
 **Mitigation:** Pop ALL messages from the queue in one check and concatenate them into a single injection. Use `LPOP` in a loop until empty, then combine.
 
+## Parent-Child Steering (ChatSession to DevSession)
+
+In addition to Telegram reply-thread steering (user to agent), the steering queue supports **parent-child steering** where a ChatSession (PM persona) pushes steering messages to its spawned DevSessions.
+
+### How It Works
+
+The ChatSession invokes `scripts/steer_child.py` via bash to push steering messages to a running child DevSession. The script validates the parent-child relationship before pushing to the same Redis steering queue used by bridge steering.
+
+```
+ChatSession decides to steer
+    |
+    v
+python scripts/steer_child.py --session-id <child_id> --message "focus on tests" --parent-id <parent_id>
+    |
+    v
+Script validates: child exists, is a DevSession, parent_chat_session_id matches, status is "running"
+    |
+    v
+push_steering_message(child_session_id, text, sender="ChatSession")
+    |
+    v
+Child's watchdog picks up on next tool call (existing _handle_steering in health_check.py)
+    |
+    v
+DevSession adjusts behavior
+```
+
+### CLI Usage
+
+```bash
+# Steer a child DevSession
+python scripts/steer_child.py --session-id <child_id> --message "skip docs, focus on tests" --parent-id <parent_id>
+
+# Send abort signal to a child
+python scripts/steer_child.py --session-id <child_id> --message "stop" --parent-id <parent_id> --abort
+
+# List active child DevSessions
+python scripts/steer_child.py --list --parent-id <parent_id>
+```
+
+The `--parent-id` can also be read from the `VALOR_SESSION_ID` environment variable, which is set by `sdk_client.py` for running sessions.
+
+### Validation
+
+The script enforces strict parent-child relationship validation:
+
+- Target must be an existing AgentSession
+- Target must be a DevSession (`is_dev` check)
+- Target's `parent_chat_session_id` must match the caller's ID
+- Target must be in `running` status
+
+All validation failures exit with non-zero code and print an error to stderr.
+
+### Relationship to Bridge Steering
+
+| Aspect | Bridge Steering | Parent-Child Steering |
+|--------|----------------|----------------------|
+| Caller | Telegram user (via reply thread) | ChatSession (via bash script) |
+| Entry point | `bridge/telegram_bridge.py` | `scripts/steer_child.py` |
+| Validation | Session ID match + running status | Parent-child relationship + running status |
+| Redis queue | Same (`steering:{session_id}`) | Same (`steering:{session_id}`) |
+| Consumption | Same (watchdog `_handle_steering`) | Same (watchdog `_handle_steering`) |
+| Sender field | User's name | "ChatSession" |
+
+Both paths converge on the same `push_steering_message()` function in `agent/steering.py` and the same consumption path in the watchdog hook.
+
 ## No-Gos (Out of Scope)
 
 - **Message classification AI** — Existing reply-to handling is sufficient for routing. No LLM-based classification of "steering vs new task" needed.
 - **Progress streaming** — No play-by-play updates to Telegram. Only meaningful communication.
 - **Multi-session steering** — Only one session runs per project at a time (enforced by job queue). No need to handle concurrent session steering.
 - **Non-reply steering** — Only reply-thread messages count as steering. A new mention always creates a new job.
+- **Automatic fan-out** — Parent-child steering is always explicit, per-child. No broadcasting to all children.
 
 ## Success Criteria
 
