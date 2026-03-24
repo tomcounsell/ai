@@ -328,11 +328,12 @@ def list_indexed_documents(db_path: Path | None = None) -> dict:
     }
 
 
-if __name__ == "__main__":
+def main():
+    """CLI entry point for knowledge search."""
     import sys
 
     if len(sys.argv) < 2:
-        print("Usage: python -m tools.knowledge_search 'search query'")
+        print("Usage: valor-knowledge-search 'search query'")
         sys.exit(1)
 
     query = " ".join(sys.argv[1:])
@@ -349,3 +350,7 @@ if __name__ == "__main__":
             print(f"\n  {r['path']}")
             print(f"  Score: {r['score']:.2f}")
             print(f"  {r['snippet'][:100]}...")
+
+
+if __name__ == "__main__":
+    main()

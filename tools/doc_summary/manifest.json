@@ -1,33 +1,30 @@
 {
-  "name": "doc-summary",
+  "name": "doc_summary",
   "version": "1.0.0",
   "description": "Document summarization with configurable detail levels and key point extraction",
   "type": "api",
   "status": "stable",
-
   "source": {
     "type": "internal",
     "package": null,
     "repository": null,
     "command": null
   },
-
   "capabilities": [
     "analyze",
     "generate",
     "read"
   ],
-
   "requires": {
-    "env": ["ANTHROPIC_API_KEY"],
+    "env": [
+      "ANTHROPIC_API_KEY"
+    ],
     "python": ">=3.10"
   },
-
   "commands": {
     "verify": "python -c \"from tools.doc_summary import summarize; print('OK')\"",
     "test": "pytest tools/doc-summary/tests/ -v"
   },
-
   "workflows": [
     {
       "name": "brief-summary",

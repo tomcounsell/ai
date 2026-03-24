@@ -93,6 +93,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Test Baseline Verification](test-baseline-verification.md) | Verified classification of test failures as regressions vs pre-existing by running failing tests against main | Shipped |
 | [Test Coverage Standards](test-coverage-standards.md) | Standards and tooling for preventing silent failure classes: exception swallowing, empty output loops, coupled tests, missing error rendering, silent builds | Shipped |
 | [Test Reliability: Flaky Filter](test-reliability-flaky-filter.md) | Branch-side retry for flaky tests, deterministic junitxml baseline parsing, and completeness validation for test classification | Shipped |
+| [Tools Standard](tools-standard.md) | Tool compliance standard, audit checks, and remediation results for the tools/ directory | Shipped |
 | [Trace & Verify Protocol](trace-and-verify.md) | Data-driven root cause analysis replacing narrative-only 5 Whys with forward verification | Shipped |
 | [Workspace Safety Invariants](workspace-safety-invariants.md) | Pre-launch validation of agent working directories with CWD existence, path containment, and slug sanitization | Shipped |
 | [Worktree SDK Compatibility Experiment](worktree-sdk-compatibility.md) | Experiment results for Claude Agent SDK compatibility with git worktrees | Archived |

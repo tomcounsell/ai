@@ -1,15 +1,14 @@
 {
   "name": "transcribe",
   "version": "1.0.0",
-  "description": "Audio/voice transcription using local Whisper",
-  "type": "cli",
+  "description": "Audio/voice transcription using OpenAI Whisper API",
+  "type": "api",
   "status": "stable",
 
   "source": {
     "type": "external",
-    "package": "insanely-fast-whisper",
-    "repository": "https://github.com/Vaibhavs10/insanely-fast-whisper",
-    "command": "insanely-fast-whisper"
+    "package": "openai",
+    "repository": "https://platform.openai.com/docs/guides/speech-to-text"
   },
 
   "capabilities": [
@@ -18,24 +17,17 @@
   ],
 
   "requires": {
-    "binaries": ["insanely-fast-whisper"],
+    "env": ["OPENAI_API_KEY"],
     "python": ">=3.10"
   },
 
   "commands": {
-    "install": "pipx install insanely-fast-whisper",
-    "verify": "insanely-fast-whisper --help",
-    "help": "insanely-fast-whisper --help"
+    "verify": "python -c \"from tools.transcribe import transcribe_audio; print('OK')\"",
+    "test": "pytest tools/transcribe/tests/ -v"
   },
 
   "config": {
-    "default_model": "openai/whisper-large-v3",
-    "models": [
-      "openai/whisper-large-v3",
-      "openai/whisper-medium",
-      "openai/whisper-small",
-      "openai/whisper-tiny"
-    ],
+    "default_model": "whisper-1",
     "supported_formats": ["mp3", "wav", "m4a", "ogg", "flac", "webm"]
   },
 
@@ -44,7 +36,9 @@
       "name": "basic-transcription",
       "description": "Transcribe an audio file to text",
       "steps": [
-        "insanely-fast-whisper --file-name audio.mp3"
+        "from tools.transcribe import transcribe_audio",
+        "result = transcribe_audio('audio.mp3')",
+        "print(result['text'])"
       ]
     },
     {
@@ -52,7 +46,8 @@
       "description": "Transcribe Telegram voice message",
       "steps": [
         "Download .ogg file from Telegram",
-        "insanely-fast-whisper --file-name voice.ogg",
+        "from tools.transcribe import transcribe_audio",
+        "result = transcribe_audio('voice.ogg')",
         "Return transcription text"
       ]
     }

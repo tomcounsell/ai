@@ -1,0 +1,54 @@
+{
+  "name": "web",
+  "version": "1.0.0",
+  "description": "Unified web search and URL fetch with multi-provider fallback (Perplexity, Tavily, Firecrawl, httpx)",
+  "type": "api",
+  "status": "stable",
+
+  "source": {
+    "type": "internal",
+    "repository": "https://github.com/tomcounsell/ai"
+  },
+
+  "capabilities": [
+    "search",
+    "fetch"
+  ],
+
+  "requires": {
+    "env": ["PERPLEXITY_API_KEY"],
+    "python": ">=3.10"
+  },
+
+  "commands": {
+    "verify": "python -c \"from tools.web import web_search_sync, fetch_sync; print('OK')\"",
+    "test": "pytest tools/web/tests/ -v"
+  },
+
+  "config": {
+    "search_providers": ["perplexity", "tavily"],
+    "fetch_providers": ["firecrawl", "httpx_fallback"],
+    "fallback_order": "First available provider succeeds; subsequent providers are tried on failure"
+  },
+
+  "workflows": [
+    {
+      "name": "web-search",
+      "description": "Search the web with AI-summarized results",
+      "steps": [
+        "from tools.web import web_search_sync",
+        "result = web_search_sync('latest Python release')",
+        "print(result.answer)"
+      ]
+    },
+    {
+      "name": "url-fetch",
+      "description": "Fetch and clean content from a URL",
+      "steps": [
+        "from tools.web import fetch_sync",
+        "result = fetch_sync('https://example.com')",
+        "print(result.content)"
+      ]
+    }
+  ]
+}
