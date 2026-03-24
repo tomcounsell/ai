@@ -110,5 +110,6 @@ The script:
 |-------|---------|-------|
 | `job_id` | AgentSession primary key (AutoKeyField) | `session.id` property alias available |
 | `session_id` | Telegram-derived session identifier | Format: `tg_{project}_{chat_id}_{msg_id}` |
-| `claude_code_session_id` | Claude Code's internal session ID | New field for future use |
+| `telegram_message_id` | Telegram message ID (integer) | Renamed from `message_id` for clarity |
+| `telegram_message_key` | Popoto key to TelegramMessage | Renamed from `trigger_message_id` for clarity |
 | `claude_session_uuid` | Claude Code transcript UUID | Used for continuation sessions |
