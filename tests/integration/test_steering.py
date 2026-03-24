@@ -389,7 +389,11 @@ class TestWatchdogSteering:
 
     @pytest.mark.asyncio
     async def test_watchdog_handles_abort(self):
-        """Watchdog should return block when abort signal is in queue."""
+        """Watchdog should inject abort directive via hookSpecificOutput.
+
+        PostToolUse hooks can't enforce continue_: False directly, so the
+        abort is injected as additionalContext with a strong stop directive.
+        """
         from agent.health_check import _handle_steering
 
         session_id = "test_watchdog_abort"
@@ -397,8 +401,11 @@ class TestWatchdogSteering:
 
         result = await _handle_steering(session_id)
         assert result is not None
-        assert result["continue_"] is False
-        assert "Aborted" in result.get("stopReason", "")
+        # Abort is delivered via hookSpecificOutput additionalContext
+        hook_output = result["hookSpecificOutput"]
+        assert hook_output["hookEventName"] == "PostToolUse"
+        assert "ABORT from Tom" in hook_output["additionalContext"]
+        assert "stop immediately" in hook_output["additionalContext"]
 
     @pytest.mark.asyncio
     async def test_watchdog_injects_message(self):

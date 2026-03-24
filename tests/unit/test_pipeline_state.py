@@ -1,4 +1,4 @@
-"""Tests for agent/pipeline_state.py.
+"""Tests for agent/build_pipeline.py (renamed from agent/pipeline_state.py).
 
 Tests cover: load/exists with missing files, initialize schema,
 save/load round-trips, advance_stage transitions, patch_iterations
@@ -9,7 +9,7 @@ import json
 
 import pytest
 
-import agent.pipeline_state as ps
+import agent.build_pipeline as ps
 
 
 @pytest.fixture(autouse=True)

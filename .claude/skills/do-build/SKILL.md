@@ -93,7 +93,7 @@ If `TARGET_REPO == ORCHESTRATOR_REPO`, this is a same-repo build and no special 
 2. **Read the plan** at `PLAN_PATH`
 3. **Check pipeline state** - After resolving the plan path, derive `{slug}` from the plan filename and check for existing state:
    ```bash
-   python -c "from agent.pipeline_state import load; import json; s = load('{slug}'); print(json.dumps(s) if s else 'null')"
+   python -c "from agent.build_pipeline import load; import json; s = load('{slug}'); print(json.dumps(s) if s else 'null')"
    ```
    - If state exists and `stage != "plan"`: resume from that stage, skip already-completed stages listed in `completed_stages`
    - If no state (output is `null`): proceed normally — initialize state after worktree creation
@@ -134,38 +134,38 @@ If `TARGET_REPO == ORCHESTRATOR_REPO`, this is a same-repo build and no special 
    All subsequent agent work happens inside `$TARGET_REPO/.worktrees/{slug}/`, NOT the orchestrator repo directory.
 8. **Initialize pipeline state** - For fresh builds (no prior state), initialize now:
    ```bash
-   python -c "from agent.pipeline_state import initialize; initialize('{slug}', 'session/{slug}', '$TARGET_REPO/.worktrees/{slug}', target_repo='$TARGET_REPO')"
+   python -c "from agent.build_pipeline import initialize; initialize('{slug}', 'session/{slug}', '$TARGET_REPO/.worktrees/{slug}', target_repo='$TARGET_REPO')"
    ```
    Skip this step if state already existed from step 3.
 9. **Advance to branch stage** after worktree is ready:
    ```bash
-   python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}', 'branch')"
+   python -c "from agent.build_pipeline import advance_stage; advance_stage('{slug}', 'branch')"
    ```
 10. **Parse the Team Members** and Step by Step Tasks sections
 11. **Create all tasks** using `TaskCreate` before starting execution
 12. **Deploy agents** in order, respecting dependencies and parallel flags (agents follow SDLC: Build → Test loop with up to 5 iterations)
 13. **Advance to implement stage** before deploying builder agents:
     ```bash
-    python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}', 'implement')"
+    python -c "from agent.build_pipeline import advance_stage; advance_stage('{slug}', 'implement')"
     ```
 14. **Monitor progress** and handle any issues
 15. **Advance to test stage** after implementation tasks complete:
     ```bash
-    python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}', 'test')"
+    python -c "from agent.build_pipeline import advance_stage; advance_stage('{slug}', 'test')"
     ```
 16. **Verify Definition of Done** - Ensure all tasks completed with: code working, tests passing, quality checks pass
 17. **Advance to review stage** after tests pass:
     ```bash
-    python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}', 'review')"
+    python -c "from agent.build_pipeline import advance_stage; advance_stage('{slug}', 'review')"
     ```
 18. **Advance to document stage** after review passes:
     ```bash
-    python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}', 'document')"
+    python -c "from agent.build_pipeline import advance_stage; advance_stage('{slug}', 'document')"
     ```
 19. **Run documentation gate** - Validate docs changed, scan related docs, create review issues
 20. **Advance to pr stage** after documentation gate passes:
     ```bash
-    python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}', 'pr')"
+    python -c "from agent.build_pipeline import advance_stage; advance_stage('{slug}', 'pr')"
     ```
 21. **Verify commits exist before PR** - Run `git -C $TARGET_REPO/.worktrees/{slug} log --oneline main..HEAD` and count the output lines. If zero commits exist on the session branch, **ABORT with error**: "BUILD FAILED: No commits on session/{slug}. Builder agents produced no code changes." Do NOT proceed to push or PR creation.
 22. **Push and open a PR** - `git -C $TARGET_REPO/.worktrees/{slug} push -u origin session/{slug}` then `gh pr create --repo $TARGET_GH_REPO` (use `--repo` only for cross-repo builds)
@@ -285,7 +285,7 @@ When the final `validate-all` task completes, verify Definition of Done criteria
 **Pipeline stage at this point:** `test` → advance to `review` before proceeding.
 
 ```bash
-python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}', 'review')"
+python -c "from agent.build_pipeline import advance_stage; advance_stage('{slug}', 'review')"
 ```
 
 **Definition of Done Checklist (pre-documentation):**
@@ -338,7 +338,7 @@ The output should be the main repo path, NOT a `.worktrees/` path. If the CWD is
 After review passes, advance to the `document` stage and run documentation lifecycle checks:
 
 ```bash
-python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}', 'document')"
+python -c "from agent.build_pipeline import advance_stage; advance_stage('{slug}', 'document')"
 ```
 
 This is the Document phase of the pipeline: `Plan → Branch → Implement → Test → Review → **Document** → PR`. Documentation is written and validated here, after implementation is reviewed — not interleaved with implementation.
@@ -383,7 +383,7 @@ This creates tracking issues for documentation that should be reviewed for updat
 After documentation gate passes, advance to the `pr` stage and push:
 
 ```bash
-python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}', 'pr')"
+python -c "from agent.build_pipeline import advance_stage; advance_stage('{slug}', 'pr')"
 ```
 
 Then push and create the PR. For cross-repo builds, use `$TARGET_REPO` and `--repo $TARGET_GH_REPO`:

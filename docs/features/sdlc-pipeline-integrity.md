@@ -70,7 +70,7 @@ When a dev-session subagent completes, the SubagentStop hook now injects the cur
 
 The hook:
 1. Detects `agent_type == "dev-session"` completions
-2. Reads `sdlc_stages` or `stage_states` from the AgentSession in Redis
+2. Reads `stage_states` from the AgentSession in Redis (the legacy `sdlc_stages` field was removed in PR #490)
 3. Returns `{"reason": "Pipeline state: {dict}"}` so the PM sees which stages are actually complete vs still pending
 
 This creates a feedback loop: the PM dispatches a dev-session to run a stage, the dev-session updates `stage_states` during execution, and the SubagentStop hook feeds the updated state back to the PM before it decides the next action.

@@ -217,8 +217,8 @@ def check_stalled_sessions() -> list[dict]:
     """Check for sessions that appear stalled based on status-specific thresholds.
 
     Queries all sessions with status in (pending, running, active) and checks
-    how long they've been in that state. Uses last_transition_at (falling back
-    to started_at or created_at) as the reference timestamp.
+    how long they've been in that state. Uses started_at (falling back
+    to created_at) as the reference timestamp.
 
     For active sessions, also checks last_activity -- if last_activity is recent
     (within the active threshold), the session is not considered stalled.
@@ -253,9 +253,7 @@ def check_stalled_sessions() -> list[dict]:
                 session_id = session.session_id or session.job_id or "unknown"
 
                 # Determine reference timestamp based on status
-                ref_time = (
-                    session.last_transition_at or session.started_at or session.created_at or now
-                )
+                ref_time = session.started_at or session.created_at or now
 
                 # For active sessions, use last_activity as reference
                 if status_val == "active":

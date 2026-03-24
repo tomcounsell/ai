@@ -65,7 +65,7 @@ Single Popoto model (`AgentSession`) with discriminator field. Popoto ORM does n
 
 ### DevSession-specific fields
 - `parent_chat_session_id` (KeyField) -- logical FK to parent ChatSession
-- `sdlc_stages` -- JSON dict of stage -> status
+- `stage_states` -- JSON dict of stage -> status
 - `slug` -- derives branch name, plan path, worktree
 - `artifacts` -- JSON dict of issue_url, plan_url, pr_url, etc.
 
@@ -75,7 +75,7 @@ Single Popoto model (`AgentSession`) with discriminator field. Popoto ORM does n
 
 ### Derived Properties
 - `is_chat`, `is_dev` -- type checks
-- `is_sdlc` -- derived from sdlc_stages (not a stored flag)
+- `is_sdlc` -- derived from stage_states (not a stored flag)
 - `current_stage` -- first stage with status "in_progress"
 - `derived_branch_name` -- `session/{slug}` if slug exists
 - `plan_path` -- `docs/plans/{slug}.md` if slug exists

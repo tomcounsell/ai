@@ -1,4 +1,7 @@
-"""Pipeline state persistence for SDLC build stages.
+"""Build pipeline state persistence for SDLC build stages.
+
+Renamed from agent/pipeline_state.py to avoid naming collision with
+bridge/pipeline_state.py (PipelineStateMachine).
 
 Tracks progress of a build pipeline keyed by slug (e.g., "my-feature").
 State is stored at data/pipeline/{slug}/state.json and survives process

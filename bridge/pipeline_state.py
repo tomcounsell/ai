@@ -447,3 +447,29 @@ class PipelineStateMachine:
             "current_stage": self.current_stage(),
             "has_remaining": self.has_remaining_stages(),
         }
+
+
+def record_stage_completion(session: AgentSession, stage: str) -> None:
+    """Record a stage as completed in one shot.
+
+    Convenience helper for skills that complete a stage atomically
+    (no separate start/complete needed). Handles the case where
+    the session has no stage_states yet by initializing defaults.
+
+    Args:
+        session: The AgentSession to update.
+        stage: The SDLC stage name (e.g., "BUILD", "TEST").
+    """
+    sm = PipelineStateMachine(session)
+    current = sm.states.get(stage, "pending")
+    if current != "in_progress":
+        try:
+            sm.start_stage(stage)
+        except ValueError:
+            logger.warning(
+                f"record_stage_completion: could not start {stage} "
+                f"(current={current}), forcing completion"
+            )
+            sm.states[stage] = "in_progress"
+            sm._save()
+    sm.complete_stage(stage)

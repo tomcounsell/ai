@@ -44,7 +44,6 @@ def _make_agent_session(
         project_key=project_key,
         chat_id=chat_id,
         message_id=message_id,
-        last_transition_at=None,
         retry_count=retry_count,
         last_stall_reason=None,
         message_text=message_text,

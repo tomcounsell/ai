@@ -222,19 +222,6 @@ class HealthChecker:
                 details={"error": str(e)},
             )
 
-    def check_observer_telemetry(self) -> HealthCheckResult:
-        """No-op — Observer removed in SDLC Redesign Phase 2.
-
-        Kept for backward compatibility with health check callers.
-        Returns healthy status since nudge loop has no telemetry to check.
-        """
-        return HealthCheckResult(
-            component="observer_telemetry",
-            status=HealthStatus.HEALTHY,
-            message="Observer removed — nudge loop active (no telemetry)",
-            details={},
-        )
-
     def get_overall_health(self) -> OverallHealth:
         """Run all health checks and return overall status.
 
@@ -247,7 +234,6 @@ class HealthChecker:
         checks.append(self.check_database())
         checks.append(self.check_telegram_connection())
         checks.append(self.check_disk_space())
-        checks.append(self.check_observer_telemetry())
 
         # Add API key checks
         api_results = self.check_api_keys()

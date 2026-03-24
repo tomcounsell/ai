@@ -25,15 +25,18 @@ Unified Redis model tracking agent work from enqueue through completion. Replace
 
 ## SDLC Stage Tracking
 
-Pipeline stage state is stored in the `stage_states` JSON field on AgentSession, managed by the `PipelineStateMachine` in `bridge/pipeline_state.py`. The state machine provides:
+Pipeline stage state is stored in the `stage_states` JSON field on AgentSession, managed by the `PipelineStateMachine` in `bridge/pipeline_state.py`. This is the single field for stage state -- the legacy `sdlc_stages` field was removed in PR #490 and all stage tracking is consolidated here. The state machine provides:
 
 | Method | Returns | Purpose |
 |---|---|---|
 | `PipelineStateMachine.has_remaining_stages()` | `bool` | `True` if pipeline graph has a non-terminal next stage from the last completed stage |
 | `PipelineStateMachine.has_failed_stage()` | `bool` | `True` if any stage has `FAILED` or `ERROR` status |
 | `PipelineStateMachine.get_display_progress()` | `dict` | Maps stage names to status (`completed`, `in_progress`, `pending`, `failed`) |
+| `record_stage_completion(session, stage)` | `None` | Convenience helper that starts and completes a stage atomically |
 
-`is_sdlc` (property) returns `True` if `classification_type == "sdlc"`.
+`is_sdlc` (property) returns `True` if either (1) `stage_states` contains any non-pending/non-ready stage, or (2) `classification_type == "sdlc"` for freshly-classified sessions.
+
+`_get_stage_states_dict()` parses the `stage_states` JSON field into a dict. It handles `None`, `dict`, and JSON string inputs.
 
 These are used by the [stage-aware auto-continue](bridge-workflow-gaps.md#stage-aware-path-sdlc-jobs) routing in `agent/job_queue.py`.
 
