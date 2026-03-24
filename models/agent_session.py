@@ -87,7 +87,7 @@ class AgentSession(Model):
     revival_context = Field(null=True, max_length=MSG_MAX_CHARS)
     work_item_slug = Field(null=True)
     task_list_id = Field(null=True)
-    classification_type = Field(null=True)
+    classification_type = Field(null=True)  # Actively used by is_sdlc, session_tags, job_scheduler
     auto_continue_count = Field(type=int, default=0)
     started_at = Field(type=float, null=True)  # Cannot be SortedField because it starts as None
 
@@ -106,7 +106,7 @@ class AgentSession(Model):
     summary = Field(null=True, max_length=50_000)
     branch_name = Field(null=True)
     tags = ListField(null=True)
-    classification_confidence = Field(type=float, null=True)
+    classification_confidence = Field(type=float, null=True)  # Paired with classification_type
 
     # === New fields ===
     history = ListField(null=True)  # Append-only lifecycle events
