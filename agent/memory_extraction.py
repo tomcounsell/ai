@@ -80,17 +80,16 @@ async def extract_observations_async(
 
         # Parse observations (one per line)
         observations = [
-            line.strip()
-            for line in raw_text.split("\n")
-            if line.strip() and len(line.strip()) > 10
+            line.strip() for line in raw_text.split("\n") if line.strip() and len(line.strip()) > 10
         ]
 
         if not observations:
             return []
 
         # Save each observation as Memory
-        from models.memory import Memory
         from popoto import InteractionWeight
+
+        from models.memory import Memory
 
         if not project_key:
             project_key = os.environ.get("VALOR_PROJECT_KEY", "dm")
@@ -105,14 +104,15 @@ async def extract_observations_async(
                 source="agent",
             )
             if m:
-                saved.append({
-                    "content": obs[:500],
-                    "memory_id": getattr(m, "memory_id", ""),
-                })
+                saved.append(
+                    {
+                        "content": obs[:500],
+                        "memory_id": getattr(m, "memory_id", ""),
+                    }
+                )
 
         logger.info(
-            f"[memory_extraction] Extracted {len(saved)} observations "
-            f"from session {session_id}"
+            f"[memory_extraction] Extracted {len(saved)} observations from session {session_id}"
         )
         return saved
 
@@ -166,8 +166,9 @@ async def detect_outcomes_async(
 
         # Feed into ObservationProtocol
         try:
-            from models.memory import Memory
             from popoto import ObservationProtocol
+
+            from models.memory import Memory
 
             # Load memory instances by key
             memories = []
@@ -192,10 +193,11 @@ async def detect_outcomes_async(
 
                 if redis_outcome_map:
                     ObservationProtocol.on_context_used(memories, redis_outcome_map)
+                    acted = sum(1 for v in redis_outcome_map.values() if v == "acted")
+                    dismissed = len(redis_outcome_map) - acted
                     logger.info(
                         f"[memory_extraction] Outcome detection: "
-                        f"{sum(1 for v in redis_outcome_map.values() if v == 'acted')} acted, "
-                        f"{sum(1 for v in redis_outcome_map.values() if v == 'dismissed')} dismissed"
+                        f"{acted} acted, {dismissed} dismissed"
                     )
         except Exception as e:
             logger.warning(f"[memory_extraction] ObservationProtocol failed (non-fatal): {e}")

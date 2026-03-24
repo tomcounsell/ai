@@ -77,12 +77,40 @@ def extract_topic_keywords(tool_name: str, tool_input: Any) -> list[str]:
 
 
 # Words too generic to be useful as topic keywords
-_NOISE_WORDS = frozenset({
-    "the", "and", "for", "with", "from", "this", "that", "not",
-    "def", "class", "import", "return", "true", "false", "none",
-    "self", "src", "tmp", "var", "usr", "bin", "etc", "test",
-    "file", "line", "read", "write", "bash", "python", "git",
-})
+_NOISE_WORDS = frozenset(
+    {
+        "the",
+        "and",
+        "for",
+        "with",
+        "from",
+        "this",
+        "that",
+        "not",
+        "def",
+        "class",
+        "import",
+        "return",
+        "true",
+        "false",
+        "none",
+        "self",
+        "src",
+        "tmp",
+        "var",
+        "usr",
+        "bin",
+        "etc",
+        "test",
+        "file",
+        "line",
+        "read",
+        "write",
+        "bash",
+        "python",
+        "git",
+    }
+)
 
 
 def check_and_inject(

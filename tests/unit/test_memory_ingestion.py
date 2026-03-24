@@ -1,14 +1,13 @@
 """Unit tests for Telegram memory ingestion and system prompt priming."""
 
-import pytest
-
 
 class TestMemoryIngestion:
     """Test Memory.save() for Telegram messages."""
 
     def test_human_message_creates_memory(self):
-        from models.memory import Memory
         from popoto import InteractionWeight
+
+        from models.memory import Memory
 
         m = Memory.safe_save(
             agent_id="test-user",
@@ -29,7 +28,7 @@ class TestMemoryIngestion:
         # The bridge checks `if text and text.strip()` before saving
         # This test verifies that even if empty content reaches Memory,
         # it doesn't crash
-        m = Memory.safe_save(
+        Memory.safe_save(
             agent_id="test-user",
             project_key="test-ingestion",
             content="",
@@ -44,7 +43,7 @@ class TestMemoryIngestion:
         from models.memory import Memory
 
         # Force an error by passing invalid kwargs
-        result = Memory.safe_save(
+        Memory.safe_save(
             agent_id=None,  # KeyField may reject None
             project_key="test",
             content="test",

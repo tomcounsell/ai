@@ -158,10 +158,7 @@ class BackgroundTask:
                     response_text=str(self._result or ""),
                 )
             except Exception as mem_err:
-                logger.debug(
-                    f"[{self.messenger.session_id}] "
-                    f"Memory extraction skipped: {mem_err}"
-                )
+                logger.debug(f"[{self.messenger.session_id}] Memory extraction skipped: {mem_err}")
 
         except Exception as e:
             self._error = e

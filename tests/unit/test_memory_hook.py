@@ -1,6 +1,5 @@
 """Unit tests for the memory hook (thought injection)."""
 
-import pytest
 
 
 class TestExtractTopicKeywords:

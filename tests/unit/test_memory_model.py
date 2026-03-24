@@ -1,28 +1,30 @@
 """Unit tests for the Memory model and config defaults."""
 
-import pytest
 
 
 class TestMemoryDefaults:
     """Test config/memory_defaults.py apply_defaults()."""
 
     def test_apply_defaults_sets_decay_rate(self):
-        from config.memory_defaults import MEMORY_DECAY_RATE, apply_defaults
         from popoto import Defaults
+
+        from config.memory_defaults import MEMORY_DECAY_RATE, apply_defaults
 
         apply_defaults()
         assert Defaults.DECAY_RATE == MEMORY_DECAY_RATE
 
     def test_apply_defaults_sets_write_filter(self):
-        from config.memory_defaults import MEMORY_WF_MIN_THRESHOLD, apply_defaults
         from popoto import Defaults
+
+        from config.memory_defaults import MEMORY_WF_MIN_THRESHOLD, apply_defaults
 
         apply_defaults()
         assert Defaults.WF_MIN_THRESHOLD == MEMORY_WF_MIN_THRESHOLD
 
     def test_apply_defaults_idempotent(self):
-        from config.memory_defaults import apply_defaults
         from popoto import Defaults
+
+        from config.memory_defaults import apply_defaults
 
         apply_defaults()
         rate1 = Defaults.DECAY_RATE
@@ -46,8 +48,9 @@ class TestMemoryModel:
         assert required.issubset(field_names), f"Missing fields: {required - field_names}"
 
     def test_memory_has_bloom_filter(self):
-        from models.memory import Memory
         from popoto.fields.existence_filter import ExistenceFilter
+
+        from models.memory import Memory
 
         bloom = Memory._meta.fields.get("bloom")
         assert bloom is not None
