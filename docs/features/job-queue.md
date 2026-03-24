@@ -17,10 +17,11 @@ fields["status"] = "running"
 new_job = await AgentSession.async_create(**fields)  # adds to new index via on_save
 ```
 
-This is applied in three functions:
-- `_pop_job()` -- pending to running
+This is applied in three functions (plus dependency-related operations):
+- `_pop_job()` -- pending to running (also filters out dependency-blocked jobs)
 - `_recover_interrupted_jobs()` -- running to pending (sync, startup)
 - `_reset_running_jobs()` -- running to pending (async, shutdown)
+- `retry_job()` -- failed/cancelled to pending (PM queue management)
 
 The `_extract_job_fields()` helper reads all non-auto fields (56+) from an AgentSession instance for recreation.
 
@@ -73,21 +74,35 @@ Priority ranking constant: `PRIORITY_RANK = {"urgent": 0, "high": 1, "normal": 2
 
 The agent can enqueue jobs mid-conversation via `tools/job_scheduler.py`. See [Job Scheduling](job-scheduling.md) for details.
 
+## Sibling Job Dependencies
+
+Jobs can declare dependencies on other jobs via `depends_on` (a list of `stable_job_id` values). See [Job Dependency Tracking](job-dependency-tracking.md) for the full design including branch-session mapping, checkpoint/restore, and PM queue management.
+
+Key behaviors:
+- `_pop_job()` skips jobs whose dependencies have not all reached `completed` status
+- `cancelled` and `failed` jobs block their dependents
+- A periodic `_dependency_health_check()` detects stuck chains and logs warnings
+- PM can reorder, cancel, and retry jobs via `reorder_job()`, `cancel_job()`, `retry_job()`
+
 ## Parent-Child Job Hierarchy
 
 Jobs support parent-child decomposition via the `parent_job_id` field on `AgentSession`.
 
-### New Fields
+### Hierarchy Fields
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `parent_job_id` | `KeyField(null=True)` | Links child to parent job. Indexed for efficient queries. |
+| `stable_job_id` | `KeyField(null=True)` | UUID set once at creation, never changes on delete-and-recreate. Used as dependency reference key. |
+| `depends_on` | `ListField(null=True)` | List of `stable_job_id` values this job must wait for. |
+| `commit_sha` | `Field(null=True)` | HEAD commit SHA for checkpoint/restore across session pause/resume. |
 
-### New Status Value
+### Status Values
 
 | Status | Description |
 |--------|-------------|
 | `waiting_for_children` | Parent has spawned children and is waiting for them to complete |
+| `cancelled` | Explicitly cancelled by PM; blocks dependents (same as `failed`) |
 
 ### Completion Propagation
 
@@ -108,4 +123,5 @@ See [Job Scheduling](job-scheduling.md) for usage details and CLI commands.
 
 - `docs/features/scale-job-queue-with-popoto-and-worktrees.md` -- Original job queue architecture
 - `docs/features/job-scheduling.md` -- Agent-initiated scheduling tool
+- `docs/features/job-dependency-tracking.md` -- Sibling dependencies, branch mapping, checkpoint/restore, PM controls
 - `agent/job_queue.py` -- Implementation

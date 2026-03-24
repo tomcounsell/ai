@@ -103,12 +103,105 @@ activity log below, determine if the agent is:
 2. Stuck in a repetitive loop (same tools, same patterns, similar errors)
 3. Exploring without converging (unbounded research with no clear deliverable)
 
+{session_context}\
 Recent activity (last {count} tool calls):
 {activity}
 
 Respond with ONLY a JSON object, no other text:
 {{"healthy": true/false, "reason": "brief explanation"}}\
 """
+
+
+def _write_activity_stream(
+    session_id: str, tool_name: str, key_args: str, tool_call_count: int
+) -> None:
+    """Append one JSONL line to the activity stream for this session.
+
+    Writes to logs/sessions/{session_id}/activity.jsonl. Creates the
+    directory lazily on first write. Zero API calls, zero cost.
+
+    Designed as a feed that SubconsciousMemory can consume later.
+
+    Args:
+        session_id: The bridge session ID.
+        tool_name: Name of the tool that was called.
+        key_args: Brief summary of the tool's input.
+        tool_call_count: Current tool call count for this session.
+    """
+    import time
+
+    try:
+        session_dir = Path("logs/sessions") / session_id
+        session_dir.mkdir(parents=True, exist_ok=True)
+        activity_file = session_dir / "activity.jsonl"
+
+        entry = json.dumps(
+            {
+                "ts": time.time(),
+                "tool": tool_name,
+                "args": key_args,
+                "n": tool_call_count,
+            }
+        )
+        with open(activity_file, "a") as f:
+            f.write(entry + "\n")
+    except Exception:
+        pass  # Never block agent on activity logging
+
+
+def _get_session_context(session_id: str) -> str:
+    """Build session context preamble for the health check judge prompt.
+
+    Reads session_type and message_text from AgentSession. Extracts gh CLI
+    commands from recent tool calls for PM session context.
+
+    Returns an empty string if no context is available.
+    """
+    try:
+        from models.agent_session import AgentSession
+
+        sessions = AgentSession.query.filter(session_id=session_id)
+        if not sessions:
+            return ""
+
+        s = sessions[0]
+        session_type = s.session_type or "unknown"
+        message_text = (s.message_text or "")[:200]
+
+        context = f"This is a {session_type} session working on: {message_text}\n\n"
+
+        # Extract gh CLI commands from activity stream for additional context
+        gh_commands = _extract_gh_commands(session_id)
+        if gh_commands:
+            context += f"Recent GitHub CLI commands: {', '.join(gh_commands[:5])}\n\n"
+
+        return context
+    except Exception:
+        return ""
+
+
+def _extract_gh_commands(session_id: str) -> list[str]:
+    """Extract gh CLI commands from the activity stream.
+
+    Reads the activity JSONL file and finds Bash tool calls containing 'gh '.
+    Returns a list of command summaries (high-signal for PM sessions).
+    """
+    try:
+        activity_file = Path("logs/sessions") / session_id / "activity.jsonl"
+        if not activity_file.exists():
+            return []
+
+        commands = []
+        for line in activity_file.read_text().strip().splitlines()[-20:]:
+            try:
+                entry = json.loads(line)
+                if entry.get("tool") == "Bash" and "gh " in entry.get("args", ""):
+                    commands.append(entry["args"][:80])
+            except json.JSONDecodeError:
+                continue
+        return commands
+    except Exception:
+        return []
 
 
 def _get_api_key() -> str:
@@ -177,8 +270,13 @@ def _summarize_input(tool_name: str, tool_input: dict[str, Any]) -> str:
     return text[:100] + ("..." if len(text) > 100 else "")
 
 
-async def _judge_health(activity: str) -> dict[str, Any]:
-    """Ask Haiku to judge whether the agent is healthy."""
+async def _judge_health(activity: str, session_context: str = "") -> dict[str, Any]:
+    """Ask Haiku to judge whether the agent is healthy.
+
+    Args:
+        activity: Formatted tool call activity summary.
+        session_context: Optional session context preamble (session_type + task).
+    """
     import anthropic
 
     api_key = _get_api_key()
@@ -186,7 +284,11 @@ async def _judge_health(activity: str) -> dict[str, Any]:
         logger.warning("Health check: no API key available, skipping")
         return {"healthy": True, "reason": "no API key for health check"}
 
-    prompt = JUDGE_PROMPT.format(count=CHECK_INTERVAL, activity=activity)
+    prompt = JUDGE_PROMPT.format(
+        count=CHECK_INTERVAL,
+        activity=activity,
+        session_context=session_context,
+    )
 
     client = anthropic.AsyncAnthropic(api_key=api_key)
     response = await client.messages.create(
@@ -329,6 +431,13 @@ async def watchdog_hook(
     _tool_counts[session_id] = _tool_counts.get(session_id, 0) + 1
     count = _tool_counts[session_id]
 
+    # === ACTIVITY STREAM (every tool call) ===
+    # Extract tool name and summarize input for the activity log
+    tool_name = input_data.get("tool_name", "unknown")
+    tool_input = input_data.get("tool_input", {})
+    key_args = _summarize_input(tool_name, tool_input) if isinstance(tool_input, dict) else ""
+    _write_activity_stream(session_id, tool_name, key_args, count)
+
     # Update session tracking in Redis (best-effort, every call)
     try:
         import time
@@ -351,16 +460,22 @@ async def watchdog_hook(
 
     try:
         activity = _read_recent_activity(transcript_path)
-        result = await _judge_health(activity)
+        # Enrich with session context for more accurate health verdicts
+        session_context = _get_session_context(session_id)
+        result = await _judge_health(activity, session_context=session_context)
 
         healthy = result.get("healthy", True)
         reason = result.get("reason", "no reason given")
 
+        # Log gh commands alongside verdict for PM session visibility
+        gh_cmds = _extract_gh_commands(session_id)
+        gh_info = f" gh_commands={gh_cmds}" if gh_cmds else ""
+
         if healthy:
-            logger.info(f"[health_check] Healthy at #{count}: {reason}")
+            logger.info(f"[health_check] Healthy at #{count}: {reason}{gh_info}")
             return {"continue_": True}
         else:
-            logger.warning(f"[health_check] UNHEALTHY at #{count}: {reason}")
+            logger.warning(f"[health_check] UNHEALTHY at #{count}: {reason}{gh_info}")
             # Two-pronged kill:
             # 1. Set flag on AgentSession so nudge loop won't auto-continue
             # 2. Inject additionalContext telling Claude to stop immediately

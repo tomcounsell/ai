@@ -4,7 +4,9 @@ Unified Redis model tracking agent work from enqueue through completion. Replace
 
 ## Status Lifecycle
 
-`pending` -> `running` -> `active` -> `dormant` -> `completed` | `failed`
+`pending` -> `running` -> `active` -> `dormant` -> `completed` | `failed` | `cancelled`
+
+The `cancelled` status is a terminal state set explicitly by the PM via `cancel_job()`. Like `failed`, cancelled jobs block any sibling jobs that depend on them.
 
 ## Key Fields
 
@@ -14,7 +16,9 @@ Unified Redis model tracking agent work from enqueue through completion. Replace
 
 **Semantic routing:** `context_summary` (what the session is about), `expectations` (what the agent needs from the human)
 
-**New:** `history` (ListField, append-only lifecycle events), `issue_url`, `plan_url`, `pr_url`
+**Lifecycle:** `history` (ListField, append-only lifecycle events), `issue_url`, `plan_url`, `pr_url`
+
+**Job dependencies:** `stable_job_id` (UUID, immutable across delete-and-recreate), `depends_on` (list of stable_job_id values), `commit_sha` (HEAD commit for checkpoint/restore)
 
 ## History Tracking
 
@@ -132,3 +136,4 @@ Fields preserved: all queue-phase fields, session-phase fields, semantic routing
 - [Session Transcripts](session-transcripts.md) - Transcript file logging
 - [Session Tagging](session-tagging.md) - Auto-tagging system
 - [Summarizer Format](summarizer-format.md) - Bullet-point summaries
+- [Job Dependency Tracking](job-dependency-tracking.md) - Sibling dependencies, branch mapping, checkpoint/restore

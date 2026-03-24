@@ -82,10 +82,15 @@ Constants in `agent/job_queue.py`:
 | `JOB_TIMEOUT_BUILD` | 9000 (2.5 hr) | Max runtime for build jobs |
 | `JOB_HEALTH_MIN_RUNNING` | 300 (5 min) | Min runtime before recovery eligible |
 
+## Dependency Health Check
+
+A separate `_dependency_health_check()` runs alongside the job health monitor. It scans pending jobs with `depends_on` set and detects stuck dependency chains -- cases where a dependency has `failed` or `cancelled` status, permanently blocking the dependent job. These are logged as warnings for PM intervention.
+
 ## Related
 
 - [scale-job-queue-with-popoto-and-worktrees.md](scale-job-queue-with-popoto-and-worktrees.md) -- The underlying Redis job queue
 - [session-watchdog.md](session-watchdog.md) -- Session-level health monitoring (complementary layer)
 - [bridge-self-healing.md](bridge-self-healing.md) -- Bridge process-level health monitoring
+- [job-dependency-tracking.md](job-dependency-tracking.md) -- Sibling dependencies and PM queue controls
 - `agent/job_queue.py` -- Implementation source
 - Issue #127 -- Original tracking issue

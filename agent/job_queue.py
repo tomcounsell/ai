@@ -16,6 +16,7 @@ import os
 import signal
 import subprocess
 import time
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -245,6 +246,10 @@ _JOB_FIELDS = [
     "claude_session_uuid",
     # Job hierarchy fields — must be preserved across delete-and-recreate
     "parent_job_id",
+    # Job dependency fields — must be preserved across delete-and-recreate
+    "stable_job_id",
+    "depends_on",
+    "commit_sha",
     # === ChatSession/DevSession fields ===
     "session_type",
     "result_text",
@@ -289,11 +294,19 @@ async def _push_job(
     parent_job_id: str | None = None,
     telegram_message_key: str | None = None,
     session_type: str = "chat",
+    depends_on: list[str] | None = None,
 ) -> int:
     """Create a job in Redis and return the pending queue depth for this chat.
 
     Queue is keyed by chat_id so different chat groups for the same project
     can run in parallel. project_key is preserved on the model for config lookup.
+
+    Args:
+        depends_on: List of stable_job_id values this job must wait for.
+            Jobs with unmet dependencies are skipped by _pop_job() until
+            all dependencies reach a terminal state (completed). Dependencies
+            in failed or cancelled state block dependents and trigger PM
+            notification.
 
     Bug 3 fix (issue #374): When creating a new record for a continuation
     (reply-to-resume), mark old completed records with the same session_id
@@ -344,6 +357,8 @@ async def _push_job(
         scheduling_depth=scheduling_depth,
         parent_job_id=parent_job_id,
         telegram_message_key=telegram_message_key,
+        stable_job_id=uuid.uuid4().hex,
+        depends_on=depends_on,
     )
 
     # Log lifecycle transition for newly created pending job
@@ -361,6 +376,252 @@ async def _push_job(
     return await AgentSession.query.async_count(chat_id=chat_id, status="pending")
 
 
+def resolve_branch_for_stage(slug: str | None, stage: str | None) -> tuple[str, bool]:
+    """Determine the correct branch and whether a worktree is needed for a given stage.
+
+    Maps (slug, stage) pairs to deterministic branch names. This replaces
+    implicit branch resolution that previously relied on skill context.
+
+    Args:
+        slug: The work item slug (e.g., 'auth-feature'). None for Q&A/non-SDLC.
+        stage: The SDLC stage (e.g., 'PLAN', 'BUILD', 'TEST'). None for non-SDLC.
+
+    Returns:
+        Tuple of (branch_name, needs_worktree).
+        - branch_name: The git branch to work on.
+        - needs_worktree: Whether a worktree should be created/used.
+    """
+    if not slug:
+        return ("main", False)
+
+    if not stage:
+        return ("main", False)
+
+    stage_upper = stage.upper()
+
+    # PLAN and ISSUE stages work on main (plans committed to main)
+    if stage_upper in ("PLAN", "ISSUE", "CRITIQUE"):
+        return ("main", False)
+
+    # BUILD, TEST, PATCH, REVIEW, DOCS stages use session branch in worktree
+    if stage_upper in ("BUILD", "TEST", "PATCH", "REVIEW", "DOCS"):
+        return (f"session/{slug}", True)
+
+    # MERGE stage uses session branch but no new worktree needed
+    if stage_upper == "MERGE":
+        return (f"session/{slug}", False)
+
+    # Fallback for unknown stages
+    logger.warning(
+        f"[branch-mapping] Unknown stage {stage!r} for slug {slug!r}, falling back to main"
+    )
+    return ("main", False)
+
+
+def checkpoint_branch_state(job: AgentSession) -> None:
+    """Record current branch + HEAD commit SHA on the AgentSession.
+
+    Called when a job pauses (steering, dependency block) to preserve
+    the exact git state for later restoration.
+
+    Args:
+        job: The AgentSession to checkpoint.
+    """
+    working_dir = job.working_dir
+    if not working_dir:
+        return
+
+    try:
+        branch = subprocess.run(
+            ["git", "-C", working_dir, "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        commit = subprocess.run(
+            ["git", "-C", working_dir, "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+
+        if branch.returncode == 0 and commit.returncode == 0:
+            branch_name = branch.stdout.strip()
+            commit_sha = commit.stdout.strip()
+            job.branch_name = branch_name
+            job.commit_sha = commit_sha
+            job.save()
+            logger.info(
+                f"[checkpoint] Saved branch={branch_name} commit={commit_sha[:8]} "
+                f"for session {job.session_id}"
+            )
+        else:
+            logger.warning(
+                f"[checkpoint] Failed to read git state for session "
+                f"{job.session_id}: branch={branch.stderr.strip()}, "
+                f"commit={commit.stderr.strip()}"
+            )
+    except Exception as e:
+        logger.warning(f"[checkpoint] Error checkpointing state for {job.session_id}: {e}")
+
+
+def restore_branch_state(job: AgentSession) -> bool:
+    """Verify and restore branch + commit state from a checkpoint.
+
+    Called when a job resumes to ensure it starts on the correct branch
+    at the correct commit. If the recorded commit is an ancestor of
+    current HEAD, proceeds on HEAD (newer commits are fine).
+
+    Args:
+        job: The AgentSession with checkpoint data.
+
+    Returns:
+        True if state was successfully verified/restored, False otherwise.
+    """
+    working_dir = job.working_dir
+    recorded_branch = job.branch_name
+    recorded_sha = job.commit_sha
+
+    if not working_dir or not recorded_branch or not recorded_sha:
+        logger.debug(
+            f"[restore] No checkpoint data for session {job.session_id} — "
+            f"proceeding on current state"
+        )
+        return True
+
+    try:
+        # Check current branch
+        current = subprocess.run(
+            ["git", "-C", working_dir, "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        current_branch = current.stdout.strip() if current.returncode == 0 else ""
+
+        if current_branch != recorded_branch:
+            logger.info(
+                f"[restore] Branch mismatch: current={current_branch}, "
+                f"recorded={recorded_branch} — checking out recorded branch"
+            )
+            checkout = subprocess.run(
+                ["git", "-C", working_dir, "checkout", recorded_branch],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if checkout.returncode != 0:
+                logger.warning(
+                    f"[restore] Failed to checkout {recorded_branch}: "
+                    f"{checkout.stderr.strip()} — proceeding on {current_branch}"
+                )
+                return False
+
+        # Verify commit is reachable
+        ancestor_check = subprocess.run(
+            [
+                "git",
+                "-C",
+                working_dir,
+                "merge-base",
+                "--is-ancestor",
+                recorded_sha,
+                "HEAD",
+            ],
+            capture_output=True,
+            timeout=5,
+        )
+        if ancestor_check.returncode == 0:
+            logger.info(
+                f"[restore] Commit {recorded_sha[:8]} is ancestor of HEAD — "
+                f"proceeding on current HEAD"
+            )
+            return True
+        else:
+            logger.warning(
+                f"[restore] Commit {recorded_sha[:8]} is not ancestor of HEAD — "
+                f"proceeding on current HEAD anyway (may have been force-pushed)"
+            )
+            return True
+
+    except Exception as e:
+        logger.warning(f"[restore] Error restoring state for {job.session_id}: {e}")
+        return False
+
+
+# Terminal statuses for dependency resolution
+_TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
+
+
+def _dependencies_met(job: AgentSession) -> bool:
+    """Check if all dependencies for a job are met (completed).
+
+    A dependency is met only when its stable_job_id resolves to a job
+    with status 'completed'. Dependencies in 'failed' or 'cancelled'
+    state block the dependent job. Missing stable_job_ids (deleted from
+    Redis) are treated as blocked (conservative — notify PM).
+
+    Args:
+        job: The AgentSession to check dependencies for.
+
+    Returns:
+        True if the job has no dependencies or all are completed.
+        False if any dependency is not completed.
+    """
+    deps = job.depends_on
+    if not deps:
+        return True
+
+    for dep_stable_id in deps:
+        if not dep_stable_id:
+            continue
+        try:
+            dep_jobs = list(AgentSession.query.filter(stable_job_id=dep_stable_id))
+            if not dep_jobs:
+                # Missing dependency — treat as blocked (conservative)
+                logger.warning(
+                    f"[dependency] Job {job.job_id} depends on missing "
+                    f"stable_job_id={dep_stable_id} — blocked"
+                )
+                return False
+            dep = dep_jobs[0]
+            if dep.status != "completed":
+                return False
+        except Exception as e:
+            logger.warning(
+                f"[dependency] Error checking dependency {dep_stable_id} "
+                f"for job {job.job_id}: {e} — treating as blocked"
+            )
+            return False
+
+    return True
+
+
+def dependency_status(job: AgentSession) -> dict[str, str]:
+    """Return the status of each dependency for a job.
+
+    Returns a dict mapping stable_job_id -> status string.
+    Missing dependencies are reported as 'missing'.
+    """
+    deps = job.depends_on
+    if not deps:
+        return {}
+
+    result = {}
+    for dep_stable_id in deps:
+        if not dep_stable_id:
+            continue
+        try:
+            dep_jobs = list(AgentSession.query.filter(stable_job_id=dep_stable_id))
+            if not dep_jobs:
+                result[dep_stable_id] = "missing"
+            else:
+                result[dep_stable_id] = dep_jobs[0].status or "unknown"
+        except Exception:
+            result[dep_stable_id] = "error"
+    return result
+
+
 async def _pop_job(chat_id: str) -> Job | None:
     """
     Pop the highest priority pending job for a chat.
@@ -370,6 +631,12 @@ async def _pop_job(chat_id: str) -> Job | None:
 
     Order: urgent > high > normal > low, then within same priority FIFO (oldest first).
     Jobs with scheduled_after in the future are skipped (deferred execution).
+    Jobs with unmet depends_on are skipped (dependency blocking).
+
+    Dependency semantics:
+    - Only 'completed' is considered "met". 'failed' and 'cancelled' block dependents.
+    - Missing stable_job_id (deleted from Redis) is treated as blocked (conservative).
+    - Empty or None depends_on is treated as no dependencies.
 
     Uses delete-and-recreate instead of field mutation to avoid KeyField
     index corruption. Popoto's KeyField.on_save() only ADDs to the new
@@ -383,6 +650,11 @@ async def _pop_job(chat_id: str) -> Job | None:
     # Filter out jobs with scheduled_after in the future
     now = time.time()
     eligible = [j for j in pending if not j.scheduled_after or j.scheduled_after <= now]
+    if not eligible:
+        return None
+
+    # Filter out jobs with unmet dependencies
+    eligible = [j for j in eligible if _dependencies_met(j)]
     if not eligible:
         return None
 
@@ -435,6 +707,204 @@ async def _remove_by_session(chat_id: str, session_id: str) -> bool:
     return removed
 
 
+def reorder_job(job_id: str, new_priority: str) -> bool:
+    """Change the priority of a pending job.
+
+    Uses delete-and-recreate to avoid KeyField index corruption.
+
+    Args:
+        job_id: The job_id (AutoKeyField) of the job to reorder.
+        new_priority: New priority level (urgent/high/normal/low).
+
+    Returns:
+        True if the job was reordered, False if not found or not pending.
+    """
+    if new_priority not in PRIORITY_RANK:
+        logger.warning(f"[pm-controls] Invalid priority: {new_priority}")
+        return False
+
+    try:
+        job = AgentSession.query.get(job_id)
+    except Exception:
+        logger.warning(f"[pm-controls] Job {job_id} not found for reorder")
+        return False
+
+    if job is None or job.status != "pending":
+        logger.warning(
+            f"[pm-controls] Job {job_id} not pending (status={getattr(job, 'status', None)}) "
+            f"— cannot reorder"
+        )
+        return False
+
+    fields = _extract_job_fields(job)
+    job.delete()
+    fields["priority"] = new_priority
+    new_job = AgentSession.create(**fields)
+    logger.info(
+        f"[pm-controls] Reordered job {job_id} -> {new_job.job_id} (priority={new_priority})"
+    )
+    return True
+
+
+def cancel_job(job_id: str) -> bool:
+    """Cancel a pending job by setting its status to 'cancelled'.
+
+    Cancelled jobs block their dependents (same as failed). PM is notified
+    and decides whether to cancel or unblock dependent jobs.
+
+    Uses delete-and-recreate to avoid KeyField index corruption.
+
+    Args:
+        job_id: The job_id of the job to cancel.
+
+    Returns:
+        True if the job was cancelled, False if not found or not pending.
+    """
+    try:
+        job = AgentSession.query.get(job_id)
+    except Exception:
+        logger.warning(f"[pm-controls] Job {job_id} not found for cancel")
+        return False
+
+    if job is None or job.status != "pending":
+        logger.warning(
+            f"[pm-controls] Job {job_id} not pending (status={getattr(job, 'status', None)}) "
+            f"— cannot cancel"
+        )
+        return False
+
+    fields = _extract_job_fields(job)
+    job.delete()
+    fields["status"] = "cancelled"
+    fields["completed_at"] = time.time()
+    new_job = AgentSession.create(**fields)
+    logger.info(
+        f"[pm-controls] Cancelled job {job_id} -> {new_job.job_id} "
+        f"(stable_job_id={new_job.stable_job_id})"
+    )
+    return True
+
+
+def retry_job(stable_job_id: str) -> AgentSession | None:
+    """Re-queue a failed or cancelled job with the same parameters.
+
+    Creates a new pending job preserving all fields from the original.
+
+    Args:
+        stable_job_id: The stable_job_id of the job to retry.
+
+    Returns:
+        The new AgentSession if retried, None if not found or not terminal.
+    """
+    try:
+        jobs = list(AgentSession.query.filter(stable_job_id=stable_job_id))
+    except Exception:
+        logger.warning(f"[pm-controls] stable_job_id {stable_job_id} not found for retry")
+        return None
+
+    if not jobs:
+        logger.warning(f"[pm-controls] No job found with stable_job_id={stable_job_id}")
+        return None
+
+    job = jobs[0]
+    if job.status not in ("failed", "cancelled"):
+        logger.warning(
+            f"[pm-controls] Job {job.job_id} status is {job.status!r} — "
+            f"can only retry failed/cancelled jobs"
+        )
+        return None
+
+    fields = _extract_job_fields(job)
+    fields["status"] = "pending"
+    fields["priority"] = "high"
+    fields["started_at"] = None
+    fields["completed_at"] = None
+    fields["created_at"] = time.time()
+    # Generate new stable_job_id for the retry
+    fields["stable_job_id"] = uuid.uuid4().hex
+    new_job = AgentSession.create(**fields)
+    logger.info(
+        f"[pm-controls] Retried job {job.job_id} -> {new_job.job_id} "
+        f"(old_stable={stable_job_id}, new_stable={new_job.stable_job_id})"
+    )
+
+    # Update depends_on references in pending jobs that pointed to the old stable_job_id.
+    # Without this, dependents would be stuck waiting for the original (now failed/cancelled) job.
+    new_stable_id = new_job.stable_job_id
+    if new_stable_id != stable_job_id:
+        chat_id = job.chat_id
+        try:
+            pending_jobs = list(AgentSession.query.filter(chat_id=chat_id, status="pending"))
+            for pending in pending_jobs:
+                deps = pending.depends_on
+                if not deps or stable_job_id not in deps:
+                    continue
+                # Replace old stable_job_id with new one using delete-and-recreate
+                # (ListField values require recreating the object to update indexes)
+                updated_deps = [new_stable_id if d == stable_job_id else d for d in deps]
+                pending_fields = _extract_job_fields(pending)
+                pending.delete()
+                pending_fields["depends_on"] = updated_deps
+                AgentSession.create(**pending_fields)
+                logger.info(
+                    f"[pm-controls] Updated depends_on for job "
+                    f"{pending_fields.get('stable_job_id', '?')}: "
+                    f"{stable_job_id} -> {new_stable_id}"
+                )
+        except Exception as e:
+            logger.warning(f"[pm-controls] Failed to update depends_on references after retry: {e}")
+
+    return new_job
+
+
+def get_queue_status(chat_id: str) -> dict:
+    """Return full queue state with dependency graph for a chat.
+
+    Returns a dict with pending, running, completed, and failed job summaries
+    including dependency information.
+
+    Args:
+        chat_id: The chat_id to query.
+
+    Returns:
+        Dict with keys: pending, running, completed, failed, cancelled.
+        Each value is a list of job summary dicts.
+    """
+    result: dict[str, list[dict]] = {
+        "pending": [],
+        "running": [],
+        "completed": [],
+        "failed": [],
+        "cancelled": [],
+    }
+
+    try:
+        all_jobs = list(AgentSession.query.filter(chat_id=chat_id))
+    except Exception as e:
+        logger.warning(f"[pm-controls] Failed to query jobs for chat {chat_id}: {e}")
+        return result
+
+    for job in all_jobs:
+        status = job.status or "unknown"
+        if status not in result:
+            continue
+
+        summary = {
+            "job_id": job.job_id,
+            "stable_job_id": job.stable_job_id,
+            "session_id": job.session_id,
+            "message_preview": (job.message_text or "")[:100],
+            "priority": job.priority,
+            "depends_on": job.depends_on or [],
+            "deps_met": _dependencies_met(job) if status == "pending" else None,
+            "created_at": job.created_at,
+            "started_at": job.started_at,
+        }
+        result[status].append(summary)
+
+    return result
+
+
 async def get_active_session_for_chat(chat_id: str) -> AgentSession | None:
     """Find the active AgentSession for a given Telegram chat_id.
 
@@ -463,6 +933,12 @@ async def _complete_job(job: Job, *, failed: bool = False) -> None:
         job: The job to complete.
         failed: If True, this job failed (used for parent finalization).
     """
+    # Checkpoint branch state before completion for audit trail
+    try:
+        checkpoint_branch_state(job._rj)
+    except Exception as e:
+        logger.debug(f"[checkpoint] Non-fatal checkpoint error at completion: {e}")
+
     parent_job_id = getattr(job._rj, "parent_job_id", None)
 
     # Finalize parent BEFORE deleting child, passing the completing child's
@@ -540,7 +1016,7 @@ async def _finalize_parent(
 
     # Build effective status map: override the completing child's status
     # since its Redis status hasn't been updated yet
-    terminal_statuses = {"completed", "failed"}
+    terminal_statuses = _TERMINAL_STATUSES
 
     def effective_status(child: AgentSession) -> str:
         if completing_child_id and child.job_id == completing_child_id:
@@ -841,7 +1317,7 @@ async def _job_hierarchy_health_check() -> None:
                 stuck_fixed += 1
                 continue
 
-            terminal_statuses = {"completed", "failed"}
+            terminal_statuses = _TERMINAL_STATUSES
             non_terminal = [c for c in children if c.status not in terminal_statuses]
             if not non_terminal:
                 # All children terminal but parent still waiting
@@ -866,6 +1342,51 @@ async def _job_hierarchy_health_check() -> None:
         )
 
 
+async def _dependency_health_check() -> None:
+    """Detect and handle stuck dependency chains.
+
+    Checks pending jobs with depends_on references to failed, cancelled,
+    or missing jobs. These will never become eligible without intervention.
+    Logs warnings for PM visibility.
+    """
+    try:
+        pending_jobs = list(AgentSession.query.filter(status="pending"))
+        stuck_count = 0
+        for job in pending_jobs:
+            deps = job.depends_on
+            if not deps:
+                continue
+            for dep_stable_id in deps:
+                if not dep_stable_id:
+                    continue
+                dep_jobs = list(AgentSession.query.filter(stable_job_id=dep_stable_id))
+                if not dep_jobs:
+                    logger.warning(
+                        "[dependency-health] Job %s blocked on missing "
+                        "dependency stable_job_id=%s — PM action needed",
+                        job.job_id,
+                        dep_stable_id,
+                    )
+                    stuck_count += 1
+                elif dep_jobs[0].status in ("failed", "cancelled"):
+                    logger.warning(
+                        "[dependency-health] Job %s blocked on %s "
+                        "dependency stable_job_id=%s (job_id=%s) — PM action needed",
+                        job.job_id,
+                        dep_jobs[0].status,
+                        dep_stable_id,
+                        dep_jobs[0].job_id,
+                    )
+                    stuck_count += 1
+        if stuck_count:
+            logger.info(
+                "[dependency-health] Found %d stuck dependency chain(s)",
+                stuck_count,
+            )
+    except Exception as e:
+        logger.error("[dependency-health] Health check failed: %s", e, exc_info=True)
+
+
 async def _job_health_loop() -> None:
     """Periodically check running jobs for liveness and timeout."""
     logger.info(
@@ -876,6 +1397,7 @@ async def _job_health_loop() -> None:
         try:
             await _job_health_check()
             await _job_hierarchy_health_check()
+            await _dependency_health_check()
         except Exception as e:
             logger.error("[job-health] Error in health check: %s", e, exc_info=True)
         await asyncio.sleep(JOB_HEALTH_CHECK_INTERVAL)
@@ -1330,7 +1852,44 @@ async def _execute_job(job: Job) -> None:
     allowed_root = Path.home() / "src"
     is_wt = WORKTREES_DIR in str(working_dir)
     working_dir = validate_workspace(working_dir, allowed_root, is_worktree=is_wt)
-    branch_name = _session_branch_name(job.session_id)
+
+    # Restore branch state from checkpoint if this is a resumed job
+    try:
+        restore_branch_state(job._rj)
+    except Exception as e:
+        logger.debug(f"[restore] Non-fatal restore error at job start: {e}")
+
+    # Resolve branch: use slug + stage mapping if available, else session-based
+    slug = job.work_item_slug
+    stage = None
+    if slug:
+        # Try to read current stage from the AgentSession
+        try:
+            sessions = list(AgentSession.query.filter(session_id=job.session_id))
+            if sessions:
+                stage = sessions[0].current_stage
+        except Exception:
+            pass
+        resolved_branch, needs_wt = resolve_branch_for_stage(slug, stage)
+        branch_name = resolved_branch
+        # If branch resolution says we need a worktree and working_dir isn't one
+        if needs_wt and WORKTREES_DIR not in str(working_dir):
+            try:
+                from agent.worktree_manager import get_or_create_worktree
+
+                wt_path = get_or_create_worktree(working_dir, slug)
+                working_dir = Path(wt_path)
+                logger.info(
+                    f"[branch-mapping] Resolved worktree for slug={slug} "
+                    f"stage={stage}: {working_dir}"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"[branch-mapping] Failed to create worktree for "
+                    f"slug={slug}: {e} — using original working dir"
+                )
+    else:
+        branch_name = _session_branch_name(job.session_id)
 
     # Compute task list ID for sub-agent task isolation
     # Tier 2: planned work uses the slug directly
