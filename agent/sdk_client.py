@@ -39,6 +39,8 @@ from claude_agent_sdk import (
 from agent.agent_definitions import get_agent_definitions
 from agent.hooks import build_hooks_config
 from agent.worktree_manager import WORKTREES_DIR, validate_workspace
+from bridge.health import get_health
+from bridge.resilience import CircuitBreaker
 from utils.github_patterns import ISSUE_NUMBER_RE as _ISSUE_NUMBER_RE
 from utils.github_patterns import PR_NUMBER_RE as _PR_NUMBER_RE
 
@@ -69,6 +71,23 @@ _last_activity_timestamps: dict[str, float] = {}
 # are considered stalled. Active sessions producing tool calls/logs are never
 # interrupted regardless of total runtime.
 SDK_INACTIVITY_TIMEOUT_SECONDS = int(os.environ.get("SDK_INACTIVITY_TIMEOUT_SECONDS", 300))
+
+# === Anthropic Circuit Breaker ===
+# Tracks failures in SDK query calls. When the Anthropic API is persistently
+# down, the circuit opens to fail fast instead of wasting resources on retries.
+# Defaults: 5 failures in 60s window, 30s probe interval.
+_anthropic_circuit = CircuitBreaker(
+    name="anthropic",
+    failure_threshold=int(os.environ.get("ANTHROPIC_CB_FAILURE_THRESHOLD", 5)),
+    window_seconds=float(os.environ.get("ANTHROPIC_CB_WINDOW_SECONDS", 60)),
+    probe_interval_seconds=float(os.environ.get("ANTHROPIC_CB_PROBE_INTERVAL", 30)),
+)
+
+# Register with health tracking singleton
+try:
+    get_health().register(_anthropic_circuit)
+except Exception:
+    pass  # Health module not critical at import time
 
 
 def get_stop_reason(session_id: str) -> str | None:
@@ -1424,6 +1443,17 @@ async def get_agent_response_sdk(
         f"session_id={session_id}"
     )
 
+    # Check Anthropic circuit breaker before starting SDK work
+    if _anthropic_circuit.is_open():
+        logger.warning(
+            "[%s] Anthropic circuit is OPEN — failing fast (not sending to SDK)",
+            request_id,
+        )
+        return (
+            "\u23f3 Message received. Processing is temporarily delayed "
+            "\u2014 I'll respond as soon as service recovers."
+        )
+
     try:
         # Extract project_key from config for env var injection
         _project_key = project.get("name", "valor").lower().replace(" ", "-") if project else None
@@ -1490,11 +1520,17 @@ async def get_agent_response_sdk(
         elapsed = time.time() - start_time
         logger.info(f"[{request_id}] SDK responded in {elapsed:.1f}s ({len(response)} chars)")
 
+        # Record success for circuit breaker
+        await _anthropic_circuit.record_success()
+
         return response
 
     except Exception as e:
         elapsed = time.time() - start_time
         logger.error(f"[{request_id}] SDK error after {elapsed:.1f}s: {e}")
+
+        # Record failure for circuit breaker
+        await _anthropic_circuit.record_failure()
         # CRASH GUARD: Mark session as failed so the watchdog doesn't try to
         # interact with a dead session. Without this cleanup, the watchdog would
         # find the session still "active" and potentially trigger further errors.

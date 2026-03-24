@@ -1280,6 +1280,32 @@ async def main():
         else:
             _session_type = "chat"  # ChatSession — PM persona, handles both SDLC and Q&A
 
+        # Degraded mode: if Anthropic circuit is open, acknowledge and dead-letter
+        try:
+            from bridge.health import get_health
+
+            _health = get_health()
+            _anthropic_cb = _health.get_circuit("anthropic")
+            if _anthropic_cb and _anthropic_cb.is_open():
+                logger.warning(
+                    "[%s] Anthropic circuit OPEN — queueing message for later replay",
+                    correlation_id,
+                )
+                await event.reply(
+                    "\u23f3 Message received. Processing is temporarily delayed "
+                    "\u2014 I'll respond as soon as service recovers."
+                )
+                from bridge.dead_letters import persist_failed_delivery
+
+                await persist_failed_delivery(
+                    chat_id=int(telegram_chat_id),
+                    reply_to=message.id,
+                    text=clean_text,
+                )
+                return
+        except Exception as _degraded_err:
+            logger.debug("Degraded mode check failed (non-fatal): %s", _degraded_err)
+
         # Enqueue: session_type drives ChatSession vs DevSession creation.
         depth = await enqueue_job(
             project_key=project_key,
@@ -1359,25 +1385,41 @@ async def main():
     if orphans_killed:
         logger.info(f"Killed {orphans_killed} orphaned Claude Code subprocess(es)")
 
-    # Start the client (retry on SQLite session lock with exponential backoff)
-    # Backoff: 2s, 5s, 10s (with jitter added by cleanup function)
+    # Start the client with exponential backoff for all connection errors.
+    # Covers SQLite lock, network errors, Telegram API issues, etc.
+    # Backoff: 0s, 2s, 4s, 8s, 16s, 32s, 64s, 128s (cap ~256s with jitter)
+    import random
+
     logger.info("Starting Telegram bridge...")
-    backoff_times = [2, 5, 10]
-    for _attempt in range(1, 4):
+    max_startup_attempts = 8
+    base_backoff = 2.0
+    max_backoff = 256.0
+    for _attempt in range(1, max_startup_attempts + 1):
         try:
             await client.start(phone=PHONE, password=PASSWORD)
             break
         except Exception as e:
-            if "database is locked" in str(e) and _attempt < 3:
-                # Try cleanup again before retry
-                _cleanup_session_locks()
-                wait_time = backoff_times[_attempt - 1]
-                logger.warning(
-                    f"Session DB locked (attempt {_attempt}/3), retrying in {wait_time}s..."
+            if _attempt >= max_startup_attempts:
+                logger.error(
+                    "Failed to connect after %d attempts, exiting for launchd restart",
+                    max_startup_attempts,
                 )
-                await asyncio.sleep(wait_time)
-            else:
                 raise
+            # For SQLite lock errors, try cleanup before retry
+            if "database is locked" in str(e):
+                _cleanup_session_locks()
+            # Exponential backoff with jitter
+            backoff = min(base_backoff * (2 ** (_attempt - 1)), max_backoff)
+            jitter = random.uniform(0, base_backoff)
+            wait_time = backoff + jitter
+            logger.warning(
+                "Startup failed (attempt %d/%d): %s — retrying in %.1fs",
+                _attempt,
+                max_startup_attempts,
+                str(e)[:200],
+                wait_time,
+            )
+            await asyncio.sleep(wait_time)
     logger.info("Connected to Telegram")
 
     # Replay any dead-lettered messages from previous session

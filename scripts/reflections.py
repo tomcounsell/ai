@@ -470,6 +470,59 @@ def extract_errors_from_redis(target_date: str) -> list[dict[str, str]]:
     return errors
 
 
+def preflight_check(
+    requirements: dict[str, list[str]] | None = None,
+) -> list[str]:
+    """Validate prerequisites before running a reflections task.
+
+    Args:
+        requirements: Dict with optional keys:
+            "files" - list of file paths that must exist
+            "commands" - list of CLI commands that must be available
+            "env_vars" - list of environment variables that must be set
+
+    Returns:
+        List of failed prerequisite descriptions. Empty if all pass.
+    """
+    if not requirements:
+        return []
+
+    failures = []
+
+    for filepath in requirements.get("files", []):
+        p = Path(filepath).expanduser()
+        if not p.exists():
+            failures.append(f"Required file missing: {filepath}")
+
+    for cmd in requirements.get("commands", []):
+        if shutil.which(cmd) is None:
+            failures.append(f"Required command not found: {cmd}")
+
+    for var in requirements.get("env_vars", []):
+        if not os.environ.get(var):
+            failures.append(f"Required env var not set: {var}")
+
+    return failures
+
+
+# Map step numbers to their prerequisites.
+# Steps not listed here have no prerequisites.
+STEP_PREREQUISITES: dict[int, dict[str, list[str]]] = {
+    3: {  # Check Error Logs (Sentry) - needs API key
+        "env_vars": ["ANTHROPIC_API_KEY"],
+    },
+    7: {  # LLM Reflection - needs API key and anthropic package
+        "env_vars": ["ANTHROPIC_API_KEY"],
+    },
+    8: {  # File Bug Issues - needs gh CLI
+        "commands": ["gh"],
+    },
+    10: {  # GitHub Issue Creation - needs gh CLI
+        "commands": ["gh"],
+    },
+}
+
+
 class ReflectionRunner:
     """Runs the reflections maintenance process.
 
@@ -541,6 +594,18 @@ class ReflectionRunner:
             self.state.current_step = step_num
             self.state.step_started_at = datetime.now().isoformat()
             self.state.save()
+
+            # Pre-flight check: validate prerequisites before running step
+            prereqs = STEP_PREREQUISITES.get(step_num)
+            if prereqs:
+                failures = preflight_check(prereqs)
+                if failures:
+                    for f in failures:
+                        logger.warning("Step %d (%s) skipped: %s", step_num, step_name, f)
+                    self.state.completed_steps.append(step_num)
+                    self.state.daily_report.append(f"Skipped: {step_name} (prerequisites not met)")
+                    self.state.save()
+                    continue
 
             try:
                 await step_func()

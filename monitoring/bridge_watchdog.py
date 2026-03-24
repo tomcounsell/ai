@@ -76,6 +76,7 @@ class HealthStatus:
     zombie_pids: list[int] | None = None
     zombie_memory_mb: float = 0.0
     active_claude_count: int = 0
+    dependency_health: dict | None = None  # Per-dependency circuit breaker states
 
     def __post_init__(self):
         if self.zombie_pids is None:
@@ -337,6 +338,20 @@ def check_bridge_health() -> HealthStatus:
             f"(soft limit: {SOFT_INSTANCE_LIMIT})"
         )
 
+    # Check 5: Dependency health (circuit breaker states)
+    dep_health = None
+    try:
+        from bridge.health import get_health
+
+        dep_health_obj = get_health()
+        dep_health = dep_health_obj.summary()
+        if dep_health.get("overall") == "degraded":
+            issues.append(f"Degraded: {dep_health_obj.formatted_status()}")
+        elif dep_health.get("overall") == "down":
+            issues.append(f"All dependencies down: {dep_health_obj.formatted_status()}")
+    except Exception as e:
+        logger.debug("Could not read dependency health: %s", e)
+
     healthy = len(issues) == 0
 
     return HealthStatus(
@@ -350,6 +365,7 @@ def check_bridge_health() -> HealthStatus:
         zombie_pids=zombie_pids,
         zombie_memory_mb=zombie_memory_mb,
         active_claude_count=active_claude_count,
+        dependency_health=dep_health,
     )
 
 
@@ -626,6 +642,13 @@ def main():
             print(f"Zombie PIDs: {status.zombie_pids}")
             print(f"Zombie memory: {status.zombie_memory_mb}MB")
         print(f"Active claude instances: {status.active_claude_count}")
+        if status.dependency_health:
+            print(f"Dependency health: {status.dependency_health.get('overall', 'unknown')}")
+            for name, info in status.dependency_health.get("circuits", {}).items():
+                print(
+                    f"  {name}: {info['state']} "
+                    f"({info.get('failures_in_window', 0)} failures in window)"
+                )
         if status.active_claude_count > SOFT_INSTANCE_LIMIT:
             print(
                 f"WARNING: Active instances exceed soft limit "
