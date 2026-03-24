@@ -1,6 +1,5 @@
 """Tests for bridge.resilience.CircuitBreaker."""
 
-import asyncio
 import time
 
 import pytest

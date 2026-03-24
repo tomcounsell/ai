@@ -1,5 +1,6 @@
 """Tests for the job status CLI (python -m agent.job_queue --status)."""
 
+import sys
 import unittest
 from io import StringIO
 from unittest.mock import MagicMock, patch
@@ -14,8 +15,6 @@ class TestJobStatusCli(unittest.TestCase):
         """Status with no jobs prints 'Queue is empty.'"""
         mock_session_cls.query.all.return_value = []
         from agent.job_queue import _cli_show_status
-
-        import sys
 
         captured = StringIO()
         sys.stdout = captured
@@ -42,8 +41,6 @@ class TestJobStatusCli(unittest.TestCase):
         mock_session_cls.query.all.return_value = [job]
 
         from agent.job_queue import _cli_show_status
-
-        import sys
 
         captured = StringIO()
         sys.stdout = captured
