@@ -154,6 +154,13 @@ If `TARGET_REPO == ORCHESTRATOR_REPO`, this is a same-repo build and no special 
     python -c "from agent.build_pipeline import advance_stage; advance_stage('{slug}', 'test')"
     ```
 16. **Verify Definition of Done** - Ensure all tasks completed with: code working, tests passing, quality checks pass
+16b. **Run build validation against plan** - After verifying definition of done, run the deterministic plan validator:
+    ```bash
+    (cd $TARGET_REPO/.worktrees/{slug} && python scripts/validate_build.py $PLAN_PATH)
+    ```
+    - If exit code 0: all plan assertions pass, proceed to review
+    - If exit code 1: feed the failure report into `/do-patch` for fixes, then re-run validation (up to 3 iterations)
+    - The script checks file existence assertions, verification table commands, and success criteria from the plan
 17. **Advance to review stage** after tests pass:
     ```bash
     python -c "from agent.build_pipeline import advance_stage; advance_stage('{slug}', 'review')"

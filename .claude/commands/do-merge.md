@@ -38,6 +38,67 @@ print('ALL_GATES_PASS' if all_pass else 'GATES_FAILED')
 "
 ```
 
+### Plan Completion Gate
+
+Before merging, scan the plan document for unchecked items that indicate unfinished work:
+
+```bash
+SLUG=$(echo "$BRANCH" | sed 's|^session/||')
+PLAN_PATH="docs/plans/${SLUG}.md"
+
+python3 -c "
+import re, sys, yaml
+from pathlib import Path
+
+plan_path = Path('$PLAN_PATH')
+if not plan_path.exists():
+    print('WARN: No plan found at $PLAN_PATH -- skipping completion gate')
+    sys.exit(0)
+
+plan_text = plan_path.read_text()
+
+# Parse frontmatter for allow_unchecked override
+frontmatter_match = re.match(r'^---\n(.*?)\n---', plan_text, re.DOTALL)
+if frontmatter_match:
+    try:
+        fm = yaml.safe_load(frontmatter_match.group(1))
+        if fm and fm.get('allow_unchecked'):
+            print('WARN: Plan has allow_unchecked: true -- unchecked items will not block merge')
+            sys.exit(0)
+    except Exception:
+        pass
+
+# Sections to exclude from the scan (not deliverables)
+exclude_sections = ['Open Questions', 'Critique Results']
+
+# Split into sections and filter
+lines = plan_text.splitlines()
+current_section = ''
+unchecked = []
+for line in lines:
+    heading_match = re.match(r'^#{1,3} (.+)', line)
+    if heading_match:
+        current_section = heading_match.group(1).strip()
+    if current_section in exclude_sections:
+        continue
+    checkbox_match = re.match(r'^[ \t]*- \[ \] (.+)', line)
+    if checkbox_match:
+        unchecked.append(f'  [{current_section}] {checkbox_match.group(1).strip()}')
+
+if unchecked:
+    print(f'COMPLETION GATE FAILED: {len(unchecked)} unchecked plan item(s):')
+    for item in unchecked:
+        print(item)
+    print()
+    print('GATES_FAILED')
+else:
+    print('COMPLETION GATE: All plan items checked.')
+    print('GATE_PASS')
+"
+```
+
+If the completion gate prints GATES_FAILED, report the unchecked items as blockers and do NOT proceed with the merge. The plan must have all checkbox items checked (except those in Open Questions and Critique Results sections) before merge is allowed.
+
 Also verify the PR is mergeable:
 
 ```bash
