@@ -65,7 +65,7 @@ The job queue processes work sequentially within a chat but lacks three capabili
 - **New dependencies**: None -- uses existing Popoto ORM and git subprocess calls
 - **Interface changes**: `_push_job()` gains `depends_on` parameter (list of stable_job_ids); `_pop_job()` gains dependency filtering; `retry_job()` for re-queuing failed children; new helper functions for branch resolution
 - **Coupling**: Moderate increase -- job_queue.py gains awareness of branch/worktree state via new helper module. Kept modular by isolating branch resolution into a separate function.
-- **Data ownership**: AgentSession gains `stable_job_id` (Field), `depends_on` (ListField), `commit_sha` (Field) fields. Branch resolution logic owned by new functions in `agent/job_queue.py`. Activity stream writes to `logs/sessions/` (filesystem, not Redis).
+- **Data ownership**: AgentSession gains `stable_job_id` (KeyField, indexed), `depends_on` (ListField), `commit_sha` (Field) fields. Branch resolution logic owned by new functions in `agent/job_queue.py`. Activity stream writes to `logs/sessions/` (filesystem, not Redis).
 - **Reversibility**: Medium -- new fields can be made nullable and ignored; `_pop_job()` dependency check is a simple filter that can be removed; observability additions are purely additive (new log lines, enriched prompt, activity file) and can be removed without affecting core queue behavior
 
 ## Appetite
@@ -99,9 +99,9 @@ No prerequisites -- this work has no external dependencies. All foundational wor
 
 #### Phase 1: Job Dependencies
 
-- Add `stable_job_id = Field(null=True)` to AgentSession — a UUID set once at creation, never changes on delete-and-recreate. `job_id` (AutoKeyField) changes on status transitions; `stable_job_id` does not. This is the dependency reference key.
+- Add `stable_job_id = KeyField(null=True)` to AgentSession — a UUID set once at creation via `uuid.uuid4().hex`, never changes on delete-and-recreate. `job_id` (AutoKeyField) changes on status transitions; `stable_job_id` does not. This is the dependency reference key. KeyField provides indexed lookup for dependency resolution. Nullable: pre-existing jobs in Redis will have `stable_job_id=None` and cannot be depended upon (which is fine since they predate the feature).
 - Add `depends_on` as a `ListField` on AgentSession (list of `stable_job_id` values, nullable). Many-to-one: multiple jobs can depend on the same stable_job_id, and a single job can depend on multiple stable_job_ids.
-- In `_pop_job()`, after filtering by `scheduled_after`, filter out jobs whose `depends_on` contains any `stable_job_id` that is not in a terminal state (`completed` or `failed`). Lookup: scan chat's jobs matching each stable_job_id.
+- In `_pop_job()`, after filtering by `scheduled_after`, filter out jobs whose `depends_on` contains any `stable_job_id` where the dependency is not `completed`. Dependencies in `failed` or `cancelled` state block dependents and trigger PM notification. Only `completed` dependencies are considered met.
 - Add `dependency_status` helper to check if all dependencies are met (looks up AgentSession by stable_job_id)
 - Failed dependency handling: notify parent ChatSession (PM) with full visibility. PM decides: cancel, retry, or unblock. No auto-cancellation — parent has full decision-making power over child jobs.
 - Add `retry_job(stable_job_id)` function for PM to re-queue a failed child job
@@ -135,9 +135,9 @@ No prerequisites -- this work has no external dependencies. All foundational wor
 - Design as a feed that SubconsciousMemory (Popoto recipe) can consume later
 
 **4b. Health check enrichment** (in `agent/health_check.py`)
-- Read `session_type` (chat/dev) and `task_description` from AgentSession model and inject into `JUDGE_PROMPT`
+- Read `session_type` (chat/dev) and `message_text` (the original task request) from AgentSession model and inject into `JUDGE_PROMPT`. No new fields needed — both already exist on the model.
 - Extract `gh` CLI commands from the tool call activity (high-signal for PM sessions doing GitHub orchestration)
-- Add session context preamble to the prompt: "This is a {session_type} session working on: {task_description}"
+- Add session context preamble to the prompt: "This is a {session_type} session working on: {message_text[:200]}"
 - Log extracted `gh` commands alongside the health verdict
 
 **4c. Subagent completion summaries** (in `agent/hooks/subagent_stop.py`)
@@ -185,7 +185,7 @@ No prerequisites -- this work has no external dependencies. All foundational wor
 - [ ] `tests/unit/test_worktree_manager.py` -- no changes expected (worktree API unchanged)
 - [ ] `tests/unit/test_branch_manager.py` -- no changes expected (existing functions unchanged)
 - [ ] `tests/unit/test_health_check.py` (if exists) -- UPDATE: verify enriched prompt includes session_type and task_description
-- [ ] `tests/unit/test_hooks.py` (if exists) -- UPDATE: verify subagent_stop logs outcome summary
+- [ ] `tests/unit/test_hooks.py` -- CREATE: new test file for subagent_stop outcome summary
 
 ## Rabbit Holes
 
@@ -201,7 +201,7 @@ No prerequisites -- this work has no external dependencies. All foundational wor
 
 ### Risk 2: Delete-and-recreate changes job_id — ~~breaking depends_on references~~
 **Impact:** Eliminated. `depends_on` uses `stable_job_id` (a UUID set once at creation, preserved across delete-and-recreate) instead of `job_id`. The delete-and-recreate pattern in `_pop_job()` must copy `stable_job_id` to the new record. No reference scanning or updating needed.
-**Residual risk:** If a record is deleted from Redis before dependents check it, the dependency lookup will find no match. Mitigation: treat missing `stable_job_id` as "completed" (optimistic — if it existed and was cleaned up, it likely finished).
+**Residual risk:** If a record is deleted from Redis before dependents check it, the dependency lookup will find no match. Mitigation: treat missing `stable_job_id` as "blocked" (conservative — notify PM). This avoids silently unblocking dependents of cancelled or cleaned-up jobs.
 
 ### Risk 3: Branch state divergence between checkpoint and restore
 **Impact:** Resume lands on wrong commit, work conflicts
@@ -322,7 +322,7 @@ No new MCP server needed. The dependency tracking is internal to the job queue. 
 - **Assigned To**: queue-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add `stable_job_id = Field(null=True)` to AgentSession — UUID set once at creation via `uuid.uuid4().hex`, never changes
+- Add `stable_job_id = KeyField(null=True)` to AgentSession — UUID set once at creation via `uuid.uuid4().hex`, never changes. KeyField for indexed lookup.
 - Add `depends_on = ListField(null=True)` to AgentSession model (stores `stable_job_id` values)
 - Add both fields to `_JOB_FIELDS` list; ensure `stable_job_id` is copied in delete-and-recreate pattern
 - Add `depends_on` parameter to `_push_job()`
@@ -366,7 +366,7 @@ No new MCP server needed. The dependency tracking is internal to the job queue. 
 - **Agent Type**: builder
 - **Parallel**: false
 - Add `reorder_job(job_id, new_priority)` -- changes priority of a pending job
-- Add `cancel_job(job_id)` -- cancels a pending job, parent PM decides cascade
+- Add `cancel_job(job_id)` -- sets status to `cancelled` (a new terminal status). Dependents of a cancelled job are blocked and PM is notified, same as `failed` — never silently unblocked.
 - Add `retry_job(stable_job_id)` -- re-queues a failed child job with same parameters
 - Add `get_queue_status(chat_id)` -- returns full queue state with dependency graph and child statuses
 - Wire into ChatSession orchestration: PM gets full visibility over child jobs (cancel, retry, inspect)
