@@ -80,11 +80,10 @@ class HealthChecker:
             HealthCheckResult for database.
         """
         try:
-            import redis
+            from popoto.redis_db import POPOTO_REDIS_DB
 
-            client = redis.Redis(host="localhost", port=6379, socket_timeout=2)
-            client.ping()
-            info = client.info("memory")
+            POPOTO_REDIS_DB.ping()
+            info = POPOTO_REDIS_DB.info("memory")
             used_mb = info.get("used_memory", 0) / (1024 * 1024)
             return HealthCheckResult(
                 component="database",

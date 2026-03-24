@@ -6,7 +6,7 @@ Polls GitHub issues across configured projects, detects new ones,
 checks for duplicates, and auto-creates draft plans via /do-plan.
 
 Entry point: Run on a 5-minute cron schedule via launchd.
-State: Redis-backed seen-issue tracker and lock.
+State: Popoto SeenIssue model for seen-tracking, raw Redis for distributed lock.
 
 See docs/features/issue-poller.md for full documentation.
 """
@@ -25,17 +25,14 @@ _project_root = str(Path(__file__).parent.parent)
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
-try:
-    import redis
-except ImportError:
-    redis = None  # type: ignore[assignment]
+from popoto.redis_db import POPOTO_REDIS_DB  # noqa: E402
 
+from models.seen_issue import SeenIssue  # noqa: E402
 from scripts.issue_dedup import compare_issues  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-# Redis key patterns
-SEEN_KEY_PREFIX = "issue_poller:seen"
+# Redis key patterns (lock and failure counter stay as raw Redis for atomicity)
 LOCK_KEY = "issue_poller:lock"
 LOCK_TTL = 300  # 5 minutes
 FAILURE_COUNT_KEY = "issue_poller:consecutive_failures"
@@ -44,41 +41,38 @@ FAILURE_COUNT_KEY = "issue_poller:consecutive_failures"
 AGENT_D_SIGNATURE = "_Auto-posted by /do-docs cascade_"
 
 
-def get_redis_client() -> redis.Redis:
-    """Get a Redis client, raising if unavailable."""
-    if redis is None:
-        raise RuntimeError("redis package not installed")
-    client = redis.Redis()
-    client.ping()
-    return client
+def get_redis_client():
+    """Get the shared Popoto Redis connection, raising if unavailable."""
+    POPOTO_REDIS_DB.ping()
+    return POPOTO_REDIS_DB
 
 
-def acquire_lock(r: redis.Redis) -> bool:
+def acquire_lock(r) -> bool:
     """Acquire a distributed lock to prevent concurrent executions.
+
+    Uses raw Redis SET NX EX for atomicity. The lock stays as raw Redis
+    because Popoto's save() cannot do atomic SET NX EX.
 
     Returns True if lock acquired, False if another instance is running.
     """
     return bool(r.set(LOCK_KEY, "1", nx=True, ex=LOCK_TTL))
 
 
-def release_lock(r: redis.Redis) -> None:
+def release_lock(r) -> None:
     """Release the distributed lock."""
     r.delete(LOCK_KEY)
 
 
-def seen_key(org: str, repo: str) -> str:
-    """Redis key for the seen-issue set for a given repo."""
-    return f"{SEEN_KEY_PREFIX}:{org}/{repo}"
-
-
-def mark_seen(r: redis.Redis, org: str, repo: str, issue_number: int) -> None:
+def mark_seen(r, org: str, repo: str, issue_number: int) -> None:
     """Mark an issue as seen (processed)."""
-    r.sadd(seen_key(org, repo), str(issue_number))
+    record = SeenIssue.get_or_create(org, repo)
+    record.mark(issue_number)
 
 
-def is_seen(r: redis.Redis, org: str, repo: str, issue_number: int) -> bool:
+def is_seen(r, org: str, repo: str, issue_number: int) -> bool:
     """Check if an issue has already been processed."""
-    return bool(r.sismember(seen_key(org, repo), str(issue_number)))
+    record = SeenIssue.get_or_create(org, repo)
+    return record.is_seen(issue_number)
 
 
 def load_projects(config_path: Path | None = None) -> list[dict]:
@@ -185,7 +179,7 @@ def get_latest_comment_id(org: str, repo: str, issue_number: int) -> str | None:
         return None
 
 
-def filter_new_issues(r: redis.Redis, org: str, repo: str, issues: list[dict]) -> list[dict]:
+def filter_new_issues(r, org: str, repo: str, issues: list[dict]) -> list[dict]:
     """Filter out already-seen issues."""
     return [issue for issue in issues if not is_seen(r, org, repo, issue["number"])]
 
@@ -346,7 +340,7 @@ def send_telegram_notification(message: str, groups: list[str] | None = None) ->
 
 
 def process_issue(
-    r: redis.Redis,
+    r,
     org: str,
     repo: str,
     issue: dict,
@@ -449,7 +443,7 @@ def process_issue(
 
 
 def poll_project(
-    r: redis.Redis,
+    r,
     project: dict,
 ) -> dict:
     """Poll a single project for new issues.
