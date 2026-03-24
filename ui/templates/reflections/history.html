@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% from "reflections/_macros.html" import format_ts, format_dur, status_badge %}
+
+{% block title %}{{ name }} History - Reflections - Valor System{% endblock %}
+{% block nav_reflections %}active{% endblock %}
+
+{% block content %}
+<div class="section-header">
+    <h1>{{ name }} - Run History</h1>
+    <a href="/reflections/" class="btn">&larr; Overview</a>
+</div>
+
+{% if runs %}
+<table class="data-table">
+    <thead>
+        <tr>
+            <th>#</th>
+            <th>Status</th>
+            <th>Timestamp</th>
+            <th>Duration</th>
+            <th>Error</th>
+            <th></th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for run in runs %}
+        <tr>
+            <td class="mono">{{ run.index }}</td>
+            <td>{{ status_badge(run.status) }}</td>
+            <td class="mono">{{ format_ts(run.timestamp) }}</td>
+            <td class="mono">{{ format_dur(run.duration) }}</td>
+            <td>
+                {% if run.error %}
+                <span style="color: var(--red); font-size: 12px;">{{ run.error[:100] }}{% if run.error|length > 100 %}...{% endif %}</span>
+                {% else %}
+                <span class="text-muted">-</span>
+                {% endif %}
+            </td>
+            <td>
+                <a href="/reflections/{{ name }}/history/{{ run.index }}/" class="link">detail</a>
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+{% if total_pages > 1 %}
+<div class="pagination">
+    {% if page > 1 %}
+    <a href="/reflections/{{ name }}/history/?page={{ page - 1 }}" class="btn">&larr; Prev</a>
+    {% endif %}
+    <span class="current">Page {{ page }} of {{ total_pages }}</span>
+    {% if page < total_pages %}
+    <a href="/reflections/{{ name }}/history/?page={{ page + 1 }}" class="btn">Next &rarr;</a>
+    {% endif %}
+</div>
+{% endif %}
+
+{% else %}
+<div class="empty-state">
+    <h3>No run history</h3>
+    <p>This reflection has not recorded any runs yet.</p>
+</div>
+{% endif %}
+{% endblock %}

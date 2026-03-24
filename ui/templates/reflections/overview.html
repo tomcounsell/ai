@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+
+{% block title %}Reflections - Valor System{% endblock %}
+{% block nav_reflections %}active{% endblock %}
+
+{% block content %}
+<div class="section-header">
+    <h1>Reflections</h1>
+    <div class="flex gap-2">
+        <a href="/reflections/schedule/" class="btn">Schedule</a>
+        <a href="/reflections/ignores/" class="btn">Ignores</a>
+    </div>
+</div>
+
+{% if reflections %}
+<div id="status-grid" hx-get="/reflections/_partials/status-grid/" hx-trigger="every 10s" hx-swap="innerHTML">
+    {% include "reflections/_partials/status_grid.html" %}
+</div>
+{% else %}
+<div class="empty-state">
+    <h3>No reflections registered</h3>
+    <p>Add reflections to <code>config/reflections.yaml</code> to see them here.</p>
+</div>
+{% endif %}
+{% endblock %}

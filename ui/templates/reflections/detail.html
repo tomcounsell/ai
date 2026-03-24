@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% from "reflections/_macros.html" import format_ts, format_dur, status_badge %}
+
+{% block title %}Run #{{ run.index if run else '?' }} - {{ name }} - Valor System{% endblock %}
+{% block nav_reflections %}active{% endblock %}
+
+{% block content %}
+<div class="section-header">
+    <h1>{{ name }} - Run #{{ run.index if run else '?' }}</h1>
+    <a href="/reflections/{{ name }}/history/" class="btn">&larr; History</a>
+</div>
+
+{% if run %}
+<div class="grid-2 mb-4">
+    <div class="card">
+        <h3>Run Info</h3>
+        <table class="data-table">
+            <tr><td class="text-secondary">Status</td><td>{{ status_badge(run.status) }}</td></tr>
+            <tr><td class="text-secondary">Timestamp</td><td class="mono">{{ format_ts(run.timestamp) }}</td></tr>
+            <tr><td class="text-secondary">Duration</td><td class="mono">{{ format_dur(run.duration) }}</td></tr>
+        </table>
+    </div>
+    {% if run.error %}
+    <div class="card">
+        <h3>Error</h3>
+        <div class="log-viewer" style="max-height: 200px;">{{ run.error }}</div>
+    </div>
+    {% endif %}
+</div>
+
+{% if run.log_content %}
+<div class="card">
+    <h3>Log Output</h3>
+    <div class="log-viewer">{{ run.log_content }}</div>
+</div>
+{% else %}
+<div class="card">
+    <div class="flex gap-2">
+        <h3>Log Output</h3>
+        <button class="btn" hx-get="/reflections/_partials/log/{{ name }}/{{ run.index }}/" hx-target="#log-content" hx-swap="innerHTML">Load Log</button>
+    </div>
+    <div id="log-content">
+        <p class="text-muted">Click "Load Log" to view log content.</p>
+    </div>
+</div>
+{% endif %}
+
+{% else %}
+<div class="empty-state">
+    <h3>Run not found</h3>
+    <p>This run record does not exist.</p>
+</div>
+{% endif %}
+{% endblock %}
