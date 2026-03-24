@@ -69,9 +69,6 @@ class AgentSession(Model):
     job_id = AutoKeyField()
     session_id = Field()  # Telegram-derived session identifier (e.g., tg_project_chatid_msgid)
     session_type = KeyField(null=True)  # "chat" or "dev" — discriminator
-    claude_code_session_id = Field(
-        null=True
-    )  # Claude Code's session identifier (renamed from session_id overlap)
     project_key = KeyField()
     status = KeyField(default="pending")
 

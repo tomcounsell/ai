@@ -217,7 +217,6 @@ _JOB_FIELDS = [
     "auto_continue_count",
     "started_at",
     "trigger_message_id",
-    "claude_code_session_id",
     # Session-phase fields preserved across delete-and-recreate
     "last_activity",
     "completed_at",

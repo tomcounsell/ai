@@ -542,11 +542,11 @@ class TestAgentSessionFieldPresence:
             f"AgentSession.{field_name} should have been removed (now on TelegramMessage)"
         )
 
-    def test_claude_code_session_id_field_exists(self):
-        """AgentSession should have the renamed claude_code_session_id field."""
+    def test_claude_code_session_id_removed(self):
+        """claude_code_session_id was removed as a dead field (never read)."""
         from models.agent_session import AgentSession
 
-        assert "claude_code_session_id" in AgentSession._meta.field_names
+        assert "claude_code_session_id" not in AgentSession._meta.field_names
 
     def test_sender_property_exists(self):
         """AgentSession should have a sender property aliasing sender_name."""
