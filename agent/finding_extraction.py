@@ -49,8 +49,10 @@ Return a JSON array of findings. Each finding has:
 Return ONLY a JSON array, no other text. If no meaningful findings, return [].
 Example:
 [{{"category": "pattern_found", "content": "Auth uses JWT RS256", \
-"file_paths": "auth/jwt.py", "importance": 5.0}}]\
+"file_paths": "auth/jwt.py", "importance": 5.0}}]
 """
+# NOTE: Double braces {{}} above are required -- this string is used with .format(),
+# so {{ and }} produce literal { and } in the rendered prompt.
 
 # Maximum findings per extraction to avoid noise
 MAX_FINDINGS_PER_EXTRACTION = 10

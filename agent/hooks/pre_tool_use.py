@@ -226,6 +226,7 @@ def _maybe_inject_findings_into_prompt(tool_input: dict[str, Any]) -> None:
             return
 
         parent = parent_sessions[0]
+        # slug is the canonical field; work_item_slug is the legacy alias (pre-v2 sessions)
         slug = parent.slug or parent.work_item_slug
         if not slug:
             return

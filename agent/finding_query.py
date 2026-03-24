@@ -186,10 +186,24 @@ def _composite_score(finding: Finding, topics: list[str] | None = None) -> float
     score = 0.0
 
     try:
-        # Relevance from DecayingSortedField (importance * decay)
+        # Relevance: importance weighted by time decay
+        # DecayingSortedField uses: base_score * elapsed_days ^ (-decay_rate)
+        # We replicate that formula client-side since the Redis Lua score
+        # isn't exposed on the instance (only the timestamp is stored).
+        import math
+        import time
+
         importance = getattr(finding, "importance", 3.0) or 3.0
-        # Normalize importance to 0-1 range (assuming max 10.0)
-        relevance_score = min(importance / 10.0, 1.0)
+        relevance_ts = getattr(finding, "relevance", None)
+        if relevance_ts and isinstance(relevance_ts, int | float) and relevance_ts > 0:
+            elapsed_days = max((time.time() - float(relevance_ts)) / 86400.0, 0.01)
+            decay_rate = 0.5  # matches DecayingSortedField default
+            decay_factor = elapsed_days ** (-decay_rate)
+            decayed = importance * decay_factor
+        else:
+            decayed = importance
+        # Normalize to 0-1 range (importance max 10.0, decay_factor <= 1.0 for age >= 1 day)
+        relevance_score = min(decayed / 10.0, 1.0)
         score += WEIGHT_RELEVANCE * relevance_score
     except Exception:
         pass

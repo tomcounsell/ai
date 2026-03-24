@@ -150,6 +150,7 @@ def _extract_and_persist_findings(input_data: dict, agent_id: str) -> None:
             return
 
         parent = parent_sessions[0]
+        # slug is the canonical field; work_item_slug is the legacy alias (pre-v2 sessions)
         slug = parent.slug or parent.work_item_slug
         if not slug:
             logger.debug("[subagent_stop] No slug on parent session, skipping finding extraction")
@@ -161,8 +162,7 @@ def _extract_and_persist_findings(input_data: dict, agent_id: str) -> None:
         stage = parent.current_stage or ""
 
         # Get the full output text from the subagent
-        output = _extract_outcome_summary(input_data)
-        # Try to get the full result text, not just the 200-char summary
+        # Try to get the full result text first, falling back to truncated summary
         full_output = ""
         for key in ("result", "output", "response", "summary", "message"):
             value = input_data.get(key)
@@ -178,7 +178,7 @@ def _extract_and_persist_findings(input_data: dict, agent_id: str) -> None:
                         full_output = value
                         break
         if not full_output:
-            full_output = output
+            full_output = str(input_data)[:8000]
 
         # Delegate to finding extraction module
         from agent.finding_extraction import extract_findings_from_output
