@@ -708,6 +708,178 @@ async def _remove_by_session(chat_id: str, session_id: str) -> bool:
     return removed
 
 
+def reorder_job(job_id: str, new_priority: str) -> bool:
+    """Change the priority of a pending job.
+
+    Uses delete-and-recreate to avoid KeyField index corruption.
+
+    Args:
+        job_id: The job_id (AutoKeyField) of the job to reorder.
+        new_priority: New priority level (urgent/high/normal/low).
+
+    Returns:
+        True if the job was reordered, False if not found or not pending.
+    """
+    if new_priority not in PRIORITY_RANK:
+        logger.warning(f"[pm-controls] Invalid priority: {new_priority}")
+        return False
+
+    try:
+        job = AgentSession.query.get(job_id)
+    except Exception:
+        logger.warning(f"[pm-controls] Job {job_id} not found for reorder")
+        return False
+
+    if job is None or job.status != "pending":
+        logger.warning(
+            f"[pm-controls] Job {job_id} not pending (status={getattr(job, 'status', None)}) "
+            f"— cannot reorder"
+        )
+        return False
+
+    fields = _extract_job_fields(job)
+    job.delete()
+    fields["priority"] = new_priority
+    new_job = AgentSession.create(**fields)
+    logger.info(
+        f"[pm-controls] Reordered job {job_id} -> {new_job.job_id} "
+        f"(priority={new_priority})"
+    )
+    return True
+
+
+def cancel_job(job_id: str) -> bool:
+    """Cancel a pending job by setting its status to 'cancelled'.
+
+    Cancelled jobs block their dependents (same as failed). PM is notified
+    and decides whether to cancel or unblock dependent jobs.
+
+    Uses delete-and-recreate to avoid KeyField index corruption.
+
+    Args:
+        job_id: The job_id of the job to cancel.
+
+    Returns:
+        True if the job was cancelled, False if not found or not pending.
+    """
+    try:
+        job = AgentSession.query.get(job_id)
+    except Exception:
+        logger.warning(f"[pm-controls] Job {job_id} not found for cancel")
+        return False
+
+    if job is None or job.status != "pending":
+        logger.warning(
+            f"[pm-controls] Job {job_id} not pending (status={getattr(job, 'status', None)}) "
+            f"— cannot cancel"
+        )
+        return False
+
+    fields = _extract_job_fields(job)
+    job.delete()
+    fields["status"] = "cancelled"
+    fields["completed_at"] = time.time()
+    new_job = AgentSession.create(**fields)
+    logger.info(
+        f"[pm-controls] Cancelled job {job_id} -> {new_job.job_id} "
+        f"(stable_job_id={new_job.stable_job_id})"
+    )
+    return True
+
+
+def retry_job(stable_job_id: str) -> AgentSession | None:
+    """Re-queue a failed or cancelled job with the same parameters.
+
+    Creates a new pending job preserving all fields from the original.
+
+    Args:
+        stable_job_id: The stable_job_id of the job to retry.
+
+    Returns:
+        The new AgentSession if retried, None if not found or not terminal.
+    """
+    try:
+        jobs = list(AgentSession.query.filter(stable_job_id=stable_job_id))
+    except Exception:
+        logger.warning(f"[pm-controls] stable_job_id {stable_job_id} not found for retry")
+        return None
+
+    if not jobs:
+        logger.warning(f"[pm-controls] No job found with stable_job_id={stable_job_id}")
+        return None
+
+    job = jobs[0]
+    if job.status not in ("failed", "cancelled"):
+        logger.warning(
+            f"[pm-controls] Job {job.job_id} status is {job.status!r} — "
+            f"can only retry failed/cancelled jobs"
+        )
+        return None
+
+    fields = _extract_job_fields(job)
+    fields["status"] = "pending"
+    fields["priority"] = "high"
+    fields["started_at"] = None
+    fields["completed_at"] = None
+    fields["created_at"] = time.time()
+    # Generate new stable_job_id for the retry
+    fields["stable_job_id"] = uuid.uuid4().hex
+    new_job = AgentSession.create(**fields)
+    logger.info(
+        f"[pm-controls] Retried job {job.job_id} -> {new_job.job_id} "
+        f"(old_stable={stable_job_id}, new_stable={new_job.stable_job_id})"
+    )
+    return new_job
+
+
+def get_queue_status(chat_id: str) -> dict:
+    """Return full queue state with dependency graph for a chat.
+
+    Returns a dict with pending, running, completed, and failed job summaries
+    including dependency information.
+
+    Args:
+        chat_id: The chat_id to query.
+
+    Returns:
+        Dict with keys: pending, running, completed, failed, cancelled.
+        Each value is a list of job summary dicts.
+    """
+    result: dict[str, list[dict]] = {
+        "pending": [],
+        "running": [],
+        "completed": [],
+        "failed": [],
+        "cancelled": [],
+    }
+
+    try:
+        all_jobs = list(AgentSession.query.filter(chat_id=chat_id))
+    except Exception as e:
+        logger.warning(f"[pm-controls] Failed to query jobs for chat {chat_id}: {e}")
+        return result
+
+    for job in all_jobs:
+        status = job.status or "unknown"
+        if status not in result:
+            continue
+
+        summary = {
+            "job_id": job.job_id,
+            "stable_job_id": job.stable_job_id,
+            "session_id": job.session_id,
+            "message_preview": (job.message_text or "")[:100],
+            "priority": job.priority,
+            "depends_on": job.depends_on or [],
+            "deps_met": _dependencies_met(job) if status == "pending" else None,
+            "created_at": job.created_at,
+            "started_at": job.started_at,
+        }
+        result[status].append(summary)
+
+    return result
+
+
 async def get_active_session_for_chat(chat_id: str) -> AgentSession | None:
     """Find the active AgentSession for a given Telegram chat_id.
 
