@@ -3,6 +3,13 @@
 Aggregates circuit breaker states from bridge/resilience.py into a
 unified health summary that the watchdog and status reporting can consume.
 
+NOTE: The watchdog (monitoring/bridge_watchdog.py) runs as a separate
+process and cannot access in-memory circuit breaker state from this module.
+Watchdog health checks use their own HTTP/process-level probes.  If
+cross-process circuit state sharing is ever needed, consider writing
+summary() output to a file (e.g. data/health.json) that the watchdog can
+read.  See GitHub issue #495 for context.
+
 Usage:
     from bridge.health import DependencyHealth
 
@@ -78,7 +85,7 @@ class DependencyHealth:
         for name, cb in self._circuits.items():
             status = cb.status()
             circuits[name] = status
-            if status["state"] in (CircuitState.OPEN.value, "open"):
+            if status["state"] == CircuitState.OPEN.value:
                 open_count += 1
 
         total = len(self._circuits)

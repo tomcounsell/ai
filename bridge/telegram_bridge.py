@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import signal
 import subprocess
 import sys
@@ -130,8 +131,6 @@ def _cleanup_session_locks() -> int:
 
     Returns the number of processes killed.
     """
-    import random
-
     logger = logging.getLogger(__name__)
     data_dir = _BRIDGE_PROJECT_DIR / "data"
     killed = 0
@@ -1388,8 +1387,6 @@ async def main():
     # Start the client with exponential backoff for all connection errors.
     # Covers SQLite lock, network errors, Telegram API issues, etc.
     # Backoff: 0s, 2s, 4s, 8s, 16s, 32s, 64s, 128s (cap ~256s with jitter)
-    import random
-
     logger.info("Starting Telegram bridge...")
     max_startup_attempts = 8
     base_backoff = 2.0
