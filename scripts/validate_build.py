@@ -24,8 +24,9 @@ from pathlib import Path
 def extract_section(plan_text: str, heading: str) -> str:
     """Extract content of a markdown section by heading name.
 
-    Returns the text between the heading and the next heading of equal or
-    higher level, or end of document.
+    Returns the text between the heading and the next heading of level 1-3,
+    or end of document. Does not distinguish heading levels -- any heading
+    at level 1, 2, or 3 terminates the section.
     """
     # Match ## heading or ### heading
     pattern = r"^(#{1,3}) " + re.escape(heading) + r"\s*\n(.*?)(?=^#{1,3} |\Z)"
@@ -33,11 +34,6 @@ def extract_section(plan_text: str, heading: str) -> str:
     if match:
         return match.group(2)
     return ""
-
-
-def extract_checkboxes(section_text: str) -> list[str]:
-    """Extract unchecked checkbox lines from a section."""
-    return re.findall(r"^[ \t]*- \[ \] (.+)$", section_text, re.MULTILINE)
 
 
 def parse_file_assertions(plan_text: str) -> list[dict[str, str]]:
