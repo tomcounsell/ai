@@ -1,7 +1,6 @@
 """Tests for finding query (agent/finding_query.py).
 
-Verifies composite scoring, format functions, bloom utility,
-and error handling.
+Verifies composite scoring, format functions, and error handling.
 """
 
 from unittest.mock import MagicMock, patch
@@ -156,40 +155,3 @@ class TestCompositeScore:
         score_without_topic = _composite_score(f, topics=["database", "migration"])
 
         assert score_with_topic > score_without_topic
-
-
-class TestBloomHasRelevant:
-    """_bloom_has_relevant() behavior."""
-
-    def test_returns_true_when_no_bloom_field(self):
-        """Should fail-open when bloom field is not found."""
-        from agent.finding_query import _bloom_has_relevant
-
-        mock_cls = MagicMock()
-        mock_cls._meta.fields = {}
-
-        assert _bloom_has_relevant(mock_cls, ["topic"]) is True
-
-    def test_returns_true_on_bloom_hit(self):
-        """Should return True when bloom says topic might exist."""
-        from agent.finding_query import _bloom_has_relevant
-
-        mock_bloom = MagicMock()
-        mock_bloom.might_exist.return_value = True
-
-        mock_cls = MagicMock()
-        mock_cls._meta.fields = {"bloom": mock_bloom}
-
-        assert _bloom_has_relevant(mock_cls, ["auth"]) is True
-
-    def test_returns_false_when_no_bloom_hits(self):
-        """Should return False when bloom says no topics exist."""
-        from agent.finding_query import _bloom_has_relevant
-
-        mock_bloom = MagicMock()
-        mock_bloom.might_exist.return_value = False
-
-        mock_cls = MagicMock()
-        mock_cls._meta.fields = {"bloom": mock_bloom}
-
-        assert _bloom_has_relevant(mock_cls, ["auth", "jwt"]) is False

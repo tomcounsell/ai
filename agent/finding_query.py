@@ -16,6 +16,8 @@ All operations fail silently -- query failures must never crash the agent.
 from __future__ import annotations
 
 import logging
+import math
+import time
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -149,30 +151,6 @@ def format_findings_for_injection(
         return None
 
 
-def _bloom_has_relevant(finding_cls: type, topics: list[str]) -> bool:
-    """Check ExistenceFilter for any topic hit.
-
-    Returns True if bloom says at least one topic might have findings,
-    or if bloom check is unavailable (fail-open).
-    """
-    try:
-        bloom_field = finding_cls._meta.fields.get("bloom")
-        if not bloom_field:
-            return True  # Fail-open: no bloom, proceed with full query
-
-        for topic in topics:
-            try:
-                if bloom_field.might_exist(finding_cls, topic):
-                    return True
-            except Exception:
-                continue
-
-        return False
-
-    except Exception:
-        return True  # Fail-open on any error
-
-
 def _composite_score(finding: Finding, topics: list[str] | None = None) -> float:
     """Compute composite score for a finding.
 
@@ -189,9 +167,6 @@ def _composite_score(finding: Finding, topics: list[str] | None = None) -> float
         # DecayingSortedField uses: base_score * elapsed_days ^ (-decay_rate)
         # We replicate that formula client-side since the Redis Lua score
         # isn't exposed on the instance (only the timestamp is stored).
-        import math
-        import time
-
         importance = getattr(finding, "importance", 3.0) or 3.0
         relevance_ts = getattr(finding, "relevance", None)
         if relevance_ts and isinstance(relevance_ts, int | float) and relevance_ts > 0:
@@ -223,8 +198,6 @@ def _composite_score(finding: Finding, topics: list[str] | None = None) -> float
         # Access frequency from AccessTrackerMixin
         access_count = getattr(finding, "_at_access_count", 0) or 0
         # Normalize: log scale, cap at 10 accesses
-        import math
-
         access_score = min(math.log1p(access_count) / math.log1p(10), 1.0)
         score += WEIGHT_ACCESS * access_score
     except Exception:
