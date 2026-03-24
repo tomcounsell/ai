@@ -5,66 +5,84 @@ appetite: Medium
 owner: Valor
 created: 2026-03-24
 tracking: https://github.com/tomcounsell/ai/issues/495
-last_comment_id:
+last_comment_id: 4115184066
 ---
 
-# Bridge Resilience: Graceful Degradation for Dependency Outages
+# Bridge Resilience: Graceful Degradation & Recovery Pipeline Simplification
 
 ## Problem
 
-On 2026-03-23, a cascade of failures exposed gaps in the bridge's resilience. The bridge crash-looped 10 times in 2 minutes due to Telegram session lock conflicts. The watchdog killed active SDK processes. SDK retries had no backoff. Redis failures were uncoordinated. Reflections crashed on missing prerequisites.
+Two incidents on 2026-03-23 and 2026-03-24 exposed compounding failures in the bridge's resilience and recovery mechanisms.
+
+**Incident 1 (2026-03-23):** Bridge crash-looped 10 times in 2 minutes due to Telegram session lock conflicts. Watchdog killed active SDK processes. SDK retries had no backoff.
+
+**Incident 2 (2026-03-24):** Two messages in PM: Valor were lost. Session 99 ran for 26 minutes (normal, just slow). Session 100 was stuck pending behind it. The stall recovery system tried to help but used `project_key` instead of `chat_id` to start a worker — the worker found an empty queue and exited. The job was deleted-and-recreated during retry, breaking correlation. Six overlapping recovery mechanisms competed without coordination, and the "recovery" is what actually lost the message.
 
 **Current behavior:**
-- Startup retry only covers SQLite lock errors (3 attempts at 2s/5s/10s). Other Telegram connection failures crash immediately and rely on launchd restart, creating tight crash loops.
-- SDK client has max 2 retries on error but no backoff between them and no circuit breaker for sustained outages.
-- Redis operations individually wrapped in try/except (graceful per-call) but no connection-level health tracking or coordinated degradation.
-- Reflections crash with full tracebacks when prerequisites (config files, GitHub labels) are missing.
-- No degraded mode -- when Anthropic API is down, messages are silently lost.
+- Startup retry only covers SQLite lock errors (3 attempts at 2s/5s/10s). Other failures crash immediately.
+- SDK client has max 2 retries on error but no backoff and no circuit breaker.
+- Six overlapping recovery mechanisms (`_recover_interrupted_jobs`, `_recover_orphaned_jobs`, `_reset_running_jobs`, `_job_health_check`, `check_stalled_sessions`/`_recover_stalled_pending`, `_enqueue_stall_retry`) race against each other and use delete-and-recreate which loses jobs.
+- Stall recovery uses `project_key` to look up workers that are keyed by `chat_id` — every stall retry starts a worker for the wrong queue.
+- Pending stall detector doesn't know another job is running on the same chat — treats normal queue wait as a stall.
+- No way to distinguish slow SDK calls from hung ones (watchdog logs once at 180s, then silence).
+- Reflections crash with tracebacks when prerequisites are missing.
+- No degraded mode when Anthropic is down — messages are silently lost.
 
 **Desired outcome:**
+- One correct recovery loop replaces six competing mechanisms (net code deletion)
 - Bridge survives temporary outages of any single dependency without crash-looping
-- Startup uses exponential backoff with jitter for all connection failure types
-- External API calls use circuit breakers that prevent resource waste during outages
-- Degraded mode: when Anthropic is down, bridge acknowledges Telegram messages and queues them
-- Reflections validate prerequisites before attempting operations
+- Recovery is simple: "is there a live worker for this job's chat_id? If not, start one."
+- PM handles dependency failures silently (reschedule/retry), alerts human only for auth failures
+- Observability: structured logging with correlation IDs, periodic SDK heartbeats, job status CLI
 
 ## Prior Art
 
-No directly related closed issues or merged PRs found. Relevant recent commits inform the solution:
+Relevant recent commits inform the solution:
 - `6ef1117f`: Fix zombie cleanup killing active SDK processes (exit code 143)
 - `44996159`: Fix watchdog killing healthy bridge sessions when zombies detected
 - `949e9a31`: Fix zombie Claude Code process accumulation
 - `44ad4569`: Comprehensive resilience overhaul (activity tracking, circuit breaker, stall detection)
 - `c4b70812`: Observer circuit breaker with exponential backoff
 
-The observer circuit breaker pattern (graduated backoff) is the closest prior art and will be generalized into the reusable module.
+The observer circuit breaker pattern will be generalized. The stall recovery functions will be deleted entirely.
+
+## Why Previous Fixes Failed
+
+| Prior Fix | What It Did | Why It Failed / Was Incomplete |
+|-----------|-------------|-------------------------------|
+| `44ad4569` | Added stall detection + recovery | Recovery built around `project_key` but workers refactored to `chat_id` — every recovery starts the wrong worker |
+| `6ef1117f` | Fixed watchdog killing active SDK | Only addressed zombie cleanup, not the pending stall false-positive that treats queue wait as a stall |
+| Stall retry mechanism | Delete-and-recreate job on stall | Race-prone: deletes job a legitimate worker is about to pop. New job_id breaks correlation. Create failure = permanent job loss |
+
+**Root cause pattern:** Recovery mechanisms were added incrementally without revisiting whether earlier ones were still correct after the worker-keying refactor from project_key to chat_id.
 
 ## Data Flow
 
-Traces the failure propagation path that this plan addresses:
+**Current (broken) recovery flow:**
+1. Job enqueued for `chat_id=-1003449100931`, worker started for that chat
+2. Worker busy with job N, job N+1 sits pending
+3. Session watchdog detects pending stall (300s threshold, unaware of running job)
+4. `_recover_stalled_pending()` calls `_kill_stalled_worker(project_key="valor")` → finds nothing (workers keyed by chat_id)
+5. `_enqueue_stall_retry()` deletes original job, creates new one, calls `_ensure_worker("valor")` → starts worker for wrong key
+6. Worker for `chat:valor` finds empty queue, exits. Job orphaned in Redis forever.
+7. When job N completes, original worker checks queue — job N+1 is gone (deleted by step 5).
 
-1. **Entry point**: External dependency becomes unavailable (Telegram API, Anthropic API, or Redis)
-2. **Bridge startup** (`telegram_bridge.py:1362-1380`): Telethon `client.start()` fails. Currently only SQLite lock is retried; other errors propagate to `main()` and crash the process. Launchd restarts immediately, creating a crash loop.
-3. **SDK query** (`sdk_client.py:910-1030`): `client.query()` fails. Error is fed back to agent up to 2 times with no delay. On sustained outage, retries exhaust instantly and the session fails.
-4. **Message delivery**: Failed deliveries go to `bridge/dead_letters.py` (Redis-backed). If Redis is also down, the dead letter persist itself fails silently.
-5. **Reflections** (`scripts/reflections.py`): Scheduled tasks attempt operations that depend on files/labels/APIs existing. Missing prerequisites cause full tracebacks instead of graceful skips.
-6. **Watchdog** (`monitoring/bridge_watchdog.py`): External process checks bridge health every 60s. Currently has no visibility into per-dependency circuit state.
-
-**With this plan, the flow becomes:**
-1. Dependency fails -> circuit breaker records failure, increments counter
-2. If threshold exceeded -> circuit opens, calls short-circuit immediately
-3. Bridge enters degraded mode for that dependency (e.g., queue messages if Anthropic is down)
-4. Periodic health probes test recovery
-5. Circuit closes -> normal operation resumes, queued work replays
+**Proposed (simple) recovery flow:**
+1. Job enqueued for `chat_id=-1003449100931`, worker started for that chat
+2. Worker busy with job N, job N+1 sits pending — this is normal queue behavior
+3. Single health check scans ALL jobs (pending + running)
+4. For each job: is there a live worker for `job.chat_id`? If yes, skip. If no, start one.
+5. No deleting, no recreating, no killing workers on behalf of queued jobs.
 
 ## Architectural Impact
 
-- **New module**: `bridge/resilience.py` -- reusable CircuitBreaker class, extracted from observer pattern
-- **New module**: `bridge/health.py` -- dependency health tracking, consumed by watchdog
-- **Interface changes**: `sdk_client.query()` wraps calls with circuit breaker (internal change, no API change)
-- **Coupling**: Reduces coupling by centralizing retry/backoff logic instead of per-call ad hoc handling
-- **Data ownership**: Health state owned by `bridge/health.py`, read-only by watchdog
-- **Reversibility**: High -- each component is independently revertable. Circuit breakers can be disabled by setting thresholds to infinity.
+- **Deleted modules/functions:** `_recover_stalled_pending()`, `_kill_stalled_worker()`, `_enqueue_stall_retry()` from `session_watchdog.py`; `_recover_orphaned_jobs()`, `_reset_running_jobs()` from `job_queue.py`
+- **New module:** `bridge/resilience.py` — reusable CircuitBreaker class extracted from observer pattern
+- **New module:** `bridge/health.py` — dependency health tracking
+- **Modified:** `_job_health_check()` in `job_queue.py` expanded to cover pending jobs and become the single recovery mechanism
+- **Interface changes:** None external. `sdk_client.query()` wraps calls with circuit breaker internally.
+- **Coupling:** Reduces coupling — centralizes retry/backoff instead of per-call ad hoc handling
+- **Reversibility:** High — circuit breakers can be disabled by setting thresholds high. Recovery refactor is independently revertable.
 
 ## Appetite
 
@@ -73,133 +91,149 @@ Traces the failure propagation path that this plan addresses:
 **Team:** Solo dev, PM
 
 **Interactions:**
-- PM check-ins: 1-2 (scope alignment on degraded mode UX)
+- PM check-ins: 1 (scope alignment on degraded mode UX)
 - Review rounds: 1 (code review)
 
 ## Prerequisites
 
-No prerequisites -- this work uses only stdlib and existing packages (no new external dependencies).
+No prerequisites — uses only stdlib and existing packages.
 
 ## Solution
 
 ### Key Elements
 
-- **Unified CircuitBreaker class** (`bridge/resilience.py`): Reusable circuit breaker with configurable failure threshold, backoff schedule, and half-open probe logic. States: closed (normal), open (failing, calls short-circuit), half-open (probing recovery).
-- **Startup retry enhancement** (`telegram_bridge.py`): Replace SQLite-only retry with general connection retry covering all Telethon errors. Exponential backoff with jitter, capped at ~5 minutes before falling through to launchd restart.
-- **SDK circuit breaker** (`sdk_client.py`): Wrap query calls with CircuitBreaker. On sustained Anthropic failures, open circuit and fail fast rather than hammering API.
-- **Degraded mode handler** (`bridge/telegram_bridge.py`): When Anthropic circuit is open, acknowledge incoming Telegram messages with a brief status message and queue them via dead-letter mechanism for replay when circuit closes.
-- **Reflections pre-flight** (`scripts/reflections.py`): Each reflection task validates prerequisites (file exists, label exists, API reachable) before attempting work. Missing prerequisites produce a single warning log line, not a traceback.
-- **Dependency health status** (`bridge/health.py`): Tracks per-dependency circuit states. Exposes summary for watchdog log checks and bridge status reporting.
+- **Unified recovery loop** (`agent/job_queue.py`): Expand `_job_health_check()` to scan both `running` and `pending` jobs. For each: check if a live worker exists for `job.chat_id`. If worker is missing and job has exceeded a threshold, start a worker for that chat_id. Delete the six competing mechanisms (~400 lines) and replace with this one (~100 lines). No delete-and-recreate.
+- **CircuitBreaker class** (`bridge/resilience.py`): Extract observer circuit breaker into reusable class with configurable failure threshold, backoff schedule, half-open probe. States: closed/open/half-open.
+- **Startup retry** (`telegram_bridge.py`): Replace SQLite-only retry with general connection retry covering all Telethon errors. Exponential backoff with jitter, capped at ~5 min.
+- **SDK circuit breaker** (`sdk_client.py`): Wrap query calls with CircuitBreaker. On sustained Anthropic failures, open circuit and fail fast.
+- **Degraded mode** (`bridge/telegram_bridge.py`): When Anthropic circuit is open, acknowledge on Telegram and queue to dead-letter for replay.
+- **PM error routing**: Route dependency failures to PM agent for intelligent decision (reschedule/retry/cancel/alert). PM absorbs infrastructure noise silently; only alerts human for auth failures requiring manual re-login.
+- **Reflections pre-flight** (`scripts/reflections.py`): Validate prerequisites before each task. Single warning log on failure, not tracebacks.
+- **Observability basics**: Structured JSON logging with `job_id`/`session_id`/`correlation_id` fields. Periodic SDK heartbeat (log every 60s during running jobs). Job status CLI (`python -m agent.job_queue --status`).
 
 ### Flow
 
-**Telegram message arrives** -> Check Anthropic circuit state -> If closed: process normally -> If open: acknowledge on Telegram ("Processing delayed"), persist to dead-letter queue -> When circuit closes: replay queued messages
+**Message arrives** → Check Anthropic circuit → If closed: process normally → If open: acknowledge on Telegram, persist to dead-letter → When circuit closes: replay
 
-**Bridge startup** -> Attempt Telethon connect -> On failure: backoff with jitter (2s, 4s, 8s, 16s, 32s, 64s, 128s, 256s cap) -> After max attempts: exit cleanly for launchd restart at normal interval
+**Job recovery** → Periodic scan of all jobs → For each: worker alive for chat_id? → Yes: skip → No + exceeded threshold: `_ensure_worker(chat_id)` → Worker pops and processes job naturally
+
+**Startup** → Attempt Telethon connect → On failure: backoff with jitter (2s, 4s, 8s... 256s cap) → After max attempts: exit for launchd restart
 
 ### Technical Approach
 
-- Extract observer circuit breaker pattern into parameterized `CircuitBreaker` class with: `failure_threshold` (int), `backoff_schedule` (list of seconds), `half_open_interval` (seconds), `on_open` / `on_close` callbacks
-- Circuit breaker instances created per dependency: `telegram_cb`, `anthropic_cb`, `redis_cb`
-- Startup retry uses `asyncio.sleep` with jitter: `base * (2 ** attempt) + random(0, base)`
-- Degraded mode reuses existing `dead_letters.py` for message persistence -- no new storage mechanism
-- Health module aggregates circuit states into a dict that watchdog reads from a shared location (file or in-process if same process)
-- Reflections pre-flight is a decorator or context manager pattern: `@preflight_check(requires=["config/projects.json", "github:reflections-label"])`
+- `_job_health_check()` becomes the single recovery point: queries `AgentSession.query.filter(status__in=["running", "pending"])`, checks `_active_workers.get(job.chat_id)`, starts worker if missing
+- Delete: `_recover_interrupted_jobs`, `_recover_orphaned_jobs`, `_reset_running_jobs`, `_recover_stalled_pending`, `_kill_stalled_worker`, `_enqueue_stall_retry`
+- Keep: `_recover_interrupted_jobs` at startup only (running→pending reset) — fold into health check's startup mode
+- CircuitBreaker: parameterized with `failure_threshold`, `backoff_schedule`, `half_open_interval`, `on_open`/`on_close` callbacks
+- Degraded mode reuses `dead_letters.py` — no new storage
+- Structured logging: JSON formatter with `job_id`, `session_id`, `correlation_id`, `chat_id` fields on every log line
+- SDK heartbeat: `BackgroundTask._watchdog` emits periodic logs (every 60s) with subprocess liveness check, not just a single 180s check
+- CancelledError: catch explicitly in `_worker_loop` and `sdk_client.query` — log and complete job properly
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] Audit `except Exception: pass` blocks in `telegram_bridge.py`, `sdk_client.py`, and `scripts/reflections.py` -- each must log or change state
-- [ ] Circuit breaker `on_open` callback must log at WARNING level with dependency name and failure count
-- [ ] Degraded mode acknowledgment must be observable in test (message sent to Telegram)
+- [ ] Audit and fix `except Exception: pass` blocks in touched files — each must log or change state
+- [ ] `_worker_loop` catches `CancelledError` explicitly, logs it, completes job
+- [ ] Circuit breaker `on_open` logs at WARNING with dependency name and failure count
 
 ### Empty/Invalid Input Handling
-- [ ] CircuitBreaker handles zero-threshold (always open) and infinite-threshold (never opens) edge cases
-- [ ] Health status returns valid dict even when no circuits are registered
+- [ ] Health check handles zero active jobs gracefully
+- [ ] CircuitBreaker handles zero-threshold (always open) and infinite-threshold (never opens)
 - [ ] Startup retry handles immediate success (no unnecessary sleep)
+- [ ] Recovery handles jobs with missing `chat_id` (legacy data)
 
 ### Error State Rendering
-- [ ] Degraded mode Telegram acknowledgment includes human-readable status
-- [ ] Watchdog health output includes per-dependency state in parseable format
+- [ ] Degraded mode acknowledgment includes human-readable status
+- [ ] Job status CLI outputs readable table even with zero jobs
 
 ## Test Impact
 
-- [ ] `tests/unit/test_bridge_logic.py` -- UPDATE: add tests for new startup retry logic covering non-SQLite errors
-- [ ] `tests/unit/test_bridge_watchdog.py` -- UPDATE: add assertions for health status parsing from new `bridge/health.py`
-- [ ] `tests/unit/test_sdk_client.py` -- UPDATE: add tests for circuit breaker wrapping around query calls
-
-No existing tests need DELETE or REPLACE -- changes are additive. The existing startup retry test (if any) will need its assertions broadened to cover all error types, not just SQLite locks.
+- [ ] `tests/unit/test_pending_recovery.py` — DELETE: tests the stall retry mechanism being removed
+- [ ] `tests/unit/test_stall_detection.py` — UPDATE: remove tests for `_recover_stalled_pending`, `_kill_stalled_worker`, `_enqueue_stall_retry`; add tests for unified health check covering pending jobs
+- [ ] `tests/unit/test_transcript_liveness.py` — UPDATE: remove references to deleted recovery functions if any
+- [ ] `tests/unit/test_bridge_logic.py` — UPDATE: add tests for new startup retry covering non-SQLite errors
+- [ ] `tests/unit/test_sdk_client.py` — UPDATE: add tests for circuit breaker wrapping and CancelledError handling
 
 ## Rabbit Holes
 
-- **Distributed circuit breakers via Redis** -- Tempting to share circuit state across processes, but the bridge is a single process. In-memory state is sufficient. Redis-backed circuit state would add complexity and a circular dependency (Redis circuit breaker stored in Redis).
-- **HTTP health endpoint** -- The bridge does not serve HTTP. Exposing health via HTTP would require adding an HTTP server, which is out of scope. Use file-based or in-process health reporting instead.
-- **Per-request retry with different strategies** -- Each API call could have its own retry config, but this creates a combinatorial explosion. Circuit breaker at the dependency level is the right granularity.
-- **Automatic failover to alternative LLM providers** -- Out of scope. The bridge is tightly coupled to Anthropic SDK. Multi-provider support is a separate project.
+- **Distributed circuit breakers via Redis** — Bridge is single process. In-memory state is sufficient.
+- **HTTP health endpoint** — Bridge doesn't serve HTTP. Use file/in-process reporting.
+- **Per-request retry strategies** — Circuit breaker at dependency level is the right granularity.
+- **Multi-LLM failover** — Out of scope. Bridge is coupled to Anthropic SDK.
+- **Popoto KeyField migration** — The delete-and-recreate pattern exists because Popoto KeyFields can't be updated in place. Fixing Popoto is out of scope; instead, avoid status changes that require delete-and-recreate.
 
 ## Risks
 
-### Risk 1: Degraded mode message queue grows unbounded during long outage
-**Impact:** Memory pressure if Anthropic is down for hours and messages keep arriving
-**Mitigation:** Dead-letter queue is Redis-backed (not in-memory). Add a TTL on dead letters (24h) and a max queue size. Log warning when queue exceeds threshold.
+### Risk 1: Removing recovery mechanisms exposes edge cases they handled
+**Impact:** Some obscure failure mode that one of the six mechanisms caught is now unhandled
+**Mitigation:** The unified health check covers the same two conditions (worker dead + job exceeded threshold) that all six mechanisms ultimately check. Write tests for each known failure scenario before deleting old code.
 
-### Risk 2: Circuit breaker thresholds too aggressive or too lenient
-**Impact:** Too aggressive = normal transient errors trigger degraded mode. Too lenient = bridge hammers failing API.
-**Mitigation:** Start conservative (5 failures in 60s to open, 30s half-open probe). Make thresholds configurable via environment variables. Log all state transitions for tuning.
+### Risk 2: Circuit breaker thresholds too aggressive or lenient
+**Impact:** Too aggressive = normal transients trigger degraded mode. Too lenient = hammers failing API.
+**Mitigation:** Conservative defaults (5 failures in 60s to open, 30s half-open probe). Configurable via env vars. Log all state transitions.
 
-### Risk 3: Startup backoff delays recovery after brief outages
-**Impact:** Bridge takes minutes to reconnect after a 2-second Telegram blip
-**Mitigation:** First retry is immediate (0s), then exponential. Jitter prevents thundering herd. Launchd KeepAlive ensures restart even if all retries exhaust.
+### Risk 3: Structured logging breaks log parsers
+**Impact:** Existing grep-based log analysis and watchdog health checks break
+**Mitigation:** JSON format still greppable. Update watchdog to parse JSON. Run both formats in parallel during transition if needed.
 
 ## Race Conditions
 
-### Race 1: Circuit state read during transition
-**Location:** `bridge/resilience.py` -- CircuitBreaker state check vs state update
-**Trigger:** Concurrent coroutines check circuit state while another coroutine is recording a failure and transitioning to open
-**Data prerequisite:** Failure count must be consistent across reads
-**State prerequisite:** Circuit state (closed/open/half-open) must be atomically updated
-**Mitigation:** Use `asyncio.Lock` for state transitions. State reads (is_open check) can be lock-free since they read a single enum value -- Python's GIL ensures atomic reads of simple attributes.
+### Race 1: Health check starts worker while job is being completed
+**Location:** `agent/job_queue.py` — health check vs `_complete_job`
+**Trigger:** Health check sees no worker for a chat_id at the exact moment the worker is exiting after completing its last job
+**Data prerequisite:** Job must be in terminal state before worker exits
+**State prerequisite:** `_active_workers` entry must be removed atomically with worker exit
+**Mitigation:** Health check uses a minimum-age threshold — only recovers jobs pending/running longer than N seconds. Fresh jobs are not touched.
 
-### Race 2: Dead-letter replay vs new message processing
-**Location:** `bridge/dead_letters.py` replay + `bridge/telegram_bridge.py` message handler
-**Trigger:** Circuit closes, dead letters replay while new messages also arrive
-**Data prerequisite:** Dead letters from outage period must be replayed before new messages to preserve ordering
-**State prerequisite:** Circuit must be fully closed before replay begins
-**Mitigation:** Replay dead letters in the circuit `on_close` callback before resuming normal message processing. Use a replay lock to prevent concurrent replays.
+### Race 2: Circuit state read during transition
+**Location:** `bridge/resilience.py` — CircuitBreaker state check vs state update
+**Trigger:** Concurrent coroutines check circuit while another records a failure
+**Mitigation:** `asyncio.Lock` for state transitions. Single-value reads are GIL-atomic.
 
 ## No-Gos (Out of Scope)
 
-- HTTP health check endpoint (bridge does not serve HTTP)
-- Distributed circuit breaker state across multiple processes
+- HTTP health check endpoint
+- Distributed circuit breaker state
 - Multi-LLM provider failover
-- Watchdog architecture changes (watchdog stays external, reads health status)
-- Redis connection pooling or reconnection logic (existing per-operation try/except is adequate)
-- Telegram reconnection logic (Telethon handles this internally; we only need startup retry)
+- Popoto ORM changes (work around KeyField limitations)
+- Redis connection pooling (existing per-operation try/except is adequate)
+- Telegram reconnection logic (Telethon handles this internally)
+- OpenTelemetry adoption (premature — structured logging is the right step now)
 
 ## Update System
 
-No update system changes required -- this feature modifies bridge-internal code only. No new dependencies, no new config files, no migration steps. The existing `scripts/remote-update.sh` and launchd configuration remain unchanged. The new modules (`bridge/resilience.py`, `bridge/health.py`) are picked up automatically by git pull.
+No update system changes required. No new dependencies, no new config files. New modules (`bridge/resilience.py`, `bridge/health.py`) are picked up by git pull. Deleted functions reduce code surface.
 
 ## Agent Integration
 
-No agent integration required -- this is a bridge-internal change. The resilience module operates below the agent layer (between the bridge and external dependencies). No new MCP servers, no changes to `.mcp.json`, no new tools exposed to the agent. The bridge imports the new modules directly. The agent's behavior is unchanged -- it simply experiences fewer failures because the bridge handles outages gracefully.
+**PM error routing:** When dependency failures occur, route an error context message to the PM agent with: which dependency failed, error details, affected job, retry count. PM decides: reschedule (default, silent), retry, cancel, or alert human (only for auth failures requiring manual re-login). This reuses existing job scheduling infrastructure (`scheduled_after` field, `_pop_job` skip logic).
+
+**Job status CLI:** Add `python -m agent.job_queue --status` as a diagnostic tool. No MCP exposure needed — this is for human operators, not the agent.
+
+No other agent integration needed. The resilience module operates below the agent layer.
 
 ## Documentation
 
-- [ ] Create `docs/features/bridge-resilience.md` describing the resilience architecture: circuit breaker pattern, degraded mode, startup retry, health reporting
+- [ ] Create `docs/features/bridge-resilience.md` describing: circuit breaker pattern, unified recovery loop, degraded mode, startup retry, health reporting, structured logging
 - [ ] Add entry to `docs/features/README.md` index table
-- [ ] Update `docs/features/bridge-self-healing.md` to reference the new resilience module and health status integration with watchdog
-- [ ] Inline docstrings on `CircuitBreaker` class, `bridge/health.py` module, and reflections pre-flight decorator
+- [ ] Update `docs/features/bridge-self-healing.md` to reference resilience module and health status
+- [ ] Update `docs/features/session-watchdog.md` to reflect removed recovery functions
+- [ ] Update `docs/features/job-health-monitor.md` to reflect expanded health check scope
 
 ## Success Criteria
 
-- [ ] Bridge survives a 60-second simulated Telegram API outage without crash-looping
-- [ ] Bridge survives a 60-second simulated Anthropic API outage: queues messages, acknowledges on Telegram, replays when API returns
-- [ ] Startup retries use exponential backoff with jitter for all connection error types, not just SQLite locks
-- [ ] CircuitBreaker class is reusable: parameterized, used by at least 2 dependencies (Anthropic, startup)
-- [ ] Reflections tasks log a single warning (not a traceback) when prerequisites are missing
-- [ ] Watchdog health check can read per-dependency circuit state
-- [ ] No new external dependencies added
+- [ ] Recovery pipeline simplified: six mechanisms collapsed into one. Net lines removed > lines added.
+- [ ] Bridge survives 60s simulated Telegram API outage without crash-looping
+- [ ] Bridge survives 60s simulated Anthropic API outage: queues messages, acknowledges, replays
+- [ ] Startup retries cover all connection error types with exponential backoff + jitter
+- [ ] CircuitBreaker class reusable: used by at least 2 dependencies
+- [ ] Stall retry `project_key` vs `chat_id` bug eliminated (no more `_ensure_worker(project_key)`)
+- [ ] Pending jobs with a live worker on same chat are NOT treated as stalls
+- [ ] CancelledError caught explicitly in worker loop — no silent deaths
+- [ ] Reflections log single warning (not traceback) for missing prerequisites
+- [ ] Structured JSON logging with correlation_id on job lifecycle events
+- [ ] Job status CLI prints human-readable table of active/pending jobs
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 
@@ -207,121 +241,136 @@ No agent integration required -- this is a bridge-internal change. The resilienc
 
 ### Team Members
 
-- **Builder (resilience-core)**
-  - Name: resilience-builder
-  - Role: Implement CircuitBreaker class, health module, and startup retry enhancement
+- **Builder (recovery-refactor)**
+  - Name: recovery-builder
+  - Role: Delete six recovery mechanisms, expand _job_health_check to cover pending jobs, fix CancelledError handling
   - Agent Type: async-specialist
   - Resume: true
 
-- **Builder (integration)**
-  - Name: integration-builder
-  - Role: Wire circuit breakers into sdk_client and telegram_bridge, implement degraded mode and reflections pre-flight
+- **Builder (resilience-core)**
+  - Name: resilience-builder
+  - Role: Implement CircuitBreaker class, health module, startup retry, SDK circuit breaker, degraded mode
   - Agent Type: builder
   - Resume: true
 
-- **Validator (resilience)**
+- **Builder (observability)**
+  - Name: observability-builder
+  - Role: Structured JSON logging, SDK heartbeat, job status CLI, correlation ID threading
+  - Agent Type: builder
+  - Resume: true
+
+- **Validator**
   - Name: resilience-validator
-  - Role: Verify circuit breaker behavior, degraded mode, and startup retry under simulated failures
-  - Agent Type: test-engineer
+  - Role: Verify all components under simulated failures, confirm net code deletion
+  - Agent Type: validator
   - Resume: true
 
 - **Documentarian**
   - Name: docs-writer
-  - Role: Create feature documentation and update self-healing docs
+  - Role: Create feature docs, update existing docs for removed functions
   - Agent Type: documentarian
   - Resume: true
 
 ## Step by Step Tasks
 
-### 1. Build CircuitBreaker class and health module
+### 1. Recovery pipeline refactoring (net deletion)
+- **Task ID**: build-recovery-refactor
+- **Depends On**: none
+- **Validates**: tests/unit/test_stall_detection.py (update), tests/unit/test_pending_recovery.py (delete)
+- **Assigned To**: recovery-builder
+- **Agent Type**: async-specialist
+- **Parallel**: true
+- Delete from `monitoring/session_watchdog.py`: `_recover_stalled_pending()`, `_kill_stalled_worker()`, `_enqueue_stall_retry()`, and the pending stall path in `check_stalled_sessions()`
+- Delete from `agent/job_queue.py`: `_recover_orphaned_jobs()`, `_reset_running_jobs()`
+- Expand `_job_health_check()` to scan both `status="running"` and `status="pending"` jobs
+- For each job: check `_active_workers.get(job.chat_id)` — if no live worker and job exceeded threshold, call `_ensure_worker(job.chat_id)`
+- Fix `_worker_loop` to catch `asyncio.CancelledError` explicitly — log and complete job
+- Fix `sdk_client.query()` to catch `CancelledError` — log and re-raise
+- Update/delete affected tests
+- Verify: count lines removed vs added — must be net negative
+
+### 2. Build CircuitBreaker class and health module
 - **Task ID**: build-resilience-core
 - **Depends On**: none
 - **Validates**: tests/unit/test_circuit_breaker.py (create)
 - **Assigned To**: resilience-builder
-- **Agent Type**: async-specialist
+- **Agent Type**: builder
 - **Parallel**: true
-- Create `bridge/resilience.py` with `CircuitBreaker` class: states (closed/open/half-open), configurable failure threshold, backoff schedule, half-open probe interval, on_open/on_close callbacks, asyncio.Lock for state transitions
-- Create `bridge/health.py` with `DependencyHealth` class: register circuit breakers, expose summary dict, provide formatted status for watchdog
-- Write unit tests in `tests/unit/test_circuit_breaker.py`: state transitions, threshold behavior, half-open recovery, concurrent access, edge cases (zero threshold, immediate success)
+- Create `bridge/resilience.py` with CircuitBreaker: states (closed/open/half-open), configurable failure threshold, backoff schedule, half-open probe, on_open/on_close callbacks, asyncio.Lock
+- Create `bridge/health.py` with DependencyHealth: register circuit breakers, expose summary dict
+- Write unit tests
 
-### 2. Enhance startup retry
-- **Task ID**: build-startup-retry
+### 3. Startup retry and SDK circuit breaker
+- **Task ID**: build-startup-sdk
 - **Depends On**: build-resilience-core
-- **Validates**: tests/unit/test_bridge_logic.py (update)
-- **Assigned To**: integration-builder
+- **Validates**: tests/unit/test_bridge_logic.py (update), tests/unit/test_sdk_client.py (update)
+- **Assigned To**: resilience-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Replace SQLite-only retry in `telegram_bridge.py:1362-1380` with general connection retry: catch all `Exception` from `client.start()`, use exponential backoff with jitter (0s, 2s, 4s, 8s, 16s, 32s, 64s, 128s, 256s cap), max 8 attempts before clean exit
-- Update `tests/unit/test_bridge_logic.py` with tests for non-SQLite connection failures
+- Replace SQLite-only retry in `telegram_bridge.py` with general connection retry: all exceptions from `client.start()`, exponential backoff with jitter, max 8 attempts
+- Create Anthropic circuit breaker in `sdk_client.py` (threshold=5, backoff=[30,60,120,240,480])
+- Wrap `query()`: check circuit before calling SDK, record success/failure after
+- Implement degraded mode in message handler: when Anthropic circuit open, acknowledge on Telegram, persist to dead-letter
+- Add `on_close` callback to replay dead letters
 
-### 3. Wire SDK circuit breaker and degraded mode
-- **Task ID**: build-sdk-circuit
-- **Depends On**: build-resilience-core
-- **Validates**: tests/unit/test_sdk_client.py (update)
-- **Assigned To**: integration-builder
-- **Agent Type**: builder
-- **Parallel**: false
-- Create Anthropic circuit breaker instance in `sdk_client.py` with threshold=5, backoff=[30, 60, 120, 240, 480]
-- Wrap `query()` method: check circuit before calling SDK, record success/failure after
-- In `telegram_bridge.py` message handler: when Anthropic circuit is open, send acknowledgment to Telegram and persist message to dead-letter queue
-- Add `on_close` callback to replay dead letters when Anthropic circuit recovers
-- Update `tests/unit/test_sdk_client.py` with circuit breaker integration tests
-
-### 4. Add reflections pre-flight checks
+### 4. Reflections pre-flight checks
 - **Task ID**: build-preflight
 - **Depends On**: none
 - **Validates**: tests/unit/test_reflections_preflight.py (create)
-- **Assigned To**: integration-builder
+- **Assigned To**: resilience-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Create pre-flight validation utility (decorator or function) that checks file existence, GitHub label existence, API reachability
-- Apply to reflections tasks in `scripts/reflections.py`: wrap each task with pre-flight check, catch failures as single-line warnings
-- Write tests in `tests/unit/test_reflections_preflight.py`
+- Create pre-flight validation utility for reflections tasks
+- Apply to `scripts/reflections.py`: wrap each task, catch failures as single-line warnings
 
-### 5. Integrate health status with watchdog
-- **Task ID**: build-health-watchdog
-- **Depends On**: build-resilience-core, build-sdk-circuit
-- **Validates**: tests/unit/test_bridge_watchdog.py (update)
-- **Assigned To**: integration-builder
+### 5. Observability improvements
+- **Task ID**: build-observability
+- **Depends On**: build-recovery-refactor
+- **Validates**: manual verification
+- **Assigned To**: observability-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Update `monitoring/bridge_watchdog.py` to read health status from `bridge/health.py`
-- Include per-dependency circuit state in watchdog health check output
-- Update `tests/unit/test_bridge_watchdog.py` with health status assertions
+- Switch to JSON log formatter with `job_id`, `session_id`, `correlation_id`, `chat_id` fields
+- Make `correlation_id` mandatory at message intake, thread through all function calls
+- Expand `BackgroundTask._watchdog` to emit periodic heartbeat logs (every 60s) with subprocess liveness
+- Add `python -m agent.job_queue --status` CLI that prints table of all jobs with session, chat, duration, worker status
+- Update watchdog to parse JSON logs
 
 ### 6. Validate all components
-- **Task ID**: validate-resilience
-- **Depends On**: build-startup-retry, build-sdk-circuit, build-preflight, build-health-watchdog
+- **Task ID**: validate-all
+- **Depends On**: build-recovery-refactor, build-startup-sdk, build-preflight, build-observability
 - **Assigned To**: resilience-validator
-- **Agent Type**: test-engineer
+- **Agent Type**: validator
 - **Parallel**: false
-- Run full test suite: `pytest tests/unit/ -x -q`
+- Run full test suite
+- Verify net lines removed > lines added (count with `git diff --stat`)
 - Verify circuit breaker state transitions under simulated failures
-- Verify degraded mode acknowledgment message format
+- Verify degraded mode acknowledgment
 - Verify startup retry covers non-SQLite errors
-- Verify reflections pre-flight logs warnings (not tracebacks) for missing prerequisites
+- Verify reflections pre-flight logs warnings not tracebacks
+- Verify job status CLI output
+- Verify CancelledError handling in worker loop
 
 ### 7. Documentation
 - **Task ID**: document-feature
-- **Depends On**: validate-resilience
+- **Depends On**: validate-all
 - **Assigned To**: docs-writer
 - **Agent Type**: documentarian
 - **Parallel**: false
 - Create `docs/features/bridge-resilience.md`
-- Add entry to `docs/features/README.md` index table
-- Update `docs/features/bridge-self-healing.md` with resilience module references
-- Add inline docstrings to new modules
+- Update `docs/features/README.md` index
+- Update `docs/features/bridge-self-healing.md`, `session-watchdog.md`, `job-health-monitor.md`
 
 ### 8. Final Validation
-- **Task ID**: validate-all
+- **Task ID**: validate-final
 - **Depends On**: document-feature
 - **Assigned To**: resilience-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run full validation: `pytest tests/ -x -q`
-- Run lint: `python -m ruff check .`
-- Run format check: `python -m ruff format --check .`
-- Verify all success criteria met including documentation
+- `pytest tests/ -x -q`
+- `python -m ruff check .`
+- `python -m ruff format --check .`
+- All success criteria met including net code deletion
 
 ## Verification
 
@@ -330,10 +379,11 @@ No agent integration required -- this is a bridge-internal change. The resilienc
 | Tests pass | `pytest tests/ -x -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| Resilience module exists | `python -c "from bridge.resilience import CircuitBreaker"` | exit code 0 |
-| Health module exists | `python -c "from bridge.health import DependencyHealth"` | exit code 0 |
-| Circuit breaker unit tests | `pytest tests/unit/test_circuit_breaker.py -v` | exit code 0 |
-| No new dependencies | `git diff HEAD -- requirements.txt setup.py pyproject.toml` | output contains  |
+| Resilience module | `python -c "from bridge.resilience import CircuitBreaker"` | exit code 0 |
+| Health module | `python -c "from bridge.health import DependencyHealth"` | exit code 0 |
+| Job status CLI | `python -m agent.job_queue --status` | exit code 0 |
+| Net code deletion | `git diff --stat main | tail -1` | output contains "deletions" |
+| No new dependencies | `git diff HEAD -- requirements.txt pyproject.toml` | exit code 0 |
 
 ## Critique Results
 
@@ -344,6 +394,4 @@ No agent integration required -- this is a bridge-internal change. The resilienc
 
 ## Open Questions
 
-1. **Degraded mode message format** -- What exact text should the bridge send when Anthropic is down? Proposed: "I've received your message but my AI backend is temporarily unavailable. I'll process it automatically when service recovers." Is this appropriate, or should it be shorter/different?
-
-2. **Circuit breaker thresholds** -- Proposed defaults: 5 failures in 60s to open circuit, 30s half-open probe interval. Are these reasonable starting points, or should they be more/less aggressive?
+None — all questions from comments have been incorporated into the plan. PM alert philosophy, auth failure alerts, and recovery architecture decisions are resolved.
