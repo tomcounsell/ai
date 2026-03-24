@@ -133,7 +133,7 @@ class TestEnumerateClaudeProcesses:
             returncode=0,
             stdout=(
                 "  PID   ELAPSED  RSS COMMAND\nbadline\n"
-                "12345    05:23 102400 /usr/local/bin/claude\n"
+                "12345    05:23 102400 /usr/local/bin/claude -- /Users/test\n"
             ),
             stderr="",
         )

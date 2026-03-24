@@ -165,22 +165,26 @@ class BackgroundTask:
 
     async def _watchdog(self) -> None:
         """
-        Internal health check watchdog.
+        Internal health check watchdog with periodic heartbeat.
 
-        Waits for acknowledgment_timeout seconds, then logs if the task
-        is still running without having communicated. Does not send any
-        message to chat -- the hourglass reaction already signals progress.
+        Emits a heartbeat log every 60s while the SDK subprocess is running.
+        This provides continuous liveness visibility instead of a single
+        check at acknowledgment_timeout. Does not send any message to chat.
         """
+        heartbeat_interval = 60  # seconds
+        elapsed = 0
         try:
-            await asyncio.sleep(self.acknowledgment_timeout)
-
-            # Log health check if still running and silent
-            if self._task and not self._task.done() and not self.messenger.has_communicated():
-                logger.info(
-                    f"[{self.messenger.session_id}] Task running "
-                    f"{self.acknowledgment_timeout}s without output (health check)"
-                )
-
+            while self._task and not self._task.done():
+                await asyncio.sleep(heartbeat_interval)
+                elapsed += heartbeat_interval
+                if self._task and not self._task.done():
+                    communicated = self.messenger.has_communicated()
+                    logger.info(
+                        "[%s] SDK heartbeat: running %ds, communicated=%s",
+                        self.messenger.session_id,
+                        elapsed,
+                        communicated,
+                    )
         except asyncio.CancelledError:
             # Normal cancellation when task completes
             pass

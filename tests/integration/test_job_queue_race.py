@@ -1,7 +1,7 @@
 """Tests for job queue race condition fixes and KeyField index corruption prevention.
 
-Validates the delete-and-recreate pattern used by _pop_job, _recover_interrupted_jobs,
-_reset_running_jobs, and the drain guard in _worker_loop.
+Validates the delete-and-recreate pattern used by _pop_job,
+_recover_interrupted_jobs_startup, and the drain guard in _worker_loop.
 
 All tests use redis_test_db fixture (autouse=True in conftest.py) for isolation.
 """
@@ -13,8 +13,7 @@ import pytest
 from agent.job_queue import (
     _extract_job_fields,
     _pop_job,
-    _recover_interrupted_jobs,
-    _reset_running_jobs,
+    _recover_interrupted_jobs_startup,
 )
 from models.agent_session import AgentSession
 
@@ -154,30 +153,23 @@ class TestPopJobDeleteAndRecreate:
         assert job.message_text == "high priority"
 
 
-class TestRecoverInterruptedJobs:
-    """Tests for _recover_interrupted_jobs delete-and-recreate pattern."""
+class TestRecoverInterruptedJobsStartup:
+    """Tests for _recover_interrupted_jobs_startup delete-and-recreate pattern."""
 
     def test_no_stale_running_after_recovery(self):
         """After recovery, no jobs should remain in the running index."""
-        # Create a "running" job (simulating crash)
         _create_test_job(status="running", session_id="crashed_session")
 
-        # Verify it's in running
-        running_before = AgentSession.query.filter(project_key="test", status="running")
+        running_before = AgentSession.query.filter(status="running")
         assert len(running_before) == 1
 
-        # Run recovery
-        recovered = _recover_interrupted_jobs("test")
+        recovered = _recover_interrupted_jobs_startup()
         assert recovered == 1
 
-        # The running index should be empty
-        running_after = AgentSession.query.filter(project_key="test", status="running")
-        assert len(running_after) == 0, (
-            "Stale running index entry found after _recover_interrupted_jobs"
-        )
+        running_after = AgentSession.query.filter(status="running")
+        assert len(running_after) == 0
 
-        # The job should now be in pending with high priority
-        pending = AgentSession.query.filter(project_key="test", status="pending")
+        pending = AgentSession.query.filter(status="pending")
         assert len(pending) == 1
         assert pending[0].priority == "high"
         assert pending[0].session_id == "crashed_session"
@@ -187,47 +179,19 @@ class TestRecoverInterruptedJobs:
         _create_test_job(status="running", session_id="s1", message_text="msg1")
         _create_test_job(status="running", session_id="s2", message_text="msg2")
 
-        recovered = _recover_interrupted_jobs("test")
+        recovered = _recover_interrupted_jobs_startup()
         assert recovered == 2
 
-        running = AgentSession.query.filter(project_key="test", status="running")
+        running = AgentSession.query.filter(status="running")
         assert len(running) == 0
 
-        pending = AgentSession.query.filter(project_key="test", status="pending")
+        pending = AgentSession.query.filter(status="pending")
         assert len(pending) == 2
 
     def test_recover_returns_zero_when_nothing_to_recover(self):
         """Recovery should return 0 when no running jobs exist."""
-        recovered = _recover_interrupted_jobs("test")
+        recovered = _recover_interrupted_jobs_startup()
         assert recovered == 0
-
-
-class TestResetRunningJobs:
-    """Tests for _reset_running_jobs async delete-and-recreate pattern."""
-
-    @pytest.mark.asyncio
-    async def test_no_stale_running_after_reset(self):
-        """After reset, no jobs should remain in the running index."""
-        _create_test_job(status="running", session_id="in_flight")
-
-        running_before = AgentSession.query.filter(project_key="test", status="running")
-        assert len(running_before) == 1
-
-        reset_count = await _reset_running_jobs("test")
-        assert reset_count == 1
-
-        running_after = AgentSession.query.filter(project_key="test", status="running")
-        assert len(running_after) == 0, "Stale running index entry found after _reset_running_jobs"
-
-        pending = AgentSession.query.filter(project_key="test", status="pending")
-        assert len(pending) == 1
-        assert pending[0].priority == "high"
-
-    @pytest.mark.asyncio
-    async def test_reset_returns_zero_when_empty(self):
-        """Reset should return 0 when no running jobs exist."""
-        result = await _reset_running_jobs("test")
-        assert result == 0
 
 
 class TestDrainGuard:

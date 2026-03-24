@@ -543,18 +543,65 @@ class ReflectionRunner:
             self.state.save()
 
             try:
+                # Pre-flight: validate prerequisites before running step
+                if not self._preflight_check(step_num, step_name):
+                    continue
                 await step_func()
                 self.state.completed_steps.append(step_num)
                 self.state.daily_report.append(f"Completed: {step_name}")
                 self.state.save()
                 logger.info(f"Completed step {step_num}: {step_name}")
             except Exception as e:
-                logger.error(f"Step {step_num} failed: {e}")
-                self.state.daily_report.append(f"Failed: {step_name} - {str(e)}")
+                # Single-line warning, not a full traceback
+                logger.warning(
+                    "Step %d (%s) failed: %s: %s",
+                    step_num,
+                    step_name,
+                    type(e).__name__,
+                    str(e)[:200],
+                )
+                self.state.daily_report.append(f"Failed: {step_name} - {str(e)[:200]}")
                 self.state.save()
                 continue
 
         logger.info("Reflections completed successfully")
+
+    def _preflight_check(self, step_num: int, step_name: str) -> bool:
+        """Validate prerequisites before running a reflection step.
+
+        Checks that required external dependencies (Redis, git, gh CLI) are
+        available. Returns False with a single warning log line if a
+        prerequisite is missing, instead of letting the step crash with
+        a traceback.
+        """
+        # Steps that need Redis
+        redis_steps = set(range(1, 20))  # All steps use Redis for state
+        if step_num in redis_steps:
+            try:
+                from popoto.redis_db import POPOTO_REDIS_DB
+
+                POPOTO_REDIS_DB.ping()
+            except Exception:
+                logger.warning("Step %d (%s) skipped: Redis unavailable", step_num, step_name)
+                self.state.daily_report.append(f"Skipped: {step_name} - Redis unavailable")
+                self.state.save()
+                return False
+
+        # Steps that need gh CLI (bug filing, issue creation)
+        gh_steps = {8, 10}  # step_auto_fix_bugs, step_create_github_issue
+        if step_num in gh_steps:
+            try:
+                import shutil
+
+                if not shutil.which("gh"):
+                    logger.warning("Step %d (%s) skipped: gh CLI not found", step_num, step_name)
+                    self.state.daily_report.append(f"Skipped: {step_name} - gh CLI not found")
+                    self.state.save()
+                    return False
+            except Exception:
+                pass
+
+        return True
 
     async def step_clean_legacy(self) -> None:
         """Step 1: Clean up legacy code (ai-repo specific)."""
@@ -1739,8 +1786,9 @@ class ReflectionRunner:
         """
         import time as _time
 
-        from models.agent_session import AgentSession
         from models.cyclic_episode import CyclicEpisode
+
+        from models.agent_session import AgentSession
         from scripts.fingerprint_classifier import classify_session
 
         cutoff = _time.time() - 86400  # past 24 hours
