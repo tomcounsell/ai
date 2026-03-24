@@ -419,6 +419,137 @@ def resolve_branch_for_stage(slug: str | None, stage: str | None) -> tuple[str, 
     return ("main", False)
 
 
+def checkpoint_branch_state(job: AgentSession) -> None:
+    """Record current branch + HEAD commit SHA on the AgentSession.
+
+    Called when a job pauses (steering, dependency block) to preserve
+    the exact git state for later restoration.
+
+    Args:
+        job: The AgentSession to checkpoint.
+    """
+    working_dir = job.working_dir
+    if not working_dir:
+        return
+
+    try:
+        branch = subprocess.run(
+            ["git", "-C", working_dir, "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        commit = subprocess.run(
+            ["git", "-C", working_dir, "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+
+        if branch.returncode == 0 and commit.returncode == 0:
+            branch_name = branch.stdout.strip()
+            commit_sha = commit.stdout.strip()
+            job.branch_name = branch_name
+            job.commit_sha = commit_sha
+            job.save()
+            logger.info(
+                f"[checkpoint] Saved branch={branch_name} commit={commit_sha[:8]} "
+                f"for session {job.session_id}"
+            )
+        else:
+            logger.warning(
+                f"[checkpoint] Failed to read git state for session "
+                f"{job.session_id}: branch={branch.stderr.strip()}, "
+                f"commit={commit.stderr.strip()}"
+            )
+    except Exception as e:
+        logger.warning(f"[checkpoint] Error checkpointing state for {job.session_id}: {e}")
+
+
+def restore_branch_state(job: AgentSession) -> bool:
+    """Verify and restore branch + commit state from a checkpoint.
+
+    Called when a job resumes to ensure it starts on the correct branch
+    at the correct commit. If the recorded commit is an ancestor of
+    current HEAD, proceeds on HEAD (newer commits are fine).
+
+    Args:
+        job: The AgentSession with checkpoint data.
+
+    Returns:
+        True if state was successfully verified/restored, False otherwise.
+    """
+    working_dir = job.working_dir
+    recorded_branch = job.branch_name
+    recorded_sha = job.commit_sha
+
+    if not working_dir or not recorded_branch or not recorded_sha:
+        logger.debug(
+            f"[restore] No checkpoint data for session {job.session_id} — "
+            f"proceeding on current state"
+        )
+        return True
+
+    try:
+        # Check current branch
+        current = subprocess.run(
+            ["git", "-C", working_dir, "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        current_branch = current.stdout.strip() if current.returncode == 0 else ""
+
+        if current_branch != recorded_branch:
+            logger.info(
+                f"[restore] Branch mismatch: current={current_branch}, "
+                f"recorded={recorded_branch} — checking out recorded branch"
+            )
+            checkout = subprocess.run(
+                ["git", "-C", working_dir, "checkout", recorded_branch],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if checkout.returncode != 0:
+                logger.warning(
+                    f"[restore] Failed to checkout {recorded_branch}: "
+                    f"{checkout.stderr.strip()} — proceeding on {current_branch}"
+                )
+                return False
+
+        # Verify commit is reachable
+        ancestor_check = subprocess.run(
+            [
+                "git",
+                "-C",
+                working_dir,
+                "merge-base",
+                "--is-ancestor",
+                recorded_sha,
+                "HEAD",
+            ],
+            capture_output=True,
+            timeout=5,
+        )
+        if ancestor_check.returncode == 0:
+            logger.info(
+                f"[restore] Commit {recorded_sha[:8]} is ancestor of HEAD — "
+                f"proceeding on current HEAD"
+            )
+            return True
+        else:
+            logger.warning(
+                f"[restore] Commit {recorded_sha[:8]} is not ancestor of HEAD — "
+                f"proceeding on current HEAD anyway (may have been force-pushed)"
+            )
+            return True
+
+    except Exception as e:
+        logger.warning(f"[restore] Error restoring state for {job.session_id}: {e}")
+        return False
+
+
 # Terminal statuses for dependency resolution
 _TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 
@@ -605,6 +736,12 @@ async def _complete_job(job: Job, *, failed: bool = False) -> None:
         job: The job to complete.
         failed: If True, this job failed (used for parent finalization).
     """
+    # Checkpoint branch state before completion for audit trail
+    try:
+        checkpoint_branch_state(job._rj)
+    except Exception as e:
+        logger.debug(f"[checkpoint] Non-fatal checkpoint error at completion: {e}")
+
     parent_job_id = getattr(job._rj, "parent_job_id", None)
 
     # Finalize parent BEFORE deleting child, passing the completing child's
@@ -1518,6 +1655,12 @@ async def _execute_job(job: Job) -> None:
     allowed_root = Path.home() / "src"
     is_wt = WORKTREES_DIR in str(working_dir)
     working_dir = validate_workspace(working_dir, allowed_root, is_worktree=is_wt)
+
+    # Restore branch state from checkpoint if this is a resumed job
+    try:
+        restore_branch_state(job._rj)
+    except Exception as e:
+        logger.debug(f"[restore] Non-fatal restore error at job start: {e}")
 
     # Resolve branch: use slug + stage mapping if available, else session-based
     slug = job.work_item_slug
