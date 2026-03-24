@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% from "reflections/_macros.html" import status_badge %}
+
+{% block title %}Valor System Dashboard{% endblock %}
+
+{% block content %}
+<h1>System Dashboard</h1>
+
+<section class="dashboard-section">
+    <h2>SDLC Active Pipelines</h2>
+    <div id="sdlc-active" hx-get="/_partials/sdlc-active/" hx-trigger="every 5s" hx-swap="innerHTML">
+        {% include "sdlc/_partials/active_pipelines.html" %}
+    </div>
+</section>
+
+<section class="dashboard-section">
+    <h2>Reflections Status</h2>
+    <div id="reflections-status" hx-get="/_partials/reflections-status/" hx-trigger="every 10s" hx-swap="innerHTML">
+        {% include "reflections/_partials/status_grid.html" %}
+    </div>
+</section>
+{% endblock %}
