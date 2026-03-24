@@ -176,5 +176,6 @@ No special batch API needed.
 ## Related
 
 - [Job Queue](job-queue.md) -- Core queue infrastructure
+- [Job Dependency Tracking](job-dependency-tracking.md) -- Sibling dependencies, branch mapping, PM queue controls
 - [Chat Dev Session Architecture](chat-dev-session-architecture.md) -- ChatSession orchestrates SDLC pipeline for scheduled jobs
 - `/queue-status` skill -- Telegram-accessible queue management
