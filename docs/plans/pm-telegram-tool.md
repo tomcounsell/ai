@@ -356,10 +356,9 @@ No update system changes required — this feature is purely internal to the bri
 
 ## Open Questions
 
-None — all resolved.
+1. **Queue TTL**: Should Redis outbox entries have a TTL? If a session crashes mid-flight, stale entries could accumulate. Suggest 1 hour TTL as reasonable — sessions rarely last longer.
 
 ## Resolved Questions
 
-1. **Queue TTL**: No TTL. The relay drains pending entries on restart after a crash. TTL would risk expiring messages that should still be delivered. Orphaned keys from malformed session IDs are rare enough to handle via periodic cleanup, not TTL.
 2. **Message ordering guarantee**: No strict ordering required. FIFO is best-effort but retries can reorder — acceptable for PM communication.
 3. **Rate limiting**: No rate limits. Rely on PM persona guidance for message frequency.
