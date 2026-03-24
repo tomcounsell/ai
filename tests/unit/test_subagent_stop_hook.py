@@ -209,9 +209,7 @@ class TestExtractOutcomeSummary:
         assert "Tests passed" in result
 
     def test_extracts_from_nested_result(self):
-        result = _extract_outcome_summary(
-            {"result": {"text": "PR created at https://..."}}
-        )
+        result = _extract_outcome_summary({"result": {"text": "PR created at https://..."}})
         assert "PR created" in result
 
     def test_returns_default_when_empty(self):

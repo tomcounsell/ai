@@ -270,9 +270,7 @@ def _summarize_input(tool_name: str, tool_input: dict[str, Any]) -> str:
     return text[:100] + ("..." if len(text) > 100 else "")
 
 
-async def _judge_health(
-    activity: str, session_context: str = ""
-) -> dict[str, Any]:
+async def _judge_health(activity: str, session_context: str = "") -> dict[str, Any]:
     """Ask Haiku to judge whether the agent is healthy.
 
     Args:

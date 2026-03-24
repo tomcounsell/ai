@@ -1,8 +1,6 @@
 """Tests for job dependency tracking, branch mapping, checkpoint/restore, and PM controls."""
 
 import asyncio
-import time
-import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -538,7 +536,7 @@ class TestPopJobDependencyFiltering:
 
     def test_pop_picks_unblocked_job(self, mock_agent_session):
         """Jobs without dependencies should be picked normally."""
-        from agent.job_queue import Job, _pop_job
+        from agent.job_queue import _pop_job
 
         unblocked_job = MagicMock()
         unblocked_job.scheduled_after = None

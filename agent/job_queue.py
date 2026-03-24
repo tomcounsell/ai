@@ -413,8 +413,7 @@ def resolve_branch_for_stage(slug: str | None, stage: str | None) -> tuple[str, 
 
     # Fallback for unknown stages
     logger.warning(
-        f"[branch-mapping] Unknown stage {stage!r} for slug {slug!r}, "
-        f"falling back to main"
+        f"[branch-mapping] Unknown stage {stage!r} for slug {slug!r}, falling back to main"
     )
     return ("main", False)
 
@@ -742,8 +741,7 @@ def reorder_job(job_id: str, new_priority: str) -> bool:
     fields["priority"] = new_priority
     new_job = AgentSession.create(**fields)
     logger.info(
-        f"[pm-controls] Reordered job {job_id} -> {new_job.job_id} "
-        f"(priority={new_priority})"
+        f"[pm-controls] Reordered job {job_id} -> {new_job.job_id} (priority={new_priority})"
     )
     return True
 
