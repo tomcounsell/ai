@@ -1040,6 +1040,15 @@ class ValorAgent:
             )
             raise
 
+        except asyncio.CancelledError:
+            elapsed = time.time() - init_start
+            logger.warning(
+                "[SDK-cancelled] Query cancelled after %.0fs for session %s",
+                elapsed,
+                session_id,
+            )
+            raise
+
         except Exception as e:
             error_str = str(e)
             init_elapsed = time.time() - init_start

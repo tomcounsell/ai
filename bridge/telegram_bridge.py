@@ -1318,8 +1318,13 @@ async def main():
         loop.call_soon_threadsafe(lambda: asyncio.ensure_future(_graceful_shutdown(client)))
 
     async def _graceful_shutdown(tg_client):
-        """Reset in-flight jobs, kill SDK subprocesses, and disconnect."""
-        from agent.job_queue import _active_workers, _reset_running_jobs
+        """Cancel workers, kill SDK subprocesses, and disconnect.
+
+        Running jobs will be recovered at next startup by
+        _recover_interrupted_jobs_startup() which resets all running
+        jobs to pending unconditionally.
+        """
+        from agent.job_queue import _active_workers
 
         # Cancel all worker asyncio tasks
         for _pkey, worker_task in list(_active_workers.items()):
@@ -1327,14 +1332,6 @@ async def main():
                 worker_task.cancel()
                 logger.info(f"[{_pkey}] Cancelled worker task")
         _active_workers.clear()
-
-        for _pkey in ACTIVE_PROJECTS:
-            try:
-                reset = await _reset_running_jobs(_pkey)
-                if reset:
-                    logger.info(f"[{_pkey}] Reset {reset} running job(s) to pending")
-            except Exception as e:
-                logger.error(f"[{_pkey}] Failed to reset running jobs: {e}")
 
         # Kill SDK subprocesses so they don't survive as orphans
         orphans = _cleanup_orphaned_claude_processes()
@@ -1478,8 +1475,7 @@ async def main():
     from agent.job_queue import (
         _ensure_worker,
         _get_pending_jobs_sync,
-        _recover_interrupted_jobs,
-        _recover_orphaned_jobs,
+        _recover_interrupted_jobs_startup,
     )
 
     # Clean up stale Redis keys with invalid job_id format (e.g. 60-char
@@ -1500,17 +1496,17 @@ async def main():
     except Exception as _clean_err:
         logger.warning(f"Redis key cleanup failed (non-fatal): {_clean_err}")
 
+    # Unified startup recovery: reset ALL running jobs to pending
+    # (at startup, all running jobs are orphaned from previous process)
+    recovered = _recover_interrupted_jobs_startup()
+    if recovered:
+        logger.info(f"Recovered {recovered} interrupted job(s) at startup")
+
+    # Restart workers for pending jobs across all projects
     for _pkey in ACTIVE_PROJECTS:
-        recovered = _recover_interrupted_jobs(_pkey)
-        if recovered:
-            logger.info(f"[{_pkey}] Recovered {recovered} interrupted job(s)")
-        orphans = _recover_orphaned_jobs(_pkey)
-        if orphans:
-            logger.info(f"[{_pkey}] Recovered {orphans} orphaned job(s)")
         pending_jobs = _get_pending_jobs_sync(_pkey)
         if pending_jobs:
             logger.info(f"[{_pkey}] Found {len(pending_jobs)} persisted job(s), restarting workers")
-            # Start a worker for each unique chat_id that has pending jobs
             started_chats = set()
             for _job in pending_jobs:
                 _cid = _job.chat_id or _pkey

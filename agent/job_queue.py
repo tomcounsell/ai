@@ -622,168 +622,41 @@ def _get_pending_jobs_sync(project_key: str) -> list[AgentSession]:
     return AgentSession.query.filter(project_key=project_key, status="pending")
 
 
-def _recover_interrupted_jobs(project_key: str) -> int:
-    """
-    Reset any jobs stuck in 'running' status back to 'pending' with high priority.
+def _recover_interrupted_jobs_startup() -> int:
+    """Reset ALL running jobs to pending at startup.
 
-    Called at startup to recover jobs orphaned by a previous crash or restart.
+    At startup, all running jobs are by definition orphaned from the previous
+    process. This runs synchronously before the event loop processes messages.
+
     Uses delete-and-recreate to avoid KeyField index corruption.
     Returns the number of recovered jobs.
-
-    Note: Jobs with status="killed" are excluded (query filters on status="running").
     """
-    running_jobs = list(AgentSession.query.filter(project_key=project_key, status="running"))
+    running_jobs = list(AgentSession.query.filter(status="running"))
     if not running_jobs:
         return 0
 
     count = len(running_jobs)
     for job in running_jobs:
         old_id = job.job_id
+        chat_id = job.chat_id or job.project_key
         logger.warning(
-            f"[{project_key}] Recovering interrupted job {old_id} "
-            f"(session={job.session_id}, msg={job.message_text[:80]!r}...)"
+            "[startup-recovery] Recovering interrupted job %s "
+            "(session=%s, chat=%s, msg=%.80r...)",
+            old_id,
+            job.session_id,
+            chat_id,
+            job.message_text or "",
         )
         fields = _extract_job_fields(job)
         job.delete()
         fields["status"] = "pending"
         fields["priority"] = "high"
+        fields["started_at"] = None
         new_job = AgentSession.create(**fields)
-        logger.info(f"[{project_key}] Recovered job {old_id} -> {new_job.job_id}")
+        logger.info("[startup-recovery] Recovered job %s -> %s", old_id, new_job.job_id)
 
-    logger.warning(f"[{project_key}] Recovered {count} interrupted job(s)")
-
+    logger.warning("[startup-recovery] Recovered %d interrupted job(s)", count)
     return count
-
-
-async def _reset_running_jobs(project_key: str) -> int:
-    """
-    Async version: reset running jobs back to pending during graceful shutdown.
-    Uses delete-and-recreate to avoid KeyField index corruption.
-    Returns the number of reset jobs.
-
-    Note: Jobs with status="killed" are excluded (query filters on status="running").
-    """
-    running_jobs = await AgentSession.query.async_filter(project_key=project_key, status="running")
-    if not running_jobs:
-        return 0
-
-    for job in running_jobs:
-        old_id = job.job_id
-        logger.info(f"[{project_key}] Resetting in-flight job {old_id} to pending for next startup")
-        fields = _extract_job_fields(job)
-        await job.async_delete()
-        fields["status"] = "pending"
-        fields["priority"] = "high"
-        new_job = await AgentSession.async_create(**fields)
-        logger.info(f"[{project_key}] Reset job {old_id} -> {new_job.job_id}")
-
-    return len(running_jobs)
-
-
-def _recover_orphaned_jobs(project_key: str) -> int:
-    """
-    Scan for AgentSession objects stranded by past index corruption.
-
-    Orphans exist in the Redis class set but not in any status KeyField index.
-    This can happen when a crash occurs between delete and recreate, or when
-    KeyField.on_save() adds to the new index but the old index entry was never
-    cleaned up (leaving the object visible in the class set but invisible to
-    status-based queries).
-
-    Re-creates orphans with status 'pending' and priority 'high'.
-    """
-    from popoto.models.db_key import DB_key
-    from popoto.redis_db import POPOTO_REDIS_DB
-
-    # Get all AgentSession keys from the class set
-    class_set_key = AgentSession._meta.db_class_set_key.redis_key
-    all_keys = POPOTO_REDIS_DB.smembers(class_set_key)
-    if not all_keys:
-        return 0
-
-    # Get all keys in status index sets
-    # KeyField index pattern: $KeyF:AgentSession:status:{value}
-    indexed_keys: set[bytes] = set()
-    for status in ["pending", "running", "completed", "failed", "waiting_for_children"]:
-        index_key = DB_key(
-            AgentSession._meta.fields["status"].get_special_use_field_db_key(
-                AgentSession, "status"
-            ),
-            status,
-        ).redis_key
-        indexed_keys.update(POPOTO_REDIS_DB.smembers(index_key))
-
-    # Find orphans (in class set but not in any status index)
-    orphan_keys = all_keys - indexed_keys
-    if not orphan_keys:
-        return 0
-
-    recovered = 0
-    for key in orphan_keys:
-        try:
-            # Use errors='replace' to handle corrupted UTF-8 data in Redis keys
-            # gracefully. Corrupted bytes get replaced with U+FFFD rather than
-            # crashing the recovery loop.
-            key_str = key.decode(errors="replace") if isinstance(key, bytes) else key
-
-            # Log when UTF-8 replacement occurred so corrupted keys are
-            # diagnosable from logs without needing to inspect Redis directly.
-            if isinstance(key, bytes) and "\ufffd" in key_str:
-                logger.warning(
-                    f"[{project_key}] Corrupted UTF-8 in Redis key: {key_str!r} (hex: {key.hex()})"
-                )
-
-            # Load the object data from Redis hash
-            data = POPOTO_REDIS_DB.hgetall(key_str)
-            if not data:
-                # Hash was deleted, just a stale class set entry -- clean it up
-                POPOTO_REDIS_DB.srem(class_set_key, key)
-                continue
-
-            # Check if this belongs to our project. Use errors='replace' to
-            # handle corrupted field values without crashing.
-            pk_bytes = data.get(b"project_key", b"")
-            pk = pk_bytes.decode(errors="replace") if isinstance(pk_bytes, bytes) else pk_bytes
-            if pk != project_key:
-                continue
-
-            # Try to load as an AgentSession object for proper field extraction
-            try:
-                from popoto.models.encoding import decode_popoto_model_hashmap
-
-                orphan_job = decode_popoto_model_hashmap(AgentSession, data)
-                if orphan_job is None:
-                    continue
-                fields = _extract_job_fields(orphan_job)
-            except Exception as decode_err:
-                # Log the specific decode error and the raw key for forensics,
-                # then skip this orphan rather than crashing the whole recovery.
-                logger.warning(
-                    f"[{project_key}] Could not decode orphan {key_str}: "
-                    f"{decode_err} (raw key bytes: {key!r}), skipping"
-                )
-                continue
-
-            # Delete the orphan hash and class set entry
-            POPOTO_REDIS_DB.delete(key_str)
-            POPOTO_REDIS_DB.srem(class_set_key, key)
-
-            # Create new properly-indexed job
-            fields["status"] = "pending"
-            fields["priority"] = "high"
-            new_job = AgentSession.create(**fields)
-            recovered += 1
-            logger.warning(
-                f"[{project_key}] Recovered orphaned job from key {key_str} -> {new_job.job_id}"
-            )
-        except Exception as e:
-            logger.error(f"[{project_key}] Failed to recover orphan {key!r}: {e}")
-
-    if recovered:
-        logger.warning(
-            f"[{project_key}] Recovered {recovered} orphaned job(s) from index corruption"
-        )
-    return recovered
 
 
 # === Job Health Monitor ===
@@ -802,50 +675,44 @@ def _get_job_timeout(job) -> int:
 
 
 async def _job_health_check() -> None:
-    """Check all running jobs for liveness and timeout, recovering stuck ones.
+    """Unified health check for all jobs — the single recovery mechanism.
 
-    For each running AgentSession:
-    1. If the worker asyncio.Task is dead/missing AND the job has been running
-       longer than JOB_HEALTH_MIN_RUNNING seconds, recover it.
-    2. If the job has exceeded its timeout (from started_at), recover it
-       regardless of worker state.
-    3. Legacy jobs without started_at and no worker are also recovered.
+    Scans both 'running' and 'pending' jobs:
 
-    Note: Jobs with status="killed" are excluded (query filters on status="running").
+    For RUNNING jobs:
+    1. If worker is dead/missing AND running > JOB_HEALTH_MIN_RUNNING: recover.
+    2. If exceeded timeout: recover regardless of worker state.
+    3. Legacy jobs without started_at and no worker: recover.
 
-    Recovery follows the same delete-and-recreate pattern as
-    _recover_interrupted_jobs(): delete the stuck AgentSession, create a new
-    one as pending with high priority, then ensure a worker is running.
+    For PENDING jobs:
+    4. If no live worker for job.chat_id AND pending > JOB_HEALTH_MIN_RUNNING:
+       start a worker. This replaces the old _recover_stalled_pending mechanism.
+
+    Recovery uses delete-and-recreate (required by Popoto KeyField) but ONLY
+    for jobs whose worker is confirmed dead. Jobs with a live worker on the
+    same chat_id are never touched.
     """
-    running_jobs = list(AgentSession.query.filter(status="running"))
-    if not running_jobs:
-        logger.debug("[job-health] No running jobs found")
-        return
-
     now = time.time()
     checked = 0
     recovered = 0
+    workers_started = 0
 
+    # === Check RUNNING jobs ===
+    running_jobs = list(AgentSession.query.filter(status="running"))
     for job in running_jobs:
         checked += 1
-        project_key = job.project_key
-
-        # Check if the worker for this chat is alive
-        # Workers are keyed by chat_id; fall back to project_key for legacy jobs
-        worker_key = job.chat_id or project_key
+        worker_key = job.chat_id or job.project_key
         worker = _active_workers.get(worker_key)
         worker_alive = worker is not None and not worker.done()
 
         started_at = getattr(job, "started_at", None)
         running_seconds = (now - started_at) if started_at else None
 
-        # Determine if this job should be recovered
         should_recover = False
         reason = ""
 
         if not worker_alive:
             if started_at is None:
-                # Legacy job without started_at and no worker -- recover
                 should_recover = True
                 reason = "worker dead/missing, no started_at (legacy job)"
             elif running_seconds is not None and running_seconds > JOB_HEALTH_MIN_RUNNING:
@@ -855,17 +722,14 @@ async def _job_health_check() -> None:
                     f"{int(running_seconds)}s (>{JOB_HEALTH_MIN_RUNNING}s guard)"
                 )
             else:
-                # Worker is dead but job started recently -- race condition guard
                 logger.debug(
-                    "[job-health] Skipping job %s (project=%s) - worker dead but "
+                    "[job-health] Skipping job %s - worker dead but "
                     "running only %ss (under %ss guard)",
                     job.job_id,
-                    project_key,
                     int(running_seconds) if running_seconds else "?",
                     JOB_HEALTH_MIN_RUNNING,
                 )
         elif started_at is not None:
-            # Worker is alive, but check for timeout
             timeout = _get_job_timeout(job)
             if running_seconds is not None and running_seconds > timeout:
                 should_recover = True
@@ -873,33 +737,62 @@ async def _job_health_check() -> None:
 
         if should_recover:
             logger.warning(
-                "[job-health] Recovering stuck job %s (project=%s, session=%s): %s",
+                "[job-health] Recovering stuck job %s (chat=%s, session=%s): %s",
                 job.job_id,
-                project_key,
+                worker_key,
                 job.session_id,
                 reason,
             )
-            # Delete-and-recreate as pending (same pattern as _recover_interrupted_jobs)
             fields = _extract_job_fields(job)
             job.delete()
             fields["status"] = "pending"
             fields["priority"] = "high"
-            fields["started_at"] = None  # Reset started_at for re-processing
+            fields["started_at"] = None
             new_job = AgentSession.create(**fields)
             logger.info(
-                "[job-health] Recovered job %s -> %s (project=%s)",
+                "[job-health] Recovered job %s -> %s (chat=%s)",
                 job.job_id,
                 new_job.job_id,
-                project_key,
+                worker_key,
             )
-            _ensure_worker(job.chat_id or project_key)
+            _ensure_worker(worker_key)
             recovered += 1
 
-    logger.info(
-        "[job-health] Health check complete: %d job(s) checked, %d recovered",
-        checked,
-        recovered,
-    )
+    # === Check PENDING jobs ===
+    pending_jobs = list(AgentSession.query.filter(status="pending"))
+    for job in pending_jobs:
+        checked += 1
+        worker_key = job.chat_id or job.project_key
+        worker = _active_workers.get(worker_key)
+        worker_alive = worker is not None and not worker.done()
+
+        if worker_alive:
+            # Worker exists and is processing — pending is normal queue behavior
+            continue
+
+        # No live worker — check age threshold before starting one
+        created_at = getattr(job, "created_at", None)
+        if created_at is None:
+            continue
+        pending_seconds = now - created_at
+        if pending_seconds > JOB_HEALTH_MIN_RUNNING:
+            logger.info(
+                "[job-health] Starting worker for orphaned pending job %s "
+                "(chat=%s, pending %.0fs)",
+                job.job_id,
+                worker_key,
+                pending_seconds,
+            )
+            _ensure_worker(worker_key)
+            workers_started += 1
+
+    if checked > 0:
+        logger.info(
+            "[job-health] Health check: %d checked, %d recovered, %d workers started",
+            checked,
+            recovered,
+            workers_started,
+        )
 
 
 async def _job_hierarchy_health_check() -> None:
@@ -1195,6 +1088,9 @@ async def _worker_loop(chat_id: str) -> None:
     Includes a drain guard: when the queue appears empty, the worker yields
     to the event loop (sleep 0.1s) and re-checks once before exiting. This
     prevents losing jobs created between async_create index writes.
+
+    CancelledError is caught explicitly to ensure proper job completion
+    and worker cleanup instead of silent death.
     """
     try:
         while True:
@@ -1211,19 +1107,32 @@ async def _worker_loop(chat_id: str) -> None:
                 logger.info(f"[chat:{chat_id}] Drain guard caught job that would have been lost")
 
             job_failed = False
+            job_completed = False
             try:
                 await _execute_job(job)
+            except asyncio.CancelledError:
+                logger.warning(
+                    "[chat:%s] Worker cancelled during job %s — completing job",
+                    chat_id,
+                    job.job_id,
+                )
+                await _complete_job(job, failed=True)
+                job_completed = True
+                raise  # Re-raise to exit worker loop
             except Exception as e:
                 logger.error(f"[chat:{chat_id}] Job {job.job_id} failed: {e}")
                 job_failed = True
             finally:
-                await _complete_job(job, failed=job_failed)
+                if not job_completed:
+                    await _complete_job(job, failed=job_failed)
 
             # Check restart flag after each completed job
             if _check_restart_flag():
                 _trigger_restart()
                 break
 
+    except asyncio.CancelledError:
+        logger.info("[chat:%s] Worker loop cancelled", chat_id)
     finally:
         _active_workers.pop(chat_id, None)
 
@@ -2013,21 +1922,12 @@ async def cleanup_stale_branches(working_dir: str, max_age_hours: float = 72) ->
 
 
 def recover_orphaned_jobs_all_projects() -> int:
-    """Recover orphaned jobs across all registered projects.
+    """No-op: orphan recovery is now handled by the unified _job_health_check.
 
-    Called by the reflection scheduler as the 'orphan-recovery' reflection.
-    Returns total number of recovered jobs.
+    Kept for backward compatibility with the reflection scheduler.
     """
-    total = 0
-    for project_key in list(_project_configs.keys()):
-        try:
-            recovered = _recover_orphaned_jobs(project_key)
-            total += recovered
-        except Exception as e:
-            logger.error("[reflection] Orphan recovery failed for %s: %s", project_key, e)
-    if not _project_configs:
-        logger.debug("[reflection] No projects registered, skipping orphan recovery")
-    return total
+    logger.debug("[reflection] Orphan recovery delegated to unified health check")
+    return 0
 
 
 async def cleanup_stale_branches_all_projects() -> list[str]:
