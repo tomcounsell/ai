@@ -252,10 +252,13 @@ See `docs/features/session-isolation.md` for the full technical design.
 
 ### Self-Healing System
 
-The bridge includes automatic crash recovery (see `docs/features/bridge-self-healing.md`):
+The bridge includes automatic crash recovery (see `docs/features/bridge-self-healing.md`) and proactive resilience (see `docs/features/bridge-resilience.md`):
 
+- **Circuit breakers**: Per-dependency failure tracking via `bridge/resilience.py` -- opens circuit after threshold failures, probes for recovery
+- **Degraded mode**: When Anthropic is down, acknowledges messages on Telegram and queues for replay on recovery
+- **Startup backoff**: Exponential backoff with jitter for all connection errors (not just SQLite locks)
 - **Session lock cleanup**: Kills stale processes holding session-related files on startup
-- **Bridge watchdog**: Separate launchd service (`com.valor.bridge-watchdog`) monitors health every 60s
+- **Bridge watchdog**: Separate launchd service (`com.valor.bridge-watchdog`) monitors health every 60s, reads per-dependency circuit states
 - **Crash tracker**: Logs start/crash events to Redis via `monitoring/crash_tracker.py` with git commit correlation
 - **5-level escalation**: restart → kill stale → clear locks → revert commit → alert human
 

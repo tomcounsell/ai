@@ -53,6 +53,7 @@ A separate process that monitors bridge health and executes recovery. Runs via l
 - No crash pattern detected
 - Zombie process detection (claude/pyright processes idle > 2 hours)
 - Concurrent instance count (warns when exceeding soft limit of 5)
+- Per-dependency circuit breaker states via `bridge/health.py` (see [Bridge Resilience](bridge-resilience.md))
 
 **Zombie Process Detection**:
 
@@ -169,8 +170,10 @@ rm data/auto-revert-enabled
 
 | File | Purpose |
 |------|---------|
+| `bridge/resilience.py` | Reusable circuit breaker for proactive failure handling |
+| `bridge/health.py` | Per-dependency health aggregation for watchdog consumption |
 | `monitoring/crash_tracker.py` | Crash event logging and pattern detection |
-| `monitoring/bridge_watchdog.py` | External health monitor |
+| `monitoring/bridge_watchdog.py` | External health monitor (reads circuit breaker states) |
 | `scripts/auto-revert.sh` | Git revert and restart |
 | `data/recovery-in-progress` | Recovery lock file |
 | `data/auto-revert-enabled` | Auto-revert enable flag |
@@ -187,5 +190,6 @@ rm data/auto-revert-enabled
 
 ## Related
 
+- [Bridge Resilience](bridge-resilience.md) — circuit breakers, degraded mode, and exponential backoff for preventing crash-loops during dependency outages (complements self-healing with proactive failure handling)
 - [Message Pipeline](message-pipeline.md) — deferred enrichment and zero-loss restart mechanisms
 - [Session Transcripts](session-transcripts.md) — session lifecycle logging via AgentSession model
