@@ -48,7 +48,7 @@ class Reflection(Model):
     last_duration = Field(type=float, null=True)
     run_history = ListField(null=True)  # List of run dicts, capped at 200
 
-    RUN_HISTORY_CAP = 200
+    _RUN_HISTORY_CAP = 200
 
     @classmethod
     def get_or_create(cls, name: str) -> "Reflection":
@@ -102,8 +102,8 @@ class Reflection(Model):
         }
         history = self.run_history if isinstance(self.run_history, list) else []
         history.append(run_record)
-        if len(history) > self.RUN_HISTORY_CAP:
-            history = history[-self.RUN_HISTORY_CAP :]
+        if len(history) > self._RUN_HISTORY_CAP:
+            history = history[-self._RUN_HISTORY_CAP :]
         self.run_history = history
 
         self.save()
