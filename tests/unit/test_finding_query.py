@@ -1,6 +1,6 @@
 """Tests for finding query (agent/finding_query.py).
 
-Verifies composite scoring, bloom pre-check, format functions,
+Verifies composite scoring, format functions, bloom utility,
 and error handling.
 """
 
@@ -16,15 +16,6 @@ class TestQueryFindings:
 
         assert query_findings("") == []
         assert query_findings(None) == []
-
-    @patch("agent.finding_query._bloom_has_relevant")
-    def test_returns_empty_when_bloom_says_no(self, mock_bloom):
-        """Should short-circuit when bloom says no relevant findings."""
-        from agent.finding_query import query_findings
-
-        mock_bloom.return_value = False
-        result = query_findings("test-slug", topics=["auth", "jwt"])
-        assert result == []
 
     @patch("models.finding.Finding.query_by_slug")
     def test_returns_scored_findings(self, mock_query):

@@ -60,13 +60,12 @@ def query_findings(
     try:
         from models.finding import Finding
 
-        # Bloom pre-check: if topics provided, check if any are in bloom
-        if topics and not _bloom_has_relevant(Finding, topics):
-            logger.debug(
-                f"[finding_query] Bloom says no relevant findings for "
-                f"slug={slug}, topics={topics[:3]}"
-            )
-            return []
+        # NOTE: Bloom pre-check is NOT used for topic keyword filtering.
+        # The ExistenceFilter stores fingerprints of full content strings
+        # (via fingerprint_fn), so checking individual topic keywords against
+        # it would always return false negatives. Bloom is only useful for
+        # deduplication (checking if exact content exists), not keyword search.
+        # We rely on slug-based query + client-side topic scoring instead.
 
         # Query all findings for this slug
         candidates = Finding.query_by_slug(slug, limit=MAX_QUERY_RESULTS)
