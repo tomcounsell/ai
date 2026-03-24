@@ -73,6 +73,7 @@ Replace `CHAT_NAME` with the group name (e.g. `PM: PsyOptimal`, `Dev: Valor`). T
 | `pytest tests/integration/` | Run integration tests only |
 | `pytest -m sdlc` | Run tests for a specific feature (see `tests/README.md`) |
 | `python -m ruff format . && python -m ruff check .` | Format and lint |
+| `python -m ui.app` | Start web UI server on localhost:8500 |
 | `python scripts/reflections.py` | Run reflections maintenance manually |
 | `python scripts/reflections.py --dry-run` | Test reflections without side effects |
 | `python scripts/reflections.py --ignore "pattern"` | Silence a bug pattern for 14 days |
