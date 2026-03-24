@@ -91,15 +91,15 @@ No prerequisites — this work uses existing Redis infrastructure and Telethon c
 - **`send_telegram_message` Bash tool**: ChatSession calls a Python script that pushes messages to the Redis queue. Pre-configured with `chat_id` and `reply_to` via environment variables.
 - **Bridge message relay**: Async task in bridge that polls the Redis queue and sends messages through the existing Telethon client.
 - **AgentSession `pm_sent_message_ids`**: ListField tracking Telegram message IDs sent by the PM during a session. Bridge populates this after each successful send.
-- **Summarizer bypass**: `send_response_with_files()` checks `pm_sent_message_ids` — if non-empty, skip summarizer and only apply emoji reaction.
+- **Summarizer bypass**: Single check point in `send_response_with_files()` — drains any pending Redis queue entries, then checks `pm_sent_message_ids`. If non-empty, skip summarizer and only apply emoji reaction. If summarizer fires as fallback, sets `summarizer_delivered` flag on the session so the relay skips any late-arriving queue entries to prevent duplicate messages.
 
 ### Flow
 
 **ChatSession wants to send message** -> calls `python tools/send_telegram.py "message text"` -> script reads `TELEGRAM_CHAT_ID` and `TELEGRAM_REPLY_TO` from env -> pushes `{chat_id, reply_to, text, session_id}` to Redis list `telegram:outbox:{session_id}` -> returns immediately
 
-**Bridge relay loop** -> polls `telegram:outbox:*` keys -> for each message, sends via Telethon `send_markdown()` -> records sent Telegram message ID on AgentSession `pm_sent_message_ids` -> deletes processed queue entry
+**Bridge relay loop** -> BLPOP on `telegram:outbox:pending` index list -> gets session_id, reads from `telegram:outbox:{session_id}` -> checks `summarizer_delivered` flag (if set, discard entry to prevent dupes) -> sends via Telethon `send_markdown()` -> records sent Telegram message ID on AgentSession `pm_sent_message_ids` -> deletes processed queue entry
 
-**Session completes** -> nudge loop `send_to_chat()` -> checks AgentSession `pm_sent_message_ids` -> if non-empty, skip summarizer delivery, only set emoji reaction -> if empty, fall through to summarizer as safety net
+**Session completes** -> `send_response_with_files()` drains pending Redis queue (waits up to 2s), checks AgentSession `pm_sent_message_ids` -> if non-empty, skip summarizer, only set emoji reaction -> if empty, fire summarizer as safety net and set `summarizer_delivered` flag to prevent late relay dupes
 
 ### Technical Approach
 
@@ -107,7 +107,7 @@ No prerequisites — this work uses existing Redis infrastructure and Telethon c
 - **Environment variable injection**: `sdk_client.py` already injects `VALOR_SESSION_ID`, `JOB_ID`, `CHAT_ID` etc. Add `TELEGRAM_CHAT_ID` and `TELEGRAM_REPLY_TO` for ChatSession sessions.
 - **Bash-callable tool**: ChatSession has Bash access. A simple Python script in `tools/send_telegram.py` avoids MCP server complexity. The script uses the existing Redis connection pattern from `tools/`.
 - **Relay as asyncio task**: The bridge's event loop already runs background tasks (calendar heartbeat, job queue). Add a relay task that processes the outbox queue.
-- **Linkification and formatting**: The `send_telegram.py` tool handles PR/Issue reference linkification (e.g., `PR #42` -> `[PR #42](url)`) using the existing `_linkify_references()` from `bridge/summarizer.py`, extracted to a shared utility.
+- **Linkification and formatting**: The `send_telegram.py` tool handles PR/Issue reference linkification (e.g., `PR #42` -> `[PR #42](url)`). Extract `_linkify_references()` from `bridge/summarizer.py` to `bridge/formatting.py`, refactored to accept `github_org` and `github_repo` as parameters instead of a session object. The tool reads `GITHUB_ORG` and `GITHUB_REPO` from environment variables (injected alongside `TELEGRAM_CHAT_ID`).
 - **Length enforcement**: Telegram's 4096 char limit enforced in the tool before queueing.
 
 ## Failure Path Test Strategy
@@ -149,7 +149,7 @@ No prerequisites — this work uses existing Redis infrastructure and Telethon c
 
 ### Risk 2: Race between PM self-message and session completion
 **Impact:** PM queues a message but the session completes before the bridge relay processes it. Summarizer fires because `pm_sent_message_ids` is empty, leading to duplicate messages.
-**Mitigation:** When session completes, `send_to_chat()` waits briefly (500ms) for the relay to process any pending queue entries before checking `pm_sent_message_ids`. Also check the queue length directly — if entries exist in `telegram:outbox:{session_id}`, wait for relay to drain.
+**Mitigation:** `send_response_with_files()` drains the queue (up to 2s) before checking. If summarizer fires as fallback, `summarizer_delivered` flag is set on AgentSession so the relay discards any late-arriving entries for that session. This eliminates the duplicate message scenario.
 
 ### Risk 3: ChatSession uses tool incorrectly or not at all
 **Impact:** PM returns raw text without calling the tool, triggering the summarizer.
@@ -158,11 +158,11 @@ No prerequisites — this work uses existing Redis infrastructure and Telethon c
 ## Race Conditions
 
 ### Race 1: Queue drain vs. completion check
-**Location:** `agent/job_queue.py` `send_to_chat()` and bridge relay task
-**Trigger:** Session completes, `send_to_chat()` checks `pm_sent_message_ids` before relay has processed the queue
-**Data prerequisite:** All entries in `telegram:outbox:{session_id}` must be processed before completion check
+**Location:** `bridge/response.py` `send_response_with_files()` and bridge relay task
+**Trigger:** Session completes, bypass check runs before relay has processed the queue
+**Data prerequisite:** All entries in `telegram:outbox:{session_id}` must be processed before bypass decision
 **State prerequisite:** AgentSession `pm_sent_message_ids` must reflect all sent messages
-**Mitigation:** `send_to_chat()` checks Redis queue length for `telegram:outbox:{session_id}`. If non-zero, poll with 100ms intervals up to 2 seconds for relay to drain. After timeout, fall through to summarizer as safety net.
+**Mitigation:** `send_response_with_files()` actively drains the queue (poll 100ms intervals, up to 2s). After timeout, if queue still non-empty, fall through to summarizer and set `summarizer_delivered` flag. Relay checks this flag before sending, discarding entries for sessions already handled by the summarizer — preventing duplicate messages.
 
 ### Race 2: Concurrent relay processing
 **Location:** Bridge relay task
@@ -243,13 +243,15 @@ No update system changes required — this feature is purely internal to the bri
 ### 1. Add AgentSession field and Redis queue contract
 - **Task ID**: build-model
 - **Depends On**: none
-- **Validates**: tests/unit/test_agent_session.py (update)
+- **Validates**: tests/unit/test_agent_session.py (create)
 - **Assigned To**: bridge-relay-builder
 - **Agent Type**: builder
 - **Parallel**: true
 - Add `pm_sent_message_ids` ListField to AgentSession in `models/agent_session.py`
-- Define Redis key pattern: `telegram:outbox:{session_id}` with JSON message format `{chat_id, reply_to, text, session_id, timestamp}`
-- Add helper methods on AgentSession: `record_pm_message(msg_id)` and `has_pm_messages() -> bool`
+- Add `summarizer_delivered` BooleanField (default False) to AgentSession — set when summarizer fires as fallback, checked by relay to prevent duplicate messages
+- Define Redis key pattern: `telegram:outbox:{session_id}` for per-session message queue, `telegram:outbox:pending` as index list of session_ids with pending messages
+- JSON message format: `{chat_id, reply_to, text, session_id, timestamp}`
+- Add helper methods on AgentSession: `record_pm_message(msg_id)`, `has_pm_messages() -> bool`, `mark_summarizer_delivered()`
 
 ### 2. Build `tools/send_telegram.py`
 - **Task ID**: build-tool
@@ -258,10 +260,11 @@ No update system changes required — this feature is purely internal to the bri
 - **Assigned To**: telegram-tool-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Create `tools/send_telegram.py` that reads `TELEGRAM_CHAT_ID`, `TELEGRAM_REPLY_TO`, `VALOR_SESSION_ID` from env
+- Create `tools/send_telegram.py` that reads `TELEGRAM_CHAT_ID`, `TELEGRAM_REPLY_TO`, `VALOR_SESSION_ID`, `GITHUB_ORG`, `GITHUB_REPO` from env
 - Accepts message text as CLI argument
-- Pushes to Redis list `telegram:outbox:{session_id}`
-- Extract `_linkify_references()` from `bridge/summarizer.py` to `bridge/formatting.py` shared utility
+- Pushes to Redis list `telegram:outbox:{session_id}` AND appends session_id to `telegram:outbox:pending` index list
+- Extract `_linkify_references()` from `bridge/summarizer.py` to `bridge/formatting.py`, refactored to accept `github_org` and `github_repo` as parameters (not a session object)
+- Update `bridge/summarizer.py` to call the extracted function from `bridge/formatting.py`
 - Apply linkification and 4096 char truncation before queueing
 - Return exit code 0 on success, non-zero on failure with stderr message
 
@@ -272,8 +275,9 @@ No update system changes required — this feature is purely internal to the bri
 - **Assigned To**: telegram-tool-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- In `agent/sdk_client.py` `_build_options()`, inject `TELEGRAM_CHAT_ID` and `TELEGRAM_REPLY_TO` for chat-type sessions
-- Source values from the job's `chat_id` and `message_id` fields
+- In `agent/sdk_client.py` `_build_options()`, inject `TELEGRAM_CHAT_ID`, `TELEGRAM_REPLY_TO`, `GITHUB_ORG`, and `GITHUB_REPO` for chat-type sessions
+- Source `TELEGRAM_CHAT_ID` and `TELEGRAM_REPLY_TO` from the job's `chat_id` and `message_id` fields
+- Source `GITHUB_ORG` and `GITHUB_REPO` from `get_project_config()` using the session's `project_key`
 
 ### 4. Build bridge relay task
 - **Task ID**: build-relay
@@ -282,9 +286,11 @@ No update system changes required — this feature is purely internal to the bri
 - **Assigned To**: bridge-relay-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Create async relay function in `bridge/telegram_relay.py` that polls `telegram:outbox:*` Redis keys
-- For each message: send via Telethon `send_markdown()`, record message ID on AgentSession, delete queue entry
+- Create async relay function in `bridge/telegram_relay.py` that BLPOP on `telegram:outbox:pending` index list (O(1) instead of wildcard scan)
+- For each session_id popped: read from `telegram:outbox:{session_id}`, check `summarizer_delivered` flag on AgentSession (if set, discard to prevent duplicate messages)
+- Send via Telethon `send_markdown()`, record message ID on AgentSession, delete queue entry
 - Handle send failures: log error, re-push to queue tail, backoff
+- Track `last_relay_processed_at` timestamp; bridge watchdog alerts if relay hasn't processed in >60s while queue entries exist
 - Start relay task in bridge's main event loop alongside job queue consumer
 
 ### 5. Implement summarizer bypass
@@ -294,10 +300,11 @@ No update system changes required — this feature is purely internal to the bri
 - **Assigned To**: bridge-relay-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- In `bridge/response.py` `send_response_with_files()`: before summarizer call, check AgentSession `has_pm_messages()`
+- **Single check point** in `bridge/response.py` `send_response_with_files()`: before summarizer call, drain any pending Redis queue entries for `telegram:outbox:{session_id}` (poll 100ms intervals, up to 2s timeout)
+- Re-read AgentSession after drain, check `has_pm_messages()`
 - If PM self-messaged: skip summarizer, skip text send, only return True (emoji reaction handled separately)
-- In `agent/job_queue.py` `send_to_chat()`: before delivery, check Redis queue `telegram:outbox:{session_id}` — if non-empty, wait up to 2s for drain
-- After drain wait, re-read AgentSession and check `pm_sent_message_ids`
+- If PM did NOT self-message: fire summarizer as fallback, then set `summarizer_delivered` flag on AgentSession so the relay discards any late-arriving queue entries (prevents duplicate messages)
+- No bypass logic in `agent/job_queue.py` `send_to_chat()` — all bypass decisions consolidated in `send_response_with_files()`
 
 ### 6. Update PM persona with communication guidelines
 - **Task ID**: build-persona
@@ -306,7 +313,7 @@ No update system changes required — this feature is purely internal to the bri
 - **Assigned To**: telegram-tool-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Update ChatSession system prompt injection in `sdk_client.py` L1403-1424 with tool usage instructions
+- Update ChatSession system prompt via `load_pm_system_prompt()` or the ChatSession prompt block in `agent/sdk_client.py` `_create_options()` with tool usage instructions
 - Add guidelines: use `send_telegram_message` for stakeholder communication, never expose SDLC stage names, write in business terms
 - Add instruction: if you don't call the tool, your return value will be summarized and sent automatically (fallback behavior)
 
@@ -349,13 +356,26 @@ No update system changes required — this feature is purely internal to the bri
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
-| CONCERN | [agent-type] | [The concern raised] | [How/whether it was addressed] |
+| Severity | Critic | Concern | Resolution |
+|----------|--------|---------|------------|
+| BLOCKER | Skeptic, Operator | Bypass check split across two files (`response.py` and `job_queue.py`) with no coordination | Consolidated to single check point in `send_response_with_files()` |
+| BLOCKER | Skeptic, Adversary | `_linkify_references()` needs session object; tool script has no session | Refactored to accept `github_org`/`github_repo` params; injected as env vars |
+| CONCERN | Adversary, Operator | 2s drain timeout may cause duplicate messages (summarizer + late relay) | Added `summarizer_delivered` flag on AgentSession; relay checks before sending |
+| CONCERN | Operator, Simplifier | `telegram:outbox:*` wildcard scan is O(N) | Replaced with `telegram:outbox:pending` index list, relay uses BLPOP (O(1)) |
+| CONCERN | Archaeologist | Task 1 references non-existent `test_agent_session.py` | Changed to `(create)` — new file |
+| CONCERN | Skeptic | Task 6 references wrong line numbers in `sdk_client.py` | Replaced with function name references |
+| CONCERN | Operator | No health monitoring for relay task | Added `last_relay_processed_at` tracking; watchdog alerts if stale |
+| NIT | structural | `validate-all` has no specific validation command | Acceptable — validator agent runs Verification table commands |
+| NIT | structural | Some file paths unqualified | Minor; builders resolve from context |
 
 ---
 
 ## Open Questions
 
-1. **Queue TTL**: Should Redis outbox entries have a TTL? If a session crashes mid-flight, stale entries could accumulate. Suggest 1 hour TTL as reasonable — sessions rarely last longer.
-2. **Message ordering guarantee**: Should the relay preserve strict ordering of PM messages? Redis LPUSH/RPOP maintains FIFO, but if a send fails and is retried, ordering could break. Is strict ordering critical for PM communication?
-3. **Rate limiting**: Should the tool enforce any rate limit on PM message sends? E.g., max 5 messages per session to prevent runaway tool calls? Or leave uncapped and rely on PM persona guidance?
+None — all resolved.
+
+## Resolved Questions
+
+1. **Queue TTL**: No TTL. The relay drains pending entries on restart after a crash. TTL would risk expiring messages that should still be delivered. Orphaned keys from malformed session IDs are rare enough to handle via periodic cleanup, not TTL.
+2. **Message ordering guarantee**: No strict ordering required. FIFO is best-effort but retries can reorder — acceptable for PM communication.
+3. **Rate limiting**: No rate limits. Rely on PM persona guidance for message frequency.
