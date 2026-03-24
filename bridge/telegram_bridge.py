@@ -1382,7 +1382,7 @@ async def main():
                 )
                 raise
             # Exponential backoff with jitter, capped at 256s
-            base_delay = min(2 ** _attempt, 256)
+            base_delay = min(2**_attempt, 256)
             jitter = random.uniform(0, base_delay * 0.2)
             wait_time = base_delay + jitter
             logger.warning(

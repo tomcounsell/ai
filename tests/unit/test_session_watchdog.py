@@ -407,5 +407,3 @@ class TestCheckAllSessionsModelException:
         assert session.status == "active"
         # Error should have been logged
         assert any("Error handling session" in e for e in logged_errors)
-
-
