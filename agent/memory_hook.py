@@ -1,13 +1,16 @@
-"""Subconscious memory thought injection for PostToolUse hook.
+"""Subconscious memory and finding thought injection for PostToolUse hook.
 
 Checks ExistenceFilter for topic relevance, assembles context via
 ContextAssembler, and returns <thought> blocks via additionalContext.
 
+Also injects relevant findings from the cross-agent knowledge relay
+when the current session has a slug (work item scope).
+
 Rate-limited via sliding window: every WINDOW_SIZE tool calls, extracts
 topic keywords from the current window plus previous windows in the buffer.
 
-All operations are wrapped in try/except — memory system failures must
-never crash or slow down the agent.
+All operations are wrapped in try/except -- memory/finding system failures
+must never crash or slow down the agent.
 """
 
 from __future__ import annotations
@@ -220,6 +223,11 @@ def check_and_inject(
                 except Exception:
                     pass
 
+        # Also inject relevant findings from cross-agent relay
+        finding_thoughts = _inject_findings(session_id, unique_keywords)
+        if finding_thoughts:
+            thoughts.extend(finding_thoughts)
+
         if not thoughts:
             return None
 
@@ -232,6 +240,60 @@ def check_and_inject(
     except Exception as e:
         logger.warning(f"[memory_hook] Injection failed (non-fatal): {e}")
         return None
+
+
+def _inject_findings(session_id: str, keywords: list[str]) -> list[str]:
+    """Inject relevant findings from cross-agent knowledge relay.
+
+    Checks if the current session has a slug (work item scope) and
+    queries findings for that slug. Returns formatted <thought> blocks.
+
+    Returns empty list if no slug, no findings, or on any error.
+    """
+    try:
+        # Get slug from environment (set by SDLC pipeline)
+        slug = os.environ.get("VALOR_WORK_ITEM_SLUG")
+        if not slug:
+            # Try to get slug from the session
+            valor_session_id = os.environ.get("VALOR_SESSION_ID")
+            if valor_session_id:
+                try:
+                    from models.agent_session import AgentSession
+
+                    sessions = list(AgentSession.query.filter(session_id=valor_session_id))
+                    if sessions:
+                        slug = sessions[0].slug or sessions[0].work_item_slug
+                except Exception:
+                    pass
+
+        if not slug:
+            return []
+
+        from agent.finding_query import query_findings
+
+        findings = query_findings(slug=slug, topics=keywords, limit=2)
+        if not findings:
+            return []
+
+        thoughts = []
+        for finding in findings:
+            content = getattr(finding, "content", "")
+            stage = getattr(finding, "stage", "")
+            if content:
+                prefix = f"[Prior finding from {stage}] " if stage else "[Prior finding] "
+                thoughts.append(f"<thought>{prefix}{content}</thought>")
+
+        if thoughts:
+            logger.debug(
+                f"[memory_hook] Injected {len(thoughts)} finding thoughts "
+                f"for session {session_id}, slug={slug}"
+            )
+
+        return thoughts
+
+    except Exception as e:
+        logger.debug(f"[memory_hook] Finding injection failed (non-fatal): {e}")
+        return []
 
 
 def get_injected_thoughts(session_id: str) -> list[tuple[str, str]]:

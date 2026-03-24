@@ -24,6 +24,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Config Architecture](config-architecture.md) | Unified config system: Pydantic Settings, path constants, zero hardcoded paths | Shipped |
 | [Context Fidelity Modes](context-fidelity-modes.md) | Right-sized context compression (full/compact/minimal/steering) for sub-agent dispatch | Shipped |
 | [Correlation IDs](correlation-ids.md) | End-to-end request tracing with shared correlation_id from Telegram receipt to response delivery | Shipped |
+| [Cross-Agent Knowledge Relay](cross-agent-knowledge-relay.md) | Persistent findings from parallel sub-agent work: extract on completion, inject into subsequent stages | Shipped |
 | [Deep Plan Analysis](deep-plan-analysis.md) | Prior Art, Data Flow, Failure Analysis, and Architectural Impact investigation sections in /do-plan | Shipped |
 | [Deployment](deployment.md) | Multi-instance deployment configuration with per-machine project routing | Shipped |
 | [Design Review](do-design-review.md) | Review web UI against 10 premium design criteria with severity ratings | Shipped |
