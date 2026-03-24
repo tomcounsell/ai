@@ -827,6 +827,33 @@ def retry_job(stable_job_id: str) -> AgentSession | None:
         f"[pm-controls] Retried job {job.job_id} -> {new_job.job_id} "
         f"(old_stable={stable_job_id}, new_stable={new_job.stable_job_id})"
     )
+
+    # Update depends_on references in pending jobs that pointed to the old stable_job_id.
+    # Without this, dependents would be stuck waiting for the original (now failed/cancelled) job.
+    new_stable_id = new_job.stable_job_id
+    if new_stable_id != stable_job_id:
+        chat_id = job.chat_id
+        try:
+            pending_jobs = list(AgentSession.query.filter(chat_id=chat_id, status="pending"))
+            for pending in pending_jobs:
+                deps = pending.depends_on
+                if not deps or stable_job_id not in deps:
+                    continue
+                # Replace old stable_job_id with new one using delete-and-recreate
+                # (ListField values require recreating the object to update indexes)
+                updated_deps = [new_stable_id if d == stable_job_id else d for d in deps]
+                pending_fields = _extract_job_fields(pending)
+                pending.delete()
+                pending_fields["depends_on"] = updated_deps
+                AgentSession.create(**pending_fields)
+                logger.info(
+                    f"[pm-controls] Updated depends_on for job "
+                    f"{pending_fields.get('stable_job_id', '?')}: "
+                    f"{stable_job_id} -> {new_stable_id}"
+                )
+        except Exception as e:
+            logger.warning(f"[pm-controls] Failed to update depends_on references after retry: {e}")
+
     return new_job
 
 

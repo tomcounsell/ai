@@ -451,6 +451,48 @@ class TestRetryJob:
         result = retry_job("nonexistent")
         assert result is None
 
+    def test_retry_updates_dependents(self, mock_agent_session):
+        """When a job is retried, pending jobs that depend on its old
+        stable_job_id should be updated to reference the new stable_job_id."""
+        from agent.job_queue import retry_job
+
+        old_stable = "old-stable-id"
+
+        # The failed job being retried
+        job = MagicMock()
+        job.status = "failed"
+        job.job_id = "old-id"
+        job.chat_id = "chat-1"
+
+        # A pending job that depends on the old stable id
+        dependent = MagicMock()
+        dependent.depends_on = [old_stable, "other-dep"]
+        dependent.stable_job_id = "dep-stable"
+
+        # The new job created by retry
+        new_job = MagicMock()
+        new_job.job_id = "new-id"
+        new_job.stable_job_id = "new-stable-id"
+
+        mock_agent_session.create.return_value = new_job
+
+        # First call: filter(stable_job_id=old_stable) -> [job]
+        # Second call: filter(chat_id="chat-1", status="pending") -> [dependent]
+        mock_agent_session.query.filter.side_effect = [
+            [job],  # lookup the job to retry
+            [dependent],  # pending jobs in the same chat
+        ]
+
+        result = retry_job(old_stable)
+        assert result is not None
+
+        # Verify the dependent was deleted and recreated with updated deps
+        dependent.delete.assert_called_once()
+        # The second create call should have the updated depends_on
+        assert mock_agent_session.create.call_count == 2
+        second_create_kwargs = mock_agent_session.create.call_args_list[1][1]
+        assert second_create_kwargs["depends_on"] == ["new-stable-id", "other-dep"]
+
 
 class TestGetQueueStatus:
     """Tests for get_queue_status PM control."""
