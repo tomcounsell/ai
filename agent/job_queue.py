@@ -16,6 +16,7 @@ import os
 import signal
 import subprocess
 import time
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -245,6 +246,10 @@ _JOB_FIELDS = [
     "claude_session_uuid",
     # Job hierarchy fields — must be preserved across delete-and-recreate
     "parent_job_id",
+    # Job dependency fields — must be preserved across delete-and-recreate
+    "stable_job_id",
+    "depends_on",
+    "commit_sha",
     # === ChatSession/DevSession fields ===
     "session_type",
     "result_text",
@@ -289,11 +294,19 @@ async def _push_job(
     parent_job_id: str | None = None,
     telegram_message_key: str | None = None,
     session_type: str = "chat",
+    depends_on: list[str] | None = None,
 ) -> int:
     """Create a job in Redis and return the pending queue depth for this chat.
 
     Queue is keyed by chat_id so different chat groups for the same project
     can run in parallel. project_key is preserved on the model for config lookup.
+
+    Args:
+        depends_on: List of stable_job_id values this job must wait for.
+            Jobs with unmet dependencies are skipped by _pop_job() until
+            all dependencies reach a terminal state (completed). Dependencies
+            in failed or cancelled state block dependents and trigger PM
+            notification.
 
     Bug 3 fix (issue #374): When creating a new record for a continuation
     (reply-to-resume), mark old completed records with the same session_id
@@ -344,6 +357,8 @@ async def _push_job(
         scheduling_depth=scheduling_depth,
         parent_job_id=parent_job_id,
         telegram_message_key=telegram_message_key,
+        stable_job_id=uuid.uuid4().hex,
+        depends_on=depends_on,
     )
 
     # Log lifecycle transition for newly created pending job
@@ -361,6 +376,79 @@ async def _push_job(
     return await AgentSession.query.async_count(chat_id=chat_id, status="pending")
 
 
+# Terminal statuses for dependency resolution
+_TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
+
+
+def _dependencies_met(job: AgentSession) -> bool:
+    """Check if all dependencies for a job are met (completed).
+
+    A dependency is met only when its stable_job_id resolves to a job
+    with status 'completed'. Dependencies in 'failed' or 'cancelled'
+    state block the dependent job. Missing stable_job_ids (deleted from
+    Redis) are treated as blocked (conservative — notify PM).
+
+    Args:
+        job: The AgentSession to check dependencies for.
+
+    Returns:
+        True if the job has no dependencies or all are completed.
+        False if any dependency is not completed.
+    """
+    deps = job.depends_on
+    if not deps:
+        return True
+
+    for dep_stable_id in deps:
+        if not dep_stable_id:
+            continue
+        try:
+            dep_jobs = list(AgentSession.query.filter(stable_job_id=dep_stable_id))
+            if not dep_jobs:
+                # Missing dependency — treat as blocked (conservative)
+                logger.warning(
+                    f"[dependency] Job {job.job_id} depends on missing "
+                    f"stable_job_id={dep_stable_id} — blocked"
+                )
+                return False
+            dep = dep_jobs[0]
+            if dep.status != "completed":
+                return False
+        except Exception as e:
+            logger.warning(
+                f"[dependency] Error checking dependency {dep_stable_id} "
+                f"for job {job.job_id}: {e} — treating as blocked"
+            )
+            return False
+
+    return True
+
+
+def dependency_status(job: AgentSession) -> dict[str, str]:
+    """Return the status of each dependency for a job.
+
+    Returns a dict mapping stable_job_id -> status string.
+    Missing dependencies are reported as 'missing'.
+    """
+    deps = job.depends_on
+    if not deps:
+        return {}
+
+    result = {}
+    for dep_stable_id in deps:
+        if not dep_stable_id:
+            continue
+        try:
+            dep_jobs = list(AgentSession.query.filter(stable_job_id=dep_stable_id))
+            if not dep_jobs:
+                result[dep_stable_id] = "missing"
+            else:
+                result[dep_stable_id] = dep_jobs[0].status or "unknown"
+        except Exception:
+            result[dep_stable_id] = "error"
+    return result
+
+
 async def _pop_job(chat_id: str) -> Job | None:
     """
     Pop the highest priority pending job for a chat.
@@ -370,6 +458,12 @@ async def _pop_job(chat_id: str) -> Job | None:
 
     Order: urgent > high > normal > low, then within same priority FIFO (oldest first).
     Jobs with scheduled_after in the future are skipped (deferred execution).
+    Jobs with unmet depends_on are skipped (dependency blocking).
+
+    Dependency semantics:
+    - Only 'completed' is considered "met". 'failed' and 'cancelled' block dependents.
+    - Missing stable_job_id (deleted from Redis) is treated as blocked (conservative).
+    - Empty or None depends_on is treated as no dependencies.
 
     Uses delete-and-recreate instead of field mutation to avoid KeyField
     index corruption. Popoto's KeyField.on_save() only ADDs to the new
@@ -383,6 +477,11 @@ async def _pop_job(chat_id: str) -> Job | None:
     # Filter out jobs with scheduled_after in the future
     now = time.time()
     eligible = [j for j in pending if not j.scheduled_after or j.scheduled_after <= now]
+    if not eligible:
+        return None
+
+    # Filter out jobs with unmet dependencies
+    eligible = [j for j in eligible if _dependencies_met(j)]
     if not eligible:
         return None
 
@@ -540,7 +639,7 @@ async def _finalize_parent(
 
     # Build effective status map: override the completing child's status
     # since its Redis status hasn't been updated yet
-    terminal_statuses = {"completed", "failed"}
+    terminal_statuses = _TERMINAL_STATUSES
 
     def effective_status(child: AgentSession) -> str:
         if completing_child_id and child.job_id == completing_child_id:
@@ -841,7 +940,7 @@ async def _job_hierarchy_health_check() -> None:
                 stuck_fixed += 1
                 continue
 
-            terminal_statuses = {"completed", "failed"}
+            terminal_statuses = _TERMINAL_STATUSES
             non_terminal = [c for c in children if c.status not in terminal_statuses]
             if not non_terminal:
                 # All children terminal but parent still waiting
@@ -866,6 +965,51 @@ async def _job_hierarchy_health_check() -> None:
         )
 
 
+async def _dependency_health_check() -> None:
+    """Detect and handle stuck dependency chains.
+
+    Checks pending jobs with depends_on references to failed, cancelled,
+    or missing jobs. These will never become eligible without intervention.
+    Logs warnings for PM visibility.
+    """
+    try:
+        pending_jobs = list(AgentSession.query.filter(status="pending"))
+        stuck_count = 0
+        for job in pending_jobs:
+            deps = job.depends_on
+            if not deps:
+                continue
+            for dep_stable_id in deps:
+                if not dep_stable_id:
+                    continue
+                dep_jobs = list(AgentSession.query.filter(stable_job_id=dep_stable_id))
+                if not dep_jobs:
+                    logger.warning(
+                        "[dependency-health] Job %s blocked on missing "
+                        "dependency stable_job_id=%s — PM action needed",
+                        job.job_id,
+                        dep_stable_id,
+                    )
+                    stuck_count += 1
+                elif dep_jobs[0].status in ("failed", "cancelled"):
+                    logger.warning(
+                        "[dependency-health] Job %s blocked on %s "
+                        "dependency stable_job_id=%s (job_id=%s) — PM action needed",
+                        job.job_id,
+                        dep_jobs[0].status,
+                        dep_stable_id,
+                        dep_jobs[0].job_id,
+                    )
+                    stuck_count += 1
+        if stuck_count:
+            logger.info(
+                "[dependency-health] Found %d stuck dependency chain(s)",
+                stuck_count,
+            )
+    except Exception as e:
+        logger.error("[dependency-health] Health check failed: %s", e, exc_info=True)
+
+
 async def _job_health_loop() -> None:
     """Periodically check running jobs for liveness and timeout."""
     logger.info(
@@ -876,6 +1020,7 @@ async def _job_health_loop() -> None:
         try:
             await _job_health_check()
             await _job_hierarchy_health_check()
+            await _dependency_health_check()
         except Exception as e:
             logger.error("[job-health] Error in health check: %s", e, exc_info=True)
         await asyncio.sleep(JOB_HEALTH_CHECK_INTERVAL)

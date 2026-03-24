@@ -157,6 +157,17 @@ class AgentSession(Model):
     # Parent tracks aggregate progress via get_children() / get_completion_progress().
     parent_job_id = KeyField(null=True)
 
+    # === Job dependency fields ===
+    # stable_job_id: UUID set once at creation, never changes on delete-and-recreate.
+    # job_id (AutoKeyField) changes on status transitions; stable_job_id does not.
+    # This is the dependency reference key. Nullable for pre-existing jobs.
+    stable_job_id = KeyField(null=True)
+    # depends_on: list of stable_job_id values this job must wait for.
+    # Only jobs whose dependencies are all in terminal state become eligible.
+    depends_on = ListField(null=True)
+    # commit_sha: HEAD commit SHA recorded at pause for checkpoint/restore.
+    commit_sha = Field(null=True)
+
     # === Compatibility ===
 
     @property
