@@ -173,6 +173,8 @@ Findings decay naturally via DecayingSortedField:
 - [ ] All extraction/query/injection failures are caught silently -- finding system never crashes the agent
 - [ ] Unit tests cover Finding model, extraction, query, injection, and deduplication
 - [ ] Integration test verifies end-to-end relay: extract from one session, inject into another
+- [ ] Integration tests use real Redis (not mocks) for the full extract-store-query-inject pipeline
+- [ ] At least one value measurement test proves findings from stage N appear in stage N+1 context
 - [ ] Feature documentation at `docs/features/cross-agent-knowledge-relay.md`
 
 ## No-Gos
@@ -241,6 +243,39 @@ New test files:
 - **Cross-slug findings**: Do not propagate findings across work items. Each slug is isolated. If a pattern is truly general, it belongs in Memory (subconscious), not Finding.
 - **Finding UI**: Do not build a web UI for browsing findings. This is a machine-to-machine system. Debugging can use Redis CLI or a simple script.
 - **Finding export/sync**: Do not add cross-machine sync for findings. Findings are ephemeral by design (they decay). Patterns that survive should crystallize into ProceduralPatterns (#393).
+
+## Integration & Value Measurement
+
+The current test suite (57 tests) relies entirely on mocks. This section defines real Redis integration tests and value measurement tests that prove the pipeline works end-to-end.
+
+### Real Redis Integration Tests
+
+All tests below use actual Redis (no mocks for Redis or Popoto). Test file: `tests/integration/test_finding_relay.py` (replace existing mock-based content).
+
+- [ ] **Finding round-trip**: `Finding.save()` to Redis, then retrieve by slug -- verify all fields persist correctly
+- [ ] **Query round-trip**: Save multiple findings with different importance/stages, call `query_findings(slug, topics)`, verify ranked results come back from real Redis
+- [ ] **Injection format**: Query findings from Redis, pass through `format_findings_for_injection()`, verify output contains correct `<thought>` block structure
+- [ ] **Full pipeline**: SubagentStop extraction (with mock Haiku, real Redis) saves Finding records, then `query_findings()` retrieves them, then injection formats them -- complete extract-store-query-inject cycle
+- [ ] **Deduplication round-trip**: Save a finding to Redis, then run extraction with a duplicate content string, verify the existing finding's confidence is reinforced (not a new record created)
+- [ ] **Bloom filter with real data**: Save findings, verify `Finding.bloom.might_exist()` returns True for saved content and (probabilistically) False for unseen content
+
+### Value Measurement Tests
+
+These tests prove that findings from one SDLC stage actually appear in the next stage's context. Test file: `tests/integration/test_finding_value.py` (new file).
+
+- [ ] **Cross-stage relay**: Create findings tagged `stage=BUILD` for a slug, then simulate a TEST-stage dev-session dispatch -- verify the pre-dispatch prompt includes BUILD-stage findings
+- [ ] **PostToolUse injection**: Create findings for a slug in Redis, configure a session with that slug, trigger PostToolUse hook -- verify `additionalContext` contains finding `<thought>` blocks
+- [ ] **Before/after comparison**: Run `query_findings()` for a slug with zero prior findings (returns empty), then save findings and re-query -- assert the "with" case returns actionable context (non-empty list with content matching saved findings)
+- [ ] **Injection count**: Save N findings across BUILD and REVIEW stages, query from TEST stage context -- verify the count of injected findings matches expectations (respects limit parameter and token budget)
+- [ ] **Relevance filtering**: Save findings with varying importance scores, query with a topic list -- verify higher-importance findings rank first and low-importance findings are excluded by WriteFilterMixin
+
+### Mock Test Disposition
+
+- [ ] `tests/unit/test_finding_injection.py` -- KEEP mock tests for Haiku API calls and error handling paths; REMOVE mock Redis tests (replaced by real Redis integration tests above)
+- [ ] `tests/unit/test_finding_relay.py` -- DELETE entirely (replaced by `tests/integration/test_finding_relay.py` with real Redis)
+- [ ] `tests/unit/test_finding_model.py` -- KEEP for model schema validation; REMOVE any mock Redis CRUD tests (covered by integration tests)
+- [ ] `tests/unit/test_finding_extraction.py` -- KEEP mock Haiku extraction tests (external API); REMOVE mock Redis persistence tests
+- [ ] `tests/unit/test_finding_query.py` -- KEEP mock tests for CompositeScoreQuery logic; ADD real Redis variants in integration suite
 
 ## Documentation
 
