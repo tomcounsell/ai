@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from scripts.issue_dedup import (
     DUPLICATE_THRESHOLD,
@@ -155,34 +155,34 @@ class TestHasSufficientContext:
 class TestFilterNewIssues:
     """Test seen-issue filtering."""
 
-    def test_filters_seen_issues(self):
-        r = MagicMock()
-        r.sismember.side_effect = lambda key, num: num == "1"
+    @patch("scripts.issue_poller.is_seen")
+    def test_filters_seen_issues(self, mock_is_seen):
+        mock_is_seen.side_effect = lambda org, repo, num: num == 1
 
         issues = [
             {"number": 1, "title": "Old"},
             {"number": 2, "title": "New"},
             {"number": 3, "title": "Also New"},
         ]
-        result = filter_new_issues(r, "org", "repo", issues)
+        result = filter_new_issues("org", "repo", issues)
         assert len(result) == 2
         assert result[0]["number"] == 2
         assert result[1]["number"] == 3
 
-    def test_all_seen(self):
-        r = MagicMock()
-        r.sismember.return_value = True
+    @patch("scripts.issue_poller.is_seen")
+    def test_all_seen(self, mock_is_seen):
+        mock_is_seen.return_value = True
 
         issues = [{"number": 1}, {"number": 2}]
-        result = filter_new_issues(r, "org", "repo", issues)
+        result = filter_new_issues("org", "repo", issues)
         assert len(result) == 0
 
-    def test_none_seen(self):
-        r = MagicMock()
-        r.sismember.return_value = False
+    @patch("scripts.issue_poller.is_seen")
+    def test_none_seen(self, mock_is_seen):
+        mock_is_seen.return_value = False
 
         issues = [{"number": 1}, {"number": 2}]
-        result = filter_new_issues(r, "org", "repo", issues)
+        result = filter_new_issues("org", "repo", issues)
         assert len(result) == 2
 
 
@@ -217,6 +217,7 @@ class TestLoadProjects:
 class TestProcessIssue:
     """Test the main issue processing logic."""
 
+    @patch("scripts.issue_poller.mark_seen")
     @patch("scripts.issue_poller.dispatch_plan_creation")
     @patch("scripts.issue_poller.apply_label")
     @patch("scripts.issue_poller.send_telegram_notification")
@@ -231,15 +232,14 @@ class TestProcessIssue:
         mock_notify,
         mock_label,
         mock_dispatch,
+        mock_mark_seen,
     ):
-        r = MagicMock()
         mock_existing.return_value = False
         mock_compare.return_value = None  # unique
         mock_comment_id.return_value = "12345"
         mock_dispatch.return_value = True
 
         result = process_issue(
-            r,
             "org",
             "repo",
             {
@@ -252,18 +252,19 @@ class TestProcessIssue:
         )
         assert result == "planned"
         mock_dispatch.assert_called_once()
-        r.sadd.assert_called()
+        mock_mark_seen.assert_called_with("org", "repo", 1)
 
+    @patch("scripts.issue_poller.mark_seen")
     @patch("scripts.issue_poller.add_comment")
     @patch("scripts.issue_poller.apply_label")
     @patch("scripts.issue_poller.send_telegram_notification")
     @patch("scripts.issue_poller.check_existing_plan")
-    def test_flags_insufficient_context(self, mock_existing, mock_notify, mock_label, mock_comment):
-        r = MagicMock()
+    def test_flags_insufficient_context(
+        self, mock_existing, mock_notify, mock_label, mock_comment, mock_mark_seen
+    ):
         mock_existing.return_value = False
 
         result = process_issue(
-            r,
             "org",
             "repo",
             {"number": 1, "title": "Bug", "body": "Fix it"},
@@ -273,13 +274,13 @@ class TestProcessIssue:
         assert result == "needs-review"
         mock_label.assert_called_with("org", "repo", 1, "needs-review")
 
+    @patch("scripts.issue_poller.mark_seen")
     @patch("scripts.issue_poller.check_existing_plan")
-    def test_skips_existing_plan(self, mock_existing):
-        r = MagicMock()
+    def test_skips_existing_plan(self, mock_existing, mock_mark_seen):
         mock_existing.return_value = True
 
         result = process_issue(
-            r, "org", "repo", {"number": 1, "title": "Test", "body": "Test body text"}, [], []
+            "org", "repo", {"number": 1, "title": "Test", "body": "Test body text"}, [], []
         )
         assert result == "skipped"
 

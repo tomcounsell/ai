@@ -63,13 +63,13 @@ def release_lock(r) -> None:
     r.delete(LOCK_KEY)
 
 
-def mark_seen(r, org: str, repo: str, issue_number: int) -> None:
+def mark_seen(org: str, repo: str, issue_number: int) -> None:
     """Mark an issue as seen (processed)."""
     record = SeenIssue.get_or_create(org, repo)
     record.mark(issue_number)
 
 
-def is_seen(r, org: str, repo: str, issue_number: int) -> bool:
+def is_seen(org: str, repo: str, issue_number: int) -> bool:
     """Check if an issue has already been processed."""
     record = SeenIssue.get_or_create(org, repo)
     return record.is_seen(issue_number)
@@ -179,9 +179,9 @@ def get_latest_comment_id(org: str, repo: str, issue_number: int) -> str | None:
         return None
 
 
-def filter_new_issues(r, org: str, repo: str, issues: list[dict]) -> list[dict]:
+def filter_new_issues(org: str, repo: str, issues: list[dict]) -> list[dict]:
     """Filter out already-seen issues."""
-    return [issue for issue in issues if not is_seen(r, org, repo, issue["number"])]
+    return [issue for issue in issues if not is_seen(org, repo, issue["number"])]
 
 
 def has_sufficient_context(issue: dict) -> bool:
@@ -340,7 +340,6 @@ def send_telegram_notification(message: str, groups: list[str] | None = None) ->
 
 
 def process_issue(
-    r,
     org: str,
     repo: str,
     issue: dict,
@@ -360,7 +359,7 @@ def process_issue(
     # Check if a plan already exists (race condition prevention)
     if check_existing_plan(org, repo, number):
         logger.info(f"Plan already exists for {org}/{repo}#{number}, marking as seen")
-        mark_seen(r, org, repo, number)
+        mark_seen(org, repo, number)
         return "skipped"
 
     # Check for sufficient context
@@ -379,7 +378,7 @@ def process_issue(
             f"Issue {org}/{repo}#{number} needs review (insufficient context): {title}",
             telegram_groups,
         )
-        mark_seen(r, org, repo, number)
+        mark_seen(org, repo, number)
         return "needs-review"
 
     # Run dedup check against other open issues
@@ -415,7 +414,7 @@ def process_issue(
             f"({score:.0%}): {title}",
             telegram_groups,
         )
-        mark_seen(r, org, repo, number)
+        mark_seen(org, repo, number)
         return "duplicate"
 
     # Get latest comment ID for plan frontmatter
@@ -429,7 +428,7 @@ def process_issue(
             f"Auto-planned: {org}/{repo}#{number}: {title}",
             telegram_groups,
         )
-        mark_seen(r, org, repo, number)
+        mark_seen(org, repo, number)
 
         # Note related issues in plan if any
         if dedup_result and dedup_result.get("classification") == "related":
@@ -443,7 +442,6 @@ def process_issue(
 
 
 def poll_project(
-    r,
     project: dict,
 ) -> dict:
     """Poll a single project for new issues.
@@ -461,7 +459,7 @@ def poll_project(
         logger.info(f"No open issues found for {org}/{repo}")
         return {"total": 0, "new": 0, "planned": 0, "duplicate": 0, "error": 0}
 
-    new_issues = filter_new_issues(r, org, repo, issues)
+    new_issues = filter_new_issues(org, repo, issues)
     logger.info(f"Found {len(new_issues)} new issues in {org}/{repo}")
 
     results = {
@@ -475,7 +473,7 @@ def poll_project(
     }
 
     for issue in new_issues:
-        status = process_issue(r, org, repo, issue, issues, telegram_groups)
+        status = process_issue(org, repo, issue, issues, telegram_groups)
         results[status] = results.get(status, 0) + 1
 
     return results
@@ -508,7 +506,7 @@ def run_polling_cycle() -> dict:
         for project in projects:
             key = f"{project['org']}/{project['repo']}"
             try:
-                summary[key] = poll_project(r, project)
+                summary[key] = poll_project(project)
             except Exception as e:
                 logger.error(f"Error polling {key}: {e}")
                 summary[key] = {"error": str(e)}
