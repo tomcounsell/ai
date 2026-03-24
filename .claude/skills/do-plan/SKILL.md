@@ -208,11 +208,6 @@ gh issue edit $EXISTING_ISSUE --add-label "plan"
 
 **Only create a NEW issue if** the plan was initiated from scratch (not from an existing issue).
 
-Before creating, check `~/Desktop/Valor/projects.json` for the current project:
-- If `notion` key exists -> create a Notion task (use Notion MCP tools)
-- If only `github` key exists -> create a GitHub issue (use `gh` CLI)
-- If neither -> skip tracking, just use the plan doc
-
 ```bash
 TYPE=$(grep '^type:' docs/plans/{slug}.md | sed 's/type: *//' | tr -d ' ')
 if [ -z "$TYPE" ]; then
@@ -278,8 +273,6 @@ $(gh issue view $ISSUE_NUM --json body -q .body)"
 fi
 ```
 
-For Notion tasks, use MCP tools to create a page with Title, Status, Type, and link to the plan document.
-
 After linking or creating: update the plan's `tracking:` field and commit.
 
 ### Phase 2.7: Sync Issue Comments into Plan
@@ -327,7 +320,7 @@ Plan critique is handled separately by `/do-plan-critique` (war room). This phas
 ```
 Plan draft created: docs/plans/{slug}.md
 
-Tracking: {GitHub issue URL or Notion page URL}
+Tracking: {GitHub issue URL}
 
 I've made the following key assumptions:
 - [Assumption 1]
@@ -342,18 +335,14 @@ After receiving answers:
 
 1. **Update plan** - Incorporate feedback, remove Open Questions section
 2. **Mark as finalized** - Update frontmatter: `status: Ready`
-3. **Suggest implementation prompt**:
+3. **Invite discussion**:
 
 ```
 Plan finalized: docs/plans/{slug}.md
 
-When you're ready to implement, use this prompt:
+Tracking: {GitHub issue URL}
 
----
-Implement the plan in docs/plans/{slug}.md
-
-Follow the solution approach, stay within the appetite, and avoid the identified rabbit holes. Check off success criteria as you complete them.
----
+I think I'm done, but I'm supposed to ask — does anything feel off? Missed edge cases, wrong assumptions, anything that doesn't sit right? Now is the cheapest time to catch it.
 ```
 
 ## Output Location
@@ -386,6 +375,6 @@ Status and classification are tracked in the plan document's YAML frontmatter.
 Update status as work progresses. Keep all tracking in the plan document itself.
 
 **Tracking issue lifecycle:**
-- When plan status changes to `Ready` or `In Progress`, update the GitHub issue / Notion task status accordingly
+- When plan status changes to `Ready` or `In Progress`, update the GitHub issue status accordingly
 - Issues are closed automatically when the **implementation PR** merges (via `Closes #N` in the do-build PR body) — do NOT close issues manually
 - **Plan PRs (on protected branches) must NEVER close the tracking issue** — only the implementation PR should
