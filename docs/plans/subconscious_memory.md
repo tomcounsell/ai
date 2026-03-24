@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Large
 owner: Valor
@@ -274,7 +274,8 @@ Integration test: Save a memory via `Memory.save()`, trigger a PostToolUse hook 
 - [ ] System prompt priming in `config/personas/_base.md` across all session types
 - [ ] Async Haiku extraction runs post-session, saves novel observations as memories
 - [ ] Outcome detection compares injected thoughts vs response, feeds ObservationProtocol
-- [ ] Rate limiting prevents thought injection flooding (configurable interval)
+- [ ] Sliding window injection: every 3 tool calls, rolling buffer of 9, topic keywords from windows
+- [ ] Bigram outcome detection: 1-2 word phrase overlap between injected thoughts and response
 - [ ] All memory operations wrapped in try/except with logging (never crash agent)
 - [ ] `config/memory_defaults.py` overrides popoto Defaults with tuning constants
 - [ ] Logging on all memory ops: injection count, extraction count, outcome breakdown
@@ -367,8 +368,8 @@ Integration test: Save a memory via `Memory.save()`, trigger a PostToolUse hook 
 - If positive: run `ContextAssembler.assemble()` with keywords as query_cues
 - Format results as `<thought>content</thought>` blocks
 - Return via `additionalContext` in hook response
-- Rate limit: inject every 10 tool calls OR on topic keyword change
-- Track injected thoughts in session-scoped list for outcome detection
+- Sliding window rate limiting: keep rolling buffer of last 9 tool calls (3 windows of 3). Every 3rd call, extract topic keywords from current window + previous two windows for richer context
+- Track injected thoughts in session-scoped list for outcome detection (list of (memory_key, content) tuples)
 - Integrate into `watchdog_hook()` in `agent/health_check.py`
 - All operations wrapped in try/except with logging
 - Reference `~/src/popoto/docs/features/context-assembler.md` for ContextAssembler API
@@ -443,10 +444,10 @@ Integration test: Save a memory via `Memory.save()`, trigger a PostToolUse hook 
 
 ---
 
-## Open Questions
+## Resolved Questions
 
-1. **Extraction prompt tuning**: The Haiku extraction prompt needs to distinguish novel observations from generic LLM output. Should we start with a conservative prompt (extract very little) and loosen it, or aggressive (extract more) and tighten?
+1. **Extraction prompt tuning**: Start aggressive — extract more, tune down. We want to generate data for tuning Defaults, so over-extraction is better than under-extraction for v1. WriteFilterMixin gates the worst noise at save time.
 
-2. **Rate limiting strategy**: Proposed: inject every 10 tool calls OR on topic keyword change. Is 10 the right interval, or should it be adaptive based on session length?
+2. **Rate limiting strategy**: Sliding window of 3, remembering 9. Keep a rolling buffer of the last 9 tool calls (3 windows of 3). Every 3rd tool call, extract topic keywords from the current window with context from the previous two windows. This catches multi-step patterns (e.g., "opened deploy.sh → grepped rollback → read config.yaml" → topic: deployment).
 
-3. **Outcome detection v1**: Keyword overlap for acted/dismissed is crude but simple. Is that acceptable for v1, with Haiku-based classification as a future upgrade?
+3. **Outcome detection v1**: Bigram (1-2 word phrase) overlap between injected thought content and response text. Pure Python, no LLM. Extract n-grams from both, check intersection. Non-empty overlap → acted, empty → dismissed. Contradicted detection deferred to v2 (requires semantic understanding). Upgrade path: local classifier or Haiku if bigrams prove too noisy.
