@@ -81,6 +81,36 @@ def _record_stage_on_parent(parent_session_id: str) -> None:
         logger.warning(f"[subagent_stop] Failed to record stage completion: {e}")
 
 
+def _extract_outcome_summary(input_data: dict) -> str:
+    """Extract a brief outcome summary from the subagent's return value.
+
+    Looks for common result patterns in the input_data dict and returns
+    a truncated summary string. Returns a sensible default if no
+    meaningful outcome can be extracted.
+
+    Args:
+        input_data: The SubagentStopHookInput dict.
+
+    Returns:
+        A brief outcome summary string (max 200 chars).
+    """
+    # Try common result fields
+    for key in ("result", "output", "response", "summary", "message"):
+        value = input_data.get(key)
+        if value and isinstance(value, str):
+            return value[:200]
+
+    # Try to extract from nested result
+    result = input_data.get("result")
+    if isinstance(result, dict):
+        for key in ("text", "message", "summary", "output"):
+            value = result.get(key)
+            if value and isinstance(value, str):
+                return value[:200]
+
+    return "completed (no detailed outcome available)"
+
+
 def _get_stage_states(session_id: str) -> str | None:
     """Return the SDLC stage_states dict as a string, or None."""
     try:
@@ -112,18 +142,26 @@ async def subagent_stop_hook(
     agent_type = input_data.get("agent_type", "unknown")
     agent_id = input_data.get("agent_id", "unknown")
 
-    logger.info(f"[subagent_stop] Subagent completed: agent_type={agent_type}, agent_id={agent_id}")
+    # Extract outcome summary from subagent return value
+    outcome = _extract_outcome_summary(input_data)
+    logger.info(
+        f"[subagent_stop] Subagent completed: agent_type={agent_type}, "
+        f"agent_id={agent_id}, outcome={outcome}"
+    )
 
     # Register DevSession completion in Redis for parent ChatSession tracking
     if agent_type == "dev-session":
         _register_dev_session_completion(agent_id)
 
-        # Inject SDLC stage state back to PM so it knows what's actually done
+        # Inject SDLC stage state and outcome back to PM
         session_id = os.environ.get("VALOR_SESSION_ID")
         if session_id:
             stages = _get_stage_states(session_id)
             if stages:
                 logger.info(f"[subagent_stop] Injecting stage state for {session_id}")
-                return {"reason": f"Pipeline state: {stages}"}
+                reason = f"Pipeline state: {stages}"
+                if outcome:
+                    reason += f"\nOutcome: {outcome}"
+                return {"reason": reason}
 
     return {}
