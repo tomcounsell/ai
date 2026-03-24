@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Building
 type: feature
 appetite: Medium
 owner: Valor
@@ -20,12 +20,7 @@ When ChatSession orchestrates work through sub-agents (DevSession stages, parall
 
 ## Dependencies
 
-**Blocked on two open issues:**
-
-- **#394** (Popoto Agent Memory integration) -- provides DecayingSortedField, AccessTracker, WriteFilter, ConfidenceField, CoOccurrenceField, CompositeScoreQuery, ExistenceFilter, ContextAssembler
-- **#393** (Behavioral Episode Memory) -- provides the pattern crystallization model (CyclicEpisode, ProceduralPattern)
-
-Both must ship before this work begins. The plan below designs around the primitives described in those issues. Where this plan references a Popoto primitive, the assumption is that the primitive is available as an ORM-level building block per #394.
+**Builds on PR #515** (Subconscious Memory) which shipped the core Popoto primitives: DecayingSortedField, ConfidenceField, WriteFilterMixin, AccessTrackerMixin, ExistenceFilter, CoOccurrenceField, CompositeScoreQuery, ContextAssembler. All primitives are available as ORM-level building blocks.
 
 **Already available (used by this plan):**
 - `Memory` model with DecayingSortedField, ConfidenceField, WriteFilterMixin, AccessTrackerMixin, ExistenceFilter (shipped in PR #515)
@@ -49,14 +44,12 @@ Both must ship before this work begins. The plan below designs around the primit
 - PM check-ins: 1 (design review after plan)
 - Review rounds: 1-2
 
-Depends on #394 and #393 shipping first. Once those land, estimated build effort is 2-3 sessions.
+Builds on PR #515. Estimated build effort is 2-3 sessions.
 
 ## Prerequisites
 
-- #394 (Popoto Agent Memory integration) -- all 12 primitives available
-- #393 (Behavioral Episode Memory) -- CyclicEpisode and ProceduralPattern models established
-- CoOccurrenceField available in popoto (for linking related findings across agents)
-- CompositeScoreQuery available in popoto (for multi-factor retrieval)
+- PR #515 (Subconscious Memory) -- all Popoto primitives available (DecayingSortedField, ConfidenceField, WriteFilterMixin, AccessTrackerMixin, ExistenceFilter, CoOccurrenceField, CompositeScoreQuery, ContextAssembler)
+- Memory model established with bloom filter injection pipeline
 
 ## Solution
 
