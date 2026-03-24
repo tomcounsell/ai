@@ -22,7 +22,7 @@ Popoto primitives used:
 - `ConfidenceField` for deduplication reinforcement
 - `WriteFilterMixin` to gate trivial findings
 - `AccessTrackerMixin` to track which findings get reused
-- `ExistenceFilter` (bloom) for O(1) topic pre-checks
+- `ExistenceFilter` (bloom) for O(1) deduplication pre-checks during extraction
 - `CoOccurrenceField` linking findings from the same extraction batch
 
 ### Extraction (`agent/finding_extraction.py`)
@@ -39,10 +39,12 @@ When a DevSession completes, the SubagentStop hook (`agent/hooks/subagent_stop.p
 
 When extracting new findings:
 
-1. Check `Finding.bloom.might_exist(content)` for O(1) pre-filter
-2. If bloom says "maybe exists," run full content similarity check (exact/substring match)
+1. Check `Finding.bloom.might_exist(content)` for O(1) pre-filter on content strings
+2. If bloom says "maybe exists," run full content similarity check (exact/substring match) within the same slug
 3. If duplicate found: reinforce existing finding's confidence, refresh access tracker
 4. If no duplicate: save as new finding
+
+Note: The bloom filter stores fingerprints of full content strings (via `fingerprint_fn`), so it is only useful for deduplication -- not for keyword/topic searching.
 
 ### Query (`agent/finding_query.py`)
 
@@ -55,7 +57,7 @@ When extracting new findings:
 | Access frequency | 0.2 | AccessTrackerMixin |
 | Topic relevance | 0.1 | Keyword matching against content/file_paths |
 
-ExistenceFilter pre-check: if topics are provided and no bloom hits, the full query is skipped entirely (O(1) short-circuit).
+The query always fetches all findings for the slug, then scores and ranks them client-side. Topic keywords are matched against content and file_paths for the topic relevance component. The ExistenceFilter (bloom) is NOT used in the query path -- it stores content fingerprints for deduplication, not topic keywords, so checking topics against it would produce false negatives.
 
 ### Injection
 
@@ -93,7 +95,7 @@ All finding operations fail silently:
 - Injection failures: no `<thought>` blocks added
 - Redis unavailable: `Finding.safe_save()` returns None
 - Haiku API failure: extraction skipped
-- Bloom corruption: falls through to full query (slower but correct)
+- Bloom corruption: dedup falls through to full content check (slower but correct)
 
 ## Related
 
