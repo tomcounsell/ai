@@ -22,11 +22,11 @@ def _make_test_job(session_id: str, chat_id: str = "test_chat") -> MagicMock:
     job.project_key = "valor"
     job.session_id = session_id
     job.chat_id = chat_id
-    job.message_id = 1
+    job.telegram_message_id = 1
     job.auto_continue_count = 0
     job.message_text = "test message"
     job.sender_name = "Test"
-    job.trigger_message_id = None
+    job.telegram_message_key = None
     job.work_item_slug = None
     job.task_list_id = None
     return job
@@ -46,7 +46,7 @@ class TestNudgeLoopOutcomes:
             project_key="valor",
             working_dir="/tmp/test",
             chat_id="tc",
-            message_id=1,
+            telegram_message_id=1,
             message_text="build something",
         )
         session.status = "running"
@@ -84,7 +84,7 @@ class TestNudgeLoopOutcomes:
             project_key="valor",
             working_dir="/tmp/test",
             chat_id="tc",
-            message_id=1,
+            telegram_message_id=1,
             message_text="what time is it?",
         )
         session.status = "running"
@@ -178,7 +178,7 @@ class TestNudgeLoopOutcomes:
             project_key="valor",
             working_dir="/tmp/test",
             chat_id="tc",
-            message_id=1,
+            telegram_message_id=1,
             message_text="test",
         )
         session.status = "completed"

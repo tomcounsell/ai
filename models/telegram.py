@@ -19,7 +19,7 @@ class TelegramMessage(Model):
 
     Carries all message metadata (media, URLs, classification) that was
     previously stored on AgentSession. AgentSession now references this
-    model via trigger_message_id.
+    model via telegram_message_key.
     """
 
     msg_id = AutoKeyField()

@@ -26,7 +26,7 @@ class TestSessionErrorIsolation:
             project_key="valor",
             working_dir="/tmp/test",
             chat_id=chat_id,
-            message_id=1,
+            telegram_message_id=1,
             message_text="task 1",
         )
         session2 = AgentSession.create_chat(
@@ -34,7 +34,7 @@ class TestSessionErrorIsolation:
             project_key="valor",
             working_dir="/tmp/test",
             chat_id=chat_id,
-            message_id=2,
+            telegram_message_id=2,
             message_text="task 2",
         )
 
@@ -71,7 +71,7 @@ class TestSessionErrorIsolation:
             project_key="valor",
             working_dir="/tmp/test",
             chat_id="err_chat",
-            message_id=1,
+            telegram_message_id=1,
             message_text="do something risky",
         )
         session.status = "running"
@@ -95,7 +95,7 @@ class TestSessionErrorIsolation:
             project_key="valor",
             working_dir="/tmp/test",
             chat_id=f"chat_a_{ts}",
-            message_id=1,
+            telegram_message_id=1,
             message_text="task a",
         )
         s_a.status = "failed"
@@ -107,7 +107,7 @@ class TestSessionErrorIsolation:
             project_key="valor",
             working_dir="/tmp/test",
             chat_id=f"chat_b_{ts}",
-            message_id=1,
+            telegram_message_id=1,
             message_text="task b",
         )
         s_b.status = "running"

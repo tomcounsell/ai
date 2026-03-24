@@ -31,7 +31,7 @@ def _create_test_job(**overrides) -> AgentSession:
         "message_text": "test message",
         "sender_name": "Test",
         "chat_id": "123",
-        "message_id": 1,
+        "telegram_message_id": 1,
     }
     defaults.update(overrides)
     return AgentSession.create(**defaults)

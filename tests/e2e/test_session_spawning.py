@@ -29,7 +29,7 @@ class TestDevSessionCreation:
             project_key="valor",
             working_dir="/tmp/test",
             chat_id="test_chat",
-            message_id=1,
+            telegram_message_id=1,
             message_text="run /do-build",
         )
         parent.status = "running"
@@ -84,7 +84,7 @@ class TestDevSessionCompletion:
             project_key="valor",
             working_dir="/tmp/test",
             chat_id="tc",
-            message_id=1,
+            telegram_message_id=1,
             message_text="build",
         )
 
@@ -129,7 +129,7 @@ class TestDevSessionCompletion:
             project_key="valor",
             working_dir="/tmp/test",
             chat_id="tc",
-            message_id=1,
+            telegram_message_id=1,
             message_text="build",
         )
 
@@ -174,7 +174,7 @@ class TestDevSessionCompletion:
             project_key="valor",
             working_dir="/tmp/test",
             chat_id="tc",
-            message_id=1,
+            telegram_message_id=1,
             message_text="complex build",
         )
 

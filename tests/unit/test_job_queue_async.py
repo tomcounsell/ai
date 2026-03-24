@@ -90,7 +90,7 @@ class TestPushJobAsyncWrapping:
                     message_text="hello",
                     sender_name="Test",
                     chat_id="123",
-                    message_id=1,
+                    telegram_message_id=1,
                 )
             )
             # to_thread should be called for superseding and lifecycle logging

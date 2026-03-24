@@ -692,7 +692,7 @@ async def main():
 
         # Store ALL incoming messages for history (regardless of whether we respond)
         _early_project_key = project.get("_key", "dm") if project else "dm"
-        stored_msg_id = None  # Track for trigger_message_id cross-reference
+        stored_msg_id = None  # Track for telegram_message_key cross-reference
         try:
             store_result = store_message(
                 chat_id=str(event.chat_id),
@@ -1295,13 +1295,13 @@ async def main():
             message_text=clean_text,
             sender_name=sender_name,
             chat_id=telegram_chat_id,
-            message_id=message.id,
+            telegram_message_id=message.id,
             chat_title=chat_title,
             priority="normal",
             sender_id=sender_id,
             classification_type=_classification,
             correlation_id=correlation_id,
-            trigger_message_id=stored_msg_id,
+            telegram_message_key=stored_msg_id,
             session_type=_session_type,
         )
         logger.info(

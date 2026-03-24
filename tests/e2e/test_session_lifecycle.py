@@ -34,7 +34,7 @@ class TestSessionCreationFromMessage:
             project_key="valor",
             working_dir="/Users/test/src/ai",
             chat_id=str(event.chat_id),
-            message_id=event.message.id,
+            telegram_message_id=event.message.id,
             message_text=event.message.text,
             sender_name="Tom",
             sender_id=event.sender_id,
@@ -61,7 +61,7 @@ class TestSessionCreationFromMessage:
             project_key="valor",
             working_dir="/Users/test/src/ai",
             chat_id=str(event.chat_id),
-            message_id=event.message.id,
+            telegram_message_id=event.message.id,
             message_text=event.message.text,
         )
 
@@ -80,7 +80,7 @@ class TestSessionStatusTransitions:
             project_key="valor",
             working_dir="/tmp/test",
             chat_id="lc_chat",
-            message_id=1,
+            telegram_message_id=1,
             message_text="do something",
         )
 
@@ -120,7 +120,7 @@ class TestSessionStatusTransitions:
             project_key="valor",
             working_dir="/tmp/test",
             chat_id="dorm_chat",
-            message_id=1,
+            telegram_message_id=1,
             message_text="should I use React or Vue?",
         )
 
@@ -139,7 +139,7 @@ class TestSessionStatusTransitions:
             project_key="valor",
             working_dir="/tmp/test",
             chat_id="fail_chat",
-            message_id=1,
+            telegram_message_id=1,
             message_text="crash me",
         )
 
@@ -183,7 +183,7 @@ class TestHistoryAccumulation:
             project_key="valor",
             working_dir="/tmp/test",
             chat_id="hist_chat",
-            message_id=1,
+            telegram_message_id=1,
             message_text="track this",
         )
 
@@ -205,7 +205,7 @@ class TestHistoryAccumulation:
             project_key="valor",
             working_dir="/tmp/test",
             chat_id="link_chat",
-            message_id=1,
+            telegram_message_id=1,
             message_text="track links",
         )
 

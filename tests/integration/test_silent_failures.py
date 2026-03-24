@@ -46,7 +46,7 @@ class TestPushJobLogging:
             created_at=time.time(),
             message_text="test message",
             working_dir="/tmp/test",
-            message_id=1,
+            telegram_message_id=1,
             priority="normal",
         )
 
@@ -68,7 +68,7 @@ class TestPushJobLogging:
                 message_text="test",
                 sender_name="Test",
                 chat_id="chat_1",
-                message_id=1,
+                telegram_message_id=1,
             )
 
         # Verify warning was logged with session_id
@@ -98,7 +98,7 @@ class TestPopJobLogging:
             created_at=time.time(),
             message_text="test message",
             working_dir="/tmp/test",
-            message_id=2,
+            telegram_message_id=2,
             priority="normal",
         )
 
@@ -141,7 +141,7 @@ class TestEnqueueContinuationSessionLookupLogging:
         mock_job.message_text = "continue"
         mock_job.sender_name = "Test"
         mock_job.chat_id = "chat_3"
-        mock_job.message_id = 3
+        mock_job.telegram_message_id = 3
         mock_job.work_item_slug = None
         mock_job.task_list_id = None
         mock_job.classification_type = None
@@ -246,7 +246,7 @@ class TestCheckRevivalBranchLogging:
             created_at=_time.time(),
             message_text="test",
             working_dir="/tmp/nonexistent",
-            message_id=99,
+            telegram_message_id=99,
             priority="normal",
         )
 

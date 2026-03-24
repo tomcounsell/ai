@@ -23,7 +23,7 @@ class TestPerChatQueueIsolation:
             project_key="valor",
             working_dir="/tmp/test",
             chat_id="chat_111",
-            message_id=1,
+            telegram_message_id=1,
             message_text="Hello from chat A",
             sender_name="Alice",
         )
@@ -32,7 +32,7 @@ class TestPerChatQueueIsolation:
             project_key="valor",
             working_dir="/tmp/test",
             chat_id="chat_222",
-            message_id=2,
+            telegram_message_id=2,
             message_text="Hello from chat B",
             sender_name="Bob",
         )
@@ -54,7 +54,7 @@ class TestPerChatQueueIsolation:
             project_key="valor",
             working_dir="/tmp/test",
             chat_id="chat_333",
-            message_id=10,
+            telegram_message_id=10,
             message_text="msg1",
         )
         s2 = AgentSession.create_chat(
@@ -62,7 +62,7 @@ class TestPerChatQueueIsolation:
             project_key="valor",
             working_dir="/tmp/test",
             chat_id="chat_444",
-            message_id=11,
+            telegram_message_id=11,
             message_text="msg2",
         )
 
@@ -87,7 +87,7 @@ class TestPerChatQueueIsolation:
             project_key="shared_project",
             working_dir="/tmp/test",
             chat_id="group_aaa",
-            message_id=100,
+            telegram_message_id=100,
             message_text="task 1",
         )
         AgentSession.create_chat(
@@ -95,7 +95,7 @@ class TestPerChatQueueIsolation:
             project_key="shared_project",
             working_dir="/tmp/test",
             chat_id="group_bbb",
-            message_id=101,
+            telegram_message_id=101,
             message_text="task 2",
         )
 
@@ -116,7 +116,7 @@ class TestPerChatQueueIsolation:
             project_key="valor",
             working_dir="/tmp/test",
             chat_id="dedup_chat_1",
-            message_id=999,
+            telegram_message_id=999,
             message_text="same message",
         )
         s2 = AgentSession.create_chat(
@@ -124,7 +124,7 @@ class TestPerChatQueueIsolation:
             project_key="valor",
             working_dir="/tmp/test",
             chat_id="dedup_chat_2",
-            message_id=999,
+            telegram_message_id=999,
             message_text="same message",
         )
 
