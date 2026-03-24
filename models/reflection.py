@@ -46,7 +46,7 @@ class Reflection(Model):
     last_status = Field(default="pending")  # pending | running | success | error | skipped
     last_error = Field(null=True, max_length=1000)
     last_duration = Field(type=float, null=True)
-    run_history = ListField(null=True)  # List of run dicts, capped at 200
+    run_history = ListField(default=[])  # List of run dicts, capped at 200
 
     _RUN_HISTORY_CAP = 200
 
@@ -64,6 +64,7 @@ class Reflection(Model):
             last_status="pending",
             last_error=None,
             last_duration=None,
+            run_history=[],
         )
 
     def mark_started(self) -> None:
