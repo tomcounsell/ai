@@ -49,8 +49,8 @@ The job queue processes work sequentially within a chat but lacks three capabili
 
 ## Data Flow
 
-1. **Entry point**: ChatSession queues multiple jobs via `_push_job()`, specifying `depends_on` job IDs
-2. **Queue filtering**: `_pop_job()` checks each pending job's `depends_on` list against completed jobs. Jobs with unmet dependencies are skipped.
+1. **Entry point**: ChatSession queues multiple jobs via `_push_job()`, specifying `depends_on` session IDs (stable keys)
+2. **Queue filtering**: `_pop_job()` checks each pending job's `depends_on` list of session_ids against their terminal status. Jobs with unmet dependencies are skipped.
 3. **Branch resolution**: When `_execute_job()` starts a DevSession, `resolve_branch_for_stage()` maps slug + stage to the correct branch (main for PLAN, `session/{slug}` for BUILD/TEST/REVIEW)
 4. **Worktree setup**: For `session/{slug}` branches, `get_or_create_worktree()` ensures the worktree exists and sets the working directory
 5. **Pause checkpoint**: When a job pauses (steering, dependency), `checkpoint_branch_state()` records current branch + HEAD commit SHA on the AgentSession
@@ -63,7 +63,7 @@ The job queue processes work sequentially within a chat but lacks three capabili
 ## Architectural Impact
 
 - **New dependencies**: None -- uses existing Popoto ORM and git subprocess calls
-- **Interface changes**: `_push_job()` gains `depends_on` parameter; `_pop_job()` gains dependency filtering; new helper functions for branch resolution
+- **Interface changes**: `_push_job()` gains `depends_on` parameter (list of session_ids); `_pop_job()` gains dependency filtering; `retry_job()` for re-queuing failed children; new helper functions for branch resolution
 - **Coupling**: Moderate increase -- job_queue.py gains awareness of branch/worktree state via new helper module. Kept modular by isolating branch resolution into a separate function.
 - **Data ownership**: AgentSession gains `depends_on` (ListField), `commit_sha` (Field) fields. Branch resolution logic owned by new functions in `agent/job_queue.py`. Activity stream writes to `logs/sessions/` (filesystem, not Redis).
 - **Reversibility**: Medium -- new fields can be made nullable and ignored; `_pop_job()` dependency check is a simple filter that can be removed; observability additions are purely additive (new log lines, enriched prompt, activity file) and can be removed without affecting core queue behavior
@@ -93,18 +93,19 @@ No prerequisites -- this work has no external dependencies. All foundational wor
 
 ### Flow
 
-**ChatSession queues work** → `_push_job(depends_on=[job_a_id])` → **Worker loop** → `_pop_job()` checks dependencies → **Skip blocked jobs** → **Pick eligible job** → `resolve_branch_for_stage()` → **DevSession starts on correct branch** → **Work** → **Pause** → `checkpoint_branch_state()` → **Resume** → `restore_branch_state()` → **Complete** → **Dependent jobs become eligible**
+**ChatSession queues work** → `_push_job(depends_on=[session_id_a])` → **Worker loop** → `_pop_job()` checks dependencies by session_id → **Skip blocked jobs** → **Pick eligible job** → `resolve_branch_for_stage()` → **DevSession starts on correct branch** → **Work** → **Pause** → `checkpoint_branch_state()` → **Resume** → `restore_branch_state()` → **Complete** → **Dependent jobs become eligible** / **Fail** → **PM notified, decides: retry or cancel**
 
 ### Technical Approach
 
 #### Phase 1: Job Dependencies
 
-- Add `depends_on` as a `ListField` on AgentSession (list of job_ids, nullable)
-- In `_pop_job()`, after filtering by `scheduled_after`, filter out jobs whose `depends_on` contains any job_id that is not in a terminal state (`completed` or `failed`)
-- Add `dependency_status` helper to check if all dependencies are met
-- Failed dependency handling: when a depended-on job fails, mark dependent jobs as `blocked` and notify PM via the parent ChatSession
-- Add `reorder_job()` function for PM to change priority of pending jobs
-- Add `cancel_job()` function for PM to cancel pending jobs without affecting running ones
+- Add `depends_on` as a `ListField` on AgentSession (list of `session_id` values, nullable). Uses `session_id` as the dependency key because it is stable across the delete-and-recreate pattern in `_pop_job()`, unlike `job_id` which changes on status transitions. Many-to-one: multiple jobs can depend on the same session_id.
+- In `_pop_job()`, after filtering by `scheduled_after`, filter out jobs whose `depends_on` contains any `session_id` that is not in a terminal state (`completed` or `failed`)
+- Add `dependency_status` helper to check if all dependencies are met (looks up AgentSession by session_id)
+- Failed dependency handling: notify parent ChatSession (PM) with full visibility. PM decides: cancel, retry, or unblock. No auto-cancellation — parent has full decision-making power over child jobs.
+- Add `retry_job(session_id)` function for PM to re-queue a failed child job
+- Add `reorder_job(job_id, new_priority)` function for PM to change priority of pending jobs
+- Add `cancel_job(job_id)` function for PM to cancel pending jobs without affecting running ones
 
 #### Phase 2: Branch-Session Mapping
 
@@ -197,9 +198,9 @@ No prerequisites -- this work has no external dependencies. All foundational wor
 **Impact:** Jobs stuck in pending forever, queue appears frozen
 **Mitigation:** Health check (`_job_health_check`) already detects stuck pending jobs. Add specific check: if a pending job has `depends_on` pointing to a failed/deleted job, auto-unblock it and notify PM.
 
-### Risk 2: Delete-and-recreate changes job_id, breaking depends_on references
-**Impact:** When `_pop_job()` does delete-and-recreate for status change, the new job gets a new `job_id`. Any other job's `depends_on` list pointing to the old ID becomes stale.
-**Mitigation:** After delete-and-recreate in `_pop_job()`, scan pending jobs for `depends_on` references to the old ID and update them to the new ID. Same pattern as `_transition_parent()` does for `parent_job_id`.
+### Risk 2: Delete-and-recreate changes job_id — ~~breaking depends_on references~~
+**Impact:** Eliminated. `depends_on` uses `session_id` (stable across delete-and-recreate) instead of `job_id`. No reference scanning or updating needed.
+**Residual risk:** If a session_id is reused or a session record is deleted from Redis before dependents check it, the dependency lookup will find no match. Mitigation: treat missing session_id as "completed" (optimistic — if it existed and was cleaned up, it likely finished).
 
 ### Risk 3: Branch state divergence between checkpoint and restore
 **Impact:** Resume lands on wrong commit, work conflicts
@@ -260,8 +261,8 @@ No new MCP server needed. The dependency tracking is internal to the job queue. 
 - [ ] `_pop_job()` skips jobs with unmet dependencies
 - [ ] DevSessions automatically land on the correct branch for their slug + stage
 - [ ] Session pause records branch + commit SHA; resume restores it
-- [ ] PM can reorder and cancel pending jobs
-- [ ] Failed dependency handling: PM notified, dependent jobs marked blocked
+- [ ] PM can reorder, cancel, and retry child jobs
+- [ ] Failed dependency handling: PM notified with full visibility, decides cancel/retry (no auto-cancellation)
 - [ ] No regression in single-job execution path (jobs without `depends_on` work as before)
 - [ ] Health check detects and handles stuck dependency chains
 - [ ] Activity stream writes JSONL per tool call to `logs/sessions/{session_id}/activity.jsonl`
@@ -320,10 +321,10 @@ No new MCP server needed. The dependency tracking is internal to the job queue. 
 - **Assigned To**: queue-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add `depends_on = ListField(null=True)` to AgentSession model
+- Add `depends_on = ListField(null=True)` to AgentSession model (stores `session_id` values, not `job_id`)
 - Add `depends_on` to `_JOB_FIELDS` list and `_push_job()` parameters
-- In `_pop_job()`, filter eligible jobs: skip if any `depends_on` job_id is not in terminal state
-- After delete-and-recreate in `_pop_job()`, update any `depends_on` references to old job_id -> new job_id
+- In `_pop_job()`, filter eligible jobs: skip if any `depends_on` session_id is not in terminal state (look up AgentSession by session_id)
+- No reference scanning needed — session_id is stable across delete-and-recreate
 - Add `_dependency_health_check()` to detect and handle stuck dependency chains
 - Write unit tests for dependency filtering, failed deps, empty deps
 
@@ -362,10 +363,11 @@ No new MCP server needed. The dependency tracking is internal to the job queue. 
 - **Agent Type**: builder
 - **Parallel**: false
 - Add `reorder_job(job_id, new_priority)` -- changes priority of a pending job
-- Add `cancel_job(job_id)` -- cancels a pending job, handles dependency cascade
-- Add `get_queue_status(chat_id)` -- returns full queue state with dependency graph
-- Wire into ChatSession orchestration
-- Write unit tests for reorder, cancel, status functions
+- Add `cancel_job(job_id)` -- cancels a pending job, parent PM decides cascade
+- Add `retry_job(session_id)` -- re-queues a failed child job with same parameters
+- Add `get_queue_status(chat_id)` -- returns full queue state with dependency graph and child statuses
+- Wire into ChatSession orchestration: PM gets full visibility over child jobs (cancel, retry, inspect)
+- Write unit tests for reorder, cancel, retry, status functions
 
 ### 5. Implement session observability
 - **Task ID**: build-observability
@@ -436,6 +438,8 @@ No new MCP server needed. The dependency tracking is internal to the job queue. 
 
 ## Open Questions
 
-1. **Failed dependency semantics**: When Job A fails, should dependent Job B be auto-cancelled, auto-failed, or held in a `blocked` state for PM decision? The plan proposes `blocked` + PM notification, but auto-cancellation would be simpler.
-2. **Cross-chat dependencies**: Should jobs in different Telegram chats be able to depend on each other? The current scope says no, but multi-project orchestration might need this eventually.
-3. **Dependency on delete-and-recreate ID stability**: The delete-and-recreate pattern means job_ids change on status transitions. The plan proposes scanning and updating `depends_on` references, but an alternative is using `session_id` (stable) as the dependency key instead of `job_id`. Which is preferred?
+All resolved:
+
+1. **Failed dependency semantics** — RESOLVED: Parent job gets full visibility and decision-making power. Parent can cancel and retry child jobs. No auto-cancellation — the PM (parent ChatSession) decides what to do with failed dependencies.
+2. **Cross-chat dependencies** — RESOLVED: No cross-chat dependencies allowed. Cross-project dependencies are tracked via GitHub issues only (e.g., AI repo issue waiting on a new Popoto feature). The job queue is strictly within a single chat's scope.
+3. **Dependency key** — RESOLVED: Use `session_id` (stable) instead of `job_id` (changes on delete-and-recreate). `depends_on` stores a list of `session_id` values. This is a many-to-one relationship — multiple jobs can depend on the same session_id, and a single job can depend on multiple session_ids.
