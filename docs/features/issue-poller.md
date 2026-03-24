@@ -6,7 +6,7 @@ Automatic SDLC kickoff for new GitHub issues. Polls configured repositories on a
 
 1. **Cron fires** every 5 minutes via launchd (`com.valor.issue-poller.plist`)
 2. **Polls** `gh issue list` for each project in `~/Desktop/Valor/projects.json` that has a `github` key
-3. **Filters** out already-seen issues using a Redis set (`issue_poller:seen:{org}/{repo}`)
+3. **Filters** out already-seen issues using the `SeenIssue` Popoto model (`models/seen_issue.py`)
 4. **Validates** issue context (title + body length), flagging thin issues as `needs-review`
 5. **Dedup check** using Claude Haiku to score semantic similarity against other open issues
 6. **Dispatches** plan creation via `claude -p` for valid unique issues
@@ -18,6 +18,7 @@ Automatic SDLC kickoff for new GitHub issues. Polls configured repositories on a
 ```
 launchd (5 min) → scripts/issue_poller.py
                     ├── Redis lock (prevent concurrent runs)
+                    ├── SeenIssue model (Popoto, tracks processed issues per repo)
                     ├── ~/Desktop/Valor/projects.json (multi-project iteration)
                     ├── gh CLI (fetch issues, apply labels, add comments)
                     ├── scripts/issue_dedup.py (Claude Haiku similarity scoring)
@@ -26,9 +27,18 @@ launchd (5 min) → scripts/issue_poller.py
 
 ## State Management
 
+The poller uses a mix of Popoto models and raw Redis keys:
+
+### Popoto Models
+
+| Model | Key | Purpose |
+|-------|-----|---------|
+| `SeenIssue` (`models/seen_issue.py`) | `repo_key` (org/repo) | Tracks processed issue numbers per repository via a `SetField` |
+
+### Raw Redis Keys
+
 | Redis Key | Type | Purpose |
 |-----------|------|---------|
-| `issue_poller:seen:{org}/{repo}` | Set | Issue numbers already processed |
 | `issue_poller:lock` | String (TTL) | Distributed lock preventing concurrent runs |
 | `issue_poller:consecutive_failures` | Counter | Tracks consecutive cycle failures for alerting |
 
@@ -87,7 +97,7 @@ launchctl bootout gui/$(id -u)/com.valor.issue-poller
 |---------|-------|-----|
 | Poller not running | launchd not loaded | `./scripts/install_issue_poller.sh` |
 | "lock held" in logs | Previous cycle still running or crashed | Lock auto-expires after 5 min; or `redis-cli DEL issue_poller:lock` |
-| Issues not detected | Issue already in seen set | Check `redis-cli SMEMBERS issue_poller:seen:{org}/{repo}` |
+| Issues not detected | Issue already in SeenIssue model | Check via `python -c "from models.seen_issue import SeenIssue; print(SeenIssue.get_or_create('org','repo').issue_numbers)"` |
 | Dedup always skipped | `ANTHROPIC_API_KEY` missing | Ensure key is in `.env` |
 | No notifications | `valor-telegram` CLI not available | Check bridge is running; falls back to logging |
 
@@ -103,6 +113,8 @@ launchctl bootout gui/$(id -u)/com.valor.issue-poller
 |------|---------|
 | `scripts/issue_poller.py` | Main polling loop and orchestration |
 | `scripts/issue_dedup.py` | LLM-based similarity scoring engine |
+| `models/seen_issue.py` | Popoto model tracking processed issues per repo |
 | `com.valor.issue-poller.plist` | launchd service definition (5-min interval) |
 | `scripts/install_issue_poller.sh` | launchd installation script |
-| `tests/test_issue_poller.py` | Unit tests |
+| `tests/test_issue_poller.py` | Integration tests |
+| `tests/unit/test_seen_issue.py` | Unit tests for SeenIssue model |
