@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Medium
 owner: Valor
@@ -72,7 +72,7 @@ The observer circuit breaker pattern will be generalized. The stall recovery fun
 2. Worker busy with job N, job N+1 sits pending — this is normal queue behavior
 3. Single health check scans ALL jobs (pending + running)
 4. For each job: is there a live worker for `job.chat_id`? If yes, skip. If no, start one.
-5. No deleting, no recreating, no killing workers on behalf of queued jobs.
+5. Recovery of truly orphaned jobs (worker dead) uses Popoto's delete-and-recreate (required by KeyField). But the health check never deletes jobs that have a live worker — no more destroying jobs a legitimate worker is about to pop.
 
 ## Architectural Impact
 
@@ -107,7 +107,7 @@ No prerequisites — uses only stdlib and existing packages.
 - **Startup retry** (`telegram_bridge.py`): Replace SQLite-only retry with general connection retry covering all Telethon errors. Exponential backoff with jitter, capped at ~5 min.
 - **SDK circuit breaker** (`sdk_client.py`): Wrap query calls with CircuitBreaker. On sustained Anthropic failures, open circuit and fail fast.
 - **Degraded mode** (`bridge/telegram_bridge.py`): When Anthropic circuit is open, acknowledge on Telegram and queue to dead-letter for replay.
-- **PM error routing**: Route dependency failures to PM agent for intelligent decision (reschedule/retry/cancel/alert). PM absorbs infrastructure noise silently; only alerts human for auth failures requiring manual re-login.
+- **Auth failure alerts**: When Claude Code OAuth or Telegram session auth fails (requires manual re-login), send a Telegram alert to the stakeholder. All other dependency failures are handled silently by circuit breakers. PM error routing (intelligent reschedule/retry/cancel decisions) deferred to follow-up issue.
 - **Reflections pre-flight** (`scripts/reflections.py`): Validate prerequisites before each task. Single warning log on failure, not tracebacks.
 - **Observability basics**: Structured JSON logging with `job_id`/`session_id`/`correlation_id` fields. Periodic SDK heartbeat (log every 60s during running jobs). Job status CLI (`python -m agent.job_queue --status`).
 
@@ -121,11 +121,11 @@ No prerequisites — uses only stdlib and existing packages.
 
 ### Technical Approach
 
-- `_job_health_check()` becomes the single recovery point: queries `AgentSession.query.filter(status__in=["running", "pending"])`, checks `_active_workers.get(job.chat_id)`, starts worker if missing
-- Delete: `_recover_interrupted_jobs`, `_recover_orphaned_jobs`, `_reset_running_jobs`, `_recover_stalled_pending`, `_kill_stalled_worker`, `_enqueue_stall_retry`
-- Keep: `_recover_interrupted_jobs` at startup only (running→pending reset) — fold into health check's startup mode
+- `_job_health_check()` becomes the single recovery point: queries all `running` and `pending` jobs, checks `_active_workers.get(job.chat_id)`, starts worker if missing. For truly orphaned jobs (worker dead + exceeded threshold), uses Popoto's delete-and-recreate to reset status (required by KeyField architecture). Key distinction: never touches jobs that have a live worker on the same chat_id.
+- Delete: `_recover_orphaned_jobs`, `_reset_running_jobs`, `_recover_stalled_pending`, `_kill_stalled_worker`, `_enqueue_stall_retry`
+- Fold `_recover_interrupted_jobs` into `_job_health_check` with a startup mode: runs synchronously at startup before the event loop processes messages, resets all `running` jobs to `pending` unconditionally (at startup, all running jobs are by definition orphaned from previous crash). Periodic mode applies the threshold check.
 - CircuitBreaker: parameterized with `failure_threshold`, `backoff_schedule`, `half_open_interval`, `on_open`/`on_close` callbacks
-- Degraded mode reuses `dead_letters.py` — no new storage
+- Degraded mode: when Anthropic circuit is open, incoming messages stay in the job queue as `pending` (not dead-lettered). The health check will start a worker when the circuit closes. Dead-letter queue is only for Telegram delivery failures, not API outages.
 - Structured logging: JSON formatter with `job_id`, `session_id`, `correlation_id`, `chat_id` fields on every log line
 - SDK heartbeat: `BackgroundTask._watchdog` emits periodic logs (every 60s) with subprocess liveness check, not just a single 180s check
 - CancelledError: catch explicitly in `_worker_loop` and `sdk_client.query` — log and complete job properly
@@ -207,7 +207,7 @@ No update system changes required. No new dependencies, no new config files. New
 
 ## Agent Integration
 
-**PM error routing:** When dependency failures occur, route an error context message to the PM agent with: which dependency failed, error details, affected job, retry count. PM decides: reschedule (default, silent), retry, cancel, or alert human (only for auth failures requiring manual re-login). This reuses existing job scheduling infrastructure (`scheduled_after` field, `_pop_job` skip logic).
+**Auth failure alerts:** When Claude Code OAuth or Telegram session auth fails, send a Telegram alert to the stakeholder (these require manual re-login). All other dependency failures handled silently by circuit breakers. PM error routing (intelligent reschedule/retry/cancel) deferred to a follow-up issue.
 
 **Job status CLI:** Add `python -m agent.job_queue --status` as a diagnostic tool. No MCP exposure needed — this is for human operators, not the agent.
 
@@ -283,6 +283,7 @@ No other agent integration needed. The resilience module operates below the agen
 - Delete from `monitoring/session_watchdog.py`: `_recover_stalled_pending()`, `_kill_stalled_worker()`, `_enqueue_stall_retry()`, and the pending stall path in `check_stalled_sessions()`
 - Delete from `agent/job_queue.py`: `_recover_orphaned_jobs()`, `_reset_running_jobs()`
 - Expand `_job_health_check()` to scan both `status="running"` and `status="pending"` jobs
+- Add startup mode: `_job_health_check(startup=True)` runs synchronously at bridge startup before event loop, resets ALL running jobs to pending unconditionally (all running jobs at startup are orphaned). Periodic mode (default) applies threshold check.
 - For each job: check `_active_workers.get(job.chat_id)` — if no live worker and job exceeded threshold, call `_ensure_worker(job.chat_id)`
 - Fix `_worker_loop` to catch `asyncio.CancelledError` explicitly — log and complete job
 - Fix `sdk_client.query()` to catch `CancelledError` — log and re-raise
@@ -310,8 +311,7 @@ No other agent integration needed. The resilience module operates below the agen
 - Replace SQLite-only retry in `telegram_bridge.py` with general connection retry: all exceptions from `client.start()`, exponential backoff with jitter, max 8 attempts
 - Create Anthropic circuit breaker in `sdk_client.py` (threshold=5, backoff=[30,60,120,240,480])
 - Wrap `query()`: check circuit before calling SDK, record success/failure after
-- Implement degraded mode in message handler: when Anthropic circuit open, acknowledge on Telegram, persist to dead-letter
-- Add `on_close` callback to replay dead letters
+- Implement degraded mode in message handler: when Anthropic circuit open, acknowledge on Telegram ("Processing delayed — will respond when service recovers"), leave job as pending in queue. Health check will start worker when circuit closes.
 
 ### 4. Reflections pre-flight checks
 - **Task ID**: build-preflight
@@ -326,7 +326,7 @@ No other agent integration needed. The resilience module operates below the agen
 ### 5. Observability improvements
 - **Task ID**: build-observability
 - **Depends On**: build-recovery-refactor
-- **Validates**: manual verification
+- **Validates**: tests/unit/test_structured_logging.py (create), tests/unit/test_job_status_cli.py (create)
 - **Assigned To**: observability-builder
 - **Agent Type**: builder
 - **Parallel**: false
@@ -334,7 +334,8 @@ No other agent integration needed. The resilience module operates below the agen
 - Make `correlation_id` mandatory at message intake, thread through all function calls
 - Expand `BackgroundTask._watchdog` to emit periodic heartbeat logs (every 60s) with subprocess liveness
 - Add `python -m agent.job_queue --status` CLI that prints table of all jobs with session, chat, duration, worker status
-- Update watchdog to parse JSON logs
+- Update `monitoring/bridge_watchdog.py` to parse JSON logs instead of plain text
+- Write tests for JSON log format and job status CLI output
 
 ### 6. Validate all components
 - **Task ID**: validate-all
@@ -387,8 +388,15 @@ No other agent integration needed. The resilience module operates below the agen
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
-| CONCERN | [agent-type] | [The concern raised] | [How/whether it was addressed] |
+| Severity | Critic | Concern | Resolution |
+|----------|--------|---------|------------|
+| BLOCKER | Skeptic, Archaeologist | Plan claims "no delete-and-recreate" but Popoto KeyField requires it for status changes | FIXED: Clarified that orphaned job recovery retains delete-and-recreate (Popoto constraint). "No delete-and-recreate" refers to not destroying jobs with live workers. |
+| CONCERN | Adversary, Operator | Dead letter replay on circuit close may duplicate messages; dead_letters stores outbound, not inbound | FIXED: Removed dead-letter replay. Degraded mode keeps jobs pending in queue; health check starts worker when circuit closes. |
+| CONCERN | Skeptic, Operator | Task 5 (observability) has no test validation — "manual verification" unacceptable | FIXED: Added test files for structured logging and job status CLI. Added watchdog update subtask. |
+| CONCERN | Skeptic | `_recover_interrupted_jobs` fold into health check startup mode underspecified | FIXED: Added explicit startup mode spec — runs synchronously before event loop, unconditional reset. |
+| CONCERN | Simplifier, Operator | PM error routing vague, no implementation path, no task in step-by-step | FIXED: Descoped PM error routing to follow-up issue. Kept auth failure alerts only. |
+| NIT | Simplifier | Reflections pre-flight loosely coupled to core problem | Kept — low effort, high value, no dependencies. Can be split if needed. |
+| NIT | User | "async-specialist" agent type undefined | Kept — it is defined in the agent type list in the template. |
 
 ---
 
