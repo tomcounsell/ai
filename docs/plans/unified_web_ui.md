@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: Needs Revision
 type: feature
 appetite: Large
 owner: Valor
@@ -432,7 +432,90 @@ No agent integration required — this is a standalone localhost web server for 
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Date**: 2026-03-24
+**Critics**: Skeptic, Operator, Archaeologist, Adversary, Simplifier, User
+**Findings**: 8 total (2 blockers, 4 concerns, 2 nits)
+
+### Blockers
+
+#### 1. Port number discrepancy between issue and plan
+- **Severity**: BLOCKER
+- **Critics**: Skeptic, Operator
+- **Location**: Issue #477 body vs. plan (throughout)
+- **Finding**: The GitHub issue specifies port 8420 as the default (`UI_PORT` default 8420), but the plan uses port 8500 everywhere (Problem section, Data Flow, Prerequisites, Solution, Success Criteria, Verification). The builder will not know which port is authoritative.
+- **Suggestion**: Align on one port number. Update either the issue or the plan so both match. If 8500 is correct, confirm in the issue.
+
+#### 2. Reflection model extension modifies shared code without updating mark_completed callers
+- **Severity**: BLOCKER
+- **Critics**: Skeptic, Adversary
+- **Location**: Task 2 (build-reflections-data), models/reflection.py:69-84
+- **Finding**: The plan says to add `run_history` ListField to the `Reflection` model and update `mark_completed()` to append run history. However, `mark_completed()` is called from `agent/reflection_scheduler.py` (lines 226, 235) with only `(duration)` and `(duration, error=error_msg)` args. The plan's Test Impact section claims "no existing tests affected" and "modifies no existing code" -- but this IS a modification to the `Reflection` model's `mark_completed()` method, and the scheduler callers need no signature change only if the append is internal. The plan should explicitly state the `mark_completed()` signature remains backward-compatible and the Test Impact section should acknowledge the model change.
+- **Suggestion**: (1) Clarify in Task 2 that `mark_completed()` appends to `run_history` internally without changing its signature. (2) Update Test Impact to note that `models/reflection.py` is being modified and existing callers in `agent/reflection_scheduler.py` should be regression-tested.
+
+### Concerns
+
+#### 3. FastAPI, uvicorn, jinja2 not currently installed
+- **Severity**: CONCERN
+- **Critics**: Operator
+- **Location**: Architectural Impact, pyproject.toml
+- **Finding**: The plan says "FastAPI is already a project dependency" in the issue body, but `fastapi`, `uvicorn`, and `jinja2` are NOT in `pyproject.toml` and are not installed. The plan's Solution section correctly identifies them as new dependencies, but the issue body is misleading. Also, the `ui` package is not listed in `[tool.hatch.build.targets.wheel] packages` -- if the project uses `pip install -e .`, `ui/` won't be importable without adding it there.
+- **Suggestion**: Add `ui` to the hatch packages list in Task 1 alongside adding the new dependencies to pyproject.toml.
+
+#### 4. No process management or startup documentation for the UI server
+- **Severity**: CONCERN
+- **Critics**: Operator
+- **Location**: Solution, Update System
+- **Finding**: The plan creates a standalone process (`python -m ui.app`) but provides no guidance on how to start/stop it alongside the bridge. The Update System section says "could add a launchd service for auto-start, but not in this scope." Without even a mention in `scripts/valor-service.sh` or a manual startup note, the UI server will be forgotten after build.
+- **Suggestion**: At minimum, add a Quick Commands entry to CLAUDE.md for `python -m ui.app` in the Documentation task. Consider whether the update skill should know about this process.
+
+#### 5. Popoto sync calls in async FastAPI may block event loop
+- **Severity**: CONCERN
+- **Critics**: Skeptic, Adversary
+- **Location**: Risk 1, Data Flow
+- **Finding**: The plan identifies this risk and proposes using `asyncio.to_thread()` or sync route handlers. However, no task explicitly assigns implementing this mitigation. Task 2 (reflections data layer) and Task 4 (SDLC data layer) don't mention async wrapping. If builders use `async def` route handlers with direct Popoto calls, the event loop will block on every request.
+- **Suggestion**: Add an explicit instruction in Tasks 2 and 4 to either use `def` (sync) route handlers or wrap all Popoto queries in `asyncio.to_thread()`. Don't leave this as a risk -- make it a task instruction.
+
+#### 6. run_history cap logic is underspecified
+- **Severity**: CONCERN
+- **Critics**: Adversary, Simplifier
+- **Location**: Task 2, Risk 2
+- **Finding**: The plan says to "cap at 30 days worth of entries based on reflection interval" with an example of health-check at 5min = ~8640 runs/30d. Popoto ListField stores atomically with the model (msgpack serialized). 8640 run dicts at ~200 bytes each is ~1.7MB per key, which could cause Redis serialization latency. The cap calculation also requires knowing the interval at append time, coupling the model to the registry config.
+- **Suggestion**: Use a simpler fixed cap (e.g., 100 or 200 entries) instead of interval-based calculation. This avoids coupling the model to config and keeps Redis payload sizes predictable.
+
+### Nits
+
+#### 7. Four tasks lack explicit validation commands
+- **Severity**: NIT
+- **Critics**: Skeptic
+- **Location**: Tasks 6, 7, 8, 9
+- **Finding**: Tasks design-polish, test-suite, document-feature, and validate-all have no `Validates` field. While test-suite and validate-all are inherently validation tasks, design-polish and document-feature would benefit from concrete check commands.
+- **Suggestion**: Add `Validates` to design-polish (e.g., visual screenshot check or CSS lint) and document-feature (e.g., `test -f docs/features/web-ui.md`).
+
+#### 8. Prior art plan still exists and may confuse builders
+- **Severity**: NIT
+- **Critics**: Archaeologist
+- **Location**: Prior Art section
+- **Finding**: `docs/plans/reflections-dashboard.md` (from superseded issue #413) still exists on disk with status "Ready." A builder might accidentally reference it. The issue body from #477 mentions this was superseded.
+- **Suggestion**: Mark the old plan's status as "Superseded" or delete it before build begins, to prevent confusion.
+
+### Structural Check Results
+
+| Check | Status | Detail |
+|-------|--------|--------|
+| Required sections | PASS | All 4 required sections present and non-empty |
+| Task numbering | PASS | Sequential 1-9, no gaps |
+| Dependencies valid | PASS | All Depends On references point to valid Task IDs |
+| Circular dependencies | PASS | No cycles detected |
+| File paths exist | PASS | 4 existing files referenced correctly; 34 paths are new (expected for greenfield `ui/` package) |
+| Tasks with validation | WARN | 5 of 9 tasks have Validates commands (4 missing: design-polish, test-suite, document-feature, validate-all) |
+| Prerequisites met | PASS | Redis running, port 8500 available |
+| Cross-references | PASS | Success criteria map to tasks; No-Gos don't appear as planned work |
+
+### Verdict
+
+**NEEDS REVISION** -- 2 blockers must be resolved before build:
+1. Resolve the port number discrepancy (8500 vs 8420) between plan and issue
+2. Clarify the Reflection model modification scope and update Test Impact accordingly
 
 ---
 
