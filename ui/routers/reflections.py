@@ -19,8 +19,7 @@ def reflections_overview(request: Request):
     templates = request.app.state.templates
     reflections = get_all_reflections()
     return templates.TemplateResponse(
-        "reflections/overview.html",
-        {"request": request, "reflections": reflections},
+        request, "reflections/overview.html", {"reflections": reflections}
     )
 
 
@@ -31,10 +30,7 @@ def reflections_schedule(request: Request):
 
     templates = request.app.state.templates
     schedule = get_schedule()
-    return templates.TemplateResponse(
-        "reflections/schedule.html",
-        {"request": request, "schedule": schedule},
-    )
+    return templates.TemplateResponse(request, "reflections/schedule.html", {"schedule": schedule})
 
 
 @router.get("/ignores/", response_class=HTMLResponse)
@@ -44,10 +40,7 @@ def reflections_ignores(request: Request):
 
     templates = request.app.state.templates
     ignores = get_active_ignores()
-    return templates.TemplateResponse(
-        "reflections/ignores.html",
-        {"request": request, "ignores": ignores},
-    )
+    return templates.TemplateResponse(request, "reflections/ignores.html", {"ignores": ignores})
 
 
 @router.get("/{name}/history/", response_class=HTMLResponse)
@@ -58,9 +51,9 @@ def reflection_history(request: Request, name: str, page: int = 1):
     templates = request.app.state.templates
     history_data = get_run_history(name, page=page)
     return templates.TemplateResponse(
+        request,
         "reflections/history.html",
         {
-            "request": request,
             "name": name,
             "runs": history_data["runs"],
             "page": page,
@@ -77,8 +70,7 @@ def reflection_detail(request: Request, name: str, run_index: int):
     templates = request.app.state.templates
     run = get_run_detail(name, run_index)
     return templates.TemplateResponse(
-        "reflections/detail.html",
-        {"request": request, "name": name, "run": run},
+        request, "reflections/detail.html", {"name": name, "run": run}
     )
 
 
@@ -93,8 +85,7 @@ def partial_status_grid(request: Request):
     templates = request.app.state.templates
     reflections = get_all_reflections()
     return templates.TemplateResponse(
-        "reflections/_partials/status_grid.html",
-        {"request": request, "reflections": reflections},
+        request, "reflections/_partials/status_grid.html", {"reflections": reflections}
     )
 
 
@@ -106,6 +97,7 @@ def partial_log_viewer(request: Request, name: str, run_index: int):
     templates = request.app.state.templates
     log_content = get_log_content(name, run_index)
     return templates.TemplateResponse(
+        request,
         "reflections/_partials/log_viewer.html",
-        {"request": request, "log_content": log_content, "name": name},
+        {"log_content": log_content, "name": name},
     )

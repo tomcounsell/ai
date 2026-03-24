@@ -20,8 +20,9 @@ def sdlc_overview(request: Request):
     active = get_active_pipelines()
     completed = get_recent_completions(limit=10)
     return templates.TemplateResponse(
+        request,
         "sdlc/pipelines.html",
-        {"request": request, "active_pipelines": active, "completed_pipelines": completed},
+        {"active_pipelines": active, "completed_pipelines": completed},
     )
 
 
@@ -32,10 +33,7 @@ def sdlc_detail(request: Request, job_id: str):
 
     templates = request.app.state.templates
     pipeline = get_pipeline_detail(job_id)
-    return templates.TemplateResponse(
-        "sdlc/detail.html",
-        {"request": request, "pipeline": pipeline},
-    )
+    return templates.TemplateResponse(request, "sdlc/detail.html", {"pipeline": pipeline})
 
 
 @router.get("/completed/", response_class=HTMLResponse)
@@ -46,8 +44,7 @@ def sdlc_completed(request: Request, page: int = 1):
     templates = request.app.state.templates
     completed = get_recent_completions(limit=25, page=page)
     return templates.TemplateResponse(
-        "sdlc/completed.html",
-        {"request": request, "pipelines": completed, "page": page},
+        request, "sdlc/completed.html", {"pipelines": completed, "page": page}
     )
 
 
@@ -62,8 +59,7 @@ def partial_active_pipelines(request: Request):
     templates = request.app.state.templates
     active = get_active_pipelines()
     return templates.TemplateResponse(
-        "sdlc/_partials/active_pipelines.html",
-        {"request": request, "active_pipelines": active},
+        request, "sdlc/_partials/active_pipelines.html", {"active_pipelines": active}
     )
 
 
@@ -75,6 +71,5 @@ def partial_stage_indicator(request: Request, job_id: str):
     templates = request.app.state.templates
     pipeline = get_pipeline_detail(job_id)
     return templates.TemplateResponse(
-        "sdlc/_partials/stage_indicator.html",
-        {"request": request, "pipeline": pipeline},
+        request, "sdlc/_partials/stage_indicator.html", {"pipeline": pipeline}
     )

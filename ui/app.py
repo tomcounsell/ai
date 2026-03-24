@@ -107,19 +107,14 @@ def create_app() -> FastAPI:
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request):
         """Root route: dashboard listing page."""
-        return templates.TemplateResponse(
-            "index.html",
-            {"request": request},
-        )
+        return templates.TemplateResponse(request, "index.html")
 
     # Exception handler for Redis connection failures
     @app.exception_handler(Exception)
     async def generic_exception_handler(request: Request, exc: Exception):
         """Render a user-friendly error page instead of a 500 traceback."""
         return templates.TemplateResponse(
-            "error.html",
-            {"request": request, "error": str(exc)},
-            status_code=500,
+            request, "error.html", {"error": str(exc)}, status_code=500
         )
 
     return app
