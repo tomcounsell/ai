@@ -57,9 +57,7 @@ class TestDetectOutcomes:
     async def test_empty_response(self):
         from agent.memory_extraction import detect_outcomes_async
 
-        result = await detect_outcomes_async(
-            [("key1", "deployment strategy")], ""
-        )
+        result = await detect_outcomes_async([("key1", "deployment strategy")], "")
         assert result == {}
 
     @pytest.mark.asyncio

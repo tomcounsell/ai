@@ -1,7 +1,6 @@
 """Unit tests for the memory hook (thought injection)."""
 
 
-
 class TestExtractTopicKeywords:
     """Test agent/memory_hook.py extract_topic_keywords()."""
 

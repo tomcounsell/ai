@@ -1,7 +1,6 @@
 """Unit tests for the Memory model and config defaults."""
 
 
-
 class TestMemoryDefaults:
     """Test config/memory_defaults.py apply_defaults()."""
 
