@@ -81,7 +81,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Skills Dependency Map](skills-dependency-map.md) | Visual map of skill-to-skill, skill-to-agent, and sub-file relationships for cleanup planning | Shipped |
 | [Skills Reorganization](skills-reorganization.md) | Canonical SKILL.md template, progressive disclosure, command consolidation, hardlink scoping | Shipped |
 | [Stall Retry](stall-retry.md) | Automatic retry of stalled agent sessions with exponential backoff, process cleanup, and Telegram notification on final failure | Shipped |
-| [Steering Queue](steering-queue.md) | Mid-execution course correction via Telegram reply threads | Shipped |
+| [Steering Queue](steering-queue.md) | Mid-execution course correction via Telegram reply threads and parent-child ChatSession-to-DevSession steering | Shipped |
 | [Structured Logging & Telemetry](structured-logging-telemetry.md) | Redis-backed telemetry counters, structured log lines, and health check integration for Observer Agent observability | Shipped |
 | [Summarizer Format](summarizer-format.md) | Structured bullet-point output with SDLC stage progress and markdown links for Telegram delivery | Shipped |
 | [System Overview](system-overview.md) | High-level architecture and design principles | Archived |

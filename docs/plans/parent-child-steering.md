@@ -1,5 +1,5 @@
 ---
-status: Building
+status: Complete
 type: feature
 appetite: Small
 owner: Valor

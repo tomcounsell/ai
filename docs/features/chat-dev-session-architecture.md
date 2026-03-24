@@ -137,6 +137,27 @@ The PM (ChatSession) orchestrates SDLC work by spawning one DevSession per pipel
 
 The stop hook (`.claude/hooks/stop.py`) includes a warning for SDLC-classified sessions that complete without any stage progress. This catches cases where the DevSession bypasses the pipeline. The warning is logged to stderr and is non-fatal.
 
+## Parent-Child Steering
+
+The ChatSession can push steering messages to its running child DevSessions, enabling mid-execution course correction without waiting for the DevSession to complete.
+
+### Mechanism
+
+ChatSession invokes `scripts/steer_child.py` via bash with the child's session ID and a steering message. The script validates the parent-child relationship (via `parent_chat_session_id`) and pushes to the child's Redis steering queue. The child's watchdog hook picks up the message on the next tool call.
+
+```bash
+# Steer a running child
+python scripts/steer_child.py --session-id <child_id> --message "focus on tests" --parent-id <parent_id>
+
+# Abort a child
+python scripts/steer_child.py --session-id <child_id> --message "stop" --parent-id <parent_id> --abort
+
+# List active children
+python scripts/steer_child.py --list --parent-id <parent_id>
+```
+
+This reuses the same steering infrastructure (Redis queue, watchdog consumption) as Telegram reply-thread steering. See [Steering Queue](steering-queue.md) for the full steering architecture.
+
 ## Agent Definitions
 
 The `dev-session` agent is defined in `agent/agent_definitions.py`:
