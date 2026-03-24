@@ -200,7 +200,7 @@ class TestSubagentStopHookDevSession:
     """Test full hook behavior for dev-session agent type."""
 
     @pytest.mark.asyncio
-    async def test_injects_sdlc_stages_for_dev_session(self, monkeypatch):
+    async def test_injects_stage_states_for_dev_session(self, monkeypatch):
         """Should inject pipeline state into reason field for dev-sessions."""
         monkeypatch.setenv("VALOR_SESSION_ID", "pm-session-1")
 
