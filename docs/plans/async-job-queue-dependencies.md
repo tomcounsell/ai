@@ -5,7 +5,7 @@ appetite: Large
 owner: Valor
 created: 2026-03-24
 tracking: https://github.com/tomcounsell/ai/issues/501
-last_comment_id:
+last_comment_id: 4115465261
 ---
 
 # Async Job Queue with Branch-Session Mapping and Dependency Tracking
@@ -38,6 +38,7 @@ The job queue processes work sequentially within a chat but lacks three capabili
 - **PR #466**: SDLC Redesign Phase 2 -- nudge loop, per-chat queue. Merged. Current architecture foundation.
 - **PR #485**: Job scheduler kill command. Merged. Job lifecycle management.
 - **Issue #493**: ruflo deep dive -- source research identifying this work item.
+- **Issue #501 comment (observability findings)**: Live session observed 3 SDLC jobs queued simultaneously. Job 105 waited 28+ minutes unnecessarily while Jobs 103/104 ran -- it had no dependency on them but FIFO ordering blocked it. This validates the dependency tracking need: with `depends_on`, independent jobs could be reordered by the PM.
 
 ## Data Flow
 
@@ -179,6 +180,7 @@ No prerequisites -- this work has no external dependencies. All foundational wor
 - Full DAG visualization in Telegram messages
 - Job queue persistence across Redis restarts (already handled by Popoto)
 - Cross-chat job dependencies (dependencies are within a single chat's queue)
+- Observability enhancements (health check context, activity stream, subagent summaries) -- proposed in issue #501 comment but deserve a separate issue. The core dependency and branch-mapping work is independent of observability improvements.
 
 ## Update System
 
