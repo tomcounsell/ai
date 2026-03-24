@@ -197,6 +197,10 @@ tests/
 | Level | File | Tests | Description |
 |-------|------|------:|-------------|
 | unit | `test_model_relationships.py` | 30 | Redis model relationships |
+| unit | `test_memory_model.py` | 151 | Memory model (decay, confidence, write filter, bloom) |
+| unit | `test_memory_hook.py` | 135 | PostToolUse thought injection, sliding window |
+| unit | `test_memory_extraction.py` | 107 | Post-session Haiku extraction, outcome detection |
+| unit | `test_memory_ingestion.py` | 89 | Telegram message memory ingestion |
 | integration | `test_redis_models.py` | 30 | Popoto model CRUD |
 
 ### `monitoring` — Observability

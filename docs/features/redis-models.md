@@ -31,10 +31,16 @@ DeadLetter               ReflectionRun
   project_key              project_key
   chat_id
 
-BridgeEvent
-  event_id
-  project_key
-  chat_id
+BridgeEvent              Memory
+  event_id                 memory_id
+  project_key              agent_id
+  chat_id                  project_key
+                           content
+                           importance
+                           source
+                           relevance (DecayingSortedField)
+                           confidence (ConfidenceField)
+                           bloom (ExistenceFilter)
 ```
 
 ## Cross-References
@@ -69,6 +75,7 @@ Models with project_key:
 - **DeadLetter** (added)
 - **Chat** (added)
 - **ReflectionRun** (added)
+- **Memory** (added — subconscious memory records, partitioned by project_key)
 
 ## Field Ownership
 
