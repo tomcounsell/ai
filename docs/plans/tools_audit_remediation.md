@@ -1,5 +1,5 @@
 ---
-status: Review
+status: Complete
 type: chore
 appetite: Medium
 owner: Valor
