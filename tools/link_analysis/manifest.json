@@ -23,7 +23,7 @@
   },
   "commands": {
     "verify": "python -c \"from tools.link_analysis import extract_urls; print('OK')\"",
-    "test": "pytest tools/link-analysis/tests/ -v"
+    "test": "pytest tools/link_analysis/tests/ -v"
   },
   "workflows": [
     {

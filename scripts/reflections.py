@@ -584,7 +584,10 @@ class ReflectionRunner:
             except Exception:
                 logger.warning("Step %d (%s) skipped: Redis unavailable", step_num, step_name)
                 self.state.daily_report.append(f"Skipped: {step_name} - Redis unavailable")
-                self.state.save()
+                try:
+                    self.state.save()
+                except Exception:
+                    logger.debug("Could not save state after Redis-down detection (expected)")
                 return False
 
         # Steps that need gh CLI (bug filing, issue creation)
@@ -1786,9 +1789,8 @@ class ReflectionRunner:
         """
         import time as _time
 
-        from models.cyclic_episode import CyclicEpisode
-
         from models.agent_session import AgentSession
+        from models.cyclic_episode import CyclicEpisode
         from scripts.fingerprint_classifier import classify_session
 
         cutoff = _time.time() - 86400  # past 24 hours

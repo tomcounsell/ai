@@ -23,7 +23,7 @@
   },
   "commands": {
     "verify": "python -c \"from tools.knowledge_search import search_knowledge; print('OK')\"",
-    "test": "pytest tools/knowledge-search/tests/ -v"
+    "test": "pytest tools/knowledge_search/tests/ -v"
   },
   "workflows": [
     {

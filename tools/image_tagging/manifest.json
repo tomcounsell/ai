@@ -22,7 +22,7 @@
   },
   "commands": {
     "verify": "python -c \"from tools.image_tagging import tag_image; print('OK')\"",
-    "test": "pytest tools/image-tagging/tests/ -v"
+    "test": "pytest tools/image_tagging/tests/ -v"
   },
   "workflows": [
     {

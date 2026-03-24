@@ -23,7 +23,7 @@
   },
   "commands": {
     "verify": "python -c \"from tools.image_analysis import analyze_image; print('OK')\"",
-    "test": "pytest tools/image-analysis/tests/ -v"
+    "test": "pytest tools/image_analysis/tests/ -v"
   },
   "workflows": [
     {

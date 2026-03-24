@@ -23,7 +23,7 @@
   },
   "commands": {
     "verify": "python -c \"from tools.doc_summary import summarize; print('OK')\"",
-    "test": "pytest tools/doc-summary/tests/ -v"
+    "test": "pytest tools/doc_summary/tests/ -v"
   },
   "workflows": [
     {

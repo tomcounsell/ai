@@ -29,6 +29,11 @@
     "aspect_ratios": ["1:1", "16:9", "9:16", "4:3", "3:4"]
   },
 
+  "commands": {
+    "verify": "python -c \"from tools.image_gen import generate_image; print('OK')\"",
+    "test": "pytest tools/image_gen/tests/ -v"
+  },
+
   "workflows": [
     {
       "name": "basic-generation",

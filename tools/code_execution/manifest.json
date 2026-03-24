@@ -19,7 +19,7 @@
   },
   "commands": {
     "verify": "python -c \"from tools.code_execution import execute_code; print('OK')\"",
-    "test": "pytest tools/code-execution/tests/ -v"
+    "test": "pytest tools/code_execution/tests/ -v"
   },
   "workflows": [
     {
