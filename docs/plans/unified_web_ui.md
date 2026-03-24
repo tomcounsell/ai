@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Large
 owner: Valor
@@ -181,7 +181,7 @@ No existing tests affected — this is a greenfield feature with no prior test c
 
 ### Risk 2: Large run_history ListField on Reflection model
 **Impact:** If run_history grows unbounded, Redis memory increases and serialization slows
-**Mitigation:** Cap `run_history` at last N entries (e.g., 100). Trim oldest on append. Log files on disk provide full history.
+**Mitigation:** Cap `run_history` at 30 days worth of entries (varies by reflection interval). Trim oldest on append. Large log content stays on disk as file paths, not inline.
 
 ### Risk 3: HTMX CDN dependency
 **Impact:** If CDN is unreachable, dashboard loses interactivity
@@ -324,7 +324,7 @@ No agent integration required — this is a standalone localhost web server for 
 - **Agent Type**: builder
 - **Parallel**: false
 - Extend `Reflection` model: add `run_history` ListField for historical run dicts (timestamp, status, duration, error, log_path)
-- Update `Reflection.mark_completed()` to append to `run_history` (capped at 100 entries)
+- Update `Reflection.mark_completed()` to append to `run_history` (cap at 30 days worth of entries based on reflection interval — e.g., health-check at 5min = ~8640 runs/30d, daily = 30 runs/30d)
 - Create `ui/data/reflections.py`: functions to query all reflections, get run history, get schedule, get ignore patterns, read log file content by path
 - Load registry from `config/reflections.yaml` for descriptions and intervals
 
@@ -438,8 +438,4 @@ No agent integration required — this is a standalone localhost web server for 
 
 ## Open Questions
 
-1. **Reflection run_history cap**: I proposed capping at 100 entries per reflection. Is that sufficient, or do you want longer history (with disk-backed overflow)?
-
-2. **SDLC timestamp extraction**: The `history` field on AgentSession contains entries like `[stage] BUILD completed`. These don't have explicit timestamps. Should we add timestamps to history entries going forward (minor instrumentation change), or derive approximate times from session metadata?
-
-3. **Old reflections-dashboard plan**: `docs/plans/reflections-dashboard.md` (tracking #413) is now superseded. Should I mark it as Cancelled and archive it, or leave it for reference?
+None — all resolved.

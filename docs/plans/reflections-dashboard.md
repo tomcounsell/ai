@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: Cancelled
 type: feature
 appetite: Medium
 owner: Valor
