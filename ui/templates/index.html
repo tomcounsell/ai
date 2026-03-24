@@ -1,19 +1,113 @@
 {% extends "base.html" %}
+{% from "reflections/_macros.html" import format_ts, format_dur, format_interval, status_badge, relative_time %}
 
-{% block title %}Valor System Dashboard{% endblock %}
+{% block title %}Valor System{% endblock %}
 
 {% block content %}
-<h1>System Dashboards</h1>
-<div class="dashboard-grid">
-    <a href="/reflections/" class="dashboard-card">
-        <h2>Reflections</h2>
-        <p>Scheduled task execution, history, errors, and ignore patterns. Monitor health checks, daily maintenance, and automated recovery.</p>
-        <span class="card-arrow">&rarr;</span>
-    </a>
-    <a href="/sdlc/" class="dashboard-card">
-        <h2>SDLC Observer</h2>
-        <p>Real-time view of active development pipelines, stage transitions, and outcomes. Track issues from plan through merge.</p>
-        <span class="card-arrow">&rarr;</span>
-    </a>
-</div>
+<h1 class="page-title">Valor System</h1>
+
+{# ── Agent Sessions ── #}
+<section id="sessions">
+    <h2>Agent Sessions</h2>
+    <div id="sessions-table" hx-get="/_partials/sessions/" hx-trigger="every 5s" hx-swap="innerHTML">
+        {% include "_partials/sessions_table.html" %}
+    </div>
+</section>
+
+{# ── Reflections ── #}
+<section id="reflections" class="mt-8">
+    <h2>Reflections</h2>
+    {% if reflections %}
+    <div id="status-grid" hx-get="/reflections/_partials/status-grid/" hx-trigger="every 10s" hx-swap="innerHTML">
+        {% include "reflections/_partials/status_grid.html" %}
+    </div>
+    {% else %}
+    <div class="empty-state">
+        <h3>No reflections registered</h3>
+        <p>Add reflections to <code>config/reflections.yaml</code> to see them here.</p>
+    </div>
+    {% endif %}
+</section>
+
+{# ── Schedule ── #}
+<section id="schedule" class="mt-8">
+    <h2>Schedule</h2>
+    {% if schedule %}
+    <table class="data-table">
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Status</th>
+                <th>Next Due</th>
+                <th>Time Until</th>
+                <th>Interval</th>
+                <th>Last Run</th>
+                <th>Priority</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for r in schedule %}
+            <tr>
+                <td>
+                    <span class="card-title">{{ r.name }}</span>
+                    {% if not r.enabled %}
+                    <span class="badge badge-skipped">disabled</span>
+                    {% endif %}
+                </td>
+                <td>{{ status_badge(r.last_status) }}</td>
+                <td class="mono">{{ format_ts(r.next_due) }}</td>
+                <td class="mono">
+                    {% if r.overdue %}
+                    <span style="color: var(--red);">{{ relative_time(r.due_in_seconds) }}</span>
+                    {% else %}
+                    {{ relative_time(r.due_in_seconds) }}
+                    {% endif %}
+                </td>
+                <td class="mono">{{ format_interval(r.interval) }}</td>
+                <td class="mono">{{ format_ts(r.last_run) }}</td>
+                <td><span class="badge badge-{{ r.priority }}">{{ r.priority }}</span></td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty-state">
+        <h3>No reflections scheduled</h3>
+        <p>Add reflections to <code>config/reflections.yaml</code>.</p>
+    </div>
+    {% endif %}
+</section>
+
+{# ── Ignore Patterns ── #}
+<section id="ignores" class="mt-8">
+    <h2>Ignore Patterns</h2>
+    {% if ignores %}
+    <table class="data-table">
+        <thead>
+            <tr>
+                <th>Pattern</th>
+                <th>Reason</th>
+                <th>Created</th>
+                <th>Expires</th>
+                <th>Remaining</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for entry in ignores %}
+            <tr>
+                <td class="mono">{{ entry.pattern }}</td>
+                <td>{{ entry.reason or '-' }}</td>
+                <td class="mono">{{ format_ts(entry.created_at) }}</td>
+                <td class="mono">{{ format_ts(entry.expires_at) }}</td>
+                <td class="mono">{{ relative_time(entry.time_remaining) }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty-state-inline">
+        <span class="text-muted">No active ignore patterns</span>
+    </div>
+    {% endif %}
+</section>
 {% endblock %}

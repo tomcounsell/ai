@@ -1,0 +1,79 @@
+{% if pipeline %}
+<td colspan="8" class="session-detail-cell">
+    <div class="inline-detail">
+        <div class="grid-2 mb-4">
+            <div>
+                <h3>Details</h3>
+                <table class="data-table compact">
+                    <tr><td class="text-secondary">Job ID</td><td class="mono">{{ pipeline.job_id }}</td></tr>
+                    <tr><td class="text-secondary">Session ID</td><td class="mono">{{ pipeline.session_id or '-' }}</td></tr>
+                    <tr><td class="text-secondary">Project</td><td class="mono">{{ pipeline.project_key or '-' }}</td></tr>
+                    <tr><td class="text-secondary">Branch</td><td class="mono">{{ pipeline.branch_name or '-' }}</td></tr>
+                    <tr><td class="text-secondary">Slug</td><td class="mono">{{ pipeline.slug or '-' }}</td></tr>
+                    <tr><td class="text-secondary">Created</td><td class="mono">{{ pipeline.created_at | format_timestamp if pipeline.created_at else '-' }}</td></tr>
+                    <tr><td class="text-secondary">Started</td><td class="mono">{{ pipeline.started_at | format_timestamp if pipeline.started_at else '-' }}</td></tr>
+                    {% if pipeline.completed_at %}
+                    <tr><td class="text-secondary">Completed</td><td class="mono">{{ pipeline.completed_at | format_timestamp }}</td></tr>
+                    {% endif %}
+                </table>
+            </div>
+            <div>
+                <h3>Links</h3>
+                <table class="data-table compact">
+                    {% if pipeline.issue_url %}
+                    <tr><td class="text-secondary">Issue</td><td><a href="{{ pipeline.issue_url }}" class="link" target="_blank">{{ pipeline.issue_url }}</a></td></tr>
+                    {% endif %}
+                    {% if pipeline.plan_url %}
+                    <tr><td class="text-secondary">Plan</td><td><a href="{{ pipeline.plan_url }}" class="link" target="_blank">{{ pipeline.plan_url }}</a></td></tr>
+                    {% endif %}
+                    {% if pipeline.pr_url %}
+                    <tr><td class="text-secondary">PR</td><td><a href="{{ pipeline.pr_url }}" class="link" target="_blank">{{ pipeline.pr_url }}</a></td></tr>
+                    {% endif %}
+                    {% if not pipeline.issue_url and not pipeline.plan_url and not pipeline.pr_url %}
+                    <tr><td class="text-muted" colspan="2">No links</td></tr>
+                    {% endif %}
+                </table>
+
+                {% if pipeline.stages %}
+                <h3 class="mt-4">Stage Progress</h3>
+                <div class="stage-indicator mt-4" style="font-size: 13px;">
+                    {% set p = pipeline %}
+                    {% for stage in p.stages %}
+                    {% if not loop.first %}<span class="stage-arrow">&#9654;</span>{% endif %}
+                    <span class="stage-dot {{ 'completed' if stage.is_done else ('in-progress' if stage.is_active else ('failed' if stage.is_failed else '')) }}">{{ stage.name }}</span>
+                    {% endfor %}
+                </div>
+                {% endif %}
+            </div>
+        </div>
+
+        {% if pipeline.events %}
+        <h3>Timeline</h3>
+        <div class="timeline mt-4">
+            {% for event in pipeline.events %}
+            <div class="timeline-item {{ 'success' if 'completed' in event.text else ('error' if 'failed' in event.text or 'error' in event.text else ('active' if 'in_progress' in event.text else '')) }}">
+                <div class="flex gap-2">
+                    <span class="badge badge-{{ event.role }}">{{ event.role }}</span>
+                    {% if event.timestamp %}
+                    <span class="timeline-time">{{ event.timestamp | format_timestamp }}</span>
+                    {% endif %}
+                </div>
+                <div class="timeline-text">{{ event.text }}</div>
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+
+        {% if pipeline.message_text %}
+        <h3 class="mt-4">Original Message</h3>
+        <div class="log-viewer" style="max-height: 150px;">{{ pipeline.message_text }}</div>
+        {% endif %}
+    </div>
+</td>
+{% else %}
+<td colspan="8" class="session-detail-cell">
+    <div class="inline-detail">
+        <span class="text-muted">Session details not available.</span>
+    </div>
+</td>
+{% endif %}

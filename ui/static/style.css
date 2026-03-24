@@ -193,6 +193,21 @@ h3 {
     background: var(--green-bg);
 }
 
+.badge-blue {
+    color: var(--blue);
+    background: var(--blue-bg);
+}
+
+.badge-purple {
+    color: var(--purple);
+    background: var(--purple-bg);
+}
+
+.badge-active, .badge-waiting_for_children {
+    color: var(--yellow);
+    background: var(--yellow-bg);
+}
+
 /* Cards and panels */
 .card {
     background: var(--bg-secondary);
@@ -578,4 +593,56 @@ a.link:hover {
 
 @keyframes spin {
     to { transform: rotate(360deg); }
+}
+
+/* Page title (no nav) */
+.page-title {
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin-bottom: 24px;
+    font-family: var(--font-mono);
+}
+
+/* Inline session detail */
+.session-row {
+    transition: background 0.1s;
+}
+
+.session-row:hover td {
+    background: var(--bg-tertiary);
+}
+
+.session-detail-row:empty {
+    display: none;
+}
+
+.session-detail-cell {
+    padding: 0 !important;
+    border-bottom: 1px solid var(--border);
+}
+
+.inline-detail {
+    background: var(--bg-secondary);
+    padding: 16px 24px;
+    border-top: 1px solid var(--border);
+}
+
+.inline-detail h3 {
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-secondary);
+    margin-bottom: 8px;
+}
+
+.data-table.compact td {
+    padding: 4px 8px;
+    font-size: 12px;
+}
+
+/* Inline empty state (no padding) */
+.empty-state-inline {
+    padding: 16px 0;
+    color: var(--text-muted);
 }

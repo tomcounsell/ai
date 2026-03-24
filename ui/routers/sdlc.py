@@ -65,7 +65,19 @@ def partial_stage_indicator(request: Request, job_id: str):
     )
 
 
-# Parameterized route MUST be last to avoid shadowing static routes above
+# Parameterized routes MUST be last to avoid shadowing static routes above
+@router.get("/{job_id}/_inline/", response_class=HTMLResponse)
+def sdlc_detail_inline(request: Request, job_id: str):
+    """HTMX partial: inline session detail for the dashboard table."""
+    from ui.data.sdlc import get_pipeline_detail
+
+    templates = request.app.state.templates
+    pipeline = get_pipeline_detail(job_id)
+    return templates.TemplateResponse(
+        request, "_partials/session_detail_inline.html", {"pipeline": pipeline}
+    )
+
+
 @router.get("/{job_id}/", response_class=HTMLResponse)
 def sdlc_detail(request: Request, job_id: str):
     """Pipeline detail with stage transition timeline."""

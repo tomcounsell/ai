@@ -108,18 +108,22 @@ class PipelineProgress(BaseModel):
 
 
 def _parse_stage_states(raw: str | dict | None) -> list[StageState]:
-    """Parse stage_states field into typed StageState objects."""
+    """Parse stage_states field into typed StageState objects.
+
+    Returns an empty list when raw is None/empty (non-SDLC sessions).
+    Only returns stage objects when actual stage data exists.
+    """
     if not raw:
-        return [StageState(name=s, status="pending") for s in SDLC_STAGES]
+        return []
 
     if isinstance(raw, str):
         try:
             raw = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
-            return [StageState(name=s, status="pending") for s in SDLC_STAGES]
+            return []
 
     if not isinstance(raw, dict):
-        return [StageState(name=s, status="pending") for s in SDLC_STAGES]
+        return []
 
     stages = []
     for name in SDLC_STAGES:
@@ -198,11 +202,15 @@ def _session_to_pipeline(session) -> PipelineProgress:
 # === Public query functions ===
 
 
-def get_active_pipelines() -> list[PipelineProgress]:
-    """Get all active SDLC pipelines (sessions with stage_states that aren't completed).
+def get_all_sessions() -> list[PipelineProgress]:
+    """Get ALL agent sessions, sorted by last_activity descending.
+
+    Returns all sessions regardless of whether they have stage_states.
+    Sessions with stage_states will have SDLC stage indicators;
+    sessions without will have an empty stages list.
 
     Returns:
-        List of PipelineProgress for active pipelines, sorted by last activity.
+        List of PipelineProgress for all sessions, most recent first.
     """
     from models.agent_session import AgentSession
 
@@ -212,20 +220,21 @@ def get_active_pipelines() -> list[PipelineProgress]:
         logger.warning(f"Failed to query AgentSession: {e}")
         return []
 
-    active = []
-    for session in all_sessions:
-        # Only include sessions that have SDLC stage tracking
-        if not session.stage_states:
-            continue
-        # Skip completed/failed sessions
-        if session.status in ("completed", "failed"):
-            continue
-        pipeline = _session_to_pipeline(session)
-        active.append(pipeline)
+    pipelines = [_session_to_pipeline(session) for session in all_sessions]
+    pipelines.sort(key=lambda p: p.last_activity or p.created_at or 0, reverse=True)
+    return pipelines
 
-    # Sort by last_activity descending (most recent first)
-    active.sort(key=lambda p: p.last_activity or p.created_at or 0, reverse=True)
-    return active
+
+def get_active_pipelines() -> list[PipelineProgress]:
+    """Get active SDLC pipelines (sessions with stage_states that aren't completed).
+
+    Filtered version of get_all_sessions() for backward compatibility.
+
+    Returns:
+        List of PipelineProgress for active SDLC pipelines, sorted by last activity.
+    """
+    all_sessions = get_all_sessions()
+    return [p for p in all_sessions if p.stages and p.status not in ("completed", "failed")]
 
 
 def get_pipeline_detail(job_id: str) -> PipelineProgress | None:

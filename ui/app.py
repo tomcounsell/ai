@@ -106,8 +106,36 @@ def create_app() -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request):
-        """Root route: dashboard listing page."""
-        return templates.TemplateResponse(request, "index.html")
+        """Root route: single-page dashboard with all system state."""
+        from ui.data.reflections import get_active_ignores, get_all_reflections, get_schedule
+        from ui.data.sdlc import get_all_sessions
+
+        sessions = get_all_sessions()
+        reflections = get_all_reflections()
+        schedule = get_schedule()
+        ignores = get_active_ignores()
+        return templates.TemplateResponse(
+            request,
+            "index.html",
+            {
+                "sessions": sessions,
+                "reflections": reflections,
+                "schedule": schedule,
+                "ignores": ignores,
+            },
+        )
+
+    @app.get("/_partials/sessions/", response_class=HTMLResponse)
+    def partial_sessions_table(request: Request):
+        """HTMX partial: refreshable sessions table."""
+        from ui.data.sdlc import get_all_sessions
+
+        sessions = get_all_sessions()
+        return templates.TemplateResponse(
+            request,
+            "_partials/sessions_table.html",
+            {"sessions": sessions},
+        )
 
     # Exception handler for Redis connection failures
     @app.exception_handler(Exception)

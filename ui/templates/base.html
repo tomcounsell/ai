@@ -9,13 +9,6 @@
     {% block head %}{% endblock %}
 </head>
 <body>
-    <nav class="top-nav">
-        <a href="/" class="nav-brand">Valor System</a>
-        <div class="nav-links">
-            <a href="/reflections/" class="nav-link {% block nav_reflections %}{% endblock %}">Reflections</a>
-            <a href="/sdlc/" class="nav-link {% block nav_sdlc %}{% endblock %}">SDLC</a>
-        </div>
-    </nav>
     <main class="container">
         {% block content %}{% endblock %}
     </main>

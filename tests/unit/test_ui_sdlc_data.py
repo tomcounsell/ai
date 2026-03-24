@@ -14,15 +14,13 @@ class TestStageStateParsing:
         from ui.data.sdlc import _parse_stage_states
 
         result = _parse_stage_states(None)
-        assert len(result) == 8  # All SDLC stages
-        assert all(s.status == "pending" for s in result)
+        assert len(result) == 0  # Non-SDLC sessions get empty stages
 
     def test_parse_empty_string(self):
         from ui.data.sdlc import _parse_stage_states
 
         result = _parse_stage_states("")
-        assert len(result) == 8
-        assert all(s.status == "pending" for s in result)
+        assert len(result) == 0  # Non-SDLC sessions get empty stages
 
     def test_parse_valid_json_string(self):
         from ui.data.sdlc import _parse_stage_states
@@ -49,8 +47,7 @@ class TestStageStateParsing:
         from ui.data.sdlc import _parse_stage_states
 
         result = _parse_stage_states("not valid json{{{")
-        assert len(result) == 8
-        assert all(s.status == "pending" for s in result)
+        assert len(result) == 0  # Malformed JSON treated as no stage data
 
     def test_parse_nested_status_dict(self):
         """Handle stage_states where values are dicts with a 'status' key."""
@@ -195,6 +192,12 @@ class TestHistoryParsing:
 
 class TestSdlcQueryFunctions:
     """Tests for SDLC query functions against Redis."""
+
+    def test_get_all_sessions_returns_list(self):
+        from ui.data.sdlc import get_all_sessions
+
+        result = get_all_sessions()
+        assert isinstance(result, list)
 
     def test_get_active_pipelines_returns_list(self):
         from ui.data.sdlc import get_active_pipelines
