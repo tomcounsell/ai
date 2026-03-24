@@ -330,7 +330,6 @@ def check_stalled_sessions() -> list[dict]:
     return stalled
 
 
-
 def assess_session_health(session: AgentSession) -> dict[str, Any]:
     """Assess the health of a single session.
 
@@ -578,9 +577,6 @@ def _safe_abandon_session(session: AgentSession, reason: str) -> bool:
             e,
         )
         return False
-
-
-
 
 
 async def fix_unhealthy_session(session: AgentSession, assessment: dict[str, Any]) -> bool:

@@ -13,7 +13,6 @@ standard log aggregation tools while remaining greppable.
 
 import json
 import logging
-import time
 from typing import Any
 
 

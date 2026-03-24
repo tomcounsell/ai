@@ -640,8 +640,7 @@ def _recover_interrupted_jobs_startup() -> int:
         old_id = job.job_id
         chat_id = job.chat_id or job.project_key
         logger.warning(
-            "[startup-recovery] Recovering interrupted job %s "
-            "(session=%s, chat=%s, msg=%.80r...)",
+            "[startup-recovery] Recovering interrupted job %s (session=%s, chat=%s, msg=%.80r...)",
             old_id,
             job.session_id,
             chat_id,
@@ -777,8 +776,7 @@ async def _job_health_check() -> None:
         pending_seconds = now - created_at
         if pending_seconds > JOB_HEALTH_MIN_RUNNING:
             logger.info(
-                "[job-health] Starting worker for orphaned pending job %s "
-                "(chat=%s, pending %.0fs)",
+                "[job-health] Starting worker for orphaned pending job %s (chat=%s, pending %.0fs)",
                 job.job_id,
                 worker_key,
                 pending_seconds,

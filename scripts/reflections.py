@@ -582,9 +582,7 @@ class ReflectionRunner:
 
                 POPOTO_REDIS_DB.ping()
             except Exception:
-                logger.warning(
-                    "Step %d (%s) skipped: Redis unavailable", step_num, step_name
-                )
+                logger.warning("Step %d (%s) skipped: Redis unavailable", step_num, step_name)
                 self.state.daily_report.append(f"Skipped: {step_name} - Redis unavailable")
                 self.state.save()
                 return False
@@ -596,9 +594,7 @@ class ReflectionRunner:
                 import shutil
 
                 if not shutil.which("gh"):
-                    logger.warning(
-                        "Step %d (%s) skipped: gh CLI not found", step_num, step_name
-                    )
+                    logger.warning("Step %d (%s) skipped: gh CLI not found", step_num, step_name)
                     self.state.daily_report.append(f"Skipped: {step_name} - gh CLI not found")
                     self.state.save()
                     return False
@@ -1790,8 +1786,9 @@ class ReflectionRunner:
         """
         import time as _time
 
-        from models.agent_session import AgentSession
         from models.cyclic_episode import CyclicEpisode
+
+        from models.agent_session import AgentSession
         from scripts.fingerprint_classifier import classify_session
 
         cutoff = _time.time() - 86400  # past 24 hours
