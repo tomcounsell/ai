@@ -141,11 +141,29 @@ run_mirofish_research(episode_id: int, prompt: str) -> EpisodeArtifact
 Calls the MiroFish swarm intelligence service via HTTP API for perspective-oriented simulation. Produces stakeholder reaction modeling, evidence-based predictions, counter-arguments, and audience reception analysis. Saves result as `p2-mirofish` artifact. Gracefully degrades when `MIROFISH_API_URL` is not set or the service is unreachable, creating a skip artifact. Requires the MiroFish sidecar service to be running.
 
 ```python
+add_file_research(episode_id: int, title: str, file_path: str | Path) -> EpisodeArtifact
+```
+Parses a document file (PDF, DOCX, ODT) using `parse_document()` and stores the extracted text as a `p2-{title}` artifact. If parsing fails, creates an artifact with empty content and `parse_failed: true` metadata so the pipeline can continue gracefully. Delegates to `add_manual_research()` for storage after successful extraction.
+
+```python
 add_manual_research(episode_id: int, title: str, content: str) -> EpisodeArtifact
 ```
 Stores human-pasted research as `p2-{title}` artifact. Used for Grok, expert interviews, or any manual source.
 
 All research functions use `_get_episode_context()` to build prompts from the best available context (prefers `question-discovery` artifact, falls back to `p1-brief`, then `Episode.description`).
+
+---
+
+### Document Parser Utility (`apps/common/utilities/document_parser.py`)
+
+```python
+parse_document(path: Path | str) -> str
+```
+Extracts plain text from a document file using kreuzberg's `extract_file_sync()` API. Supports PDF, DOCX, ODT, TXT, and MD formats. Kreuzberg auto-detects the file format from the extension and delegates to the appropriate extractor (pdfium for PDFs, python-docx for DOCX, etc.). Plain text formats (.txt, .md) are read directly without kreuzberg.
+
+Raises `FileNotFoundError` for missing files and `ValueError` for unsupported extensions. Returns an empty string if kreuzberg extraction fails (e.g., corrupt files), logging the error for diagnostics.
+
+The backfill command (`_episode_import_utils.py`) uses `parse_document()` to extract text from PDF files during episode import, storing the extracted text in the `content` field alongside the URL instead of creating empty-content URL-only artifacts.
 
 ---
 

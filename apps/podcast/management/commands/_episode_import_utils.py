@@ -348,7 +348,7 @@ def create_artifacts(
         # Title is the relative path, optionally normalized
         title = normalize_title_fn(rel_str) if normalize_title_fn else rel_str
 
-        # Handle PDF files (URL-only artifacts, binary content stays external)
+        # Handle PDF files — extract text via kreuzberg, keep URL as well
         if path.suffix.lower() == ".pdf":
             podcast_slug = episode.podcast.slug
             episode_slug = episode.slug
@@ -356,13 +356,26 @@ def create_artifacts(
                 f"https://research.yuda.me/podcast/episodes/"
                 f"{podcast_slug}/{episode_slug}/{rel_str}"
             )
+            # Attempt text extraction; fall back to URL-only on failure
+            pdf_text = ""
+            try:
+                from apps.common.utilities.document_parser import parse_document
+
+                pdf_text = parse_document(path)
+            except Exception as exc:
+                warnings.append(f"PDF text extraction failed for {rel_str}: {exc}")
+
+            label = "url+text" if pdf_text else "url"
             if verbose:
-                stdout(f"  ARTIFACT (url): {title}")
+                if pdf_text:
+                    stdout(f"  ARTIFACT ({label}): {title} ({len(pdf_text)} chars)")
+                else:
+                    stdout(f"  ARTIFACT ({label}): {title}")
             if not dry_run:
                 _, was_created = EpisodeArtifact.objects.update_or_create(
                     episode=episode,
                     title=title,
-                    defaults={"content": "", "url": pdf_url},
+                    defaults={"content": pdf_text, "url": pdf_url},
                 )
                 if was_created:
                     created += 1

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from apps.podcast.models import Episode, EpisodeArtifact
 
@@ -717,6 +718,68 @@ def run_mirofish_research(episode_id: int, prompt: str) -> EpisodeArtifact:
     action = "Created" if created else "Updated"
     logger.info("%s p2-mirofish artifact for episode %s", action, episode_id)
     return artifact
+
+
+# ---------------------------------------------------------------------------
+# File-based research (document parsing)
+# ---------------------------------------------------------------------------
+
+
+def add_file_research(
+    episode_id: int, title: str, file_path: str | Path
+) -> EpisodeArtifact:
+    """Parse a document file and store the extracted text as a research artifact.
+
+    Uses :func:`~apps.common.utilities.document_parser.parse_document` to
+    extract text from binary formats (PDF, DOCX, ODT) and then delegates to
+    :func:`add_manual_research` for storage.
+
+    If parsing fails, the artifact is still created with empty content and
+    metadata noting the failure, so the pipeline can continue.
+
+    Args:
+        episode_id: Primary key of the target :class:`Episode`.
+        title: Short identifier used in the artifact title (e.g. ``"whitepaper"``).
+        file_path: Path to the document file.
+
+    Returns:
+        The newly created or updated :class:`EpisodeArtifact`.
+    """
+    from apps.common.utilities.document_parser import parse_document
+
+    file_path = Path(file_path)
+
+    try:
+        content = parse_document(file_path)
+    except (FileNotFoundError, ValueError) as exc:
+        logger.warning(
+            "Failed to parse document %s for episode %s: %s",
+            file_path,
+            episode_id,
+            exc,
+        )
+        content = ""
+
+    if not content:
+        # Create artifact with metadata noting the parse failure so the
+        # pipeline can continue gracefully.
+        episode = Episode.objects.get(pk=episode_id)
+        artifact, _ = EpisodeArtifact.objects.update_or_create(
+            episode=episode,
+            title=f"p2-{title}",
+            defaults={
+                "content": "",
+                "description": f"File research: {title} (parse failed or empty).",
+                "workflow_context": "Research Gathering",
+                "metadata": {
+                    "file_path": str(file_path),
+                    "parse_failed": True,
+                },
+            },
+        )
+        return artifact
+
+    return add_manual_research(episode_id, title, content)
 
 
 # ---------------------------------------------------------------------------

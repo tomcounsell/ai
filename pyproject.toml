@@ -63,6 +63,7 @@ dependencies = [
     "html2text>=2025.4.15",
     "markdown>=3.10.2",
     "notebooklm-py>=0.3.3",
+    "kreuzberg>=4.4.6",
 ]
 
 [project.optional-dependencies]
