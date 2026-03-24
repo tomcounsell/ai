@@ -216,7 +216,49 @@ No agent integration required — this is a Claude Code slash command skill (`.c
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Critique Date**: 2026-03-24
+**Critics**: Skeptic, Operator, Archaeologist, Adversary, Simplifier, User
+**Findings**: 3 total (0 blockers, 2 concerns, 1 nit)
+
+### Concerns
+
+#### Vacuous "Tests pass" success criterion
+- **Severity**: CONCERN
+- **Critics**: Skeptic
+- **Location**: Success Criteria, item 12
+- **Finding**: Success criterion `Tests pass (/do-test)` is vacuous for a prompt-only skill that creates no Python code and modifies no existing behavior. Running the test suite will trivially pass since nothing changed.
+- **Suggestion**: Remove the "Tests pass" criterion or replace it with a functional validation: "Run `/do-oop-audit` against a real Python project (e.g., this repo's `tools/` or `bridge/`) and confirm findings are accurate and actionable."
+
+#### No functional validation in Verification table
+- **Severity**: CONCERN
+- **Critics**: User, Skeptic
+- **Location**: Verification table (line 206-214)
+- **Finding**: All eight verification checks are structural (file exists, line count, grep for sections, lint clean). None verify that the skill actually produces useful output when invoked. A SKILL.md could pass every structural check and still produce poor or hallucinated audit findings.
+- **Suggestion**: Add a verification row: `Smoke test | /do-oop-audit tools/ | Produces severity-grouped findings with 0 false positives in CRITICAL tier`. This matches the `new-audit-skill` meta-skill Step 7 ("Test the audit").
+
+### Nits
+
+#### Over-specified team orchestration for a Small task
+- **Severity**: NIT
+- **Critics**: Simplifier
+- **Location**: Team Orchestration section (line 138-153)
+- **Finding**: The Team Orchestration section defines two named agents (skill-builder, skill-validator) with Resume flags for what is a single-file, solo-dev task. Tasks 2 and 4 are both validation steps that could be merged into one post-docs check.
+- **Suggestion**: Keep the structure if it is required by the plan template, but consider merging Task 2 (validate-skill) into Task 4 (validate-all) to reduce sequential overhead.
+
+### Structural Check Results
+
+| Check | Status | Detail |
+|-------|--------|--------|
+| Required sections | PASS | All 4 required sections present and non-empty |
+| Task numbering | PASS | Tasks 1-4 sequential, no gaps |
+| Dependencies valid | PASS | All Depends On references resolve to valid task IDs, no cycles |
+| File paths exist | PASS | 2 of 3 referenced paths are intentionally new (skill + feature doc), 1 exists (README.md) |
+| Prerequisites met | PASS | No prerequisites declared (greenfield) |
+| Cross-references | PASS | All success criteria map to tasks; no No-Gos appear in Solution; no Rabbit Holes in tasks |
+
+### Verdict
+
+**READY TO BUILD** — No blockers. The two concerns (vacuous test criterion, missing functional validation) are acknowledged risks that can be addressed during build by adding a smoke-test step. The plan is well-structured, follows established patterns, and has a complete spec from the issue.
 
 ---
 
