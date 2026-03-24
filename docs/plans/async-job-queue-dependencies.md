@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Large
 owner: Valor
@@ -101,12 +101,12 @@ No prerequisites -- this work has no external dependencies. All foundational wor
 
 - Add `stable_job_id = KeyField(null=True)` to AgentSession — a UUID set once at creation via `uuid.uuid4().hex`, never changes on delete-and-recreate. `job_id` (AutoKeyField) changes on status transitions; `stable_job_id` does not. This is the dependency reference key. KeyField provides indexed lookup for dependency resolution. Nullable: pre-existing jobs in Redis will have `stable_job_id=None` and cannot be depended upon (which is fine since they predate the feature).
 - Add `depends_on` as a `ListField` on AgentSession (list of `stable_job_id` values, nullable). Many-to-one: multiple jobs can depend on the same stable_job_id, and a single job can depend on multiple stable_job_ids.
-- In `_pop_job()`, after filtering by `scheduled_after`, filter out jobs whose `depends_on` contains any `stable_job_id` where the dependency is not `completed`. Dependencies in `failed` or `cancelled` state block dependents and trigger PM notification. Only `completed` dependencies are considered met.
+- In `_pop_job()`, after filtering by `scheduled_after`, filter out jobs whose `depends_on` contains any `stable_job_id` where the dependency is not `completed`. Only `completed` is considered "met." Dependencies in `failed` or `cancelled` state (both terminal) block dependents and trigger PM notification — they are never silently unblocked. Missing `stable_job_id` (deleted from Redis) is treated as blocked (conservative — notify PM) to prevent silently unblocking dependents of cleaned-up jobs.
 - Add `dependency_status` helper to check if all dependencies are met (looks up AgentSession by stable_job_id)
 - Failed dependency handling: notify parent ChatSession (PM) with full visibility. PM decides: cancel, retry, or unblock. No auto-cancellation — parent has full decision-making power over child jobs.
 - Add `retry_job(stable_job_id)` function for PM to re-queue a failed child job
 - Add `reorder_job(job_id, new_priority)` function for PM to change priority of pending jobs
-- Add `cancel_job(job_id)` function for PM to cancel pending jobs without affecting running ones
+- Add `cancel_job(job_id)` function for PM to cancel pending jobs without affecting running ones. Sets status to `cancelled` — a new explicit terminal status. `cancelled` is added to all `terminal_statuses` sets throughout `job_queue.py` (currently `{"completed", "failed"}` becomes `{"completed", "failed", "cancelled"}`). In dependency checking, `cancelled` blocks dependents the same as `failed` — dependents are NOT silently unblocked. PM is notified and decides whether to cancel or unblock dependent jobs.
 
 #### Phase 2: Branch-Session Mapping
 
@@ -135,7 +135,7 @@ No prerequisites -- this work has no external dependencies. All foundational wor
 - Design as a feed that SubconsciousMemory (Popoto recipe) can consume later
 
 **4b. Health check enrichment** (in `agent/health_check.py`)
-- Read `session_type` (chat/dev) and `message_text` (the original task request) from AgentSession model and inject into `JUDGE_PROMPT`. No new fields needed — both already exist on the model.
+- Read `session_type` (chat/dev) and `message_text` (the original task request) from AgentSession model and inject into `JUDGE_PROMPT`. No new fields needed — `session_type` and `message_text` both already exist on the AgentSession model (`session_type` is a Field, `message_text` is a Field with max_length=MSG_MAX_CHARS).
 - Extract `gh` CLI commands from the tool call activity (high-signal for PM sessions doing GitHub orchestration)
 - Add session context preamble to the prompt: "This is a {session_type} session working on: {message_text[:200]}"
 - Log extracted `gh` commands alongside the health verdict
@@ -174,7 +174,7 @@ No prerequisites -- this work has no external dependencies. All foundational wor
 ### Observability Edge Cases
 - [ ] Activity stream: test that `logs/sessions/` directory is created lazily on first tool call
 - [ ] Activity stream: test that JSONL append survives concurrent writes (file append is atomic on POSIX for small writes)
-- [ ] Health check enrichment: test that missing `session_type` or `task_description` on AgentSession falls back gracefully (empty string, not crash)
+- [ ] Health check enrichment: test that missing `session_type` or `message_text` on AgentSession falls back gracefully (empty string, not crash)
 - [ ] Subagent summary: test that missing or empty return value produces a sensible default summary
 
 ## Test Impact
@@ -184,7 +184,7 @@ No prerequisites -- this work has no external dependencies. All foundational wor
 - [ ] `tests/unit/test_job_queue_async.py::test_complete_job` -- UPDATE: verify dependency cascade (dependent jobs become eligible)
 - [ ] `tests/unit/test_worktree_manager.py` -- no changes expected (worktree API unchanged)
 - [ ] `tests/unit/test_branch_manager.py` -- no changes expected (existing functions unchanged)
-- [ ] `tests/unit/test_health_check.py` (if exists) -- UPDATE: verify enriched prompt includes session_type and task_description
+- [ ] `tests/unit/test_health_check.py` (if exists) -- UPDATE: verify enriched prompt includes session_type and message_text
 - [ ] `tests/unit/test_hooks.py` -- CREATE: new test file for subagent_stop outcome summary
 
 ## Rabbit Holes
@@ -201,7 +201,7 @@ No prerequisites -- this work has no external dependencies. All foundational wor
 
 ### Risk 2: Delete-and-recreate changes job_id — ~~breaking depends_on references~~
 **Impact:** Eliminated. `depends_on` uses `stable_job_id` (a UUID set once at creation, preserved across delete-and-recreate) instead of `job_id`. The delete-and-recreate pattern in `_pop_job()` must copy `stable_job_id` to the new record. No reference scanning or updating needed.
-**Residual risk:** If a record is deleted from Redis before dependents check it, the dependency lookup will find no match. Mitigation: treat missing `stable_job_id` as "blocked" (conservative — notify PM). This avoids silently unblocking dependents of cancelled or cleaned-up jobs.
+**Residual risk:** If a record is deleted from Redis before dependents check it, the dependency lookup will find no match. Mitigation: treat missing `stable_job_id` as "blocked" (conservative — notify PM). This avoids silently unblocking dependents of cleaned-up jobs. The explicit `cancelled` terminal status ensures that intentionally cancelled jobs block their dependents with clear semantics rather than disappearing from Redis.
 
 ### Risk 3: Branch state divergence between checkpoint and restore
 **Impact:** Resume lands on wrong commit, work conflicts
@@ -366,7 +366,7 @@ No new MCP server needed. The dependency tracking is internal to the job queue. 
 - **Agent Type**: builder
 - **Parallel**: false
 - Add `reorder_job(job_id, new_priority)` -- changes priority of a pending job
-- Add `cancel_job(job_id)` -- sets status to `cancelled` (a new terminal status). Dependents of a cancelled job are blocked and PM is notified, same as `failed` — never silently unblocked.
+- Add `cancel_job(job_id)` -- sets status to `cancelled` (a new explicit terminal status added to all `terminal_statuses` sets in `job_queue.py`). Dependents of a cancelled job are blocked and PM is notified, same as `failed` — never silently unblocked.
 - Add `retry_job(stable_job_id)` -- re-queues a failed child job with same parameters
 - Add `get_queue_status(chat_id)` -- returns full queue state with dependency graph and child statuses
 - Wire into ChatSession orchestration: PM gets full visibility over child jobs (cancel, retry, inspect)
@@ -380,7 +380,7 @@ No new MCP server needed. The dependency tracking is internal to the job queue. 
 - **Agent Type**: builder
 - **Parallel**: true (independent of phases 1-4)
 - **5a. Activity stream** -- In `watchdog_hook()` in `agent/health_check.py`, on every tool call, append one JSONL line to `logs/sessions/{session_id}/activity.jsonl`. Fields: timestamp, tool_name, key_args (reuse `_summarize_input()`), tool_call_count. Create directory lazily. Zero API cost.
-- **5b. Health check enrichment** -- In `agent/health_check.py`, read `session_type` and `task_description` from AgentSession model. Inject into `JUDGE_PROMPT` as context preamble. Extract `gh` CLI commands from tool call history and log alongside verdict.
+- **5b. Health check enrichment** -- In `agent/health_check.py`, read `session_type` and `message_text` from AgentSession model (both already exist on the model). Inject into `JUDGE_PROMPT` as context preamble. Extract `gh` CLI commands from tool call history and log alongside verdict.
 - **5c. Subagent completion summaries** -- In `agent/hooks/subagent_stop.py`, extract outcome summary from `input_data` and log structured outcome line (agent_type, agent_id, summary). Include in returned `reason` field.
 - Write tests for activity stream file creation, health check prompt enrichment, subagent summary extraction
 
@@ -440,30 +440,33 @@ No new MCP server needed. The dependency tracking is internal to the job queue. 
 **Critics**: Skeptic, Operator, Archaeologist, Adversary, Simplifier, User
 **Findings**: 8 total (2 blockers, 4 concerns, 2 nits)
 
-### Blockers
+### Blockers (RESOLVED)
 
-#### 1. `task_description` field does not exist on AgentSession
+#### 1. `task_description` field does not exist on AgentSession — RESOLVED
 - **Severity**: BLOCKER
 - **Critics**: Skeptic
 - **Location**: Phase 4b (Health check enrichment), line 138-140
 - **Finding**: The plan says to read `task_description` from AgentSession and inject into the judge prompt, but AgentSession has no `task_description` field. The plan never specifies adding this field to the model or to `_JOB_FIELDS`.
 - **Suggestion**: Either add `task_description = Field(null=True)` to AgentSession (and to `_JOB_FIELDS`), or derive the description from an existing field like `message_text` or `context_summary`.
+- **Resolution**: Plan updated to use `message_text` (already exists on AgentSession as `Field(max_length=MSG_MAX_CHARS)`) instead of the non-existent `task_description`. No new fields needed.
 
-#### 2. `cancel_job()` semantics create unsafe optimistic unblocking
+#### 2. `cancel_job()` semantics create unsafe optimistic unblocking — RESOLVED
 - **Severity**: BLOCKER
 - **Critics**: Adversary, Skeptic
 - **Location**: Risk 2 (residual risk) + Task 4 (`cancel_job`)
 - **Finding**: The plan says "treat missing stable_job_id as completed" (optimistic unblocking), and `cancel_job()` cancels pending jobs. But the plan defines no "cancelled" terminal status. If cancellation deletes the job from Redis, dependents will treat the missing dependency as completed and proceed -- potentially executing work whose prerequisite was intentionally cancelled. This directly contradicts the "PM decides" design principle.
 - **Suggestion**: Define an explicit `cancelled` terminal status. In dependency checking, treat `cancelled` the same as `failed` (block dependents, notify PM) rather than optimistically unblocking.
+- **Resolution**: Plan updated with explicit `cancelled` terminal status added to all `terminal_statuses` sets. Dependency checking treats `cancelled` same as `failed` (blocks dependents, notifies PM). Missing `stable_job_id` treated as blocked (conservative). No optimistic unblocking anywhere.
 
 ### Concerns
 
-#### 3. `stable_job_id` lookup performance -- no KeyField index
+#### 3. `stable_job_id` lookup performance -- no KeyField index — RESOLVED
 - **Severity**: CONCERN
 - **Critics**: Skeptic
 - **Location**: Phase 1, `_pop_job()` dependency filtering
 - **Finding**: `stable_job_id` is defined as `Field(null=True)`, not a `KeyField`. Dependency checking in `_pop_job()` must scan all chat jobs to find records matching each `stable_job_id` in a job's `depends_on` list. With many jobs this becomes O(N*M) per pop.
 - **Suggestion**: Consider making `stable_job_id` a `KeyField` for indexed lookup, or document why scan performance is acceptable (e.g., jobs per chat are always small).
+- **Resolution**: The plan already specifies `stable_job_id = KeyField(null=True)` in Phase 1 and Task 1. The critique misread the plan — KeyField is already specified for indexed lookup.
 
 #### 4. `_transition_parent()` not mentioned in plan but needs `stable_job_id` and `depends_on` awareness
 - **Severity**: CONCERN
@@ -511,13 +514,13 @@ No new MCP server needed. The dependency tracking is internal to the job queue. 
 | Dependencies valid | PASS | All `Depends On` references point to valid task IDs, no cycles |
 | File paths exist | WARN | 9 of 11 referenced source files exist; `tests/unit/test_hooks.py` and `docs/features/job-dependency-tracking.md` do not (latter is intentionally new) |
 | Prerequisites met | PASS | No prerequisites declared |
-| Cross-references | WARN | `task_description` field referenced in solution but absent from AgentSession model and not listed as a new field to add |
+| Cross-references | PASS | All referenced fields (`session_type`, `message_text`, `stable_job_id`, `depends_on`, `commit_sha`) either exist or are explicitly listed as new fields to add |
 
 ### Verdict
 
-**NEEDS REVISION** -- 2 blockers must be resolved before build:
-1. Add `task_description` field to AgentSession or specify which existing field to use for health check enrichment
-2. Define `cancelled` status semantics so `cancel_job()` doesn't silently unblock dependents
+**READY TO BUILD** -- Both blockers resolved:
+1. ~~Add `task_description` field to AgentSession or specify which existing field to use for health check enrichment~~ — RESOLVED: uses existing `message_text` field
+2. ~~Define `cancelled` status semantics so `cancel_job()` doesn't silently unblock dependents~~ — RESOLVED: explicit `cancelled` terminal status, blocks dependents same as `failed`
 
 ---
 
