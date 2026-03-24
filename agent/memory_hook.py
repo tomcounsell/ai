@@ -17,12 +17,17 @@ import os
 import re
 from typing import Any
 
-logger = logging.getLogger(__name__)
+from config.memory_defaults import (
+    INJECTION_BUFFER_SIZE as BUFFER_SIZE,
+)
+from config.memory_defaults import (
+    INJECTION_WINDOW_SIZE as WINDOW_SIZE,
+)
+from config.memory_defaults import (
+    MAX_THOUGHTS_PER_INJECTION as MAX_THOUGHTS,
+)
 
-# Sliding window configuration (from config/memory_defaults.py)
-WINDOW_SIZE = 3
-BUFFER_SIZE = 9
-MAX_THOUGHTS = 3
+logger = logging.getLogger(__name__)
 
 # Session-scoped state (in-memory, resets with process)
 _tool_buffers: dict[str, list[dict[str, Any]]] = {}
@@ -163,6 +168,8 @@ def check_and_inject(
         # Bloom check — fast O(1) pre-filter
         from models.memory import Memory
 
+        # NOTE: Accesses popoto internal metadata (_meta.fields). If upgrading
+        # popoto, verify that BloomFilterField still registers in _meta.fields.
         bloom_field = Memory._meta.fields.get("bloom")
         if not bloom_field:
             return None

@@ -123,7 +123,7 @@ async def extract_observations_async(
         return []
 
 
-def _extract_bigrams(text: str) -> set[tuple[str] | tuple[str, str]]:
+def _extract_bigrams(text: str) -> set[tuple[str, ...]]:
     """Extract unigrams and bigrams from text for overlap detection.
 
     Filters out words shorter than 4 chars to reduce noise.
