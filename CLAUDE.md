@@ -191,6 +191,13 @@ Telegram → Python Bridge (Telethon) → ChatSession (read-only, PM persona)
 - **DevSession** (`session_type="dev"`) - Does coding work, Dev persona, full permissions
 - **Nudge loop** - Bridge output routing (deliver or nudge, no SDLC awareness)
 
+**Subconscious Memory** (see `docs/features/subconscious-memory.md`):
+- Human Telegram messages are saved as Memory records on receipt (importance=6.0)
+- PostToolUse hook checks ExistenceFilter bloom and injects `<thought>` blocks via additionalContext
+- Post-session Haiku extraction saves agent observations (importance=1.0)
+- Outcome detection (bigram overlap) feeds ObservationProtocol to strengthen/weaken memories
+- All memory operations fail silently -- memory system never crashes the agent
+
 **Key Directories:**
 - `.claude/commands/` - Slash command skills
 - `.claude/agents/` - Subagent definitions (including `dev-session`)
