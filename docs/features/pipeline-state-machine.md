@@ -37,6 +37,10 @@ sm.has_remaining_stages()     # True if pipeline not complete
 sm.has_failed_stage()         # True if any stage failed
 sm.get_display_progress()     # {stage: status} for DISPLAY_STAGES
 sm.classify_outcome(stage, stop_reason, output_tail)  # "success"/"fail"/"ambiguous"
+
+# Convenience: start + complete in one shot (for atomic stage completions)
+from bridge.pipeline_state import record_stage_completion
+record_stage_completion(session, "BUILD")
 ```
 
 ## Stage Statuses
@@ -82,7 +86,7 @@ Falls back to `"ambiguous"` for the Observer LLM to handle.
 
 | File | Purpose |
 |------|---------|
-| `bridge/pipeline_state.py` | PipelineStateMachine class |
+| `bridge/pipeline_state.py` | PipelineStateMachine class + `record_stage_completion()` helper |
 | `bridge/pipeline_graph.py` | Transition table (PIPELINE_EDGES, DISPLAY_STAGES) |
 | `models/agent_session.py` | `stage_states` field on AgentSession |
 | `tests/unit/test_pipeline_state_machine.py` | 49 unit tests |
