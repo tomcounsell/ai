@@ -149,8 +149,8 @@ class Job:
         return self._rj.chat_id
 
     @property
-    def message_id(self) -> int:
-        return self._rj.message_id
+    def telegram_message_id(self) -> int:
+        return self._rj.telegram_message_id
 
     @property
     def chat_title(self) -> str | None:
@@ -181,8 +181,8 @@ class Job:
         return self._rj.classification_type
 
     @property
-    def trigger_message_id(self) -> str | None:
-        return self._rj.trigger_message_id
+    def telegram_message_key(self) -> str | None:
+        return self._rj.telegram_message_key
 
     @property
     def auto_continue_count(self) -> int:
@@ -208,7 +208,7 @@ _JOB_FIELDS = [
     "sender_name",
     "sender_id",
     "chat_id",
-    "message_id",
+    "telegram_message_id",
     "chat_title",
     "revival_context",
     "work_item_slug",
@@ -216,8 +216,7 @@ _JOB_FIELDS = [
     "classification_type",
     "auto_continue_count",
     "started_at",
-    "trigger_message_id",
-    "claude_code_session_id",
+    "telegram_message_key",
     # Session-phase fields preserved across delete-and-recreate
     "last_activity",
     "completed_at",
@@ -275,7 +274,7 @@ async def _push_job(
     message_text: str,
     sender_name: str,
     chat_id: str,
-    message_id: int,
+    telegram_message_id: int,
     chat_title: str | None = None,
     priority: str = "normal",
     revival_context: str | None = None,
@@ -288,7 +287,7 @@ async def _push_job(
     scheduled_after: float | None = None,
     scheduling_depth: int = 0,
     parent_job_id: str | None = None,
-    trigger_message_id: str | None = None,
+    telegram_message_key: str | None = None,
     session_type: str = "chat",
 ) -> int:
     """Create a job in Redis and return the pending queue depth for this chat.
@@ -333,7 +332,7 @@ async def _push_job(
         sender_name=sender_name,
         sender_id=sender_id,
         chat_id=chat_id,
-        message_id=message_id,
+        telegram_message_id=telegram_message_id,
         chat_title=chat_title,
         revival_context=revival_context,
         work_item_slug=work_item_slug,
@@ -344,7 +343,7 @@ async def _push_job(
         scheduled_after=scheduled_after,
         scheduling_depth=scheduling_depth,
         parent_job_id=parent_job_id,
-        trigger_message_id=trigger_message_id,
+        telegram_message_key=telegram_message_key,
     )
 
     # Log lifecycle transition for newly created pending job
@@ -1007,7 +1006,7 @@ async def enqueue_job(
     message_text: str,
     sender_name: str,
     chat_id: str,
-    message_id: int,
+    telegram_message_id: int,
     chat_title: str | None = None,
     priority: str = "normal",
     revival_context: str | None = None,
@@ -1020,7 +1019,7 @@ async def enqueue_job(
     scheduled_after: float | None = None,
     scheduling_depth: int = 0,
     parent_job_id: str | None = None,
-    trigger_message_id: str | None = None,
+    telegram_message_key: str | None = None,
     session_type: str = "chat",
 ) -> int:
     """
@@ -1039,7 +1038,7 @@ async def enqueue_job(
         sender_name=sender_name,
         sender_id=sender_id,
         chat_id=chat_id,
-        message_id=message_id,
+        telegram_message_id=telegram_message_id,
         chat_title=chat_title,
         priority=priority,
         revival_context=revival_context,
@@ -1051,7 +1050,7 @@ async def enqueue_job(
         scheduled_after=scheduled_after,
         scheduling_depth=scheduling_depth,
         parent_job_id=parent_job_id,
-        trigger_message_id=trigger_message_id,
+        telegram_message_key=telegram_message_key,
         session_type=session_type,
     )
     _ensure_worker(chat_id)
@@ -1343,7 +1342,7 @@ async def _execute_job(job: Job) -> None:
     else:
         # Derive from session_id which encodes chat_id and root message
         parts = job.session_id.split("_")
-        root_id = parts[-1] if "_" in job.session_id else job.message_id
+        root_id = parts[-1] if "_" in job.session_id else job.telegram_message_id
         task_list_id = f"thread-{job.chat_id}-{root_id}"
 
     # Read correlation_id from job for end-to-end tracing
@@ -1451,7 +1450,7 @@ async def _execute_job(job: Job) -> None:
                 f"[{job.project_key}] Session already completed — "
                 f"delivering without nudge ({len(msg)} chars)"
             )
-            await send_cb(job.chat_id, msg, job.message_id, agent_session)
+            await send_cb(job.chat_id, msg, job.telegram_message_id, agent_session)
             chat_state.completion_sent = True
 
         elif action == "drop":
@@ -1504,13 +1503,13 @@ async def _execute_job(job: Job) -> None:
                 job.chat_id,
                 "The task completed but produced no output. "
                 "Please re-trigger if you expected results.",
-                job.message_id,
+                job.telegram_message_id,
                 agent_session,
             )
             chat_state.completion_sent = True
 
         elif action == "deliver":
-            await send_cb(job.chat_id, msg, job.message_id, agent_session)
+            await send_cb(job.chat_id, msg, job.telegram_message_id, agent_session)
             chat_state.completion_sent = True
             logger.info(
                 f"[{job.project_key}] Delivered to Telegram "
@@ -1524,7 +1523,7 @@ async def _execute_job(job: Job) -> None:
     )
 
     # Deferred enrichment: process media, YouTube, links, reply chain.
-    # Reads enrichment params exclusively from TelegramMessage via trigger_message_id.
+    # Reads enrichment params exclusively from TelegramMessage via telegram_message_key.
     enriched_text = job.message_text
     enrich_has_media = False
     enrich_media_type = None
@@ -1532,11 +1531,11 @@ async def _execute_job(job: Job) -> None:
     enrich_non_youtube_urls = None
     enrich_reply_to_msg_id = None
 
-    if job.trigger_message_id:
+    if job.telegram_message_key:
         try:
             from models.telegram import TelegramMessage
 
-            trigger_msgs = list(TelegramMessage.query.filter(msg_id=job.trigger_message_id))
+            trigger_msgs = list(TelegramMessage.query.filter(msg_id=job.telegram_message_key))
             if trigger_msgs:
                 tm = trigger_msgs[0]
                 enrich_has_media = bool(tm.has_media)
@@ -1546,11 +1545,11 @@ async def _execute_job(job: Job) -> None:
                 enrich_reply_to_msg_id = tm.reply_to_msg_id
                 logger.debug(
                     f"[{job.project_key}] Resolved enrichment from "
-                    f"TelegramMessage {job.trigger_message_id}"
+                    f"TelegramMessage {job.telegram_message_key}"
                 )
             else:
                 logger.debug(
-                    f"[{job.project_key}] trigger_message_id {job.trigger_message_id} "
+                    f"[{job.project_key}] telegram_message_key {job.telegram_message_key} "
                     f"not found, skipping enrichment"
                 )
         except Exception as e:
@@ -1566,23 +1565,23 @@ async def _execute_job(job: Job) -> None:
                 message_text=job.message_text,
                 has_media=enrich_has_media,
                 media_type=enrich_media_type,
-                raw_media_message_id=job.message_id,
+                raw_media_message_id=job.telegram_message_id,
                 youtube_urls=enrich_youtube_urls,
                 non_youtube_urls=enrich_non_youtube_urls,
                 reply_to_msg_id=enrich_reply_to_msg_id,
                 chat_id=job.chat_id,
                 sender_name=job.sender_name,
-                message_id=job.message_id,
+                message_id=job.telegram_message_id,
             )
         except Exception as e:
             logger.warning(f"[{job.project_key}] Enrichment failed, using raw text: {e}")
 
     # Set back-reference: TelegramMessage.agent_session_id -> this session's job_id
-    if job.trigger_message_id:
+    if job.telegram_message_key:
         try:
             from models.telegram import TelegramMessage
 
-            trigger_msgs = list(TelegramMessage.query.filter(msg_id=job.trigger_message_id))
+            trigger_msgs = list(TelegramMessage.query.filter(msg_id=job.telegram_message_key))
             if trigger_msgs and not trigger_msgs[0].agent_session_id:
                 trigger_msgs[0].agent_session_id = job._rj.job_id
                 trigger_msgs[0].save()
@@ -1691,7 +1690,7 @@ async def _execute_job(job: Job) -> None:
         else:
             emoji = REACTION_SUCCESS
         try:
-            await react_cb(job.chat_id, job.message_id, emoji)
+            await react_cb(job.chat_id, job.telegram_message_id, emoji)
         except Exception as e:
             logger.warning(f"Failed to set reaction: {e}")
 

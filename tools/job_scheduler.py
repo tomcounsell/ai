@@ -303,7 +303,7 @@ def cmd_schedule(args: argparse.Namespace) -> int:
             message_text=message_text,
             sender_name="System (Scheduled)",
             chat_id=inherited_chat_id,
-            message_id=int(ctx["message_id"]) if ctx["message_id"] else 0,
+            telegram_message_id=int(ctx["message_id"]) if ctx["message_id"] else 0,
             classification_type=inherited_classification_type,
             session_type=session_type,
             scheduled_after=scheduled_after,
@@ -507,7 +507,7 @@ def cmd_push(args: argparse.Namespace) -> int:
             message_text=args.message,
             sender_name="System (Push)",
             chat_id=ctx["chat_id"],
-            message_id=int(ctx["message_id"]) if ctx["message_id"] else 0,
+            telegram_message_id=int(ctx["message_id"]) if ctx["message_id"] else 0,
             scheduling_depth=depth + 1,
             correlation_id=f"push-{uuid.uuid4().hex[:12]}",
         )

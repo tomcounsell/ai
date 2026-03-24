@@ -69,9 +69,6 @@ class AgentSession(Model):
     job_id = AutoKeyField()
     session_id = Field()  # Telegram-derived session identifier (e.g., tg_project_chatid_msgid)
     session_type = KeyField(null=True)  # "chat" or "dev" — discriminator
-    claude_code_session_id = Field(
-        null=True
-    )  # Claude Code's session identifier (renamed from session_id overlap)
     project_key = KeyField()
     status = KeyField(default="pending")
 
@@ -85,19 +82,19 @@ class AgentSession(Model):
     sender_name = Field(null=True)
     sender_id = Field(type=int, null=True)
     chat_id = KeyField(null=True)
-    message_id = Field(type=int, null=True)
+    telegram_message_id = Field(type=int, null=True)
     chat_title = Field(null=True)
     revival_context = Field(null=True, max_length=MSG_MAX_CHARS)
     work_item_slug = Field(null=True)
     task_list_id = Field(null=True)
-    classification_type = Field(null=True)
+    classification_type = Field(null=True)  # Actively used by is_sdlc, session_tags, job_scheduler
     auto_continue_count = Field(type=int, default=0)
     started_at = Field(type=float, null=True)  # Cannot be SortedField because it starts as None
 
     # === Cross-reference to TelegramMessage ===
-    trigger_message_id = Field(
+    telegram_message_key = Field(
         null=True
-    )  # msg_id of the TelegramMessage that triggered this session
+    )  # msg_id of the TelegramMessage that triggered this session (Popoto key)
 
     # === Session fields (from SessionLog) ===
     last_activity = Field(type=float, null=True)
@@ -109,7 +106,7 @@ class AgentSession(Model):
     summary = Field(null=True, max_length=50_000)
     branch_name = Field(null=True)
     tags = ListField(null=True)
-    classification_confidence = Field(type=float, null=True)
+    classification_confidence = Field(type=float, null=True)  # Paired with classification_type
 
     # === New fields ===
     history = ListField(null=True)  # Append-only lifecycle events
@@ -238,12 +235,12 @@ class AgentSession(Model):
         project_key: str,
         working_dir: str,
         chat_id: str,
-        message_id: int,
+        telegram_message_id: int,
         message_text: str,
         sender_name: str | None = None,
         sender_id: int | None = None,
         chat_title: str | None = None,
-        trigger_message_id: str | None = None,
+        telegram_message_key: str | None = None,
         **kwargs,
     ) -> "AgentSession":
         """Create a ChatSession (PM persona, read-only orchestrator).
@@ -259,12 +256,12 @@ class AgentSession(Model):
             project_key=project_key,
             working_dir=working_dir,
             chat_id=chat_id,
-            message_id=message_id,
+            telegram_message_id=telegram_message_id,
             message_text=message_text,
             sender_name=sender_name,
             sender_id=sender_id,
             chat_title=chat_title,
-            trigger_message_id=trigger_message_id,
+            telegram_message_key=telegram_message_key,
             created_at=time.time(),
             **kwargs,
         )

@@ -218,7 +218,7 @@ class TestJobQueueLifecycleLogging:
             message_text="hello",
             sender_name="tester",
             chat_id="100",
-            message_id=1,
+            telegram_message_id=1,
         )
 
         sessions = list(AgentSession.query.filter(session_id="jq-lc-test-1"))
@@ -240,7 +240,7 @@ class TestJobQueueLifecycleLogging:
             message_text="hello",
             sender_name="tester",
             chat_id="100",
-            message_id=1,
+            telegram_message_id=1,
         )
 
         job = await _pop_job("100")

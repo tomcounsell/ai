@@ -39,13 +39,13 @@ class TestAsyncCreateMatchesFactoryMethods:
             created_at=time.time(),
             sender_name="Test",
             chat_id=str(-time.time_ns() % 999_000),
-            message_id=1,
+            telegram_message_id=1,
             **shared,
         )
         via_factory = AgentSession.create_dev(
             parent_chat_session_id="parent-123",
             chat_id=str(-time.time_ns() % 999_000),
-            message_id=2,
+            telegram_message_id=2,
             **shared,
         )
 
@@ -63,7 +63,7 @@ class TestAsyncCreateMatchesFactoryMethods:
             "message_text": "equivalence test",
             "sender_name": "Test",
             "chat_id": str(-time.time_ns() % 999_000),
-            "message_id": 1,
+            "telegram_message_id": 1,
         }
 
         via_direct = await AgentSession.async_create(
@@ -100,7 +100,7 @@ class TestSessionTypeRoundTrip:
             message_text="roundtrip chat",
             sender_name="Test",
             chat_id=str(-time.time_ns() % 999_000),
-            message_id=1,
+            telegram_message_id=1,
             session_type="chat",
         )
 
@@ -122,7 +122,7 @@ class TestSessionTypeRoundTrip:
             message_text="roundtrip dev",
             sender_name="Test",
             chat_id=str(-time.time_ns() % 999_000),
-            message_id=1,
+            telegram_message_id=1,
             session_type="dev",
         )
 
@@ -158,7 +158,7 @@ class TestValidSessionTypes:
             message_text="test",
             sender_name="Test",
             chat_id="999",
-            message_id=1,
+            telegram_message_id=1,
             session_type="dev",
         )
         assert session.is_chat is False
@@ -176,7 +176,7 @@ class TestValidSessionTypes:
             message_text="test",
             sender_name="Test",
             chat_id="999",
-            message_id=1,
+            telegram_message_id=1,
             session_type="chat",
         )
         assert session.is_dev is False

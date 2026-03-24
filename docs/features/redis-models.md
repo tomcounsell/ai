@@ -8,10 +8,10 @@ Popoto models stored in Redis form the persistent state layer of the system. Thi
 TelegramMessage ──────── AgentSession
   msg_id                   job_id
   agent_session_id ──────> job_id
-  trigger_message_id <──── trigger_message_id
+  msg_id <─────────────── telegram_message_key
   project_key              project_key
   chat_id                  chat_id
-  message_id               message_id
+  message_id               telegram_message_id
   has_media                (deprecated: has_media)
   media_type               (deprecated: media_type)
   youtube_urls             (deprecated: youtube_urls)
@@ -44,8 +44,8 @@ BridgeEvent
 When a Telegram message triggers an agent session:
 
 1. **Bridge stores TelegramMessage** with media, URL, and classification metadata
-2. **Bridge enqueues AgentSession** with `trigger_message_id` pointing to the TelegramMessage's `msg_id`
-3. **Job worker resolves TelegramMessage** via `trigger_message_id` to get enrichment parameters
+2. **Bridge enqueues AgentSession** with `telegram_message_key` pointing to the TelegramMessage's `msg_id`
+3. **Job worker resolves TelegramMessage** via `telegram_message_key` to get enrichment parameters
 4. **Job worker sets back-reference**: `TelegramMessage.agent_session_id = AgentSession.job_id`
 
 This bidirectional link enables:
@@ -55,7 +55,7 @@ This bidirectional link enables:
 
 ### Fallback Path
 
-For sessions created before the migration (no `trigger_message_id`), the job worker falls back to reading enrichment fields directly from AgentSession. These fields are retained on AgentSession for backward compatibility with pre-existing records.
+For sessions created before the migration (no `telegram_message_key`), the job worker falls back to reading enrichment fields directly from AgentSession. These fields are retained on AgentSession for backward compatibility with pre-existing records.
 
 ## project_key
 
@@ -72,7 +72,7 @@ Models with project_key:
 
 ## Field Ownership
 
-Message metadata (media, URLs, classification) is owned by **TelegramMessage**, not AgentSession. The fields exist on both models for backward compatibility, but new code should always read from TelegramMessage via `trigger_message_id`.
+Message metadata (media, URLs, classification) is owned by **TelegramMessage**, not AgentSession. The fields exist on both models for backward compatibility, but new code should always read from TelegramMessage via `telegram_message_key`.
 
 | Field | Owner | Also On |
 |-------|-------|-------------------|
@@ -102,7 +102,7 @@ python scripts/migrate_model_relationships.py --max-age 30
 The script:
 1. Backfills `project_key` on all models using `chat_id -> project` mapping from `~/Desktop/Valor/projects.json`
 2. Copies enrichment metadata from AgentSession to TelegramMessage
-3. Sets `trigger_message_id` and `agent_session_id` cross-references
+3. Sets `telegram_message_key` and `agent_session_id` cross-references
 
 ## Identity Fields
 
@@ -110,5 +110,6 @@ The script:
 |-------|---------|-------|
 | `job_id` | AgentSession primary key (AutoKeyField) | `session.id` property alias available |
 | `session_id` | Telegram-derived session identifier | Format: `tg_{project}_{chat_id}_{msg_id}` |
-| `claude_code_session_id` | Claude Code's internal session ID | New field for future use |
+| `telegram_message_id` | Telegram message ID (integer) | Renamed from `message_id` for clarity |
+| `telegram_message_key` | Popoto key to TelegramMessage | Renamed from `trigger_message_id` for clarity |
 | `claude_session_uuid` | Claude Code transcript UUID | Used for continuation sessions |

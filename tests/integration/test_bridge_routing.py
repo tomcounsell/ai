@@ -33,7 +33,7 @@ def _default_push_kwargs(**overrides) -> dict:
         "message_text": "test message",
         "sender_name": "TestUser",
         "chat_id": str(-time.time_ns() % 999_000),
-        "message_id": 1,
+        "telegram_message_id": 1,
     }
     defaults.update(overrides)
     return defaults
@@ -224,7 +224,7 @@ class TestWorkflowIdAbsent:
             message_text="test",
             sender_name="Test",
             chat_id="999",
-            message_id=1,
+            telegram_message_id=1,
             session_type="chat",
         )
         assert not hasattr(test_session, "workflow_id") or test_session.workflow_id is None

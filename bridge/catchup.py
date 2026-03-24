@@ -179,7 +179,7 @@ async def scan_for_missed_messages(
                     message_text=text,
                     sender_name=sender_name,
                     chat_id=str(dialog.entity.id),
-                    message_id=message.id,
+                    telegram_message_id=message.id,
                     chat_title=chat_title,
                     priority="low",  # Lower priority than real-time messages
                     sender_id=sender_id,

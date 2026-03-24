@@ -30,7 +30,7 @@ def _create_test_job(**overrides) -> AgentSession:
         "message_text": "test message",
         "sender_name": "Test",
         "chat_id": "123",
-        "message_id": 1,
+        "telegram_message_id": 1,
     }
     defaults.update(overrides)
     return AgentSession.create(**defaults)
@@ -67,7 +67,7 @@ class TestExtractJobFields:
         assert fields["sender_name"] == "Test"
         assert fields["sender_id"] == 42
         assert fields["chat_id"] == "123"
-        assert fields["message_id"] == 1
+        assert fields["telegram_message_id"] == 1
         assert fields["chat_title"] == "Test Chat"
         assert fields["revival_context"] == "some context"
         assert fields["work_item_slug"] == "my-feature"

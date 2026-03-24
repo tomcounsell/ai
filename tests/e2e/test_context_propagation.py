@@ -28,7 +28,7 @@ class TestChatSessionContextFields:
             project_key="valor",
             working_dir="/Users/test/src/ai",
             chat_id="ctx_chat_123",
-            message_id=42,
+            telegram_message_id=42,
             message_text="build the feature",
             sender_name="Valor",
             sender_id=111222,
@@ -49,7 +49,7 @@ class TestChatSessionContextFields:
         assert reloaded.project_key == "valor"
         assert reloaded.working_dir == "/Users/test/src/ai"
         assert reloaded.chat_id == "ctx_chat_123"
-        assert reloaded.message_id == 42
+        assert reloaded.telegram_message_id == 42
         assert reloaded.message_text == "build the feature"
         assert reloaded.sender_name == "Valor"
         assert reloaded.sender_id == 111222
@@ -71,7 +71,7 @@ class TestDevSessionParentLinkage:
             project_key="valor",
             working_dir="/tmp/test",
             chat_id="link_chat",
-            message_id=1,
+            telegram_message_id=1,
             message_text="do work",
         )
 
@@ -100,7 +100,7 @@ class TestDevSessionParentLinkage:
             project_key="valor",
             working_dir="/tmp/test",
             chat_id="multi_chat",
-            message_id=5,
+            telegram_message_id=5,
             message_text="complex task",
         )
 
@@ -160,7 +160,7 @@ class TestDerivedPaths:
             project_key="valor",
             working_dir="/tmp/test",
             chat_id="fb_chat",
-            message_id=1,
+            telegram_message_id=1,
             message_text="quick question",
         )
         session.branch_name = "feature/manual-branch"
@@ -202,7 +202,7 @@ class TestSDLCStagesPropagation:
             project_key="valor",
             working_dir="/tmp/test",
             chat_id="chat_no_sdlc",
-            message_id=1,
+            telegram_message_id=1,
             message_text="what time is it?",
         )
         assert chat.is_sdlc is False
@@ -221,7 +221,7 @@ class TestSessionTypeDiscriminator:
             project_key="valor",
             working_dir="/tmp",
             chat_id="tc",
-            message_id=1,
+            telegram_message_id=1,
             message_text="hi",
         )
         dev = AgentSession.create_dev(
@@ -242,7 +242,7 @@ class TestSessionTypeDiscriminator:
             project_key="query_test",
             working_dir="/tmp",
             chat_id="qt",
-            message_id=1,
+            telegram_message_id=1,
             message_text="hi",
         )
         AgentSession.create_dev(

@@ -129,7 +129,7 @@ class TestCatchupRevival:
         call_kwargs = enqueue_job_fn.call_args[1]
         assert call_kwargs["project_key"] == "valor"
         assert call_kwargs["chat_id"] == "200"
-        assert call_kwargs["message_id"] == 99
+        assert call_kwargs["telegram_message_id"] == 99
         assert call_kwargs["priority"] == "low"
 
     @pytest.mark.asyncio

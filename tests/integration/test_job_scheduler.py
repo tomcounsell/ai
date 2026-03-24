@@ -57,7 +57,7 @@ def _create_pending(
         message_text=message,
         sender_name="Test",
         chat_id="test-chat",
-        message_id=0,
+        telegram_message_id=0,
         scheduled_after=scheduled_after,
         scheduling_depth=scheduling_depth,
     )
