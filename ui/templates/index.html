@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+
+{% block title %}Valor System Dashboard{% endblock %}
+
+{% block content %}
+<h1>System Dashboards</h1>
+<div class="dashboard-grid">
+    <a href="/reflections/" class="dashboard-card">
+        <h2>Reflections</h2>
+        <p>Scheduled task execution, history, errors, and ignore patterns. Monitor health checks, daily maintenance, and automated recovery.</p>
+        <span class="card-arrow">&rarr;</span>
+    </a>
+    <a href="/sdlc/" class="dashboard-card">
+        <h2>SDLC Observer</h2>
+        <p>Real-time view of active development pipelines, stage transitions, and outcomes. Track issues from plan through merge.</p>
+        <span class="card-arrow">&rarr;</span>
+    </a>
+</div>
+{% endblock %}

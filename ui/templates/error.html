@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+
+{% block title %}Error - Valor System{% endblock %}
+
+{% block content %}
+<div class="error-page">
+    <h1>Something went wrong</h1>
+    <p class="error-message">{{ error }}</p>
+    <p>This may be a temporary issue. Check that Redis is running and try refreshing the page.</p>
+    <a href="/" class="btn">&larr; Back to Dashboard</a>
+</div>
+{% endblock %}

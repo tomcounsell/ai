@@ -25,6 +25,9 @@ dependencies = [
     "pyyaml>=6.0.3",
     "rich>=13.0.0", # Required by pydantic logfire plugin
     "sentry-sdk>=2.0.0", # Error monitoring and performance tracing
+    "fastapi>=0.115.0", # Web UI framework
+    "uvicorn[standard]>=0.34.0", # ASGI server for web UI
+    "jinja2>=3.1.0", # Template engine for web UI
 ]
 
 [project.optional-dependencies]
@@ -57,7 +60,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["bridge", "tools", "scripts", "agent", "utils"]
+packages = ["bridge", "tools", "scripts", "agent", "utils", "ui"]
 
 [tool.ruff]
 line-length = 100
@@ -101,4 +104,5 @@ markers = [
     "sdk: Claude SDK client, permissions, SDLC enforcement",
     "impact: Code and documentation impact analysis",
     "models: Redis/Popoto model relationships and persistence",
+    "webui: Web UI dashboards, routes, templates",
 ]
