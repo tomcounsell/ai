@@ -156,7 +156,10 @@ class TestReflectionModelExtension:
         ref = Reflection.get_or_create("_test_ui_cap")
         try:
             # Pre-populate with many entries
-            ref.run_history = [{"timestamp": i, "status": "success", "duration": 1.0, "error": None} for i in range(250)]
+            ref.run_history = [
+                {"timestamp": i, "status": "success", "duration": 1.0, "error": None}
+                for i in range(250)
+            ]
             ref.save()
 
             ref.mark_completed(duration=1.0)

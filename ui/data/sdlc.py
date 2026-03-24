@@ -181,8 +181,7 @@ def _session_to_pipeline(session) -> PipelineProgress:
         slug=session.slug or session.work_item_slug,
         message_text=session.message_text,
         project_key=session.project_key,
-        branch_name=session.branch_name
-        or (f"session/{session.slug}" if session.slug else None),
+        branch_name=session.branch_name or (f"session/{session.slug}" if session.slug else None),
         created_at=session.created_at,
         started_at=session.started_at,
         completed_at=session.completed_at,
