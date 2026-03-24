@@ -235,29 +235,13 @@ EOF
 
 ```bash
 # MANDATORY: switch to main before committing the plan — regardless of current branch
-ORIGINAL_BRANCH=$(git branch --show-current)
 git stash --include-untracked 2>/dev/null
 git checkout main
 git stash pop 2>/dev/null
 
 git add docs/plans/{slug}.md && git commit -m "Plan: $ISSUE_TITLE"
-if git push 2>/dev/null; then
-  PLAN_BRANCH="main"
-else
-  # Main is protected — create a branch and PR for the entire SDLC lifecycle
-  PLAN_BRANCH="plan/{slug}"
-  git checkout -b "$PLAN_BRANCH"
-  git push -u origin "$PLAN_BRANCH"
-  # This PR is reused for the full SDLC (plan → build → test → review → merge).
-  # Title MUST match the tracking issue title.
-  # Do NOT reference the tracking issue with closing keywords (Closes, Fixes, Resolves).
-  gh pr create --title "$ISSUE_TITLE" --body "Adds plan document for {slug}. Implementation will follow on this branch." --label "plan"
-  # Switch back to main for subsequent work
-  git checkout main
-fi
+git push
 ```
-
-**Protected branch handling:** If pushing directly to main fails (common with protected branches), the skill automatically creates a `plan/{slug}` branch and opens a PR. This PR is reused for the entire SDLC — do-build pushes implementation commits to the same branch rather than creating a new PR. The PR title matches the tracking issue title.
 
 **CRITICAL: Plan PRs must NOT close the tracking issue.** The tracking issue stays open until the *implementation* PR merges with `Closes #N`. Never use closing keywords (Closes, Fixes, Resolves) when referencing the tracking issue in the plan PR body.
 
@@ -362,8 +346,6 @@ Use snake_case for slugs: `async_meeting_reschedule.md`, `dark_mode_toggle.md`, 
 ## Branch Workflow
 
 **MANDATORY: Plans are committed on `main`.** Before committing, switch to `main` regardless of current branch. Plans are documentation, not code — they do not belong on feature branches.
-
-If `main` is protected (push rejected), create a `plan/{slug}` branch from main and open a PR.
 
 When the plan is *executed* (via `/do-build`), the build skill creates a feature branch, does the work there, and opens a PR.
 
