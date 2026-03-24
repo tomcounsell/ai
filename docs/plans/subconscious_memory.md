@@ -155,30 +155,30 @@ Reference docs in `~/src/popoto/docs/`:
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] Memory.save() failures in telegram_bridge.py must log warning, not crash bridge
-- [ ] ContextAssembler.assemble() failures in hook must log warning, return no additionalContext
-- [ ] ExistenceFilter.might_exist() failures must log warning, skip injection (not block tool call)
-- [ ] Haiku extraction API failures must log warning, skip extraction (not block session completion)
-- [ ] ObservationProtocol failures must log warning, skip reinforcement (not crash)
+- [x] Memory.save() failures in telegram_bridge.py must log warning, not crash bridge
+- [x] ContextAssembler.assemble() failures in hook must log warning, return no additionalContext
+- [x] ExistenceFilter.might_exist() failures must log warning, skip injection (not block tool call)
+- [x] Haiku extraction API failures must log warning, skip extraction (not block session completion)
+- [x] ObservationProtocol failures must log warning, skip reinforcement (not crash)
 
 ### Empty/Invalid Input Handling
-- [ ] Empty Telegram message text → skip Memory.save() (no empty content records)
-- [ ] Empty response stream → skip extraction (no Haiku call)
-- [ ] ContextAssembler returns empty records → no `<thought>` blocks injected
-- [ ] Bloom check on empty/None keyword → skip check, no error
+- [x] Empty Telegram message text → skip Memory.save() (no empty content records)
+- [x] Empty response stream → skip extraction (no Haiku call)
+- [x] ContextAssembler returns empty records → no `<thought>` blocks injected
+- [x] Bloom check on empty/None keyword → skip check, no error
 
 ### Error State Rendering
-- [ ] Memory system failures are invisible to the agent (no error messages in context)
-- [ ] Logging captures all failures with enough context for debugging
+- [x] Memory system failures are invisible to the agent (no error messages in context)
+- [x] Logging captures all failures with enough context for debugging
 
 ## Test Impact
 
 No existing tests affected — this is a greenfield feature adding new files (models/memory.py, config/memory_defaults.py, agent/memory_hook.py) and extending existing code with purely additive changes. The PostToolUse hook extension adds a new code path but doesn't modify existing paths.
 
 Existing tests to verify still pass:
-- [ ] `tests/unit/test_health_check.py` — existing watchdog_hook tests must still pass after memory hook addition
-- [ ] `tests/unit/test_model_relationships.py` — verify Memory model registers correctly
-- [ ] `tests/integration/test_steering.py` — steering mechanism unaffected by memory hook
+- [x] `tests/unit/test_health_check.py` — existing watchdog_hook tests must still pass after memory hook addition
+- [x] `tests/unit/test_model_relationships.py` — verify Memory model registers correctly
+- [x] `tests/integration/test_steering.py` — steering mechanism unaffected by memory hook
 
 ## Rabbit Holes
 
@@ -260,27 +260,27 @@ Integration test: Save a memory via `Memory.save()`, trigger a PostToolUse hook 
 
 ## Documentation
 
-- [ ] Create `docs/features/subconscious-memory.md` describing the architecture (two ingestion paths, retrieval, reinforcement)
-- [ ] Add entry to `docs/features/README.md` index table
-- [ ] Document `config/memory_defaults.py` tuning constants with guidance on when to adjust each
-- [ ] Add memory system to architecture diagram in CLAUDE.md (under System Architecture)
+- [x] Create `docs/features/subconscious-memory.md` describing the architecture (two ingestion paths, retrieval, reinforcement)
+- [x] Add entry to `docs/features/README.md` index table
+- [x] Document `config/memory_defaults.py` tuning constants with guidance on when to adjust each
+- [x] Add memory system to architecture diagram in CLAUDE.md (under System Architecture)
 
 ## Success Criteria
 
-- [ ] `popoto>=1.0.3` in pyproject.toml, importable with agent memory primitives
-- [ ] Memory model with DecayingSortedField, ConfidenceField, WriteFilterMixin, AccessTrackerMixin, ExistenceFilter
-- [ ] Human Telegram messages create Memory records with InteractionWeight.HUMAN importance
-- [ ] PostToolUse hook checks ExistenceFilter, assembles context, injects `<thought>` blocks via additionalContext
-- [ ] System prompt priming in `config/personas/_base.md` across all session types
-- [ ] Async Haiku extraction runs post-session, saves novel observations as memories
-- [ ] Outcome detection compares injected thoughts vs response, feeds ObservationProtocol
-- [ ] Sliding window injection: every 3 tool calls, rolling buffer of 9, topic keywords from windows
-- [ ] Bigram outcome detection: 1-2 word phrase overlap between injected thoughts and response
-- [ ] All memory operations wrapped in try/except with logging (never crash agent)
-- [ ] `config/memory_defaults.py` overrides popoto Defaults with tuning constants
-- [ ] Logging on all memory ops: injection count, extraction count, outcome breakdown
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] `popoto>=1.0.3` in pyproject.toml, importable with agent memory primitives
+- [x] Memory model with DecayingSortedField, ConfidenceField, WriteFilterMixin, AccessTrackerMixin, ExistenceFilter
+- [x] Human Telegram messages create Memory records with InteractionWeight.HUMAN importance
+- [x] PostToolUse hook checks ExistenceFilter, assembles context, injects `<thought>` blocks via additionalContext
+- [x] System prompt priming in `config/personas/_base.md` across all session types
+- [x] Async Haiku extraction runs post-session, saves novel observations as memories
+- [x] Outcome detection compares injected thoughts vs response, feeds ObservationProtocol
+- [x] Sliding window injection: every 3 tool calls, rolling buffer of 9, topic keywords from windows
+- [x] Bigram outcome detection: 1-2 word phrase overlap between injected thoughts and response
+- [x] All memory operations wrapped in try/except with logging (never crash agent)
+- [x] `config/memory_defaults.py` overrides popoto Defaults with tuning constants
+- [x] Logging on all memory ops: injection count, extraction count, outcome breakdown
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
