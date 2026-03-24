@@ -178,6 +178,7 @@ tests/test_results_*.json
 # Huey runtime files
 huey.pid
 data/
+!ui/data/
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
