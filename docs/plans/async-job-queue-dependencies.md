@@ -436,7 +436,88 @@ No new MCP server needed. The dependency tracking is internal to the job queue. 
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Critique run**: 2026-03-24
+**Critics**: Skeptic, Operator, Archaeologist, Adversary, Simplifier, User
+**Findings**: 8 total (2 blockers, 4 concerns, 2 nits)
+
+### Blockers
+
+#### 1. `task_description` field does not exist on AgentSession
+- **Severity**: BLOCKER
+- **Critics**: Skeptic
+- **Location**: Phase 4b (Health check enrichment), line 138-140
+- **Finding**: The plan says to read `task_description` from AgentSession and inject into the judge prompt, but AgentSession has no `task_description` field. The plan never specifies adding this field to the model or to `_JOB_FIELDS`.
+- **Suggestion**: Either add `task_description = Field(null=True)` to AgentSession (and to `_JOB_FIELDS`), or derive the description from an existing field like `message_text` or `context_summary`.
+
+#### 2. `cancel_job()` semantics create unsafe optimistic unblocking
+- **Severity**: BLOCKER
+- **Critics**: Adversary, Skeptic
+- **Location**: Risk 2 (residual risk) + Task 4 (`cancel_job`)
+- **Finding**: The plan says "treat missing stable_job_id as completed" (optimistic unblocking), and `cancel_job()` cancels pending jobs. But the plan defines no "cancelled" terminal status. If cancellation deletes the job from Redis, dependents will treat the missing dependency as completed and proceed -- potentially executing work whose prerequisite was intentionally cancelled. This directly contradicts the "PM decides" design principle.
+- **Suggestion**: Define an explicit `cancelled` terminal status. In dependency checking, treat `cancelled` the same as `failed` (block dependents, notify PM) rather than optimistically unblocking.
+
+### Concerns
+
+#### 3. `stable_job_id` lookup performance -- no KeyField index
+- **Severity**: CONCERN
+- **Critics**: Skeptic
+- **Location**: Phase 1, `_pop_job()` dependency filtering
+- **Finding**: `stable_job_id` is defined as `Field(null=True)`, not a `KeyField`. Dependency checking in `_pop_job()` must scan all chat jobs to find records matching each `stable_job_id` in a job's `depends_on` list. With many jobs this becomes O(N*M) per pop.
+- **Suggestion**: Consider making `stable_job_id` a `KeyField` for indexed lookup, or document why scan performance is acceptable (e.g., jobs per chat are always small).
+
+#### 4. `_transition_parent()` not mentioned in plan but needs `stable_job_id` and `depends_on` awareness
+- **Severity**: CONCERN
+- **Critics**: Skeptic
+- **Location**: Task 1 (build-deps)
+- **Finding**: `_transition_parent()` (line 575 of job_queue.py) does its own delete-and-recreate for parent jobs and updates children's `parent_job_id`. If a parent has `stable_job_id` or `depends_on`, these must also be preserved. The plan mentions updating `_JOB_FIELDS` but doesn't call out `_transition_parent` specifically.
+- **Suggestion**: Add explicit mention that `_transition_parent` must preserve `stable_job_id` via `_JOB_FIELDS` (which it already uses via `_extract_job_fields`). Confirm this is sufficient by tracing the code path.
+
+#### 5. Activity stream has no rotation or size limits
+- **Severity**: CONCERN
+- **Critics**: Operator
+- **Location**: Phase 4a (Activity stream)
+- **Finding**: Activity stream appends JSONL indefinitely to `logs/sessions/{session_id}/activity.jsonl`. Long-running or resumed sessions could accumulate large files. No cleanup, rotation, or size cap is specified.
+- **Suggestion**: Add a max file size or max line count after which older entries are truncated, or document that session cleanup (already existing for transcripts) will handle these files.
+
+#### 6. Existing jobs in Redis lack `stable_job_id` -- no migration plan
+- **Severity**: CONCERN
+- **Critics**: Adversary
+- **Location**: Phase 1, AgentSession model changes
+- **Finding**: Jobs already in Redis when this deploys will have `stable_job_id = None`. If any code path creates a job with `depends_on` referencing a pre-migration job, the lookup will fail. The plan doesn't address backward compatibility or migration.
+- **Suggestion**: Add a note that `stable_job_id` is nullable and only set on new jobs. Dependency features only apply to newly created jobs. Pre-existing jobs cannot be depended upon (which is fine since they predate the feature).
+
+### Nits
+
+#### 7. `tests/unit/test_hooks.py` referenced but does not exist
+- **Severity**: NIT
+- **Critics**: Structural check
+- **Location**: Test Impact section, Task 5
+- **Finding**: The plan references `tests/unit/test_hooks.py` in both the Test Impact section and Task 5 validation, but this file does not exist. The plan hedges with "(if exists)" but the Test Impact section doesn't note this.
+- **Suggestion**: Create the test file as part of Task 5, or update the Test Impact entry to say "CREATE" instead of "UPDATE".
+
+#### 8. PM queue management functions expand scope beyond stated problem
+- **Severity**: NIT
+- **Critics**: Simplifier
+- **Location**: Task 4 (build-pm-controls)
+- **Finding**: The problem statement identifies three pain points (no dependency tracking, no branch mapping, no state preservation) plus observability. Task 4 adds four new PM functions (`reorder_job`, `cancel_job`, `retry_job`, `get_queue_status`) that weren't in the problem statement. While useful, this is scope expansion.
+- **Suggestion**: Acknowledge this as intentional scope expansion in the plan, or defer Task 4 to a follow-up issue if appetite is tight.
+
+### Structural Check Results
+
+| Check | Status | Detail |
+|-------|--------|--------|
+| Required sections | PASS | All four required sections present and non-empty |
+| Task numbering | PASS | Tasks 1-8 sequential, no gaps |
+| Dependencies valid | PASS | All `Depends On` references point to valid task IDs, no cycles |
+| File paths exist | WARN | 9 of 11 referenced source files exist; `tests/unit/test_hooks.py` and `docs/features/job-dependency-tracking.md` do not (latter is intentionally new) |
+| Prerequisites met | PASS | No prerequisites declared |
+| Cross-references | WARN | `task_description` field referenced in solution but absent from AgentSession model and not listed as a new field to add |
+
+### Verdict
+
+**NEEDS REVISION** -- 2 blockers must be resolved before build:
+1. Add `task_description` field to AgentSession or specify which existing field to use for health check enrichment
+2. Define `cancelled` status semantics so `cancel_job()` doesn't silently unblock dependents
 
 ---
 
