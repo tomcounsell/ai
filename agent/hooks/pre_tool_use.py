@@ -184,15 +184,18 @@ def _maybe_register_dev_session(tool_input: dict[str, Any]) -> None:
 
     # Wire PipelineStateMachine.start_stage() so subagent_stop can later
     # find the in_progress stage and mark it completed.
-    full_prompt = tool_input.get("prompt", "")
-    stage = _extract_stage_from_prompt(full_prompt)
-    if stage:
-        _start_pipeline_stage(parent_session_id, stage)
-    else:
-        logger.debug(
-            f"[pre_tool_use] No SDLC stage found in dev-session prompt, "
-            f"skipping start_stage (prompt[:100]={full_prompt[:100]!r})"
-        )
+    try:
+        full_prompt = tool_input.get("prompt", "")
+        stage = _extract_stage_from_prompt(full_prompt)
+        if stage:
+            _start_pipeline_stage(parent_session_id, stage)
+        else:
+            logger.debug(
+                f"[pre_tool_use] No SDLC stage found in dev-session prompt, "
+                f"skipping start_stage (prompt[:100]={full_prompt[:100]!r})"
+            )
+    except Exception as e:
+        logger.warning(f"[pre_tool_use] Failed to start pipeline stage: {e}")
 
 
 async def pre_tool_use_hook(
