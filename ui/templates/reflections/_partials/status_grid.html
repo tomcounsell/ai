@@ -1,0 +1,44 @@
+{% from "reflections/_macros.html" import format_ts, format_dur, format_interval, status_badge %}
+
+<table class="data-table">
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Status</th>
+            <th>Last Run</th>
+            <th>Duration</th>
+            <th>Runs</th>
+            <th>Interval</th>
+            <th>Next Due</th>
+            <th></th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for r in reflections %}
+        <tr>
+            <td>
+                <div class="card-title">{{ r.name }}</div>
+                <div class="text-muted" style="font-size: 12px;">{{ r.description }}</div>
+            </td>
+            <td>{{ status_badge(r.last_status) }}</td>
+            <td class="mono">{{ format_ts(r.last_run) }}</td>
+            <td class="mono">{{ format_dur(r.last_duration) }}</td>
+            <td class="mono">{{ r.run_count or 0 }}</td>
+            <td class="mono">{{ format_interval(r.interval) }}</td>
+            <td class="mono">{{ format_ts(r.next_due) }}</td>
+            <td>
+                {% if r.has_history %}
+                <a href="/reflections/{{ r.name }}/history/" class="link">history</a>
+                {% endif %}
+            </td>
+        </tr>
+        {% if r.last_error %}
+        <tr>
+            <td colspan="8" style="padding: 4px 12px 8px;">
+                <div class="log-viewer" style="max-height: 100px; font-size: 11px;">{{ r.last_error }}</div>
+            </td>
+        </tr>
+        {% endif %}
+        {% endfor %}
+    </tbody>
+</table>
