@@ -231,7 +231,15 @@ EOF
 
 #### Step 2: Push the plan
 
+**Plans are documentation, not code. ALWAYS commit and push to main first.**
+
 ```bash
+# MANDATORY: switch to main before committing the plan — regardless of current branch
+ORIGINAL_BRANCH=$(git branch --show-current)
+git stash --include-untracked 2>/dev/null
+git checkout main
+git stash pop 2>/dev/null
+
 git add docs/plans/{slug}.md && git commit -m "Plan: $ISSUE_TITLE"
 if git push 2>/dev/null; then
   PLAN_BRANCH="main"
@@ -353,7 +361,9 @@ Use snake_case for slugs: `async_meeting_reschedule.md`, `dark_mode_toggle.md`, 
 
 ## Branch Workflow
 
-**Plans are pushed to main when possible.** If the main branch is protected (push rejected), the skill automatically creates a `plan/{slug}` branch and opens a PR for the plan document.
+**MANDATORY: Plans are committed on `main`.** Before committing, switch to `main` regardless of current branch. Plans are documentation, not code — they do not belong on feature branches.
+
+If `main` is protected (push rejected), create a `plan/{slug}` branch from main and open a PR.
 
 When the plan is *executed* (via `/do-build`), the build skill creates a feature branch, does the work there, and opens a PR.
 
