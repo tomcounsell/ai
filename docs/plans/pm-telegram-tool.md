@@ -356,6 +356,10 @@ No update system changes required — this feature is purely internal to the bri
 
 ## Open Questions
 
-1. **Queue TTL**: Should Redis outbox entries have a TTL? If a session crashes mid-flight, stale entries could accumulate. Suggest 1 hour TTL as reasonable — sessions rarely last longer.
-2. **Message ordering guarantee**: Should the relay preserve strict ordering of PM messages? Redis LPUSH/RPOP maintains FIFO, but if a send fails and is retried, ordering could break. Is strict ordering critical for PM communication?
-3. **Rate limiting**: Should the tool enforce any rate limit on PM message sends? E.g., max 5 messages per session to prevent runaway tool calls? Or leave uncapped and rely on PM persona guidance?
+None — all resolved.
+
+## Resolved Questions
+
+1. **Queue TTL**: No TTL. The relay drains pending entries on restart after a crash. TTL would risk expiring messages that should still be delivered. Orphaned keys from malformed session IDs are rare enough to handle via periodic cleanup, not TTL.
+2. **Message ordering guarantee**: No strict ordering required. FIFO is best-effort but retries can reorder — acceptable for PM communication.
+3. **Rate limiting**: No rate limits. Rely on PM persona guidance for message frequency.
