@@ -4,18 +4,21 @@ Automatically detects and recovers stuck running jobs in the Redis-based job que
 
 ## Overview
 
-The job health monitor runs as a periodic async task alongside the bridge process. Every 5 minutes, it scans all `running` AgentSessions to check:
+The job health monitor runs as a periodic async task alongside the bridge process. Every 5 minutes, it scans all `running` AND `pending` AgentSessions to check:
 
 1. Whether the associated worker coroutine is still alive
 2. Whether the job has exceeded its maximum duration
+3. Whether pending jobs have a worker that can process them
 
-When a stuck job is detected, it is automatically recovered by deleting it and re-creating it as `pending`, allowing a new worker to pick it up.
+This is the **single unified recovery mechanism** — it replaces six competing recovery functions that previously raced against each other. See [Bridge Resilience](bridge-resilience.md) for the full refactoring context.
+
+When a stuck running job is detected, it is automatically recovered by deleting it and re-creating it as `pending`. When an orphaned pending job is found (no live worker), a worker is started for it.
 
 ## How It Works
 
 ### Detection
 
-- **Dead worker detection**: Checks `_active_workers[project_key]` asyncio Task liveness via `.done()`. If the task has finished (crashed, cancelled, or completed), the job is considered orphaned.
+- **Dead worker detection**: Checks `_active_workers[chat_id]` asyncio Task liveness via `.done()`. If the task has finished (crashed, cancelled, or completed), the job is considered orphaned.
 - **Timeout detection**: Compares `started_at` timestamp against the configured max duration for the job type.
 - **Race condition guard**: Jobs must be running for at least 5 minutes (`JOB_HEALTH_MIN_RUNNING`) before they become eligible for recovery. This prevents false positives on jobs that just started processing.
 

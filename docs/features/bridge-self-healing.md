@@ -17,7 +17,7 @@ The bridge includes a multi-layered self-healing system to recover from crashes 
 3. Clears orphaned lock/journal files
 4. Adds jitter to prevent thundering herd on restart
 
-**Retry Logic**: Exponential backoff with cleanup between attempts (2s, 5s, 10s).
+**Retry Logic**: General connection retry with exponential backoff and jitter (2s to 256s cap, 8 attempts max). Covers all Telethon errors, not just SQLite locks. See [Bridge Resilience](bridge-resilience.md) for details.
 
 ### 2. Crash Tracker (`monitoring/crash_tracker.py`)
 
