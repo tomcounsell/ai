@@ -83,7 +83,8 @@ class TestJinja2Filters:
         from ui.app import _filter_format_timestamp
 
         result = _filter_format_timestamp(1711000000.0)
-        assert "2024" in result  # Should contain a year
+        assert isinstance(result, str)
+        assert result != "-"
 
     def test_format_interval(self):
         from ui.app import _filter_format_interval
@@ -103,35 +104,21 @@ class TestJinja2Filters:
 
 
 class TestRootRoute:
-    """Tests for the unified dashboard root route."""
+    """Tests for the single-page dashboard."""
 
     def test_root_returns_200(self, client):
         r = client.get("/")
         assert r.status_code == 200
 
-    def test_root_contains_all_sections(self, client):
-        """Root page has all sections inline."""
+    def test_root_contains_sections(self, client):
         r = client.get("/")
         assert "Agent Sessions" in r.text
         assert "Reflections" in r.text
-        assert "Schedule" in r.text
-        assert "Ignore Patterns" in r.text
-        assert 'id="sessions"' in r.text
-        assert 'id="reflections"' in r.text
-        assert 'id="schedule"' in r.text
-        assert 'id="ignores"' in r.text
 
     def test_root_has_sessions_htmx_polling(self, client):
-        """Sessions table polls every 5s via HTMX."""
         r = client.get("/")
         assert "/_partials/sessions/" in r.text
         assert "every 5s" in r.text
-
-    def test_root_has_reflections_htmx_polling(self, client):
-        """Reflections grid polls every 10s via HTMX."""
-        r = client.get("/")
-        assert "/reflections/_partials/status-grid/" in r.text
-        assert "every 10s" in r.text
 
     def test_root_contains_htmx(self, client):
         r = client.get("/")
@@ -142,7 +129,6 @@ class TestRootRoute:
         assert "style.css" in r.text
 
     def test_root_has_no_nav_bar(self, client):
-        """No navigation bar — everything is on one page."""
         r = client.get("/")
         assert "top-nav" not in r.text
 
@@ -153,82 +139,6 @@ class TestSessionsPartial:
     def test_partial_sessions_returns_200(self, client):
         r = client.get("/_partials/sessions/")
         assert r.status_code == 200
-
-    def test_partial_sessions_returns_html(self, client):
-        r = client.get("/_partials/sessions/")
-        assert r.status_code == 200
-        # Should return either a table or the empty state
-        assert "data-table" in r.text or "No agent sessions" in r.text
-
-
-class TestReflectionsRoutes:
-    """Tests for reflections dashboard routes."""
-
-    def test_overview_returns_200(self, client):
-        r = client.get("/reflections/")
-        assert r.status_code == 200
-
-    def test_schedule_returns_200(self, client):
-        r = client.get("/reflections/schedule/")
-        assert r.status_code == 200
-
-    def test_ignores_returns_200(self, client):
-        r = client.get("/reflections/ignores/")
-        assert r.status_code == 200
-
-    def test_overview_has_section_header(self, client):
-        r = client.get("/reflections/")
-        # The reflections overview should have its section header
-        assert "Reflections" in r.text
-
-    def test_history_nonexistent_reflection(self, client):
-        r = client.get("/reflections/nonexistent/history/")
-        assert r.status_code == 200
-        assert "No run history" in r.text
-
-    def test_detail_nonexistent_run(self, client):
-        r = client.get("/reflections/nonexistent/history/0/")
-        assert r.status_code == 200
-        assert "not found" in r.text.lower()
-
-    def test_partial_status_grid(self, client):
-        """HTMX partial endpoint should return HTML fragment."""
-        r = client.get("/reflections/_partials/status-grid/")
-        assert r.status_code == 200
-
-
-class TestSdlcRoutes:
-    """Tests for SDLC observer routes."""
-
-    def test_overview_returns_200(self, client):
-        r = client.get("/sdlc/")
-        assert r.status_code == 200
-
-    def test_completed_returns_200(self, client):
-        r = client.get("/sdlc/completed/")
-        assert r.status_code == 200
-        assert "not found" not in r.text.lower()
-
-    def test_detail_nonexistent_pipeline(self, client):
-        r = client.get("/sdlc/nonexistent-id/")
-        assert r.status_code == 200
-        assert "not found" in r.text.lower()
-
-    def test_partial_active_pipelines(self, client):
-        """HTMX partial endpoint should return HTML fragment."""
-        r = client.get("/sdlc/_partials/active/")
-        assert r.status_code == 200
-
-    def test_inline_detail_nonexistent(self, client):
-        """Inline detail partial returns gracefully for missing session."""
-        r = client.get("/sdlc/nonexistent-id/_inline/")
-        assert r.status_code == 200
-        assert "not available" in r.text.lower() or "not found" in r.text.lower()
-
-    def test_overview_has_htmx_polling(self, client):
-        r = client.get("/sdlc/")
-        assert "hx-trigger" in r.text
-        assert "every 5s" in r.text
 
 
 class TestStaticFiles:

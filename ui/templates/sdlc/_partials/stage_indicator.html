@@ -1,4 +1,3 @@
 {% for stage in p.stages %}
-{% if not loop.first %}<span class="stage-arrow">&#9654;</span>{% endif %}
-<span class="stage-dot {{ 'completed' if stage.is_done else ('in-progress' if stage.is_active else ('failed' if stage.is_failed else '')) }}">{{ stage.name }}</span>
+<span class="stage-dot {{ 'completed' if stage.is_done else ('in-progress' if stage.is_active else ('failed' if stage.is_failed else '')) }}" title="{{ stage.name }}">{{ stage.name[0] }}</span>
 {% endfor %}

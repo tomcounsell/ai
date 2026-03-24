@@ -202,15 +202,17 @@ def _session_to_pipeline(session) -> PipelineProgress:
 # === Public query functions ===
 
 
-def get_all_sessions() -> list[PipelineProgress]:
-    """Get ALL agent sessions, sorted by last_activity descending.
+def get_all_sessions(limit: int = 16) -> list[PipelineProgress]:
+    """Get agent sessions sorted by last activity.
 
-    Returns all sessions regardless of whether they have stage_states.
-    Sessions with stage_states will have SDLC stage indicators;
-    sessions without will have an empty stages list.
+    Active sessions always appear (no cap). Inactive sessions are filtered
+    to those within the last 48 hours, capped at `limit` total.
+
+    Args:
+        limit: Maximum number of inactive sessions to show.
 
     Returns:
-        List of PipelineProgress for all sessions, most recent first.
+        List of PipelineProgress, newest activity first.
     """
     from models.agent_session import AgentSession
 
@@ -220,9 +222,26 @@ def get_all_sessions() -> list[PipelineProgress]:
         logger.warning(f"Failed to query AgentSession: {e}")
         return []
 
-    pipelines = [_session_to_pipeline(session) for session in all_sessions]
-    pipelines.sort(key=lambda p: p.last_activity or p.created_at or 0, reverse=True)
-    return pipelines
+    cutoff = time.time() - 48 * 3600
+    active = []
+    inactive = []
+
+    for session in all_sessions:
+        pipeline = _session_to_pipeline(session)
+        if pipeline.status in ("running", "pending", "in_progress"):
+            active.append(pipeline)
+        else:
+            last_ts = pipeline.last_activity or pipeline.completed_at or pipeline.created_at or 0
+            if last_ts >= cutoff:
+                inactive.append(pipeline)
+
+    active.sort(key=lambda p: p.last_activity or p.created_at or 0, reverse=True)
+    inactive.sort(
+        key=lambda p: p.last_activity or p.completed_at or p.created_at or 0,
+        reverse=True,
+    )
+
+    return active + inactive[:limit]
 
 
 def get_active_pipelines() -> list[PipelineProgress]:

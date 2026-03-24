@@ -265,23 +265,24 @@ h3 {
 
 /* Stage indicator (horizontal pipeline) */
 .stage-indicator {
-    display: flex;
+    display: inline-flex;
     align-items: center;
     gap: 2px;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
+    white-space: nowrap;
 }
 
 .stage-dot {
     display: flex;
     align-items: center;
-    gap: 4px;
-    padding: 3px 8px;
-    border-radius: 4px;
-    font-size: 11px;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    border-radius: 3px;
+    font-size: 10px;
     font-family: var(--font-mono);
-    font-weight: 500;
+    font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.3px;
     background: var(--bg-tertiary);
     color: var(--text-muted);
     border: 1px solid transparent;

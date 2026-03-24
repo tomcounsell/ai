@@ -21,11 +21,27 @@ STATIC_DIR = UI_DIR / "static"
 
 
 def _filter_format_timestamp(ts: float | None) -> str:
-    """Jinja2 filter: format Unix timestamp to readable datetime."""
+    """Jinja2 filter: format Unix timestamp to humanized relative time."""
     if ts is None:
         return "-"
     dt = datetime.datetime.fromtimestamp(ts)
-    return dt.strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.datetime.now()
+    diff = now - dt
+
+    if diff.total_seconds() < 0:
+        return dt.strftime("%H:%M")
+    if diff.total_seconds() < 60:
+        return "just now"
+    if diff.total_seconds() < 3600:
+        mins = int(diff.total_seconds() / 60)
+        return f"{mins}m ago"
+    if diff.total_seconds() < 86400 and dt.date() == now.date():
+        return f"today {dt.strftime('%H:%M')}"
+    if dt.date() == (now - datetime.timedelta(days=1)).date():
+        return f"yesterday {dt.strftime('%H:%M')}"
+    if diff.days < 7:
+        return f"{diff.days}d ago"
+    return dt.strftime("%Y-%m-%d")
 
 
 def _filter_format_duration(seconds: float | None) -> str:
@@ -96,13 +112,6 @@ def create_app() -> FastAPI:
 
     # Store templates in app state for access by routers
     app.state.templates = templates
-
-    # Register routers
-    from ui.routers.reflections import router as reflections_router
-    from ui.routers.sdlc import router as sdlc_router
-
-    app.include_router(reflections_router, prefix="/reflections")
-    app.include_router(sdlc_router, prefix="/sdlc")
 
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request):
