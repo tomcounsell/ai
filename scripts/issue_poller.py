@@ -6,7 +6,7 @@ Polls GitHub issues across configured projects, detects new ones,
 checks for duplicates, and auto-creates draft plans via /do-plan.
 
 Entry point: Run on a 5-minute cron schedule via launchd.
-State: Redis-backed seen-issue tracker and lock.
+State: Popoto SeenIssue model for seen-tracking, raw Redis for distributed lock.
 
 See docs/features/issue-poller.md for full documentation.
 """
@@ -25,17 +25,14 @@ _project_root = str(Path(__file__).parent.parent)
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
-try:
-    import redis
-except ImportError:
-    redis = None  # type: ignore[assignment]
+from popoto.redis_db import POPOTO_REDIS_DB  # noqa: E402
 
+from models.seen_issue import SeenIssue  # noqa: E402
 from scripts.issue_dedup import compare_issues  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-# Redis key patterns
-SEEN_KEY_PREFIX = "issue_poller:seen"
+# Redis key patterns (lock and failure counter stay as raw Redis for atomicity)
 LOCK_KEY = "issue_poller:lock"
 LOCK_TTL = 300  # 5 minutes
 FAILURE_COUNT_KEY = "issue_poller:consecutive_failures"
@@ -44,41 +41,38 @@ FAILURE_COUNT_KEY = "issue_poller:consecutive_failures"
 AGENT_D_SIGNATURE = "_Auto-posted by /do-docs cascade_"
 
 
-def get_redis_client() -> redis.Redis:
-    """Get a Redis client, raising if unavailable."""
-    if redis is None:
-        raise RuntimeError("redis package not installed")
-    client = redis.Redis()
-    client.ping()
-    return client
+def get_redis_client():
+    """Get the shared Popoto Redis connection, raising if unavailable."""
+    POPOTO_REDIS_DB.ping()
+    return POPOTO_REDIS_DB
 
 
-def acquire_lock(r: redis.Redis) -> bool:
+def acquire_lock(r) -> bool:
     """Acquire a distributed lock to prevent concurrent executions.
+
+    Uses raw Redis SET NX EX for atomicity. The lock stays as raw Redis
+    because Popoto's save() cannot do atomic SET NX EX.
 
     Returns True if lock acquired, False if another instance is running.
     """
     return bool(r.set(LOCK_KEY, "1", nx=True, ex=LOCK_TTL))
 
 
-def release_lock(r: redis.Redis) -> None:
+def release_lock(r) -> None:
     """Release the distributed lock."""
     r.delete(LOCK_KEY)
 
 
-def seen_key(org: str, repo: str) -> str:
-    """Redis key for the seen-issue set for a given repo."""
-    return f"{SEEN_KEY_PREFIX}:{org}/{repo}"
-
-
-def mark_seen(r: redis.Redis, org: str, repo: str, issue_number: int) -> None:
+def mark_seen(org: str, repo: str, issue_number: int) -> None:
     """Mark an issue as seen (processed)."""
-    r.sadd(seen_key(org, repo), str(issue_number))
+    record = SeenIssue.get_or_create(org, repo)
+    record.mark(issue_number)
 
 
-def is_seen(r: redis.Redis, org: str, repo: str, issue_number: int) -> bool:
+def is_seen(org: str, repo: str, issue_number: int) -> bool:
     """Check if an issue has already been processed."""
-    return bool(r.sismember(seen_key(org, repo), str(issue_number)))
+    record = SeenIssue.get_or_create(org, repo)
+    return record.is_seen(issue_number)
 
 
 def load_projects(config_path: Path | None = None) -> list[dict]:
@@ -185,9 +179,9 @@ def get_latest_comment_id(org: str, repo: str, issue_number: int) -> str | None:
         return None
 
 
-def filter_new_issues(r: redis.Redis, org: str, repo: str, issues: list[dict]) -> list[dict]:
+def filter_new_issues(org: str, repo: str, issues: list[dict]) -> list[dict]:
     """Filter out already-seen issues."""
-    return [issue for issue in issues if not is_seen(r, org, repo, issue["number"])]
+    return [issue for issue in issues if not is_seen(org, repo, issue["number"])]
 
 
 def has_sufficient_context(issue: dict) -> bool:
@@ -346,7 +340,6 @@ def send_telegram_notification(message: str, groups: list[str] | None = None) ->
 
 
 def process_issue(
-    r: redis.Redis,
     org: str,
     repo: str,
     issue: dict,
@@ -366,7 +359,7 @@ def process_issue(
     # Check if a plan already exists (race condition prevention)
     if check_existing_plan(org, repo, number):
         logger.info(f"Plan already exists for {org}/{repo}#{number}, marking as seen")
-        mark_seen(r, org, repo, number)
+        mark_seen(org, repo, number)
         return "skipped"
 
     # Check for sufficient context
@@ -385,7 +378,7 @@ def process_issue(
             f"Issue {org}/{repo}#{number} needs review (insufficient context): {title}",
             telegram_groups,
         )
-        mark_seen(r, org, repo, number)
+        mark_seen(org, repo, number)
         return "needs-review"
 
     # Run dedup check against other open issues
@@ -421,7 +414,7 @@ def process_issue(
             f"({score:.0%}): {title}",
             telegram_groups,
         )
-        mark_seen(r, org, repo, number)
+        mark_seen(org, repo, number)
         return "duplicate"
 
     # Get latest comment ID for plan frontmatter
@@ -435,7 +428,7 @@ def process_issue(
             f"Auto-planned: {org}/{repo}#{number}: {title}",
             telegram_groups,
         )
-        mark_seen(r, org, repo, number)
+        mark_seen(org, repo, number)
 
         # Note related issues in plan if any
         if dedup_result and dedup_result.get("classification") == "related":
@@ -449,7 +442,6 @@ def process_issue(
 
 
 def poll_project(
-    r: redis.Redis,
     project: dict,
 ) -> dict:
     """Poll a single project for new issues.
@@ -467,7 +459,7 @@ def poll_project(
         logger.info(f"No open issues found for {org}/{repo}")
         return {"total": 0, "new": 0, "planned": 0, "duplicate": 0, "error": 0}
 
-    new_issues = filter_new_issues(r, org, repo, issues)
+    new_issues = filter_new_issues(org, repo, issues)
     logger.info(f"Found {len(new_issues)} new issues in {org}/{repo}")
 
     results = {
@@ -481,7 +473,7 @@ def poll_project(
     }
 
     for issue in new_issues:
-        status = process_issue(r, org, repo, issue, issues, telegram_groups)
+        status = process_issue(org, repo, issue, issues, telegram_groups)
         results[status] = results.get(status, 0) + 1
 
     return results
@@ -514,7 +506,7 @@ def run_polling_cycle() -> dict:
         for project in projects:
             key = f"{project['org']}/{project['repo']}"
             try:
-                summary[key] = poll_project(r, project)
+                summary[key] = poll_project(project)
             except Exception as e:
                 logger.error(f"Error polling {key}: {e}")
                 summary[key] = {"error": str(e)}
