@@ -1969,25 +1969,25 @@ async def cleanup_stale_branches_all_projects() -> list[str]:
 
 
 def _cli_show_status() -> None:
-    """Show current queue state grouped by project and status."""
+    """Show current queue state grouped by chat_id, with worker and health info."""
     all_jobs = list(AgentSession.query.all())
     if not all_jobs:
         print("Queue is empty.")
         return
 
-    # Group by project_key
-    by_project: dict[str, list] = {}
+    # Group by chat_id (worker key)
+    by_chat: dict[str, list] = {}
     for job in all_jobs:
         key = job.chat_id or job.project_key
-        if key not in by_project:
-            by_project[key] = []
-        by_project[key].append(job)
+        if key not in by_chat:
+            by_chat[key] = []
+        by_chat[key].append(job)
 
     now = time.time()
-    for queue_key, jobs in sorted(by_project.items()):
-        project_key = jobs[0].project_key if jobs else queue_key
-        print(f"\n=== {project_key} (chat: {queue_key}) ===")
-        worker = _active_workers.get(queue_key)
+    for chat_key, jobs in sorted(by_chat.items()):
+        project_key = jobs[0].project_key if jobs else chat_key
+        print(f"\n=== {project_key} (chat: {chat_key}) ===")
+        worker = _active_workers.get(chat_key)
         worker_status = "alive" if (worker and not worker.done()) else "DEAD/missing"
         print(f"  Worker: {worker_status}")
 
@@ -1999,15 +1999,36 @@ def _cli_show_status() -> None:
             elif job.created_at:
                 duration = f" (queued {format_duration(now - job.created_at)})"
 
-            msg_preview = (job.message_text or "")[:60]
-            print(f"  [{job.status:>9}] {job.job_id}{duration} - {msg_preview}")
+            session_id = (getattr(job, "session_id", "") or "")[:12]
+            corr_id = (getattr(job, "correlation_id", "") or "")[:8]
+            msg_preview = (job.message_text or "")[:50]
+            extras = []
+            if session_id:
+                extras.append(f"sid={session_id}")
+            if corr_id:
+                extras.append(f"cid={corr_id}")
+            extra_str = f" ({', '.join(extras)})" if extras else ""
+            print(f"  [{job.status:>9}] {job.job_id}{duration}{extra_str} - {msg_preview}")
+
+    # Health summary
+    try:
+        from bridge.health import get_health
+
+        health = get_health()
+        degraded = health.degraded_dependencies()
+        if degraded:
+            print(f"\nHealth: DEGRADED ({', '.join(degraded)})")
+        else:
+            print("\nHealth: OK")
+    except Exception:
+        print("\nHealth: unknown (bridge not running)")
 
     # Summary
     status_counts: dict[str, int] = {}
     for job in all_jobs:
         status_counts[job.status] = status_counts.get(job.status, 0) + 1
     summary = ", ".join(f"{v} {k}" for k, v in sorted(status_counts.items()))
-    print(f"\nTotal: {len(all_jobs)} jobs ({summary})")
+    print(f"Total: {len(all_jobs)} jobs ({summary})")
 
 
 def _cli_flush_stuck() -> None:

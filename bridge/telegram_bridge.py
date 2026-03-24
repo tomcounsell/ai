@@ -412,7 +412,14 @@ logging.basicConfig(
 root_logger = logging.getLogger()
 file_handler = logging.FileHandler(LOG_DIR / "bridge.log")
 file_handler.setLevel(logging.DEBUG)
-file_handler.setFormatter(logging.Formatter(FILE_FORMAT))
+# Use JSON formatter for structured logging (parseable by log aggregation tools)
+# Falls back to plain text if the module can't be imported
+try:
+    from bridge.log_format import StructuredJsonFormatter
+
+    file_handler.setFormatter(StructuredJsonFormatter())
+except ImportError:
+    file_handler.setFormatter(logging.Formatter(FILE_FORMAT))
 file_handler.addFilter(InternalDebugFilter())
 root_logger.addHandler(file_handler)
 
