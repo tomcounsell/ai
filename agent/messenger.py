@@ -149,6 +149,20 @@ class BackgroundTask:
             if send_result and self._result:
                 await self.messenger.send(self._result, message_type="result")
 
+            # Post-session memory extraction (non-fatal, async)
+            try:
+                from agent.memory_extraction import run_post_session_extraction
+
+                await run_post_session_extraction(
+                    session_id=self.messenger.session_id,
+                    response_text=str(self._result or ""),
+                )
+            except Exception as mem_err:
+                logger.debug(
+                    f"[{self.messenger.session_id}] "
+                    f"Memory extraction skipped: {mem_err}"
+                )
+
         except Exception as e:
             self._error = e
             self._completed_at = datetime.now()
