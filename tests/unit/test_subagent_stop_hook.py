@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agent.hooks.subagent_stop import (
+    _extract_outcome_summary,
     _get_stage_states,
     _register_dev_session_completion,
     subagent_stop_hook,
@@ -194,6 +195,41 @@ class TestGetSdlcStages:
             result = _get_stage_states("session-1")
 
         assert result is None
+
+
+class TestExtractOutcomeSummary:
+    """Tests for _extract_outcome_summary."""
+
+    def test_extracts_result_field(self):
+        result = _extract_outcome_summary({"result": "Build completed successfully"})
+        assert "Build completed" in result
+
+    def test_extracts_output_field(self):
+        result = _extract_outcome_summary({"output": "Tests passed"})
+        assert "Tests passed" in result
+
+    def test_extracts_from_nested_result(self):
+        result = _extract_outcome_summary(
+            {"result": {"text": "PR created at https://..."}}
+        )
+        assert "PR created" in result
+
+    def test_returns_default_when_empty(self):
+        result = _extract_outcome_summary({})
+        assert "completed" in result
+
+    def test_truncates_long_output(self):
+        long_text = "x" * 500
+        result = _extract_outcome_summary({"result": long_text})
+        assert len(result) <= 200
+
+    def test_handles_non_string_result(self):
+        result = _extract_outcome_summary({"result": 42})
+        assert "completed" in result
+
+    def test_skips_none_values(self):
+        result = _extract_outcome_summary({"result": None, "output": None})
+        assert "completed" in result
 
 
 class TestSubagentStopHookDevSession:
