@@ -440,7 +440,78 @@ Integration test: Save a memory via `Memory.save()`, trigger a PostToolUse hook 
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Plan**: docs/plans/subconscious_memory.md
+**Issue**: #514
+**Critics**: Skeptic, Operator, Archaeologist, Adversary, Simplifier, User
+**Findings**: 7 total (0 blockers, 2 concerns, 5 nits)
+
+### Concerns
+
+#### Extraction hook insertion point is underspecified
+- **Severity**: CONCERN
+- **Critics**: Skeptic, Operator
+- **Location**: Flow 3 / Task 4 (build-extraction)
+- **Finding**: The plan says to hook extraction into `agent/messenger.py` after `BackgroundTask._result` is available (line 146), but `_run_work()` is a private method that handles both success and error paths. There is no post-completion callback or event. The builder will need to either subclass BackgroundTask, monkey-patch `_run_work`, or add a new hook mechanism. This is non-trivial integration work disguised as "hook into messenger.py."
+- **Suggestion**: Specify the exact integration pattern: add an `on_complete` callback to BackgroundTask that fires after `_result` is set, or add the extraction call directly inside `_run_work()` after line 147. Either way, make it explicit in the task.
+
+#### No memory cleanup or TTL strategy
+- **Severity**: CONCERN
+- **Critics**: Operator, Adversary
+- **Location**: Solution / Architectural Impact
+- **Finding**: The plan describes memory creation (ingestion, extraction) but never addresses memory deletion or expiration. With human messages at importance 6.0 and agent observations continuously added, memory volume will grow unbounded. The plan mentions monitoring `fill_ratio()` for bloom but not for the memory records themselves. DecayingSortedField handles ranking but not deletion.
+- **Suggestion**: Add a cleanup strategy: either TTL-based expiry on low-confidence memories, a max-records cap with eviction, or an explicit "no cleanup in v1, monitor volume" statement with a threshold that triggers action.
+
+### Nits
+
+#### Bigram outcome detection may be too noisy for useful reinforcement
+- **Severity**: NIT
+- **Critics**: Skeptic
+- **Location**: Resolved Questions / Success Criteria (line 278-279)
+- **Finding**: Bigram overlap between injected thoughts and response text will produce false positives whenever common technical terms appear in both (e.g., "the file", "this function", "error handling"). This makes the ObservationProtocol reinforcement signal unreliable. The plan acknowledges this is v1 but still lists it as a success criterion.
+- **Suggestion**: Consider making outcome detection a success criterion for "runs without error" rather than "produces accurate classifications." Defer accuracy validation to a follow-up tuning cycle.
+
+#### `_base.md` is persona config, not system prompt priming
+- **Severity**: NIT
+- **Critics**: Simplifier
+- **Location**: Spike 4 / Task 2 (build-ingestion)
+- **Finding**: `config/personas/_base.md` currently contains Valor's identity, communication style, and philosophy (420 lines). Adding `<thought>` priming instructions here mixes memory system concerns with persona definition. It works but creates coupling between the memory system and persona config.
+- **Suggestion**: This is minor -- the plan correctly identified the single insertion point. Just ensure the priming text is clearly delimited (e.g., a `## Subconscious Memory` section) so it can be found and removed if the feature is reverted.
+
+#### Team Orchestration section may over-prescribe parallelism
+- **Severity**: NIT
+- **Critics**: Simplifier
+- **Location**: Team Orchestration / Step by Step Tasks
+- **Finding**: Tasks 2, 3, and 4 are marked parallel but all depend on Task 1 (build-memory-model). In practice with a solo dev, these will likely be sequential anyway. The orchestration section adds 50+ lines of team member definitions that a solo dev won't use. The task dependency graph in "Depends On" fields is sufficient.
+- **Suggestion**: No change needed -- the orchestration section is harmless and forwards-compatible with future multi-agent builds. Just a note that a solo dev can ignore it.
+
+#### Prior Art section could reference popoto's own test suite
+- **Severity**: NIT
+- **Critics**: Archaeologist
+- **Location**: Prior Art
+- **Finding**: The plan references popoto docs extensively but not popoto's test suite. Since this project will be the first production user of v1.0.3 agent memory primitives (Risk 4), the popoto test coverage for these primitives is relevant prior art that would increase confidence.
+- **Suggestion**: Add a note: "Reviewed popoto test coverage for agent-memory primitives at `~/src/popoto/tests/`" to the Prior Art section, or verify test coverage exists as part of Task 1.
+
+#### Success criteria #8 and #9 are implementation details, not criteria
+- **Severity**: NIT
+- **Critics**: User
+- **Location**: Success Criteria (lines 277-278)
+- **Finding**: "Sliding window injection: every 3 tool calls, rolling buffer of 9, topic keywords from windows" and "Bigram outcome detection: 1-2 word phrase overlap" are implementation specifications, not success criteria. Success criteria should describe observable outcomes, not algorithmic choices.
+- **Suggestion**: Reframe as outcome-oriented: "Rate-limited thought injection prevents context flooding" and "Outcome detection classifies injected thoughts as acted/dismissed."
+
+### Structural Check Results
+
+| Check | Status | Detail |
+|-------|--------|--------|
+| Required sections | PASS | Documentation, Update System, Agent Integration, Test Impact all present and non-empty |
+| Task numbering | PASS | Tasks 1-7 sequential, no gaps |
+| Dependencies valid | PASS | All Depends On references point to valid task IDs |
+| File paths exist | PASS | 7/7 existing files verified; 9 new files correctly identified as to-create |
+| Prerequisites met | PASS | popoto v1.0.3 tag exists, Redis running (PONG), Anthropic API key present |
+| Cross-references | PASS | All success criteria map to tasks; no No-Gos appear in solution; no Rabbit Holes in tasks |
+
+### Verdict
+
+**READY TO BUILD** -- No blockers. The two concerns (extraction hook insertion point and memory cleanup strategy) are acknowledged risks that can be resolved during build without plan revision. The plan is thorough, well-spiked, and internally consistent.
 
 ---
 
