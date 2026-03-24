@@ -38,6 +38,9 @@ MEMORY_ACTED_SIGNAL = 0.85
 MEMORY_CONTRADICTED_SIGNAL = 0.15
 MEMORY_DISMISSED_WEAKEN = 0.85
 
+# Default project key used when VALOR_PROJECT_KEY env var is not set
+DEFAULT_PROJECT_KEY = "dm"
+
 # ContextAssembler tuning
 MEMORY_SURFACING_THRESHOLD = 0.4  # slightly lower than default 0.5 to surface more
 

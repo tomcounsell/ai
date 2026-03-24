@@ -33,6 +33,11 @@ from popoto.fields.existence_filter import ExistenceFilter  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
+# Valid source types for Memory.source field
+SOURCE_HUMAN = "human"
+SOURCE_AGENT = "agent"
+SOURCE_SYSTEM = "system"
+
 
 class Memory(WriteFilterMixin, AccessTrackerMixin, Model):
     """Subconscious memory record.
@@ -57,7 +62,7 @@ class Memory(WriteFilterMixin, AccessTrackerMixin, Model):
     project_key = KeyField()
     content = StringField(default="")
     importance = FloatField(default=1.0)
-    source = StringField(default="agent")  # "human", "agent", "system"
+    source = StringField(default=SOURCE_AGENT)  # SOURCE_HUMAN, SOURCE_AGENT, SOURCE_SYSTEM
 
     relevance = DecayingSortedField(
         base_score_field="importance",

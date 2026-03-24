@@ -144,9 +144,11 @@ def check_and_inject(
 
         # Resolve project_key
         if not project_key:
-            project_key = os.environ.get("VALOR_PROJECT_KEY", "dm")
+            from config.memory_defaults import DEFAULT_PROJECT_KEY
 
-        # Extract keywords from current window (last WINDOW_SIZE entries)
+            project_key = os.environ.get("VALOR_PROJECT_KEY", DEFAULT_PROJECT_KEY)
+
+        # Extract keywords from full buffer (last BUFFER_SIZE entries)
         all_keywords: list[str] = []
         for entry in buffer[-BUFFER_SIZE:]:
             kw = extract_topic_keywords(entry["tool_name"], entry["tool_input"])

@@ -89,10 +89,12 @@ async def extract_observations_async(
         # Save each observation as Memory
         from popoto import InteractionWeight
 
-        from models.memory import Memory
+        from models.memory import SOURCE_AGENT, Memory
 
         if not project_key:
-            project_key = os.environ.get("VALOR_PROJECT_KEY", "dm")
+            from config.memory_defaults import DEFAULT_PROJECT_KEY
+
+            project_key = os.environ.get("VALOR_PROJECT_KEY", DEFAULT_PROJECT_KEY)
 
         saved = []
         for obs in observations[:10]:  # cap at 10 observations
@@ -101,7 +103,7 @@ async def extract_observations_async(
                 project_key=project_key,
                 content=obs[:500],
                 importance=InteractionWeight.AGENT,
-                source="agent",
+                source=SOURCE_AGENT,
             )
             if m:
                 saved.append(
@@ -121,7 +123,7 @@ async def extract_observations_async(
         return []
 
 
-def _extract_bigrams(text: str) -> set[tuple[str, ...]]:
+def _extract_bigrams(text: str) -> set[tuple[str] | tuple[str, str]]:
     """Extract unigrams and bigrams from text for overlap detection.
 
     Filters out words shorter than 4 chars to reduce noise.

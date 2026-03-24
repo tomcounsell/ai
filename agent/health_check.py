@@ -418,15 +418,6 @@ async def watchdog_hook(
     session_id = valor_session_id or input_data.get("session_id", "unknown")
     transcript_path = input_data.get("transcript_path", "")
 
-    # === STEERING CHECK (every tool call) ===
-    try:
-        steering_result = await _handle_steering(session_id)
-        if steering_result is not None:
-            return steering_result
-    except Exception as e:
-        logger.error(f"[steering] Error in steering check: {e}")
-        # Never block due to steering bug
-
     # Increment counter
     _tool_counts[session_id] = _tool_counts.get(session_id, 0) + 1
     count = _tool_counts[session_id]
@@ -454,6 +445,7 @@ async def watchdog_hook(
         pass  # Non-fatal: don't let tracking break the agent
 
     # === MEMORY INJECTION (every tool call, internally rate-limited) ===
+    # Computed before steering so both can be combined if needed
     memory_context = None
     try:
         from agent.memory_hook import check_and_inject
@@ -461,6 +453,23 @@ async def watchdog_hook(
         memory_context = check_and_inject(session_id, tool_name, tool_input)
     except Exception as e:
         logger.debug(f"[memory_hook] Import or call failed (non-fatal): {e}")
+
+    # === STEERING CHECK (every tool call) ===
+    try:
+        steering_result = await _handle_steering(session_id)
+        if steering_result is not None:
+            # Combine memory_context with steering result if both exist
+            if memory_context and steering_result.get("continue_"):
+                steering_result = {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PostToolUse",
+                        "additionalContext": memory_context,
+                    },
+                }
+            return steering_result
+    except Exception as e:
+        logger.error(f"[steering] Error in steering check: {e}")
+        # Never block due to steering bug
 
     if count % CHECK_INTERVAL != 0:
         if memory_context:
