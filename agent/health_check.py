@@ -453,7 +453,23 @@ async def watchdog_hook(
     except Exception:
         pass  # Non-fatal: don't let tracking break the agent
 
+    # === MEMORY INJECTION (every tool call, internally rate-limited) ===
+    memory_context = None
+    try:
+        from agent.memory_hook import check_and_inject
+
+        memory_context = check_and_inject(session_id, tool_name, tool_input)
+    except Exception as e:
+        logger.debug(f"[memory_hook] Import or call failed (non-fatal): {e}")
+
     if count % CHECK_INTERVAL != 0:
+        if memory_context:
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "additionalContext": memory_context,
+                },
+            }
         return {"continue_": True}
 
     logger.info(f"[health_check] Running health check at tool call #{count} (session={session_id})")
@@ -473,6 +489,13 @@ async def watchdog_hook(
 
         if healthy:
             logger.info(f"[health_check] Healthy at #{count}: {reason}{gh_info}")
+            if memory_context:
+                return {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PostToolUse",
+                        "additionalContext": memory_context,
+                    },
+                }
             return {"continue_": True}
         else:
             logger.warning(f"[health_check] UNHEALTHY at #{count}: {reason}{gh_info}")
