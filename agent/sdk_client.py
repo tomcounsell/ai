@@ -71,6 +71,49 @@ _last_activity_timestamps: dict[str, float] = {}
 SDK_INACTIVITY_TIMEOUT_SECONDS = int(os.environ.get("SDK_INACTIVITY_TIMEOUT_SECONDS", 300))
 
 
+class CircuitOpenError(RuntimeError):
+    """Raised when the Anthropic circuit breaker is open.
+
+    The worker loop catches this specifically to leave the job as pending
+    (instead of marking it failed) so the health check can retry when
+    the circuit closes.
+    """
+
+    pass
+
+
+# === Anthropic Circuit Breaker ===
+# Protects against sustained Anthropic API failures. When open, queries fail fast
+# instead of accumulating timeouts. Registered with DependencyHealth for diagnostics.
+_anthropic_circuit = None  # Lazy-initialized to avoid import cycles
+
+
+def _get_anthropic_circuit():
+    """Get or create the Anthropic circuit breaker (lazy singleton)."""
+    global _anthropic_circuit
+    if _anthropic_circuit is None:
+        from bridge.resilience import CircuitBreaker
+
+        _anthropic_circuit = CircuitBreaker(
+            name="anthropic",
+            failure_threshold=5,
+            failure_window=60.0,
+            half_open_interval=30.0,
+            on_open=lambda: logger.warning(
+                "Anthropic circuit OPEN — queries will fail fast until recovery"
+            ),
+            on_close=lambda: logger.info("Anthropic circuit CLOSED — service recovered"),
+        )
+        # Register with global health tracker
+        try:
+            from bridge.health import get_health
+
+            get_health().register("anthropic", _anthropic_circuit)
+        except Exception:
+            pass  # Non-fatal
+    return _anthropic_circuit
+
+
 def get_stop_reason(session_id: str) -> str | None:
     """Get and consume the stop_reason for a completed session query."""
     return _session_stop_reasons.pop(session_id, None)
@@ -927,6 +970,18 @@ class ValorAgent:
         response_parts: list[str] = []
         retries = 0
 
+        # Circuit breaker check: fail fast if Anthropic is down
+        circuit = _get_anthropic_circuit()
+        if not circuit.allows_request():
+            logger.warning(
+                "[SDK-circuit] Anthropic circuit is OPEN — failing fast for session %s",
+                session_id,
+            )
+            raise CircuitOpenError(
+                "Anthropic service unavailable (circuit breaker open). "
+                "Job will remain pending and retry when service recovers."
+            )
+
         # Bug 2 fix (issue #374): Reset watchdog tool counts at query start
         # so continuation sessions don't inherit inflated counts from prior runs.
         if session_id:
@@ -1038,6 +1093,7 @@ class ValorAgent:
                 session_id,
                 query_timeout,
             )
+            asyncio.ensure_future(circuit.record_failure(TimeoutError("query timeout")))
             raise
 
         except asyncio.CancelledError:
@@ -1047,9 +1103,13 @@ class ValorAgent:
                 elapsed,
                 session_id,
             )
+            # CancelledError is not an API failure — don't record against circuit
             raise
 
         except Exception as e:
+            # Record failure for circuit breaker
+            asyncio.ensure_future(circuit.record_failure(e))
+
             error_str = str(e)
             init_elapsed = time.time() - init_start
 
@@ -1111,6 +1171,11 @@ class ValorAgent:
             else:
                 logger.error(f"SDK query failed after {init_elapsed:.2f}s: {e}")
             raise
+
+        else:
+            # Query succeeded — record success for circuit breaker
+            asyncio.ensure_future(circuit.record_success())
+
         finally:
             # Always unregister client from registry
             if session_id:

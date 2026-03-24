@@ -1120,8 +1120,22 @@ async def _worker_loop(chat_id: str) -> None:
                 job_completed = True
                 raise  # Re-raise to exit worker loop
             except Exception as e:
-                logger.error(f"[chat:{chat_id}] Job {job.job_id} failed: {e}")
-                job_failed = True
+                # Check if this is a circuit breaker rejection — leave job pending
+                from agent.sdk_client import CircuitOpenError
+
+                if isinstance(e, CircuitOpenError):
+                    logger.warning(
+                        "[chat:%s] Job %s deferred (circuit open) — "
+                        "will retry when service recovers",
+                        chat_id,
+                        job.job_id,
+                    )
+                    # Don't complete the job — leave it for health check to retry
+                    job_completed = True
+                    break  # Exit worker loop; health check will restart
+                else:
+                    logger.error(f"[chat:{chat_id}] Job {job.job_id} failed: {e}")
+                    job_failed = True
             finally:
                 if not job_completed:
                     await _complete_job(job, failed=job_failed)

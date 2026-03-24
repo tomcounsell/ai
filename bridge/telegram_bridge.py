@@ -1356,25 +1356,39 @@ async def main():
     if orphans_killed:
         logger.info(f"Killed {orphans_killed} orphaned Claude Code subprocess(es)")
 
-    # Start the client (retry on SQLite session lock with exponential backoff)
-    # Backoff: 2s, 5s, 10s (with jitter added by cleanup function)
+    # Start the client with general connection retry covering all Telethon errors.
+    # Exponential backoff with jitter: 2s, 4s, 8s, 16s, 32s, 64s, 128s, 256s cap.
+    import random
+
     logger.info("Starting Telegram bridge...")
-    backoff_times = [2, 5, 10]
-    for _attempt in range(1, 4):
+    max_attempts = 8
+    for _attempt in range(1, max_attempts + 1):
         try:
             await client.start(phone=PHONE, password=PASSWORD)
             break
         except Exception as e:
-            if "database is locked" in str(e) and _attempt < 3:
-                # Try cleanup again before retry
-                _cleanup_session_locks()
-                wait_time = backoff_times[_attempt - 1]
-                logger.warning(
-                    f"Session DB locked (attempt {_attempt}/3), retrying in {wait_time}s..."
+            if _attempt >= max_attempts:
+                logger.error(
+                    "Failed to connect to Telegram after %d attempts: %s",
+                    max_attempts,
+                    e,
                 )
-                await asyncio.sleep(wait_time)
-            else:
                 raise
+            # Exponential backoff with jitter, capped at 256s
+            base_delay = min(2 ** _attempt, 256)
+            jitter = random.uniform(0, base_delay * 0.2)
+            wait_time = base_delay + jitter
+            logger.warning(
+                "Connection attempt %d/%d failed (%s: %s), retrying in %.1fs...",
+                _attempt,
+                max_attempts,
+                type(e).__name__,
+                str(e)[:200],
+                wait_time,
+            )
+            if "database is locked" in str(e):
+                _cleanup_session_locks()
+            await asyncio.sleep(wait_time)
     logger.info("Connected to Telegram")
 
     # Replay any dead-lettered messages from previous session
