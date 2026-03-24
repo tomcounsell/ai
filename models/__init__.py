@@ -13,6 +13,7 @@ Provides fast, queryable Redis models for all persistent data:
 - DedupRecord: per-chat message deduplication tracking
 - SeenIssue: GitHub issue poller seen-issue tracking
 - ObserverTelemetry: observer agent telemetry counters and events
+- Memory: subconscious memory records (human instructions, agent observations)
 """
 
 from models.agent_session import AgentSession
@@ -21,6 +22,7 @@ from models.chat import Chat
 from models.dead_letter import DeadLetter
 from models.dedup import DedupRecord
 from models.link import Link
+from models.memory import Memory
 from models.reflection import Reflection
 from models.reflections import ReflectionIgnore, ReflectionRun
 from models.seen_issue import SeenIssue
@@ -44,4 +46,5 @@ __all__ = [
     "TelegramMessage",
     "Chat",
     "Link",
+    "Memory",
 ]

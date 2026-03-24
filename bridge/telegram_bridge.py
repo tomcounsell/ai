@@ -723,6 +723,23 @@ async def main():
         except Exception as e:
             logger.error(f"Error storing message: {e}")
 
+        # Save to subconscious memory (non-fatal, never crashes bridge)
+        try:
+            if text and text.strip() and not getattr(sender, "bot", False):
+                from popoto import InteractionWeight
+
+                from models.memory import Memory
+
+                Memory.safe_save(
+                    agent_id=sender_name or "unknown",
+                    project_key=_early_project_key,
+                    content=text[:500],
+                    importance=InteractionWeight.HUMAN,
+                    source="human",
+                )
+        except Exception as e:
+            logger.warning(f"Memory save failed (non-fatal): {e}")
+
         # Extract and store links from whitelisted senders
         if sender_username and sender_username.lower() in LINK_COLLECTORS:
             try:

@@ -419,3 +419,7 @@ request_human_input(
 - Problems you can solve with available tools
 
 This escape hatch bypasses auto-continue logic. Use sparingly — every invocation signals potential system design improvement needed
+
+## Subconscious Memory
+
+You may see `<thought>` blocks appear in your context. These are memories from past sessions — observations, patterns, and human instructions that surfaced because they are relevant to your current work. Treat them as background context: consider them but do not reference them explicitly in your responses. They help you make better decisions without the human needing to repeat themselves.
