@@ -122,9 +122,7 @@ class TestClassifyIntent:
                 "qa 0.97 User is asking for information"
             )
             with patch("anthropic.Anthropic", return_value=mock_client):
-                result = asyncio.get_event_loop().run_until_complete(
-                    classify_intent("How does the bridge work?")
-                )
+                result = asyncio.run(classify_intent("How does the bridge work?"))
                 assert result.intent == "qa"
                 assert result.confidence == 0.97
                 assert result.is_qa is True
@@ -136,27 +134,21 @@ class TestClassifyIntent:
                 "work 0.99 User wants to fix something"
             )
             with patch("anthropic.Anthropic", return_value=mock_client):
-                result = asyncio.get_event_loop().run_until_complete(
-                    classify_intent("Fix the bridge")
-                )
+                result = asyncio.run(classify_intent("Fix the bridge"))
                 assert result.intent == "work"
                 assert result.confidence == 0.99
                 assert result.is_work is True
 
     def test_no_api_key_defaults_to_work(self):
         with patch("utils.api_keys.get_anthropic_api_key", return_value=""):
-            result = asyncio.get_event_loop().run_until_complete(
-                classify_intent("What time is it?")
-            )
+            result = asyncio.run(classify_intent("What time is it?"))
             assert result.intent == "work"
             assert result.is_work is True
 
     def test_api_error_defaults_to_work(self):
         with patch("utils.api_keys.get_anthropic_api_key", return_value="test-key"):
             with patch("anthropic.Anthropic", side_effect=RuntimeError("API down")):
-                result = asyncio.get_event_loop().run_until_complete(
-                    classify_intent("What's the status?")
-                )
+                result = asyncio.run(classify_intent("What's the status?"))
                 assert result.intent == "work"
                 assert result.is_work is True
 
@@ -167,7 +159,7 @@ class TestClassifyIntent:
                 "qa 0.95 follow-up question"
             )
             with patch("anthropic.Anthropic", return_value=mock_client):
-                result = asyncio.get_event_loop().run_until_complete(
+                result = asyncio.run(
                     classify_intent(
                         "And what about the nudge loop?",
                         context={
