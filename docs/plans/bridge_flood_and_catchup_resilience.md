@@ -5,7 +5,7 @@ appetite: Small
 owner: Valor
 created: 2026-03-25
 tracking: https://github.com/tomcounsell/ai/issues/510
-last_comment_id:
+last_comment_id: 4127256190
 ---
 
 # Bridge Flood-Backoff Persistence & Dynamic Catchup Lookback
