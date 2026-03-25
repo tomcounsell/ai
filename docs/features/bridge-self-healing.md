@@ -125,9 +125,31 @@ The watchdog is installed alongside the bridge:
 ./scripts/valor-service.sh install
 # Installs:
 # - com.valor.bridge (main bridge, with log rotation on startup)
-# - com.valor.update (cron at 06:00/18:00)
+# - com.valor.update (polls every 30 minutes)
 # - com.valor.bridge-watchdog (every 60s)
 ```
+
+### 10. Update Polling (`com.valor.update`)
+
+**Problem**: Code pushes to main could take up to 12 hours to propagate to all machines, since the update plist only ran at 6 AM and 6 PM.
+
+**Solution**: The `com.valor.update` launchd plist uses `StartInterval` of 1800 seconds (30 minutes) to poll for updates frequently. Each invocation runs `scripts/remote-update.sh`, which:
+1. Acquires a lock (`data/update.lock`) to prevent concurrent runs
+2. Runs `git fetch` + `git pull` via `scripts/update/run.py --cron`
+3. If new commits arrived: syncs dependencies (if dep files changed), writes `data/restart-requested`
+4. The bridge job queue detects the restart flag and triggers a graceful restart after in-flight jobs complete
+
+**Verify polling is active**:
+```bash
+launchctl list | grep com.valor.update
+```
+
+**Check update logs**:
+```bash
+tail -f logs/update.log
+```
+
+**Manual override**: The Telegram `/update` command continues to work for immediate updates.
 
 ## Recovery Lock
 
