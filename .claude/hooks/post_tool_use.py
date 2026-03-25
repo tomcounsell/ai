@@ -253,6 +253,24 @@ def check_file_reminders(hook_input: dict) -> None:
             print(reminder)
 
 
+def _run_memory_recall(hook_input: dict) -> str | None:
+    """Run memory recall and return additionalContext string or None.
+
+    Queries subconscious memory based on accumulated tool calls.
+    Fails silently -- memory errors never block tool execution.
+    """
+    try:
+        from hook_utils.memory_bridge import recall
+
+        session_id = hook_input.get("session_id", "unknown")
+        tool_name = hook_input.get("tool_name", "")
+        tool_input = hook_input.get("tool_input", {})
+
+        return recall(session_id, tool_name, tool_input)
+    except Exception:
+        return None
+
+
 def main():
     hook_input = read_hook_input()
     if not hook_input:
@@ -283,6 +301,13 @@ def main():
     }
 
     append_to_log(session_dir, "tool_use.jsonl", entry)
+
+    # Memory recall -- query subconscious memory and inject thoughts
+    additional_context = _run_memory_recall(hook_input)
+    if additional_context:
+        # Output hook response with additionalContext for thought injection
+        response = json.dumps({"additionalContext": additional_context})
+        print(response)
 
 
 if __name__ == "__main__":

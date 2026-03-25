@@ -203,7 +203,8 @@ Telegram → Python Bridge (Telethon) → ChatSession (read-only, PM persona)
 - Intentional saves via `python -m tools.memory_search save "content"` for project-level learnings (7.0-8.0)
 - Post-merge learning extraction distills PR takeaways into memories (importance=7.0)
 - Outcome detection (bigram overlap) feeds ObservationProtocol to strengthen/weaken memories
-- All memory operations fail silently -- memory system never crashes the agent
+- **Claude Code hooks** extend memory to CLI sessions via `.claude/hooks/hook_utils/memory_bridge.py` (see `docs/features/claude-code-memory.md`): UserPromptSubmit ingests prompts, PostToolUse recalls with file-based sliding window, Stop extracts observations
+- All memory operations fail silently -- memory system never crashes the agent or hooks
 
 **Key Directories:**
 - `.claude/commands/` - Slash command skills
