@@ -16,7 +16,7 @@ Messages are routed to session types based on chat title prefix:
 - **"Dev: X" groups** -> `session_type="dev"` (DevSession, full permissions, dev persona). The classifier is skipped — Dev groups always get a DevSession directly.
 - **Everything else** -> `session_type="chat"` (ChatSession, PM persona). This includes both SDLC work and Q&A. The ChatSession decides whether to spawn a DevSession.
 
-There are exactly two session types: `chat` and `dev`. The previous `simple` session type has been removed — all messages route through ChatSession, which is intelligent enough to handle Q&A directly.
+There are exactly two session types: `chat` and `dev`. The previous `simple` session type has been removed — all messages route through ChatSession, which is intelligent enough to handle Q&A directly. When a message is classified as an informational query with high confidence (>0.90), the ChatSession answers directly without spawning a DevSession. See [ChatSession Q&A Mode](chatsession-qa-mode.md) for the classifier design and routing details.
 
 ## Architecture
 
@@ -33,19 +33,30 @@ Route by chat_title prefix
     |-- Everything else → ChatSession (session_type="chat")
             |-- Queued per chat_id
             |-- Read-only, PM persona
-            |-- Stage-by-stage SDLC orchestration
             |
             v
-        ChatSession assesses current stage
-            |-- Spawns one DevSession per stage
-            |-- Verifies result before progressing
-            |-- Repeats until pipeline complete
+        Intent Classifier (Haiku, binary)
             |
-            v
-        ChatSession composes delivery
-            |-- Persona-voiced message
-            v
-        Telegram Response
+            |-- Q&A (confidence > 0.90)
+            |       |-- Direct answer with read-only tools
+            |       |-- Reduced nudge cap (10)
+            |       v
+            |   Telegram Response
+            |
+            |-- Work (or low confidence)
+                    |-- Stage-by-stage SDLC orchestration
+                    |
+                    v
+                ChatSession assesses current stage
+                    |-- Spawns one DevSession per stage
+                    |-- Verifies result before progressing
+                    |-- Repeats until pipeline complete
+                    |
+                    v
+                ChatSession composes delivery
+                    |-- Persona-voiced message
+                    v
+                Telegram Response
 ```
 
 ## Data Model
