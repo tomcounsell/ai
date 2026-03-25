@@ -637,6 +637,68 @@ def verify_models(project_dir: Path) -> list[str]:
     return errors
 
 
+def check_telegram_session(project_dir: Path) -> ToolCheck:
+    """Check if the Telegram session file exists and is authorized.
+
+    Uses Telethon to connect (without sending auth codes) and verify
+    the session is valid. If not, instructs the user to run telegram_login.py.
+    """
+    python_path = project_dir / ".venv" / "bin" / "python"
+    if not python_path.exists():
+        return ToolCheck(name="telegram_session", available=False, error="No .venv/bin/python")
+
+    # Find session file
+    session_files = list((project_dir / "data").glob("*.session"))
+    if not session_files:
+        return ToolCheck(
+            name="telegram_session",
+            available=False,
+            error="No session file in data/. Run: python scripts/telegram_login.py",
+        )
+
+    # Check authorization using Telethon (connect-only, no SendCodeRequest)
+    check_script = (
+        "import asyncio, os, sys; "
+        "sys.path.insert(0, '.'); "
+        "from dotenv import load_dotenv; load_dotenv(); "
+        "from telethon import TelegramClient; "
+        "session = list(__import__('pathlib').Path('data').glob('*.session'))[0]; "
+        "client = TelegramClient(str(session).replace('.session',''), "
+        "int(os.getenv('TELEGRAM_API_ID',0)), os.getenv('TELEGRAM_API_HASH','')); "
+        "async def check(): "
+        "  await client.connect(); "
+        "  ok = await client.is_user_authorized(); "
+        "  await client.disconnect(); "
+        "  return ok; "
+        "result = asyncio.run(check()); "
+        "print('authorized' if result else 'unauthorized')"
+    )
+
+    try:
+        result = run_cmd(
+            [str(python_path), "-c", check_script],
+            cwd=project_dir,
+            timeout=15,
+        )
+        output = result.stdout.strip()
+        if "authorized" == output:
+            return ToolCheck(name="telegram_session", available=True, version="authorized")
+        else:
+            return ToolCheck(
+                name="telegram_session",
+                available=False,
+                error="Session expired/invalid. Run: python scripts/telegram_login.py",
+            )
+    except subprocess.TimeoutExpired:
+        return ToolCheck(
+            name="telegram_session",
+            available=False,
+            error="Timeout checking session (Telegram may be rate-limiting)",
+        )
+    except Exception as e:
+        return ToolCheck(name="telegram_session", available=False, error=str(e))
+
+
 def verify_environment(project_dir: Path, check_ollama_model: bool = True) -> VerificationResult:
     """Run all environment verification checks."""
     result = VerificationResult()
@@ -645,6 +707,7 @@ def verify_environment(project_dir: Path, check_ollama_model: bool = True) -> Ve
     result.python_deps = check_python_deps(project_dir)
     result.dev_tools = check_dev_tools(project_dir)
     result.valor_tools = check_valor_tools(project_dir)
+    result.valor_tools.append(check_telegram_session(project_dir))
 
     if check_ollama_model:
         ollama_model = os.getenv("OLLAMA_SUMMARIZER_MODEL", "qwen3:1.7b")

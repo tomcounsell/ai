@@ -56,6 +56,7 @@ if _sentry_dsn:
 
 # Local tool imports for message and link storage
 from telethon import TelegramClient, events  # noqa: E402
+from telethon.errors import FloodWaitError  # noqa: E402
 
 from agent import get_agent_response_sdk  # noqa: F401, E402
 from bridge.context import (  # noqa: E402
@@ -1380,16 +1381,32 @@ async def main():
     if orphans_killed:
         logger.info(f"Killed {orphans_killed} orphaned Claude Code subprocess(es)")
 
-    # Start the client with general connection retry covering all Telethon errors.
-    # Exponential backoff with jitter: 2s, 4s, 8s, 16s, 32s, 64s, 128s, 256s cap.
+    # Connect using existing session only — never trigger SendCodeRequest.
+    # The bridge cannot collect auth codes interactively; use telegram_login.py for that.
+    # Retries handle transient network errors with exponential backoff.
     import random
 
     logger.info("Starting Telegram bridge...")
     max_attempts = 8
     for _attempt in range(1, max_attempts + 1):
         try:
-            await client.start(phone=PHONE, password=PASSWORD)
+            await client.connect()
+            if not await client.is_user_authorized():
+                logger.error(
+                    "Telegram session is not authorized. "
+                    "Run 'python scripts/telegram_login.py' to authenticate first."
+                )
+                raise SystemExit(1)
             break
+        except FloodWaitError as e:
+            logger.warning(
+                "FloodWaitError: Telegram requires a %d second wait. Sleeping until ready...",
+                e.seconds,
+            )
+            await asyncio.sleep(e.seconds + 5)
+            continue
+        except (SystemExit, KeyboardInterrupt):
+            raise
         except Exception as e:
             if _attempt >= max_attempts:
                 logger.error(
