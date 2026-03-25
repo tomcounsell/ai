@@ -1,7 +1,7 @@
 """Post-session memory extraction and outcome detection.
 
 Extracts novel observations from agent response text via Haiku,
-saves them as Memory records with InteractionWeight.AGENT importance.
+saves them as Memory records with category-based importance levels.
 
 Detects outcomes by comparing injected thoughts against response
 content using bigram overlap, feeds results into ObservationProtocol.
@@ -72,7 +72,8 @@ async def extract_observations_async(
     """Extract novel observations from agent response via Haiku.
 
     Calls Haiku to identify decisions, surprises, corrections, and patterns.
-    Saves each as a Memory record with InteractionWeight.AGENT (1.0) importance.
+    Saves each as a Memory record with category-based importance (4.0 for
+    corrections/decisions, 1.0 for patterns/surprises).
 
     Returns list of dicts with keys: content, memory_id.
     """
