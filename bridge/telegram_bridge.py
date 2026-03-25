@@ -150,9 +150,7 @@ def _read_flood_backoff() -> float | None:
         # Ignore stale files (>24h old based on file mtime)
         file_age = now - _FLOOD_BACKOFF_FILE.stat().st_mtime
         if file_age > _FLOOD_BACKOFF_MAX_AGE_SECONDS:
-            logger.info(
-                "[flood-backoff] Ignoring stale backoff file (%.1fh old)", file_age / 3600
-            )
+            logger.info("[flood-backoff] Ignoring stale backoff file (%.1fh old)", file_age / 3600)
             _FLOOD_BACKOFF_FILE.unlink(missing_ok=True)
             return None
         # Ignore already-expired entries

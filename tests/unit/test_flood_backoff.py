@@ -6,7 +6,6 @@ corrupt JSON returns None, stale file (>24h) ignored.
 
 import json
 import time
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -23,9 +22,7 @@ def flood_backoff_file(tmp_path):
 @pytest.fixture
 def _patch_flood_file(flood_backoff_file):
     """Patch the flood-backoff file path to use tmp_path."""
-    with patch(
-        "bridge.telegram_bridge._FLOOD_BACKOFF_FILE", flood_backoff_file
-    ):
+    with patch("bridge.telegram_bridge._FLOOD_BACKOFF_FILE", flood_backoff_file):
         yield flood_backoff_file
 
 
@@ -84,9 +81,7 @@ class TestReadFloodBackoff:
         _patch_flood_file.write_text(json.dumps(data))
 
         # Make file appear 25 hours old by patching the staleness check
-        with patch(
-            "bridge.telegram_bridge._FLOOD_BACKOFF_MAX_AGE_SECONDS", 0
-        ):
+        with patch("bridge.telegram_bridge._FLOOD_BACKOFF_MAX_AGE_SECONDS", 0):
             result = _read_flood_backoff()
             assert result is None
 

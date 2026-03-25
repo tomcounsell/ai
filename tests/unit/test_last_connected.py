@@ -19,9 +19,7 @@ def last_connected_file(tmp_path):
 @pytest.fixture
 def _patch_last_connected_file(last_connected_file):
     """Patch the last_connected file path to use tmp_path."""
-    with patch(
-        "bridge.telegram_bridge._LAST_CONNECTED_FILE", last_connected_file
-    ):
+    with patch("bridge.telegram_bridge._LAST_CONNECTED_FILE", last_connected_file):
         yield last_connected_file
 
 
