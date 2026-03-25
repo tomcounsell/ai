@@ -1,15 +1,26 @@
 {
   "name": "transcribe",
-  "version": "1.0.0",
-  "description": "Audio/voice transcription using OpenAI Whisper API",
+  "version": "2.0.0",
+  "description": "Dual-backend transcription: SuperWhisper (local) + OpenAI Whisper (cloud)",
   "type": "api",
   "status": "stable",
 
-  "source": {
-    "type": "external",
-    "package": "openai",
-    "repository": "https://platform.openai.com/docs/guides/speech-to-text"
-  },
+  "backends": [
+    {
+      "name": "superwhisper",
+      "type": "local",
+      "description": "SuperWhisper macOS app - local transcription, no API cost",
+      "detection": "pgrep -x superwhisper",
+      "priority": 1
+    },
+    {
+      "name": "openai-whisper",
+      "type": "cloud",
+      "description": "OpenAI Whisper API - cloud fallback when SuperWhisper is unavailable",
+      "repository": "https://platform.openai.com/docs/guides/speech-to-text",
+      "priority": 2
+    }
+  ],
 
   "capabilities": [
     "transcribe",
@@ -18,26 +29,30 @@
 
   "requires": {
     "env": ["OPENAI_API_KEY"],
+    "env_optional": ["SUPERWHISPER_RECORDINGS_DIR"],
     "python": ">=3.10"
   },
 
   "commands": {
-    "verify": "python -c \"from tools.transcribe import transcribe_audio; print('OK')\"",
+    "verify": "python -c \"from tools.transcribe import transcribe; print('OK')\"",
     "test": "pytest tools/transcribe/tests/ -v"
   },
 
   "config": {
     "default_model": "whisper-1",
-    "supported_formats": ["mp3", "wav", "m4a", "ogg", "flac", "webm"]
+    "supported_formats": ["mp3", "wav", "m4a", "ogg", "flac", "webm"],
+    "superwhisper_poll_interval_ms": 500,
+    "superwhisper_timeout_s": 30,
+    "superwhisper_cache_ttl_s": 60
   },
 
   "workflows": [
     {
       "name": "basic-transcription",
-      "description": "Transcribe an audio file to text",
+      "description": "Transcribe an audio file to text (auto-selects best backend)",
       "steps": [
-        "from tools.transcribe import transcribe_audio",
-        "result = transcribe_audio('audio.mp3')",
+        "from tools.transcribe import transcribe",
+        "result = transcribe('audio.mp3')",
         "print(result['text'])"
       ]
     },
@@ -46,8 +61,8 @@
       "description": "Transcribe Telegram voice message",
       "steps": [
         "Download .ogg file from Telegram",
-        "from tools.transcribe import transcribe_audio",
-        "result = transcribe_audio('voice.ogg')",
+        "from tools.transcribe import transcribe",
+        "result = transcribe('voice.ogg')",
         "Return transcription text"
       ]
     }
