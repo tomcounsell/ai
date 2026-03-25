@@ -70,13 +70,16 @@ def cmd_save(args: argparse.Namespace) -> int:
         source=args.source,
     )
 
+    if result is None:
+        if args.json:
+            print(json.dumps({"error": "Memory was not saved (filtered or failed)"}, indent=2))
+            return 1
+        print("Memory was not saved (filtered or failed).", file=sys.stderr)
+        return 1
+
     if args.json:
         print(json.dumps(result, indent=2, default=str))
         return 0
-
-    if result is None:
-        print("Memory was not saved (filtered or failed).", file=sys.stderr)
-        return 1
 
     print(f"Memory saved: {result.get('memory_id', 'unknown')}")
     return 0

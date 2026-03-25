@@ -106,7 +106,7 @@ def search(
         return {"results": results, "error": None}
 
     except Exception as e:
-        logger.warning(f"[memory_search] search failed (non-fatal): {e}")
+        logger.warning(f"[memory_search] search failed (non-fatal): {type(e).__name__}: {e}")
         return {"results": [], "error": None}
 
 
