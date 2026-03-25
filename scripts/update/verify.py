@@ -668,37 +668,44 @@ def check_telegram_session(project_dir: Path) -> ToolCheck:
                 error="No session file in data/. Run: python scripts/telegram_login.py",
             )
 
-    # Check authorization using Telethon (connect-only, no SendCodeRequest)
+    # Check authorization using Telethon (connect-only, no SendCodeRequest).
+    # Outputs one of: authorized, unauthorized, flood:NNN, error:MESSAGE
     check_script = (
         "import asyncio, os, sys; "
         "sys.path.insert(0, '.'); "
         "from dotenv import load_dotenv; load_dotenv(); "
         "from telethon import TelegramClient; "
+        "from telethon.errors import FloodWaitError; "
         "session = list(__import__('pathlib').Path('data').glob('*.session'))[0]; "
         "client = TelegramClient(str(session).replace('.session',''), "
         "int(os.getenv('TELEGRAM_API_ID',0)), os.getenv('TELEGRAM_API_HASH','')); "
         "async def check(): "
-        "  await client.connect(); "
-        "  ok = await client.is_user_authorized(); "
-        "  await client.disconnect(); "
-        "  return ok; "
-        "result = asyncio.run(check()); "
-        "print('authorized' if result else 'unauthorized')"
+        "  try: "
+        "    await client.connect(); "
+        "    ok = await client.is_user_authorized(); "
+        "    await client.disconnect(); "
+        "    print('authorized' if ok else 'unauthorized'); "
+        "  except FloodWaitError as e: "
+        "    print(f'flood:{e.seconds}'); "
+        "  except Exception as e: "
+        "    print(f'error:{type(e).__name__}: {e}'[:200]); "
+        "asyncio.run(check())"
     )
 
-    def _check_auth(cwd: Path) -> str | None:
-        """Run the auth check script. Returns 'authorized', 'unauthorized', or None on error."""
+    def _check_auth(cwd: Path) -> str:
+        """Run the auth check script. Returns status string."""
         try:
             r = run_cmd([str(python_path), "-c", check_script], cwd=cwd, timeout=15)
-            out = r.stdout.strip()
-            return out if out in ("authorized", "unauthorized") else None
-        except Exception:
-            return None
+            return r.stdout.strip() or "error:no output"
+        except subprocess.TimeoutExpired:
+            return "error:timeout"
+        except Exception as e:
+            return f"error:{e}"
 
     auth_status = _check_auth(project_dir)
 
-    # If session is invalid, try restoring from seed before giving up
-    if auth_status != "authorized":
+    # If session is unauthorized, try restoring from seed before giving up
+    if auth_status == "unauthorized":
         seed_dir = Path.home() / "Desktop" / "Valor" / "telegram_session"
         seed_files = list(seed_dir.glob("*.session")) if seed_dir.is_dir() else []
         if seed_files:
@@ -710,11 +717,28 @@ def check_telegram_session(project_dir: Path) -> ToolCheck:
 
     if auth_status == "authorized":
         return ToolCheck(name="telegram_session", available=True, version="authorized")
-    else:
+    elif auth_status.startswith("flood:"):
+        seconds = auth_status.split(":", 1)[1]
+        return ToolCheck(
+            name="telegram_session",
+            available=True,
+            version="flood-wait",
+            error=f"Telegram rate-limited ({seconds}s wait). Bridge will retry.",
+        )
+    elif auth_status == "unauthorized":
         return ToolCheck(
             name="telegram_session",
             available=False,
             error="Session expired/invalid. Run: python scripts/telegram_login.py",
+        )
+    else:
+        # Connection error, timeout, etc. — session file exists, don't block on it
+        detail = auth_status.replace("error:", "", 1)
+        return ToolCheck(
+            name="telegram_session",
+            available=True,
+            version="unknown",
+            error=f"Could not verify session ({detail}). Bridge will retry on startup.",
         )
 
 
