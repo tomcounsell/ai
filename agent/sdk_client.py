@@ -1468,49 +1468,88 @@ async def get_agent_response_sdk(
         if github_org and github_repo:
             enriched_message += f"\nGITHUB: {github_org}/{github_repo}"
 
-    # ChatSession PM dispatch: always inject for chat sessions regardless of
-    # classification or repo. The PM persona has detailed instructions, but
-    # this reinforcement ensures the Agent tool is used instead of Skill tool.
+    # ChatSession routing: classify intent and choose Q&A or PM dispatch path.
+    # Q&A mode answers informational queries directly without spawning DevSession.
+    _qa_mode = False
     if _session_type == "chat":
-        enriched_message += (
-            "\n\nYou are the PM. Orchestrate SDLC work stage-by-stage:\n"
-            "1. **Assess the current stage** — use read-only Bash commands "
-            "(gh issue view, gh pr view, gh pr list, grep) to determine "
-            "where work stands. You can run Bash for reads freely.\n"
-            "1.5. **Gather prior stage context** — if a tracking issue exists, "
-            "fetch the last few comments with "
-            "`gh api repos/{owner}/{repo}/issues/{number}/comments` and look for "
-            "comments containing `<!-- sdlc-stage-comment -->`. Include a summary "
-            "of prior stage findings in the DevSession prompt so the next stage "
-            "has full context from previous stages.\n"
-            "2. **Spawn one dev-session for the next stage** — use the Agent tool "
-            "to dispatch exactly one stage at a time:\n"
-            '   Agent(subagent_type="dev-session", description="<stage>: <short desc>", '
-            'prompt="Stage: <PLAN|BUILD|TEST|PATCH|REVIEW|DOCS>\\n'
-            "Issue: <URL>\\nPR: <URL if exists>\\n"
-            "Current state: <what's already done>\\n"
-            'Acceptance criteria: <what done looks like>")\n'
-            "3. **Verify the result** — check that the stage completed successfully "
-            "before progressing to the next one.\n"
-            "4. **Repeat** — assess, spawn, verify until the pipeline is complete "
-            "or you need human input.\n\n"
-            "For trivial or docs-only work, use your judgment on whether the full "
-            "pipeline is warranted.\n"
-            "Use the Agent tool for all coding work — slash commands like /do-build "
-            "and /do-test are the dev-session's internal tools.\n\n"
-            "**Communicating with the stakeholder:**\n"
-            "You can send Telegram messages directly using:\n"
-            '  `python tools/send_telegram.py "Your message here"`\n'
-            "This sends your message immediately to the chat. Use it for:\n"
-            "- Status updates and progress reports\n"
-            "- Questions that need human input\n"
-            "- Final delivery summaries\n"
-            "Write in business terms — never expose SDLC stage names, "
-            "pipeline internals, or implementation details. "
-            "Speak like a project manager updating a stakeholder.\n"
-            "If you don't call this tool, your return text will be "
-            "automatically summarized and sent (fallback behavior)."
-        )
+        # Classify intent for Q&A vs work routing
+        try:
+            from agent.intent_classifier import classify_intent
+            from agent.qa_metrics import record_classification
+
+            _intent_result = await classify_intent(message)
+            record_classification(_intent_result.intent, _intent_result.confidence)
+            logger.info(
+                f"[{request_id}] Intent: {_intent_result.intent} "
+                f"(conf={_intent_result.confidence:.2f}): {_intent_result.reasoning}"
+            )
+
+            if _intent_result.is_qa:
+                _qa_mode = True
+                logger.info(f"[{request_id}] Routing to Q&A mode (direct response)")
+                # Update session classification_type so nudge loop uses reduced cap
+                if session_id:
+                    try:
+                        from models.agent_session import AgentSession as _QASession
+
+                        for _s in _QASession.query.filter(session_id=session_id):
+                            if _s.status in ("running", "active", "pending"):
+                                _s.classification_type = "qa"
+                                _s.save()
+                                break
+                    except Exception:
+                        pass  # Best-effort
+        except Exception as e:
+            logger.warning(
+                f"[{request_id}] Intent classification failed, defaulting to PM dispatch: {e}"
+            )
+
+        if _qa_mode:
+            # Q&A mode: inject Q&A instructions instead of PM dispatch
+            from agent.qa_handler import build_qa_instructions
+
+            enriched_message += build_qa_instructions()
+        else:
+            # PM dispatch: orchestrate SDLC work stage-by-stage
+            enriched_message += (
+                "\n\nYou are the PM. Orchestrate SDLC work stage-by-stage:\n"
+                "1. **Assess the current stage** — use read-only Bash commands "
+                "(gh issue view, gh pr view, gh pr list, grep) to determine "
+                "where work stands. You can run Bash for reads freely.\n"
+                "1.5. **Gather prior stage context** — if a tracking issue exists, "
+                "fetch the last few comments with "
+                "`gh api repos/{owner}/{repo}/issues/{number}/comments` and look for "
+                "comments containing `<!-- sdlc-stage-comment -->`. Include a summary "
+                "of prior stage findings in the DevSession prompt so the next stage "
+                "has full context from previous stages.\n"
+                "2. **Spawn one dev-session for the next stage** — use the Agent tool "
+                "to dispatch exactly one stage at a time:\n"
+                '   Agent(subagent_type="dev-session", description="<stage>: <short desc>", '
+                'prompt="Stage: <PLAN|BUILD|TEST|PATCH|REVIEW|DOCS>\\n'
+                "Issue: <URL>\\nPR: <URL if exists>\\n"
+                "Current state: <what's already done>\\n"
+                'Acceptance criteria: <what done looks like>")\n'
+                "3. **Verify the result** — check that the stage completed successfully "
+                "before progressing to the next one.\n"
+                "4. **Repeat** — assess, spawn, verify until the pipeline is complete "
+                "or you need human input.\n\n"
+                "For trivial or docs-only work, use your judgment on whether the full "
+                "pipeline is warranted.\n"
+                "Use the Agent tool for all coding work — slash commands like /do-build "
+                "and /do-test are the dev-session's internal tools.\n\n"
+                "**Communicating with the stakeholder:**\n"
+                "You can send Telegram messages directly using:\n"
+                '  `python tools/send_telegram.py "Your message here"`\n'
+                "This sends your message immediately to the chat. Use it for:\n"
+                "- Status updates and progress reports\n"
+                "- Questions that need human input\n"
+                "- Final delivery summaries\n"
+                "Write in business terms — never expose SDLC stage names, "
+                "pipeline internals, or implementation details. "
+                "Speak like a project manager updating a stakeholder.\n"
+                "If you don't call this tool, your return text will be "
+                "automatically summarized and sent (fallback behavior)."
+            )
     enriched_message += f"\nMESSAGE: {message}"
 
     # Log prompt summary before sending to agent
