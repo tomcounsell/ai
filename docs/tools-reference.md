@@ -37,6 +37,27 @@ from tools.telegram_history import search_messages
 results = search_messages(query="deployment", limit=10)
 ```
 
+### Memory Search (`tools.memory_search`)
+
+Search, save, inspect, and forget memories from the Memory model.
+
+```python
+from tools.memory_search import search, save, inspect, forget
+
+results = search("deploy patterns", project_key="dm", limit=5)
+saved = save("API X requires auth header Y", importance=6.0)
+details = inspect(memory_id="abc123")
+deleted = forget("abc123")
+```
+
+```bash
+# CLI
+python -m tools.memory_search search "deploy patterns"
+python -m tools.memory_search save "important note" --importance 6.0
+python -m tools.memory_search inspect --stats --project dm
+python -m tools.memory_search forget --id abc123 --confirm
+```
+
 ### Code Impact Finder (`tools.code_impact_finder`)
 
 Semantic search for code, configs, and docs coupled to a proposed change. Two-stage pipeline: embedding recall + Claude Haiku reranking. Used during `/do-plan` Phase 1 for blast radius analysis.
