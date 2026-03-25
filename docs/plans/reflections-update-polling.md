@@ -5,7 +5,7 @@ appetite: Small
 owner: Valor
 created: 2026-03-25
 tracking: https://github.com/tomcounsell/ai/issues/508
-last_comment_id:
+last_comment_id: 0
 ---
 
 # Frequent Update Polling Per Machine
