@@ -149,26 +149,6 @@ async def authorize_telegram_client():
         return False
 
 
-def copy_session_to_seed():
-    """Copy the local session file to ~/Desktop/Valor/telegram_session/ as a seed.
-
-    Other machines can bootstrap from this seed instead of re-authenticating.
-    The seed is a one-time copy — each machine maintains its own live session.
-    """
-    session_file = Path(str(SESSION_PATH) + ".session")
-    if not session_file.exists():
-        return
-
-    import shutil
-
-    seed_dir = Path.home() / "Desktop" / "Valor" / "telegram_session"
-    seed_dir.mkdir(parents=True, exist_ok=True)
-    seed_file = seed_dir / session_file.name
-
-    shutil.copy2(session_file, seed_file)
-    print(f"📦 Session seed copied to {seed_file}")
-
-
 async def main():
     """Main authorization flow."""
     print("🤖 Telegram Bot Authorization Utility")
@@ -197,7 +177,6 @@ async def main():
     if await check_existing_session():
         print("\n🎉 Authorization already complete!")
         print("The bridge can connect using the existing session.")
-        copy_session_to_seed()
 
         while True:
             choice = input("\nDo you want to re-authorize anyway? (y/n): ").lower().strip()
@@ -214,7 +193,6 @@ async def main():
     success = await authorize_telegram_client()
 
     if success:
-        copy_session_to_seed()
         print("\n" + "=" * 50)
         print("🎉 Authorization complete!")
         print("\nYou can now start the Telegram bridge:")
