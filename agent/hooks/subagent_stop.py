@@ -1,5 +1,6 @@
 """SubagentStop hook: logs subagent completion, registers DevSession,
-and injects SDLC pipeline state back into the PM's context."""
+extracts findings for cross-agent relay, and injects SDLC pipeline
+state back into the PM's context."""
 
 from __future__ import annotations
 
@@ -127,6 +128,79 @@ def _get_stage_states(session_id: str) -> str | None:
         return None
 
 
+def _extract_and_persist_findings(input_data: dict, agent_id: str) -> None:
+    """Extract findings from dev-session output and persist for cross-agent relay.
+
+    Called when a dev-session completes. Looks up the parent session's slug
+    and stage, then delegates to finding_extraction for Haiku-based extraction.
+
+    Failures are logged but never raised -- this must not block completion.
+    """
+    parent_session_id = os.environ.get("VALOR_SESSION_ID")
+    if not parent_session_id:
+        return
+
+    try:
+        from models.agent_session import AgentSession
+
+        # Find the parent session to get slug and project_key
+        parent_sessions = list(AgentSession.query.filter(session_id=parent_session_id))
+        if not parent_sessions:
+            logger.debug("[subagent_stop] No parent session found, skipping finding extraction")
+            return
+
+        parent = parent_sessions[0]
+        # slug is the canonical field; work_item_slug is the legacy alias (pre-v2 sessions)
+        slug = parent.slug or parent.work_item_slug
+        if not slug:
+            logger.debug("[subagent_stop] No slug on parent session, skipping finding extraction")
+            return
+
+        project_key = parent.project_key or "default"
+
+        # Get the current stage from the parent's pipeline state
+        stage = parent.current_stage or ""
+
+        # Get the full output text from the subagent
+        # Try to get the full result text first, falling back to truncated summary
+        full_output = ""
+        for key in ("result", "output", "response", "summary", "message"):
+            value = input_data.get(key)
+            if value and isinstance(value, str):
+                full_output = value
+                break
+        if not full_output:
+            result = input_data.get("result")
+            if isinstance(result, dict):
+                for key in ("text", "message", "summary", "output"):
+                    value = result.get(key)
+                    if value and isinstance(value, str):
+                        full_output = value
+                        break
+        if not full_output:
+            full_output = str(input_data)[:8000]
+
+        # Delegate to finding extraction module
+        from agent.finding_extraction import extract_findings_from_output
+
+        dev_session_id = f"dev-{parent_session_id}"
+        findings = extract_findings_from_output(
+            output=full_output,
+            slug=slug,
+            stage=stage,
+            session_id=dev_session_id,
+            project_key=project_key,
+        )
+
+        if findings:
+            logger.info(
+                f"[subagent_stop] Extracted {len(findings)} findings for slug={slug}, stage={stage}"
+            )
+
+    except Exception as e:
+        logger.warning(f"[subagent_stop] Finding extraction failed (non-fatal): {e}")
+
+
 async def subagent_stop_hook(
     input_data: SubagentStopHookInput,
     tool_use_id: str | None,
@@ -152,6 +226,9 @@ async def subagent_stop_hook(
     # Register DevSession completion in Redis for parent ChatSession tracking
     if agent_type == "dev-session":
         _register_dev_session_completion(agent_id)
+
+        # Extract and persist findings for cross-agent knowledge relay
+        _extract_and_persist_findings(input_data, agent_id)
 
         # Inject SDLC stage state and outcome back to PM
         session_id = os.environ.get("VALOR_SESSION_ID")
