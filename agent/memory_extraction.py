@@ -1,7 +1,7 @@
 """Post-session memory extraction and outcome detection.
 
 Extracts novel observations from agent response text via Haiku,
-saves them as Memory records with InteractionWeight.AGENT importance.
+saves them as Memory records with category-based importance levels.
 
 Detects outcomes by comparing injected thoughts against response
 content using bigram overlap, feeds results into ObservationProtocol.
@@ -18,16 +18,50 @@ import re
 
 logger = logging.getLogger(__name__)
 
-# Extraction prompt for Haiku
-EXTRACTION_PROMPT = """Extract novel observations from this agent session response. Focus on:
-1. Decisions made (what was chosen and why)
-2. Surprises found (unexpected findings)
-3. Corrections received (errors caught, assumptions invalidated)
-4. Patterns noticed (recurring themes, conventions)
+# Extraction prompt for Haiku — categorized output
+EXTRACTION_PROMPT = (
+    "Extract novel observations from this agent session response."
+    " Categorize each as:\n"
+    "- CORRECTION: errors caught, assumptions invalidated, user corrections\n"
+    "- DECISION: architectural or design choices made and why\n"
+    "- PATTERN: recurring themes, conventions, best practices noticed\n"
+    "- SURPRISE: unexpected findings, edge cases discovered\n"
+    "\n"
+    "Return one observation per line in the format: CATEGORY: observation text\n"
+    "Only include genuinely novel, specific observations. Skip generic statements.\n"
+    "If there are no novel observations, return NONE.\n"
+    "\n"
+    "Example output:\n"
+    "DECISION: chose blue-green deployment over rolling updates\n"
+    "CORRECTION: Redis SCAN is preferred over KEYS in production\n"
+    "PATTERN: all Popoto models use safe_save() as the primary entry point"
+)
 
-Return only genuinely novel, specific observations. Skip generic statements.
-Return one observation per line, plain text. No numbering, no bullets.
-If there are no novel observations, return NONE."""
+# Importance levels for categorized extraction
+CATEGORY_IMPORTANCE = {
+    "correction": 4.0,
+    "decision": 4.0,
+    "pattern": 1.0,
+    "surprise": 1.0,
+}
+DEFAULT_CATEGORY_IMPORTANCE = 1.0  # fallback for uncategorized
+
+# Post-merge extraction prompt
+POST_MERGE_EXTRACTION_PROMPT = (
+    "You are reviewing a merged pull request. Extract the single most"
+    " important project-level takeaway — knowledge that would help a"
+    " developer working on this codebase in the future.\n"
+    "\n"
+    "Focus on architectural decisions, design patterns chosen, or"
+    " conventions established. Skip implementation details.\n"
+    "\n"
+    "Return a single sentence. If there is no meaningful project-level"
+    " takeaway, return NONE.\n"
+    "\n"
+    "PR Title: {title}\n"
+    "PR Description: {body}\n"
+    "Diff Summary: {diff_summary}"
+)
 
 
 async def extract_observations_async(
@@ -38,7 +72,8 @@ async def extract_observations_async(
     """Extract novel observations from agent response via Haiku.
 
     Calls Haiku to identify decisions, surprises, corrections, and patterns.
-    Saves each as a Memory record with InteractionWeight.AGENT (1.0) importance.
+    Saves each as a Memory record with category-based importance (4.0 for
+    corrections/decisions, 1.0 for patterns/surprises).
 
     Returns list of dicts with keys: content, memory_id.
     """
@@ -78,17 +113,13 @@ async def extract_observations_async(
             logger.debug("[memory_extraction] No novel observations found")
             return []
 
-        # Parse observations (one per line)
-        observations = [
-            line.strip() for line in raw_text.split("\n") if line.strip() and len(line.strip()) > 10
-        ]
+        # Parse observations with category-aware importance
+        parsed = _parse_categorized_observations(raw_text)
 
-        if not observations:
+        if not parsed:
             return []
 
         # Save each observation as Memory
-        from popoto import InteractionWeight
-
         from models.memory import SOURCE_AGENT, Memory
 
         if not project_key:
@@ -97,18 +128,18 @@ async def extract_observations_async(
             project_key = os.environ.get("VALOR_PROJECT_KEY", DEFAULT_PROJECT_KEY)
 
         saved = []
-        for obs in observations[:10]:  # cap at 10 observations
+        for obs_content, importance in parsed[:10]:  # cap at 10 observations
             m = Memory.safe_save(
                 agent_id=f"extraction-{session_id}",
                 project_key=project_key,
-                content=obs[:500],
-                importance=InteractionWeight.AGENT,
+                content=obs_content[:500],
+                importance=importance,
                 source=SOURCE_AGENT,
             )
             if m:
                 saved.append(
                     {
-                        "content": obs[:500],
+                        "content": obs_content[:500],
                         "memory_id": getattr(m, "memory_id", ""),
                     }
                 )
@@ -121,6 +152,135 @@ async def extract_observations_async(
     except Exception as e:
         logger.warning(f"[memory_extraction] Extraction failed (non-fatal): {e}")
         return []
+
+
+def _parse_categorized_observations(raw_text: str) -> list[tuple[str, float]]:
+    """Parse Haiku output into (content, importance) tuples.
+
+    Expects lines in the format: CATEGORY: observation text
+    Falls back to flat observations (all at DEFAULT_CATEGORY_IMPORTANCE)
+    if no valid categories are found.
+
+    Returns list of (content_string, importance_float) tuples.
+    """
+    lines = [
+        line.strip() for line in raw_text.split("\n") if line.strip() and len(line.strip()) > 10
+    ]
+    if not lines:
+        return []
+
+    # Try to parse categorized format
+    categorized: list[tuple[str, float]] = []
+    uncategorized: list[str] = []
+
+    for line in lines:
+        matched = False
+        for category in CATEGORY_IMPORTANCE:
+            # Match "CATEGORY: text" or "category: text" (case-insensitive prefix)
+            prefix = f"{category}:"
+            if line.lower().startswith(prefix):
+                content = line[len(prefix) :].strip()
+                if content and len(content) > 10:
+                    categorized.append((content, CATEGORY_IMPORTANCE[category]))
+                matched = True
+                break
+        if not matched:
+            uncategorized.append(line)
+
+    # If we got some categorized results, use them (drop uncategorized noise)
+    if categorized:
+        return categorized
+
+    # Fallback: treat all lines as uncategorized observations at default importance
+    return [(line, DEFAULT_CATEGORY_IMPORTANCE) for line in uncategorized]
+
+
+async def extract_post_merge_learning(
+    pr_title: str,
+    pr_body: str,
+    diff_summary: str,
+    project_key: str | None = None,
+) -> dict | None:
+    """Extract and save a project-level takeaway from a merged PR.
+
+    Calls Haiku to distill the single most important learning from a merged
+    pull request, then saves it as a Memory with importance=7.0.
+
+    Args:
+        pr_title: The pull request title.
+        pr_body: The pull request body/description.
+        diff_summary: A summary of the code changes (e.g., filenames changed).
+        project_key: Project partition key. Resolved from env if not provided.
+
+    Returns:
+        Dict with memory_id and content if saved, or None if nothing to save.
+    """
+    if not pr_title:
+        return None
+
+    try:
+        import anthropic
+
+        from config.models import MODEL_FAST
+        from utils.api_keys import get_anthropic_api_key
+
+        api_key = get_anthropic_api_key()
+        if not api_key:
+            logger.warning(
+                "[memory_extraction] No Anthropic API key, skipping post-merge extraction"
+            )
+            return None
+
+        client = anthropic.Anthropic(api_key=api_key)
+
+        prompt = POST_MERGE_EXTRACTION_PROMPT.format(
+            title=pr_title,
+            body=(pr_body or "")[:4000],
+            diff_summary=(diff_summary or "")[:4000],
+        )
+
+        message = client.messages.create(
+            model=MODEL_FAST,
+            max_tokens=200,
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+        raw_text = message.content[0].text.strip()
+
+        # Check if response indicates no takeaway (NONE at start, empty, or too short)
+        first_line = raw_text.split("\n")[0].strip()
+        if first_line.upper() == "NONE" or not raw_text or len(raw_text) < 20:
+            logger.debug("[memory_extraction] No post-merge learning extracted")
+            return None
+
+        # Save the learning as a memory
+        from models.memory import SOURCE_AGENT, Memory
+
+        if not project_key:
+            from config.memory_defaults import DEFAULT_PROJECT_KEY
+
+            project_key = os.environ.get("VALOR_PROJECT_KEY", DEFAULT_PROJECT_KEY)
+
+        m = Memory.safe_save(
+            agent_id="post-merge",
+            project_key=project_key,
+            content=raw_text[:500],
+            importance=7.0,
+            source=SOURCE_AGENT,
+        )
+
+        if m:
+            logger.info(f"[memory_extraction] Post-merge learning saved: {raw_text[:100]}")
+            return {
+                "content": raw_text[:500],
+                "memory_id": getattr(m, "memory_id", ""),
+            }
+
+        return None
+
+    except Exception as e:
+        logger.warning(f"[memory_extraction] Post-merge extraction failed (non-fatal): {e}")
+        return None
 
 
 def _extract_bigrams(text: str) -> set[tuple[str, ...]]:

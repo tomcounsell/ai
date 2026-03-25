@@ -68,6 +68,37 @@ After a session completes in `agent/messenger.py`:
 
 `config/personas/_base.md` includes a `## Subconscious Memory` section that tells the agent to treat `<thought>` blocks as background context without referencing them explicitly.
 
+### Flow 5: Intentional Saves
+
+Agents can deliberately persist high-level concepts using `python -m tools.memory_search save "content"`. Unlike passive extraction (Flow 3), intentional saves are for concepts the agent recognizes as important in the moment. Instructions in `config/personas/_base.md` (the `## Intentional Memory` section) guide the agent on when to save.
+
+**Trigger categories and importance levels:**
+
+| Trigger | Importance | Source | Example |
+|---------|-----------|--------|---------|
+| User correction | 8.0 | `human` | User clarifies how a system actually works |
+| Explicit "remember this" | 8.0 | `human` | User asks the agent to remember a fact or rule |
+| Architectural decision | 7.0 | `agent` | Design choice made during planning or building |
+
+**When NOT to save:**
+- Implementation details (file paths, function signatures) -- those belong in code comments
+- Temporary work context (current branch, PR number) -- those belong in issue comments
+- Facts already in CLAUDE.md or project docs -- avoid duplication
+- Routine observations -- the passive extraction system (Flow 3) handles those
+
+**Importance tier hierarchy** (lower to higher):
+1. Generic agent observations: 1.0 (Flow 3 default for patterns/surprises)
+2. Enhanced extraction corrections/decisions: 4.0 (Flow 3 categorized)
+3. Human Telegram messages: 6.0 (Flow 1)
+4. Agent-identified architectural decisions: 7.0 (Flow 5 intentional)
+5. Human-directed saves (corrections, explicit requests): 8.0 (Flow 5 intentional)
+
+### Flow 6: Post-Merge Learning Extraction
+
+After a PR merges, `extract_post_merge_learning()` in `agent/memory_extraction.py` distills the single most important project-level takeaway from the PR title, body, and diff summary. The learning is saved as a Memory with importance 7.0. This captures architectural decisions and conventions established by shipped code.
+
+The function is designed to be called from the SDLC merge stage or a post-merge script. It returns None gracefully if no meaningful takeaway is found or if the API call fails.
+
 ## Key Files
 
 | File | Purpose |
@@ -75,7 +106,7 @@ After a session completes in `agent/messenger.py`:
 | `models/memory.py` | Memory model (Level 3 popoto: decay, confidence, write filter, access tracker, bloom) |
 | `config/memory_defaults.py` | Tuned Defaults overrides for popoto constants |
 | `agent/memory_hook.py` | PostToolUse thought injection with sliding window rate limiting |
-| `agent/memory_extraction.py` | Post-session Haiku extraction and bigram outcome detection |
+| `agent/memory_extraction.py` | Post-session Haiku extraction (categorized), bigram outcome detection, post-merge learning extraction |
 | `agent/health_check.py` | Integration point: `watchdog_hook()` calls `check_and_inject()` |
 | `agent/messenger.py` | Integration point: `_run_work()` calls `run_post_session_extraction()` |
 | `bridge/telegram_bridge.py` | Integration point: `Memory.safe_save()` after `store_message()` |
@@ -124,5 +155,6 @@ No schema migrations are involved. Redis keys can be flushed without side effect
 ## Tracking
 
 - Issue: [#514](https://github.com/tomcounsell/ai/issues/514)
+- Intentional saves: [#521](https://github.com/tomcounsell/ai/issues/521) (PR [#524](https://github.com/tomcounsell/ai/pull/524))
 - Prior art: Issue #394 (original agent memory integration layer)
 - Downstream: Issue #395 (multi-persona memory partitioning), Issue #393 (behavioral episode memory)
