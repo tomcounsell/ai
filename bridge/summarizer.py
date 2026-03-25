@@ -857,10 +857,8 @@ def _parse_classification_response(raw: str) -> ClassificationResult | None:
 def _linkify_references(text: str, session) -> str:
     """Convert plain PR #N and Issue #N references to markdown links.
 
-    Uses the session's project_key to look up the GitHub org/repo
-    from the registered project config. If no project config is found
-    or the text already contains markdown links for a reference, it
-    is left unchanged.
+    Delegates to bridge.formatting.linkify_references_from_session for the
+    actual implementation. This wrapper preserves the existing call signature.
 
     Args:
         text: The summary text potentially containing PR #N or Issue #N
@@ -869,43 +867,9 @@ def _linkify_references(text: str, session) -> str:
     Returns:
         Text with plain references converted to markdown links.
     """
-    if not session or not text:
-        return text
+    from bridge.formatting import linkify_references_from_session
 
-    # Get project_key from session
-    project_key = getattr(session, "project_key", None)
-    if not project_key or not str(project_key).strip():
-        return text
-
-    # Look up GitHub org/repo from registered project config
-    from agent.job_queue import get_project_config
-
-    config = get_project_config(str(project_key))
-    github_config = config.get("github", {})
-    org = github_config.get("org")
-    repo = github_config.get("repo")
-
-    if not org or not repo:
-        return text
-
-    base_url = f"https://github.com/{org}/{repo}"
-
-    # Replace PR #N -> [PR #N](url/pull/N)
-    # Negative lookbehind for [ ensures we don't double-link already-linked refs
-    text = re.sub(
-        r"(?<!\[)PR #(\d+)(?!\])",
-        lambda m: f"[PR #{m.group(1)}]({base_url}/pull/{m.group(1)})",
-        text,
-    )
-
-    # Replace Issue #N -> [Issue #N](url/issues/N)
-    text = re.sub(
-        r"(?<!\[)Issue #(\d+)(?!\])",
-        lambda m: f"[Issue #{m.group(1)}]({base_url}/issues/{m.group(1)})",
-        text,
-    )
-
-    return text
+    return linkify_references_from_session(text, session)
 
 
 def _get_status_emoji(session, is_completion: bool = True) -> str:

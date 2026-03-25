@@ -393,6 +393,18 @@ async def send_response_with_files(
         except Exception:
             pass  # Fall back to existing session object
 
+    # PM self-messaging bypass: if the PM already sent messages via the
+    # send_telegram tool during this session, skip the summarizer entirely.
+    # The PM authored its own messages — the summarizer would be redundant.
+    # Only set emoji reaction (handled by the caller). See issue #497.
+    if session and hasattr(session, "has_pm_messages") and session.has_pm_messages():
+        logger.info(
+            f"Skipping summarizer: PM self-messaged during session "
+            f"{getattr(session, 'session_id', 'unknown')} "
+            f"(pm_sent_message_ids={getattr(session, 'pm_sent_message_ids', [])})"
+        )
+        return True  # Signal that content was "sent" (PM already delivered it)
+
     is_sdlc = session and hasattr(session, "is_sdlc") and session.is_sdlc
     should_summarize = text and (is_sdlc or len(text) >= 200)
     if should_summarize:

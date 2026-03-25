@@ -1631,6 +1631,15 @@ async def main():
     asyncio.create_task(message_query_loop())
     logger.info("Message query polling started")
 
+    # Start PM message relay (processes outbox queue from tools/send_telegram.py)
+    try:
+        from bridge.telegram_relay import relay_loop
+
+        asyncio.create_task(relay_loop(client))
+        logger.info("PM Telegram relay started")
+    except Exception as e:
+        logger.error(f"Failed to start PM Telegram relay: {e}")
+
     # Heartbeat: log periodically so the external watchdog sees fresh logs
     # (watchdog kills the bridge if logs are stale for 5 minutes)
     _bridge_start_time = time.time()

@@ -298,6 +298,13 @@ def _extract_sdlc_env_vars(session_id: str, gh_repo: str | None = None) -> dict[
         if gh_repo:
             env["SDLC_REPO"] = gh_repo
 
+        # PM self-messaging: inject TELEGRAM_REPLY_TO from the session's
+        # telegram_message_id so tools/send_telegram.py can reply to the
+        # original human message (issue #497).
+        tg_msg_id = getattr(session, "telegram_message_id", None)
+        if tg_msg_id is not None:
+            env["TELEGRAM_REPLY_TO"] = str(tg_msg_id)
+
         if env:
             logger.info(
                 f"SDLC env vars for session {session_id}: "
@@ -909,6 +916,13 @@ class ValorAgent:
         if self.session_type:
             env["SESSION_TYPE"] = self.session_type
 
+        # PM sessions: inject Telegram context so ChatSession can send its
+        # own messages via tools/send_telegram.py (issue #497).
+        # chat_id comes from the project config; reply_to is resolved from
+        # the AgentSession's telegram_message_id in _extract_sdlc_env_vars below.
+        if self.session_type == "chat" and self.chat_id:
+            env["TELEGRAM_CHAT_ID"] = str(self.chat_id)
+
         # PM sessions: inject Sentry auth token so sentry-cli works without
         # manual export. Token is stored in ~/Desktop/Valor/.env (iCloud-synced).
         if self.session_type == "chat":
@@ -1483,7 +1497,19 @@ async def get_agent_response_sdk(
             "For trivial or docs-only work, use your judgment on whether the full "
             "pipeline is warranted.\n"
             "Use the Agent tool for all coding work — slash commands like /do-build "
-            "and /do-test are the dev-session's internal tools."
+            "and /do-test are the dev-session's internal tools.\n\n"
+            "**Communicating with the stakeholder:**\n"
+            "You can send Telegram messages directly using:\n"
+            '  `python tools/send_telegram.py "Your message here"`\n'
+            "This sends your message immediately to the chat. Use it for:\n"
+            "- Status updates and progress reports\n"
+            "- Questions that need human input\n"
+            "- Final delivery summaries\n"
+            "Write in business terms — never expose SDLC stage names, "
+            "pipeline internals, or implementation details. "
+            "Speak like a project manager updating a stakeholder.\n"
+            "If you don't call this tool, your return text will be "
+            "automatically summarized and sent (fallback behavior)."
         )
     enriched_message += f"\nMESSAGE: {message}"
 
