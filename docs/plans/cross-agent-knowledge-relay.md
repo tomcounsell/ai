@@ -1,5 +1,5 @@
 ---
-status: Building
+status: Complete
 type: feature
 appetite: Medium
 owner: Valor
@@ -163,16 +163,16 @@ Findings decay naturally via DecayingSortedField:
 
 ## Success Criteria
 
-- [ ] `Finding` model defined in `models/finding.py` with DecayingSortedField, ConfidenceField, WriteFilterMixin, AccessTrackerMixin, ExistenceFilter, and CoOccurrenceField
-- [ ] SubagentStop hook extracts findings via Haiku on dev-session completion and persists them as Finding records scoped by slug
-- [ ] `query_findings(slug, topics, limit)` retrieves top findings using CompositeScoreQuery with ExistenceFilter pre-check
-- [ ] Pre-dispatch injection augments dev-session prompts with prior findings from the same slug (via ContextAssembler, within token budget)
-- [ ] PostToolUse injection extends memory_hook to also inject relevant findings as `<thought>` blocks
-- [ ] Deduplication: duplicate findings consolidate via ConfidenceField reinforcement instead of creating new records
-- [ ] Natural decay: findings from inactive slugs fade via DecayingSortedField; accessed findings stay hot via AccessTracker refresh
-- [ ] All extraction/query/injection failures are caught silently -- finding system never crashes the agent
-- [ ] Unit tests cover Finding model, extraction, query, injection, and deduplication
-- [ ] Integration test verifies end-to-end relay: extract from one session, inject into another
+- [x] `Finding` model defined in `models/finding.py` with DecayingSortedField, ConfidenceField, WriteFilterMixin, AccessTrackerMixin, ExistenceFilter, and CoOccurrenceField
+- [x] SubagentStop hook extracts findings via Haiku on dev-session completion and persists them as Finding records scoped by slug
+- [x] `query_findings(slug, topics, limit)` retrieves top findings using CompositeScoreQuery with ExistenceFilter pre-check
+- [x] Pre-dispatch injection augments dev-session prompts with prior findings from the same slug (via ContextAssembler, within token budget)
+- [x] PostToolUse injection extends memory_hook to also inject relevant findings as `<thought>` blocks
+- [x] Deduplication: duplicate findings consolidate via ConfidenceField reinforcement instead of creating new records
+- [x] Natural decay: findings from inactive slugs fade via DecayingSortedField; accessed findings stay hot via AccessTracker refresh
+- [x] All extraction/query/injection failures are caught silently -- finding system never crashes the agent
+- [x] Unit tests cover Finding model, extraction, query, injection, and deduplication
+- [x] Integration test verifies end-to-end relay: extract from one session, inject into another
 - [ ] Integration tests use real Redis (not mocks) for the full extract-store-query-inject pipeline
 - [ ] At least one value measurement test proves findings from stage N appear in stage N+1 context
 - [ ] Feature documentation at `docs/features/cross-agent-knowledge-relay.md`
@@ -205,22 +205,22 @@ No changes to `.mcp.json` or `mcp_servers/` directory. No new tools exposed to t
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `_extract_and_persist_findings()` wraps Haiku call in try/except -- test with mock API failure
-- [ ] `Finding.safe_save()` follows Memory.safe_save() pattern -- test with Redis connection error
-- [ ] `query_findings()` handles empty slug, missing bloom index, CompositeScoreQuery failure
-- [ ] Deduplication handles bloom false positives gracefully (content mismatch after bloom hit)
+- [x] `_extract_and_persist_findings()` wraps Haiku call in try/except -- test with mock API failure
+- [x] `Finding.safe_save()` follows Memory.safe_save() pattern -- test with Redis connection error
+- [x] `query_findings()` handles empty slug, missing bloom index, CompositeScoreQuery failure
+- [x] Deduplication handles bloom false positives gracefully (content mismatch after bloom hit)
 
 ### Empty/Invalid Input Handling
-- [ ] SubagentStop with no slug on parent session -- extraction skipped silently
-- [ ] SubagentStop with empty/None output from dev-session -- extraction skipped
-- [ ] Query with no findings for slug -- returns empty list, no error
-- [ ] Injection with zero findings -- no `<thought>` blocks added, no error
-- [ ] Finding with empty content -- filtered by WriteFilterMixin
+- [x] SubagentStop with no slug on parent session -- extraction skipped silently
+- [x] SubagentStop with empty/None output from dev-session -- extraction skipped
+- [x] Query with no findings for slug -- returns empty list, no error
+- [x] Injection with zero findings -- no `<thought>` blocks added, no error
+- [x] Finding with empty content -- filtered by WriteFilterMixin
 
 ### Degradation Scenarios
-- [ ] Haiku extraction timeout -- findings not persisted, dev-session completion still recorded
-- [ ] Redis unavailable during save -- Finding.safe_save() returns None, no crash
-- [ ] Bloom index corrupted -- falls through to full query (slower but correct)
+- [x] Haiku extraction timeout -- findings not persisted, dev-session completion still recorded
+- [x] Redis unavailable during save -- Finding.safe_save() returns None, no crash
+- [x] Bloom index corrupted -- falls through to full query (slower but correct)
 
 ## Test Impact
 
@@ -252,36 +252,36 @@ The current test suite (57 tests) relies entirely on mocks. This section defines
 
 All tests below use actual Redis (no mocks for Redis or Popoto). Test file: `tests/integration/test_finding_relay.py` (replace existing mock-based content).
 
-- [ ] **Finding round-trip**: `Finding.save()` to Redis, then retrieve by slug -- verify all fields persist correctly
-- [ ] **Query round-trip**: Save multiple findings with different importance/stages, call `query_findings(slug, topics)`, verify ranked results come back from real Redis
-- [ ] **Injection format**: Query findings from Redis, pass through `format_findings_for_injection()`, verify output contains correct `<thought>` block structure
-- [ ] **Full pipeline**: SubagentStop extraction (with mock Haiku, real Redis) saves Finding records, then `query_findings()` retrieves them, then injection formats them -- complete extract-store-query-inject cycle
-- [ ] **Deduplication round-trip**: Save a finding to Redis, then run extraction with a duplicate content string, verify the existing finding's confidence is reinforced (not a new record created)
-- [ ] **Bloom filter with real data**: Save findings, verify `Finding.bloom.might_exist()` returns True for saved content and (probabilistically) False for unseen content
+- [x] **Finding round-trip**: `Finding.save()` to Redis, then retrieve by slug -- verify all fields persist correctly
+- [x] **Query round-trip**: Save multiple findings with different importance/stages, call `query_findings(slug, topics)`, verify ranked results come back from real Redis
+- [x] **Injection format**: Query findings from Redis, pass through `format_findings_for_injection()`, verify output contains correct `<thought>` block structure
+- [x] **Full pipeline**: SubagentStop extraction (with mock Haiku, real Redis) saves Finding records, then `query_findings()` retrieves them, then injection formats them -- complete extract-store-query-inject cycle
+- [x] **Deduplication round-trip**: Save a finding to Redis, then run extraction with a duplicate content string, verify the existing finding's confidence is reinforced (not a new record created)
+- [x] **Bloom filter with real data**: Save findings, verify `Finding.bloom.might_exist()` returns True for saved content and (probabilistically) False for unseen content
 
 ### Value Measurement Tests
 
 These tests prove that findings from one SDLC stage actually appear in the next stage's context. Test file: `tests/integration/test_finding_value.py` (new file).
 
-- [ ] **Cross-stage relay**: Create findings tagged `stage=BUILD` for a slug, then simulate a TEST-stage dev-session dispatch -- verify the pre-dispatch prompt includes BUILD-stage findings
-- [ ] **PostToolUse injection**: Create findings for a slug in Redis, configure a session with that slug, trigger PostToolUse hook -- verify `additionalContext` contains finding `<thought>` blocks
-- [ ] **Before/after comparison**: Run `query_findings()` for a slug with zero prior findings (returns empty), then save findings and re-query -- assert the "with" case returns actionable context (non-empty list with content matching saved findings)
-- [ ] **Injection count**: Save N findings across BUILD and REVIEW stages, query from TEST stage context -- verify the count of injected findings matches expectations (respects limit parameter and token budget)
-- [ ] **Relevance filtering**: Save findings with varying importance scores, query with a topic list -- verify higher-importance findings rank first and low-importance findings are excluded by WriteFilterMixin
+- [x] **Cross-stage relay**: Create findings tagged `stage=BUILD` for a slug, then simulate a TEST-stage dev-session dispatch -- verify the pre-dispatch prompt includes BUILD-stage findings
+- [x] **PostToolUse injection**: Create findings for a slug in Redis, configure a session with that slug, trigger PostToolUse hook -- verify `additionalContext` contains finding `<thought>` blocks
+- [x] **Before/after comparison**: Run `query_findings()` for a slug with zero prior findings (returns empty), then save findings and re-query -- assert the "with" case returns actionable context (non-empty list with content matching saved findings)
+- [x] **Injection count**: Save N findings across BUILD and REVIEW stages, query from TEST stage context -- verify the count of injected findings matches expectations (respects limit parameter and token budget)
+- [x] **Relevance filtering**: Save findings with varying importance scores, query with a topic list -- verify higher-importance findings rank first and low-importance findings are excluded by WriteFilterMixin
 
 ### Mock Test Disposition
 
-- [ ] `tests/unit/test_finding_injection.py` -- KEEP mock tests for Haiku API calls and error handling paths; REMOVE mock Redis tests (replaced by real Redis integration tests above)
-- [ ] `tests/unit/test_finding_relay.py` -- DELETE entirely (replaced by `tests/integration/test_finding_relay.py` with real Redis)
-- [ ] `tests/unit/test_finding_model.py` -- KEEP for model schema validation; REMOVE any mock Redis CRUD tests (covered by integration tests)
-- [ ] `tests/unit/test_finding_extraction.py` -- KEEP mock Haiku extraction tests (external API); REMOVE mock Redis persistence tests
-- [ ] `tests/unit/test_finding_query.py` -- KEEP mock tests for CompositeScoreQuery logic; ADD real Redis variants in integration suite
+- [x] `tests/unit/test_finding_injection.py` -- KEEP mock tests for Haiku API calls and error handling paths; REMOVE mock Redis tests (replaced by real Redis integration tests above)
+- [x] `tests/unit/test_finding_relay.py` -- DELETE entirely (replaced by `tests/integration/test_finding_relay.py` with real Redis)
+- [x] `tests/unit/test_finding_model.py` -- KEEP for model schema validation; REMOVE any mock Redis CRUD tests (covered by integration tests)
+- [x] `tests/unit/test_finding_extraction.py` -- KEEP mock Haiku extraction tests (external API); REMOVE mock Redis persistence tests
+- [x] `tests/unit/test_finding_query.py` -- KEEP mock tests for CompositeScoreQuery logic; ADD real Redis variants in integration suite
 
 ## Documentation
 
-- [ ] Create `docs/features/cross-agent-knowledge-relay.md` describing the finding model, extraction flow, query interface, injection paths, and decay behavior
-- [ ] Add entry to `docs/features/README.md` index table
-- [ ] Update `docs/features/subconscious-memory.md` with a "Related: Cross-Agent Knowledge Relay" section explaining how Finding differs from Memory
+- [x] Create `docs/features/cross-agent-knowledge-relay.md` describing the finding model, extraction flow, query interface, injection paths, and decay behavior
+- [x] Add entry to `docs/features/README.md` index table
+- [x] Update `docs/features/subconscious-memory.md` with a "Related: Cross-Agent Knowledge Relay" section explaining how Finding differs from Memory
 
 ## Implementation Order
 
