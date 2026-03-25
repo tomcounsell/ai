@@ -111,6 +111,27 @@ def main():
             shutil.copy2(src, dst)
             _update_agent_session_log_path(session_id, str(dst))
 
+    # Memory extraction -- run Haiku extraction and outcome detection
+    # on session transcript. Fails silently on any error.
+    _run_memory_extraction(session_id, transcript_path)
+
+
+def _run_memory_extraction(session_id: str, transcript_path: str | None) -> None:
+    """Run post-session memory extraction and outcome detection.
+
+    Calls memory_bridge.extract() which handles Haiku extraction
+    and outcome detection for injected thoughts. Also cleans up
+    session sidecar files.
+
+    Fails silently -- memory errors never block session stop.
+    """
+    try:
+        from hook_utils.memory_bridge import extract
+
+        extract(session_id, transcript_path)
+    except Exception:
+        pass  # Silent failure -- never block session stop
+
 
 if __name__ == "__main__":
     main()
