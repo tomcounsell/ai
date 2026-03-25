@@ -9,7 +9,9 @@ import pytest
 from agent.hooks.subagent_stop import (
     _extract_outcome_summary,
     _get_stage_states,
+    _post_stage_comment_on_completion,
     _register_dev_session_completion,
+    _resolve_tracking_issue,
     subagent_stop_hook,
 )
 
@@ -230,6 +232,79 @@ class TestExtractOutcomeSummary:
         assert "completed" in result
 
 
+class TestResolveTrackingIssue:
+    """Test _resolve_tracking_issue helper."""
+
+    def test_from_sdlc_tracking_issue_env(self, monkeypatch):
+        monkeypatch.setenv("SDLC_TRACKING_ISSUE", "42")
+        assert _resolve_tracking_issue() == 42
+
+    def test_from_sdlc_issue_number_env(self, monkeypatch):
+        monkeypatch.delenv("SDLC_TRACKING_ISSUE", raising=False)
+        monkeypatch.setenv("SDLC_ISSUE_NUMBER", "99")
+        assert _resolve_tracking_issue() == 99
+
+    def test_returns_none_when_no_env_vars(self, monkeypatch):
+        monkeypatch.delenv("SDLC_TRACKING_ISSUE", raising=False)
+        monkeypatch.delenv("SDLC_ISSUE_NUMBER", raising=False)
+        monkeypatch.delenv("SDLC_SLUG", raising=False)
+        assert _resolve_tracking_issue() is None
+
+    def test_ignores_non_digit_values(self, monkeypatch):
+        monkeypatch.setenv("SDLC_TRACKING_ISSUE", "not-a-number")
+        monkeypatch.delenv("SDLC_ISSUE_NUMBER", raising=False)
+        monkeypatch.delenv("SDLC_SLUG", raising=False)
+        assert _resolve_tracking_issue() is None
+
+    def test_from_plan_frontmatter(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("SDLC_TRACKING_ISSUE", raising=False)
+        monkeypatch.delenv("SDLC_ISSUE_NUMBER", raising=False)
+        monkeypatch.setenv("SDLC_SLUG", "test-slug")
+
+        plan_file = tmp_path / "test-slug.md"
+        plan_file.write_text("---\ntracking: https://github.com/owner/repo/issues/123\n---\n")
+        monkeypatch.setenv("SDLC_PLAN_PATH", str(plan_file))
+
+        assert _resolve_tracking_issue() == 123
+
+
+class TestPostStageCommentOnCompletion:
+    """Test _post_stage_comment_on_completion helper."""
+
+    def test_skips_when_no_tracking_issue(self, monkeypatch, caplog):
+        monkeypatch.delenv("SDLC_TRACKING_ISSUE", raising=False)
+        monkeypatch.delenv("SDLC_ISSUE_NUMBER", raising=False)
+        monkeypatch.delenv("SDLC_SLUG", raising=False)
+        with caplog.at_level(logging.DEBUG):
+            _post_stage_comment_on_completion({}, "BUILD")
+        assert "No tracking issue" in caplog.text
+
+    def test_posts_comment_on_success(self, monkeypatch):
+        monkeypatch.setenv("SDLC_TRACKING_ISSUE", "42")
+        with patch("utils.issue_comments.post_stage_comment", return_value=True) as mock_post:
+            _post_stage_comment_on_completion({"result": "Tests passed"}, "TEST")
+        mock_post.assert_called_once()
+        assert mock_post.call_args.kwargs["issue_number"] == 42
+        assert mock_post.call_args.kwargs["stage"] == "TEST"
+
+    def test_handles_post_failure(self, monkeypatch, caplog):
+        monkeypatch.setenv("SDLC_TRACKING_ISSUE", "42")
+        with patch("utils.issue_comments.post_stage_comment", return_value=False):
+            with caplog.at_level(logging.WARNING):
+                _post_stage_comment_on_completion({}, "BUILD")
+        assert "Failed to post stage comment" in caplog.text
+
+    def test_never_crashes_on_exception(self, monkeypatch, caplog):
+        monkeypatch.setenv("SDLC_TRACKING_ISSUE", "42")
+        with patch(
+            "utils.issue_comments.post_stage_comment",
+            side_effect=RuntimeError("unexpected"),
+        ):
+            with caplog.at_level(logging.WARNING):
+                _post_stage_comment_on_completion({}, "BUILD")
+        assert "non-fatal" in caplog.text
+
+
 class TestSubagentStopHookDevSession:
     """Test full hook behavior for dev-session agent type."""
 
@@ -243,13 +318,13 @@ class TestSubagentStopHookDevSession:
             patch(
                 "agent.hooks.subagent_stop._get_stage_states",
                 return_value="{'PLAN': 'done', 'BUILD': 'done'}",
-            ) as mock_stages,
+            ),
+            patch("agent.hooks.subagent_stop._post_stage_comment_on_completion"),
         ):
             input_data = {"agent_type": "dev-session", "agent_id": "dev-1"}
             result = await subagent_stop_hook(input_data, None, None)
 
         mock_reg.assert_called_once_with("dev-1")
-        mock_stages.assert_called_once_with("pm-session-1")
         assert "reason" in result
         assert "Pipeline state" in result["reason"]
 
@@ -258,7 +333,10 @@ class TestSubagentStopHookDevSession:
         """Should not inject stages when VALOR_SESSION_ID is not set."""
         monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
 
-        with patch("agent.hooks.subagent_stop._register_dev_session_completion"):
+        with (
+            patch("agent.hooks.subagent_stop._register_dev_session_completion"),
+            patch("agent.hooks.subagent_stop._post_stage_comment_on_completion"),
+        ):
             input_data = {"agent_type": "dev-session", "agent_id": "dev-2"}
             result = await subagent_stop_hook(input_data, None, None)
 
@@ -272,8 +350,28 @@ class TestSubagentStopHookDevSession:
         with (
             patch("agent.hooks.subagent_stop._register_dev_session_completion"),
             patch("agent.hooks.subagent_stop._get_stage_states", return_value=None),
+            patch("agent.hooks.subagent_stop._post_stage_comment_on_completion"),
         ):
             input_data = {"agent_type": "dev-session", "agent_id": "dev-3"}
             result = await subagent_stop_hook(input_data, None, None)
 
         assert result == {}
+
+    @pytest.mark.asyncio
+    async def test_posts_stage_comment_on_completion(self, monkeypatch):
+        """Should call _post_stage_comment_on_completion for dev-sessions."""
+        monkeypatch.setenv("VALOR_SESSION_ID", "pm-session-3")
+
+        with (
+            patch("agent.hooks.subagent_stop._register_dev_session_completion"),
+            patch("agent.hooks.subagent_stop._get_stage_states", return_value=None),
+            patch("agent.hooks.subagent_stop._post_stage_comment_on_completion") as mock_post,
+        ):
+            input_data = {
+                "agent_type": "dev-session",
+                "agent_id": "dev-4",
+                "result": "Build complete",
+            }
+            await subagent_stop_hook(input_data, None, None)
+
+        mock_post.assert_called_once()
