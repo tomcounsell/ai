@@ -256,6 +256,8 @@ _JOB_FIELDS = [
     "parent_chat_session_id",
     "slug",
     "artifacts",
+    # === PM self-messaging fields ===
+    "pm_sent_message_ids",
 ]
 
 # Backward compat alias
@@ -2068,6 +2070,29 @@ async def _execute_job(job: Job) -> None:
             chat_state.completion_sent = True
 
         elif action == "deliver":
+            # PM outbox drain: if messages are pending in the relay queue,
+            # wait briefly for them to be sent before the summarizer fires.
+            # This prevents the race where PM queues a message but the session
+            # completes before the relay processes it (issue #497).
+            if job.session_id:
+                try:
+                    from bridge.telegram_relay import get_outbox_length
+
+                    for _drain_i in range(20):  # 20 x 100ms = 2s max
+                        if get_outbox_length(job.session_id) == 0:
+                            break
+                        await asyncio.sleep(0.1)
+                    # Re-read session for fresh pm_sent_message_ids
+                    try:
+                        fresh_sessions = list(AgentSession.query.filter(session_id=job.session_id))
+                        if fresh_sessions:
+                            fresh_sessions.sort(key=lambda s: s.created_at or 0, reverse=True)
+                            agent_session = fresh_sessions[0]
+                    except Exception:
+                        pass
+                except Exception as drain_err:
+                    logger.debug(f"[{job.project_key}] Outbox drain check failed: {drain_err}")
+
             await send_cb(job.chat_id, msg, job.telegram_message_id, agent_session)
             chat_state.completion_sent = True
             logger.info(

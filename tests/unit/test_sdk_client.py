@@ -84,6 +84,43 @@ async def test_sdk_query_simple():
     assert "4" in response
 
 
+class TestTelegramEnvInjection:
+    """Tests for TELEGRAM_CHAT_ID and TELEGRAM_REPLY_TO env var injection (issue #497)."""
+
+    def test_chat_session_injects_telegram_chat_id(self):
+        """ChatSession should inject TELEGRAM_CHAT_ID from chat_id."""
+        agent = ValorAgent(
+            chat_id="12345",
+            session_type="chat",
+        )
+        options = agent._create_options(session_id=None)
+        assert options.env.get("TELEGRAM_CHAT_ID") == "12345"
+
+    def test_non_chat_session_no_telegram_chat_id(self):
+        """Non-chat sessions should not inject TELEGRAM_CHAT_ID."""
+        agent = ValorAgent(
+            chat_id="12345",
+            session_type=None,
+        )
+        options = agent._create_options(session_id=None)
+        assert "TELEGRAM_CHAT_ID" not in options.env
+
+    def test_chat_session_without_chat_id_no_injection(self):
+        """ChatSession without chat_id should not inject TELEGRAM_CHAT_ID."""
+        agent = ValorAgent(
+            chat_id=None,
+            session_type="chat",
+        )
+        options = agent._create_options(session_id=None)
+        assert "TELEGRAM_CHAT_ID" not in options.env
+
+    def test_session_type_injected(self):
+        """SESSION_TYPE env var should be set for chat sessions."""
+        agent = ValorAgent(session_type="chat")
+        options = agent._create_options(session_id=None)
+        assert options.env.get("SESSION_TYPE") == "chat"
+
+
 @pytest.mark.asyncio
 @pytest.mark.skipif(not _sdk_available(), reason="Claude Agent SDK binary not available")
 async def test_get_agent_response_sdk():

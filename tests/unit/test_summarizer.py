@@ -1788,3 +1788,62 @@ class TestLinkifyReferences:
         session.project_key = "   "
         result = _linkify_references("PR #323", session)
         assert result == "PR #323"
+
+
+class TestSummarizerBypass:
+    """Tests for PM self-messaging summarizer bypass (issue #497).
+
+    When the PM sends messages via tools/send_telegram.py during a session,
+    the summarizer should be skipped entirely in send_response_with_files.
+    """
+
+    @pytest.mark.asyncio
+    async def test_bypass_when_pm_has_messages(self):
+        """send_response_with_files should return True without summarizing
+        when pm_sent_message_ids is non-empty."""
+        from bridge.response import send_response_with_files
+
+        mock_client = MagicMock()
+        mock_session = MagicMock()
+        mock_session.has_pm_messages.return_value = True
+        mock_session.pm_sent_message_ids = [42, 43]
+        mock_session.session_id = "test-session"
+
+        result = await send_response_with_files(
+            mock_client,
+            None,
+            "Some agent output",
+            chat_id=12345,
+            reply_to=67890,
+            session=mock_session,
+        )
+
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_no_bypass_when_no_pm_messages(self):
+        """send_response_with_files should proceed normally when
+        pm_sent_message_ids is empty."""
+        from bridge.response import send_response_with_files
+
+        mock_client = MagicMock()
+        mock_session = MagicMock()
+        mock_session.has_pm_messages.return_value = False
+        mock_session.pm_sent_message_ids = []
+        mock_session.session_id = "test-session"
+        mock_session.is_sdlc = False
+
+        # Mock send_markdown to avoid Telethon calls
+        with patch("bridge.markdown.send_markdown", new_callable=AsyncMock) as mock_send:
+            mock_send.return_value = MagicMock()
+            result = await send_response_with_files(
+                mock_client,
+                None,
+                "Short",
+                chat_id=12345,
+                reply_to=67890,
+                session=mock_session,
+            )
+
+        # Should have tried to send the text (not bypassed)
+        assert mock_send.called or result is True

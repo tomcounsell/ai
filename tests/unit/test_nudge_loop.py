@@ -191,3 +191,19 @@ class TestNonSdlcDelivery:
             max_nudge_count=MAX_NUDGE_COUNT,
         )
         assert action == "deliver"
+
+
+class TestPmSentMessageIds:
+    """Tests for pm_sent_message_ids field preserved in job queue (issue #497)."""
+
+    def test_pm_sent_message_ids_in_job_fields(self):
+        """pm_sent_message_ids should be in the _JOB_FIELDS list for preservation."""
+        from agent.job_queue import _JOB_FIELDS
+
+        assert "pm_sent_message_ids" in _JOB_FIELDS
+
+    def test_outbox_drain_import(self):
+        """bridge.telegram_relay.get_outbox_length should be importable."""
+        from bridge.telegram_relay import get_outbox_length
+
+        assert callable(get_outbox_length)

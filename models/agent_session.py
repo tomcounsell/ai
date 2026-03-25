@@ -146,6 +146,12 @@ class AgentSession(Model):
     # === ChatSession delivery field ===
     result_text = Field(null=True, max_length=MSG_MAX_CHARS)  # What was delivered to Telegram
 
+    # === PM self-messaging ===
+    # Telegram message IDs sent by the PM via send_telegram tool during this session.
+    # Populated by the bridge relay after each successful Telethon send.
+    # When non-empty, the summarizer is bypassed (PM authored its own messages).
+    pm_sent_message_ids = ListField(null=True)
+
     # === DevSession fields (null when session_type="chat") ===
     parent_chat_session_id = KeyField(null=True)  # Logical FK -> ChatSession
     slug = Field(null=True)  # Derives branch, plan path, worktree
@@ -343,6 +349,39 @@ class AgentSession(Model):
         except Exception as e:
             logger.warning(f"Failed to query dev sessions for chat {self.job_id}: {e}")
             return []
+
+    # === PM self-messaging helpers ===
+
+    def record_pm_message(self, msg_id: int) -> None:
+        """Record a Telegram message ID sent by the PM via the send_telegram tool.
+
+        Called by the bridge relay after successfully sending a PM-authored message.
+        The list is checked by the summarizer bypass to skip rewriting PM output.
+
+        Args:
+            msg_id: The Telegram message ID returned by Telethon after send.
+        """
+        current = self.pm_sent_message_ids
+        if not isinstance(current, list):
+            current = []
+        current.append(msg_id)
+        self.pm_sent_message_ids = current
+        try:
+            self.save()
+        except Exception as e:
+            logger.warning(
+                f"record_pm_message save failed for session {self.session_id} "
+                f"(msg_id={msg_id}): {e}"
+            )
+
+    def has_pm_messages(self) -> bool:
+        """Check whether the PM sent any self-authored messages during this session.
+
+        Returns True if pm_sent_message_ids is a non-empty list.
+        Used by the summarizer bypass in bridge/response.py.
+        """
+        ids = self.pm_sent_message_ids
+        return isinstance(ids, list) and len(ids) > 0
 
     # === History helpers ===
 
