@@ -217,14 +217,9 @@ def _cleanup_session_locks() -> int:
         except Exception as e:
             logger.debug(f"Error checking {session_file}: {e}")
 
-    # Also clean up journal/wal files that indicate incomplete transactions
-    for suffix in ["-journal", "-wal", "-shm"]:
-        for leftover in data_dir.glob(f"*{suffix}"):
-            try:
-                leftover.unlink()
-                logger.info(f"Removed stale {leftover.name}")
-            except Exception as e:
-                logger.debug(f"Could not remove {leftover}: {e}")
+    # DO NOT delete -wal/-shm/-journal files here. SQLite WAL files may contain
+    # uncommitted auth data. Deleting them corrupts the session, causing
+    # is_user_authorized() to return False on the next connect.
 
     # Add jitter to prevent thundering herd on restart
     if killed > 0:
