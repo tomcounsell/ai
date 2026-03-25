@@ -647,26 +647,15 @@ def check_telegram_session(project_dir: Path) -> ToolCheck:
     if not python_path.exists():
         return ToolCheck(name="telegram_session", available=False, error="No .venv/bin/python")
 
-    # Find session file — restore from seed if missing
+    # Find session file
     data_dir = project_dir / "data"
     session_files = list(data_dir.glob("*.session"))
     if not session_files:
-        # Try to restore from seed in ~/Desktop/Valor/telegram_session/
-        seed_dir = Path.home() / "Desktop" / "Valor" / "telegram_session"
-        seed_files = list(seed_dir.glob("*.session")) if seed_dir.is_dir() else []
-        if seed_files:
-            import shutil
-
-            data_dir.mkdir(parents=True, exist_ok=True)
-            dest = data_dir / seed_files[0].name
-            shutil.copy2(seed_files[0], dest)
-            session_files = [dest]
-        else:
-            return ToolCheck(
-                name="telegram_session",
-                available=False,
-                error="No session file in data/. Run: python scripts/telegram_login.py",
-            )
+        return ToolCheck(
+            name="telegram_session",
+            available=False,
+            error="No session file in data/. Run: python scripts/telegram_login.py",
+        )
 
     # Check authorization using Telethon (connect-only, no SendCodeRequest).
     # Outputs one of: authorized, unauthorized, flood:NNN, error:MESSAGE
@@ -703,17 +692,6 @@ def check_telegram_session(project_dir: Path) -> ToolCheck:
             return f"error:{e}"
 
     auth_status = _check_auth(project_dir)
-
-    # If session is unauthorized, try restoring from seed before giving up
-    if auth_status == "unauthorized":
-        seed_dir = Path.home() / "Desktop" / "Valor" / "telegram_session"
-        seed_files = list(seed_dir.glob("*.session")) if seed_dir.is_dir() else []
-        if seed_files:
-            import shutil
-
-            dest = data_dir / seed_files[0].name
-            shutil.copy2(seed_files[0], dest)
-            auth_status = _check_auth(project_dir)
 
     if auth_status == "authorized":
         return ToolCheck(name="telegram_session", available=True, version="authorized")
