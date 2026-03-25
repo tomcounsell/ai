@@ -56,6 +56,7 @@ PROJECT_APPS = [
     "apps.staff",  # for staff-only admin tools
     "apps.drugs",  # Medication tracker
     "apps.podcast",  # Podcast management and feeds
+    "apps.book",  # Blended Workforce book site (blendedworkforce.ai)
 ]
 
 INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + PROJECT_APPS
@@ -81,6 +82,7 @@ MIDDLEWARE = [
     # "request_logging.middleware.LoggingMiddleware",
     # "corsheaders.middleware.CorsMiddleware",
     "django.middleware.security.SecurityMiddleware",
+    "apps.common.utilities.django.middleware.DomainRoutingMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -118,6 +120,7 @@ TEMPLATES = [
                 "django.contrib.messages.context_processors.messages",
                 "apps.public.context_processors.active_navigation",
                 "apps.public.context_processors.debug_toolbar_toggle",
+                "apps.book.context_processors.book_context",
             ],
             "loaders": [
                 (
@@ -273,3 +276,10 @@ S3_PUBLIC_URL = os.environ.get("S3_PUBLIC_URL", "")
 # Podcast Production Settings
 # ============================================================================
 PODCAST_DEFAULT_MODEL = "claude-sonnet-4-6"
+
+# ============================================================================
+# Book Site (blendedworkforce.ai) Settings
+# ============================================================================
+BOOK_FEEDBACK_FORM_URL = os.environ.get(
+    "BOOK_FEEDBACK_FORM_URL", "#feedback-form-coming-soon"
+)

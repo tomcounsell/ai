@@ -1,0 +1,112 @@
+{% extends "book/base.html" %}
+
+{% block title %}Blended Workforce 2026 — An Annual Field Manual for CEOs{% endblock %}
+{% block meta_description %}A serialized field manual for CEOs on integrating AI employees into human teams. By Tom Counsell and Valor Engels.{% endblock %}
+
+{% block content %}
+<!-- Hero Section -->
+<section class="py-20 px-6">
+    <div class="max-w-3xl mx-auto text-center">
+        <p class="text-sm uppercase tracking-widest mb-4" style="color: var(--color-accent); font-family: var(--font-sans); font-weight: 500; letter-spacing: 0.15em;">
+            A Serialized Field Manual
+        </p>
+        <h1 class="text-5xl md:text-6xl font-black mb-6 leading-tight" style="font-family: var(--font-serif);">
+            Blended<br>Workforce<br>
+            <span style="color: var(--color-accent);">2026</span>
+        </h1>
+        <p class="text-xl mb-8 leading-relaxed" style="color: var(--color-muted); font-family: var(--font-sans); font-weight: 300;">
+            An annual field manual for CEOs at incumbent companies navigating the
+            integration of AI employees into human teams.
+        </p>
+        <p class="text-base mb-12" style="color: var(--color-muted); font-family: var(--font-sans);">
+            By <strong style="color: var(--color-ink);">Tom Counsell</strong> &amp;
+            <strong style="color: var(--color-ink);">Valor Engels</strong>
+        </p>
+    </div>
+</section>
+
+<!-- Divider -->
+<div class="max-w-xs mx-auto border-t mb-16" style="border-color: var(--color-accent-light);"></div>
+
+<!-- About the Book -->
+<section class="pb-16 px-6">
+    <div class="max-w-2xl mx-auto">
+        <h2 class="text-2xl font-bold mb-6" style="font-family: var(--font-serif);">
+            What This Book Is About
+        </h2>
+        <div class="space-y-4 text-base leading-relaxed" style="color: var(--color-muted);">
+            <p>
+                The workforce is changing. AI agents are no longer theoretical
+                abstractions &mdash; they are teammates, collaborators, and
+                specialists embedded in real organizations doing real work.
+            </p>
+            <p>
+                <em style="font-family: var(--font-serif);">Blended Workforce 2026</em>
+                is for the CEO who knows AI is transforming their industry but
+                needs a practical playbook &mdash; not more hype. Each chapter
+                tackles a specific challenge: hiring your first AI employee,
+                restructuring teams for human-AI collaboration, measuring
+                performance across silicon and carbon, and building a culture
+                where both thrive.
+            </p>
+            <p>
+                Published as a serialized field manual, each edition captures
+                what actually works <em>right now</em> &mdash; because in this
+                landscape, last year&rsquo;s playbook is already outdated.
+            </p>
+        </div>
+    </div>
+</section>
+
+<!-- CTA Section -->
+<section class="py-16 px-6" style="background-color: var(--color-ink);">
+    <div class="max-w-2xl mx-auto text-center">
+        <h2 class="text-2xl font-bold mb-4" style="font-family: var(--font-serif); color: var(--color-paper);">
+            Get the Book
+        </h2>
+        <p class="mb-8 text-base" style="color: var(--color-accent-light);">
+            Available soon. Join the announcement list to be notified at launch.
+        </p>
+        <div class="flex flex-col sm:flex-row gap-4 justify-center">
+            <a href="{% url 'book:announcements' %}"
+               class="inline-block px-8 py-3 rounded text-sm font-medium transition-colors"
+               style="background-color: var(--color-accent); color: var(--color-paper); text-decoration: none;">
+                View Announcements
+            </a>
+            <a href="{{ feedback_url }}" target="_blank" rel="noopener"
+               class="inline-block px-8 py-3 rounded text-sm font-medium border transition-colors"
+               style="border-color: var(--color-accent-light); color: var(--color-accent-light); text-decoration: none;">
+                Share Feedback
+            </a>
+        </div>
+    </div>
+</section>
+
+<!-- Authors Section -->
+<section class="py-16 px-6">
+    <div class="max-w-2xl mx-auto">
+        <h2 class="text-2xl font-bold mb-8 text-center" style="font-family: var(--font-serif);">
+            About the Authors
+        </h2>
+        <div class="grid md:grid-cols-2 gap-8">
+            <div class="text-center">
+                <h3 class="text-lg font-bold mb-2" style="font-family: var(--font-serif);">Tom Counsell</h3>
+                <p class="text-sm leading-relaxed" style="color: var(--color-muted);">
+                    CEO and technologist with deep experience building AI-native
+                    organizations. Tom has led teams at the intersection of
+                    software engineering and artificial intelligence for over a decade.
+                </p>
+            </div>
+            <div class="text-center">
+                <h3 class="text-lg font-bold mb-2" style="font-family: var(--font-serif);">Valor Engels</h3>
+                <p class="text-sm leading-relaxed" style="color: var(--color-muted);">
+                    Entrepreneur and AI strategist focused on the practical
+                    realities of deploying AI in established businesses. Valor
+                    brings hands-on experience integrating AI agents into
+                    real-world workflows.
+                </p>
+            </div>
+        </div>
+    </div>
+</section>
+{% endblock %}

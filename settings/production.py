@@ -27,6 +27,8 @@ ALLOWED_HOSTS = ALLOWED_HOSTS + [HOSTNAME]
 CSRF_TRUSTED_ORIGINS = [
     "https://ai.yuda.me",
     "https://cuttlefish-ea1h.onrender.com",
+    "https://blendedworkforce.ai",
+    "https://www.blendedworkforce.ai",
 ]
 
 # File Storage Service - use Supabase in production

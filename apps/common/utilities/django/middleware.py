@@ -49,6 +49,47 @@ class HtmxLoginRedirectMiddleware:
         return location.startswith(login_url)
 
 
+BOOK_DOMAINS: set[str] = {"blendedworkforce.ai", "www.blendedworkforce.ai"}
+
+
+class DomainRoutingMiddleware:
+    """Route requests to different URL configs based on the incoming hostname.
+
+    Uses Django's per-request ``request.urlconf`` override so that book-domain
+    requests resolve against ``apps.book.urls`` instead of the default
+    ``ROOT_URLCONF``.  This is a built-in Django feature documented at
+    https://docs.djangoproject.com/en/5.1/topics/http/urls/#how-django-processes-a-request
+
+    For any hostname in ``BOOK_DOMAINS``, the middleware sets:
+    - ``request.site_name = "book"``
+    - ``request.urlconf = "apps.book.urls"``
+
+    All other hostnames fall through to the default Cuttlefish URL config.
+    """
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        host = self._get_host(request)
+        if host in BOOK_DOMAINS:
+            request.site_name = "book"
+            request.urlconf = "apps.book.root_urls"
+        else:
+            request.site_name = "cuttlefish"
+        return self.get_response(request)
+
+    @staticmethod
+    def _get_host(request) -> str:
+        """Extract the hostname from the request, stripping port if present."""
+        try:
+            host = request.META.get("HTTP_HOST", "")
+            # Strip port number (e.g. "blendedworkforce.ai:8000" -> "blendedworkforce.ai")
+            return host.split(":")[0].lower()
+        except (AttributeError, TypeError):
+            return ""
+
+
 class APIHeaderMiddleware:
     def __init__(self, get_response):
         self.get_response = get_response

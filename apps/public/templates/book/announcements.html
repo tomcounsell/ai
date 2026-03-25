@@ -1,0 +1,40 @@
+{% extends "book/base.html" %}
+
+{% block title %}Announcements — Blended Workforce 2026{% endblock %}
+
+{% block content %}
+<section class="py-16 px-6">
+    <div class="max-w-2xl mx-auto">
+        <h1 class="text-3xl font-bold mb-8" style="font-family: var(--font-serif);">
+            Announcements
+        </h1>
+
+        {% if announcements %}
+            <div class="space-y-10">
+                {% for announcement in announcements %}
+                <article class="border-b pb-8" style="border-color: var(--color-border);">
+                    <time class="text-xs uppercase tracking-wider" style="color: var(--color-accent); font-family: var(--font-sans);">
+                        {{ announcement.published_at|date:"F j, Y" }}
+                    </time>
+                    <h2 class="text-xl font-bold mt-2 mb-3" style="font-family: var(--font-serif);">
+                        {{ announcement.title }}
+                    </h2>
+                    <div class="text-base leading-relaxed" style="color: var(--color-muted);">
+                        {{ announcement.body|linebreaks }}
+                    </div>
+                </article>
+                {% endfor %}
+            </div>
+        {% else %}
+            <div class="text-center py-16">
+                <p class="text-lg" style="color: var(--color-muted); font-family: var(--font-serif); font-style: italic;">
+                    No announcements yet.
+                </p>
+                <p class="text-sm mt-2" style="color: var(--color-muted);">
+                    Check back soon for updates on the book.
+                </p>
+            </div>
+        {% endif %}
+    </div>
+</section>
+{% endblock %}

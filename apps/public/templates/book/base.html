@@ -1,0 +1,90 @@
+{% load tailwind_cli %}
+{% load static %}
+{% load django_htmx %}
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>{% block title %}Blended Workforce 2026{% endblock %}</title>
+    <meta name="description" content="{% block meta_description %}An Annual Field Manual for CEOs on Integrating AI Employees into Human Teams{% endblock %}">
+
+    {% tailwind_css %}
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;0,900;1,400&family=Inter:wght@300;400;500;600&display=swap');
+
+        :root {
+            --color-ink: #1a1a1a;
+            --color-paper: #faf9f7;
+            --color-accent: #8b4513;
+            --color-accent-light: #d2a679;
+            --color-muted: #6b6560;
+            --color-border: #e8e4df;
+            --font-serif: 'Playfair Display', Georgia, serif;
+            --font-sans: 'Inter', system-ui, sans-serif;
+        }
+
+        body {
+            font-family: var(--font-sans);
+            color: var(--color-ink);
+            background-color: var(--color-paper);
+        }
+
+        h1, h2, h3, h4 {
+            font-family: var(--font-serif);
+        }
+
+        .accent-border {
+            border-color: var(--color-accent);
+        }
+
+        .text-accent {
+            color: var(--color-accent);
+        }
+
+        .bg-accent {
+            background-color: var(--color-accent);
+        }
+
+        .text-muted {
+            color: var(--color-muted);
+        }
+    </style>
+
+    {% block extra_css %}{% endblock %}
+</head>
+<body class="min-h-screen flex flex-col">
+    <!-- Navigation -->
+    <nav class="border-b" style="border-color: var(--color-border);">
+        <div class="max-w-4xl mx-auto px-6 py-4 flex items-center justify-between">
+            <a href="{% url 'book:landing' %}" class="text-lg font-bold" style="font-family: var(--font-serif); color: var(--color-ink); text-decoration: none;">
+                Blended Workforce
+            </a>
+            <div class="flex gap-6 text-sm" style="font-family: var(--font-sans);">
+                <a href="{% url 'book:landing' %}" class="hover:underline" style="color: var(--color-muted); text-decoration: none;">Home</a>
+                <a href="{% url 'book:announcements' %}" class="hover:underline" style="color: var(--color-muted); text-decoration: none;">Announcements</a>
+                <a href="{{ feedback_url }}" target="_blank" rel="noopener" class="hover:underline" style="color: var(--color-muted); text-decoration: none;">Feedback</a>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <main class="flex-1">
+        {% block content %}{% endblock %}
+    </main>
+
+    <!-- Footer -->
+    <footer class="border-t py-8" style="border-color: var(--color-border);">
+        <div class="max-w-4xl mx-auto px-6 text-center text-sm" style="color: var(--color-muted);">
+            <p>&copy; 2026 Tom Counsell &amp; Valor Engels. All rights reserved.</p>
+            <p class="mt-1" style="font-family: var(--font-serif); font-style: italic;">Blended Workforce 2026</p>
+        </div>
+    </footer>
+
+    {% django_htmx_script %}
+    {% block scripts %}{% endblock %}
+</body>
+</html>

@@ -46,6 +46,8 @@ if not SECRET_KEY and (LOCAL or DEBUG):
 ALLOWED_HOSTS = [
     "ai.yuda.me",
     "cuttlefish-ea1h.onrender.com",
+    "blendedworkforce.ai",
+    "www.blendedworkforce.ai",
     # '.amazonaws.com',
     "localhost",
     "127.0.0.1",
@@ -58,6 +60,8 @@ else:
         "https://cuttlefish-ea1h.onrender.com",
         "https://ai.yuda.me",
         "https://*.yuda.me",
+        "https://blendedworkforce.ai",
+        "https://www.blendedworkforce.ai",
         # 'https://s3.amazonaws.com',
         # 'https://vendor_api.com',
         "https://localhost",
