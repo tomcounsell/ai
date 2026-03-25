@@ -78,15 +78,10 @@ class TestFetchStageComments:
             ]
         )
 
-        # First call (--jq) returns non-empty to pass the check
-        mock_jq_result = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout=stage_body, stderr=""
-        )
-        # Second call (JSON) returns full comment list
-        mock_json_result = subprocess.CompletedProcess(
+        # Single call returns full JSON comment list
+        mock_run.return_value = subprocess.CompletedProcess(
             args=[], returncode=0, stdout=comments_json, stderr=""
         )
-        mock_run.side_effect = [mock_jq_result, mock_json_result]
 
         result = fetch_stage_comments(42)
         assert len(result) == 1

@@ -47,8 +47,6 @@ def fetch_stage_comments(issue_number: int, repo: str | None = None) -> list[dic
             "gh",
             "api",
             f"repos/{repo}/issues/{issue_number}/comments",
-            "--jq",
-            ".[].body",
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
         if result.returncode != 0:
@@ -57,29 +55,16 @@ def fetch_stage_comments(issue_number: int, repo: str | None = None) -> list[dic
             )
             return []
 
-        comments = []
-        # gh --jq '.[].body' outputs each body separated by newlines,
-        # but bodies themselves contain newlines. Split on the marker instead.
-        raw = result.stdout
-        if not raw.strip():
-            return []
-
-        # Re-fetch with JSON output for reliable parsing
-        cmd_json = [
-            "gh",
-            "api",
-            f"repos/{repo}/issues/{issue_number}/comments",
-        ]
-        result_json = subprocess.run(cmd_json, capture_output=True, text=True, timeout=10)
-        if result_json.returncode != 0:
-            return []
-
         try:
-            all_comments = json.loads(result_json.stdout)
+            all_comments = json.loads(result.stdout)
         except json.JSONDecodeError:
             logger.warning("[issue_comments] Failed to parse JSON response")
             return []
 
+        if not all_comments:
+            return []
+
+        comments = []
         for comment in all_comments:
             body = comment.get("body", "")
             if STAGE_COMMENT_MARKER not in body:
