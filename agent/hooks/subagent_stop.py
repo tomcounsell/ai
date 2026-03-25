@@ -1,5 +1,10 @@
 """SubagentStop hook: logs subagent completion, registers DevSession,
-and injects SDLC pipeline state back into the PM's context."""
+posts structured stage comments to the tracking GitHub issue, and injects
+SDLC pipeline state back into the PM's context.
+
+Stage comments are posted via utils.issue_comments after each DevSession
+completes, turning the GitHub issue into a living record of stage-by-stage
+progress. See docs/features/sdlc-stage-handoff.md for the full design."""
 
 from __future__ import annotations
 
