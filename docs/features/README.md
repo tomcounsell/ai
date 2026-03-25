@@ -13,7 +13,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Bridge Module Architecture](bridge-module-architecture.md) | Sub-module organization of the Telegram bridge for maintainability | Shipped |
 | [Bridge Resilience](bridge-resilience.md) | Circuit breaker, unified recovery loop, degraded mode, structured logging | Shipped |
 | [Bridge Response Improvements](bridge-response-improvements.md) | Enhancements to how the Telegram bridge formats and delivers responses | Shipped |
-| [Bridge Self-Healing](bridge-self-healing.md) | Automatic crash recovery with session lock cleanup, watchdog, and escalation | Shipped |
+| [Bridge Self-Healing](bridge-self-healing.md) | Automatic crash recovery with session lock cleanup, watchdog, escalation, flood-backoff persistence, and dynamic catchup lookback | Shipped |
 | [Bridge Workflow Gaps](bridge-workflow-gaps.md) | Auto-continue for status updates, output classification, and session log snapshots | Shipped |
 | [Build Output Verification](build-output-verification.md) | Three-layer verification gates preventing /do-build from silently completing with no code changes | Shipped |
 | [Build Session Reliability](build-session-reliability.md) | Logging propagation, commit-on-exit, worktree isolation, health monitoring | Shipped |
