@@ -84,6 +84,7 @@ class TestSystemPromptPriming:
             base_md = Path(cwd) / "config" / "personas" / "_base.md"
 
         content = base_md.read_text()
-        # Section should be in the last 500 chars
-        last_section = content[-500:]
+        # Memory sections should be at the end of the file
+        last_section = content[-2500:]
         assert "Subconscious Memory" in last_section
+        assert "Intentional Memory" in last_section
