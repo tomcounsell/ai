@@ -157,7 +157,7 @@ async def process_outbox(telegram_client) -> int:
                             store_message,
                             chat_id=message.get("chat_id"),
                             content=message.get("text", ""),
-                            sender="Valor",
+                            sender="system",
                             timestamp=datetime.now(),
                             message_type="pm_direct",
                         )

@@ -397,16 +397,18 @@ async def send_response_with_files(
     # send_telegram tool during this session, skip the summarizer entirely.
     # The PM authored its own messages — the summarizer would be redundant.
     # Only set emoji reaction (handled by the caller). See issue #497.
-    if session and hasattr(session, "has_pm_messages") and session.has_pm_messages():
+    # NOTE: We still send any extracted files (<<FILE:>> markers) before
+    # returning, so file attachments are not lost on PM self-message sessions.
+    pm_bypass = session and hasattr(session, "has_pm_messages") and session.has_pm_messages()
+    if pm_bypass:
         logger.info(
             f"Skipping summarizer: PM self-messaged during session "
             f"{getattr(session, 'session_id', 'unknown')} "
             f"(pm_sent_message_ids={getattr(session, 'pm_sent_message_ids', [])})"
         )
-        return True  # Signal that content was "sent" (PM already delivered it)
 
     is_sdlc = session and hasattr(session, "is_sdlc") and session.is_sdlc
-    should_summarize = text and (is_sdlc or len(text) >= 200)
+    should_summarize = not pm_bypass and text and (is_sdlc or len(text) >= 200)
     if should_summarize:
         try:
             from bridge.summarizer import summarize_response
@@ -496,6 +498,10 @@ async def send_response_with_files(
         except Exception as e:
             logger.error(f"Failed to send file {file_path}: {e}")
             await client.send_message(_chat_id, f"Failed to send file: {file_path.name}")
+
+    # PM bypass: files have been sent above, skip text/summarizer output
+    if pm_bypass:
+        return True  # Signal that content was "sent" (PM already delivered it)
 
     # Track if we sent anything
     sent_content = bool(files)
