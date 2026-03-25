@@ -127,6 +127,78 @@ def _get_stage_states(session_id: str) -> str | None:
         return None
 
 
+def _resolve_tracking_issue() -> int | None:
+    """Resolve tracking issue number from env var or plan frontmatter.
+
+    Checks SDLC_TRACKING_ISSUE first, then SDLC_ISSUE_NUMBER, then falls
+    back to parsing the plan frontmatter if SDLC_SLUG is set.
+
+    Returns:
+        Issue number as int, or None if not found.
+    """
+    # Direct env var (set by sdk_client.py)
+    for env_key in ("SDLC_TRACKING_ISSUE", "SDLC_ISSUE_NUMBER"):
+        value = os.environ.get(env_key)
+        if value and value.isdigit():
+            return int(value)
+
+    # Fallback: parse plan frontmatter
+    slug = os.environ.get("SDLC_SLUG")
+    if not slug:
+        return None
+
+    plan_path = os.environ.get("SDLC_PLAN_PATH")
+    if not plan_path:
+        plan_path = f"docs/plans/{slug}.md"
+
+    try:
+        import re
+
+        # Try both absolute and relative paths
+        for path in [plan_path, os.path.join(os.getcwd(), plan_path)]:
+            if os.path.isfile(path):
+                with open(path) as f:
+                    content = f.read(2000)  # Frontmatter is at the top
+                pattern = r"tracking:\s*https?://github\.com/[^/]+/[^/]+/issues/(\d+)"
+                match = re.search(pattern, content)
+                if match:
+                    return int(match.group(1))
+    except Exception as e:
+        logger.debug(f"[subagent_stop] Failed to parse plan frontmatter: {e}")
+
+    return None
+
+
+def _post_stage_comment_on_completion(input_data: dict, current_stage: str | None) -> None:
+    """Post a structured stage comment to the tracking issue.
+
+    Called after _register_dev_session_completion(). Wraps all logic in
+    try/except so comment posting never crashes the hook.
+    """
+    try:
+        issue_number = _resolve_tracking_issue()
+        if not issue_number:
+            logger.debug("[subagent_stop] No tracking issue found, skipping comment")
+            return
+
+        stage = current_stage or "UNKNOWN"
+        outcome = _extract_outcome_summary(input_data)
+
+        from utils.issue_comments import post_stage_comment
+
+        success = post_stage_comment(
+            issue_number=issue_number,
+            stage=stage,
+            outcome=outcome,
+        )
+        if success:
+            logger.info(f"[subagent_stop] Posted stage comment: {stage} on issue #{issue_number}")
+        else:
+            logger.warning(f"[subagent_stop] Failed to post stage comment on issue #{issue_number}")
+    except Exception as e:
+        logger.warning(f"[subagent_stop] Comment posting failed (non-fatal): {e}")
+
+
 async def subagent_stop_hook(
     input_data: SubagentStopHookInput,
     tool_use_id: str | None,
@@ -136,7 +208,8 @@ async def subagent_stop_hook(
 
     When agent_type is dev-session:
     1. Updates DevSession status in Redis
-    2. Injects current SDLC pipeline state via 'reason' so the PM sees
+    2. Posts a structured stage comment to the tracking issue
+    3. Injects current SDLC pipeline state via 'reason' so the PM sees
        which stages are actually complete vs still pending
     """
     agent_type = input_data.get("agent_type", "unknown")
@@ -153,8 +226,25 @@ async def subagent_stop_hook(
     if agent_type == "dev-session":
         _register_dev_session_completion(agent_id)
 
-        # Inject SDLC stage state and outcome back to PM
+        # Resolve current stage before it gets marked complete
+        current_stage = None
         session_id = os.environ.get("VALOR_SESSION_ID")
+        if session_id:
+            stages_str = _get_stage_states(session_id)
+            if stages_str:
+                # Find the stage that was just completed (most recent in_progress -> completed)
+                try:
+                    stages_dict = json.loads(stages_str) if isinstance(stages_str, str) else {}
+                    for stage_name, state in stages_dict.items():
+                        if state in ("completed", "done"):
+                            current_stage = stage_name
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+        # Post stage comment to tracking issue (non-blocking, never crashes)
+        _post_stage_comment_on_completion(input_data, current_stage)
+
+        # Inject SDLC stage state and outcome back to PM
         if session_id:
             stages = _get_stage_states(session_id)
             if stages:

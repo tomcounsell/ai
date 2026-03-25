@@ -285,12 +285,14 @@ def _extract_sdlc_env_vars(session_id: str, gh_repo: str | None = None) -> dict[
             else:
                 env["SDLC_PLAN_PATH"] = plan_url
 
-        # Issue URL -> SDLC_ISSUE_NUMBER
+        # Issue URL -> SDLC_ISSUE_NUMBER and SDLC_TRACKING_ISSUE
         issue_url = getattr(session, "issue_url", None)
         if isinstance(issue_url, str) and issue_url:
             issue_match = _ISSUE_NUMBER_RE.search(issue_url)
             if issue_match:
-                env["SDLC_ISSUE_NUMBER"] = issue_match.group(1)
+                issue_num = issue_match.group(1)
+                env["SDLC_ISSUE_NUMBER"] = issue_num
+                env["SDLC_TRACKING_ISSUE"] = issue_num
 
         # Repo (complement GH_REPO, don't replace it)
         if gh_repo:
@@ -1461,6 +1463,12 @@ async def get_agent_response_sdk(
             "1. **Assess the current stage** — use read-only Bash commands "
             "(gh issue view, gh pr view, gh pr list, grep) to determine "
             "where work stands. You can run Bash for reads freely.\n"
+            "1.5. **Gather prior stage context** — if a tracking issue exists, "
+            "fetch the last few comments with "
+            "`gh api repos/{owner}/{repo}/issues/{number}/comments` and look for "
+            "comments containing `<!-- sdlc-stage-comment -->`. Include a summary "
+            "of prior stage findings in the DevSession prompt so the next stage "
+            "has full context from previous stages.\n"
             "2. **Spawn one dev-session for the next stage** — use the Agent tool "
             "to dispatch exactly one stage at a time:\n"
             '   Agent(subagent_type="dev-session", description="<stage>: <short desc>", '
