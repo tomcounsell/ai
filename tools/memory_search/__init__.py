@@ -202,9 +202,7 @@ def inspect(
             project_key = _resolve_project_key(project_key)
             # Aggregate stats across project
             try:
-                all_records = list(
-                    Memory.query.filter(project_key=project_key)
-                )
+                all_records = list(Memory.query.filter(project_key=project_key))
             except Exception:
                 all_records = []
 
@@ -227,14 +225,10 @@ def inspect(
                 "project_key": project_key,
                 "total": len(all_records),
                 "by_source": by_source,
-                "avg_confidence": total_confidence / len(all_records)
-                if all_records
-                else 0.0,
+                "avg_confidence": total_confidence / len(all_records) if all_records else 0.0,
             }
 
-        return {
-            "error": "Provide --id for a specific memory or --stats for aggregate statistics."
-        }
+        return {"error": "Provide --id for a specific memory or --stats for aggregate statistics."}
 
     except Exception as e:
         logger.warning(f"[memory_search] inspect failed (non-fatal): {e}")

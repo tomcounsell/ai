@@ -161,15 +161,11 @@ def main() -> int:
     # search command
     search_parser = subparsers.add_parser("search", help="Search memories")
     search_parser.add_argument("query", help="Search query")
-    search_parser.add_argument(
-        "--project", "-p", help="Project key (default: from env)"
-    )
+    search_parser.add_argument("--project", "-p", help="Project key (default: from env)")
     search_parser.add_argument(
         "--limit", "-n", type=int, default=10, help="Max results (default: 10)"
     )
-    search_parser.add_argument(
-        "--json", action="store_true", help="Output as JSON"
-    )
+    search_parser.add_argument("--json", action="store_true", help="Output as JSON")
 
     # save command
     save_parser = subparsers.add_parser("save", help="Save a new memory")
@@ -188,27 +184,15 @@ def main() -> int:
         choices=["human", "agent", "system"],
         help="Source type (default: human)",
     )
-    save_parser.add_argument(
-        "--project", "-p", help="Project key (default: from env)"
-    )
-    save_parser.add_argument(
-        "--json", action="store_true", help="Output as JSON"
-    )
+    save_parser.add_argument("--project", "-p", help="Project key (default: from env)")
+    save_parser.add_argument("--json", action="store_true", help="Output as JSON")
 
     # inspect command
-    inspect_parser = subparsers.add_parser(
-        "inspect", help="Inspect a memory or show stats"
-    )
+    inspect_parser = subparsers.add_parser("inspect", help="Inspect a memory or show stats")
     inspect_parser.add_argument("--id", help="Memory ID to inspect")
-    inspect_parser.add_argument(
-        "--stats", action="store_true", help="Show aggregate statistics"
-    )
-    inspect_parser.add_argument(
-        "--project", "-p", help="Project key (default: from env)"
-    )
-    inspect_parser.add_argument(
-        "--json", action="store_true", help="Output as JSON"
-    )
+    inspect_parser.add_argument("--stats", action="store_true", help="Show aggregate statistics")
+    inspect_parser.add_argument("--project", "-p", help="Project key (default: from env)")
+    inspect_parser.add_argument("--json", action="store_true", help="Output as JSON")
 
     # forget command
     forget_parser = subparsers.add_parser("forget", help="Delete a memory")
@@ -218,9 +202,7 @@ def main() -> int:
         action="store_true",
         help="Required flag to confirm deletion",
     )
-    forget_parser.add_argument(
-        "--json", action="store_true", help="Output as JSON"
-    )
+    forget_parser.add_argument("--json", action="store_true", help="Output as JSON")
 
     args = parser.parse_args()
 

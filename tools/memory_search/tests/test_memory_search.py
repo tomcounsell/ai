@@ -13,7 +13,6 @@ import pytest
 
 from tools.memory_search import forget, inspect, save, search
 
-
 # Generate a unique project key for test isolation
 TEST_PROJECT_KEY = f"test-memory-search-{uuid.uuid4().hex[:8]}"
 
@@ -77,9 +76,7 @@ class TestSearch:
 class TestSave:
     def test_save_basic(self, _cleanup_test_memories):
         """Save a memory and get back memory_id."""
-        result = _save_and_track(
-            _cleanup_test_memories, "test memory content for save"
-        )
+        result = _save_and_track(_cleanup_test_memories, "test memory content for save")
         assert result is not None
         assert "memory_id" in result
         assert result["content"] == "test memory content for save"
@@ -125,9 +122,7 @@ class TestInspect:
 
     def test_inspect_by_id(self, _cleanup_test_memories):
         """Inspect a saved memory by ID."""
-        saved = _save_and_track(
-            _cleanup_test_memories, "memory for inspection"
-        )
+        saved = _save_and_track(_cleanup_test_memories, "memory for inspection")
         assert saved is not None
         mid = saved["memory_id"]
 
@@ -193,9 +188,7 @@ class TestIntegration:
     def test_save_then_search(self, _cleanup_test_memories):
         """Integration: save a memory, then search and find it."""
         unique_content = f"integration-test-{uuid.uuid4().hex[:8]} deploy patterns"
-        saved = _save_and_track(
-            _cleanup_test_memories, unique_content, importance=8.0
-        )
+        saved = _save_and_track(_cleanup_test_memories, unique_content, importance=8.0)
         assert saved is not None
 
         # Search for the unique content
