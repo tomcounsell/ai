@@ -173,9 +173,9 @@ Findings decay naturally via DecayingSortedField:
 - [x] All extraction/query/injection failures are caught silently -- finding system never crashes the agent
 - [x] Unit tests cover Finding model, extraction, query, injection, and deduplication
 - [x] Integration test verifies end-to-end relay: extract from one session, inject into another
-- [ ] Integration tests use real Redis (not mocks) for the full extract-store-query-inject pipeline
-- [ ] At least one value measurement test proves findings from stage N appear in stage N+1 context
-- [ ] Feature documentation at `docs/features/cross-agent-knowledge-relay.md`
+- [x] Integration tests use real Redis (not mocks) for the full extract-store-query-inject pipeline
+- [x] At least one value measurement test proves findings from stage N appear in stage N+1 context
+- [x] Feature documentation at `docs/features/cross-agent-knowledge-relay.md`
 
 ## No-Gos
 
