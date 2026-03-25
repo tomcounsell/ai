@@ -60,6 +60,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Plan Completion Gate](plan-completion-gate.md) | Deterministic validation preventing plan completion and PR merge while checkboxes remain unchecked | Shipped |
 | [Plan Prerequisites Validation](plan-prerequisites.md) | Declare and validate environment requirements before plan execution | Shipped |
 | [PM Channels](pm-channels.md) | Project manager mode routing Telegram groups to work-vault folders with SDLC bypass | Shipped |
+| [PM Telegram Tool](pm-telegram-tool.md) | ChatSession composes and sends its own Telegram messages via Redis IPC, with summarizer as fallback | Shipped |
 | [Popoto Redis Expansion](popoto-redis-expansion.md) | Migration from JSONL/JSON file state to Redis for atomicity and queries | Shipped |
 | [Race Condition Analysis](race-condition-analysis.md) | Structured concurrency analysis section in plan template with soft validator for async code | Shipped |
 | [Reaction Semantics](reaction-semantics.md) | Emoji reaction protocol for message delivery feedback and silent loss prevention | Shipped |
