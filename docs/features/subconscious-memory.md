@@ -121,16 +121,6 @@ The memory system has high reversibility:
 
 No schema migrations are involved. Redis keys can be flushed without side effects.
 
-## Related: Cross-Agent Knowledge Relay
-
-The [Cross-Agent Knowledge Relay](cross-agent-knowledge-relay.md) builds on this system with a separate `Finding` model for work-item-scoped technical discoveries. Key differences:
-
-- **Memory** stores general observations and human instructions, partitioned by `project_key`
-- **Finding** stores SDLC stage discoveries, partitioned by `slug` (work item)
-- Memory is injected via the PostToolUse hook's `<thought>` blocks
-- Findings are injected both via PostToolUse (alongside memories) and via pre-dispatch prompt augmentation
-- Both use the same Popoto primitives (DecayingSortedField, ConfidenceField, ExistenceFilter)
-
 ## Tracking
 
 - Issue: [#514](https://github.com/tomcounsell/ai/issues/514)

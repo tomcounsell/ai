@@ -1,5 +1,4 @@
-"""PreToolUse hook: blocks sensitive writes, enforces PM restrictions,
-registers DevSessions, and injects prior findings into dev-session prompts."""
+"""PreToolUse hook: blocks sensitive writes, enforces PM restrictions, registers DevSessions."""
 
 from __future__ import annotations
 
@@ -199,62 +198,6 @@ def _maybe_register_dev_session(tool_input: dict[str, Any]) -> None:
         logger.warning(f"[pre_tool_use] Failed to start pipeline stage: {e}")
 
 
-def _maybe_inject_findings_into_prompt(tool_input: dict[str, Any]) -> None:
-    """Inject prior findings into a dev-session prompt for cross-agent relay.
-
-    When the Agent tool spawns a dev-session, this function queries prior
-    findings for the current slug and appends them to the prompt. This
-    gives the new dev-session context from earlier stages.
-
-    Modifies tool_input["prompt"] in place. Failures are logged but never
-    raised -- this must not block the Agent tool.
-    """
-    subagent_type = tool_input.get("type", "")
-    if subagent_type != "dev-session":
-        return
-
-    try:
-        # Get slug from parent session
-        parent_session_id = os.environ.get("VALOR_SESSION_ID")
-        if not parent_session_id:
-            return
-
-        from models.agent_session import AgentSession
-
-        parent_sessions = list(AgentSession.query.filter(session_id=parent_session_id))
-        if not parent_sessions:
-            return
-
-        parent = parent_sessions[0]
-        # slug is the canonical field; work_item_slug is the legacy alias (pre-v2 sessions)
-        slug = parent.slug or parent.work_item_slug
-        if not slug:
-            return
-
-        # Query findings for this slug
-        from agent.finding_query import format_findings_for_injection, query_findings
-
-        findings = query_findings(slug=slug, limit=10)
-        if not findings:
-            return
-
-        # Format and append to prompt
-        findings_text = format_findings_for_injection(findings, max_tokens=2000)
-        if not findings_text:
-            return
-
-        current_prompt = tool_input.get("prompt", "")
-        tool_input["prompt"] = current_prompt + "\n\n" + findings_text
-
-        logger.info(
-            f"[pre_tool_use] Injected {len(findings)} prior findings "
-            f"into dev-session prompt for slug={slug}"
-        )
-
-    except Exception as e:
-        logger.warning(f"[pre_tool_use] Finding injection failed (non-fatal): {e}")
-
-
 async def pre_tool_use_hook(
     input_data: PreToolUseHookInput,
     tool_use_id: str | None,
@@ -272,7 +215,6 @@ async def pre_tool_use_hook(
     # Detect Agent tool spawning a dev-session
     if tool_name == "Agent":
         _maybe_register_dev_session(tool_input)
-        _maybe_inject_findings_into_prompt(tool_input)
         return {}
 
     # Only inspect write-capable tools
