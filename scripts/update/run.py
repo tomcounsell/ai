@@ -24,6 +24,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from scripts.update import (  # noqa: E402
     cal_integration,
     deps,
+    env_sync,
     git,
     hardlinks,
     hooks,
@@ -109,6 +110,7 @@ class UpdateResult:
     service_status: service.ServiceStatus | None = None
     caffeinate_status: service.CaffeinateStatus | None = None
     hardlink_result: hardlinks.HardlinkSyncResult | None = None
+    env_sync_result: env_sync.EnvSyncResult | None = None
     hook_audit: hooks.HookAuditResult | None = None
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -182,7 +184,19 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                 log(f"WARN: Failed to link {action.dst}: {action.error}", v)
                 result.warnings.append(f"Hardlink failed: {action.dst}")
 
-    # Step 1.6: Audit skill hooks for dangerous patterns
+    # Step 1.6: Sync env vars from vault
+    log("Syncing env vars from vault...", v)
+    result.env_sync_result = env_sync.sync_env_from_vault(project_dir)
+    env_r = result.env_sync_result
+    if env_r.added:
+        log(f"Added env vars: {', '.join(env_r.added)}", v, always=True)
+    if env_r.updated:
+        log(f"Updated env vars: {', '.join(env_r.updated)}", v, always=True)
+    if env_r.error:
+        log(f"WARN: Env sync: {env_r.error}", v)
+        result.warnings.append(f"Env sync: {env_r.error}")
+
+    # Step 1.7: Audit skill hooks for dangerous patterns
     log("Auditing skill hooks...", v)
     result.hook_audit = hooks.audit_skill_hooks(project_dir)
     if result.hook_audit.issues:

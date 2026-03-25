@@ -89,6 +89,11 @@ Replace `CHAT_NAME` with the group name (e.g. `PM: PsyOptimal`, `Dev: Valor`). T
 | `python -m tools.job_scheduler kill --job-id <ID>` | Kill a running or pending job by ID |
 | `python -m tools.job_scheduler kill --session-id <ID>` | Kill a job by session ID |
 | `python -m tools.job_scheduler kill --all` | Kill all running and pending jobs |
+| `python -m tools.memory_search search "query"` | Search memories by query |
+| `python -m tools.memory_search save "content"` | Save a new memory |
+| `python -m tools.memory_search inspect --id <ID>` | Inspect a specific memory |
+| `python -m tools.memory_search inspect --stats` | Show memory statistics |
+| `python -m tools.memory_search forget --id <ID> --confirm` | Delete a memory |
 
 ## Development Principles
 

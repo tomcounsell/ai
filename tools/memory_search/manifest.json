@@ -1,0 +1,42 @@
+{
+  "name": "memory_search",
+  "version": "1.0.0",
+  "description": "Search, save, inspect, and forget memories from the Memory model",
+  "type": "library",
+  "status": "stable",
+  "source": {
+    "type": "internal",
+    "package": null,
+    "repository": null,
+    "command": null
+  },
+  "capabilities": [
+    "search",
+    "save",
+    "inspect",
+    "forget"
+  ],
+  "requires": {
+    "python": ">=3.10"
+  },
+  "commands": {
+    "verify": "python -c \"from tools.memory_search import search, save, inspect, forget; print('OK')\"",
+    "test": "pytest tools/memory_search/tests/ -v"
+  },
+  "workflows": [
+    {
+      "name": "search-memories",
+      "description": "Search memory records by query",
+      "steps": [
+        "search('query', project_key='dm')"
+      ]
+    },
+    {
+      "name": "save-memory",
+      "description": "Save a new memory record",
+      "steps": [
+        "save('content', importance=6.0, source='human')"
+      ]
+    }
+  ]
+}

@@ -47,6 +47,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Job Self-Scheduling](job-scheduling.md) | Agent-initiated queue operations: schedule SDLC jobs, deferred execution, 4-tier priority, queue manipulation | Shipped |
 | [Link Content Summarization](link-summarization.md) | Auto-fetch and summarize shared links via Perplexity API | Shipped |
 | [Lint Auto-Fix](lint-auto-fix.md) | Automatic lint/format fixing via pre-commit hook and PostToolUse hook, eliminating agent churn loops | Shipped |
+| [Memory Search Tool](memory-search-tool.md) | Direct interface for searching, saving, inspecting, and forgetting memories from the Memory model | Shipped |
 | [Message Pipeline](message-pipeline.md) | Deferred enrichment pipeline for fast message acknowledgment and zero-loss restarts | Shipped |
 | [Mid-Session Steering](mid-session-steering.md) | End-to-end steering flow for injecting reply-to messages into running agent sessions | Shipped |
 | [Observer Agent](observer-agent.md) | Deterministic SDLC steer/deliver router — no LLM calls, rules-based pipeline progression | Shipped |
