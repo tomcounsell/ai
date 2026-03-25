@@ -647,14 +647,26 @@ def check_telegram_session(project_dir: Path) -> ToolCheck:
     if not python_path.exists():
         return ToolCheck(name="telegram_session", available=False, error="No .venv/bin/python")
 
-    # Find session file
-    session_files = list((project_dir / "data").glob("*.session"))
+    # Find session file — restore from seed if missing
+    data_dir = project_dir / "data"
+    session_files = list(data_dir.glob("*.session"))
     if not session_files:
-        return ToolCheck(
-            name="telegram_session",
-            available=False,
-            error="No session file in data/. Run: python scripts/telegram_login.py",
-        )
+        # Try to restore from seed in ~/Desktop/Valor/telegram_session/
+        seed_dir = Path.home() / "Desktop" / "Valor" / "telegram_session"
+        seed_files = list(seed_dir.glob("*.session")) if seed_dir.is_dir() else []
+        if seed_files:
+            import shutil
+
+            data_dir.mkdir(parents=True, exist_ok=True)
+            dest = data_dir / seed_files[0].name
+            shutil.copy2(seed_files[0], dest)
+            session_files = [dest]
+        else:
+            return ToolCheck(
+                name="telegram_session",
+                available=False,
+                error="No session file in data/. Run: python scripts/telegram_login.py",
+            )
 
     # Check authorization using Telethon (connect-only, no SendCodeRequest)
     check_script = (
@@ -674,29 +686,36 @@ def check_telegram_session(project_dir: Path) -> ToolCheck:
         "print('authorized' if result else 'unauthorized')"
     )
 
-    try:
-        result = run_cmd(
-            [str(python_path), "-c", check_script],
-            cwd=project_dir,
-            timeout=15,
-        )
-        output = result.stdout.strip()
-        if "authorized" == output:
-            return ToolCheck(name="telegram_session", available=True, version="authorized")
-        else:
-            return ToolCheck(
-                name="telegram_session",
-                available=False,
-                error="Session expired/invalid. Run: python scripts/telegram_login.py",
-            )
-    except subprocess.TimeoutExpired:
+    def _check_auth(cwd: Path) -> str | None:
+        """Run the auth check script. Returns 'authorized', 'unauthorized', or None on error."""
+        try:
+            r = run_cmd([str(python_path), "-c", check_script], cwd=cwd, timeout=15)
+            out = r.stdout.strip()
+            return out if out in ("authorized", "unauthorized") else None
+        except Exception:
+            return None
+
+    auth_status = _check_auth(project_dir)
+
+    # If session is invalid, try restoring from seed before giving up
+    if auth_status != "authorized":
+        seed_dir = Path.home() / "Desktop" / "Valor" / "telegram_session"
+        seed_files = list(seed_dir.glob("*.session")) if seed_dir.is_dir() else []
+        if seed_files:
+            import shutil
+
+            dest = data_dir / seed_files[0].name
+            shutil.copy2(seed_files[0], dest)
+            auth_status = _check_auth(project_dir)
+
+    if auth_status == "authorized":
+        return ToolCheck(name="telegram_session", available=True, version="authorized")
+    else:
         return ToolCheck(
             name="telegram_session",
             available=False,
-            error="Timeout checking session (Telegram may be rate-limiting)",
+            error="Session expired/invalid. Run: python scripts/telegram_login.py",
         )
-    except Exception as e:
-        return ToolCheck(name="telegram_session", available=False, error=str(e))
 
 
 def verify_environment(project_dir: Path, check_ollama_model: bool = True) -> VerificationResult:
