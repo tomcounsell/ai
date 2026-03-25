@@ -99,17 +99,31 @@ After a PR merges, `extract_post_merge_learning()` in `agent/memory_extraction.p
 
 The function is designed to be called from the SDLC merge stage or a post-merge script. It returns None gracefully if no meaningful takeaway is found or if the API call fails.
 
+## Claude Code Integration
+
+The memory system also runs in Claude Code CLI sessions via hooks. See [Claude Code Memory](claude-code-memory.md) for full details.
+
+- **UserPromptSubmit hook** ingests qualifying user prompts (same importance=6.0 as Telegram messages)
+- **PostToolUse hook** runs memory recall with a file-based sliding window (JSON sidecar files replace in-memory state since hooks are stateless processes)
+- **Stop hook** runs Haiku extraction and outcome detection on the session transcript
+- **Deja vu signals** provide vague recognition or novel territory cues when recall results are ambiguous
+- Bridge module: `.claude/hooks/hook_utils/memory_bridge.py`
+
+Both paths (Telegram agent and Claude Code hooks) write to the same Redis Memory model. Memories are shared across all session types.
+
 ## Key Files
 
 | File | Purpose |
 |------|---------|
 | `models/memory.py` | Memory model (Level 3 popoto: decay, confidence, write filter, access tracker, bloom) |
 | `config/memory_defaults.py` | Tuned Defaults overrides for popoto constants |
-| `agent/memory_hook.py` | PostToolUse thought injection with sliding window rate limiting |
+| `agent/memory_hook.py` | PostToolUse thought injection with sliding window rate limiting (Telegram agent path) |
 | `agent/memory_extraction.py` | Post-session Haiku extraction (categorized), bigram outcome detection, post-merge learning extraction |
 | `agent/health_check.py` | Integration point: `watchdog_hook()` calls `check_and_inject()` |
 | `agent/messenger.py` | Integration point: `_run_work()` calls `run_post_session_extraction()` |
 | `bridge/telegram_bridge.py` | Integration point: `Memory.safe_save()` after `store_message()` |
+| `.claude/hooks/hook_utils/memory_bridge.py` | Claude Code hook memory bridge (recall, ingest, extract) |
+| `.claude/hooks/user_prompt_submit.py` | Claude Code prompt ingestion hook |
 | `config/personas/_base.md` | Thought priming instruction for agents |
 
 ## Configuration
