@@ -27,14 +27,29 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-# Sliding window constants (match agent/memory_hook.py)
+# ---------------------------------------------------------------------------
+# Sliding window constants for memory recall timing
+#
+# WINDOW_SIZE: tool calls between recall queries. Lower = more frequent
+#   recall checks (and more latency); higher = fewer checks.
+# BUFFER_SIZE: max recent tool calls kept in the sidecar for keyword
+#   extraction. Should be >= WINDOW_SIZE to ensure full coverage.
+# MAX_THOUGHTS: max <thought> blocks injected per recall cycle.
+# ---------------------------------------------------------------------------
 WINDOW_SIZE = 3
 BUFFER_SIZE = 9
 MAX_THOUGHTS = 3
 
-# Deja vu thresholds
-DEJA_VU_BLOOM_HIT_THRESHOLD = 3  # minimum bloom hits for vague recognition
-NOVEL_TERRITORY_KEYWORD_THRESHOLD = 7  # minimum keywords with zero bloom hits
+# ---------------------------------------------------------------------------
+# Deja vu thresholds -- control when vague recognition messages fire
+#
+# DEJA_VU_BLOOM_HIT_THRESHOLD: minimum bloom hits to emit a "seen something
+#   related" thought when no strong ContextAssembler results are found.
+# NOVEL_TERRITORY_KEYWORD_THRESHOLD: minimum unique keywords with zero bloom
+#   hits to trigger the "new territory" thought.
+# ---------------------------------------------------------------------------
+DEJA_VU_BLOOM_HIT_THRESHOLD = 3
+NOVEL_TERRITORY_KEYWORD_THRESHOLD = 7
 
 # Trivial prompt patterns to skip during ingestion
 TRIVIAL_PATTERNS = frozenset(
@@ -299,7 +314,7 @@ def ingest(content: str) -> bool:
         project_key = _get_project_key()
 
         m = Memory.safe_save(
-            agent_id="claude-code-user",
+            agent_id=project_key,
             project_key=project_key,
             content=stripped[:500],
             importance=6.0,
