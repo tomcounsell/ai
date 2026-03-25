@@ -336,9 +336,9 @@ EOF
     echo "Bridge service installed and started"
     echo "Bridge will auto-start on boot"
 
-    # Install update cron (runs remote-update.sh every 12 hours)
+    # Install update polling (runs remote-update.sh every 30 minutes)
     echo ""
-    echo "Installing update cron..."
+    echo "Installing update polling..."
     cat > "$UPDATE_PLIST_PATH" << UPDATEEOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -360,17 +360,8 @@ EOF
         <key>HOME</key>
         <string>${HOME}</string>
     </dict>
-    <key>StartCalendarInterval</key>
-    <array>
-        <dict>
-            <key>Hour</key>
-            <integer>6</integer>
-        </dict>
-        <dict>
-            <key>Hour</key>
-            <integer>18</integer>
-        </dict>
-    </array>
+    <key>StartInterval</key>
+    <integer>1800</integer>
     <key>StandardOutPath</key>
     <string>${LOG_DIR}/update.log</string>
     <key>StandardErrorPath</key>
@@ -379,7 +370,7 @@ EOF
 </plist>
 UPDATEEOF
     launchctl load "$UPDATE_PLIST_PATH"
-    echo "Update cron installed (runs at 06:00 and 18:00)"
+    echo "Update polling installed (runs every 30 minutes)"
 
     # Install bridge watchdog (runs every 60 seconds)
     echo ""
