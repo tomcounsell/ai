@@ -5,7 +5,7 @@ appetite: Medium
 owner: Valor
 created: 2026-03-26
 tracking: https://github.com/tomcounsell/ai/issues/556
-last_comment_id:
+last_comment_id: none
 ---
 
 # Config-Driven Chat Mode
