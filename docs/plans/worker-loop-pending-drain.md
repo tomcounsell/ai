@@ -60,8 +60,9 @@ The race window: `async_create` (step 3) and `async_filter` (step 6) both use `t
 ## Architectural Impact
 
 - **New dependencies**: None -- uses existing asyncio primitives
-- **Interface changes**: `_pop_job()` gains a fallback scan path. `_worker_loop()` drain guard becomes configurable. No external API changes
-- **Coupling**: Slightly reduces coupling to Popoto indexes by adding a bypass path
+- **Interface changes**: New `_pop_job_with_fallback()` function (separate from `_pop_job()`). `_worker_loop()` drain uses Event-based wait. No external API changes
+- **Coupling**: Slightly reduces coupling to Popoto's `to_thread()` by adding a sync fallback path
+- **Process scope**: asyncio.Event is intra-process only. Multi-process deployment would require Redis pub/sub, explicitly out of scope
 - **Data ownership**: No change
 - **Reversibility**: Fully reversible -- remove the Event signaling and fallback scan, revert to current behavior
 
@@ -84,35 +85,39 @@ No prerequisites -- this work modifies existing internal code with no external d
 ### Key Elements
 
 - **asyncio.Event notification**: Signal the worker when new work is enqueued, eliminating the polling race entirely
-- **Aggressive drain guard**: Replace single 0.1s retry with configurable multi-retry (3 attempts, 0.5s spacing)
-- **Raw Redis fallback scan**: When indexed query returns empty, do a direct SCAN/KEYS check as safety net
-- **Exit-time diagnostic**: Before worker exits, verify no pending jobs exist via raw Redis -- log warning if found
+- **Event-based drain with fallback**: Single clear drain strategy — Event wait with timeout, then sync Popoto fallback
+- **Exit-time diagnostic**: Before worker exits, verify no pending jobs exist via sync query -- log warning if found
 
-### Flow
+### Flow (single drain strategy)
 
-**Job enqueued** -> `_push_job()` creates record -> `_notify_worker(chat_id)` sets Event -> Worker `await event.wait()` wakes -> `_pop_job()` finds job -> Process -> Loop
+After a job completes, the worker follows this exact sequence:
 
-**Fallback** (if Event not set or missed): Worker finishes job -> `_pop_job()` returns None -> Drain guard: retry 3x at 0.5s intervals -> If still None: raw Redis scan for pending jobs with this chat_id -> If found: log warning + retry `_pop_job()` -> If truly empty: exit
+1. `event.clear()` — reset the signal
+2. `await event.wait(timeout=1.5s)` — block until new work is signaled OR timeout
+3. **If event fires**: call `_pop_job(chat_id)` → process job → loop back to step 1
+4. **If timeout**: call `_pop_job_with_fallback(chat_id)` (sync Popoto query bypassing `to_thread()`) → if found, process → if empty, exit
+
+There is NO separate polling retry loop. The Event wait subsumes the old drain guard — the 1.5s timeout provides the same "wait for late arrivals" behavior as the old 0.1s retry, but with the Event signal as the fast path.
 
 ### Technical Approach
 
-1. **Add `asyncio.Event` per chat_id** in `_active_events` dict alongside `_active_workers`. `enqueue_job()` calls `event.set()` after `_push_job()`. The worker loop `await event.wait()` + `event.clear()` between jobs instead of relying solely on `_pop_job()` polling.
+1. **Add `asyncio.Event` per chat_id** in `_active_events` dict alongside `_active_workers`. `enqueue_job()` calls `event.set()` after `_push_job()`. The worker loop uses `event.wait()` + `event.clear()` as the primary "is there more work?" mechanism. asyncio.Event is level-triggered — `set()` during job execution latches until `clear()`.
 
-2. **Make drain guard configurable**: Extract `DRAIN_RETRIES = 3` and `DRAIN_INTERVAL = 0.5` as module-level constants. Replace the single `await asyncio.sleep(0.1)` + one retry with a loop.
+2. **Add `_pop_job_with_fallback(chat_id)`**: A separate function (not modifying `_pop_job()`) that first calls `_pop_job()` (the normal async_filter path), and if that returns None, runs a **synchronous** `AgentSession.query.filter(chat_id=chat_id, status="pending")` call directly (bypassing `to_thread()` scheduling). This avoids the thread-pool race that is the root cause while using the same Popoto indexes. Only called from the drain timeout path and exit-time diagnostic — never on the hot `_pop_job()` path.
 
-3. **Add raw Redis fallback in `_pop_job()`**: When `async_filter` returns empty, do a direct `redis.keys()` or `redis.scan()` for keys matching the AgentSession pattern with the target chat_id, then check each for `status=pending`. This bypasses Popoto indexes entirely.
+3. **Exit-time safety check**: Before the "Queue empty, worker exiting" log, run `_pop_job_with_fallback()`. If pending jobs are found, log a `WARNING` and process them. This is the last safety net.
 
-4. **Exit-time safety check**: Before the "Queue empty, worker exiting" log, run the raw Redis scan. If pending jobs are found, log a `WARNING` and retry `_pop_job()` one final time.
+**Note**: asyncio.Event is intra-process only. Multi-process deployment would require Redis pub/sub or similar, which is explicitly out of scope for this fix.
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] The raw Redis fallback scan must have try/except -- if Redis SCAN fails, fall through to normal exit (don't crash the worker)
+- [ ] The sync Popoto fallback in `_pop_job_with_fallback()` must have try/except -- if query fails, fall through to normal exit (don't crash the worker)
 - [ ] Event.set() in `enqueue_job()` must not raise if no event exists yet (worker not started)
 
 ### Empty/Invalid Input Handling
-- [ ] `_pop_job()` with empty chat_id should return None gracefully
-- [ ] Raw Redis scan returning keys that no longer exist (deleted between SCAN and GET) must handle KeyError
+- [ ] `_pop_job_with_fallback()` with empty chat_id should return None gracefully
+- [ ] Sync query returning stale records (deleted between query and processing) must handle gracefully
 
 ### Error State Rendering
 - [ ] No user-visible output -- this is internal infrastructure
@@ -120,8 +125,8 @@ No prerequisites -- this work modifies existing internal code with no external d
 
 ## Test Impact
 
-- [ ] `tests/integration/test_job_queue_race.py::TestDrainGuard::test_drain_guard_double_check_finds_late_job` -- UPDATE: adjust to new retry count/interval constants
-- [ ] `tests/integration/test_job_queue_race.py::TestDrainGuard::test_drain_guard_exits_when_truly_empty` -- UPDATE: adjust for multi-retry drain guard timing
+- [ ] `tests/integration/test_job_queue_race.py::TestDrainGuard::test_drain_guard_double_check_finds_late_job` -- REPLACE: existing test only validates `_pop_job` isolation, not `_worker_loop` integration. Rewrite to test Event-based drain in `_worker_loop`
+- [ ] `tests/integration/test_job_queue_race.py::TestDrainGuard::test_drain_guard_exits_when_truly_empty` -- REPLACE: rewrite for Event-based drain with timeout exit behavior
 
 ## Rabbit Holes
 
@@ -135,9 +140,9 @@ No prerequisites -- this work modifies existing internal code with no external d
 **Impact:** Worker exits before event is set (same as current bug)
 **Mitigation:** The aggressive drain guard + raw Redis fallback are independent safety nets. Even if the Event is missed, the multi-retry drain guard with 1.5s total wait (3 x 0.5s) is much more likely to catch the index than the current 0.1s single retry.
 
-### Risk 2: Raw Redis SCAN performance
-**Impact:** SCAN on large Redis databases could be slow
-**Mitigation:** The SCAN is only triggered as a last resort (after indexed query returns empty AND drain guard retries exhausted). Scope the SCAN with a pattern match on the chat_id to limit results. In practice, the total number of AgentSession keys is small (dozens, not millions).
+### Risk 2: Sync Popoto query blocking the event loop
+**Impact:** The `_pop_job_with_fallback()` sync query runs directly (not via `to_thread()`), briefly blocking the event loop
+**Mitigation:** This only runs on the drain timeout path (after 1.5s with no Event signal) — a cold path. The sync Popoto filter is a single Redis SINTER + HGETALL, taking microseconds. Acceptable tradeoff for correctness.
 
 ## Race Conditions
 
@@ -208,47 +213,47 @@ No agent integration required -- this is internal job queue infrastructure. No n
 
 ## Step by Step Tasks
 
-### 1. Implement asyncio.Event notification and aggressive drain guard
+### 1. Implement asyncio.Event notification and Event-based drain
 - **Task ID**: build-event-drain
 - **Depends On**: none
-- **Validates**: tests/integration/test_job_queue_race.py (update), tests/integration/test_worker_drain.py (create)
+- **Validates**: tests/integration/test_job_queue_race.py (replace), tests/integration/test_worker_drain.py (create)
 - **Assigned To**: queue-fixer
 - **Agent Type**: async-specialist
 - **Parallel**: true
 - Add `_active_events: dict[str, asyncio.Event]` alongside `_active_workers`
 - In `_ensure_worker()`: create Event if not exists, pass to `_worker_loop()`
 - In `enqueue_job()`: call `event.set()` after `_push_job()` succeeds
-- In `_worker_loop()`: after job completes, `event.clear()` then `await asyncio.wait_for(event.wait(), timeout=DRAIN_INTERVAL * DRAIN_RETRIES)` before exiting
-- Extract `DRAIN_RETRIES = 3` and `DRAIN_INTERVAL = 0.5` as module constants
-- Replace single 0.1s drain guard with multi-retry loop using these constants
+- In `_worker_loop()`: after job completes, `event.clear()` then `await asyncio.wait_for(event.wait(), timeout=1.5)`. If event fires → `_pop_job()`. If timeout → `_pop_job_with_fallback()`. If empty → exit
+- Extract `DRAIN_TIMEOUT = 1.5` as module constant (replaces old 0.1s drain guard)
+- Remove the old sleep-and-retry drain guard entirely
 
-### 2. Add raw Redis fallback scan and exit diagnostics
-- **Task ID**: build-redis-fallback
+### 2. Add `_pop_job_with_fallback()` and exit diagnostics
+- **Task ID**: build-fallback
 - **Depends On**: none
 - **Validates**: tests/integration/test_worker_drain.py (create)
 - **Assigned To**: queue-fixer
 - **Agent Type**: async-specialist
 - **Parallel**: true
-- Add `_raw_pending_check(chat_id)` function that bypasses Popoto indexes by scanning Redis keys
-- Call from `_pop_job()` when `async_filter` returns empty as a fallback
-- Add exit-time diagnostic: before "Queue empty, worker exiting", run `_raw_pending_check()` and log WARNING if pending jobs found
-- Ensure all Redis operations have try/except with graceful fallthrough
+- Add `_pop_job_with_fallback(chat_id)` as a **separate function** (do NOT modify `_pop_job()`)
+- First calls `_pop_job()` (normal path). If None, runs synchronous `AgentSession.query.filter(chat_id=chat_id, status="pending")` directly (bypassing `to_thread()`)
+- Add exit-time diagnostic: before "Queue empty, worker exiting", call `_pop_job_with_fallback()`. If found, log WARNING and process. If empty, exit
+- Wrap sync Popoto query in try/except with graceful fallthrough
 
-### 3. Update existing tests and create integration test
+### 3. Replace existing tests and create integration test
 - **Task ID**: build-tests
-- **Depends On**: build-event-drain, build-redis-fallback
+- **Depends On**: build-event-drain, build-fallback
 - **Validates**: tests/integration/test_job_queue_race.py, tests/integration/test_worker_drain.py
 - **Assigned To**: queue-fixer
 - **Agent Type**: test-engineer
 - **Parallel**: false
-- Update `TestDrainGuard` tests for new retry count/interval
+- REPLACE `TestDrainGuard` tests — existing tests only validate `_pop_job` isolation, need to test `_worker_loop` Event-based drain
 - Create `test_worker_drain.py` with end-to-end test: enqueue A, start worker, enqueue B during A execution, assert B picked up
 - Test Event notification path: verify event.set() during job execution wakes worker after completion
-- Test raw Redis fallback: mock `async_filter` to return empty, verify fallback finds the job
+- Test sync Popoto fallback: mock `async_filter` to return empty, verify `_pop_job_with_fallback()` finds the job via sync query
 - Test exit diagnostic: verify WARNING log when pending jobs exist at exit time
 
-### 4. Validate fix
-- **Task ID**: validate-fix
+### 4. Validate and document
+- **Task ID**: validate-and-document
 - **Depends On**: build-tests
 - **Assigned To**: queue-validator
 - **Agent Type**: validator
@@ -258,25 +263,9 @@ No agent integration required -- this is internal job queue infrastructure. No n
 - Run format: `python -m ruff format --check .`
 - Verify no regressions in existing job queue tests
 - Confirm sequential-per-chat guarantee is preserved
-
-### 5. Documentation
-- **Task ID**: document-feature
-- **Depends On**: validate-fix
-- **Assigned To**: queue-fixer
-- **Agent Type**: documentarian
-- **Parallel**: false
-- Update `docs/features/job-queue.md` with new drain guard behavior
+- Update `docs/features/job-queue.md` with Event-based drain behavior
 - Update docstrings for modified functions
-
-### 6. Final Validation
-- **Task ID**: validate-all
-- **Depends On**: document-feature
-- **Assigned To**: queue-validator
-- **Agent Type**: validator
-- **Parallel**: false
-- Run all validation commands
 - Verify all success criteria met
-- Generate final report
 
 ## Verification
 
@@ -285,15 +274,21 @@ No agent integration required -- this is internal job queue infrastructure. No n
 | Tests pass | `pytest tests/ -x -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| Drain constants exist | `grep -c 'DRAIN_RETRIES\|DRAIN_INTERVAL' agent/job_queue.py` | output > 1 |
+| Drain constant exists | `grep -c 'DRAIN_TIMEOUT' agent/job_queue.py` | output > 0 |
 | Event dict exists | `grep -c '_active_events' agent/job_queue.py` | output > 0 |
-| Raw fallback exists | `grep -c '_raw_pending_check' agent/job_queue.py` | output > 0 |
+| Fallback function exists | `grep -c '_pop_job_with_fallback' agent/job_queue.py` | output > 0 |
 | Exit diagnostic exists | `grep -c 'pending jobs.*exit\|exit.*pending' agent/job_queue.py` | output > 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
-| CONCERN | [agent-type] | [The concern raised] | [How/whether it was addressed] |
+| Severity | Finding | Resolution |
+|----------|---------|------------|
+| BLOCKER | Event vs polling drain overlap creates ambiguous control flow | Resolved: defined single drain strategy — Event wait with 1.5s timeout, no separate polling loop |
+| CONCERN | `redis.keys()` in fallback is problematic | Resolved: replaced with sync Popoto `query.filter()` bypassing `to_thread()` |
+| CONCERN | `_pop_job()` contract change affects all callers | Resolved: created separate `_pop_job_with_fallback()` function |
+| CONCERN | asyncio.Event single-process limitation undisclosed | Resolved: added note in Architectural Impact and Solution sections |
+| CONCERN | Test Impact dispositions should be REPLACE not UPDATE | Resolved: changed both to REPLACE with justification |
+| NIT | Tasks 4 and 6 duplicate full test suite runs | Resolved: merged into single validate-and-document task |
 
 ---
 
