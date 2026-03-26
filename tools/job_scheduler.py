@@ -13,6 +13,9 @@ Usage:
     python -m tools.job_scheduler bump --job-id <job_id>
     python -m tools.job_scheduler pop --project valor
     python -m tools.job_scheduler cancel --job-id <job_id>
+    python -m tools.job_scheduler list --status killed,abandoned
+    python -m tools.job_scheduler cleanup --age 30 --dry-run
+    python -m tools.job_scheduler cleanup --age 30
 """
 
 import argparse
@@ -885,6 +888,105 @@ def cmd_kill(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_list(args: argparse.Namespace) -> int:
+    """List sessions filtered by status."""
+    from models.agent_session import AgentSession
+
+    project_key = args.project or _get_env_context()["project_key"]
+    statuses = [s.strip() for s in args.status.split(",")]
+
+    try:
+        sessions = []
+        for status in statuses:
+            sessions.extend(list(AgentSession.query.filter(project_key=project_key, status=status)))
+
+        # Sort by created_at descending (newest first)
+        sessions.sort(key=lambda s: s.created_at or 0, reverse=True)
+
+        # Apply limit
+        if args.limit:
+            sessions = sessions[: args.limit]
+
+        items = []
+        for s in sessions:
+            item = {
+                "session_id": s.session_id,
+                "status": s.status,
+                "project_key": s.project_key,
+            }
+            if s.created_at:
+                age_min = int((time.time() - s.created_at) / 60)
+                item["created_at"] = datetime.fromtimestamp(s.created_at, tz=UTC).isoformat()
+                item["age_minutes"] = age_min
+            if s.message_text:
+                item["message_preview"] = (s.message_text or "")[:80]
+            items.append(item)
+
+        _output({"status": "ok", "count": len(items), "sessions": items})
+        return 0
+
+    except Exception as e:
+        _output({"status": "error", "message": f"Failed to list sessions: {e}"})
+        return 1
+
+
+def cmd_cleanup(args: argparse.Namespace) -> int:
+    """Delete stale sessions older than --age minutes in terminal statuses."""
+    from models.agent_session import AgentSession
+
+    project_key = args.project
+    terminal_statuses = ["killed", "abandoned", "failed"]
+    age_threshold = args.age * 60  # convert to seconds
+    now = time.time()
+
+    try:
+        targets = []
+        for status in terminal_statuses:
+            if project_key:
+                sessions = list(AgentSession.query.filter(project_key=project_key, status=status))
+            else:
+                sessions = list(AgentSession.query.filter(status=status))
+            for s in sessions:
+                age_sec = (now - float(s.created_at)) if s.created_at else 0
+                if age_sec > age_threshold:
+                    targets.append(s)
+
+        if not targets:
+            _output({"status": "ok", "message": "No stale sessions to clean up.", "deleted": 0})
+            return 0
+
+        if args.dry_run:
+            items = []
+            for s in targets:
+                age_min = int((now - float(s.created_at or 0)) / 60)
+                items.append(
+                    {
+                        "session_id": s.session_id,
+                        "status": s.status,
+                        "project_key": s.project_key,
+                        "age_minutes": age_min,
+                    }
+                )
+            _output({"status": "dry_run", "would_delete": len(items), "sessions": items})
+            return 0
+
+        for s in targets:
+            s.delete()
+
+        _output(
+            {
+                "status": "ok",
+                "deleted": len(targets),
+                "message": f"Deleted {len(targets)} stale session(s).",
+            }
+        )
+        return 0
+
+    except Exception as e:
+        _output({"status": "error", "message": f"Failed to clean up sessions: {e}"})
+        return 1
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="job_scheduler",
@@ -942,6 +1044,29 @@ def main():
     kill_group.add_argument("--session-id", help="Kill a job by session ID")
     kill_group.add_argument("--all", action="store_true", help="Kill all running and pending jobs")
 
+    # list
+    lst = subparsers.add_parser("list", help="List sessions filtered by status")
+    lst.add_argument(
+        "--status",
+        required=True,
+        help="Comma-separated statuses to filter (e.g. killed,abandoned,failed)",
+    )
+    lst.add_argument("--project", help="Project key (default: from env or 'valor')")
+    lst.add_argument("--limit", type=int, help="Max number of sessions to return")
+
+    # cleanup
+    clean = subparsers.add_parser("cleanup", help="Delete stale sessions in terminal statuses")
+    clean.add_argument(
+        "--age",
+        type=int,
+        default=30,
+        help="Delete sessions older than this many minutes (default: 30)",
+    )
+    clean.add_argument("--project", help="Scope to a specific project (default: all projects)")
+    clean.add_argument(
+        "--dry-run", action="store_true", help="Show what would be deleted without deleting"
+    )
+
     args = parser.parse_args()
 
     if not args.command:
@@ -957,6 +1082,8 @@ def main():
         "cancel": cmd_cancel,
         "children": cmd_children,
         "kill": cmd_kill,
+        "list": cmd_list,
+        "cleanup": cmd_cleanup,
     }
 
     return commands[args.command](args)

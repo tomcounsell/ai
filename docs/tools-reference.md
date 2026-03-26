@@ -127,6 +127,14 @@ python -m tools.job_scheduler cancel --job-id <JOB_ID>
 python -m tools.job_scheduler kill --job-id <JOB_ID>
 python -m tools.job_scheduler kill --session-id <SESSION_ID>
 python -m tools.job_scheduler kill --all
+
+# List sessions by status
+python -m tools.job_scheduler list --status killed,abandoned
+python -m tools.job_scheduler list --status completed --limit 5
+
+# Clean up stale sessions (deletes killed/abandoned/failed older than N minutes)
+python -m tools.job_scheduler cleanup --age 30 --dry-run   # Preview
+python -m tools.job_scheduler cleanup --age 30              # Delete
 ```
 
 See `docs/features/job-scheduling.md` for full documentation.

@@ -40,6 +40,21 @@ python -m tools.job_scheduler pop --project valor         # Remove next without 
 python -m tools.job_scheduler cancel --job-id <JOB_ID>   # Cancel specific job
 ```
 
+### Session Listing and Cleanup
+
+```bash
+# List sessions by status (comma-separated)
+python -m tools.job_scheduler list --status killed,abandoned
+python -m tools.job_scheduler list --status completed --limit 5
+
+# Clean up stale sessions (killed/abandoned/failed older than N minutes)
+python -m tools.job_scheduler cleanup --age 30 --dry-run   # Preview what would be deleted
+python -m tools.job_scheduler cleanup --age 30              # Actually delete
+python -m tools.job_scheduler cleanup --age 60 --project valor  # Scope to one project
+```
+
+The `cleanup` command deletes sessions in terminal statuses (`killed`, `abandoned`, `failed`) that are older than the specified age. Uses `delete()` directly — not status mutation — to avoid creating orphaned records (see KeyField index note in [Job Queue](job-queue.md)).
+
 ## Architecture
 
 ### Tool, Not MCP Server
