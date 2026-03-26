@@ -329,6 +329,7 @@ def get_recent_completions(limit: int = 25, page: int = 1) -> list[PipelineProgr
         try:
             pipeline = _session_to_pipeline(session)
         except Exception:
+            logger.debug(f"Skipping corrupt session: {getattr(session, 'job_id', '?')}")
             continue
         completed.append(pipeline)
 
