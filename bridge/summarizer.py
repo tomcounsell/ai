@@ -873,23 +873,45 @@ def _linkify_references(text: str, session) -> str:
 
 
 def _get_status_emoji(session, is_completion: bool = True) -> str:
-    """Get the status emoji prefix based on completion flag and session state.
+    """Get the status emoji prefix for milestone-selective display.
 
-    The is_completion flag takes priority for running/active sessions because
-    the session status hasn't been updated yet when the summary is composed.
-    Only hard terminal states (completed, failed) override the flag.
+    Milestone-selective: completion emoji is reserved for true milestones
+    (merged PR, closed issue, failed session). Routine completions get
+    no emoji prefix. In-progress work gets the hourglass.
+
+    Args:
+        session: AgentSession or mock with .status and .get_links().
+        is_completion: Whether the output is classified as completion.
+
+    Returns:
+        Emoji string or empty string for routine completions.
     """
     if not session:
+        # No session context — fall back to simple logic
         return "✅" if is_completion else "⏳"
 
     status = session.status
     if status in ("failed",):
         return "❌"
-    elif status in ("completed",):
-        return "✅"
-    else:
-        # For running/active/pending — trust the is_completion flag
-        return "✅" if is_completion else "⏳"
+
+    # Check for milestone events: merged PR or closed issue
+    is_milestone = False
+    if hasattr(session, "get_links"):
+        try:
+            links = session.get_links()
+            # PR link on completed session suggests merge milestone
+            if links.get("pr") and status in ("completed",):
+                is_milestone = True
+        except Exception:
+            pass
+
+    if status in ("completed",):
+        return "✅" if is_milestone else ""
+
+    # Running/active/pending — in-progress or routine completion
+    if is_completion:
+        return ""  # Routine completion, no emoji
+    return "⏳"
 
 
 def _build_summary_prompt(
@@ -995,7 +1017,7 @@ FORMAT RULES for the **response** field (adaptive based on content type):
 
    If the output contains EXPLICIT questions directed at the human (sentences that literally \
    end with "?" and ask the human to decide or provide input), list them AFTER the bullets, \
-   separated by "---" on its own line. Prefix each with "? ":
+   separated by "---" on its own line. Prefix each with ">> ":
 
    NEVER fabricate questions. NEVER reframe declarative statements as questions. \
    If the agent says "I will do X", that is NOT a question — it is a plan. \
@@ -1005,8 +1027,8 @@ FORMAT RULES for the **response** field (adaptive based on content type):
    • Built auth token rotation with retry
    • 12 tests passing
    ---
-   ? Should we use exponential backoff or fixed intervals?
-   ? 2 nits found in review — skip or patch?
+   >> Should we use exponential backoff or fixed intervals?
+   >> 2 nits found in review — skip or patch?
 
    WRONG — do NOT do this:
    Raw: "I will add sdlc to classifier categories"
@@ -1039,7 +1061,28 @@ Examples of what to OMIT: "Analyzed the codebase", "Read through the plan", \
 "Investigated the issue", "Here's my approach", "I'll tackle this by", \
 "My plan is to", "Step 1: ...", "The strategy is". \
 These are process noise — the PM only cares about WHAT was \
-accomplished, not THAT you read files or analyzed code or what you plan to do next."""
+accomplished, not THAT you read files or analyzed code or what you plan to do next.
+
+SDLC STAGE NATURALIZATION:
+- Translate raw SDLC stage labels to natural language equivalents: \
+PLAN → planning, BUILD → building, TEST → testing, REVIEW → reviewing, \
+DOCS → documenting, MERGE → merging. Never emit the raw uppercase labels \
+(PLAN, BUILD, TEST, REVIEW, DOCS, MERGE) in the response field. \
+The term "SDLC" itself is acceptable as a process reference.
+
+QUESTION PREFIX:
+- When listing explicit questions after the "---" separator, prefix each with \
+">> " instead of "? ". The ">>" prefix is visually distinct in Telegram.
+
+LINK FORMATTING:
+- Use short-form references only in bullet text (PR #N, issue #N). \
+Never include full URLs in bullets — link rendering is handled separately by \
+the _linkify_references post-processor.
+
+DEVELOPER METRICS SUPPRESSION:
+- Do not include line counts, file counts, addition/deletion counts, or exact test \
+pass/fail numbers. Use outcome language instead: "shipped and tested", "all tests \
+passing", "reviewed and approved". The PM cares about outcomes, not metrics."""
 
 # Blocker flag logic explained:
 # The ⚠️ flag is meant to alert the PM only when human intervention is truly required.
@@ -1201,27 +1244,53 @@ async def _summarize_with_openrouter(prompt: str) -> StructuredSummary | None:
         return None
 
 
-def _parse_summary_and_questions(summary_text: str) -> tuple[str, str | None]:
+def _normalize_question_prefix(text: str) -> str:
+    """Normalize legacy '? ' question prefix to '>> ' for visual distinction.
+
+    Accepts both '? ' and '>> ' prefixes. Lines starting with '? ' are
+    converted to '>> '. Lines already using '>> ' are left unchanged.
+    """
+    lines = text.split("\n")
+    normalized = []
+    for line in lines:
+        stripped = line.lstrip()
+        if stripped.startswith("? "):
+            normalized.append(line.replace("? ", ">> ", 1))
+        else:
+            normalized.append(line)
+    return "\n".join(normalized)
+
+
+def _parse_summary_and_questions(
+    summary_text: str,
+) -> tuple[str, str | None]:
     """Parse LLM summary output into bullets and optional questions.
 
-    The LLM may produce:
-        • Bullet 1
-        • Bullet 2
+    The LLM may produce (using >> prefix, or legacy ? prefix):
+        * Bullet 1
+        * Bullet 2
         ---
-        ? Question 1
-        ? Question 2
+        >> Question 1
+        >> Question 2
 
-    Returns (bullets, questions) where questions is None if no --- separator found.
+    Returns (bullets, questions) where questions is None if no
+    --- separator found. The >> prefix is the canonical format;
+    ? prefix is accepted for backward compatibility and normalized
+    to >> on output.
     """
     if "\n---\n" in summary_text:
         bullets, questions = summary_text.split("\n---\n", 1)
         questions = questions.strip()
         if questions:
+            questions = _normalize_question_prefix(questions)
             return bullets.strip(), questions
         return bullets.strip(), None
     # Also handle --- at the very start (edge case)
     if summary_text.strip().startswith("---"):
-        return "", summary_text.strip().lstrip("-").strip() or None
+        raw = summary_text.strip().lstrip("-").strip()
+        if raw:
+            return "", _normalize_question_prefix(raw)
+        return "", None
     return summary_text, None
 
 
@@ -1235,7 +1304,7 @@ def _compose_structured_summary(summary_text: str, session=None, is_completion: 
         • Bullet point 1
         • Bullet point 2
 
-        ? Question needing input
+        >> Question needing input
 
     SDLC:
         ⏳
@@ -1243,7 +1312,7 @@ def _compose_structured_summary(summary_text: str, session=None, is_completion: 
         • Bullet point 1
         • Bullet point 2
 
-        ? Question needing input
+        >> Question needing input
         Issue #243 | PR #250
     """
     # Re-read session from Redis to pick up stage data written during execution.
@@ -1267,7 +1336,8 @@ def _compose_structured_summary(summary_text: str, session=None, is_completion: 
 
     # Status emoji prefix (no message echo — Telegram reply-to provides context)
     emoji = _get_status_emoji(session, is_completion)
-    parts.append(emoji)
+    if emoji:
+        parts.append(emoji)
 
     # Summary text (bullets or prose)
     parts.append(bullets.strip())
@@ -1355,7 +1425,7 @@ async def summarize_response(
         if not expectations:
             open_questions = _extract_open_questions(raw_response)
             if open_questions:
-                expectations = "\n".join(f"? {q}" for q in open_questions)
+                expectations = "\n".join(f">> {q}" for q in open_questions)
                 logger.info(
                     f"Extracted {len(open_questions)} open questions from ## Open Questions section"
                 )
