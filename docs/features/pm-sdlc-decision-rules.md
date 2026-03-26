@@ -31,7 +31,7 @@ This led to the PM either asking permission for obvious merges or silently skipp
 
 ## Annotate Rather Than Skip
 
-When a review finding is genuinely not worth fixing (e.g., a style nit in legacy code, a suggestion that contradicts the plan), the do-patch builder adds an inline code comment instead of silently skipping:
+When a review finding is genuinely not worth fixing (e.g., a style nit in older code, a suggestion that contradicts the plan), the do-patch builder adds an inline code comment instead of silently skipping:
 
 ```python
 # NOTE: [finding summary] -- left as-is because [rationale]
