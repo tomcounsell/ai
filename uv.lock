@@ -1138,15 +1138,15 @@ wheels = [
 
 [[package]]
 name = "popoto"
-version = "1.4.0"
+version = "1.4.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "msgpack" },
     { name = "redis" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/16/ba/4046810bfc134a4be2d18b1a1f20beb92b9225a0ec3a6834ce0f2bb1a5f5/popoto-1.4.0.tar.gz", hash = "sha256:dcc16e7e08194eb7d3962ce9063bd95151adbee1b7f4959761386d12e20de40e", size = 341864, upload-time = "2026-03-24T09:10:15.913Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/85/5d/04deb83d4357a6510c349a3c764a7de3dae49b4cdf587ecee22509d8fd7e/popoto-1.4.1.tar.gz", hash = "sha256:65663ce0075aca98540f1560013125ba1565ed97b4df2cf5a842a7b435aab07b", size = 353342, upload-time = "2026-03-26T07:32:09.154Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a1/f7/17ed9ba1917350b8deb8fb54a4c7145aa287feda10a940ae72fc62979c9a/popoto-1.4.0-py3-none-any.whl", hash = "sha256:078b64c3db829f7be213133529362bed00dc7ff712d2189ba36cd8032bfc30c9", size = 225769, upload-time = "2026-03-24T09:10:14.099Z" },
+    { url = "https://files.pythonhosted.org/packages/1d/3d/4e22bf512e33ce580a6ed91e0b647fd2e4f9e3048fe70fe1d408f2e9db70/popoto-1.4.1-py3-none-any.whl", hash = "sha256:0cff7dfe0f035541aa6d2eafafb217ed4ce5a137f5685a15ec802f303a441261", size = 227631, upload-time = "2026-03-26T07:32:07.582Z" },
 ]
 
 [[package]]
@@ -1569,7 +1569,7 @@ wheels = [
 
 [[package]]
 name = "requests"
-version = "2.32.5"
+version = "2.33.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "certifi" },
@@ -1577,9 +1577,9 @@ dependencies = [
     { name = "idna" },
     { name = "urllib3" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/c9/74/b3ff8e6c8446842c3f5c837e9c3dfcfe2018ea6ecef224c710c85ef728f4/requests-2.32.5.tar.gz", hash = "sha256:dbba0bac56e100853db0ea71b82b4dfd5fe2bf6d3754a8893c3af500cec7d7cf", size = 134517, upload-time = "2025-08-18T20:46:02.573Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/34/64/8860370b167a9721e8956ae116825caff829224fbca0ca6e7bf8ddef8430/requests-2.33.0.tar.gz", hash = "sha256:c7ebc5e8b0f21837386ad0e1c8fe8b829fa5f544d8df3b2253bff14ef29d7652", size = 134232, upload-time = "2026-03-25T15:10:41.586Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/1e/db/4254e3eabe8020b458f1a747140d32277ec7a271daf1d235b70dc0b4e6e3/requests-2.32.5-py3-none-any.whl", hash = "sha256:2462f94637a34fd532264295e186976db0f5d453d1cdd31473c85a6a161affb6", size = 64738, upload-time = "2025-08-18T20:46:00.542Z" },
+    { url = "https://files.pythonhosted.org/packages/56/5d/c814546c2333ceea4ba42262d8c4d55763003e767fa169adc693bd524478/requests-2.33.0-py3-none-any.whl", hash = "sha256:3324635456fa185245e24865e810cecec7b4caf933d7eb133dcde67d48cee69b", size = 65017, upload-time = "2026-03-25T15:10:40.382Z" },
 ]
 
 [[package]]
@@ -1983,7 +1983,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=1.26.0" },
     { name = "ollama", specifier = ">=0.3.0" },
     { name = "openai", specifier = ">=1.0.0" },
-    { name = "popoto", specifier = ">=1.0.1" },
+    { name = "popoto", specifier = ">=1.4.1" },
     { name = "psutil", specifier = ">=5.9.0" },
     { name = "pypdf", specifier = ">=6.6.2" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
