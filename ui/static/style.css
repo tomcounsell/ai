@@ -307,6 +307,12 @@ h3 {
     border-color: rgba(248, 81, 73, 0.3);
 }
 
+.stage-dot.ready {
+    color: var(--blue);
+    background: var(--blue-bg);
+    border-color: rgba(88, 166, 255, 0.3);
+}
+
 .stage-dot.skipped {
     color: var(--text-muted);
     background: var(--bg-tertiary);
@@ -646,4 +652,62 @@ a.link:hover {
 .empty-state-inline {
     padding: 16px 0;
     color: var(--text-muted);
+}
+
+/* Project cell with popover */
+.project-cell {
+    position: relative;
+    display: inline-block;
+}
+
+.project-name {
+    cursor: default;
+    font-size: 12px;
+}
+
+.project-popover {
+    display: none;
+    position: absolute;
+    top: 100%;
+    left: 0;
+    z-index: 200;
+    min-width: 280px;
+    margin-top: 4px;
+}
+
+.project-cell:hover .project-popover {
+    display: block;
+}
+
+.popover-content {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius);
+    padding: 10px 12px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+
+.popover-row {
+    display: flex;
+    gap: 8px;
+    padding: 3px 0;
+    font-size: 12px;
+    line-height: 1.4;
+}
+
+.popover-label {
+    color: var(--text-muted);
+    min-width: 56px;
+    flex-shrink: 0;
+    font-family: var(--font-mono);
+    text-transform: uppercase;
+    font-size: 10px;
+    letter-spacing: 0.3px;
+    padding-top: 1px;
+}
+
+.popover-value {
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    word-break: break-all;
 }

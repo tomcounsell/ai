@@ -7,6 +7,7 @@ Start with: python -m ui.app
 """
 
 import datetime
+import logging
 import os
 from pathlib import Path
 
@@ -16,6 +17,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from bridge.utc import utc_now
+
+logger = logging.getLogger(__name__)
 
 UI_DIR = Path(__file__).parent
 TEMPLATES_DIR = UI_DIR / "templates"
@@ -155,6 +158,22 @@ def create_app() -> FastAPI:
         return templates.TemplateResponse(
             request, "error.html", {"error": str(exc)}, status_code=500
         )
+
+    # Startup probe: log session count for index staleness detection
+    @app.on_event("startup")
+    def _log_session_count():
+        try:
+            from models.agent_session import AgentSession
+
+            count = len(AgentSession.query.all())
+            logger.info(f"Dashboard startup: {count} AgentSession records found in Redis")
+            if count == 0:
+                logger.warning(
+                    "Dashboard startup: zero sessions found. "
+                    "Popoto indexes may be stale after restart."
+                )
+        except Exception as e:
+            logger.warning(f"Dashboard startup: failed to query sessions: {e}")
 
     return app
 
