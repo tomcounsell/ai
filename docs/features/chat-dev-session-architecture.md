@@ -11,12 +11,18 @@ This replaces the previous architecture where a single undifferentiated AgentSes
 
 ## Routing
 
-Messages are routed to session types based on chat title prefix:
+Messages are routed to session types via **config-driven chat mode resolution** (`resolve_chat_mode()` in `bridge/routing.py`), with title-prefix fallback for unconfigured groups:
 
-- **"Dev: X" groups** -> `session_type="dev"` (DevSession, full permissions, dev persona). The classifier is skipped — Dev groups always get a DevSession directly.
-- **Everything else** -> `session_type="chat"` (ChatSession, PM persona). This includes both SDLC work and Q&A. The ChatSession decides whether to spawn a DevSession.
+1. **Config persona** -- if the project's `telegram.groups` dict has a matching entry with a `persona` field, it maps directly to a mode: `"developer"` -> dev, `"project-manager"` -> pm, `"teammate"` -> qa.
+2. **Title prefix fallback** -- `"Dev: X"` -> dev mode, `"PM: X"` -> pm mode (backward compatible).
+3. **DMs** -- always resolve to qa mode.
 
-There are exactly two session types: `chat` and `dev`. The previous `simple` session type has been removed — all messages route through ChatSession, which is intelligent enough to handle Q&A directly. When a message is classified as an informational query with high confidence (>0.90), the ChatSession answers directly without spawning a DevSession. See [ChatSession Q&A Mode](chatsession-qa-mode.md) for the classifier design and routing details.
+Session type derivation from resolved mode:
+
+- **dev mode** -> `session_type="dev"` (DevSession, full permissions, dev persona). The classifier is skipped.
+- **pm, qa, or unconfigured** -> `session_type="chat"` (ChatSession, PM persona). This includes both SDLC work and Q&A. The ChatSession decides whether to spawn a DevSession.
+
+There are exactly two session types: `chat` and `dev`. The previous `simple` session type has been removed — all messages route through ChatSession, which is intelligent enough to handle Q&A directly. When a message is classified as an informational query with high confidence (>0.90), the ChatSession answers directly without spawning a DevSession. For groups with an explicit `"teammate"` persona, the classifier is bypassed entirely and Q&A mode is set directly. See [ChatSession Q&A Mode](chatsession-qa-mode.md) for the classifier design and [Config-Driven Chat Mode](config-driven-chat-mode.md) for the config schema and resolution order.
 
 ## Architecture
 
@@ -24,13 +30,16 @@ There are exactly two session types: `chat` and `dev`. The previous `simple` ses
 Telegram Message
     |
     v
-Route by chat_title prefix
+resolve_chat_mode(project, chat_title, is_dm)
+    |  1. Config persona lookup (telegram.groups.{name}.persona)
+    |  2. Title prefix fallback (Dev:/PM:)
+    |  3. DMs → always "qa"
     |
-    |-- "Dev: X" → DevSession (session_type="dev")
+    |-- dev mode → DevSession (session_type="dev")
     |       |-- Full permissions, Dev persona
     |       |-- Direct execution
     |
-    |-- Everything else → ChatSession (session_type="chat")
+    |-- pm/qa/None → ChatSession (session_type="chat")
             |-- Queued per chat_id
             |-- Read-only, PM persona
             |

@@ -1329,18 +1329,27 @@ async def get_agent_response_sdk(
     correlation_id: str | None = None,
     job_id: str | None = None,
 ) -> str:
-    """
-    Get agent response using Claude Agent SDK.
+    """Get agent response using Claude Agent SDK.
 
-    This function matches the signature of the existing get_agent_response()
-    in telegram_bridge.py to enable seamless switching via feature flag.
+    Orchestrates a complete agent session from message receipt to response.
+    Uses config-driven chat mode resolution (resolve_chat_mode from
+    bridge.routing) to determine session behavior for ChatSessions:
+
+    - "qa" mode: bypasses the Haiku intent classifier, sets qa_mode=True
+      directly on the session, reducing latency and API cost for DMs and
+      groups with "teammate" persona.
+    - "pm"/"dev" mode: bypasses the classifier, uses the config-determined
+      mode without reclassification.
+    - None (unconfigured): falls through to the existing Haiku intent
+      classifier for Q&A vs work routing.
 
     Args:
         message: The message to process
         session_id: Session ID for conversation continuity
         sender_name: Name of the sender (for logging)
-        chat_title: Chat title (for logging)
-        project: Project configuration dict
+        chat_title: Chat title (for logging and mode resolution)
+        project: Project configuration dict (contains telegram.groups with
+            optional persona fields for config-driven mode)
         chat_id: Chat ID (unused, for compatibility)
         sender_id: Telegram user ID (for permission checking)
         task_list_id: Optional task list ID to scope sub-agent Task storage
@@ -1472,37 +1481,75 @@ async def get_agent_response_sdk(
     # Q&A mode answers informational queries directly without spawning DevSession.
     _qa_mode = False
     if _session_type == "chat":
-        # Classify intent for Q&A vs work routing
-        try:
-            from agent.intent_classifier import classify_intent
-            from agent.qa_metrics import record_classification
+        # Config-driven mode bypass: skip classifier when mode is already known
+        from bridge.routing import resolve_chat_mode as _resolve_mode
 
-            _intent_result = await classify_intent(message)
-            record_classification(_intent_result.intent, _intent_result.confidence)
+        _config_mode = _resolve_mode(project, chat_title, is_dm=(chat_title is None))
+
+        if _config_mode == "qa":
+            # DMs and Q&A-persona groups: skip classifier, go straight to Q&A
+            _qa_mode = True
             logger.info(
-                f"[{request_id}] Intent: {_intent_result.intent} "
-                f"(conf={_intent_result.confidence:.2f}): {_intent_result.reasoning}"
+                f"[{request_id}] Config-driven Q&A mode "
+                f"(mode={_config_mode!r}, is_dm={chat_title is None})"
             )
+            # Record synthetic classification metric for observability
+            try:
+                from agent.qa_metrics import record_classification
 
-            if _intent_result.is_qa:
-                _qa_mode = True
-                logger.info(f"[{request_id}] Routing to Q&A mode (direct response)")
-                # Update session classification_type so nudge loop uses reduced cap
-                if session_id:
-                    try:
-                        from models.agent_session import AgentSession as _QASession
+                record_classification("qa", 1.0)
+                logger.debug(
+                    f"[{request_id}] Recorded synthetic qa classification (config-determined)"
+                )
+            except Exception:
+                pass  # Best-effort metrics
+            # Update session qa_mode flag
+            if session_id:
+                try:
+                    from models.agent_session import AgentSession as _QASession
 
-                        for _s in _QASession.query.filter(session_id=session_id):
-                            if _s.status in ("running", "active", "pending"):
-                                _s.qa_mode = True
-                                _s.save()
-                                break
-                    except Exception:
-                        pass  # Best-effort
-        except Exception as e:
-            logger.warning(
-                f"[{request_id}] Intent classification failed, defaulting to PM dispatch: {e}"
-            )
+                    for _s in _QASession.query.filter(session_id=session_id):
+                        if _s.status in ("running", "active", "pending"):
+                            _s.qa_mode = True
+                            _s.save()
+                            break
+                except Exception:
+                    pass  # Best-effort
+        elif _config_mode in ("pm", "dev"):
+            # PM/Dev persona groups: skip classifier, use PM dispatch (not Q&A)
+            logger.info(f"[{request_id}] Config-driven {_config_mode} mode, skipping classifier")
+        else:
+            # Unconfigured: fall through to intent classifier
+            try:
+                from agent.intent_classifier import classify_intent
+                from agent.qa_metrics import record_classification
+
+                _intent_result = await classify_intent(message)
+                record_classification(_intent_result.intent, _intent_result.confidence)
+                logger.info(
+                    f"[{request_id}] Intent: {_intent_result.intent} "
+                    f"(conf={_intent_result.confidence:.2f}): {_intent_result.reasoning}"
+                )
+
+                if _intent_result.is_qa:
+                    _qa_mode = True
+                    logger.info(f"[{request_id}] Routing to Q&A mode (direct response)")
+                    # Update session classification_type so nudge loop uses reduced cap
+                    if session_id:
+                        try:
+                            from models.agent_session import AgentSession as _QASession
+
+                            for _s in _QASession.query.filter(session_id=session_id):
+                                if _s.status in ("running", "active", "pending"):
+                                    _s.qa_mode = True
+                                    _s.save()
+                                    break
+                        except Exception:
+                            pass  # Best-effort
+            except Exception as e:
+                logger.warning(
+                    f"[{request_id}] Intent classification failed, defaulting to PM dispatch: {e}"
+                )
 
         if _qa_mode:
             # Q&A mode: inject Q&A instructions instead of PM dispatch
