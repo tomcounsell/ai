@@ -317,7 +317,64 @@ No agent integration required -- this is a reflections-internal change. The step
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Critics**: Skeptic, Operator, Archaeologist, Adversary, Simplifier, User
+**Findings**: 5 total (1 blocker, 3 concerns, 1 nit)
+
+### Blockers
+
+#### Missing dependency: build-step does not depend on build-address-check
+- **Severity**: BLOCKER
+- **Critics**: Simplifier, Skeptic
+- **Location**: Step by Step Tasks, Task 3 (build-step)
+- **Finding**: Task 3 (`build-step`) depends on `build-model, build-parser` but NOT on `build-address-check` (Task 4). The step method needs the address checker to determine if findings were addressed, yet the dependency is missing. A builder following the task graph could start Task 3 before the address checker exists.
+- **Suggestion**: Add `build-address-check` to Task 3's `Depends On` list: `build-model, build-parser, build-address-check`.
+
+### Concerns
+
+#### Multi-day reflection gaps cause missed PRs
+- **Severity**: CONCERN
+- **Critics**: Adversary, Operator
+- **Location**: Technical Approach (PR time window)
+- **Finding**: The plan uses `merged:>={yesterday}` as the time window, giving a fixed 24-hour lookback. If the reflections system is down for multiple days (crash, maintenance, weekend), PRs merged during the gap are silently missed and never audited.
+- **Suggestion**: Instead of hardcoding "yesterday," store the last successful audit timestamp in Redis (or use `self.state.date` from the previous successful run) and query `merged:>={last_audit_date}`. This closes the gap at no extra complexity.
+
+#### Redis-down fallback creates dedup hole
+- **Severity**: CONCERN
+- **Critics**: Adversary
+- **Location**: Failure Path Test Strategy (Redis unavailable)
+- **Finding**: When Redis is unavailable, the plan falls back to an in-memory set for deduplication. This means the current run avoids duplicates internally, but the in-memory state is lost after the run completes. The next run (with Redis restored) will re-scan the same PRs and potentially file duplicate GitHub issues since it has no record of prior audits.
+- **Suggestion**: When Redis is down, skip the step entirely (consistent with how other gh-dependent steps behave in `_preflight_check`). Filing issues without durable dedup is worse than deferring the audit by one cycle.
+
+#### Dry-run behavior unspecified for new step
+- **Severity**: CONCERN
+- **Critics**: Operator
+- **Location**: Solution / Technical Approach
+- **Finding**: The reflections system supports `--dry-run` mode (via `self.state.dry_run`), but the plan does not describe what dry-run behavior looks like for `step_pr_review_audit`. Other steps check this flag to skip destructive operations. Without this, running `python scripts/reflections.py --dry-run` would file real GitHub issues.
+- **Suggestion**: Add a dry-run check in the step: when `self.state.dry_run` is True, log the findings that would be filed but skip `gh issue create` and Redis writes. Add this to the task description for Task 3.
+
+### Nits
+
+#### Parser regex omits Code field
+- **Severity**: NIT
+- **Critics**: Skeptic
+- **Location**: Technical Approach (Structured finding regex)
+- **Finding**: The Technical Approach section lists the regex targets as `**Severity:**`, `**File:**`, `**Issue:**`, `**Fix:**` but the actual do-pr-review format (SKILL.md line 242) also includes `**Code:**`. The parser description in Task 2 does include `**Code:**`, so this is just an inconsistency in the prose, not the task spec.
+- **Suggestion**: Update the Technical Approach bullet to include `**Code:**` in the regex field list for consistency.
+
+### Structural Check Results
+
+| Check | Status | Detail |
+|-------|--------|--------|
+| Required sections | PASS | All 4 required sections present and non-empty |
+| Task numbering | PASS | Tasks 1-8 sequential, no gaps |
+| Dependencies valid | FAIL | Task 3 missing dependency on build-address-check (see Blocker above) |
+| File paths exist | PASS | 4 of 5 exist; `tests/unit/test_pr_review_audit.py` marked "(create)" -- intentionally new |
+| Prerequisites met | PASS | Plan states no prerequisites |
+| Cross-references | PASS | All success criteria map to tasks; no-gos and rabbit holes are consistent and not in planned work |
+
+### Verdict
+
+**NEEDS REVISION** -- 1 blocker must be resolved before build. The missing task dependency (build-address-check) would cause build ordering failures. The three concerns (multi-day gaps, Redis fallback dedup hole, dry-run behavior) are low-effort fixes that should be addressed in the same revision pass.
 
 ---
 
