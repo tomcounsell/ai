@@ -25,9 +25,31 @@ This is applied in three functions (plus dependency-related operations):
 
 The `_extract_job_fields()` helper reads all non-auto fields (56+) from an AgentSession instance for recreation.
 
-## Worker Drain Guard
+## Worker Drain Guard (Event-Based)
 
-The worker loop now includes a drain guard before exiting. When `_pop_job()` returns `None`, the worker sleeps 100ms (yielding to the event loop) then re-checks. This catches jobs whose `async_create` index writes were still in-flight due to popoto's three-step creation process (`HSET`, `SADD` class set, `SADD` KeyField index).
+The worker loop uses an Event-based drain strategy to reliably pick up pending jobs after completing each job. This replaces the original 100ms sleep-and-retry approach which was insufficient to handle the thread-pool race between Popoto's `async_create` index writes and `async_filter` reads.
+
+### How It Works
+
+1. **asyncio.Event notification**: `enqueue_job()` signals a per-chat `asyncio.Event` after pushing a job. The event is level-triggered (stays set until cleared), so signals during job execution are not lost.
+
+2. **Event-based wait**: After completing a job, `_worker_loop()` clears the event and waits for it with a `DRAIN_TIMEOUT` (configurable constant, default 1.5s). If the event fires, the worker pops the next job via `_pop_job()`.
+
+3. **Sync Popoto fallback**: If the timeout expires without an event, `_pop_job_with_fallback()` runs a synchronous `AgentSession.query.filter()` call that bypasses `to_thread()` scheduling. This eliminates the thread-pool race that caused the original index visibility bug.
+
+4. **Exit-time safety check**: Before exiting with "Queue empty", the worker runs one final `_pop_job_with_fallback()` and logs a WARNING if orphaned pending jobs are found.
+
+### Key Functions
+
+| Function | Purpose |
+|----------|---------|
+| `_pop_job_with_fallback(chat_id)` | Tries `_pop_job()` first, then sync Popoto query as fallback |
+| `DRAIN_TIMEOUT` | Module constant (1.5s) controlling the Event wait timeout |
+| `_active_events` | Dict mapping chat_id to asyncio.Event for worker notification |
+
+### Why the Original Drain Guard Failed
+
+The original 100ms sleep relied on `_pop_job()` (which uses `async_filter` via `to_thread()`) finding the job on retry. But the root cause is a thread-pool scheduling race: `async_create` writes the hash and index entries via multiple Redis commands in a thread, and `async_filter` reads the index intersection in a separate thread. The 100ms window was too short, and both calls suffered from the same `to_thread()` race. The sync fallback bypasses this entirely.
 
 ## Startup Orphan Recovery
 
