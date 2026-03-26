@@ -42,6 +42,15 @@ Issue #273
 
 Simple emoji + bullets format, no stage line or link footer. Still summarized via Haiku. No message echo -- Telegram's reply-to feature provides context about what the response is answering.
 
+### Q&A Mode (Prose)
+```
+The bridge connects Telegram to Claude via Telethon. See bridge/telegram_bridge.py
+for the main entry point. The nudge loop in agent/job_queue.py handles delivery
+routing based on stop_reason classification.
+```
+
+When `qa_mode=True` on the session, `_compose_structured_summary()` bypasses all structured formatting — no emoji prefix, no bullet parsing, no template. The LLM summary (already in conversational prose via `qa_mode=True` context in the prompt) is returned directly. The processing reaction is cleared instead of setting a completion emoji.
+
 ## Emoji Vocabulary
 
 | Emoji | Meaning |
@@ -158,6 +167,7 @@ The `expectations` field description explicitly states it should only be set whe
 3. **Questions**: Preserved exactly, surfaced after bullets via `---` separator with `>> ` prefix
 4. **SDLC work**: Emoji + stage line + bullets + questions + link footer (no message echo)
 5. **Status updates**: 2-4 bullet points
+6. **Q&A sessions** (`qa_mode=True`): Conversational prose — no bullets, no emoji prefix, no structured template. Bypasses `_compose_structured_summary()` formatting entirely.
 
 ## Telegram Markdown
 

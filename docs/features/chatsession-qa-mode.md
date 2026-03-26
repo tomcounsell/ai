@@ -48,10 +48,12 @@ Classification signals:
 
 Provides Q&A-specific instructions that replace the PM dispatch block when a message is classified as Q&A.
 
+- **Research-first behavior**: instructions prioritize evidence gathering before answering — search code with Grep/Glob, query memory system, consult docs, then cite findings
 - **Tools available**: Read, Glob, Grep, Bash (read-only commands: git log, git status, gh issue view, gh pr list)
 - **Tools blocked**: file writes, branch creation, test execution, Agent tool (no DevSession spawning)
 - **Nudge cap**: 10 (vs 50 for normal sessions), set via `QA_MAX_NUDGE_COUNT`
 - **Persona**: same PM persona with Q&A-specific additions (conversational tone, cite file paths, direct answers)
+- **Single delivery path**: Q&A always goes through the summarizer — no dual-path ambiguity with `send_telegram.py`
 
 ### Metrics (`agent/qa_metrics.py`)
 
@@ -78,12 +80,21 @@ In `_execute_agent_request()`, after determining the session type is "chat":
 3. If `is_qa` is true, injects Q&A instructions via `build_qa_instructions()` instead of PM dispatch instructions
 4. If `is_work` or classifier fails, preserves current behavior exactly
 
+### `bridge/summarizer.py`
+
+Q&A sessions bypass structured formatting entirely:
+
+- `_build_summary_prompt()` appends `qa_mode=True` context so the LLM produces conversational prose instead of bullets
+- `_compose_structured_summary()` returns the LLM summary directly without emoji prefix, bullet parsing, or structured template
+- `SUMMARIZER_SYSTEM_PROMPT` includes a Q&A format rule: respond in prose, no bullets, no status emoji
+
 ### `agent/job_queue.py`
 
 In the nudge loop, checks the session's `qa_mode` field:
 
 - If `True`, uses `QA_MAX_NUDGE_COUNT` (10) instead of the default `MAX_NUDGE_COUNT` (50)
 - Q&A sessions resolve faster; the reduced cap prevents runaway sessions
+- On successful completion, Q&A sessions clear the processing reaction (set to `None`) instead of setting a completion emoji
 
 ## Key Design Decisions
 
@@ -97,7 +108,8 @@ In the nudge loop, checks the session's `qa_mode` field:
 | File | Purpose |
 |------|---------|
 | `agent/intent_classifier.py` | Haiku-based binary classifier with few-shot prompt |
-| `agent/qa_handler.py` | Q&A instruction builder and nudge cap constant |
+| `agent/qa_handler.py` | Q&A instruction builder (research-first) and nudge cap constant |
+| `bridge/summarizer.py` | Q&A prose bypass in `_compose_structured_summary()` and prompt context |
 | `agent/qa_metrics.py` | Redis-backed classification and response time counters |
 | `agent/sdk_client.py` | Integration point: classifier call and instruction injection |
 | `agent/job_queue.py` | Integration point: reduced nudge cap for Q&A sessions |
