@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: Shipped
 type: feature
 appetite: Medium
 owner: Valor
