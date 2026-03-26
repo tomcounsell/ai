@@ -16,6 +16,7 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from bridge.utc import utc_now
 from config.paths import DATA_DIR
 
 # Calendar config lives in ~/Desktop/Valor/, queue/cache in data/
@@ -260,7 +261,7 @@ def main() -> None:
         sys.exit(1)
 
     slug = args[0]
-    now = datetime.now().astimezone()
+    now = utc_now()
     config = load_calendar_config()
     calendar_id = get_calendar_id(project, config)
     if not calendar_id:

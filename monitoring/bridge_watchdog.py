@@ -24,8 +24,10 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
+
+from bridge.utc import utc_iso, utc_now
 
 # Add project root to path
 PROJECT_DIR = Path(__file__).parent.parent
@@ -492,7 +494,7 @@ def execute_recovery(level: int, issues: list[str]) -> bool:
         json.dumps(
             {
                 "level": level,
-                "started": datetime.now().isoformat(),
+                "started": utc_iso(),
                 "issues": issues,
             }
         )
@@ -568,7 +570,10 @@ def run_health_check() -> bool:
         try:
             lock_data = json.loads(RECOVERY_LOCK.read_text())
             lock_time = datetime.fromisoformat(lock_data.get("started", ""))
-            age = (datetime.now() - lock_time).total_seconds()
+            # Ensure lock_time is tz-aware for comparison (legacy files may be naive)
+            if lock_time.tzinfo is None:
+                lock_time = lock_time.replace(tzinfo=UTC)
+            age = (utc_now() - lock_time).total_seconds()
             if age < 300:  # 5 minute recovery timeout
                 logger.info("Recovery in progress, skipping check")
                 return True

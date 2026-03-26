@@ -9,9 +9,10 @@ import logging
 import re
 import subprocess
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Literal
+
+from bridge.utc import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -146,7 +147,7 @@ def create_work_branch(
     """
     # Generate branch name
     sanitized = sanitize_branch_name(description)
-    timestamp = datetime.now().strftime("%Y%m%d")
+    timestamp = utc_now().strftime("%Y%m%d")
     branch_name = f"feature/{timestamp}-{sanitized}"
 
     try:
@@ -224,7 +225,7 @@ def create_plan_document(
     plan_content = f"""# Work Plan: {branch_name}
 
 **Status**: IN_PROGRESS
-**Created**: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+**Created**: {utc_now().strftime("%Y-%m-%d %H:%M:%S")} UTC
 **Branch**: `{branch_name}`
 
 ## Original Request

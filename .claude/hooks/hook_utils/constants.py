@@ -3,7 +3,7 @@
 import json
 import os
 import sys
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 
@@ -52,7 +52,7 @@ def read_hook_input() -> dict:
 def append_to_log(session_dir: Path, filename: str, entry: dict) -> None:
     """Append an entry to a JSON log file (stored as JSON lines)."""
     log_path = session_dir / filename
-    entry["timestamp"] = datetime.utcnow().isoformat() + "Z"
+    entry["timestamp"] = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     with open(log_path, "a") as f:
         f.write(json.dumps(entry) + "\n")
 
@@ -60,6 +60,6 @@ def append_to_log(session_dir: Path, filename: str, entry: dict) -> None:
 def write_json_log(session_dir: Path, filename: str, data: dict) -> None:
     """Write data to a JSON file (overwrites)."""
     log_path = session_dir / filename
-    data["timestamp"] = datetime.utcnow().isoformat() + "Z"
+    data["timestamp"] = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     with open(log_path, "w") as f:
         json.dump(data, f, indent=2)

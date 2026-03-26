@@ -18,6 +18,8 @@ from pathlib import Path
 
 import pytest
 
+from bridge.utc import utc_now
+
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
@@ -53,7 +55,7 @@ class ResourceSnapshot:
 
             process = psutil.Process()
             return cls(
-                timestamp=datetime.now(),
+                timestamp=utc_now(),
                 memory_mb=process.memory_info().rss / (1024 * 1024),
                 cpu_percent=process.cpu_percent(interval=0.1),
                 active_processes=1,
@@ -61,7 +63,7 @@ class ResourceSnapshot:
         except ImportError:
             # Fallback without psutil
             return cls(
-                timestamp=datetime.now(),
+                timestamp=utc_now(),
                 memory_mb=0.0,
                 cpu_percent=0.0,
                 active_processes=1,

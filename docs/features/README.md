@@ -110,6 +110,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Test Reliability: Flaky Filter](test-reliability-flaky-filter.md) | Branch-side retry for flaky tests, deterministic junitxml baseline parsing, and completeness validation for test classification | Shipped |
 | [Tools Standard](tools-standard.md) | Tool compliance standard, audit checks, and remediation results for the tools/ directory | Shipped |
 | [Trace & Verify Protocol](trace-and-verify.md) | Data-driven root cause analysis replacing narrative-only 5 Whys with forward verification | Shipped |
+| [UTC Timestamps](utc-timestamps.md) | All timestamps normalized to tz-aware UTC with `bridge/utc.py` utilities; local conversion only at display boundary | Shipped |
 | [Web UI](web-ui.md) | Localhost FastAPI web application at port 8500 serving observability dashboards with HTMX interactivity and dark theme | Shipped |
 | [Workspace Safety Invariants](workspace-safety-invariants.md) | Pre-launch validation of agent working directories with CWD existence, path containment, and slug sanitization | Shipped |
 | [Worktree SDK Compatibility Experiment](worktree-sdk-compatibility.md) | Experiment results for Claude Agent SDK compatibility with git worktrees | Archived |

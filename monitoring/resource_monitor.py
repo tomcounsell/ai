@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+from bridge.utc import utc_now
+
 if TYPE_CHECKING:
     from monitoring.alerts import Alert
 
@@ -33,7 +35,7 @@ class ResourceSnapshot:
         """Capture current resource state."""
         if not PSUTIL_AVAILABLE:
             return cls(
-                timestamp=datetime.now(),
+                timestamp=utc_now(),
                 memory_mb=0.0,
                 cpu_percent=0.0,
                 active_sessions=active_sessions,
@@ -43,7 +45,7 @@ class ResourceSnapshot:
 
         process = psutil.Process()
         return cls(
-            timestamp=datetime.now(),
+            timestamp=utc_now(),
             memory_mb=process.memory_info().rss / (1024 * 1024),
             cpu_percent=process.cpu_percent(interval=0.1),
             active_sessions=active_sessions,

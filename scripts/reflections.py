@@ -43,6 +43,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from bridge.utc import utc_now
+
 # Ensure project root is in sys.path for standalone execution
 _project_root = str(Path(__file__).parent.parent)
 if _project_root not in sys.path:
@@ -504,7 +506,7 @@ class ReflectionRunner:
 
     def _load_state(self) -> ReflectionsState:
         """Load state from Redis ReflectionRun model."""
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = utc_now().strftime("%Y-%m-%d")
         from models.reflections import ReflectionRun
 
         run = ReflectionRun.load_or_create(today)
@@ -539,7 +541,7 @@ class ReflectionRunner:
 
             logger.info(f"Starting step {step_num}: {step_name}")
             self.state.current_step = step_num
-            self.state.step_started_at = datetime.now().isoformat()
+            self.state.step_started_at = utc_now().isoformat()
             self.state.save()
 
             try:
@@ -667,7 +669,7 @@ class ReflectionRunner:
         """
         total_files_analyzed = 0
         total_findings = 0
-        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        yesterday = (utc_now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
         for project in self.projects:
             slug = project["slug"]
@@ -700,7 +702,7 @@ class ReflectionRunner:
 
                 try:
                     mtime = datetime.fromtimestamp(log_file.stat().st_mtime)
-                    if mtime < datetime.now() - timedelta(days=7):
+                    if mtime < utc_now() - timedelta(days=7):
                         findings.append(f"Log file {log_file.name} is older than 7 days")
 
                     size_mb = log_file.stat().st_size / (1024 * 1024)
@@ -950,7 +952,7 @@ class ReflectionRunner:
 
         report_lines.append("")
         report_lines.append("---")
-        report_lines.append(f"*Generated at {datetime.now().isoformat()}*")
+        report_lines.append(f"*Generated at {utc_now().isoformat()}*")
 
         # Write report
         report_content = "\n".join(report_lines)
@@ -970,7 +972,7 @@ class ReflectionRunner:
         Tries Redis-backed analysis via AgentSession/BridgeEvent first,
         falls back to file-based analysis.
         """
-        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        yesterday = (utc_now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
         # Try Redis-backed analysis first
         analysis = analyze_sessions_from_redis(yesterday)
@@ -1789,9 +1791,8 @@ class ReflectionRunner:
         """
         import time as _time
 
-        from models.cyclic_episode import CyclicEpisode
-
         from models.agent_session import AgentSession
+        from models.cyclic_episode import CyclicEpisode
         from scripts.fingerprint_classifier import classify_session
 
         cutoff = _time.time() - 86400  # past 24 hours
@@ -2064,7 +2065,7 @@ class ReflectionRunner:
             return
 
         mod_time = datetime.fromtimestamp(principal_path.stat().st_mtime)
-        age_days = (datetime.now() - mod_time).days
+        age_days = (utc_now() - mod_time).days
         staleness_threshold = 90
 
         if age_days > staleness_threshold:
@@ -2197,7 +2198,7 @@ class ReflectionsState:
     step_progress: dict[str, Any] = field(default_factory=dict)
     completed_steps: list[int] = field(default_factory=list)
     daily_report: list[str] = field(default_factory=list)
-    date: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d"))
+    date: str = field(default_factory=lambda: utc_now().strftime("%Y-%m-%d"))
     findings: dict[str, list[str]] = field(default_factory=dict)
     session_analysis: dict[str, Any] = field(default_factory=dict)
     reflections: list[dict[str, str]] = field(default_factory=list)

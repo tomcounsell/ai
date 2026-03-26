@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
+from bridge.utc import utc_now
 from scripts.docs_auditor import (
     AuditSummary,
     DocsAuditor,
@@ -160,19 +161,19 @@ class TestFrequencyGate:
         assert auditor._should_skip() is False
 
     def test_recent_audit_skips(self, repo: Path, auditor: DocsAuditor) -> None:
-        state = {"last_audit_date": datetime.now().isoformat()}
+        state = {"last_audit_date": utc_now().isoformat()}
         with patch.object(auditor, "_load_state", return_value=state):
             assert auditor._should_skip() is True
 
     def test_old_audit_does_not_skip(self, repo: Path, auditor: DocsAuditor) -> None:
-        old_date = (datetime.now() - timedelta(days=8)).isoformat()
+        old_date = (utc_now() - timedelta(days=8)).isoformat()
         state = {"last_audit_date": old_date}
         with patch.object(auditor, "_load_state", return_value=state):
             assert auditor._should_skip() is False
 
     def test_boundary_exactly_7_days_skips(self, repo: Path, auditor: DocsAuditor) -> None:
         # 6.9 days ago — still within window
-        recent = (datetime.now() - timedelta(days=6, hours=23)).isoformat()
+        recent = (utc_now() - timedelta(days=6, hours=23)).isoformat()
         state = {"last_audit_date": recent}
         with patch.object(auditor, "_load_state", return_value=state):
             assert auditor._should_skip() is True
@@ -294,7 +295,7 @@ class TestSweepIndexFiles:
 
 class TestRunFrequencyGate:
     def test_run_skips_if_recent(self, repo: Path) -> None:
-        state = {"last_audit_date": datetime.now().isoformat()}
+        state = {"last_audit_date": utc_now().isoformat()}
         auditor = DocsAuditor(repo_root=repo, dry_run=True)
         with patch.object(auditor, "_load_state", return_value=state):
             summary = auditor.run()

@@ -26,6 +26,8 @@ from pathlib import Path
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from bridge.utc import utc_iso
+
 from tools.telegram_users import get_whitelisted_users, resolve_username
 
 
@@ -136,7 +138,7 @@ def main():
         "user_id": user_id,
         "username": username,
         "limit": count,
-        "requested_at": datetime.now().isoformat(),
+        "requested_at": utc_iso(),
     }
 
     try:

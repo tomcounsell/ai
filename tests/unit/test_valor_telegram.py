@@ -1,13 +1,14 @@
 """Tests for the unified valor-telegram CLI tool."""
 
 import sys
-from datetime import datetime, timedelta
+from datetime import timedelta
 from unittest.mock import patch
 
 import pytest
 
 # Import the module under test
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent.parent))
+from bridge.utc import utc_now
 from tools.valor_telegram import format_timestamp, parse_since, resolve_chat
 
 
@@ -17,31 +18,31 @@ class TestParseSince:
     def test_hours_ago(self):
         result = parse_since("1 hour ago")
         assert result is not None
-        expected = datetime.now() - timedelta(hours=1)
+        expected = utc_now() - timedelta(hours=1)
         assert abs((result - expected).total_seconds()) < 2
 
     def test_multiple_hours(self):
         result = parse_since("3 hours ago")
         assert result is not None
-        expected = datetime.now() - timedelta(hours=3)
+        expected = utc_now() - timedelta(hours=3)
         assert abs((result - expected).total_seconds()) < 2
 
     def test_minutes_ago(self):
         result = parse_since("30 minutes ago")
         assert result is not None
-        expected = datetime.now() - timedelta(minutes=30)
+        expected = utc_now() - timedelta(minutes=30)
         assert abs((result - expected).total_seconds()) < 2
 
     def test_days_ago(self):
         result = parse_since("2 days ago")
         assert result is not None
-        expected = datetime.now() - timedelta(days=2)
+        expected = utc_now() - timedelta(days=2)
         assert abs((result - expected).total_seconds()) < 2
 
     def test_weeks_ago(self):
         result = parse_since("1 week ago")
         assert result is not None
-        expected = datetime.now() - timedelta(weeks=1)
+        expected = utc_now() - timedelta(weeks=1)
         assert abs((result - expected).total_seconds()) < 2
 
     def test_invalid_input(self):

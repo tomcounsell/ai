@@ -16,6 +16,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from bridge.utc import utc_now
+
 logger = logging.getLogger(__name__)
 
 
@@ -67,7 +69,7 @@ class BossMessenger:
 
             record = MessageRecord(
                 content=message[:200],  # Truncate for record
-                timestamp=datetime.now(),
+                timestamp=utc_now(),
                 message_type=message_type,
             )
             self.messages_sent.append(record)
@@ -130,7 +132,7 @@ class BackgroundTask:
             coro: The async work to perform (should return a string result)
             send_result: Whether to automatically send the result when done
         """
-        self._started_at = datetime.now()
+        self._started_at = utc_now()
 
         # Start the main work
         self._task = asyncio.create_task(self._run_work(coro, send_result))
@@ -144,7 +146,7 @@ class BackgroundTask:
         """Execute the work and handle completion."""
         try:
             self._result = await coro
-            self._completed_at = datetime.now()
+            self._completed_at = utc_now()
 
             if send_result and self._result:
                 await self.messenger.send(self._result, message_type="result")
@@ -162,7 +164,7 @@ class BackgroundTask:
 
         except Exception as e:
             self._error = e
-            self._completed_at = datetime.now()
+            self._completed_at = utc_now()
             logger.error(f"[{self.messenger.session_id}] Background task failed: {e}")
 
             # Send error notification
