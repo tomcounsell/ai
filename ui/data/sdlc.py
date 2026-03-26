@@ -165,6 +165,25 @@ def _parse_history(history_list: list | None) -> list[PipelineEvent]:
     return events
 
 
+def _safe_str(val, default: str | None = None) -> str | None:
+    """Return val as a string if it's a real value, else default."""
+    if val is None or not isinstance(val, (str, int, float, bool)):
+        return default
+    return str(val)
+
+
+def _safe_float(val) -> float | None:
+    """Return val as a float if it's a real number, else None."""
+    if isinstance(val, (int, float)):
+        return float(val)
+    if isinstance(val, str):
+        try:
+            return float(val)
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
 def _session_to_pipeline(session) -> PipelineProgress:
     """Convert an AgentSession instance to a PipelineProgress model."""
     stages = _parse_stage_states(session.stage_states)
@@ -177,25 +196,27 @@ def _session_to_pipeline(session) -> PipelineProgress:
             current = s.name
             break
 
+    slug = _safe_str(session.slug) or _safe_str(session.work_item_slug) or ""
+
     return PipelineProgress(
-        job_id=session.job_id or "",
-        session_id=session.session_id,
-        session_type=str(session.session_type) if session.session_type else "",
-        status=str(session.status) if session.status else "",
-        slug=str(session.slug or session.work_item_slug or ""),
-        message_text=session.message_text,
-        project_key=session.project_key,
-        branch_name=session.branch_name or (f"session/{session.slug}" if session.slug else None),
-        created_at=session.created_at,
-        started_at=session.started_at,
-        completed_at=session.completed_at,
-        last_activity=session.last_activity,
+        job_id=_safe_str(session.job_id) or "",
+        session_id=_safe_str(session.session_id),
+        session_type=_safe_str(session.session_type),
+        status=_safe_str(session.status),
+        slug=slug,
+        message_text=_safe_str(session.message_text),
+        project_key=_safe_str(session.project_key),
+        branch_name=_safe_str(session.branch_name) or (f"session/{slug}" if slug else None),
+        created_at=_safe_float(session.created_at),
+        started_at=_safe_float(session.started_at),
+        completed_at=_safe_float(session.completed_at),
+        last_activity=_safe_float(session.last_activity),
         stages=stages,
         current_stage=current,
         events=events,
-        issue_url=session.issue_url,
-        plan_url=session.plan_url,
-        pr_url=session.pr_url,
+        issue_url=_safe_str(session.issue_url),
+        plan_url=_safe_str(session.plan_url),
+        pr_url=_safe_str(session.pr_url),
     )
 
 
@@ -227,7 +248,11 @@ def get_all_sessions(limit: int = 16) -> list[PipelineProgress]:
     inactive = []
 
     for session in all_sessions:
-        pipeline = _session_to_pipeline(session)
+        try:
+            pipeline = _session_to_pipeline(session)
+        except Exception:
+            logger.debug(f"Skipping corrupt session: {getattr(session, 'job_id', '?')}")
+            continue
         if pipeline.status in ("running", "pending", "in_progress"):
             active.append(pipeline)
         else:
@@ -301,7 +326,11 @@ def get_recent_completions(limit: int = 25, page: int = 1) -> list[PipelineProgr
             continue
         if session.status not in ("completed", "failed"):
             continue
-        pipeline = _session_to_pipeline(session)
+        try:
+            pipeline = _session_to_pipeline(session)
+        except Exception:
+            logger.debug(f"Skipping corrupt session: {getattr(session, 'job_id', '?')}")
+            continue
         completed.append(pipeline)
 
     # Sort by completed_at descending

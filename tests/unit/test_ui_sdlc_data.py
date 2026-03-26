@@ -190,6 +190,93 @@ class TestHistoryParsing:
         assert events[0].timestamp == 123.0
 
 
+class TestSafeStr:
+    """Tests for _safe_str helper that sanitizes Popoto field values."""
+
+    def test_normal_string(self):
+        from ui.data.sdlc import _safe_str
+
+        assert _safe_str("hello") == "hello"
+
+    def test_none_returns_default(self):
+        from ui.data.sdlc import _safe_str
+
+        assert _safe_str(None) is None
+        assert _safe_str(None, "fallback") == "fallback"
+
+    def test_int_converted(self):
+        from ui.data.sdlc import _safe_str
+
+        assert _safe_str(42) == "42"
+
+    def test_float_converted(self):
+        from ui.data.sdlc import _safe_str
+
+        assert _safe_str(3.14) == "3.14"
+
+    def test_bool_converted(self):
+        from ui.data.sdlc import _safe_str
+
+        assert _safe_str(True) == "True"
+
+    def test_popoto_object_returns_default(self):
+        """Popoto DB_key or Field objects should be rejected, not str()-ed."""
+        from ui.data.sdlc import _safe_str
+
+        class FakeField:
+            pass
+
+        assert _safe_str(FakeField()) is None
+        assert _safe_str(FakeField(), "default") == "default"
+
+    def test_empty_string_preserved(self):
+        from ui.data.sdlc import _safe_str
+
+        assert _safe_str("") == ""
+
+
+class TestSafeFloat:
+    """Tests for _safe_float helper that sanitizes Popoto numeric fields."""
+
+    def test_int(self):
+        from ui.data.sdlc import _safe_float
+
+        assert _safe_float(42) == 42.0
+
+    def test_float(self):
+        from ui.data.sdlc import _safe_float
+
+        assert _safe_float(3.14) == 3.14
+
+    def test_numeric_string(self):
+        from ui.data.sdlc import _safe_float
+
+        assert _safe_float("1711234567.89") == 1711234567.89
+
+    def test_none(self):
+        from ui.data.sdlc import _safe_float
+
+        assert _safe_float(None) is None
+
+    def test_non_numeric_string(self):
+        from ui.data.sdlc import _safe_float
+
+        assert _safe_float("not a number") is None
+
+    def test_popoto_object(self):
+        from ui.data.sdlc import _safe_float
+
+        class FakeField:
+            pass
+
+        assert _safe_float(FakeField()) is None
+
+    def test_empty_string(self):
+        from ui.data.sdlc import _safe_float
+
+        assert _safe_float("") is None
+
+
 class TestSdlcQueryFunctions:
     """Tests for SDLC query functions against Redis."""
 
