@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Critiqued
 type: feature
 appetite: Medium
 owner: Valor
@@ -218,7 +218,7 @@ No agent integration required -- this is a Claude Code hooks-internal change. Th
 - **Assigned To**: hooks-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- In `user_prompt_submit.py`: after memory ingest, create AgentSession via `create_local()`, store `job_id` in sidecar
+- In `user_prompt_submit.py`: after memory ingest, check sidecar for existing `agent_session_job_id` -- if absent, create AgentSession via `create_local()` and store `job_id` in sidecar. **One AgentSession per Claude Code session** (keyed by hook input `session_id`), not one per prompt. (Critique #2)
 - In `post_tool_use.py`: read `job_id` from sidecar, update `last_activity` and increment `tool_call_count` on AgentSession
 - In `stop.py`: read `job_id` from sidecar, mark AgentSession completed/failed based on `stop_reason`, set `completed_at` and `log_path`
 - Add sidecar read/write helpers to `hook_utils/constants.py` or `memory_bridge.py`
@@ -232,8 +232,7 @@ No agent integration required -- this is a Claude Code hooks-internal change. Th
 - **Agent Type**: builder
 - **Parallel**: true
 - In `agent/memory_hook.py` `check_and_inject()`: after bloom check, add "vague recognition" path (bloom hits >= threshold but no ContextAssembler results) and "novel territory" path (zero bloom hits, many keywords)
-- Use same thresholds as `memory_bridge.py` (import from shared config or define locally)
-- Move deja vu threshold constants to `config/memory_defaults.py` for single source of truth
+- Move `DEJA_VU_BLOOM_HIT_THRESHOLD` and `NOVEL_TERRITORY_KEYWORD_THRESHOLD` from `memory_bridge.py` (lines 46-52) to `config/memory_defaults.py`, then update both `memory_bridge.py` and `agent/memory_hook.py` to import from the shared location. (Critique #3)
 
 ### 4. Add post-merge learning trigger for Claude Code path
 - **Task ID**: build-post-merge
@@ -242,9 +241,9 @@ No agent integration required -- this is a Claude Code hooks-internal change. Th
 - **Assigned To**: hooks-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- In `post_tool_use.py`: when `gh pr merge` is detected in Bash command, set a `merge_detected` flag in the SDLC sidecar state
-- In `stop.py`: if `merge_detected` flag is set, call `extract_post_merge_learning()` with the merged PR info
-- Extract PR number from the merge command via regex
+- In `post_tool_use.py`: extend the existing `is_merge` detection (line 196, `r"\bgh\s+pr\s+merge\b"`) in `update_sdlc_state_for_bash()` to also set a `merge_detected` flag and extract the PR number into the SDLC sidecar state. Do NOT add duplicate regex detection. (Critique #4)
+- In `stop.py`: if `merge_detected` flag is set, call a new `post_merge_extract()` wrapper in `memory_bridge.py` that imports and invokes `extract_post_merge_learning()` from `agent/memory_extraction.py`. (Critique #5)
+- The `post_merge_extract()` wrapper follows the same pattern as the existing `extract()` wrapper in `memory_bridge.py`
 
 ### 5. Validate integration
 - **Task ID**: validate-integration
@@ -290,11 +289,19 @@ No agent integration required -- this is a Claude Code hooks-internal change. Th
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
-| CONCERN | [agent-type] | [The concern raised] | [How/whether it was addressed] |
+<!-- Populated by /do-plan-critique (war room). 2026-03-26 -->
+
+| # | Agent | Concern | Resolution |
+|---|-------|---------|------------|
+| 1 | architect | **New `create_local()` vs reusing `create_dev()`**: Plan proposes a third factory method, but `create_dev()` already has all required fields except `parent_chat_session_id` (which is required). Adding a third factory increases surface area. | **Addressed in plan**: Keep `create_local()` as planned. `create_dev()` is tightly coupled to ChatSession orchestration (requires `parent_chat_session_id`, `message_text`). Local sessions have no parent ChatSession and no triggering message. A separate factory makes the contract explicit and avoids making `parent_chat_session_id` optional (which would weaken the DevSession contract). |
+| 2 | architect | **Session ID uniqueness and idempotency**: `UserPromptSubmit` fires on every prompt in the same Claude Code session. The idempotency guard ("sidecar presence check") is buried in Technical Approach, but it is a core design decision -- one AgentSession per CLI session, not one per prompt. | **Addressed in plan**: Added to Task 2 step 1 as explicit requirement: "Check sidecar for existing `agent_session_job_id` before creating. One AgentSession per Claude Code session (keyed by `session_id`), not one per prompt." |
+| 3 | builder | **Deja vu threshold constant migration is a two-file change**: Task 3 says move thresholds to `config/memory_defaults.py`, but `memory_bridge.py` (lines 46-52) defines `DEJA_VU_BLOOM_HIT_THRESHOLD` and `NOVEL_TERRITORY_KEYWORD_THRESHOLD` locally. Both files must be updated. | **Addressed in plan**: Task 3 updated to explicitly include updating `memory_bridge.py` imports to use the shared constants from `config/memory_defaults.py`. |
+| 4 | builder | **Post-merge detection regex already exists**: `post_tool_use.py` line 196 already computes `is_merge` via `r"\bgh\s+pr\s+merge\b"`. Task 4 should piggyback on this existing detection rather than adding new regex. | **Addressed in plan**: Task 4 updated to note that the existing `is_merge` detection in `update_sdlc_state_for_bash()` should be extended to also set the `merge_detected` flag in the SDLC sidecar, rather than adding duplicate detection logic. |
+| 5 | builder | **`extract_post_merge_learning()` is not exposed via `memory_bridge.py`**: The function exists in `agent/memory_extraction.py` but hooks import from `hook_utils/memory_bridge.py`. A new wrapper function is needed in `memory_bridge.py`, similar to how `extract()` wraps the extraction pipeline. | **Addressed in plan**: Task 4 updated to include adding a `post_merge_extract()` wrapper in `memory_bridge.py` that imports and calls `extract_post_merge_learning()` from `agent/memory_extraction.py`, matching the existing wrapper pattern. |
+| 6 | validator | **Dashboard null-safety for Telegram-specific fields is asserted but unverified**: Plan claims dashboard renders generically, but the HTML templates have not been inspected for direct access to `chat_id`, `sender_name`, or `telegram_message_id` without null guards. | **Noted as risk**: Task 5 (validate-integration) must explicitly verify template rendering with a session that has null `chat_id`, `sender_name`, and `telegram_message_id`. If null guards are missing, the builder must add Jinja2 default filters. This is low-risk since the dashboard already handles sessions with missing fields from job hierarchy children, but must be verified. |
 
 ---
 
 ## Open Questions
 
-No open questions -- the issue recon resolved all assumptions. The patterns are established by PR #525 (memory hooks) and the AgentSession model already supports the required fields.
+No open questions -- the critique resolved all concerns with plan amendments. The patterns are established by PR #525 (memory hooks) and the AgentSession model already supports the required fields.
