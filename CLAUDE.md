@@ -163,7 +163,7 @@ The standard flow from conversation to shipped feature:
 ### Phase 2: SDLC (triggered by work request)
 - ChatSession steers the pipeline, invoking `/sdlc` skills as needed
 - `/sdlc` assesses current state, invokes ONE sub-skill, and returns
-- Stages: Plan -> Build -> Test -> Patch -> Review -> Patch -> Docs -> Merge
+- Stages: Plan -> Critique -> Build -> Test -> Patch -> Review -> Patch -> Docs -> Merge
 - See `.claude/skills/sdlc/SKILL.md` for the ground truth on stage definitions
 
 ### Phase 3: Review & Merge
