@@ -331,6 +331,42 @@ def clean_message(text: str, project: dict | None) -> str:
     return result.strip()
 
 
+def _truncate_at_sentence_boundary(text: str, limit: int = 4096) -> str:
+    """Truncate text at a sentence boundary within the character limit.
+
+    Finds the last sentence-ending punctuation (. ! ?) followed by whitespace
+    or end-of-string within the limit. Falls back to raw truncation with
+    ellipsis if no sentence boundary is found within the last 500 characters.
+
+    Args:
+        text: The text to truncate.
+        limit: Maximum character count (default: Telegram's 4096 limit).
+
+    Returns:
+        Truncated text ending at a complete sentence, or '...' fallback.
+    """
+    if not text or len(text) <= limit:
+        return text or ""
+
+    # Reserve space for potential ellipsis
+    search_text = text[: limit - 3]
+
+    # Look for sentence boundaries in the last 500 chars
+    search_start = max(0, len(search_text) - 500)
+    search_window = search_text[search_start:]
+
+    # Match . or ! or ? followed by whitespace or end
+    matches = list(re.finditer(r"[.!?](?:\s|$)", search_window))
+
+    if matches:
+        last_match = matches[-1]
+        cut_pos = search_start + last_match.start() + 1
+        return text[:cut_pos].rstrip()
+
+    # No sentence boundary found -- fall back to raw truncation
+    return text[: limit - 3] + "..."
+
+
 async def send_response_with_files(
     client: TelegramClient,
     event,
@@ -499,7 +535,10 @@ async def send_response_with_files(
             logger.error(f"Failed to send file {file_path}: {e}")
             await client.send_message(_chat_id, f"Failed to send file: {file_path.name}")
 
-    # PM bypass: files have been sent above, skip text/summarizer output
+    # PM bypass (dual-personality guard): files have been sent above,
+    # skip text/summarizer output. This prevents sending both PM
+    # self-messages AND a summarized version of the same content.
+    # Guard coverage: pm_bypass blocks summarization AND text sending.
     if pm_bypass:
         return True  # Signal that content was "sent" (PM already delivered it)
 
@@ -508,9 +547,9 @@ async def send_response_with_files(
 
     # Send text if there's meaningful content
     if text and not text.isspace():
-        # Safety truncation at Telegram's limit (summarizer handles graceful shortening)
+        # Sentence-aware truncation at Telegram's 4096-char limit
         if len(text) > 4096:
-            text = text[:4093] + "..."
+            text = _truncate_at_sentence_boundary(text, limit=4096)
         try:
             # Use markdown parse mode with plain-text fallback
             from bridge.markdown import send_markdown

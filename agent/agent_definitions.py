@@ -13,10 +13,13 @@ Each agent definition includes:
 
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 
 from claude_agent_sdk import AgentDefinition
+
+logger = logging.getLogger(__name__)
 
 # Root of the repository, resolved relative to this file's location.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -37,7 +40,22 @@ def _parse_agent_markdown(path: Path) -> dict[str, str | dict[str, str]]:
 
     Returns a dict with string keys for each frontmatter field plus 'body'
     containing the markdown content after the closing '---'.
+
+    If the file does not exist, logs a warning and returns a fallback dict
+    with empty frontmatter and a minimal body. This prevents the entire
+    session from crashing when an agent definition file is missing (e.g.,
+    during deployment before file sync completes).
     """
+    if not path.exists():
+        logger.warning("Agent definition file not found: %s — using fallback prompt", path)
+        return {
+            "frontmatter": {"description": f"Fallback for missing {path.name}"},
+            "body": (
+                f"Agent definition file {path.name} is not available."
+                " Operate with your best judgment."
+            ),
+        }
+
     text = path.read_text(encoding="utf-8")
 
     # Match YAML frontmatter delimited by '---'
@@ -133,3 +151,28 @@ def _load_dev_session_prompt() -> str:
         "Follow the SDLC pipeline stages as directed by your parent ChatSession.\n"
         "Commit at logical checkpoints as you work.\n"
     )
+
+
+# Agent files referenced by get_agent_definitions(). Used by validate_agent_files()
+# to check that all expected files exist on disk at bridge startup.
+_EXPECTED_AGENT_FILES = [
+    "builder.md",
+    "validator.md",
+    "code-reviewer.md",
+    "dev-session.md",
+]
+
+
+def validate_agent_files() -> list[str]:
+    """Check that all expected agent definition files exist on disk.
+
+    Returns a list of missing file paths (as strings). An empty list means
+    all files are present. Called during bridge startup to surface missing
+    files early via log warnings.
+    """
+    missing = []
+    for filename in _EXPECTED_AGENT_FILES:
+        path = _AGENTS_DIR / filename
+        if not path.exists():
+            missing.append(str(path))
+    return missing
