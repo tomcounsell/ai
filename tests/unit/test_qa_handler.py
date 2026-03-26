@@ -24,14 +24,22 @@ class TestBuildQaInstructions:
         result = build_qa_instructions()
         assert "Do NOT write files" in result
 
-    def test_telegram_send_instruction(self):
+    def test_no_send_telegram_instruction(self):
+        """Q&A should not reference send_telegram.py — single delivery path via summarizer."""
         result = build_qa_instructions()
-        assert "send_telegram.py" in result
+        assert "send_telegram.py" not in result
 
     def test_conversational_tone(self):
         result = build_qa_instructions()
         assert "directly" in result
         assert "conversational" in result.lower() or "conversationally" in result.lower()
+
+    def test_research_first_behavior(self):
+        """Q&A instructions should emphasize research before answering."""
+        result = build_qa_instructions()
+        assert "memory_search" in result
+        assert "Grep" in result or "Glob" in result
+        assert "evidence" in result.lower() or "cite" in result.lower()
 
 
 class TestQaConstants:

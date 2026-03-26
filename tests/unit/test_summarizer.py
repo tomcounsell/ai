@@ -1077,6 +1077,38 @@ class TestComposeStructuredSummary:
         result = _compose_structured_summary("• Working on it", session=None, is_completion=False)
         assert "⏳" in result
 
+    def test_qa_mode_returns_prose_without_emoji(self):
+        """Q&A sessions bypass structured formatting — return prose directly."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session.qa_mode = True
+        session.session_id = None  # Skip Redis refresh
+
+        result = _compose_structured_summary(
+            "The bridge uses Telethon for Telegram integration. See bridge/telegram_bridge.py.",
+            session=session,
+        )
+        # No emoji prefix
+        assert not result.startswith("✅")
+        assert not result.startswith("⏳")
+        assert not result.startswith("❌")
+        # Prose preserved as-is
+        assert "bridge uses Telethon" in result
+
+    def test_qa_mode_false_still_gets_structured(self):
+        """Non-Q&A sessions with qa_mode=False still get structured formatting."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session.qa_mode = False
+        session.session_id = None
+        session.status = "completed"
+
+        result = _compose_structured_summary("• Built it", session=session)
+        assert "✅" in result
+        assert "• Built it" in result
+
 
 class TestNoMessageEcho:
     """Tests verifying that message echo has been removed (issue #241).
@@ -1216,6 +1248,26 @@ class TestComposeStructuredSummaryWithSession:
         assert "BUILD" not in result
         # No echo of user message (Telegram reply-to provides context)
         assert result.split("\n")[0].strip() in ("\u2705", "\u23f3", "\u274c")
+
+    def test_qa_mode_session_returns_prose(self):
+        """Q&A session bypasses all structured formatting."""
+        session = _mock_session_with_stages({})
+        session.qa_mode = True
+        session.session_id = None  # Skip Redis refresh
+        session.message_text = "How does the bridge work?"
+        session.status = "completed"
+
+        result = _compose_structured_summary(
+            "The bridge connects Telegram to Claude via Telethon. "
+            "See bridge/telegram_bridge.py for the main entry point.",
+            session=session,
+        )
+
+        # No structured formatting — pure prose
+        assert not result.startswith("\u2705")
+        assert not result.startswith("\u23f3")
+        assert "\u2022" not in result  # No bullet points
+        assert "bridge connects Telegram" in result
 
 
 class TestSummarizationBypass:
