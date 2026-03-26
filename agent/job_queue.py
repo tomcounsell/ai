@@ -1999,8 +1999,7 @@ async def _execute_job(job: Job) -> None:
         # Use reduced nudge cap for Q&A sessions
         _effective_nudge_cap = MAX_NUDGE_COUNT
         if agent_session:
-            _cls_type = getattr(agent_session, "classification_type", None)
-            if _cls_type == "qa":
+            if getattr(agent_session, "qa_mode", False):
                 from agent.qa_handler import QA_MAX_NUDGE_COUNT
 
                 _effective_nudge_cap = QA_MAX_NUDGE_COUNT

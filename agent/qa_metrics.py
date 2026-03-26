@@ -10,20 +10,28 @@ from __future__ import annotations
 import logging
 import time
 
+from agent.intent_classifier import QA_CONFIDENCE_THRESHOLD
+
 logger = logging.getLogger(__name__)
 
 # Redis key prefix for Q&A metrics
 _PREFIX = "qa_metrics"
 
+# Module-level lazy singleton for Redis connection
+_redis_client = None
+
 
 def _get_redis():
-    """Get Redis connection, returns None on failure."""
+    """Get Redis connection (lazy singleton), returns None on failure."""
+    global _redis_client
+    if _redis_client is not None:
+        return _redis_client
     try:
         import redis
-
         from config.redis_config import get_redis_url
 
-        return redis.Redis.from_url(get_redis_url(), decode_responses=True)
+        _redis_client = redis.Redis.from_url(get_redis_url(), decode_responses=True)
+        return _redis_client
     except Exception:
         return None
 
@@ -40,7 +48,7 @@ def record_classification(intent: str, confidence: float) -> None:
         if not r:
             return
 
-        if intent == "qa" and confidence >= 0.90:
+        if intent == "qa" and confidence >= QA_CONFIDENCE_THRESHOLD:
             r.incr(f"{_PREFIX}:qa_classified_count")
         elif intent == "qa":
             r.incr(f"{_PREFIX}:qa_low_confidence_count")

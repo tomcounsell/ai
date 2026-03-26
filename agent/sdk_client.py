@@ -1494,7 +1494,7 @@ async def get_agent_response_sdk(
 
                         for _s in _QASession.query.filter(session_id=session_id):
                             if _s.status in ("running", "active", "pending"):
-                                _s.classification_type = "qa"
+                                _s.qa_mode = True
                                 _s.save()
                                 break
                     except Exception:
