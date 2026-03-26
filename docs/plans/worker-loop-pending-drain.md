@@ -112,21 +112,21 @@ There is NO separate polling retry loop. The Event wait subsumes the old drain g
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] The sync Popoto fallback in `_pop_job_with_fallback()` must have try/except -- if query fails, fall through to normal exit (don't crash the worker)
-- [ ] Event.set() in `enqueue_job()` must not raise if no event exists yet (worker not started)
+- [x] The sync Popoto fallback in `_pop_job_with_fallback()` must have try/except -- if query fails, fall through to normal exit (don't crash the worker)
+- [x] Event.set() in `enqueue_job()` must not raise if no event exists yet (worker not started)
 
 ### Empty/Invalid Input Handling
-- [ ] `_pop_job_with_fallback()` with empty chat_id should return None gracefully
-- [ ] Sync query returning stale records (deleted between query and processing) must handle gracefully
+- [x] `_pop_job_with_fallback()` with empty chat_id should return None gracefully
+- [x] Sync query returning stale records (deleted between query and processing) must handle gracefully
 
 ### Error State Rendering
-- [ ] No user-visible output -- this is internal infrastructure
-- [ ] Warning log when exit-time scan finds orphaned pending jobs is the observable error signal
+- [x] No user-visible output -- this is internal infrastructure
+- [x] Warning log when exit-time scan finds orphaned pending jobs is the observable error signal
 
 ## Test Impact
 
-- [ ] `tests/integration/test_job_queue_race.py::TestDrainGuard::test_drain_guard_double_check_finds_late_job` -- REPLACE: existing test only validates `_pop_job` isolation, not `_worker_loop` integration. Rewrite to test Event-based drain in `_worker_loop`
-- [ ] `tests/integration/test_job_queue_race.py::TestDrainGuard::test_drain_guard_exits_when_truly_empty` -- REPLACE: rewrite for Event-based drain with timeout exit behavior
+- [x] `tests/integration/test_job_queue_race.py::TestDrainGuard::test_drain_guard_double_check_finds_late_job` -- REPLACE: existing test only validates `_pop_job` isolation, not `_worker_loop` integration. Rewrite to test Event-based drain in `_worker_loop`
+- [x] `tests/integration/test_job_queue_race.py::TestDrainGuard::test_drain_guard_exits_when_truly_empty` -- REPLACE: rewrite for Event-based drain with timeout exit behavior
 
 ## Rabbit Holes
 
@@ -178,22 +178,22 @@ No agent integration required -- this is internal job queue infrastructure. No n
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/job-queue.md` with the new drain guard behavior, Event-based notification, and raw Redis fallback
-- [ ] Add entry to `docs/features/README.md` index table if not already present
+- [x] Update `docs/features/job-queue.md` with the new drain guard behavior, Event-based notification, and raw Redis fallback
+- [x] Add entry to `docs/features/README.md` index table if not already present
 
 ### Inline Documentation
-- [ ] Docstring updates for `_pop_job()`, `_worker_loop()`, `_ensure_worker()`
-- [ ] Comment explaining the raw Redis fallback and when it triggers
+- [x] Docstring updates for `_pop_job()`, `_worker_loop()`, `_ensure_worker()`
+- [x] Comment explaining the raw Redis fallback and when it triggers
 
 ## Success Criteria
 
-- [ ] Two jobs enqueued for the same chat_id within 5 seconds: both complete without manual intervention
-- [ ] Worker loop logs a warning if exit-time scan finds pending jobs (raw Redis check)
-- [ ] Integration test: enqueue job A, start worker, enqueue job B while A runs, assert B is picked up after A completes
-- [ ] Drain guard retry count and interval are configurable constants (not hardcoded)
-- [ ] No xfail markers related to this bug
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] Two jobs enqueued for the same chat_id within 5 seconds: both complete without manual intervention
+- [x] Worker loop logs a warning if exit-time scan finds pending jobs (raw Redis check)
+- [x] Integration test: enqueue job A, start worker, enqueue job B while A runs, assert B is picked up after A completes
+- [x] Drain guard retry count and interval are configurable constants (not hardcoded)
+- [x] No xfail markers related to this bug
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
