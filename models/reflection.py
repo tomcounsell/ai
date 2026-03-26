@@ -50,6 +50,17 @@ class Reflection(Model):
 
     _RUN_HISTORY_CAP = 200
 
+    def _normalize_run_history(self) -> None:
+        """Ensure run_history is a plain list before saving.
+
+        Popoto's ListField can deserialize as a ListField descriptor object
+        instead of a plain list when loading from Redis. This normalization
+        prevents ModelException on save() due to 'ListField object is not
+        iterable' validation errors.
+        """
+        if not isinstance(self.run_history, list):
+            self.run_history = []
+
     @classmethod
     def get_or_create(cls, name: str) -> "Reflection":
         """Get existing reflection state by name, or create a new record."""
@@ -71,6 +82,7 @@ class Reflection(Model):
         """Mark this reflection as currently running."""
         self.last_status = "running"
         self.last_run = time.time()
+        self._normalize_run_history()
         self.save()
 
     def mark_completed(self, duration: float, error: str | None = None) -> None:
@@ -101,7 +113,8 @@ class Reflection(Model):
             "duration": duration,
             "error": error[:500] if error else None,
         }
-        history = self.run_history if isinstance(self.run_history, list) else []
+        self._normalize_run_history()
+        history = self.run_history
         history.append(run_record)
         if len(history) > self._RUN_HISTORY_CAP:
             history = history[-self._RUN_HISTORY_CAP :]
@@ -113,6 +126,7 @@ class Reflection(Model):
         """Mark this reflection as skipped (e.g., already running)."""
         self.last_status = "skipped"
         self.last_error = reason
+        self._normalize_run_history()
         self.save()
 
     @classmethod
