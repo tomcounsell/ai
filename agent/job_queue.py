@@ -1725,7 +1725,7 @@ async def _worker_loop(chat_id: str, event: asyncio.Event) -> None:
                     job = await _pop_job_with_fallback(chat_id)
                     if job is not None:
                         logger.warning(
-                            f"[chat:{chat_id}] Exit-time scan found pending job "
+                            f"[chat:{chat_id}] Found pending job at exit time: "
                             f"{job.job_id} — processing instead of exiting"
                         )
                     else:
