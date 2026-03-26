@@ -122,6 +122,122 @@ SHUTTING_DOWN = False
 # Project directory (for running scripts, checking flags, etc.)
 _BRIDGE_PROJECT_DIR = Path(__file__).parent.parent
 
+# Flood-backoff and last-connected file paths
+_FLOOD_BACKOFF_FILE = _BRIDGE_PROJECT_DIR / "data" / "flood-backoff"
+_LAST_CONNECTED_FILE = _BRIDGE_PROJECT_DIR / "data" / "last_connected"
+
+# Staleness threshold: ignore flood-backoff files older than 24 hours
+_FLOOD_BACKOFF_MAX_AGE_SECONDS = 24 * 3600
+
+
+def _read_flood_backoff() -> float | None:
+    """Read the flood-backoff file and return the expiry timestamp.
+
+    Returns None if the file doesn't exist, is corrupt, expired, or stale (>24h old).
+    """
+    try:
+        if not _FLOOD_BACKOFF_FILE.exists():
+            return None
+        raw = _FLOOD_BACKOFF_FILE.read_text().strip()
+        if not raw:
+            return None
+        data = json.loads(raw)
+        expiry_ts = data.get("expiry_ts")
+        if expiry_ts is None:
+            return None
+        expiry_ts = float(expiry_ts)
+        now = time.time()
+        # Ignore stale files (>24h old based on file mtime)
+        file_age = now - _FLOOD_BACKOFF_FILE.stat().st_mtime
+        if file_age > _FLOOD_BACKOFF_MAX_AGE_SECONDS:
+            logger.info("[flood-backoff] Ignoring stale backoff file (%.1fh old)", file_age / 3600)
+            _FLOOD_BACKOFF_FILE.unlink(missing_ok=True)
+            return None
+        # Ignore already-expired entries
+        if expiry_ts <= now:
+            logger.info("[flood-backoff] Backoff already expired, removing file")
+            _FLOOD_BACKOFF_FILE.unlink(missing_ok=True)
+            return None
+        return expiry_ts
+    except (json.JSONDecodeError, ValueError, OSError, TypeError) as e:
+        logger.warning("[flood-backoff] Failed to read backoff file: %s", e)
+        return None
+
+
+def _write_flood_backoff(wait_seconds: int) -> None:
+    """Write a flood-backoff file with the expiry timestamp.
+
+    Uses atomic write (write to temp file + os.replace) to prevent corruption.
+    """
+    try:
+        expiry_ts = time.time() + wait_seconds
+        data = {"expiry_ts": expiry_ts, "seconds": wait_seconds}
+        tmp_path = _FLOOD_BACKOFF_FILE.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(data))
+        os.replace(str(tmp_path), str(_FLOOD_BACKOFF_FILE))
+        logger.info(
+            "[flood-backoff] Wrote backoff file: wait=%ds, expiry=%s",
+            wait_seconds,
+            datetime.fromtimestamp(expiry_ts).isoformat(),
+        )
+    except OSError as e:
+        logger.warning("[flood-backoff] Failed to write backoff file: %s", e)
+
+
+def _clear_flood_backoff() -> None:
+    """Delete the flood-backoff file after successful connection."""
+    try:
+        if _FLOOD_BACKOFF_FILE.exists():
+            _FLOOD_BACKOFF_FILE.unlink(missing_ok=True)
+            logger.info("[flood-backoff] Cleared backoff file after successful connect")
+    except OSError as e:
+        logger.warning("[flood-backoff] Failed to clear backoff file: %s", e)
+
+
+def _read_last_connected() -> datetime | None:
+    """Read the last-connected timestamp file.
+
+    Returns None if the file doesn't exist or contains invalid data.
+    Future timestamps are clamped to now.
+    """
+    try:
+        if not _LAST_CONNECTED_FILE.exists():
+            return None
+        raw = _LAST_CONNECTED_FILE.read_text().strip()
+        if not raw:
+            return None
+        from datetime import UTC
+
+        ts = datetime.fromisoformat(raw)
+        # Ensure timezone-aware
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=UTC)
+        # Clamp future timestamps to now
+        now = datetime.now(UTC)
+        if ts > now:
+            logger.warning("[last-connected] Future timestamp clamped to now: %s", raw)
+            return now
+        return ts
+    except (ValueError, OSError, TypeError) as e:
+        logger.warning("[last-connected] Failed to read timestamp: %s", e)
+        return None
+
+
+def _write_last_connected() -> None:
+    """Write the current timestamp to the last-connected file.
+
+    Uses atomic write (write to temp file + os.replace) to prevent corruption.
+    """
+    try:
+        from datetime import UTC
+
+        now = datetime.now(UTC)
+        tmp_path = _LAST_CONNECTED_FILE.with_suffix(".tmp")
+        tmp_path.write_text(now.isoformat())
+        os.replace(str(tmp_path), str(_LAST_CONNECTED_FILE))
+    except OSError as e:
+        logger.warning("[last-connected] Failed to write timestamp: %s", e)
+
 
 def _cleanup_session_locks() -> int:
     """Kill stale processes holding the Telegram session file.
@@ -1358,6 +1474,9 @@ async def main():
         if orphans:
             logger.info(f"Killed {orphans} SDK subprocess(es) during shutdown")
 
+        # Write final last-connected timestamp before shutting down
+        _write_last_connected()
+
         logger.info("Waiting 2s for in-flight tasks to finish...")
         await asyncio.sleep(2)
         logger.info("Disconnecting Telegram client...")
@@ -1382,6 +1501,19 @@ async def main():
     import random
 
     logger.info("Starting Telegram bridge...")
+
+    # Check flood-backoff file before attempting to connect
+    backoff_expiry = _read_flood_backoff()
+    if backoff_expiry is not None:
+        remaining = backoff_expiry - time.time()
+        if remaining > 0:
+            logger.warning(
+                "[flood-backoff] Respecting backoff from previous run: %.0fs remaining",
+                remaining,
+            )
+            await asyncio.sleep(remaining)
+            logger.info("[flood-backoff] Backoff period complete, proceeding with connect")
+
     max_attempts = 8
     for _attempt in range(1, max_attempts + 1):
         try:
@@ -1398,6 +1530,7 @@ async def main():
                 "FloodWaitError: Telegram requires a %d second wait. Sleeping until ready...",
                 e.seconds,
             )
+            _write_flood_backoff(e.seconds)
             await asyncio.sleep(e.seconds + 5)
             continue
         except (SystemExit, KeyboardInterrupt):
@@ -1426,6 +1559,8 @@ async def main():
                 _cleanup_session_locks()
             await asyncio.sleep(wait_time)
     logger.info("Connected to Telegram")
+    _clear_flood_backoff()
+    _write_last_connected()
 
     # Replay any dead-lettered messages from previous session
     try:
@@ -1569,8 +1704,23 @@ async def main():
     async def _run_catchup():
         logger.info("Starting catchup scan for missed messages...")
         try:
+            from datetime import UTC
+
             from agent.job_queue import enqueue_job as _enqueue_job
             from bridge.catchup import scan_for_missed_messages
+
+            # Compute dynamic lookback from last_connected timestamp
+            lookback = None
+            last_connected = _read_last_connected()
+            if last_connected is not None:
+                lookback = datetime.now(UTC) - last_connected
+                logger.info(
+                    "[catchup] Dynamic lookback from last_connected: %s (file value: %s)",
+                    lookback,
+                    last_connected.isoformat(),
+                )
+            else:
+                logger.info("[catchup] No last_connected file found, using default lookback")
 
             caught_up = await scan_for_missed_messages(
                 client=client,
@@ -1579,6 +1729,7 @@ async def main():
                 should_respond_fn=should_respond_async,
                 enqueue_job_fn=_enqueue_job,
                 find_project_fn=find_project_for_chat,
+                lookback_override=lookback,
             )
             logger.info(f"Catchup scan complete: {caught_up} message(s) queued")
         except Exception as e:
@@ -1641,10 +1792,17 @@ async def main():
 
     async def heartbeat_loop():
         _last_zombie_cleanup = time.time()
+        _last_connected_write = time.time()
 
         while True:
             await asyncio.sleep(30)
             uptime_min = int((time.time() - _bridge_start_time) / 60)
+
+            # Update last-connected timestamp every 5 minutes
+            now_ts = time.time()
+            if now_ts - _last_connected_write >= 300:
+                _last_connected_write = now_ts
+                _write_last_connected()
 
             # Check for orphaned pending jobs when no workers are active
             from agent.job_queue import _active_workers

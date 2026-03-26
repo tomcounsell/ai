@@ -24,6 +24,7 @@ async def scan_for_missed_messages(
     should_respond_fn,
     enqueue_job_fn,
     find_project_fn,
+    lookback_override: timedelta | None = None,
 ) -> int:
     """
     Scan monitored groups for messages that may have been missed.
@@ -35,12 +36,24 @@ async def scan_for_missed_messages(
         should_respond_fn: Async function to check if we should respond
         enqueue_job_fn: Async function to enqueue a job
         find_project_fn: Function to find project config for a chat
+        lookback_override: If provided, use this timedelta instead of
+            CATCHUP_LOOKBACK_MINUTES. Capped at 24 hours.
 
     Returns:
         Number of messages queued for processing
     """
     queued = 0
-    cutoff = datetime.now(UTC) - timedelta(minutes=CATCHUP_LOOKBACK_MINUTES)
+    if lookback_override is not None:
+        # Cap at 24 hours to prevent scanning excessive history
+        max_lookback = timedelta(hours=24)
+        effective_lookback = min(lookback_override, max_lookback)
+        cutoff = datetime.now(UTC) - effective_lookback
+        logger.info(
+            "[catchup] Using dynamic lookback: %s (capped at 24h)",
+            effective_lookback,
+        )
+    else:
+        cutoff = datetime.now(UTC) - timedelta(minutes=CATCHUP_LOOKBACK_MINUTES)
 
     logger.info(
         f"[catchup] Scanning {len(monitored_groups)} groups for messages since {cutoff.isoformat()}"

@@ -129,7 +129,38 @@ The watchdog is installed alongside the bridge:
 # - com.valor.bridge-watchdog (every 60s)
 ```
 
-### 10. Update Polling (`com.valor.update`)
+### 10. Flood-Backoff Persistence (`bridge/telegram_bridge.py`)
+
+**Problem**: When the bridge hits a Telegram `FloodWaitError` with a long duration, launchd restarts compound the problem. Each restart triggers a new connection attempt, which increments Telegram's flood counter, escalating the wait from seconds to hours.
+
+**Solution**: On `FloodWaitError`, the bridge writes a `data/flood-backoff` JSON file containing the expiry timestamp. On startup, before attempting to connect, the bridge checks this file and sleeps until the flood period clears. This makes launchd restarts harmless.
+
+**File format** (`data/flood-backoff`):
+```json
+{"expiry_ts": 1711382400.0, "seconds": 300}
+```
+
+**Safety guards**:
+- Expired entries are ignored and the file is deleted
+- Stale files (older than 24 hours based on mtime) are ignored and deleted
+- Corrupt or empty files are treated as "no backoff"
+- The file is deleted on successful connect
+- All writes use atomic temp-file + `os.replace` to prevent corruption
+
+### 11. Dynamic Catchup Lookback (`bridge/catchup.py`)
+
+**Problem**: The fixed 60-minute `CATCHUP_LOOKBACK_MINUTES` means that after a multi-hour outage, messages older than 60 minutes are silently missed forever.
+
+**Solution**: The bridge persists a `data/last_connected` ISO 8601 timestamp file. On startup, catchup reads this timestamp and uses it to compute the lookback window dynamically instead of using the fixed 60-minute default. The lookback is capped at 24 hours to avoid scanning excessive history.
+
+**Timestamp updates**:
+- Written on successful Telegram connect
+- Updated every 5 minutes via the heartbeat loop
+- Written on graceful shutdown (SIGTERM/SIGINT)
+
+**Fallback**: If the file is missing or invalid, the default 60-minute lookback is used. Redis dedup (`is_duplicate_message`) prevents double-processing even if the window overlaps with already-handled messages.
+
+### 12. Update Polling (`com.valor.update`)
 
 **Problem**: Code pushes to main could take up to 12 hours to propagate to all machines, since the update plist only ran at 6 AM and 6 PM.
 
@@ -196,6 +227,8 @@ rm data/auto-revert-enabled
 | `scripts/auto-revert.sh` | Git revert and restart |
 | `data/recovery-in-progress` | Recovery lock file |
 | `data/auto-revert-enabled` | Auto-revert enable flag |
+| `data/flood-backoff` | Flood-backoff expiry (JSON) |
+| `data/last_connected` | Last-connected timestamp (ISO 8601) |
 | `logs/watchdog.log` | Watchdog output |
 
 ## Design Principles
@@ -205,7 +238,7 @@ rm data/auto-revert-enabled
 - **No monitoring dashboards** - Telegram alerts only
 - **No configuration** - Hardcoded 60s watchdog, sensible defaults
 - **No external services** - Self-contained recovery
-- **Single persistence layer** - All state in Redis (no SQLite, no flat files)
+- **Minimal file-based state** - Flood-backoff and last-connected use simple files in `data/` for cross-restart persistence; all other state in Redis
 
 ## Related
 
