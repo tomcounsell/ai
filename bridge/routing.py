@@ -177,6 +177,72 @@ def is_team_chat(chat_title: str | None) -> bool:
 
 
 # =============================================================================
+# Config-Driven Chat Mode Resolution
+# =============================================================================
+
+# Mapping from persona field values in projects.json to mode strings.
+PERSONA_TO_MODE = {
+    "teammate": "qa",
+    "project-manager": "pm",
+    "developer": "dev",
+}
+
+
+def resolve_chat_mode(
+    project: dict | None,
+    chat_title: str | None,
+    is_dm: bool = False,
+) -> str | None:
+    """Resolve the effective chat mode from config, title prefix, or DM status.
+
+    Resolution order:
+    1. DMs -> always "qa"
+    2. Group persona field in projects.json -> map to mode
+    3. Title prefix "Dev:" -> "dev", "PM:" -> "pm"
+    4. None (unconfigured -- fall through to existing classifier behavior)
+
+    Args:
+        project: Project configuration dict from projects.json, or None.
+        chat_title: Telegram chat/group title, or None for DMs.
+        is_dm: Whether this is a direct message.
+
+    Returns:
+        "qa", "pm", "dev", or None (unconfigured).
+    """
+    # DMs are always Q&A
+    if is_dm:
+        return "qa"
+
+    # Look up persona from group config in projects.json
+    if project and chat_title:
+        telegram_config = project.get("telegram", {})
+        groups = telegram_config.get("groups", {})
+        if isinstance(groups, dict):
+            for group_name, group_config in groups.items():
+                if group_name.lower() in chat_title.lower():
+                    if isinstance(group_config, dict):
+                        persona = group_config.get("persona", "")
+                        mode = PERSONA_TO_MODE.get(persona)
+                        if mode:
+                            logger.debug(
+                                f"resolve_chat_mode: persona={persona!r} -> mode={mode!r} "
+                                f"for {chat_title!r}"
+                            )
+                            return mode
+                    break  # Found matching group but no valid persona
+
+    # Title prefix fallback
+    if chat_title:
+        if chat_title.startswith("Dev:"):
+            return "dev"
+        if chat_title.startswith("PM:"):
+            return "pm"
+
+    # Unconfigured -- caller should fall through to existing behavior
+    return None
+
+
+# =============================================================================
 # User Permissions
 # =============================================================================
 
@@ -689,6 +755,18 @@ async def should_respond_async(
                 return True, True
         except Exception as e:
             logger.debug(f"Could not check replied message: {e}")
+
+    # Config-driven Q&A groups: passive listener (mention/reply only, skip Ollama)
+    chat_mode = resolve_chat_mode(project, chat_title, is_dm=False)
+    if chat_mode == "qa":
+        mentions = telegram_config.get("mention_triggers", DEFAULT_MENTIONS)
+        text_lower = text.lower()
+        if any(mention.lower() in text_lower for mention in mentions):
+            logger.debug("Q&A-mode group: @mention detected - responding")
+            return True, False
+        # Completely silent -- no response, no reaction
+        logger.debug(f"Q&A-mode group: silent storage for {chat_title!r}")
+        return False, False
 
     # Team chats (no Dev:/PM: prefix) are mention-only
     if is_team_chat(chat_title):

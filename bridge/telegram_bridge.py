@@ -1416,13 +1416,18 @@ async def main():
             except Exception as e:
                 logger.debug(f"Classification inheritance lookup failed (non-fatal): {e}")
 
-        # Determine session_type based on chat title prefix.
-        # "Dev: X" groups → DevSession (full permissions, dev persona)
-        # Everything else → ChatSession (PM persona, orchestrates DevSessions)
+        # Determine session_type from config-driven mode, with title-prefix fallback.
+        # "dev" mode → DevSession (full permissions, dev persona)
+        # Everything else → ChatSession (PM persona, orchestrates DevSessions + Q&A)
+        from bridge.routing import resolve_chat_mode
+
         _classification = classification_result.get("type")
-        if chat_title and chat_title.startswith("Dev:"):
+        _chat_mode = resolve_chat_mode(project, chat_title, is_dm=is_dm)
+        if _chat_mode == "dev":
             _session_type = "dev"  # DevSession — Dev persona, full permissions
-            logger.info(f"[{project_name}] Dev group detected: {chat_title!r} → session_type=dev")
+            logger.info(
+                f"[{project_name}] Dev mode (config-driven): {chat_title!r} → session_type=dev"
+            )
         else:
             _session_type = "chat"  # ChatSession — PM persona, handles both SDLC and Q&A
 
