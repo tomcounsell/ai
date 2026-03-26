@@ -72,7 +72,7 @@ for status in ("pending", "running"):
             branches.append(branch)
 ```
 
-Branch existence is then verified individually in git (`git branch --list <specific-branch>`), rather than enumerating all branches. The `state.work_status` legacy fallback was also removed.
+Branch existence is then verified individually in git (`git branch --list <specific-branch>`), rather than enumerating all branches. Redis is the sole source of truth for session state.
 
 ### Behavioral Change
 
@@ -80,7 +80,7 @@ Branch existence is then verified individually in git (`git branch --list <speci
 |--------|-------|
 | All `session/*` branches visible to any chat | Only branches belonging to the calling `chat_id` |
 | Revival could notify wrong chat | Revival only notifies the chat that owns the session |
-| `state.work_status` checked as fallback | Redis is the sole source of truth |
+| File-based state checked as fallback | Redis is the sole source of truth |
 
 ## Deferred Execution (`scheduled_after`)
 
