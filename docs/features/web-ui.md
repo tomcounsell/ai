@@ -80,6 +80,10 @@ ui/
    ```
 5. Add a card to `ui/templates/index.html`
 
+## Lifecycle
+
+The web UI runs as a standalone process, independent of the bridge. The `/update` skill auto-restarts it if it was running when an update is deployed (`scripts/update/service.py` — `is_webui_running()`, `restart_webui()`). If the UI is not running at update time, it is left stopped.
+
 ## Configuration
 
 | Variable | Default | Description |
