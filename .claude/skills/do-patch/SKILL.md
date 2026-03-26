@@ -129,6 +129,11 @@ YOUR JOB:
 If the fix requires understanding surrounding context, read the relevant files first.
 If the failure has multiple root causes, fix all of them in this single pass.
 If a fix would contradict the plan's no-gos or architectural decisions, report the conflict instead of proceeding.
+
+**Annotate rather than skip:** If a review finding is genuinely not worth fixing (e.g., a style nit in legacy code, a suggestion that contradicts the plan), do NOT silently skip it. Instead:
+- Add an inline code comment at the relevant location: `# NOTE: [finding summary] -- left as-is because [rationale]`
+- This creates a paper trail so the next reviewer does not re-flag the same issue.
+- The finding is then 'addressed' (annotated), not 'skipped'.
 "
 })
 ```
