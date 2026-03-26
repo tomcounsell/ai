@@ -36,6 +36,7 @@ def _mock_session_with_stages(stage_dict, links=None):
     session.issue_url = (links or {}).get("issue")
     session.plan_url = (links or {}).get("plan")
     session.pr_url = (links or {}).get("pr")
+    session.qa_mode = False  # Default: not a Q&A session
     return session
 
 
@@ -1130,6 +1131,7 @@ class TestNoMessageEcho:
         session.message_text = "continue"
         session.status = "running"
         session.is_sdlc = True
+        session.qa_mode = False
 
         result = _compose_structured_summary(
             "• Built the bypass\n• Tests passing", session=session, is_completion=True
@@ -1146,6 +1148,7 @@ class TestNoMessageEcho:
         session._get_history_list.return_value = ["[user] What time is it?"]
         session.message_text = "What time is it?"
         session.status = "completed"
+        session.qa_mode = False
 
         result = _compose_structured_summary("It's 3pm UTC+7", session=session, is_completion=True)
         first_line = result.split("\n")[0]
