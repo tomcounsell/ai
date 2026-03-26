@@ -957,6 +957,9 @@ def _build_summary_prompt(
             if history:
                 recent = history[-5:]  # Last 5 entries
                 context_parts.append("Recent history: " + " | ".join(str(e) for e in recent))
+        # Signal Q&A mode so the LLM uses prose format
+        if getattr(session, "qa_mode", False):
+            context_parts.append("qa_mode=True (use conversational prose, no bullets or emoji)")
         if context_parts:
             context_section = "\n\nSession context:\n" + "\n".join(context_parts) + "\n"
 
@@ -1041,6 +1044,10 @@ FORMAT RULES for the **response** field (adaptive based on content type):
    If there are no explicit questions in the raw output, do NOT include the "---" separator.
 
 5. STATUS UPDATES / WORK WITH CONTEXT: 2-4 bullet points starting with "• "
+
+6. Q&A SESSIONS (when session context indicates qa_mode=True):
+   Respond in conversational prose — no bullets, no status emoji prefix, no structured template.
+   Write as a knowledgeable teammate answering a question. Cite sources naturally in prose.
 
 GENERAL RULES:
 - NEVER include the agent's plan, approach, or strategy. The PM wants RESULTS, not plans.
@@ -1328,6 +1335,11 @@ def _compose_structured_summary(summary_text: str, session=None, is_completion: 
                 logger.debug(f"Refreshed session {session.session_id} for structured summary")
         except Exception as e:
             logger.debug(f"Could not refresh session for summary: {e}")
+
+    # Q&A bypass: return prose directly without emoji prefix, bullet parsing,
+    # or structured template. The LLM summary is already in conversational form.
+    if session and getattr(session, "qa_mode", False):
+        return summary_text.strip()
 
     # Parse questions from LLM output
     bullets, questions = _parse_summary_and_questions(summary_text)

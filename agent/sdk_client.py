@@ -70,55 +70,6 @@ _last_activity_timestamps: dict[str, float] = {}
 # interrupted regardless of total runtime.
 SDK_INACTIVITY_TIMEOUT_SECONDS = int(os.environ.get("SDK_INACTIVITY_TIMEOUT_SECONDS", 300))
 
-# === Crash Message Pool ===
-# Varied crash fallback messages to avoid robotic repetition.
-# Each includes next-step language so the user knows what to expect.
-# A module-level variable tracks the last message to prevent consecutive
-# repeats.
-CRASH_MESSAGE_POOL = [
-    (
-        "Something went sideways and I couldn't recover. "
-        "The error has been logged -- you may want to re-trigger."
-    ),
-    (
-        "Hit an unexpected error during processing. "
-        "Details are logged for investigation. Try again shortly."
-    ),
-    ("Ran into a problem I couldn't work around. The error is captured -- a retry should work."),
-    (
-        "Processing failed due to an internal error. "
-        "It's been logged. You can re-send your message to try again."
-    ),
-    (
-        "An error interrupted this session. "
-        "The details are saved for debugging -- feel free to retry."
-    ),
-]
-
-_last_crash_message: str | None = None
-
-
-def _get_crash_message() -> str:
-    """Select a crash message from the pool, avoiding consecutive repeats.
-
-    Returns a varied, human-friendly crash message. Tracks the last
-    message used to ensure no two consecutive crashes produce identical
-    text.
-    """
-    global _last_crash_message
-    import random
-
-    if not CRASH_MESSAGE_POOL:
-        return "An error occurred. Please try again."
-
-    candidates = [m for m in CRASH_MESSAGE_POOL if m != _last_crash_message]
-    if not candidates:
-        candidates = CRASH_MESSAGE_POOL
-
-    selected = random.choice(candidates)
-    _last_crash_message = selected
-    return selected
-
 
 class CircuitOpenError(RuntimeError):
     """Raised when the Anthropic circuit breaker is open.
@@ -1582,18 +1533,6 @@ async def get_agent_response_sdk(
                 "before progressing to the next one.\n"
                 "4. **Repeat** — assess, spawn, verify until the pipeline is complete "
                 "or you need human input.\n\n"
-                "**Interpreting stage outcomes:**\n"
-                "DevSession output may contain `<!-- OUTCOME {\"status\":\"...\", ...} -->` JSON. "
-                "Use this decision table:\n"
-                "| Status | Action |\n"
-                "| `success` | Proceed to next stage. If TEST+REVIEW+DOCS all passed clean → auto-merge (no human ask). |\n"
-                "| `partial` | Dispatch PATCH for tech_debt/nits, then re-REVIEW. Never silently skip findings. |\n"
-                "| `fail` | Dispatch PATCH for blockers, then re-REVIEW. |\n"
-                "| no OUTCOME block | Use your judgment from the output text. |\n\n"
-                "**Key principles:**\n"
-                "- Findings are NEVER silently ignored — they are either fixed or annotated with inline code comments.\n"
-                "- Auto-merge when all gates pass with zero findings. Do not ask permission for obvious merges.\n"
-                "- Only escalate to human when genuinely blocked or when a decision requires business judgment.\n\n"
                 "For trivial or docs-only work, use your judgment on whether the full "
                 "pipeline is warranted.\n"
                 "Use the Agent tool for all coding work — slash commands like /do-build "
@@ -1725,4 +1664,7 @@ async def get_agent_response_sdk(
             complete_transcript(session_id, status="failed", summary=error_summary)
         except Exception:
             pass  # Best-effort cleanup
-        return _get_crash_message()
+        return (
+            "Sorry, I ran into an issue and couldn't recover. "
+            "The error has been logged for investigation."
+        )

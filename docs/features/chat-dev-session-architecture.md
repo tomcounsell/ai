@@ -169,6 +169,38 @@ python scripts/steer_child.py --list --parent-id <parent_id>
 
 This reuses the same steering infrastructure (Redis queue, watchdog consumption) as Telegram reply-thread steering. See [Steering Queue](steering-queue.md) for the full steering architecture.
 
+## Q&A Formatting (Prose vs Structured)
+
+The PM persona uses different output formatting for Q&A sessions versus work sessions. The `qa_mode` flag on `AgentSession` is the single branch point for all formatting differences.
+
+### Q&A Mode (conversational prose)
+
+When `qa_mode=True`:
+- **Instructions**: `build_qa_instructions()` in `agent/qa_handler.py` emphasizes research-first behavior -- search code, query memory, consult docs, cite findings
+- **Summarizer**: The summarizer LLM receives `qa_mode=True` context and produces conversational prose instead of bullets
+- **Structured summary bypass**: `_compose_structured_summary()` in `bridge/summarizer.py` returns the LLM summary directly without emoji prefix, bullet parsing, or structured template
+- **Reaction**: Processing reaction is cleared (set to `None`) after Q&A delivery instead of setting a completion emoji
+- **Single delivery path**: Q&A always goes through the summarizer -- no dual-path ambiguity with `send_telegram.py`
+
+### Work Mode (structured formatting)
+
+When `qa_mode=False` or unset:
+- **Summarizer**: Produces bullet points with status emoji prefix
+- **Structured summary**: Full formatting with emoji, stage line (for SDLC), bullets, question section, and link footer
+- **Reaction**: Completion emoji set on success
+
+### Data Flow
+
+```
+Q&A message → intent classifier → qa_mode=True on AgentSession
+    → Agent researches (code, memory, docs)
+    → Agent returns prose answer
+    → Summarizer formats as prose (qa_mode context)
+    → _compose_structured_summary() bypasses structured template
+    → Telegram delivers prose directly
+    → Processing reaction cleared (None)
+```
+
 ## Agent Definitions
 
 The `dev-session` agent is defined in `agent/agent_definitions.py`:

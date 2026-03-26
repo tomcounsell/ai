@@ -2275,7 +2275,10 @@ async def _execute_job(job: Job) -> None:
     # Set reaction based on result and delivery state
     # Skip if a continuation job was enqueued (defer reaction to that job)
     if react_cb and not chat_state.defer_reaction:
-        if task.error:
+        # Q&A sessions: clear the processing reaction instead of setting completion emoji
+        if agent_session and getattr(agent_session, "qa_mode", False) and not task.error:
+            emoji = None  # Clear reaction
+        elif task.error:
             emoji = REACTION_ERROR
         elif messenger.has_communicated():
             emoji = REACTION_COMPLETE
