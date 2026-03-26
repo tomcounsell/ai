@@ -69,7 +69,7 @@ Runs the ChatSession with Q&A-specific instructions instead of PM dispatch instr
 **Integration point:** The Q&A handler modifies the enriched message and system prompt construction in `sdk_client.py`'s `_execute_agent_request()` function. When intent=qa:
 1. Replace PM dispatch instructions with Q&A instructions
 2. Keep the same PM persona system prompt
-3. Inject `SESSION_MODE=qa` env var so hooks know this is Q&A
+3. Set `classification_type="qa"` on AgentSession so nudge loop uses reduced cap
 4. Use a reduced nudge cap in `job_queue.py`
 
 ### Component 3: Escape Hatch
@@ -100,7 +100,7 @@ Track classification distribution and response times for observability.
 - [ ] 2. Create `agent/qa_handler.py` with Q&A-specific message enrichment
   - `build_qa_instructions() -> str` that replaces PM dispatch block
   - Q&A-specific system prompt additions (conversational tone, cite sources)
-  - `SESSION_MODE=qa` env var injection
+  - `classification_type="qa"` field on AgentSession (set via Popoto ORM)
 
 - [ ] 3. Integrate classifier into `agent/sdk_client.py` message processing
   - Call `classify_intent()` before PM dispatch instruction injection (around line 1460)
@@ -109,7 +109,7 @@ Track classification distribution and response times for observability.
   - Log classification result for every message
 
 - [ ] 4. Add reduced nudge cap for Q&A sessions in `agent/job_queue.py`
-  - Check `SESSION_MODE` env var in nudge loop
+  - Check `classification_type` field on AgentSession in nudge loop
   - Q&A sessions: max 10 nudges (vs 50 for SDLC)
   - Q&A sessions: shorter inactivity timeout
 

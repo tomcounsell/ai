@@ -1637,6 +1637,15 @@ async def get_agent_response_sdk(
         elapsed = time.time() - start_time
         logger.info(f"[{request_id}] SDK responded in {elapsed:.1f}s ({len(response)} chars)")
 
+        # Record response time metric for Q&A observability
+        if _session_type == "chat":
+            try:
+                from agent.qa_metrics import record_response_time
+
+                record_response_time("qa" if _qa_mode else "work", elapsed)
+            except Exception:
+                pass  # Best-effort metrics
+
         return response
 
     except Exception as e:
