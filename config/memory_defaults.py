@@ -49,6 +49,11 @@ MAX_THOUGHTS_PER_INJECTION = 3
 INJECTION_WINDOW_SIZE = 3  # tool calls per window
 INJECTION_BUFFER_SIZE = 9  # total tool calls in rolling buffer
 
+# Deja vu thresholds -- control when vague recognition messages fire
+# Shared between memory_bridge.py (hooks path) and agent/memory_hook.py (SDK path)
+DEJA_VU_BLOOM_HIT_THRESHOLD = 3  # min bloom hits for "seen something related" thought
+NOVEL_TERRITORY_KEYWORD_THRESHOLD = 7  # min unique keywords with zero bloom hits
+
 
 def apply_defaults() -> None:
     """Override popoto Defaults with memory-tuned values.

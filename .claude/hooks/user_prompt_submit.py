@@ -35,6 +35,41 @@ def main():
     except Exception:
         pass  # Silent failure -- never block prompt submission
 
+    # Create AgentSession for local CLI session (one per session, idempotent)
+    try:
+        session_id = hook_input.get("session_id", "")
+        if session_id:
+            from hook_utils.memory_bridge import (
+                load_agent_session_sidecar,
+                save_agent_session_sidecar,
+            )
+
+            sidecar = load_agent_session_sidecar(session_id)
+            if not sidecar.get("agent_session_job_id"):
+                # First prompt in this session -- create AgentSession
+                from models.agent_session import AgentSession
+
+                local_session_id = f"local-{session_id}"
+                cwd = hook_input.get("cwd", "")
+
+                # Resolve project key
+                from hook_utils.memory_bridge import _get_project_key
+
+                project_key = _get_project_key()
+
+                agent_session = AgentSession.create_local(
+                    session_id=local_session_id,
+                    project_key=project_key,
+                    working_dir=cwd,
+                    status="running",
+                    message_text=prompt[:500] if prompt else "",
+                )
+
+                sidecar["agent_session_job_id"] = agent_session.job_id
+                save_agent_session_sidecar(session_id, sidecar)
+    except Exception:
+        pass  # Silent failure -- never block prompt submission
+
 
 if __name__ == "__main__":
     main()

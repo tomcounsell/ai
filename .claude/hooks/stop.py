@@ -111,9 +111,73 @@ def main():
             shutil.copy2(src, dst)
             _update_agent_session_log_path(session_id, str(dst))
 
+    # Complete AgentSession lifecycle tracking
+    _complete_agent_session(session_id, hook_input)
+
     # Memory extraction -- run Haiku extraction and outcome detection
     # on session transcript. Fails silently on any error.
     _run_memory_extraction(session_id, transcript_path)
+
+    # Post-merge learning extraction (if a PR was merged during this session)
+    _run_post_merge_extraction(session_id)
+
+
+def _complete_agent_session(session_id: str, hook_input: dict) -> None:
+    """Mark the AgentSession as completed or failed based on stop_reason.
+
+    Reads the agent_session_job_id from the sidecar file, updates the
+    AgentSession status, completed_at timestamp, and log_path.
+
+    Fails silently -- session completion errors never block stop.
+    """
+    try:
+        import time
+
+        from hook_utils.memory_bridge import load_agent_session_sidecar
+
+        sidecar = load_agent_session_sidecar(session_id)
+        job_id = sidecar.get("agent_session_job_id")
+        if not job_id:
+            return
+
+        from models.agent_session import AgentSession
+
+        agent_session = AgentSession.query.get(job_id)
+        if not agent_session:
+            return
+
+        stop_reason = hook_input.get("stop_reason", "unknown")
+        if stop_reason in ("error", "crash"):
+            agent_session.status = "failed"
+        else:
+            agent_session.status = "completed"
+
+        agent_session.completed_at = time.time()
+        agent_session.save()
+    except Exception:
+        pass  # Silent failure -- never block session stop
+
+
+def _run_post_merge_extraction(session_id: str) -> None:
+    """Run post-merge learning extraction if a PR was merged during this session.
+
+    Checks the agent session sidecar for the merge_detected flag set by
+    PostToolUse when a gh pr merge command is detected.
+
+    Fails silently -- merge learning failures never block session stop.
+    """
+    try:
+        from hook_utils.memory_bridge import load_agent_session_sidecar, post_merge_extract
+
+        sidecar = load_agent_session_sidecar(session_id)
+        if not sidecar.get("merge_detected"):
+            return
+
+        pr_number = sidecar.get("merged_pr_number")
+        if pr_number:
+            post_merge_extract(pr_number)
+    except Exception:
+        pass  # Silent failure -- never block session stop
 
 
 def _run_memory_extraction(session_id: str, transcript_path: str | None) -> None:

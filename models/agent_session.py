@@ -292,6 +292,41 @@ class AgentSession(Model):
         return session
 
     @classmethod
+    def create_local(
+        cls,
+        *,
+        session_id: str,
+        project_key: str,
+        working_dir: str,
+        **kwargs,
+    ) -> "AgentSession":
+        """Create an AgentSession for a local Claude Code CLI session.
+
+        Local sessions have no parent ChatSession, no Telegram context,
+        and no triggering message. They are created by Claude Code hooks
+        (UserPromptSubmit) to provide dashboard observability for CLI work.
+
+        The session_id should use the format ``local-{claude_session_id}``
+        to avoid collisions with Telegram-originated session IDs.
+
+        Args:
+            session_id: Unique session identifier (format: local-{uuid}).
+            project_key: Project partition key for Redis queries.
+            working_dir: Absolute path to the working directory.
+            **kwargs: Additional AgentSession fields to set.
+        """
+        session = cls(
+            session_id=session_id,
+            session_type=SESSION_TYPE_DEV,
+            project_key=project_key,
+            working_dir=working_dir,
+            created_at=time.time(),
+            **kwargs,
+        )
+        session.save()
+        return session
+
+    @classmethod
     def create_dev(
         cls,
         *,

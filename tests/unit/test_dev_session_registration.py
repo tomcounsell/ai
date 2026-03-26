@@ -107,6 +107,72 @@ class TestPreToolUseDevSessionDetection:
             mock_create.assert_not_called()
 
 
+class TestCreateLocalFactory:
+    """AgentSession.create_local() should create a local CLI session."""
+
+    def test_creates_session_with_correct_fields(self):
+        """create_local() sets session_type=dev, status, and required fields."""
+        with patch("models.agent_session.AgentSession.save"):
+            from models.agent_session import AgentSession
+
+            session = AgentSession.create_local(
+                session_id="local-abc-123",
+                project_key="dm",
+                working_dir="/Users/test/src/ai",
+            )
+
+            assert session.session_id == "local-abc-123"
+            assert session.session_type == "dev"
+            assert session.project_key == "dm"
+            assert session.working_dir == "/Users/test/src/ai"
+            assert session.created_at is not None
+
+    def test_telegram_fields_are_null(self):
+        """Local sessions have no Telegram context."""
+        with patch("models.agent_session.AgentSession.save"):
+            from models.agent_session import AgentSession
+
+            session = AgentSession.create_local(
+                session_id="local-xyz",
+                project_key="dm",
+                working_dir="/tmp",
+            )
+
+            assert session.chat_id is None
+            assert session.telegram_message_id is None
+            assert session.sender_name is None
+            assert session.parent_chat_session_id is None
+
+    def test_accepts_kwargs(self):
+        """create_local() passes extra kwargs to the model."""
+        with patch("models.agent_session.AgentSession.save"):
+            from models.agent_session import AgentSession
+
+            session = AgentSession.create_local(
+                session_id="local-kw",
+                project_key="dm",
+                working_dir="/tmp",
+                status="running",
+                message_text="test prompt",
+            )
+
+            assert session.status == "running"
+            assert session.message_text == "test prompt"
+
+    def test_calls_save(self):
+        """create_local() persists the session to Redis."""
+        with patch("models.agent_session.AgentSession.save") as mock_save:
+            from models.agent_session import AgentSession
+
+            AgentSession.create_local(
+                session_id="local-save",
+                project_key="dm",
+                working_dir="/tmp",
+            )
+
+            mock_save.assert_called_once()
+
+
 class TestSubagentStopDevSessionCompletion:
     """SubagentStop hook should log DevSession completion and update status."""
 

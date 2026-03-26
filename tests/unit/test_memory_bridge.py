@@ -420,6 +420,88 @@ class TestExtract:
             mock_cleanup.assert_called_once_with("test-session")
 
 
+class TestAgentSessionSidecar:
+    """Test the agent session sidecar load/save operations."""
+
+    def test_load_missing_file(self, tmp_path, monkeypatch):
+        """Returns empty dict when sidecar file does not exist."""
+        from hook_utils.memory_bridge import load_agent_session_sidecar
+
+        monkeypatch.setattr(
+            "hook_utils.memory_bridge._get_sidecar_dir",
+            lambda sid: tmp_path / sid,
+        )
+        result = load_agent_session_sidecar("test-session")
+        assert result == {}
+
+    def test_load_corrupt_json(self, tmp_path, monkeypatch):
+        """Returns empty dict when sidecar file contains invalid JSON."""
+        from hook_utils.memory_bridge import load_agent_session_sidecar
+
+        monkeypatch.setattr(
+            "hook_utils.memory_bridge._get_sidecar_dir",
+            lambda sid: tmp_path / sid,
+        )
+        sidecar_dir = tmp_path / "test-session"
+        sidecar_dir.mkdir(parents=True)
+        (sidecar_dir / "agent_session.json").write_text("not valid json{")
+
+        result = load_agent_session_sidecar("test-session")
+        assert result == {}
+
+    def test_load_valid(self, tmp_path, monkeypatch):
+        """Loads valid agent session sidecar data correctly."""
+        from hook_utils.memory_bridge import load_agent_session_sidecar
+
+        monkeypatch.setattr(
+            "hook_utils.memory_bridge._get_sidecar_dir",
+            lambda sid: tmp_path / sid,
+        )
+        sidecar_dir = tmp_path / "test-session"
+        sidecar_dir.mkdir(parents=True)
+        data = {"agent_session_job_id": "job-123", "merge_detected": True}
+        (sidecar_dir / "agent_session.json").write_text(json.dumps(data))
+
+        result = load_agent_session_sidecar("test-session")
+        assert result["agent_session_job_id"] == "job-123"
+        assert result["merge_detected"] is True
+
+    def test_save_atomic(self, tmp_path, monkeypatch):
+        """Saves agent session sidecar file atomically."""
+        from hook_utils.memory_bridge import load_agent_session_sidecar, save_agent_session_sidecar
+
+        monkeypatch.setattr(
+            "hook_utils.memory_bridge._get_sidecar_dir",
+            lambda sid: tmp_path / sid,
+        )
+        data = {"agent_session_job_id": "job-456"}
+        save_agent_session_sidecar("test-session", data)
+
+        # No tmp file left
+        sidecar_dir = tmp_path / "test-session"
+        assert (sidecar_dir / "agent_session.json").exists()
+        assert not (sidecar_dir / "agent_session.json.tmp").exists()
+
+        # Round-trip
+        loaded = load_agent_session_sidecar("test-session")
+        assert loaded["agent_session_job_id"] == "job-456"
+
+    def test_load_non_dict(self, tmp_path, monkeypatch):
+        """Returns empty dict when sidecar contains non-dict JSON value."""
+        from hook_utils.memory_bridge import load_agent_session_sidecar
+
+        monkeypatch.setattr(
+            "hook_utils.memory_bridge._get_sidecar_dir",
+            lambda sid: tmp_path / sid,
+        )
+        sidecar_dir = tmp_path / "test-session"
+        sidecar_dir.mkdir(parents=True)
+        (sidecar_dir / "agent_session.json").write_text('"just a string"')
+
+        result = load_agent_session_sidecar("test-session")
+        assert result == {}
+
+
 class TestCleanupSidecar:
     """Test the cleanup_sidecar() function."""
 

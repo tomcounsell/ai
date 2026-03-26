@@ -21,7 +21,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Chat Dev Session Architecture](chat-dev-session-architecture.md) | ChatSession/DevSession split — session type discriminator splitting orchestration from execution | Shipped |
 | [ChatSession Q&A Mode](chatsession-qa-mode.md) | Haiku-based intent classifier routing informational queries to direct ChatSession response without DevSession spawn | Shipped |
 | [Classification](classification.md) | Auto-classification of messages as bug/feature/chore with immutability and reclassify skill | Shipped |
-| [Claude Code Memory](claude-code-memory.md) | Hook-based memory integration for Claude Code CLI sessions: prompt ingestion, tool-call recall with sliding window, deja vu signals, and post-session extraction | Shipped |
+| [Claude Code Memory](claude-code-memory.md) | Hook-based memory integration for Claude Code CLI sessions: prompt ingestion, tool-call recall with sliding window, deja vu signals, post-session extraction, AgentSession lifecycle tracking, and post-merge learning | Shipped |
 | [Code Impact Finder](code-impact-finder.md) | Semantic search for blast radius analysis during /do-plan | Shipped |
 | [Completion Tracking](completion-tracking.md) | Branch-based work tracking and completion token system | Archived |
 | [Config Architecture](config-architecture.md) | Unified config system: Pydantic Settings, path constants, zero hardcoded paths | Shipped |

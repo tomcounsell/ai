@@ -103,13 +103,14 @@ The function is designed to be called from the SDLC merge stage or a post-merge 
 
 The memory system also runs in Claude Code CLI sessions via hooks. See [Claude Code Memory](claude-code-memory.md) for full details.
 
-- **UserPromptSubmit hook** ingests qualifying user prompts (same importance=6.0 as Telegram messages)
-- **PostToolUse hook** runs memory recall with a file-based sliding window (JSON sidecar files replace in-memory state since hooks are stateless processes)
-- **Stop hook** runs Haiku extraction and outcome detection on the session transcript
-- **Deja vu signals** provide vague recognition or novel territory cues when recall results are ambiguous
+- **UserPromptSubmit hook** ingests qualifying user prompts (same importance=6.0 as Telegram messages) and creates an AgentSession record for dashboard observability
+- **PostToolUse hook** runs memory recall with a file-based sliding window (JSON sidecar files replace in-memory state since hooks are stateless processes) and updates AgentSession activity tracking
+- **Stop hook** runs Haiku extraction and outcome detection on the session transcript, completes the AgentSession lifecycle, and triggers post-merge learning extraction when applicable
+- **Deja vu signals** provide vague recognition or novel territory cues when recall results are ambiguous (shared thresholds with SDK agent path via `config/memory_defaults.py`)
+- **Post-merge learning** is triggered from the Stop hook when `gh pr merge` is detected during the session, calling `extract_post_merge_learning()` with PR metadata fetched via `gh` CLI
 - Bridge module: `.claude/hooks/hook_utils/memory_bridge.py`
 
-Both paths (Telegram agent and Claude Code hooks) write to the same Redis Memory model. Memories are shared across all session types.
+Both paths (Telegram agent and Claude Code hooks) write to the same Redis Memory model. Memories are shared across all session types. All memory capabilities (ingestion, recall, deja vu signals, extraction, outcome detection, post-merge learning) now have feature parity across both paths.
 
 ## Key Files
 
@@ -122,8 +123,10 @@ Both paths (Telegram agent and Claude Code hooks) write to the same Redis Memory
 | `agent/health_check.py` | Integration point: `watchdog_hook()` calls `check_and_inject()` |
 | `agent/messenger.py` | Integration point: `_run_work()` calls `run_post_session_extraction()` |
 | `bridge/telegram_bridge.py` | Integration point: `Memory.safe_save()` after `store_message()` |
-| `.claude/hooks/hook_utils/memory_bridge.py` | Claude Code hook memory bridge (recall, ingest, extract) |
-| `.claude/hooks/user_prompt_submit.py` | Claude Code prompt ingestion hook |
+| `.claude/hooks/hook_utils/memory_bridge.py` | Claude Code hook memory bridge (recall, ingest, extract, agent session sidecar helpers, post-merge extract) |
+| `.claude/hooks/user_prompt_submit.py` | Claude Code prompt ingestion hook and AgentSession creation |
+| `.claude/hooks/post_tool_use.py` | Claude Code PostToolUse hook with memory recall and AgentSession activity tracking |
+| `.claude/hooks/stop.py` | Claude Code Stop hook with extraction, AgentSession completion, and post-merge learning |
 | `config/personas/_base.md` | Thought priming instruction for agents |
 
 ## Configuration
@@ -142,6 +145,8 @@ All tuning constants are in `config/memory_defaults.py`. Call `apply_defaults()`
 | `MAX_THOUGHTS_PER_INJECTION` | 3 | Maximum thought blocks per injection event |
 | `INJECTION_WINDOW_SIZE` | 3 | Tool calls per sliding window |
 | `INJECTION_BUFFER_SIZE` | 9 | Total tool calls in rolling buffer |
+| `DEJA_VU_BLOOM_HIT_THRESHOLD` | 3 | Bloom hits needed for "vague recognition" thought (shared across both paths) |
+| `NOVEL_TERRITORY_KEYWORD_THRESHOLD` | 7 | Unique keywords with zero bloom hits needed for "novel territory" thought |
 
 ## Error Handling
 

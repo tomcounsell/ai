@@ -1,5 +1,5 @@
 ---
-status: Critiqued
+status: Building
 type: feature
 appetite: Medium
 owner: Valor
@@ -95,24 +95,24 @@ No prerequisites -- this work has no external dependencies. Uses existing Redis,
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] All new AgentSession operations in hooks use `except Exception: pass` -- test that hook completes normally when Redis is unavailable
-- [ ] Verify sidecar corruption (invalid JSON) doesn't prevent hook execution
+- [x] All new AgentSession operations in hooks use `except Exception: pass` -- test that hook completes normally when Redis is unavailable
+- [x] Verify sidecar corruption (invalid JSON) doesn't prevent hook execution
 
 ### Empty/Invalid Input Handling
-- [ ] UserPromptSubmit with empty session_id still completes without creating AgentSession
-- [ ] PostToolUse with missing sidecar file (no prior UserPromptSubmit) skips AgentSession update gracefully
-- [ ] Stop hook with missing sidecar skips AgentSession completion gracefully
+- [x] UserPromptSubmit with empty session_id still completes without creating AgentSession
+- [x] PostToolUse with missing sidecar file (no prior UserPromptSubmit) skips AgentSession update gracefully
+- [x] Stop hook with missing sidecar skips AgentSession completion gracefully
 
 ### Error State Rendering
-- [ ] Dashboard renders local sessions without errors (no Telegram-specific fields like chat_id)
-- [ ] Sessions with null chat_id, telegram_message_id display correctly on dashboard
+- [x] Dashboard renders local sessions without errors (no Telegram-specific fields like chat_id)
+- [x] Sessions with null chat_id, telegram_message_id display correctly on dashboard
 
 ## Test Impact
 
-- [ ] `tests/unit/test_memory_bridge.py` -- UPDATE: add tests for deja vu signal emission in recall()
-- [ ] `tests/unit/test_memory_hook.py` -- UPDATE: add tests for deja vu signals in check_and_inject()
-- [ ] `tests/unit/test_stop_hook.py` -- UPDATE: add test for AgentSession completion on stop
-- [ ] `tests/unit/test_dev_session_registration.py` -- UPDATE: add test for create_local() factory
+- [x] `tests/unit/test_memory_bridge.py` -- UPDATE: add tests for deja vu signal emission in recall()
+- [x] `tests/unit/test_memory_hook.py` -- UPDATE: add tests for deja vu signals in check_and_inject()
+- [x] `tests/unit/test_stop_hook.py` -- UPDATE: add test for AgentSession completion on stop
+- [x] `tests/unit/test_dev_session_registration.py` -- UPDATE: add test for create_local() factory
 
 No existing tests broken -- all changes are additive. The updates above add new test cases for new functionality.
 
@@ -156,26 +156,26 @@ No agent integration required -- this is a Claude Code hooks-internal change. Th
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/claude-code-memory.md` to document AgentSession lifecycle tracking
-- [ ] Update `docs/features/subconscious-memory.md` to close the parity gaps in any gap table
-- [ ] Add entry to `docs/features/README.md` index table if a new feature doc is created
+- [x] Update `docs/features/claude-code-memory.md` to document AgentSession lifecycle tracking
+- [x] Update `docs/features/subconscious-memory.md` to close the parity gaps in any gap table
+- [x] Add entry to `docs/features/README.md` index table if a new feature doc is created
 
 ### Inline Documentation
-- [ ] Docstrings on `create_local()` factory method
-- [ ] Code comments explaining sidecar job_id persistence pattern
+- [x] Docstrings on `create_local()` factory method
+- [x] Code comments explaining sidecar job_id persistence pattern
 
 ## Success Criteria
 
-- [ ] Local Claude Code sessions create an AgentSession record in Redis on first user prompt
-- [ ] AgentSession status transitions through pending -> running -> completed/failed during session lifecycle
-- [ ] Dashboard at `localhost:8500` shows local Claude Code sessions with correct status, timestamps, and project key
-- [ ] `last_activity` updates on each tool call (via PostToolUse hook)
-- [ ] Session is marked completed on normal Stop, failed on error Stop
-- [ ] Deja vu signals (vague recognition + novel territory) are emitted by SDK agent path (`agent/memory_hook.py`)
-- [ ] Post-merge learning extraction is triggered from Claude Code sessions
-- [ ] All hook operations fail silently -- never block the CLI session
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] Local Claude Code sessions create an AgentSession record in Redis on first user prompt
+- [x] AgentSession status transitions through pending -> running -> completed/failed during session lifecycle
+- [x] Dashboard at `localhost:8500` shows local Claude Code sessions with correct status, timestamps, and project key
+- [x] `last_activity` updates on each tool call (via PostToolUse hook)
+- [x] Session is marked completed on normal Stop, failed on error Stop
+- [x] Deja vu signals (vague recognition + novel territory) are emitted by SDK agent path (`agent/memory_hook.py`)
+- [x] Post-merge learning extraction is triggered from Claude Code sessions
+- [x] All hook operations fail silently -- never block the CLI session
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 

@@ -86,6 +86,137 @@ class TestCheckAndInject:
         assert result is None
 
 
+class TestDejaVuSignals:
+    """Test deja vu signal paths in check_and_inject()."""
+
+    def test_novel_territory_signal(self):
+        """Returns novel territory thought when zero bloom hits and many keywords."""
+        from unittest.mock import MagicMock, patch
+
+        from agent.memory_hook import _tool_buffers, _tool_counts, check_and_inject
+        from config.memory_defaults import (
+            INJECTION_WINDOW_SIZE,
+            NOVEL_TERRITORY_KEYWORD_THRESHOLD,
+        )
+
+        session = "test-novel-territory"
+        _tool_counts.pop(session, None)
+        _tool_buffers.pop(session, None)
+
+        keywords = [f"keyword_{i}" for i in range(NOVEL_TERRITORY_KEYWORD_THRESHOLD + 1)]
+
+        mock_bloom = MagicMock()
+        mock_bloom.might_exist = MagicMock(return_value=False)
+
+        mock_memory_cls = MagicMock()
+        mock_memory_cls._meta.fields.get.return_value = mock_bloom
+
+        with (
+            patch("agent.memory_hook.extract_topic_keywords", return_value=keywords),
+            patch("models.memory.Memory", mock_memory_cls),
+        ):
+            # Fill up to WINDOW_SIZE to trigger query
+            for i in range(INJECTION_WINDOW_SIZE - 1):
+                check_and_inject(session, "Read", {"file_path": f"f{i}.py"})
+            result = check_and_inject(session, "Read", {"file_path": "final.py"})
+
+        assert result is not None
+        assert "new territory" in result
+
+        # Cleanup
+        _tool_counts.pop(session, None)
+        _tool_buffers.pop(session, None)
+
+    def test_vague_recognition_signal(self):
+        """Returns vague recognition thought when bloom hits but no strong results."""
+        from unittest.mock import MagicMock, patch
+
+        from agent.memory_hook import _tool_buffers, _tool_counts, check_and_inject
+        from config.memory_defaults import (
+            DEJA_VU_BLOOM_HIT_THRESHOLD,
+            INJECTION_WINDOW_SIZE,
+        )
+
+        session = "test-vague-recognition"
+        _tool_counts.pop(session, None)
+        _tool_buffers.pop(session, None)
+
+        keywords = [f"kw_{i}" for i in range(DEJA_VU_BLOOM_HIT_THRESHOLD + 2)]
+
+        mock_bloom = MagicMock()
+        mock_bloom.might_exist = MagicMock(return_value=True)
+
+        mock_memory_cls = MagicMock()
+        mock_memory_cls._meta.fields.get.return_value = mock_bloom
+
+        mock_result = MagicMock()
+        mock_result.records = []  # No strong results
+
+        mock_assembler_instance = MagicMock()
+        mock_assembler_instance.assemble.return_value = mock_result
+
+        mock_assembler_cls = MagicMock(return_value=mock_assembler_instance)
+
+        with (
+            patch("agent.memory_hook.extract_topic_keywords", return_value=keywords),
+            patch("models.memory.Memory", mock_memory_cls),
+            patch("popoto.ContextAssembler", mock_assembler_cls),
+        ):
+            for i in range(INJECTION_WINDOW_SIZE - 1):
+                check_and_inject(session, "Read", {"file_path": f"f{i}.py"})
+            result = check_and_inject(session, "Read", {"file_path": "final.py"})
+
+        assert result is not None
+        assert "encountered something related" in result
+
+        # Cleanup
+        _tool_counts.pop(session, None)
+        _tool_buffers.pop(session, None)
+
+    def test_no_signal_below_thresholds(self):
+        """Returns None when bloom hits are below threshold and no strong results."""
+        from unittest.mock import MagicMock, patch
+
+        from agent.memory_hook import _tool_buffers, _tool_counts, check_and_inject
+        from config.memory_defaults import INJECTION_WINDOW_SIZE
+
+        session = "test-below-threshold"
+        _tool_counts.pop(session, None)
+        _tool_buffers.pop(session, None)
+
+        # Only 2 keywords -- below DEJA_VU_BLOOM_HIT_THRESHOLD (3)
+        keywords = ["kw_0", "kw_1"]
+
+        mock_bloom = MagicMock()
+        mock_bloom.might_exist = MagicMock(return_value=True)
+
+        mock_memory_cls = MagicMock()
+        mock_memory_cls._meta.fields.get.return_value = mock_bloom
+
+        mock_result = MagicMock()
+        mock_result.records = []
+
+        mock_assembler_instance = MagicMock()
+        mock_assembler_instance.assemble.return_value = mock_result
+
+        mock_assembler_cls = MagicMock(return_value=mock_assembler_instance)
+
+        with (
+            patch("agent.memory_hook.extract_topic_keywords", return_value=keywords),
+            patch("models.memory.Memory", mock_memory_cls),
+            patch("popoto.ContextAssembler", mock_assembler_cls),
+        ):
+            for i in range(INJECTION_WINDOW_SIZE - 1):
+                check_and_inject(session, "Read", {"file_path": f"f{i}.py"})
+            result = check_and_inject(session, "Read", {"file_path": "final.py"})
+
+        assert result is None
+
+        # Cleanup
+        _tool_counts.pop(session, None)
+        _tool_buffers.pop(session, None)
+
+
 class TestGetInjectedThoughts:
     """Test agent/memory_hook.py get_injected_thoughts()."""
 
