@@ -72,8 +72,8 @@ Based on the assessment, invoke exactly ONE sub-skill and return.
 | Branch exists, no PR | `/do-build` with plan path | Build must create the PR — resume build |
 | Tests failing | `/do-patch` then `/do-test` | Fix what is broken |
 | PR exists, no review | `/do-pr-review {pr_number}` | Code is ready for review |
-| PR review has blockers or nits | `/do-patch` | Address review feedback |
-| Review clean, docs not updated | `/do-docs` | Last step before merge |
+| PR review has blockers or nits | `/do-patch` | Address review feedback (must pass before DOCS) |
+| Review clean, docs not updated | `/do-docs` | Last step before merge (only after clean review) |
 | All stages complete | Report done | PM delivers to human |
 
 **CRITICAL**: Before dispatching `/do-pr-review`, verify a PR actually exists by checking the output of `gh pr list`. If no PR exists for this branch, dispatch `/do-build` instead — it handles PR creation. Never send `/do-pr-review` without a real PR number.
