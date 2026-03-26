@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 
+from bridge.utc import utc_now
+
 logger = logging.getLogger(__name__)
 
 
@@ -120,7 +122,7 @@ class AlertManager:
         Returns:
             List of recent alerts.
         """
-        cutoff = datetime.now() - timedelta(hours=hours)
+        cutoff = utc_now() - timedelta(hours=hours)
         return [a for a in self._alerts if a.timestamp >= cutoff]
 
     def get_unacknowledged(self) -> list[Alert]:
@@ -154,7 +156,7 @@ class AlertManager:
         Returns:
             Number of alerts cleared.
         """
-        cutoff = datetime.now() - timedelta(hours=hours)
+        cutoff = utc_now() - timedelta(hours=hours)
         old_count = len(self._alerts)
         self._alerts = [a for a in self._alerts if a.timestamp >= cutoff]
         return old_count - len(self._alerts)

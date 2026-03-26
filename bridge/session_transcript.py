@@ -15,8 +15,9 @@ Transcript file format (one entry per line):
 
 import logging
 import time
-from datetime import datetime
 from pathlib import Path
+
+from bridge.utc import utc_iso
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +38,7 @@ def _transcript_path(session_id: str) -> Path:
 
 def _now_iso() -> str:
     """Return current time as ISO 8601 string."""
-    return datetime.now().isoformat()
+    return utc_iso()
 
 
 def start_transcript(

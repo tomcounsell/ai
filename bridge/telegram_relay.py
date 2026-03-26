@@ -149,16 +149,15 @@ async def process_outbox(telegram_client) -> int:
 
                     # Store sent message for Redis history
                     try:
-                        from datetime import datetime
-
                         from bridge.telegram_bridge import store_message
+                        from bridge.utc import utc_now
 
                         await asyncio.to_thread(
                             store_message,
                             chat_id=message.get("chat_id"),
                             content=message.get("text", ""),
                             sender="system",
-                            timestamp=datetime.now(),
+                            timestamp=utc_now(),
                             message_type="pm_direct",
                         )
                     except Exception:

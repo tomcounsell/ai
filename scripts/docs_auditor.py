@@ -19,9 +19,11 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+
+from bridge.utc import utc_now
 
 # Ensure project root is importable
 _project_root = str(Path(__file__).parent.parent)
@@ -923,7 +925,10 @@ CORRECTIONS:
             return False
         try:
             last_dt = datetime.fromisoformat(last_audit)
-            cutoff = datetime.now() - timedelta(days=self.AUDIT_FREQUENCY_DAYS)
+            # Handle legacy naive datetime strings by assuming UTC
+            if last_dt.tzinfo is None:
+                last_dt = last_dt.replace(tzinfo=UTC)
+            cutoff = utc_now() - timedelta(days=self.AUDIT_FREQUENCY_DAYS)
             return last_dt > cutoff
         except ValueError:
             return False
@@ -950,7 +955,7 @@ CORRECTIONS:
             from models.reflections import ReflectionRun
 
             state = self._load_state()
-            state["last_audit_date"] = datetime.now().isoformat()
+            state["last_audit_date"] = utc_now().isoformat()
             # Delete existing singleton and recreate with updated state
             existing = ReflectionRun.query.filter(date="__docs_audit_meta__")
             for run in existing:

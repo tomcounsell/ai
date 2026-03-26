@@ -203,7 +203,7 @@ class TestAnalyzeSessionsFromRedis:
             tool_call_count=20,  # High ratio = thrashing
         )
 
-        today = __import__("datetime").datetime.now().strftime("%Y-%m-%d")
+        today = __import__("bridge.utc", fromlist=["utc_now"]).utc_now().strftime("%Y-%m-%d")
         result = analyze_sessions_from_redis(today)
         assert result["sessions_analyzed"] == 1
         assert len(result["thrash_sessions"]) == 1
@@ -225,7 +225,7 @@ class TestAnalyzeSessionsFromRedis:
             summary="Crashed during build step",
         )
 
-        today = __import__("datetime").datetime.now().strftime("%Y-%m-%d")
+        today = __import__("bridge.utc", fromlist=["utc_now"]).utc_now().strftime("%Y-%m-%d")
         result = analyze_sessions_from_redis(today)
         assert len(result.get("error_patterns", [])) >= 1
 

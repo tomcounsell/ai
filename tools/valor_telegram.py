@@ -20,6 +20,8 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from bridge.utc import utc_now
+
 
 def parse_since(text: str) -> datetime | None:
     """Parse relative time strings like '1 hour ago', '30 minutes ago', '2 days ago'.
@@ -38,7 +40,7 @@ def parse_since(text: str) -> datetime | None:
     for pattern, delta_fn in patterns:
         match = re.match(pattern, text)
         if match:
-            return datetime.now() - delta_fn(match)
+            return utc_now() - delta_fn(match)
 
     return None
 
@@ -107,7 +109,7 @@ def cmd_read(args: argparse.Namespace) -> int:
             if args.since:
                 since_dt = parse_since(args.since)
                 if since_dt:
-                    days = max(1, (datetime.now() - since_dt).days + 1)
+                    days = max(1, (utc_now() - since_dt).days + 1)
             result = search_history(
                 query=args.search,
                 chat_id=chat_id,

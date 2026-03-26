@@ -15,6 +15,8 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from bridge.utc import utc_now
+
 UI_DIR = Path(__file__).parent
 TEMPLATES_DIR = UI_DIR / "templates"
 STATIC_DIR = UI_DIR / "static"
@@ -24,8 +26,8 @@ def _filter_format_timestamp(ts: float | None) -> str:
     """Jinja2 filter: format Unix timestamp to humanized relative time."""
     if ts is None:
         return "-"
-    dt = datetime.datetime.fromtimestamp(ts)
-    now = datetime.datetime.now()
+    dt = datetime.datetime.fromtimestamp(ts, tz=datetime.UTC)
+    now = utc_now()
     diff = now - dt
 
     if diff.total_seconds() < 0:

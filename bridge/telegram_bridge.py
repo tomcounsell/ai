@@ -28,6 +28,8 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+from bridge.utc import utc_iso, utc_now
+
 # Ensure user site-packages is available for claude_agent_sdk
 # Add user site-packages as fallback (after venv packages take priority)
 user_site = Path.home() / "Library/Python/3.12/lib/python/site-packages"
@@ -686,7 +688,7 @@ async def check_message_query_request(client: TelegramClient) -> None:
             "user_id": user_id,
             "username": username,
             "messages": formatted_messages,
-            "completed_at": datetime.now().isoformat(),
+            "completed_at": utc_iso(),
         }
 
         # Write result
@@ -700,7 +702,7 @@ async def check_message_query_request(client: TelegramClient) -> None:
         error_result = {
             "success": False,
             "error": str(e),
-            "completed_at": datetime.now().isoformat(),
+            "completed_at": utc_iso(),
         }
         with open(result_file, "w") as f:
             json.dump(error_result, f, indent=2)
@@ -1614,7 +1616,7 @@ async def main():
                                     chat_id=chat_id,
                                     content=filtered,  # full content, no truncation
                                     sender="Valor",
-                                    timestamp=datetime.now(),
+                                    timestamp=utc_now(),
                                     message_type="response",
                                 )
                             except Exception:

@@ -28,8 +28,10 @@ Usage:
 import re
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+
+from bridge.utc import utc_now
 
 # macOS Messages database path
 MESSAGES_DB_PATH = Path.home() / "Library" / "Messages" / "chat.db"
@@ -81,7 +83,7 @@ def _apple_time_to_datetime(apple_time: int | None) -> datetime | None:
         return None
     # Apple time is in nanoseconds since 2001-01-01
     unix_timestamp = (apple_time / 1_000_000_000) + APPLE_EPOCH_OFFSET
-    return datetime.fromtimestamp(unix_timestamp)
+    return datetime.fromtimestamp(unix_timestamp, tz=UTC)
 
 
 def _datetime_to_apple_time(dt: datetime) -> int:
@@ -164,7 +166,7 @@ def get_recent_messages(
             params.extend([f"%{sender}%", f"%{sender}%"])
 
         if since_minutes:
-            cutoff = datetime.now() - timedelta(minutes=since_minutes)
+            cutoff = utc_now() - timedelta(minutes=since_minutes)
             apple_cutoff = _datetime_to_apple_time(cutoff)
             query += " AND m.date > ?"
             params.append(apple_cutoff)
@@ -183,7 +185,7 @@ def get_recent_messages(
                 text=row["text"],
                 sender=row["sender"] or "Unknown",
                 is_from_me=bool(row["is_from_me"]),
-                date=_apple_time_to_datetime(row["date"]) or datetime.now(),
+                date=_apple_time_to_datetime(row["date"]) or utc_now(),
                 service=row["service"] or "Unknown",
                 chat_id=row["chat_identifier"],
             )
@@ -235,7 +237,7 @@ def search_messages(
         params: list = [f"%{query}%"]
 
         if since_minutes:
-            cutoff = datetime.now() - timedelta(minutes=since_minutes)
+            cutoff = utc_now() - timedelta(minutes=since_minutes)
             apple_cutoff = _datetime_to_apple_time(cutoff)
             sql += " AND m.date > ?"
             params.append(apple_cutoff)
@@ -254,7 +256,7 @@ def search_messages(
                 text=row["text"],
                 sender=row["sender"] or "Unknown",
                 is_from_me=bool(row["is_from_me"]),
-                date=_apple_time_to_datetime(row["date"]) or datetime.now(),
+                date=_apple_time_to_datetime(row["date"]) or utc_now(),
                 service=row["service"] or "Unknown",
                 chat_id=row["chat_identifier"],
             )
@@ -441,7 +443,7 @@ def list_senders(
         params: list = []
 
         if since_days:
-            cutoff = datetime.now() - timedelta(days=since_days)
+            cutoff = utc_now() - timedelta(days=since_days)
             apple_cutoff = _datetime_to_apple_time(cutoff)
             query += " AND m.date > ?"
             params.append(apple_cutoff)
