@@ -693,6 +693,71 @@ async def _pop_job(chat_id: str) -> Job | None:
     return Job(new_job)
 
 
+async def _pop_job_with_fallback(chat_id: str) -> "Job | None":
+    """Pop a pending job using async_filter first, then sync fallback.
+
+    This is a separate function from _pop_job() to avoid changing the hot path.
+    Called only from the drain timeout path and exit-time diagnostic in _worker_loop.
+
+    The sync fallback bypasses to_thread() scheduling, which eliminates the
+    thread-pool race between async_create index writes and async_filter reads
+    that is the root cause of the pending job drain bug.
+    """
+    # Try the normal async path first
+    job = await _pop_job(chat_id)
+    if job is not None:
+        return job
+
+    # Sync fallback: bypass to_thread() to avoid the index visibility race.
+    # This runs a synchronous Popoto query directly, which blocks the event loop
+    # briefly (single Redis SINTER + HGETALL, microseconds). Acceptable tradeoff
+    # on the cold drain path for correctness.
+    try:
+        pending = AgentSession.query.filter(chat_id=chat_id, status="pending")
+        if not pending:
+            return None
+
+        # Apply the same filtering as _pop_job: scheduled_after, dependencies
+        now = time.time()
+        eligible = [j for j in pending if not j.scheduled_after or j.scheduled_after <= now]
+        eligible = [j for j in eligible if _dependencies_met(j)]
+        if not eligible:
+            return None
+
+        # Sort: highest priority first, then oldest first (FIFO)
+        def sort_key(j):
+            prio = PRIORITY_RANK.get(j.priority, 2)
+            return (prio, j.created_at or 0)
+
+        eligible.sort(key=sort_key)
+        chosen = eligible[0]
+
+        # Delete-and-recreate for status transition (same pattern as _pop_job)
+        fields = _extract_job_fields(chosen)
+        logger.info(
+            f"[chat:{chat_id}] Sync fallback: deleting job {chosen.job_id} "
+            f"(session {chosen.session_id}) for status change pending->running"
+        )
+        await chosen.async_delete()
+        fields["status"] = "running"
+        fields["started_at"] = time.time()
+        new_job = await AgentSession.async_create(**fields)
+        logger.info(
+            f"[chat:{chat_id}] Sync fallback: recreated job as {new_job.job_id} "
+            f"(session {new_job.session_id}) with status=running"
+        )
+
+        try:
+            new_job.log_lifecycle_transition("running", "worker picked up job (sync fallback)")
+        except Exception as e:
+            logger.warning(f"Failed to log lifecycle transition for job {new_job.job_id}: {e}")
+
+        return Job(new_job)
+    except Exception:
+        logger.exception(f"[chat:{chat_id}] Sync fallback query failed, falling through to exit")
+        return None
+
+
 async def _pending_depth(chat_id: str) -> int:
     """Count of pending jobs for a chat."""
     return await AgentSession.query.async_count(chat_id=chat_id, status="pending")
@@ -1422,7 +1487,13 @@ def format_duration(seconds) -> str:
 
 # === Per-project worker ===
 
+# Drain timeout: how long the worker waits for new work after completing a job.
+# The Event-based drain uses this as the timeout for asyncio.Event.wait().
+# If no event fires within this window, the worker falls back to a sync query.
+DRAIN_TIMEOUT = 1.5  # seconds
+
 _active_workers: dict[str, asyncio.Task] = {}
+_active_events: dict[str, asyncio.Event] = {}
 
 # Project configs registered by the bridge (for auto_merge lookup etc.)
 _project_configs: dict[str, dict] = {}
@@ -1578,6 +1649,14 @@ async def enqueue_job(
         session_type=session_type,
     )
     _ensure_worker(chat_id)
+
+    # Signal the worker that new work is available. asyncio.Event is level-triggered:
+    # set() latches until clear(), so even if the worker is busy executing a job,
+    # it will see the event when it next checks.
+    event = _active_events.get(chat_id)
+    if event is not None:
+        event.set()
+
     log_prefix = f"[{correlation_id}]" if correlation_id else f"[{project_key}]"
     logger.info(f"{log_prefix} Enqueued job (priority={priority}, depth={depth}, chat={chat_id})")
     return depth
@@ -1588,16 +1667,22 @@ def _ensure_worker(chat_id: str) -> None:
 
     Workers are per-chat so different chat groups (even for the same project)
     can process jobs in parallel. Within a chat, jobs run sequentially.
+
+    Creates an asyncio.Event for the chat if one doesn't exist. The event is
+    used by _worker_loop to wait for new work notifications from enqueue_job().
     """
     existing = _active_workers.get(chat_id)
     if existing and not existing.done():
         return
-    task = asyncio.create_task(_worker_loop(chat_id))
+    # Create or reset the event for this chat's worker
+    event = asyncio.Event()
+    _active_events[chat_id] = event
+    task = asyncio.create_task(_worker_loop(chat_id, event))
     _active_workers[chat_id] = task
     logger.info(f"[chat:{chat_id}] Started job queue worker")
 
 
-async def _worker_loop(chat_id: str) -> None:
+async def _worker_loop(chat_id: str, event: asyncio.Event) -> None:
     """
     Process jobs sequentially for one chat.
     Runs until queue is empty, then exits (restarted on next enqueue).
@@ -1606,9 +1691,12 @@ async def _worker_loop(chat_id: str) -> None:
     Workers are per-chat_id so different chat groups can run in parallel.
     Within a chat, jobs run sequentially to prevent git conflicts.
 
-    Includes a drain guard: when the queue appears empty, the worker yields
-    to the event loop (sleep 0.1s) and re-checks once before exiting. This
-    prevents losing jobs created between async_create index writes.
+    Uses an Event-based drain strategy to reliably pick up pending jobs:
+    1. After completing a job, clear the event and wait for it (with DRAIN_TIMEOUT).
+    2. If the event fires (new work enqueued), pop the next job via _pop_job().
+    3. If the timeout expires, use _pop_job_with_fallback() which includes a
+       synchronous Popoto query that bypasses the to_thread() index visibility race.
+    4. Before exiting, run a final _pop_job_with_fallback() as a safety net.
 
     CancelledError is caught explicitly to ensure proper job completion
     and worker cleanup instead of silent death.
@@ -1617,15 +1705,34 @@ async def _worker_loop(chat_id: str) -> None:
         while True:
             job = await _pop_job(chat_id)
             if job is None:
-                # Drain guard: yield to event loop, let in-flight creates finish
-                await asyncio.sleep(0.1)
-                job = await _pop_job(chat_id)
-                if job is None:
-                    logger.info(f"[chat:{chat_id}] Queue empty, worker exiting")
-                    if _check_restart_flag():
-                        _trigger_restart()
-                    break
-                logger.info(f"[chat:{chat_id}] Drain guard caught job that would have been lost")
+                # Event-based drain: wait for enqueue_job() to signal new work,
+                # or fall back to sync query after timeout.
+                event.clear()
+                try:
+                    await asyncio.wait_for(event.wait(), timeout=DRAIN_TIMEOUT)
+                    # Event fired — new work was enqueued
+                    job = await _pop_job(chat_id)
+                except TimeoutError:
+                    # Timeout — use sync fallback to bypass index visibility race
+                    job = await _pop_job_with_fallback(chat_id)
+
+                if job is not None:
+                    logger.info(
+                        f"[chat:{chat_id}] Drain guard caught job that would have been lost"
+                    )
+                else:
+                    # Exit-time safety check: one final sync scan before giving up
+                    job = await _pop_job_with_fallback(chat_id)
+                    if job is not None:
+                        logger.warning(
+                            f"[chat:{chat_id}] Found pending job at exit time: "
+                            f"{job.job_id} — processing instead of exiting"
+                        )
+                    else:
+                        logger.info(f"[chat:{chat_id}] Queue empty, worker exiting")
+                        if _check_restart_flag():
+                            _trigger_restart()
+                        break
 
             job_failed = False
             job_completed = False
@@ -1661,6 +1768,9 @@ async def _worker_loop(chat_id: str) -> None:
                 if not job_completed:
                     await _complete_job(job, failed=job_failed)
 
+            # Clear the event after processing so the next drain wait starts fresh
+            event.clear()
+
             # Check restart flag after each completed job
             if _check_restart_flag():
                 _trigger_restart()
@@ -1670,6 +1780,7 @@ async def _worker_loop(chat_id: str) -> None:
         logger.info("[chat:%s] Worker loop cancelled", chat_id)
     finally:
         _active_workers.pop(chat_id, None)
+        _active_events.pop(chat_id, None)
 
 
 def _find_valor_calendar() -> str:
