@@ -135,6 +135,12 @@ class AgentSession(Model):
     # === Watchdog fields ===
     watchdog_unhealthy = Field(null=True)  # Reason string when flagged unhealthy, None when healthy
 
+    # === Q&A mode flag ===
+    # Set to True when intent classifier routes to Q&A mode. Separate from
+    # classification_type (which holds the bridge's original classification
+    # like "question", "bug", etc.) to avoid dual-purposing that field.
+    qa_mode = Field(type=bool, null=True)
+
     # === Semantic routing fields ===
     context_summary = Field(null=True, max_length=200)  # What this session is about
     expectations = Field(null=True, max_length=500)  # What the agent needs from the human

@@ -1996,11 +1996,19 @@ async def _execute_job(job: Job) -> None:
                 f"[{job.project_key}] Watchdog flagged session unhealthy: {unhealthy_reason}"
             )
 
+        # Use reduced nudge cap for Q&A sessions
+        _effective_nudge_cap = MAX_NUDGE_COUNT
+        if agent_session:
+            if getattr(agent_session, "qa_mode", False):
+                from agent.qa_handler import QA_MAX_NUDGE_COUNT
+
+                _effective_nudge_cap = QA_MAX_NUDGE_COUNT
+
         action = classify_nudge_action(
             msg=msg,
             stop_reason=stop_reason,
             auto_continue_count=chat_state.auto_continue_count,
-            max_nudge_count=MAX_NUDGE_COUNT,
+            max_nudge_count=_effective_nudge_cap,
             session_status=session_status,
             completion_sent=chat_state.completion_sent,
             watchdog_unhealthy=unhealthy_reason,
