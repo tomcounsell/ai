@@ -19,7 +19,7 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -925,6 +925,9 @@ CORRECTIONS:
             return False
         try:
             last_dt = datetime.fromisoformat(last_audit)
+            # Handle legacy naive datetime strings by assuming UTC
+            if last_dt.tzinfo is None:
+                last_dt = last_dt.replace(tzinfo=UTC)
             cutoff = utc_now() - timedelta(days=self.AUDIT_FREQUENCY_DAYS)
             return last_dt > cutoff
         except ValueError:

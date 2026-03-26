@@ -28,7 +28,7 @@ Usage:
 import re
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from bridge.utc import utc_now
@@ -83,7 +83,7 @@ def _apple_time_to_datetime(apple_time: int | None) -> datetime | None:
         return None
     # Apple time is in nanoseconds since 2001-01-01
     unix_timestamp = (apple_time / 1_000_000_000) + APPLE_EPOCH_OFFSET
-    return datetime.fromtimestamp(unix_timestamp)
+    return datetime.fromtimestamp(unix_timestamp, tz=UTC)
 
 
 def _datetime_to_apple_time(dt: datetime) -> int:

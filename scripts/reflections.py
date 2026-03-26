@@ -39,7 +39,7 @@ import re
 import shutil
 import subprocess
 import sys
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -701,7 +701,7 @@ class ReflectionRunner:
                     continue
 
                 try:
-                    mtime = datetime.fromtimestamp(log_file.stat().st_mtime)
+                    mtime = datetime.fromtimestamp(log_file.stat().st_mtime, tz=UTC)
                     if mtime < utc_now() - timedelta(days=7):
                         findings.append(f"Log file {log_file.name} is older than 7 days")
 
@@ -2064,7 +2064,7 @@ class ReflectionRunner:
             self.state.step_progress["principal_staleness"] = {"status": "missing"}
             return
 
-        mod_time = datetime.fromtimestamp(principal_path.stat().st_mtime)
+        mod_time = datetime.fromtimestamp(principal_path.stat().st_mtime, tz=UTC)
         age_days = (utc_now() - mod_time).days
         staleness_threshold = 90
 
