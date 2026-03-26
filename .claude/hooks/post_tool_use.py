@@ -230,6 +230,24 @@ def update_sdlc_state_for_bash(hook_input: dict) -> None:
         state["code_modified"] = False
         state.pop("modified_on_branch", None)  # Clear stale branch tracking
 
+        # Store merge_detected flag and PR number in agent session sidecar
+        # for post-merge learning extraction in the Stop hook
+        try:
+            from hook_utils.memory_bridge import (
+                load_agent_session_sidecar,
+                save_agent_session_sidecar,
+            )
+
+            as_sidecar = load_agent_session_sidecar(session_id)
+            as_sidecar["merge_detected"] = True
+            # Extract PR number from command (e.g., "gh pr merge 123")
+            pr_match = re.search(r"gh\s+pr\s+merge\s+(\d+)", command)
+            if pr_match:
+                as_sidecar["merged_pr_number"] = pr_match.group(1)
+            save_agent_session_sidecar(session_id, as_sidecar)
+        except Exception:
+            pass  # Non-fatal
+
     try:
         save_sdlc_state(session_id, state)
     except Exception as e:
@@ -271,6 +289,37 @@ def _run_memory_recall(hook_input: dict) -> str | None:
         return None
 
 
+def _update_agent_session(hook_input: dict) -> None:
+    """Update AgentSession last_activity and tool_call_count.
+
+    Reads the agent_session_job_id from the sidecar file and updates
+    the corresponding AgentSession record in Redis. Fails silently.
+    """
+    try:
+        session_id = hook_input.get("session_id", "")
+        if not session_id:
+            return
+
+        from hook_utils.memory_bridge import load_agent_session_sidecar
+
+        sidecar = load_agent_session_sidecar(session_id)
+        job_id = sidecar.get("agent_session_job_id")
+        if not job_id:
+            return
+
+        from models.agent_session import AgentSession
+
+        agent_session = AgentSession.query.get(job_id)
+        if not agent_session:
+            return
+
+        agent_session.last_activity = time.time()
+        agent_session.tool_call_count = (agent_session.tool_call_count or 0) + 1
+        agent_session.save()
+    except Exception:
+        pass  # Silent failure -- never block tool execution
+
+
 def main():
     hook_input = read_hook_input()
     if not hook_input:
@@ -282,6 +331,9 @@ def main():
     # Update SDLC session state based on tool type
     update_sdlc_state_for_file_write(hook_input)
     update_sdlc_state_for_bash(hook_input)
+
+    # Update AgentSession lifecycle tracking
+    _update_agent_session(hook_input)
 
     session_id = get_session_id(hook_input)
     session_dir = ensure_session_log_dir(session_id)

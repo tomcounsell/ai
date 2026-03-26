@@ -41,15 +41,18 @@ BUFFER_SIZE = 9
 MAX_THOUGHTS = 3
 
 # ---------------------------------------------------------------------------
-# Deja vu thresholds -- control when vague recognition messages fire
-#
-# DEJA_VU_BLOOM_HIT_THRESHOLD: minimum bloom hits to emit a "seen something
-#   related" thought when no strong ContextAssembler results are found.
-# NOVEL_TERRITORY_KEYWORD_THRESHOLD: minimum unique keywords with zero bloom
-#   hits to trigger the "new territory" thought.
+# Deja vu thresholds -- imported from shared config so both the hooks path
+# (this module) and the SDK agent path (agent/memory_hook.py) use the same
+# values. Fallback to hardcoded defaults if config import fails.
 # ---------------------------------------------------------------------------
-DEJA_VU_BLOOM_HIT_THRESHOLD = 3
-NOVEL_TERRITORY_KEYWORD_THRESHOLD = 7
+try:
+    from config.memory_defaults import (
+        DEJA_VU_BLOOM_HIT_THRESHOLD,
+        NOVEL_TERRITORY_KEYWORD_THRESHOLD,
+    )
+except Exception:
+    DEJA_VU_BLOOM_HIT_THRESHOLD = 3
+    NOVEL_TERRITORY_KEYWORD_THRESHOLD = 7
 
 # Trivial prompt patterns to skip during ingestion
 TRIVIAL_PATTERNS = frozenset(
@@ -396,9 +399,111 @@ def cleanup_sidecar(session_id: str) -> None:
     """
     try:
         sidecar_dir = _get_sidecar_dir(session_id)
-        for filename in ("memory_buffer.json", "memory_buffer.json.tmp"):
+        for filename in (
+            "memory_buffer.json",
+            "memory_buffer.json.tmp",
+            "agent_session.json",
+            "agent_session.json.tmp",
+        ):
             filepath = sidecar_dir / filename
             if filepath.exists():
                 filepath.unlink()
     except Exception:
         pass  # Cleanup is best-effort
+
+
+def post_merge_extract(pr_number: str | int | None = None) -> None:
+    """Run post-merge learning extraction for a merged PR.
+
+    Wrapper around agent/memory_extraction.extract_post_merge_learning()
+    for use from Claude Code hooks. Fetches PR metadata via gh CLI and
+    calls the extraction pipeline.
+
+    All exceptions are caught -- merge learning failures never block hooks.
+    """
+    try:
+        import subprocess
+
+        if not pr_number:
+            return
+
+        # Fetch PR title and body via gh CLI
+        result = subprocess.run(
+            ["gh", "pr", "view", str(pr_number), "--json", "title,body"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            return
+
+        pr_data = json.loads(result.stdout)
+        pr_title = pr_data.get("title", "")
+        pr_body = pr_data.get("body", "")
+
+        if not pr_title:
+            return
+
+        # Get a brief diff summary (filenames changed)
+        diff_result = subprocess.run(
+            ["gh", "pr", "diff", str(pr_number), "--name-only"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        diff_summary = diff_result.stdout[:2000] if diff_result.returncode == 0 else ""
+
+        import asyncio
+
+        from agent.memory_extraction import extract_post_merge_learning
+
+        project_key = _get_project_key()
+        asyncio.run(
+            extract_post_merge_learning(
+                pr_title=pr_title,
+                pr_body=pr_body,
+                diff_summary=diff_summary,
+                project_key=project_key,
+            )
+        )
+
+    except Exception as e:
+        logger.warning(f"[memory_bridge] post_merge_extract failed (non-fatal): {e}")
+
+
+def load_agent_session_sidecar(session_id: str) -> dict:
+    """Load the agent session sidecar data for a session.
+
+    Returns a dict that may contain 'agent_session_job_id' and
+    'merge_detected' among other keys. Returns empty dict if
+    the file is missing or corrupt.
+    """
+    sidecar_path = _get_sidecar_dir(session_id) / "agent_session.json"
+    if not sidecar_path.exists():
+        return {}
+    try:
+        with open(sidecar_path) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_agent_session_sidecar(session_id: str, data: dict) -> None:
+    """Persist agent session sidecar data atomically.
+
+    Uses tmp + rename pattern to avoid partial writes.
+    Stores agent_session_job_id and other cross-hook state.
+    """
+    sidecar_dir = _get_sidecar_dir(session_id)
+    sidecar_dir.mkdir(parents=True, exist_ok=True)
+    sidecar_path = sidecar_dir / "agent_session.json"
+    tmp_path = sidecar_path.with_suffix(".json.tmp")
+    try:
+        with open(tmp_path, "w") as f:
+            json.dump(data, f)
+        tmp_path.rename(sidecar_path)
+    except Exception:
+        if tmp_path.exists():
+            tmp_path.unlink()
+        raise

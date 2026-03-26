@@ -18,6 +18,10 @@ import re
 from typing import Any
 
 from config.memory_defaults import (
+    DEJA_VU_BLOOM_HIT_THRESHOLD,
+    NOVEL_TERRITORY_KEYWORD_THRESHOLD,
+)
+from config.memory_defaults import (
     INJECTION_BUFFER_SIZE as BUFFER_SIZE,
 )
 from config.memory_defaults import (
@@ -174,16 +178,22 @@ def check_and_inject(
         if not bloom_field:
             return None
 
-        has_relevant = False
+        bloom_hits = 0
         for keyword in unique_keywords:
             try:
                 if bloom_field.might_exist(Memory, keyword):
-                    has_relevant = True
-                    break
+                    bloom_hits += 1
             except Exception:
                 continue
 
-        if not has_relevant:
+        # Deja vu: no bloom hits but significant keyword count
+        # signals "novel territory" -- pay attention to what works here
+        if bloom_hits == 0:
+            if len(unique_keywords) >= NOVEL_TERRITORY_KEYWORD_THRESHOLD:
+                return (
+                    "<thought>This is new territory -- "
+                    "I should pay attention to what works here.</thought>"
+                )
             return None
 
         # Full assembly — Redis-only, ~5-10ms
@@ -201,7 +211,15 @@ def check_and_inject(
             partition_filters={"project_key": project_key},
         )
 
+        # Deja vu: bloom hits but no strong results signals "vague recognition"
+        # -- something related was seen before but details are unclear
         if not result.records:
+            if bloom_hits >= DEJA_VU_BLOOM_HIT_THRESHOLD:
+                topic_hint = ", ".join(unique_keywords[:3])
+                return (
+                    "<thought>I have encountered something related to "
+                    f"{topic_hint} before, but the details are unclear.</thought>"
+                )
             return None
 
         # Format as <thought> blocks
