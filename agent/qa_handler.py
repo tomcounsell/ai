@@ -30,7 +30,7 @@ def build_qa_instructions() -> str:
         "Do NOT spawn a DevSession or use the Agent tool.\n\n"
         "RESEARCH FIRST — before answering, gather evidence:\n"
         "1. Search source code with Grep/Glob to find relevant files and implementations\n"
-        "2. Query the memory system: `python -m tools.memory_search search \"relevant query\"`\n"
+        '2. Query the memory system: `python -m tools.memory_search search "relevant query"`\n'
         "3. Consult knowledge base docs in docs/features/ and docs/ directories\n"
         "4. Cite your findings — file paths, line numbers, memory entries, doc references\n\n"
         "GUIDELINES:\n"
