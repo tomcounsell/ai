@@ -2,93 +2,56 @@
 
 ## Overview
 
-Audio and voice transcription using local Whisper models. Optimized for speed on Apple Silicon using `insanely-fast-whisper`.
+Dual-backend audio transcription tool. Uses **SuperWhisper** (local macOS app) as the primary backend for free, fast transcription. Falls back to **OpenAI Whisper API** when SuperWhisper is unavailable.
 
-**Current Implementation**: [insanely-fast-whisper](https://github.com/Vaibhavs10/insanely-fast-whisper) - uses Flash Attention 2 and batching for 10x+ faster transcription.
+**Backends:**
+1. **SuperWhisper** (primary) - Local macOS app, no API cost, fast
+2. **OpenAI Whisper API** (fallback) - Cloud API, paid per minute
 
 **Capabilities**: `transcribe`, `analyze`
 
-## Installation
+## How It Works
 
-```bash
-# Install via pipx (recommended)
-pipx install insanely-fast-whisper
+When `transcribe()` is called:
 
-# Or via pip
-pip install insanely-fast-whisper
-```
-
-Verify installation:
-
-```bash
-insanely-fast-whisper --help
-```
-
-### Apple Silicon Optimization
-
-For best performance on Mac:
-
-```bash
-# Install with MPS (Metal Performance Shaders) support
-pip install torch torchvision torchaudio
-```
+1. Check if SuperWhisper is running (cached for 60s via `pgrep`)
+2. If running: send audio via `open -g -a superwhisper`, poll for `meta.json`
+3. If not running or times out (30s): fall back to OpenAI Whisper API
+4. Return identical format regardless of backend
 
 ## Quick Start
 
-```bash
-# Transcribe an audio file
-insanely-fast-whisper --file-name audio.mp3
+```python
+from tools.transcribe import transcribe
 
-# Output to JSON
-insanely-fast-whisper --file-name audio.mp3 --transcript-path output.json
+# Auto-selects best available backend
+result = transcribe("audio.ogg")
+print(result["text"])
+
+# With timestamps (always uses OpenAI)
+result = transcribe("audio.ogg", timestamps=True)
+print(result["words"])
 ```
 
-## Workflows
+## Installation
 
-### Basic Transcription
+### SuperWhisper (Primary)
 
-```bash
-# Transcribe with default settings (whisper-large-v3)
-insanely-fast-whisper --file-name meeting.mp3
+1. Install [SuperWhisper](https://superwhisper.com) from the Mac App Store or website
+2. Ensure it is running (`pgrep -x superwhisper` should return a PID)
+3. Disable auto-paste: SuperWhisper > Preferences > Advanced > disable auto-paste
 
-# Use a smaller/faster model
-insanely-fast-whisper --file-name meeting.mp3 --model-name openai/whisper-small
-```
+Recordings are stored at `~/Documents/superwhisper/recordings/` by default.
+Override with the `SUPERWHISPER_RECORDINGS_DIR` environment variable.
 
-### Telegram Voice Messages
+### OpenAI Whisper API (Fallback)
 
-```bash
-# Telegram voice messages are .ogg format
-insanely-fast-whisper --file-name voice_message.ogg
-```
-
-### With Timestamps
+Set the `OPENAI_API_KEY` environment variable.
 
 ```bash
-# Get word-level timestamps
-insanely-fast-whisper --file-name podcast.mp3 --timestamp word
+# Verify
+python -c "import os; assert os.environ.get('OPENAI_API_KEY')"
 ```
-
-### Batch Processing
-
-```bash
-# Process multiple files
-for f in audio/*.mp3; do
-  insanely-fast-whisper --file-name "$f" --transcript-path "${f%.mp3}.json"
-done
-```
-
-## Command Reference
-
-| Option | Description |
-|--------|-------------|
-| `--file-name` | Path to audio file (required) |
-| `--model-name` | Whisper model (default: openai/whisper-large-v3) |
-| `--transcript-path` | Output file path (JSON) |
-| `--timestamp` | Timestamp granularity: `chunk` or `word` |
-| `--device-id` | GPU device ID (default: 0, use "mps" for Mac) |
-| `--batch-size` | Batch size for processing (default: 24) |
-| `--language` | Language code (auto-detected if not set) |
 
 ## Supported Formats
 
@@ -98,50 +61,44 @@ done
 - OGG (`.ogg`) - Telegram voice messages
 - FLAC (`.flac`)
 - WebM (`.webm`)
+- MP4 (`.mp4`)
+- MPEG (`.mpeg`, `.mpga`)
 
-## Models
+## Configuration
 
-| Model | Size | Speed | Accuracy | Use Case |
-|-------|------|-------|----------|----------|
-| whisper-large-v3 | 1.5GB | Slow | Best | Final transcripts |
-| whisper-medium | 769MB | Medium | Good | Balanced |
-| whisper-small | 244MB | Fast | OK | Quick drafts |
-| whisper-tiny | 39MB | Fastest | Basic | Testing |
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `SUPERWHISPER_RECORDINGS_DIR` | `~/Documents/superwhisper/recordings/` | SuperWhisper recordings directory |
+| `OPENAI_API_KEY` | (required for fallback) | OpenAI API key |
 
-## Python Integration
+## API Reference
 
-```python
-import subprocess
-import json
+### `transcribe(audio_source, language=None, response_format="json", timestamps=False, prompt=None)`
 
-def transcribe(audio_path: str, model: str = "openai/whisper-large-v3") -> str:
-    """Transcribe audio file to text."""
-    result = subprocess.run(
-        [
-            "insanely-fast-whisper",
-            "--file-name", audio_path,
-            "--model-name", model,
-            "--transcript-path", "/tmp/transcript.json"
-        ],
-        capture_output=True,
-        text=True
-    )
+Returns a dict with:
+- `text` - Transcribed text
+- `language` - Detected language (None for SuperWhisper)
+- `duration` - Audio duration in seconds (when available)
+- `error` - Error message (only on failure)
 
-    if result.returncode != 0:
-        raise RuntimeError(f"Transcription failed: {result.stderr}")
+### `transcribe_with_timestamps(audio_source, language=None)`
 
-    with open("/tmp/transcript.json") as f:
-        data = json.load(f)
+Shortcut for transcription with word-level timestamps. Always uses OpenAI backend.
 
-    return data.get("text", "")
-```
+### `get_supported_formats()`
+
+Returns set of supported audio format extensions.
+
+## Bridge Integration
+
+`bridge/media.py:transcribe_voice()` calls `tools.transcribe.transcribe()` to handle voice messages from Telegram. The bridge does not make direct OpenAI API calls for transcription.
 
 ## Troubleshooting
 
 | Issue | Solution |
 |-------|----------|
-| Out of memory | Use smaller model or reduce batch size |
-| Slow on Mac | Ensure MPS is available (`--device-id mps`) |
-| Wrong language | Specify `--language` explicitly |
-| Format not supported | Convert to MP3/WAV first with ffmpeg |
-| Module not found | Reinstall with `pipx install --force insanely-fast-whisper` |
+| SuperWhisper not detected | Ensure the app is running: `pgrep -x superwhisper` |
+| Transcription times out | SuperWhisper may be busy; falls back to OpenAI automatically |
+| No OPENAI_API_KEY | Set the env var for fallback to work |
+| Wrong language | Use `language="en"` parameter (OpenAI backend only) |
+| Format not supported | Check `get_supported_formats()` for valid extensions |
