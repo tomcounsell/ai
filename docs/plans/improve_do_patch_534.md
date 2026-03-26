@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: Complete
 type: chore
 appetite: Small
 owner: Valor
@@ -111,17 +111,17 @@ No agent integration required -- these are documentation files read by humans an
 
 ## Documentation
 
-- [ ] Verify `docs/features/do-patch-skill.md` (created by PR #550) covers the review-finding patch type
-- [ ] No new feature docs needed -- this is a documentation alignment chore
+- [x] Verify `docs/features/do-patch-skill.md` (created by PR #550) covers the review-finding patch type
+- [x] No new feature docs needed -- this is a documentation alignment chore
 
 ## Success Criteria
 
-- [ ] CLAUDE.md pipeline description includes CRITIQUE stage and matches canonical graph
-- [ ] SDLC SKILL.md dispatch table has clarifying note for post-review patch gate
-- [ ] do-patch SKILL.md handles both test-failure and review-finding patch types (already done by PR #550 -- verify only)
-- [ ] PM persona includes post-review patch in stage orchestration logic (already done in sdk_client.py by PR #550 -- verify only)
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] CLAUDE.md pipeline description includes CRITIQUE stage and matches canonical graph
+- [x] SDLC SKILL.md dispatch table has clarifying note for post-review patch gate
+- [x] do-patch SKILL.md handles both test-failure and review-finding patch types (already done by PR #550 -- verify only)
+- [x] PM persona includes post-review patch in stage orchestration logic (already done in sdk_client.py by PR #550 -- verify only)
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
