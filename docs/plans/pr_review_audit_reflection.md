@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: Critiqued
 type: feature
 appetite: Medium
 owner: Valor
@@ -36,7 +36,7 @@ When the PM merges a PR with unaddressed findings -- tech debt "noted for future
 ## Data Flow
 
 1. **Entry point**: `step_pr_review_audit` runs as step 20 in the ReflectionRunner sequence
-2. **PR discovery**: For each project in `projects.json` with a `github` config, run `gh pr list --state merged` to find PRs merged since the last reflection run (using `self.state.date` minus 1 day as the cutoff)
+2. **PR discovery**: For each project in `projects.json` with a `github` config, run `gh pr list --state merged` to find PRs merged since the last successful audit (via `PRReviewAudit.last_successful_run()`, falling back to yesterday if no prior run)
 3. **Review comment fetch**: For each merged PR, fetch review comments via `gh api repos/{owner}/{repo}/pulls/{number}/reviews` and `gh api repos/{owner}/{repo}/pulls/{number}/comments`
 4. **Finding extraction**: Parse review comments for structured finding format (`**Severity:** blocker | tech_debt | nit`, `**File:**`, `**Issue:**`, `**Fix:**`). These are the fields defined in `.claude/skills/do-pr-review/SKILL.md`
 5. **Address check**: For each finding, check if the file/line was modified in commits after the review comment timestamp (via `gh api` commit history on the PR). If modified, consider it addressed.
@@ -85,8 +85,8 @@ No prerequisites -- this work uses existing `gh` CLI, Redis, and Popoto infrastr
 
 ### Technical Approach
 
-- **PR time window**: Use `--search "merged:>={yesterday}"` with `gh pr list` where yesterday is derived from `self.state.date`. This gives a 24-hour window matching the daily reflection cadence.
-- **Structured finding regex**: Match the exact format from do-pr-review SKILL.md: `\*\*Severity:\*\*\s*(blocker|tech_debt|nit)` plus `\*\*File:\*\*`, `\*\*Issue:\*\*`, `\*\*Fix:\*\*` fields. Only parse comments that match the structured format -- ignore free-text comments.
+- **PR time window**: Use `--search "merged:>={last_audit_date}"` with `gh pr list` where `last_audit_date` is the timestamp of the last successful PR review audit (stored in Redis via `PRReviewAudit.last_successful_run()` classmethod). Falls back to yesterday if no prior run exists. This closes multi-day gaps when reflections is down for maintenance, crashes, or weekends.
+- **Structured finding regex**: Match the exact format from do-pr-review SKILL.md: `\*\*Severity:\*\*\s*(blocker|tech_debt|nit)` plus `\*\*File:\*\*`, `\*\*Code:\*\*`, `\*\*Issue:\*\*`, `\*\*Fix:\*\*` fields. Only parse comments that match the structured format -- ignore free-text comments.
 - **Address detection**: For each finding's file path, check if the file appears in any PR commit made after the review comment timestamp. This is a heuristic -- if the file was touched, assume the finding was addressed. Conservative approach: only mark as addressed if the specific file was modified.
 - **Issue grouping**: File one GitHub issue per PR that has unaddressed findings (not one per finding). The issue body lists all findings from that PR, grouped by severity. This keeps the issue tracker manageable.
 - **Label mapping**: `blocker` -> label `critical`, `tech_debt` -> label `tech-debt`, `nit` -> label `nit`. Also add label `pr-review-audit` for easy filtering.
@@ -100,7 +100,7 @@ No prerequisites -- this work uses existing `gh` CLI, Redis, and Popoto infrastr
 - [ ] `gh pr list` failure (network, auth) logs warning and skips project -- does not halt run
 - [ ] `gh api` timeout for review comments logs warning and skips that PR
 - [ ] `gh issue create` failure logs warning and continues to next finding group
-- [ ] Redis unavailable for dedup check falls back to in-memory set for current run (no persistent dedup, but no crash)
+- [ ] Redis unavailable for dedup check causes step to skip entirely (log warning, defer audit to next cycle -- consistent with how other gh-dependent steps behave in preflight)
 
 ### Empty/Invalid Input Handling
 - [ ] PR with no review comments is skipped silently
@@ -219,6 +219,7 @@ No agent integration required -- this is a reflections-internal change. The step
 - Add `is_audited(comment_id)` classmethod for dedup check
 - Add `mark_audited(comment_id, repo, pr_number, severity, issue_url)` classmethod for recording
 - Add `cleanup_expired(max_age_days=90)` classmethod for TTL cleanup
+- Add `last_successful_run()` classmethod that returns the most recent `audited_at` timestamp (used for PR time window lookback instead of fixed yesterday)
 
 ### 2. Implement finding parser
 - **Task ID**: build-parser
@@ -234,7 +235,7 @@ No agent integration required -- this is a reflections-internal change. The step
 
 ### 3. Implement step_pr_review_audit method
 - **Task ID**: build-step
-- **Depends On**: build-model, build-parser
+- **Depends On**: build-model, build-parser, build-address-check
 - **Validates**: tests/unit/test_pr_review_audit.py (create)
 - **Assigned To**: audit-builder
 - **Agent Type**: builder
@@ -246,6 +247,7 @@ No agent integration required -- this is a reflections-internal change. The step
 - Group unaddressed findings per PR into a single GitHub issue with labels `pr-review-audit` plus severity labels
 - Add findings to `self.state.findings` with key `{slug}:pr_review_audit` for report integration
 - Update `self.state.step_progress["pr_review_audit"]` with metrics: prs_scanned, findings_total, findings_unaddressed, issues_filed
+- Respect `self.state.dry_run`: when True, log findings that would be filed but skip `gh issue create` and Redis writes. This matches the pattern used by other destructive steps.
 
 ### 4. Add address detection logic
 - **Task ID**: build-address-check
@@ -374,7 +376,7 @@ No agent integration required -- this is a reflections-internal change. The step
 
 ### Verdict
 
-**NEEDS REVISION** -- 1 blocker must be resolved before build. The missing task dependency (build-address-check) would cause build ordering failures. The three concerns (multi-day gaps, Redis fallback dedup hole, dry-run behavior) are low-effort fixes that should be addressed in the same revision pass.
+**REVISED** -- All findings addressed. Blocker (missing build-address-check dependency) fixed. Concerns resolved: multi-day gaps closed via last_successful_run() lookback, Redis-down fallback changed to skip-step, dry-run behavior added to step task. Nit (missing Code field in regex list) corrected.
 
 ---
 
