@@ -12,7 +12,7 @@ The `cancelled` status is a terminal state set explicitly by the PM via `cancel_
 
 **Queue-phase:** `job_id`, `project_key`, `status`, `priority`, `message_text`, `sender_name`, `chat_id`, `message_id`, `auto_continue_count`, `started_at`
 
-**Session-phase:** `turn_count`, `tool_call_count`, `log_path`, `summary`, `branch_name`, `tags`, `classification_type`
+**Session-phase:** `turn_count`, `tool_call_count`, `log_path`, `summary`, `branch_name`, `tags`, `classification_type`, `qa_mode`
 
 **Semantic routing:** `context_summary` (what the session is about), `expectations` (what the agent needs from the human)
 

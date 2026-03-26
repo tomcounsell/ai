@@ -105,7 +105,7 @@ ChatSession owns all SDLC intelligence. The bridge just keeps it working.
 1. **Rate limited** -> wait with backoff, then nudge
 2. **Empty output** -> nudge (not deliver)
 3. **end_turn + substantial output** -> deliver to Telegram
-4. **Safety cap (50 nudges)** -> deliver regardless
+4. **Safety cap** -> deliver regardless (50 nudges for work sessions, 10 for Q&A sessions via `qa_mode` flag)
 5. **Already-completed session** -> deliver without nudge
 
 ### Key Constants

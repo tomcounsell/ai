@@ -80,15 +80,15 @@ In `_execute_agent_request()`, after determining the session type is "chat":
 
 ### `agent/job_queue.py`
 
-In the nudge loop, checks the session's `classification_type`:
+In the nudge loop, checks the session's `qa_mode` field:
 
-- If "qa", uses `QA_MAX_NUDGE_COUNT` (10) instead of the default `MAX_NUDGE_COUNT` (50)
+- If `True`, uses `QA_MAX_NUDGE_COUNT` (10) instead of the default `MAX_NUDGE_COUNT` (50)
 - Q&A sessions resolve faster; the reduced cap prevents runaway sessions
 
 ## Key Design Decisions
 
 1. **Conservative threshold (0.90)**: false negatives (Q&A classified as work) cause no harm -- just unnecessary DevSession spawn. False positives (work classified as Q&A) are more costly, so the threshold is high.
-2. **No new session type**: Q&A is a routing decision, not a new `session_type` value. The AgentSession model is unchanged.
+2. **No new session type**: Q&A is a routing decision, not a new `session_type` value. A `qa_mode` boolean field on AgentSession tracks the routing decision separately from `classification_type` (which preserves the bridge's original classification).
 3. **No bridge changes**: Q&A vs work routing happens entirely in the agent layer. The bridge continues routing all messages to ChatSession.
 4. **No caching**: each message is classified independently for simplicity.
 
