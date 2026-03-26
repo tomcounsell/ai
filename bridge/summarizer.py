@@ -1304,7 +1304,7 @@ def _compose_structured_summary(summary_text: str, session=None, is_completion: 
         • Bullet point 1
         • Bullet point 2
 
-        ? Question needing input
+        >> Question needing input
 
     SDLC:
         ⏳
@@ -1312,7 +1312,7 @@ def _compose_structured_summary(summary_text: str, session=None, is_completion: 
         • Bullet point 1
         • Bullet point 2
 
-        ? Question needing input
+        >> Question needing input
         Issue #243 | PR #250
     """
     # Re-read session from Redis to pick up stage data written during execution.
@@ -1336,7 +1336,8 @@ def _compose_structured_summary(summary_text: str, session=None, is_completion: 
 
     # Status emoji prefix (no message echo — Telegram reply-to provides context)
     emoji = _get_status_emoji(session, is_completion)
-    parts.append(emoji)
+    if emoji:
+        parts.append(emoji)
 
     # Summary text (bullets or prose)
     parts.append(bullets.strip())

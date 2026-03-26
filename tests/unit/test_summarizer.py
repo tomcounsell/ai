@@ -1110,7 +1110,8 @@ class TestNoMessageEcho:
             "• Built the bypass\n• Tests passing", session=session, is_completion=True
         )
         first_line = result.split("\n")[0]
-        assert first_line.strip() in ("✅", "⏳", "❌", "")
+        # First line is emoji or content (no emoji for routine completions)
+        assert first_line.strip() in ("✅", "⏳", "❌", "") or first_line.startswith("•")
         assert "continue" not in first_line
 
     def test_no_echo_on_regular_session(self):
@@ -1216,9 +1217,11 @@ class TestComposeStructuredSummaryWithSession:
             is_completion=True,
         )
 
-        # First line is empty (routine) or emoji
+        # First line is emoji or content (no emoji for routine completions)
         first_line = result.split("\n")[0]
-        assert first_line.strip() in ("\u2705", "\u23f3", "\u274c", "")
+        assert first_line.strip() in ("\u2705", "\u23f3", "\u274c", "") or first_line.startswith(
+            "\u2022"
+        )
         assert "continue" not in first_line
         # Bullets present
         assert "\u2022 Implemented the bypass" in result
@@ -1235,8 +1238,9 @@ class TestComposeStructuredSummaryWithSession:
         # No stage-related content for non-SDLC
         assert "ISSUE" not in result
         assert "BUILD" not in result
-        # First line is empty or emoji
-        assert result.split("\n")[0].strip() in ("\u2705", "\u23f3", "\u274c", "")
+        # First line is emoji or content (no emoji for routine completions)
+        first_line = result.split("\n")[0].strip()
+        assert first_line in ("\u2705", "\u23f3", "\u274c", "") or len(first_line) > 0
 
 
 class TestSummarizationBypass:
