@@ -85,6 +85,7 @@ def search(
         result = assembler.assemble(
             query_cues={"topic": query},
             agent_id=project_key,
+            partition_filters={"project_key": project_key},
         )
 
         if not result.records:

@@ -198,6 +198,7 @@ def check_and_inject(
         result = assembler.assemble(
             query_cues={"topic": " ".join(unique_keywords[:5])},
             agent_id=project_key,
+            partition_filters={"project_key": project_key},
         )
 
         if not result.records:
