@@ -11,8 +11,10 @@ import time
 import pytest
 
 from agent.job_queue import (
+    DRAIN_TIMEOUT,
     _extract_job_fields,
     _pop_job,
+    _pop_job_with_fallback,
     _recover_interrupted_jobs_startup,
 )
 from models.agent_session import AgentSession
@@ -195,33 +197,83 @@ class TestRecoverInterruptedJobsStartup:
 
 
 class TestDrainGuard:
-    """Tests for the worker drain guard logic."""
+    """Tests for the Event-based worker drain guard logic.
+
+    Validates the drain strategy: asyncio.Event notification from enqueue_job(),
+    with sync Popoto fallback via _pop_job_with_fallback() on timeout.
+    """
+
+    def test_drain_timeout_is_configurable_constant(self):
+        """DRAIN_TIMEOUT should be a module-level constant, not hardcoded."""
+        assert isinstance(DRAIN_TIMEOUT, (int, float))
+        assert DRAIN_TIMEOUT > 0
 
     @pytest.mark.asyncio
-    async def test_drain_guard_double_check_finds_late_job(self):
-        """Simulate the drain guard catching a job that appears between checks.
+    async def test_pop_job_with_fallback_finds_job_via_sync_query(self):
+        """_pop_job_with_fallback should find a pending job even when
+        _pop_job would miss it due to index visibility issues.
 
-        This test verifies the core drain guard behavior: when _pop_job
-        returns None on first try, the worker sleeps and retries. We test
-        this by creating a job just before the second _pop_job call.
+        Since we can't easily reproduce the index race in tests, we test
+        the happy path: a job exists and _pop_job_with_fallback finds it.
         """
+        _create_test_job(message_text="fallback target")
+
+        result = await _pop_job_with_fallback("123")
+        assert result is not None
+        assert result.message_text == "fallback target"
+
+    @pytest.mark.asyncio
+    async def test_pop_job_with_fallback_returns_none_when_empty(self):
+        """_pop_job_with_fallback should return None when no pending jobs exist."""
+        result = await _pop_job_with_fallback("123")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_pop_job_with_fallback_respects_priority(self):
+        """Sync fallback should respect priority ordering like _pop_job."""
+        _create_test_job(priority="low", message_text="low prio", created_at=time.time())
+        _create_test_job(priority="high", message_text="high prio", created_at=time.time() + 1)
+
+        result = await _pop_job_with_fallback("123")
+        assert result is not None
+        assert result.message_text == "high prio"
+
+    @pytest.mark.asyncio
+    async def test_pop_job_with_fallback_transitions_to_running(self):
+        """_pop_job_with_fallback should transition the job from pending to running."""
+        _create_test_job(message_text="status check")
+
+        result = await _pop_job_with_fallback("123")
+        assert result is not None
+
+        # No pending jobs should remain
+        pending = AgentSession.query.filter(chat_id="123", status="pending")
+        assert len(pending) == 0
+
+        # One running job should exist
+        running = AgentSession.query.filter(chat_id="123", status="running")
+        assert len(running) == 1
+
+    @pytest.mark.asyncio
+    async def test_event_based_drain_catches_late_job(self):
+        """When _pop_job returns None, creating a job should be found by fallback."""
         # First call: no jobs
         result1 = await _pop_job("123")
         assert result1 is None
 
-        # Simulate a late-arriving job (created during the sleep window)
+        # Simulate a late-arriving job
         _create_test_job(message_text="late arrival")
 
-        # Second call: should find the job
-        result2 = await _pop_job("123")
+        # Fallback should find it
+        result2 = await _pop_job_with_fallback("123")
         assert result2 is not None
         assert result2.message_text == "late arrival"
 
     @pytest.mark.asyncio
-    async def test_drain_guard_exits_when_truly_empty(self):
-        """When queue is truly empty, both checks should return None."""
+    async def test_drain_exits_when_truly_empty(self):
+        """When queue is truly empty, both _pop_job and fallback return None."""
         result1 = await _pop_job("123")
         assert result1 is None
 
-        result2 = await _pop_job("123")
+        result2 = await _pop_job_with_fallback("123")
         assert result2 is None
