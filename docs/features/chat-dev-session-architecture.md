@@ -30,13 +30,16 @@ There are exactly two session types: `chat` and `dev`. The previous `simple` ses
 Telegram Message
     |
     v
-Route by chat_title prefix
+resolve_chat_mode(project, chat_title, is_dm)
+    |  1. Config persona lookup (telegram.groups.{name}.persona)
+    |  2. Title prefix fallback (Dev:/PM:)
+    |  3. DMs → always "qa"
     |
-    |-- "Dev: X" → DevSession (session_type="dev")
+    |-- dev mode → DevSession (session_type="dev")
     |       |-- Full permissions, Dev persona
     |       |-- Direct execution
     |
-    |-- Everything else → ChatSession (session_type="chat")
+    |-- pm/qa/None → ChatSession (session_type="chat")
             |-- Queued per chat_id
             |-- Read-only, PM persona
             |

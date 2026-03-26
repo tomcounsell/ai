@@ -713,16 +713,26 @@ async def should_respond_async(
     sender_username: str | None = None,
     sender_id: int | None = None,
 ) -> tuple[bool, bool]:
-    """
-    Async response decision with full context.
+    """Async response decision with full context.
 
     Returns (should_respond, is_reply_to_valor) tuple.
 
-    Decision logic for groups with respond_to_unaddressed:
-    - Case 1: Unaddressed message → Ollama classifies if it needs work
-    - Case 2: Reply to Valor → Always respond (continue session)
-    - Case 3: @valor → Always respond
-    - Case 4: @someoneelse → Always ignore
+    Uses config-driven chat mode resolution (resolve_chat_mode) as the first
+    routing gate. When a group resolves to "qa" mode (via "teammate" persona in
+    projects.json), the group becomes a passive listener: messages are stored
+    but the agent only responds on @mention or reply-to-Valor. This skips
+    Ollama classification entirely for those groups, reducing latency and
+    preventing unwanted responses in observation-only channels.
+
+    Decision logic after mode resolution:
+    - Reply to Valor -> always respond (continue session, checked before mode)
+    - Q&A mode group -> @mention only (passive listener)
+    - Team chat (no Dev:/PM: prefix) -> @mention only
+    - respond_to_all -> always respond
+    - respond_to_unaddressed -> Ollama classifies need
+    - @valor -> always respond
+    - @someoneelse -> always ignore
+    - Unaddressed -> Ollama classifies if it needs work
     """
     message = event.message
 

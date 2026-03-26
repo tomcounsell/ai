@@ -1329,18 +1329,27 @@ async def get_agent_response_sdk(
     correlation_id: str | None = None,
     job_id: str | None = None,
 ) -> str:
-    """
-    Get agent response using Claude Agent SDK.
+    """Get agent response using Claude Agent SDK.
 
-    This function matches the signature of the existing get_agent_response()
-    in telegram_bridge.py to enable seamless switching via feature flag.
+    Orchestrates a complete agent session from message receipt to response.
+    Uses config-driven chat mode resolution (resolve_chat_mode from
+    bridge.routing) to determine session behavior for ChatSessions:
+
+    - "qa" mode: bypasses the Haiku intent classifier, sets qa_mode=True
+      directly on the session, reducing latency and API cost for DMs and
+      groups with "teammate" persona.
+    - "pm"/"dev" mode: bypasses the classifier, uses the config-determined
+      mode without reclassification.
+    - None (unconfigured): falls through to the existing Haiku intent
+      classifier for Q&A vs work routing.
 
     Args:
         message: The message to process
         session_id: Session ID for conversation continuity
         sender_name: Name of the sender (for logging)
-        chat_title: Chat title (for logging)
-        project: Project configuration dict
+        chat_title: Chat title (for logging and mode resolution)
+        project: Project configuration dict (contains telegram.groups with
+            optional persona fields for config-driven mode)
         chat_id: Chat ID (unused, for compatibility)
         sender_id: Telegram user ID (for permission checking)
         task_list_id: Optional task list ID to scope sub-agent Task storage
