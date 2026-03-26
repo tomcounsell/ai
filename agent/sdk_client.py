@@ -70,6 +70,55 @@ _last_activity_timestamps: dict[str, float] = {}
 # interrupted regardless of total runtime.
 SDK_INACTIVITY_TIMEOUT_SECONDS = int(os.environ.get("SDK_INACTIVITY_TIMEOUT_SECONDS", 300))
 
+# === Crash Message Pool ===
+# Varied crash fallback messages to avoid robotic repetition.
+# Each includes next-step language so the user knows what to expect.
+# A module-level variable tracks the last message to prevent consecutive
+# repeats.
+CRASH_MESSAGE_POOL = [
+    (
+        "Something went sideways and I couldn't recover. "
+        "The error has been logged -- you may want to re-trigger."
+    ),
+    (
+        "Hit an unexpected error during processing. "
+        "Details are logged for investigation. Try again shortly."
+    ),
+    ("Ran into a problem I couldn't work around. The error is captured -- a retry should work."),
+    (
+        "Processing failed due to an internal error. "
+        "It's been logged. You can re-send your message to try again."
+    ),
+    (
+        "An error interrupted this session. "
+        "The details are saved for debugging -- feel free to retry."
+    ),
+]
+
+_last_crash_message: str | None = None
+
+
+def _get_crash_message() -> str:
+    """Select a crash message from the pool, avoiding consecutive repeats.
+
+    Returns a varied, human-friendly crash message. Tracks the last
+    message used to ensure no two consecutive crashes produce identical
+    text.
+    """
+    global _last_crash_message
+    import random
+
+    if not CRASH_MESSAGE_POOL:
+        return "An error occurred. Please try again."
+
+    candidates = [m for m in CRASH_MESSAGE_POOL if m != _last_crash_message]
+    if not candidates:
+        candidates = CRASH_MESSAGE_POOL
+
+    selected = random.choice(candidates)
+    _last_crash_message = selected
+    return selected
+
 
 class CircuitOpenError(RuntimeError):
     """Raised when the Anthropic circuit breaker is open.
@@ -1664,7 +1713,4 @@ async def get_agent_response_sdk(
             complete_transcript(session_id, status="failed", summary=error_summary)
         except Exception:
             pass  # Best-effort cleanup
-        return (
-            "Sorry, I ran into an issue and couldn't recover. "
-            "The error has been logged for investigation."
-        )
+        return _get_crash_message()

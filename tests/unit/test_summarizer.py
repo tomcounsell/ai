@@ -1026,18 +1026,25 @@ class TestParseSummaryAndQuestions:
         assert questions is None
 
     def test_bullets_and_questions(self):
+        text = "• Built the feature\n• Pushed to main\n---\n>> Should I merge?"
+        bullets, questions = _parse_summary_and_questions(text)
+        assert bullets == "• Built the feature\n• Pushed to main"
+        assert questions == ">> Should I merge?"
+
+    def test_bullets_and_questions_legacy_prefix(self):
+        """Legacy ? prefix is normalized to >> prefix."""
         text = "• Built the feature\n• Pushed to main\n---\n? Should I merge?"
         bullets, questions = _parse_summary_and_questions(text)
         assert bullets == "• Built the feature\n• Pushed to main"
-        assert questions == "? Should I merge?"
+        assert questions == ">> Should I merge?"
 
     def test_multiple_questions(self):
-        text = "• Done\n---\n? Q1\n? Q2\n? Q3"
+        text = "• Done\n---\n>> Q1\n>> Q2\n>> Q3"
         bullets, questions = _parse_summary_and_questions(text)
         assert bullets == "• Done"
-        assert "? Q1" in questions
-        assert "? Q2" in questions
-        assert "? Q3" in questions
+        assert ">> Q1" in questions
+        assert ">> Q2" in questions
+        assert ">> Q3" in questions
 
     def test_empty_questions_section(self):
         text = "• Done\n---\n"
@@ -1069,8 +1076,8 @@ class TestComposeStructuredSummary:
         assert "• Shipped it" in result
 
     def test_questions_appended(self):
-        result = _compose_structured_summary("• Done\n---\n? Should I merge?", session=None)
-        assert "? Should I merge?" in result
+        result = _compose_structured_summary("• Done\n---\n>> Should I merge?", session=None)
+        assert ">> Should I merge?" in result
         assert "• Done" in result
 
     def test_not_completion_uses_pending_emoji(self):
@@ -1103,7 +1110,7 @@ class TestNoMessageEcho:
             "• Built the bypass\n• Tests passing", session=session, is_completion=True
         )
         first_line = result.split("\n")[0]
-        assert first_line.strip() in ("✅", "⏳", "❌")
+        assert first_line.strip() in ("✅", "⏳", "❌", "")
         assert "continue" not in first_line
 
     def test_no_echo_on_regular_session(self):
@@ -1114,28 +1121,30 @@ class TestNoMessageEcho:
         session._get_history_list.return_value = ["[user] What time is it?"]
         session.message_text = "What time is it?"
         session.status = "completed"
+        session.get_links.return_value = {}
 
         result = _compose_structured_summary("It's 3pm UTC+7", session=session, is_completion=True)
-        first_line = result.split("\n")[0]
-        assert first_line.strip() in ("✅", "⏳", "❌")
-        assert "What time is it?" not in first_line
+        assert "What time is it?" not in result
 
 
 class TestGetStatusEmojiRegression:
-    """Regression tests for _get_status_emoji — issue #192."""
+    """Regression tests for _get_status_emoji — issue #192.
 
-    def test_running_session_with_completion_flag_returns_checkmark(self):
-        """Regression: is_completion=True must return ✅ even when session is running."""
+    Updated for milestone-selective behavior (issue #540).
+    """
+
+    def test_running_session_with_completion_returns_empty(self):
+        """Routine completion with running session returns empty."""
         from unittest.mock import MagicMock
 
         session = MagicMock()
         session.status = "running"
 
         result = _get_status_emoji(session, is_completion=True)
-        assert result == "✅"
+        assert result == ""
 
-    def test_running_session_without_completion_flag_returns_pending(self):
-        """is_completion=False with running session returns ⏳."""
+    def test_running_session_without_completion_returns_pending(self):
+        """is_completion=False with running session returns hourglass."""
         from unittest.mock import MagicMock
 
         session = MagicMock()
@@ -1154,15 +1163,27 @@ class TestGetStatusEmojiRegression:
         assert _get_status_emoji(session, is_completion=True) == "❌"
         assert _get_status_emoji(session, is_completion=False) == "❌"
 
-    def test_completed_session_always_returns_checkmark(self):
-        """Completed status always returns ✅."""
+    def test_completed_without_pr_returns_empty(self):
+        """Completed session without PR is routine (no emoji)."""
         from unittest.mock import MagicMock
 
         session = MagicMock()
         session.status = "completed"
+        session.get_links.return_value = {}
+
+        assert _get_status_emoji(session, is_completion=True) == ""
+
+    def test_completed_with_pr_returns_checkmark(self):
+        """Completed session with PR is milestone (checkmark)."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session.status = "completed"
+        session.get_links.return_value = {
+            "pr": "https://github.com/org/repo/pull/42",
+        }
 
         assert _get_status_emoji(session, is_completion=True) == "✅"
-        assert _get_status_emoji(session, is_completion=False) == "✅"
 
     def test_no_session_uses_completion_flag(self):
         """No session defers to is_completion flag."""
@@ -1195,9 +1216,9 @@ class TestComposeStructuredSummaryWithSession:
             is_completion=True,
         )
 
-        # First line is emoji only (no message echo)
+        # First line is empty (routine) or emoji
         first_line = result.split("\n")[0]
-        assert first_line.strip() in ("\u2705", "\u23f3", "\u274c")
+        assert first_line.strip() in ("\u2705", "\u23f3", "\u274c", "")
         assert "continue" not in first_line
         # Bullets present
         assert "\u2022 Implemented the bypass" in result
@@ -1214,8 +1235,8 @@ class TestComposeStructuredSummaryWithSession:
         # No stage-related content for non-SDLC
         assert "ISSUE" not in result
         assert "BUILD" not in result
-        # No echo of user message (Telegram reply-to provides context)
-        assert result.split("\n")[0].strip() in ("\u2705", "\u23f3", "\u274c")
+        # First line is empty or emoji
+        assert result.split("\n")[0].strip() in ("\u2705", "\u23f3", "\u274c", "")
 
 
 class TestSummarizationBypass:
@@ -1354,7 +1375,7 @@ class TestQuestionFabricationPrevention:
 
         assert result.expectations is not None
         assert "exponential backoff" in result.expectations
-        assert "? Should we use exponential backoff or fixed intervals?" in result.text
+        assert ">> Should we use exponential backoff or fixed intervals?" in result.text
 
     @pytest.mark.asyncio
     async def test_mixed_declarative_and_questions(self):
@@ -1384,7 +1405,7 @@ class TestQuestionFabricationPrevention:
         assert "retry" in result.text.lower()
         # Only one question line
         lines = result.text.split("\n")
-        question_lines = [line for line in lines if line.strip().startswith("?")]
+        question_lines = [line for line in lines if line.strip().startswith(">>")]
         assert len(question_lines) == 1
         assert "throttling" in question_lines[0]
 
@@ -1521,9 +1542,11 @@ class TestQuestionFabricationIntegration:
         assert result.expectations is None, (
             f"Haiku fabricated expectations from declarative output: {result.expectations}"
         )
-        # No ? prefix lines should appear
+        # No question prefix lines should appear (>> or legacy ?)
         lines = result.text.split("\n")
-        question_lines = [line for line in lines if line.strip().startswith("?")]
+        question_lines = [
+            line for line in lines if line.strip().startswith(">>") or line.strip().startswith("?")
+        ]
         assert len(question_lines) == 0, f"Haiku fabricated question lines: {question_lines}"
 
     @pytest.mark.asyncio
@@ -1847,3 +1870,168 @@ class TestSummarizerBypass:
 
         # Should have tried to send the text (not bypassed)
         assert mock_send.called or result is True
+
+
+class TestNormalizeQuestionPrefix:
+    """Tests for _normalize_question_prefix."""
+
+    def test_legacy_prefix_normalized(self):
+        from bridge.summarizer import _normalize_question_prefix
+
+        result = _normalize_question_prefix("? Should I merge?")
+        assert result == ">> Should I merge?"
+
+    def test_new_prefix_unchanged(self):
+        from bridge.summarizer import _normalize_question_prefix
+
+        result = _normalize_question_prefix(">> Should I merge?")
+        assert result == ">> Should I merge?"
+
+    def test_mixed_prefixes(self):
+        from bridge.summarizer import _normalize_question_prefix
+
+        text = "? First question\n>> Second question\n? Third"
+        result = _normalize_question_prefix(text)
+        assert ">> First question" in result
+        assert ">> Second question" in result
+        assert ">> Third" in result
+        assert "? " not in result
+
+    def test_non_question_lines_unchanged(self):
+        from bridge.summarizer import _normalize_question_prefix
+
+        result = _normalize_question_prefix("Normal text here")
+        assert result == "Normal text here"
+
+
+class TestCrashMessagePool:
+    """Tests for the crash message pool in sdk_client.py."""
+
+    def test_pool_has_minimum_variants(self):
+        from agent.sdk_client import CRASH_MESSAGE_POOL
+
+        assert len(CRASH_MESSAGE_POOL) >= 4
+
+    def test_get_crash_message_returns_string(self):
+        from agent.sdk_client import _get_crash_message
+
+        msg = _get_crash_message()
+        assert isinstance(msg, str)
+        assert len(msg) > 10
+
+    def test_no_consecutive_repeats(self):
+        """Crash messages should not repeat consecutively."""
+        import agent.sdk_client as mod
+        from agent.sdk_client import _get_crash_message
+
+        mod._last_crash_message = None
+
+        messages = [_get_crash_message() for _ in range(20)]
+        for i in range(1, len(messages)):
+            assert messages[i] != messages[i - 1], f"Consecutive repeat at index {i}: {messages[i]}"
+
+    def test_first_call_no_previous(self):
+        """First call with no previous message should work."""
+        import agent.sdk_client as mod
+        from agent.sdk_client import _get_crash_message
+
+        mod._last_crash_message = None
+        msg = _get_crash_message()
+        assert msg in mod.CRASH_MESSAGE_POOL
+
+    def test_all_variants_include_next_step(self):
+        """Each crash message includes next-step language."""
+        from agent.sdk_client import CRASH_MESSAGE_POOL
+
+        next_step_words = [
+            "retry",
+            "try again",
+            "re-trigger",
+            "re-send",
+            "check back",
+        ]
+        for msg in CRASH_MESSAGE_POOL:
+            has_next = any(w in msg.lower() for w in next_step_words)
+            assert has_next, f"Missing next-step language: {msg}"
+
+
+class TestSentenceAwareTruncation:
+    """Tests for _truncate_at_sentence_boundary in response.py."""
+
+    def test_short_text_unchanged(self):
+        from bridge.response import _truncate_at_sentence_boundary
+
+        text = "Short text."
+        assert _truncate_at_sentence_boundary(text) == text
+
+    def test_truncates_at_sentence_boundary(self):
+        from bridge.response import _truncate_at_sentence_boundary
+
+        sentences = "First sentence. Second sentence. Third. "
+        text = sentences * 50
+        result = _truncate_at_sentence_boundary(text, limit=100)
+        assert len(result) <= 100
+        assert result.endswith(".")
+
+    def test_fallback_to_ellipsis(self):
+        from bridge.response import _truncate_at_sentence_boundary
+
+        text = "a" * 5000
+        result = _truncate_at_sentence_boundary(text, limit=4096)
+        assert len(result) <= 4096
+        assert result.endswith("...")
+
+    def test_empty_text(self):
+        from bridge.response import _truncate_at_sentence_boundary
+
+        assert _truncate_at_sentence_boundary("") == ""
+        assert _truncate_at_sentence_boundary(None) == ""
+
+    def test_exact_limit_unchanged(self):
+        from bridge.response import _truncate_at_sentence_boundary
+
+        text = "x" * 4096
+        result = _truncate_at_sentence_boundary(text, limit=4096)
+        assert result == text
+
+    def test_preserves_exclamation_boundary(self):
+        from bridge.response import _truncate_at_sentence_boundary
+
+        text = "Done! " * 800 + "Extra text over limit"
+        result = _truncate_at_sentence_boundary(text, limit=4096)
+        assert result.rstrip().endswith("!")
+
+    def test_question_mark_boundary(self):
+        from bridge.response import _truncate_at_sentence_boundary
+
+        text = "Is it working? " * 300 + "Extra text"
+        result = _truncate_at_sentence_boundary(text, limit=4096)
+        assert result.rstrip().endswith("?")
+
+
+class TestSummarizerPromptUpdates:
+    """Tests for new SUMMARIZER_SYSTEM_PROMPT content (#540)."""
+
+    def test_prompt_contains_sdlc_naturalization(self):
+        from bridge.summarizer import SUMMARIZER_SYSTEM_PROMPT
+
+        assert "planning" in SUMMARIZER_SYSTEM_PROMPT
+        assert "building" in SUMMARIZER_SYSTEM_PROMPT
+        assert "testing" in SUMMARIZER_SYSTEM_PROMPT
+
+    def test_prompt_contains_question_prefix_instruction(self):
+        from bridge.summarizer import SUMMARIZER_SYSTEM_PROMPT
+
+        assert ">> " in SUMMARIZER_SYSTEM_PROMPT
+
+    def test_prompt_contains_link_format_instruction(self):
+        from bridge.summarizer import SUMMARIZER_SYSTEM_PROMPT
+
+        prompt_lower = SUMMARIZER_SYSTEM_PROMPT.lower()
+        assert "short-form references" in prompt_lower
+
+    def test_prompt_contains_metrics_suppression(self):
+        from bridge.summarizer import SUMMARIZER_SYSTEM_PROMPT
+
+        prompt_lower = SUMMARIZER_SYSTEM_PROMPT.lower()
+        assert "line counts" in prompt_lower
