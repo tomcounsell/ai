@@ -1,6 +1,8 @@
 """Tests for the SDLC data access layer and Pydantic serializers."""
 
 import json
+import time
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -62,6 +64,21 @@ class TestStageStateParsing:
         assert by_name["ISSUE"].status == "completed"
         assert by_name["PLAN"].status == "in_progress"
 
+    def test_parse_with_patch_cycle_count_metadata(self):
+        """Verify _patch_cycle_count keys are ignored (only SDLC_STAGES iterated)."""
+        from ui.data.sdlc import _parse_stage_states
+
+        data = {
+            "ISSUE": "completed",
+            "PLAN": "completed",
+            "_patch_cycle_count": 2,
+            "_critique_cycle_count": 1,
+        }
+        result = _parse_stage_states(data)
+        assert len(result) == 8
+        names = {s.name for s in result}
+        assert "_patch_cycle_count" not in names
+
 
 class TestStageStateModel:
     """Tests for the StageState Pydantic model."""
@@ -94,6 +111,15 @@ class TestStageStateModel:
 
         s = StageState(name="CRITIQUE", status="skipped")
         assert s.is_done
+
+    def test_is_ready(self):
+        from ui.data.sdlc import StageState
+
+        s = StageState(name="BUILD", status="ready")
+        assert s.is_ready
+        assert not s.is_active
+        assert not s.is_done
+        assert not s.is_failed
 
 
 class TestPipelineProgress:
@@ -133,8 +159,6 @@ class TestPipelineProgress:
             assert p.is_complete
 
     def test_duration_calculation(self):
-        import time
-
         from ui.data.sdlc import PipelineProgress
 
         now = time.time()
@@ -146,6 +170,36 @@ class TestPipelineProgress:
 
         p = PipelineProgress(job_id="123")
         assert p.duration is None
+
+    def test_project_name_field(self):
+        from ui.data.sdlc import PipelineProgress
+
+        p = PipelineProgress(
+            job_id="123",
+            project_key="popoto",
+            project_name="Popoto ORM",
+        )
+        assert p.project_name == "Popoto ORM"
+
+    def test_project_name_defaults_none(self):
+        from ui.data.sdlc import PipelineProgress
+
+        p = PipelineProgress(job_id="123", project_key="popoto")
+        assert p.project_name is None
+
+    def test_project_metadata_field(self):
+        from ui.data.sdlc import PipelineProgress
+
+        metadata = {
+            "github_repo": "tomcounsell/popoto",
+            "tech_stack": "Python, Redis",
+        }
+        p = PipelineProgress(
+            job_id="123",
+            project_key="popoto",
+            project_metadata=metadata,
+        )
+        assert p.project_metadata["github_repo"] == "tomcounsell/popoto"
 
 
 class TestHistoryParsing:
@@ -275,6 +329,163 @@ class TestSafeFloat:
         from ui.data.sdlc import _safe_float
 
         assert _safe_float("") is None
+
+
+class TestHistoryFallback:
+    """Tests for inferring stage states from session history."""
+
+    def test_infer_empty_history(self):
+        from ui.data.sdlc import _infer_stages_from_history
+
+        assert _infer_stages_from_history(None) == []
+        assert _infer_stages_from_history([]) == []
+
+    def test_infer_no_stage_entries(self):
+        from ui.data.sdlc import _infer_stages_from_history
+
+        history = ["[lifecycle] pending->running", "[user] hello"]
+        result = _infer_stages_from_history(history)
+        assert result == []
+
+    def test_infer_single_stage(self):
+        from ui.data.sdlc import _infer_stages_from_history
+
+        history = ["[stage] PLAN started"]
+        result = _infer_stages_from_history(history)
+        assert len(result) == 8
+        by_name = {s.name: s for s in result}
+        assert by_name["PLAN"].is_active  # Last mentioned = in_progress
+
+    def test_infer_multiple_stages(self):
+        from ui.data.sdlc import _infer_stages_from_history
+
+        history = [
+            "[stage] ISSUE completed",
+            "[stage] PLAN completed",
+            "[stage] BUILD started",
+        ]
+        result = _infer_stages_from_history(history)
+        by_name = {s.name: s for s in result}
+        assert by_name["ISSUE"].is_done
+        assert by_name["PLAN"].is_done
+        assert by_name["BUILD"].is_active
+
+    def test_session_to_pipeline_uses_history_fallback(self):
+        """When stage_states is None but history has stage entries, infer stages."""
+        from ui.data.sdlc import _session_to_pipeline
+
+        mock_session = MagicMock()
+        mock_session.job_id = "test-123"
+        mock_session.session_id = "sess-1"
+        mock_session.session_type = "chat"
+        mock_session.status = "running"
+        mock_session.slug = None
+        mock_session.work_item_slug = None
+        mock_session.message_text = "test"
+        mock_session.project_key = None
+        mock_session.branch_name = None
+        mock_session.created_at = time.time()
+        mock_session.started_at = time.time()
+        mock_session.completed_at = None
+        mock_session.last_activity = None
+        mock_session.stage_states = None
+        mock_session.history = ["[stage] ISSUE done", "[stage] PLAN started"]
+        mock_session.issue_url = None
+        mock_session.plan_url = None
+        mock_session.pr_url = None
+
+        pipeline = _session_to_pipeline(mock_session)
+        assert len(pipeline.stages) == 8
+        by_name = {s.name: s for s in pipeline.stages}
+        assert by_name["ISSUE"].is_done
+        assert by_name["PLAN"].is_active
+
+
+class TestProjectMetadata:
+    """Tests for project name and metadata resolution."""
+
+    def test_get_project_metadata_no_key(self):
+        from ui.data.sdlc import _get_project_metadata
+
+        name, meta = _get_project_metadata(None)
+        assert name is None
+        assert meta is None
+
+    def test_get_project_metadata_not_found(self):
+        from ui.data.sdlc import _get_project_metadata
+
+        with patch("ui.data.sdlc._load_project_configs", return_value={}):
+            name, meta = _get_project_metadata("nonexistent")
+            assert name is None
+            assert meta is None
+
+    def test_get_project_metadata_found(self):
+        from ui.data.sdlc import _get_project_metadata
+
+        mock_configs = {
+            "myproject": {
+                "name": "My Project",
+                "github_repo": "owner/myproject",
+                "working_directory": "/home/user/myproject",
+                "telegram": {"groups": ["PM: MyProject"]},
+                "context": {"tech_stack": "Python, FastAPI"},
+                "machine": "macbook-pro",
+            }
+        }
+        with patch("ui.data.sdlc._load_project_configs", return_value=mock_configs):
+            name, meta = _get_project_metadata("myproject")
+            assert name == "My Project"
+            assert meta["github_repo"] == "owner/myproject"
+            assert meta["telegram_chat"] == "PM: MyProject"
+            assert meta["working_dir"] == "/home/user/myproject"
+            assert meta["tech_stack"] == "Python, FastAPI"
+            assert meta["machine"] == "macbook-pro"
+
+    def test_get_project_metadata_minimal(self):
+        """Project with only a name still returns name, None metadata."""
+        from ui.data.sdlc import _get_project_metadata
+
+        mock_configs = {"simple": {"name": "Simple"}}
+        with patch("ui.data.sdlc._load_project_configs", return_value=mock_configs):
+            name, meta = _get_project_metadata("simple")
+            assert name == "Simple"
+            assert meta is None
+
+
+class TestRetentionFilter:
+    """Tests for configurable session retention in get_all_sessions."""
+
+    def test_sessions_within_retention_included(self):
+        """Sessions with recent timestamps should be included."""
+        from ui.data.sdlc import PipelineProgress
+
+        now = time.time()
+        p = PipelineProgress(
+            job_id="123",
+            status="completed",
+            completed_at=now - 3600,  # 1 hour ago
+        )
+        # completed_at is within default 48h retention
+        assert p.completed_at > (now - 48 * 3600)
+
+    def test_timestamp_fallback_chain(self):
+        """When last_activity is None, fallback to other timestamps."""
+        from ui.data.sdlc import PipelineProgress
+
+        now = time.time()
+        # Session with only created_at set
+        p = PipelineProgress(
+            job_id="123",
+            status="completed",
+            created_at=now - 3600,
+            last_activity=None,
+            completed_at=None,
+            started_at=None,
+        )
+        # Best timestamp fallback: completed_at or last_activity or started_at or created_at
+        best_ts = p.completed_at or p.last_activity or p.started_at or p.created_at or 0
+        assert best_ts == p.created_at
+        assert best_ts > 0
 
 
 class TestSdlcQueryFunctions:

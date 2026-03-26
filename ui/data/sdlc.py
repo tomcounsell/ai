@@ -9,6 +9,8 @@ synchronous Redis calls. FastAPI runs sync route handlers in a threadpool.
 
 import json
 import logging
+import os
+import re
 import time
 
 from pydantic import BaseModel
@@ -17,6 +19,14 @@ logger = logging.getLogger(__name__)
 
 # SDLC stages in pipeline order (matches models/agent_session.py)
 SDLC_STAGES = ["ISSUE", "PLAN", "CRITIQUE", "BUILD", "TEST", "REVIEW", "DOCS", "MERGE"]
+
+# Configurable retention for inactive sessions (default 48h)
+DASHBOARD_RETENTION_HOURS = int(os.environ.get("DASHBOARD_RETENTION_HOURS", "48"))
+
+# Module-level cache for project configs
+_project_configs_cache: dict | None = None
+_project_configs_ts: float = 0.0
+_PROJECT_CONFIGS_TTL = 60.0  # seconds
 
 
 # === Pydantic models ===
@@ -40,6 +50,10 @@ class StageState(BaseModel):
     def is_failed(self) -> bool:
         return self.status == "failed"
 
+    @property
+    def is_ready(self) -> bool:
+        return self.status == "ready"
+
 
 class PipelineEvent(BaseModel):
     """A single event from the session history."""
@@ -59,6 +73,8 @@ class PipelineProgress(BaseModel):
     slug: str | None = None
     message_text: str | None = None
     project_key: str | None = None
+    project_name: str | None = None
+    project_metadata: dict | None = None
     branch_name: str | None = None
     created_at: float | None = None
     started_at: float | None = None
@@ -102,6 +118,129 @@ class PipelineProgress(BaseModel):
                 text += "..."
             return text
         return self.job_id or "unknown"
+
+
+# === Project config helpers ===
+
+
+def _load_project_configs() -> dict:
+    """Load project configs from projects.json with a short TTL cache.
+
+    Returns a dict mapping project_key -> project config dict.
+    Falls back to empty dict if projects.json is unavailable.
+    """
+    global _project_configs_cache, _project_configs_ts
+
+    now = time.time()
+    if _project_configs_cache is not None and (now - _project_configs_ts) < _PROJECT_CONFIGS_TTL:
+        return _project_configs_cache
+
+    try:
+        from bridge.routing import load_config
+
+        config = load_config()
+        projects = config.get("projects", {})
+        _project_configs_cache = projects
+        _project_configs_ts = now
+        return projects
+    except Exception as e:
+        logger.warning(f"Failed to load project configs: {e}")
+        _project_configs_cache = {}
+        _project_configs_ts = now
+        return {}
+
+
+def _get_project_metadata(project_key: str | None) -> tuple[str | None, dict | None]:
+    """Look up human-readable project name and metadata from projects.json.
+
+    Returns:
+        (project_name, project_metadata) tuple. Both None if not found.
+    """
+    if not project_key:
+        return None, None
+
+    configs = _load_project_configs()
+    project = configs.get(project_key)
+    if not project:
+        return None, None
+
+    name = project.get("name", project_key)
+    context = project.get("context", {})
+    telegram = project.get("telegram", {})
+
+    metadata = {}
+    if telegram.get("groups"):
+        metadata["telegram_chat"] = ", ".join(telegram["groups"])
+    if project.get("github_repo"):
+        metadata["github_repo"] = project["github_repo"]
+    if project.get("working_directory"):
+        metadata["working_dir"] = project["working_directory"]
+    if context.get("tech_stack"):
+        metadata["tech_stack"] = context["tech_stack"]
+    if project.get("machine"):
+        metadata["machine"] = project["machine"]
+    elif context.get("machine"):
+        metadata["machine"] = context["machine"]
+
+    return name, metadata if metadata else None
+
+
+# === Stage inference from history ===
+
+
+def _infer_stages_from_history(history_list: list | None) -> list["StageState"]:
+    """Infer SDLC stage states from session history entries.
+
+    Fallback for sessions created before stage_states was populated (pre-#492).
+    Scans history for [stage] entries and marks referenced stages as completed
+    (assuming sequential pipeline progression).
+
+    Returns empty list if no stage info found in history.
+    """
+    if not history_list or not isinstance(history_list, list):
+        return []
+
+    # Collect mentioned stage names from history
+    mentioned_stages = set()
+    active_stage = None
+    stage_pattern = re.compile(r"^\[stage\]\s*(\w+)", re.IGNORECASE)
+
+    for entry in history_list:
+        if not isinstance(entry, str):
+            continue
+        match = stage_pattern.match(entry)
+        if match:
+            stage_name = match.group(1).upper()
+            if stage_name in SDLC_STAGES:
+                mentioned_stages.add(stage_name)
+
+    if not mentioned_stages:
+        return []
+
+    # Build stage list: stages mentioned in history are completed,
+    # the last mentioned stage is marked in_progress (heuristic)
+    last_stage_idx = -1
+    for stage_name in mentioned_stages:
+        idx = SDLC_STAGES.index(stage_name)
+        if idx > last_stage_idx:
+            last_stage_idx = idx
+            active_stage = stage_name
+
+    stages = []
+    for name in SDLC_STAGES:
+        if name == active_stage:
+            stages.append(StageState(name=name, status="in_progress"))
+        elif name in mentioned_stages:
+            stages.append(StageState(name=name, status="completed"))
+        else:
+            idx = SDLC_STAGES.index(name)
+            if idx < last_stage_idx and all(SDLC_STAGES[i] in mentioned_stages for i in range(idx)):
+                # Earlier stages implied completed
+                stages.append(StageState(name=name, status="completed"))
+            else:
+                stages.append(StageState(name=name, status="pending"))
+
+    return stages
 
 
 # === Parsing helpers ===
@@ -187,7 +326,13 @@ def _safe_float(val) -> float | None:
 def _session_to_pipeline(session) -> PipelineProgress:
     """Convert an AgentSession instance to a PipelineProgress model."""
     stages = _parse_stage_states(session.stage_states)
-    events = _parse_history(session.history if isinstance(session.history, list) else None)
+
+    # Fallback: infer stages from history when stage_states is empty
+    history_list = session.history if isinstance(session.history, list) else None
+    if not stages and history_list:
+        stages = _infer_stages_from_history(history_list)
+
+    events = _parse_history(history_list)
 
     # Determine current stage
     current = None
@@ -198,6 +343,10 @@ def _session_to_pipeline(session) -> PipelineProgress:
 
     slug = _safe_str(session.slug) or _safe_str(session.work_item_slug) or ""
 
+    # Resolve project name and metadata
+    project_key = _safe_str(session.project_key)
+    project_name, project_metadata = _get_project_metadata(project_key)
+
     return PipelineProgress(
         job_id=_safe_str(session.job_id) or "",
         session_id=_safe_str(session.session_id),
@@ -205,7 +354,9 @@ def _session_to_pipeline(session) -> PipelineProgress:
         status=_safe_str(session.status),
         slug=slug,
         message_text=_safe_str(session.message_text),
-        project_key=_safe_str(session.project_key),
+        project_key=project_key,
+        project_name=project_name,
+        project_metadata=project_metadata,
         branch_name=_safe_str(session.branch_name) or (f"session/{slug}" if slug else None),
         created_at=_safe_float(session.created_at),
         started_at=_safe_float(session.started_at),
@@ -223,11 +374,12 @@ def _session_to_pipeline(session) -> PipelineProgress:
 # === Public query functions ===
 
 
-def get_all_sessions(limit: int = 16) -> list[PipelineProgress]:
+def get_all_sessions(limit: int = 50) -> list[PipelineProgress]:
     """Get agent sessions sorted by last activity.
 
     Active sessions always appear (no cap). Inactive sessions are filtered
-    to those within the last 48 hours, capped at `limit` total.
+    to those within the configured retention period (DASHBOARD_RETENTION_HOURS
+    env var, default 48h), capped at `limit` total.
 
     Args:
         limit: Maximum number of inactive sessions to show.
@@ -243,9 +395,13 @@ def get_all_sessions(limit: int = 16) -> list[PipelineProgress]:
         logger.warning(f"Failed to query AgentSession: {e}")
         return []
 
-    cutoff = time.time() - 48 * 3600
+    cutoff = time.time() - DASHBOARD_RETENTION_HOURS * 3600
     active = []
     inactive = []
+
+    def _best_timestamp(p: PipelineProgress) -> float:
+        """Pick the best available timestamp for ordering/filtering."""
+        return p.completed_at or p.last_activity or p.started_at or p.created_at or 0
 
     for session in all_sessions:
         try:
@@ -253,18 +409,20 @@ def get_all_sessions(limit: int = 16) -> list[PipelineProgress]:
         except Exception:
             logger.debug(f"Skipping corrupt session: {getattr(session, 'job_id', '?')}")
             continue
-        if pipeline.status in ("running", "pending", "in_progress"):
+        if pipeline.status in (
+            "running",
+            "pending",
+            "in_progress",
+            "active",
+            "waiting_for_children",
+        ):
             active.append(pipeline)
         else:
-            last_ts = pipeline.last_activity or pipeline.completed_at or pipeline.created_at or 0
-            if last_ts >= cutoff:
+            if _best_timestamp(pipeline) >= cutoff:
                 inactive.append(pipeline)
 
     active.sort(key=lambda p: p.last_activity or p.created_at or 0, reverse=True)
-    inactive.sort(
-        key=lambda p: p.last_activity or p.completed_at or p.created_at or 0,
-        reverse=True,
-    )
+    inactive.sort(key=_best_timestamp, reverse=True)
 
     return active + inactive[:limit]
 
