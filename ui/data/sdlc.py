@@ -180,9 +180,9 @@ def _session_to_pipeline(session) -> PipelineProgress:
     return PipelineProgress(
         job_id=session.job_id or "",
         session_id=session.session_id,
-        session_type=session.session_type,
-        status=session.status,
-        slug=session.slug or session.work_item_slug,
+        session_type=str(session.session_type) if session.session_type else "",
+        status=str(session.status) if session.status else "",
+        slug=str(session.slug or session.work_item_slug or ""),
         message_text=session.message_text,
         project_key=session.project_key,
         branch_name=session.branch_name or (f"session/{session.slug}" if session.slug else None),
