@@ -129,9 +129,17 @@ start_bridge() {
         cat "$PROJECT_DIR/data/upgrade-pending"
     fi
 
-    # Rotate oversized log files before starting
+    # Rotate oversized log files before starting.
+    # All launchd-managed logs (StandardOutPath/StandardErrorPath) are rotated here
+    # because launchd holds file descriptors open — newsyslog alone cannot reliably
+    # rotate actively-written files. This runs on every service start/restart.
     rotate_log "$LOG_DIR/bridge.error.log"
     rotate_log "$LOG_DIR/bridge.log"
+    rotate_log "$LOG_DIR/issue_poller_error.log"
+    rotate_log "$LOG_DIR/issue_poller.log"
+    rotate_log "$LOG_DIR/watchdog.log"
+    rotate_log "$LOG_DIR/reflections.log"
+    rotate_log "$LOG_DIR/reflections_error.log"
 
     echo "Starting Valor bridge..."
 
