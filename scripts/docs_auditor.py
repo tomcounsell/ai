@@ -299,9 +299,13 @@ class DocsAuditor:
         "CLAUDE.md",
     ]
 
-    def __init__(self, repo_root: Path, dry_run: bool = False) -> None:
+    def __init__(
+        self, repo_root: Path, dry_run: bool = False, max_api_calls: int = 50
+    ) -> None:
         self.repo_root = repo_root.resolve()
         self.dry_run = dry_run
+        self.max_api_calls = max_api_calls
+        self._api_call_count = 0
         self._client: Any = None  # lazy-init anthropic client
 
     # ------------------------------------------------------------------
@@ -525,9 +529,19 @@ class DocsAuditor:
             logger.info("No documentation files found to audit")
             return summary
 
-        logger.info("Auditing %d documentation files", len(docs))
+        logger.info("Auditing %d documentation files (API call cap: %d)", len(docs), self.max_api_calls)
 
         for path in docs:
+            # Check API call cap before processing next file
+            if self._api_call_count >= self.max_api_calls:
+                logger.warning(
+                    "API call cap reached (%d/%d). Stopping audit with %d files remaining.",
+                    self._api_call_count,
+                    self.max_api_calls,
+                    len(docs) - len(summary.verdicts),
+                )
+                break
+
             try:
                 verdict = self.analyze_doc(path)
                 summary.verdicts[str(path)] = verdict
@@ -624,6 +638,7 @@ CORRECTIONS:
 
         try:
             client = self._get_client()
+            self._api_call_count += 1
             response = client.messages.create(
                 model=model,
                 max_tokens=1024,
