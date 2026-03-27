@@ -309,9 +309,11 @@ def _update_agent_session(hook_input: dict) -> None:
 
         from models.agent_session import AgentSession
 
-        agent_session = AgentSession.query.get(job_id)
-        if not agent_session:
+        local_sid = f"local-{session_id}"
+        matches = list(AgentSession.query.filter(session_id=local_sid))
+        if not matches:
             return
+        agent_session = matches[0]
 
         agent_session.last_activity = time.time()
         agent_session.tool_call_count = (agent_session.tool_call_count or 0) + 1

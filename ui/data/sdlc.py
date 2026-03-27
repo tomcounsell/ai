@@ -94,10 +94,11 @@ class PipelineProgress(BaseModel):
     @property
     def duration(self) -> float | None:
         """Total duration in seconds from start to completion or now."""
-        if not self.started_at:
+        start = self.started_at or self.created_at
+        if not start:
             return None
         end = self.completed_at or time.time()
-        return end - self.started_at
+        return end - start
 
     @property
     def is_active(self) -> bool:
@@ -304,6 +305,21 @@ def _parse_history(history_list: list | None) -> list[PipelineEvent]:
     return events
 
 
+def _resolve_session_type(session) -> str | None:
+    """Map session_type + qa_mode into a dashboard display type.
+
+    chat + qa_mode=True  → "Q&A"
+    chat + qa_mode=False → "PM"
+    dev                  → "dev"
+    """
+    raw = getattr(session, "session_type", None)
+    if raw == "chat":
+        if getattr(session, "qa_mode", False):
+            return "Q&A"
+        return "PM"
+    return _safe_str(raw)
+
+
 def _safe_str(val, default: str | None = None) -> str | None:
     """Return val as a string if it's a real value, else default."""
     if val is None or not isinstance(val, (str, int, float, bool)):
@@ -350,7 +366,7 @@ def _session_to_pipeline(session) -> PipelineProgress:
     return PipelineProgress(
         job_id=_safe_str(session.job_id) or "",
         session_id=_safe_str(session.session_id),
-        session_type=_safe_str(session.session_type),
+        session_type=_resolve_session_type(session),
         status=_safe_str(session.status),
         slug=slug,
         message_text=_safe_str(session.message_text),

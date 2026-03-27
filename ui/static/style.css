@@ -203,6 +203,11 @@ h3 {
     background: var(--purple-bg);
 }
 
+.badge-green {
+    color: var(--green);
+    background: var(--green-bg);
+}
+
 .badge-active, .badge-waiting_for_children {
     color: var(--yellow);
     background: var(--yellow-bg);

@@ -45,17 +45,35 @@ def main():
             )
 
             sidecar = load_agent_session_sidecar(session_id)
-            if not sidecar.get("agent_session_job_id"):
+            job_id = sidecar.get("agent_session_job_id")
+            if job_id:
+                # Subsequent prompt in same session -- re-activate
+                import time
+
+                from models.agent_session import AgentSession
+
+                try:
+                    local_sid = f"local-{session_id}"
+                    matches = list(AgentSession.query.filter(session_id=local_sid))
+                    if matches:
+                        agent_session = matches[0]
+                        agent_session.status = "running"
+                        agent_session.last_activity = time.time()
+                        agent_session.completed_at = None
+                        agent_session.save()
+                except Exception:
+                    pass  # Non-fatal
+            else:
                 # First prompt in this session -- create AgentSession
                 from models.agent_session import AgentSession
 
                 local_session_id = f"local-{session_id}"
                 cwd = hook_input.get("cwd", "")
 
-                # Resolve project key
+                # Resolve project key from cwd
                 from hook_utils.memory_bridge import _get_project_key
 
-                project_key = _get_project_key()
+                project_key = _get_project_key(cwd)
 
                 agent_session = AgentSession.create_local(
                     session_id=local_session_id,

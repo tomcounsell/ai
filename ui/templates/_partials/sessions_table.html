@@ -53,7 +53,7 @@
             </td>
             <td>
                 {% if s.session_type %}
-                <span class="badge badge-{{ 'blue' if s.session_type == 'dev' else 'purple' }}">{{ s.session_type }}</span>
+                <span class="badge badge-{{ 'blue' if s.session_type == 'dev' else ('green' if s.session_type == 'Q&A' else 'purple') }}">{{ s.session_type | upper }}</span>
                 {% else %}
                 <span class="text-muted">-</span>
                 {% endif %}
@@ -77,7 +77,7 @@
                 <span class="text-muted">-</span>
                 {% endif %}
             </td>
-            <td class="mono">{{ s.started_at | format_timestamp }}</td>
+            <td class="mono">{{ (s.started_at or s.created_at) | format_timestamp }}</td>
             <td class="mono">{{ s.duration | format_duration }}</td>
             <td>
                 <div class="flex gap-2">

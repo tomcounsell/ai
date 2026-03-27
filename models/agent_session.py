@@ -315,12 +315,15 @@ class AgentSession(Model):
             working_dir: Absolute path to the working directory.
             **kwargs: Additional AgentSession fields to set.
         """
+        now = time.time()
         session = cls(
             session_id=session_id,
             session_type=SESSION_TYPE_DEV,
             project_key=project_key,
             working_dir=working_dir,
-            created_at=time.time(),
+            created_at=now,
+            started_at=now,
+            last_activity=now,
             **kwargs,
         )
         session.save()

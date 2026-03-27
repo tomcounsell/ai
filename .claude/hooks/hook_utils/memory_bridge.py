@@ -134,14 +134,41 @@ def _save_sidecar(session_id: str, data: dict) -> None:
         raise
 
 
-def _get_project_key() -> str:
-    """Resolve the project key from environment or defaults."""
+def _get_project_key(cwd: str | None = None) -> str:
+    """Resolve the project key from environment, cwd path match, or defaults.
+
+    Priority: VALOR_PROJECT_KEY env var > cwd match against projects.json > default.
+    """
+    env_key = os.environ.get("VALOR_PROJECT_KEY")
+    if env_key:
+        return env_key
+
+    # Try to match cwd against projects.json working_directory entries
+    if cwd:
+        try:
+            projects_path = Path.home() / "Desktop" / "Valor" / "projects.json"
+            if projects_path.exists():
+                with open(projects_path) as f:
+                    data = json.load(f)
+                home = str(Path.home())
+                for key, proj in data.get("projects", {}).items():
+                    wd = proj.get("working_directory", "")
+                    if wd:
+                        wd = wd.replace("~", home)
+                        if cwd.startswith(wd):
+                            return key
+        except Exception:
+            pass
+
+        # No projects.json match -- derive from directory basename
+        return Path(cwd).name
+
     try:
         from config.memory_defaults import DEFAULT_PROJECT_KEY
 
-        return os.environ.get("VALOR_PROJECT_KEY", DEFAULT_PROJECT_KEY)
+        return DEFAULT_PROJECT_KEY
     except Exception:
-        return os.environ.get("VALOR_PROJECT_KEY", "dm")
+        return "dm"
 
 
 def recall(
@@ -402,8 +429,9 @@ def cleanup_sidecar(session_id: str) -> None:
         for filename in (
             "memory_buffer.json",
             "memory_buffer.json.tmp",
-            "agent_session.json",
-            "agent_session.json.tmp",
+            # NOTE: agent_session.json is intentionally NOT cleaned up here.
+            # It must persist across turns so that UserPromptSubmit can reuse
+            # the same AgentSession for the entire Claude Code session.
         ):
             filepath = sidecar_dir / filename
             if filepath.exists():

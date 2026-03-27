@@ -142,9 +142,13 @@ def _complete_agent_session(session_id: str, hook_input: dict) -> None:
 
         from models.agent_session import AgentSession
 
-        agent_session = AgentSession.query.get(job_id)
-        if not agent_session:
+        # Popoto AutoKeyField .get() requires a key object, not a raw string.
+        # Use filter on session_id instead.
+        sidecar_session_id = f"local-{session_id}"
+        matches = list(AgentSession.query.filter(session_id=sidecar_session_id))
+        if not matches:
             return
+        agent_session = matches[0]
 
         stop_reason = hook_input.get("stop_reason", "unknown")
         if stop_reason in ("error", "crash"):
