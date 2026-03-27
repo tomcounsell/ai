@@ -6,7 +6,7 @@ A long-running process that performs daily self-directed maintenance tasks.
 14 units: 11 independent items + 3 merged pipelines.
 
 Independent units:
-1. legacy_code_scan     — Clean Up Legacy Code
+1. code_scan     — Clean Up Stale Code
 2. log_review           — Review Previous Day's Logs
 3. task_management      — Clean Up Task Management
 4. documentation_audit  — Audit Documentation
@@ -483,7 +483,7 @@ class ReflectionRunner:
         self.state = self._load_state()
         self.projects = load_local_projects()
         self.steps = [
-            ("legacy_code_scan", "Clean Up Legacy Code", self.step_clean_legacy),
+            ("code_scan", "Clean Up Stale Code", self.step_clean_legacy),
             ("log_review", "Review Previous Day's Logs", self.step_review_logs),
             ("task_management", "Clean Up Task Management", self.step_clean_tasks),
             ("documentation_audit", "Audit Documentation", self.step_audit_docs),

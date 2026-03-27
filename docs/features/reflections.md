@@ -81,7 +81,7 @@ The bridge watchdog (`com.valor.bridge-watchdog`) is intentionally NOT in the re
 
 The `daily-maintenance` reflection runs the full pipeline from `scripts/reflections.py`. The runner loads state from Redis, executes each unit in order, and checkpoints after every unit. If interrupted, the next run resumes from where it left off. Each unit is independently failable — a crash in one unit does not block the rest.
 
-The pipeline has 14 units: 11 independent items and 3 merged pipelines. Completed units are tracked by string key (e.g. `"legacy_code_scan"`), not by integer position. This means units can be reordered or renamed without data migrations — any unknown key in `completed_steps` is simply skipped.
+The pipeline has 14 units: 11 independent items and 3 merged pipelines. Completed units are tracked by string key (e.g. `"code_scan"`), not by integer position. This means units can be reordered or renamed without data migrations — any unknown key in `completed_steps` is simply skipped.
 
 ### 14-Unit Pipeline
 
@@ -89,7 +89,7 @@ The pipeline has 14 units: 11 independent items and 3 merged pipelines. Complete
 
 | # | Key | Name | Description | Scope | Failure Mode |
 |---|-----|------|-------------|-------|--------------|
-| 1 | `legacy_code_scan` | Clean Up Legacy Code | Scans for TODO comments, old-style typing imports | AI repo only | Non-blocking |
+| 1 | `code_scan` | Clean Up Stale Code | Scans for TODO comments, old-style typing imports | AI repo only | Non-blocking |
 | 2 | `log_review` | Review Previous Day's Logs | Extracts structured errors from log files and Redis BridgeEvent records | Per-project | Non-blocking, skips if `logs/bridge.log` missing |
 | 3 | `task_management` | Clean Up Task Management | Lists open bug issues via `gh issue list` per project | Per-project | Non-blocking, requires `gh` auth |
 | 4 | `documentation_audit` | Audit Documentation | Weekly LLM-powered accuracy audit of `docs/` (see [Documentation Audit](documentation-audit.md)) | AI repo only | Non-blocking, requires `ANTHROPIC_API_KEY` |
@@ -122,21 +122,21 @@ One record per calendar date. Acts as the primary state checkpoint for resumabil
 | Field | Type | Purpose |
 |-------|------|---------|
 | `date` | UniqueKeyField | YYYY-MM-DD, one run per day |
-| `completed_steps` | ListField | Units already finished, e.g. `["legacy_code_scan", "log_review"]` |
+| `completed_steps` | ListField | Units already finished, e.g. `["code_scan", "log_review"]` |
 | `daily_report` | ListField | Human-readable log lines per unit |
 | `findings` | DictField | `{category: [finding_strings]}` |
 | `session_analysis` | DictField | Output from session analysis sub-step |
 | `reflections` | ListField | LLM reflection outputs |
 | `auto_fix_attempts` | ListField | Auto-fix attempt records |
-| `step_progress` | DictField | Per-unit metrics, e.g. `{"legacy_code_scan": {"findings": 2}}` |
+| `step_progress` | DictField | Per-unit metrics, e.g. `{"code_scan": {"findings": 2}}` |
 | `started_at` | SortedField(float) | Unix timestamp, used for cleanup |
 | `dry_run` | Field(bool) | True if `--dry-run` mode |
 
 **Checkpoint cycle**: After each unit completes (or fails), the runner saves all state to Redis via `ReflectionRun.save_checkpoint()`. This deletes and recreates the record to handle Popoto's KeyField constraints.
 
-**Resume scenario**: If reflections crashes during `session_intelligence`, the next run loads the ReflectionRun for today, sees `completed_steps = ["legacy_code_scan", ...]`, and continues from `session_intelligence`.
+**Resume scenario**: If reflections crashes during `session_intelligence`, the next run loads the ReflectionRun for today, sees `completed_steps = ["code_scan", ...]`, and continues from `session_intelligence`.
 
-**Legacy migration**: If `completed_steps` contains integers (data from before the string-key refactor), the runner resets it to an empty list. This safely re-runs any steps that ran earlier in the day — all units are idempotent.
+**Integer migration**: If `completed_steps` contains integers (data from before the string-key refactor), the runner resets it to an empty list. This safely re-runs any steps that ran earlier in the day — all units are idempotent.
 
 ### ReflectionIgnore
 
@@ -340,7 +340,7 @@ The reflection scheduler starts automatically as part of the bridge worker loop.
 | Registry | `config/reflections.yaml` |
 | State | Redis via `models/reflection.py` |
 | Tick interval | 60 seconds |
-| Legacy plist | `com.valor.reflections.plist` (deprecated, bridge scheduler replaces it) |
+| Old plist | `com.valor.reflections.plist` (now managed by bridge scheduler) |
 
 ### Adding a New Reflection
 
@@ -383,11 +383,11 @@ The scheduler picks it up on the next tick. No code changes or service restarts 
 | `agent/reflection_scheduler.py` | Unified scheduler: registry loader, schedule evaluator, executor |
 | `config/reflections.yaml` | Declarative registry of all reflections |
 | `models/reflection.py` | Reflection state model (per-reflection Redis tracking) |
-| `models/reflections.py` | Legacy models (ReflectionRun for daily pipeline, ReflectionIgnore) |
+| `models/reflections.py` | Core models (ReflectionRun for daily pipeline, ReflectionIgnore) |
 | `scripts/reflections.py` | Daily maintenance 14-unit runner |
 | `scripts/reflections_report.py` | GitHub issue creation module |
-| `scripts/install_reflections.sh` | launchd installation script (legacy, kept for migration) |
-| `com.valor.reflections.plist` | launchd schedule definition (legacy, kept for migration) |
+| `scripts/install_reflections.sh` | launchd installation script (kept for manual invocation) |
+| `com.valor.reflections.plist` | launchd schedule definition (kept for manual invocation) |
 | `~/Desktop/Valor/projects.json` | Multi-repo project registry |
 | `logs/reflections/` | Local report output directory |
 | `tests/unit/test_reflection_scheduler.py` | Scheduler and registry tests |
