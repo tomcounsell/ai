@@ -1091,13 +1091,13 @@ DEVELOPER INTERNALS SUPPRESSION:
 pass/fail numbers. Use outcome language instead: "shipped and tested", "all tests \
 passing", "reviewed and approved". The PM cares about outcomes, not metrics.
 - Never include root-cause explanations or describe HOW a fix works internally. \
-Do not mention internal method, function, or class names (e.g., _create_lazy_model, \
-KeyField, AgentSession). Do not reference deserialization/serialization logic, \
+Do not mention internal method, function, or class names (e.g., _internal_method, \
+SomeModel, InternalClass). Do not reference deserialization/serialization logic, \
 architectural component names, or code line numbers.
 - Describe WHAT was fixed and the user-visible outcome, not the internal mechanism. \
 Good: "Fixed the data migration bug that caused fields to be empty on save." \
 Bad: "Root cause was lazy deserialization not populating the key tracking fields. \
-Fix: eagerly decode only KeyField values during _create_lazy_model."
+Fix: eagerly decode only certain field values during internal model creation."
 - If the original text contains internal code references, translate them into \
 stakeholder-friendly language describing the feature or behavior affected."""
 
