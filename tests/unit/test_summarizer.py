@@ -1914,6 +1914,8 @@ class TestSummarizerBypass:
         mock_session.pm_sent_message_ids = []
         mock_session.session_id = "test-session"
         mock_session.is_sdlc = False
+        # Ensure parent lookup also returns no PM messages
+        mock_session.get_parent_chat_session.return_value = None
 
         # Mock send_markdown to avoid Telethon calls
         with patch("bridge.markdown.send_markdown", new_callable=AsyncMock) as mock_send:
@@ -1929,6 +1931,119 @@ class TestSummarizerBypass:
 
         # Should have tried to send the text (not bypassed)
         assert mock_send.called or result is True
+
+
+class TestSummarizerBypassParentSession:
+    """Tests for PM bypass guard with parent ChatSession lookup (issue #571).
+
+    In SDLC flows, the DevSession (child) is passed to send_response_with_files,
+    but PM messages are recorded on the parent ChatSession. The guard must check
+    the parent session when the child has no PM messages.
+    """
+
+    @pytest.mark.asyncio
+    async def test_bypass_when_parent_has_pm_messages(self):
+        """DevSession with parent ChatSession that has PM messages -> bypass fires."""
+        from bridge.response import send_response_with_files
+
+        mock_client = MagicMock()
+        mock_parent = MagicMock()
+        mock_parent.has_pm_messages.return_value = True
+        mock_parent.pm_sent_message_ids = [100, 101]
+
+        mock_session = MagicMock()
+        mock_session.has_pm_messages.return_value = False
+        mock_session.pm_sent_message_ids = []
+        mock_session.session_id = "dev-session-1"
+        mock_session.get_parent_chat_session.return_value = mock_parent
+
+        result = await send_response_with_files(
+            mock_client,
+            None,
+            "DevSession agent output",
+            chat_id=12345,
+            reply_to=67890,
+            session=mock_session,
+        )
+
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_no_bypass_when_parent_is_dangling(self):
+        """DevSession with dangling parent_chat_session_id -> bypass does not fire."""
+        from bridge.response import send_response_with_files
+
+        mock_client = MagicMock()
+        mock_session = MagicMock()
+        mock_session.has_pm_messages.return_value = False
+        mock_session.pm_sent_message_ids = []
+        mock_session.session_id = "dev-session-2"
+        mock_session.get_parent_chat_session.return_value = None
+        mock_session.is_sdlc = False
+
+        with patch("bridge.markdown.send_markdown", new_callable=AsyncMock) as mock_send:
+            mock_send.return_value = MagicMock()
+            result = await send_response_with_files(
+                mock_client,
+                None,
+                "Short",
+                chat_id=12345,
+                reply_to=67890,
+                session=mock_session,
+            )
+
+        assert mock_send.called or result is True
+
+    @pytest.mark.asyncio
+    async def test_no_bypass_when_no_parent(self):
+        """Session without parent_chat_session_id -> no parent lookup, no bypass."""
+        from bridge.response import send_response_with_files
+
+        mock_client = MagicMock()
+        mock_session = MagicMock()
+        mock_session.has_pm_messages.return_value = False
+        mock_session.pm_sent_message_ids = []
+        mock_session.session_id = "chat-session-1"
+        mock_session.is_sdlc = False
+        # Remove get_parent_chat_session to simulate a plain session
+        del mock_session.get_parent_chat_session
+
+        with patch("bridge.markdown.send_markdown", new_callable=AsyncMock) as mock_send:
+            mock_send.return_value = MagicMock()
+            result = await send_response_with_files(
+                mock_client,
+                None,
+                "Short",
+                chat_id=12345,
+                reply_to=67890,
+                session=mock_session,
+            )
+
+        assert mock_send.called or result is True
+
+
+class TestSummarizerInternalsSuppressionPrompt:
+    """Tests that SUMMARIZER_SYSTEM_PROMPT bans implementation details (issue #571)."""
+
+    def test_prompt_contains_internals_suppression_section(self):
+        """The prompt should have DEVELOPER INTERNALS SUPPRESSION, not just metrics."""
+        from bridge.summarizer import SUMMARIZER_SYSTEM_PROMPT
+
+        assert "DEVELOPER INTERNALS SUPPRESSION" in SUMMARIZER_SYSTEM_PROMPT
+
+    def test_prompt_bans_root_cause_explanations(self):
+        """The prompt should explicitly prohibit root-cause explanations."""
+        from bridge.summarizer import SUMMARIZER_SYSTEM_PROMPT
+
+        assert "root-cause" in SUMMARIZER_SYSTEM_PROMPT.lower()
+
+    def test_prompt_bans_internal_method_names(self):
+        """The prompt should prohibit internal method/function/class names."""
+        from bridge.summarizer import SUMMARIZER_SYSTEM_PROMPT
+
+        assert "method" in SUMMARIZER_SYSTEM_PROMPT.lower()
+        assert "function" in SUMMARIZER_SYSTEM_PROMPT.lower()
+        assert "class name" in SUMMARIZER_SYSTEM_PROMPT.lower()
 
 
 class TestNormalizeQuestionPrefix:

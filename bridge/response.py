@@ -431,17 +431,30 @@ async def send_response_with_files(
             pass  # Fall back to existing session object
 
     # PM self-messaging bypass: if the PM already sent messages via the
-    # send_telegram tool during this session, skip the summarizer entirely.
-    # The PM authored its own messages — the summarizer would be redundant.
-    # Only set emoji reaction (handled by the caller). See issue #497.
+    # send_telegram tool during this session (or its parent ChatSession in
+    # SDLC flows), skip the summarizer entirely. The PM authored its own
+    # messages — the summarizer would be redundant.
+    # Only set emoji reaction (handled by the caller). See issue #497, #571.
     # NOTE: We still send any extracted files (<<FILE:>> markers) before
     # returning, so file attachments are not lost on PM self-message sessions.
     pm_bypass = session and hasattr(session, "has_pm_messages") and session.has_pm_messages()
+    pm_bypass_source = "session"
+    if not pm_bypass and session and hasattr(session, "get_parent_chat_session"):
+        parent = session.get_parent_chat_session()
+        if parent and hasattr(parent, "has_pm_messages") and parent.has_pm_messages():
+            pm_bypass = True
+            pm_bypass_source = "parent"
     if pm_bypass:
+        # Log pm_sent_message_ids from the source that triggered the bypass
+        if pm_bypass_source == "parent" and hasattr(session, "get_parent_chat_session"):
+            _parent = session.get_parent_chat_session()
+            _bypass_ids = getattr(_parent, "pm_sent_message_ids", []) if _parent else []
+        else:
+            _bypass_ids = getattr(session, "pm_sent_message_ids", [])
         logger.info(
-            f"Skipping summarizer: PM self-messaged during session "
+            f"Skipping summarizer: PM self-messaged during {pm_bypass_source} "
             f"{getattr(session, 'session_id', 'unknown')} "
-            f"(pm_sent_message_ids={getattr(session, 'pm_sent_message_ids', [])})"
+            f"(pm_sent_message_ids={_bypass_ids})"
         )
 
     is_sdlc = session and hasattr(session, "is_sdlc") and session.is_sdlc
