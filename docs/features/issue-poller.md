@@ -60,6 +60,25 @@ The poller filters out automated comments from the `/do-docs` cascade (Agent D) 
 - Latest comment ID tracking (for plan freshness gates)
 - New activity evaluation (to prevent false re-processing)
 
+## Cross-Repo Dispatch
+
+When an issue belongs to a project other than the ai repo, the poller correctly targets that project's working directory instead of the ai repo. This prevents foreign-repo branches from being created inside the ai repo (which would wipe out ai files and corrupt git state).
+
+**How it works:**
+
+1. `poll_project()` extracts `working_directory` from the project dict
+2. `process_issue()` forwards it to `dispatch_plan_creation()`
+3. `dispatch_plan_creation()` runs `claude -p` with:
+   - `cwd=working_directory` (target project, not ai repo)
+   - `GH_REPO={org}/{repo}` env var (so the agent targets the right repo)
+   - `SDLC_TARGET_REPO={working_directory}` env var (for cross-repo plan file placement)
+
+For the ai repo itself (`working_directory == _project_root`), no new env vars are injected and behavior is unchanged.
+
+**Fallback:** If `working_directory` is empty or points to a non-existent path, a warning is logged and the ai repo root is used instead.
+
+This mirrors the pattern established in `agent/sdk_client.py` (PR #396) for Telegram-routed SDLC work.
+
 ## Configuration
 
 Projects are loaded from `~/Desktop/Valor/projects.json`. Only entries with a `github` key are polled:
@@ -69,11 +88,14 @@ Projects are loaded from `~/Desktop/Valor/projects.json`. Only entries with a `g
   "projects": {
     "my-project": {
       "github": {"org": "myorg", "repo": "myrepo"},
+      "working_directory": "~/src/my-project",
       "telegram": {"groups": ["Dev: MyProject"]}
     }
   }
 }
 ```
+
+The `working_directory` field is required for cross-repo dispatch to work correctly. If omitted, the poller falls back to the ai repo root and logs a warning.
 
 ## Installation
 

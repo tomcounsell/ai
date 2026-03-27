@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 import sys
 import time
@@ -274,11 +275,31 @@ def dispatch_plan_creation(
     repo: str,
     issue_number: int,
     last_comment_id: str | None = None,
+    working_directory: str | None = None,
 ) -> bool:
     """Dispatch plan creation via claude -p subprocess.
 
     Invokes the /do-plan skill to create a draft plan for the issue.
+    For foreign repos, sets GH_REPO and SDLC_TARGET_REPO env vars so the
+    spawned agent targets the correct repository instead of the ai repo.
     """
+    # Resolve cwd: use working_directory if valid, else fall back to _project_root
+    if working_directory and Path(working_directory).exists():
+        cwd = working_directory
+    else:
+        if working_directory and not Path(working_directory).exists():
+            logger.warning(
+                f"working_directory {working_directory!r} does not exist, "
+                f"falling back to _project_root"
+            )
+        cwd = _project_root
+
+    # Build subprocess env: inject cross-repo vars for foreign repos
+    env = os.environ.copy()
+    if cwd != _project_root:
+        env["GH_REPO"] = f"{org}/{repo}"
+        env["SDLC_TARGET_REPO"] = cwd
+
     prompt = (
         f"Create a plan for issue #{issue_number} in {org}/{repo}. "
         f"Use /do-plan to create a draft plan."
@@ -287,7 +308,7 @@ def dispatch_plan_creation(
         prompt += f" Initialize last_comment_id in the plan frontmatter to {last_comment_id}."
 
     try:
-        logger.info(f"Dispatching plan creation for {org}/{repo}#{issue_number}")
+        logger.info(f"Dispatching plan creation for {org}/{repo}#{issue_number} in {cwd}")
         result = subprocess.run(
             [
                 "claude",
@@ -299,7 +320,8 @@ def dispatch_plan_creation(
             capture_output=True,
             text=True,
             timeout=300,  # 5 minute timeout for plan creation
-            cwd=_project_root,
+            cwd=cwd,
+            env=env,
         )
         if result.returncode != 0:
             logger.warning(
@@ -345,6 +367,7 @@ def process_issue(
     issue: dict,
     all_open_issues: list[dict],
     telegram_groups: list[str],
+    working_directory: str | None = None,
 ) -> str:
     """Process a single new issue.
 
@@ -421,7 +444,7 @@ def process_issue(
     last_comment_id = get_latest_comment_id(org, repo, number)
 
     # Dispatch plan creation
-    success = dispatch_plan_creation(org, repo, number, last_comment_id)
+    success = dispatch_plan_creation(org, repo, number, last_comment_id, working_directory)
     if success:
         apply_label(org, repo, number, "auto-planned")
         send_telegram_notification(
@@ -451,6 +474,7 @@ def poll_project(
     org = project["org"]
     repo = project["repo"]
     telegram_groups = project.get("telegram_groups", [])
+    working_directory = project.get("working_directory") or None
 
     logger.info(f"Polling {org}/{repo}...")
 
@@ -473,7 +497,7 @@ def poll_project(
     }
 
     for issue in new_issues:
-        status = process_issue(org, repo, issue, issues, telegram_groups)
+        status = process_issue(org, repo, issue, issues, telegram_groups, working_directory)
         results[status] = results.get(status, 0) + 1
 
     return results
