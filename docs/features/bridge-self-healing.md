@@ -96,9 +96,16 @@ This is distinct from the loop-level crash guard (which marks sessions as `faile
 
 ### 5. Log Rotation
 
-**`bridge.log`**: Managed by Python's `logging.handlers.RotatingFileHandler` (10MB max, 5 backups). Configured in `bridge/telegram_bridge.py` at startup. Prevents unbounded growth from verbose reflection runs.
+Log rotation uses a dual-mechanism approach: Python-managed rotation for application logs, and shell rotation + newsyslog for launchd-managed stderr/stdout logs.
 
-**`bridge.error.log`**: Stderr redirected by launchd, so Python's handler cannot manage it. The `rotate_log()` function in `valor-service.sh` runs at bridge startup and rotates it if exceeding 10MB (3 backup copies).
+**Python-managed logs** (auto-rotate on write via `RotatingFileHandler`, 10MB max, 5 backups):
+- `bridge.log` — configured in `bridge/telegram_bridge.py`
+- `issue_poller.log` — configured in `scripts/issue_poller.py`
+
+**Shell-rotated logs** (`rotate_log()` in `valor-service.sh`, runs at bridge startup, 10MB max, 3 backups):
+- `bridge.error.log`, `issue_poller_error.log`, `watchdog.log`, `reflections.log`, `reflections_error.log`
+
+**newsyslog safety net** (`config/newsyslog.valor.conf`, installed to `/etc/newsyslog.d/valor.conf`): Covers all 5 launchd-managed logs with hourly checks, 10MB max, 5 bzip2-compressed backups. Uses the `N` flag (no signal) because launchd holds file descriptors open. Acts as a backup if the bridge doesn't restart for extended periods.
 
 ### 6. Startup Redis Key Cleanup (`bridge/telegram_bridge.py`)
 

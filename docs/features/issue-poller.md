@@ -125,8 +125,8 @@ launchctl bootout gui/$(id -u)/com.valor.issue-poller
 
 ## Logs
 
-- **Main log**: `logs/issue_poller.log`
-- **Error log**: `logs/issue_poller_error.log`
+- **Main log**: `logs/issue_poller.log` — auto-rotated via `RotatingFileHandler` (10MB max, 5 backups)
+- **Error log**: `logs/issue_poller_error.log` — rotated by `rotate_log()` in `valor-service.sh` on bridge startup (10MB, 3 backups) + newsyslog hourly safety net
 - **Alert threshold**: 3+ consecutive failures triggers a Telegram notification
 
 ## Files
