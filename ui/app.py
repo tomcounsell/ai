@@ -121,17 +121,21 @@ def create_app() -> FastAPI:
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request):
         """Root route: single-page dashboard with all system state."""
+        from ui.data.machine import get_machine_name, get_machine_projects
         from ui.data.reflections import get_all_reflections
         from ui.data.sdlc import get_all_sessions
 
         sessions = get_all_sessions()
         reflections = get_all_reflections()
+        machine_projects = get_machine_projects()
         return templates.TemplateResponse(
             request,
             "index.html",
             {
                 "sessions": sessions,
                 "reflections": reflections,
+                "machine_name": get_machine_name(),
+                "machine_projects": machine_projects,
             },
         )
 
