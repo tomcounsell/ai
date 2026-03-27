@@ -216,7 +216,57 @@ No agent integration required — this is infrastructure/ops configuration with 
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Plan**: docs/plans/log_rotation_cleanup.md
+**Issue**: #570
+**Critics**: Skeptic, Operator, Archaeologist, Adversary, Simplifier, User
+**Findings**: 4 total (0 blockers, 3 concerns, 1 nit)
+
+### Concerns
+
+#### 1. newsyslog N-flag assumption needs validation
+- **Severity**: CONCERN
+- **Critics**: Skeptic, Adversary
+- **Location**: Risks > Risk 2 / Technical Approach
+- **Finding**: The plan claims launchd "reopens the file path on each write cycle" when using the N (no signal) flag, but launchd holds file descriptors open via StandardOutPath/StandardErrorPath. After newsyslog renames the file, launchd continues writing to the old (now renamed) inode, not the new file at the original path. This means rotation would silently stop capturing new output until the launchd job is restarted.
+- **Suggestion**: Validate this assumption with a spike before building. The correct approach may be to use newsyslog with a PID file and SIGHUP, or to add a post-rotate script that `launchctl kickstart -k` the affected services. Alternatively, use the existing shell-based `rotate_log` function in `valor-service.sh` (lines 92-123) which already handles this by truncation rather than rename.
+
+#### 2. Existing rotate_log in valor-service.sh not acknowledged
+- **Severity**: CONCERN
+- **Critics**: Archaeologist, Simplifier
+- **Location**: Solution > Key Elements
+- **Finding**: `scripts/valor-service.sh` already has a `rotate_log` shell function (lines 92-123) that rotates `bridge.error.log` and `bridge.log` on each `start_bridge` call. The plan introduces newsyslog as a second rotation mechanism for these same files without acknowledging the existing one. This creates two competing rotation systems for overlapping files.
+- **Suggestion**: Either extend the existing `rotate_log` function to cover all launchd-managed logs (simpler, no sudo, no newsyslog), or replace `rotate_log` with newsyslog entirely. Document the choice and remove the redundant mechanism.
+
+#### 3. Test Impact entry for test_issue_poller.py is inaccurate
+- **Severity**: CONCERN
+- **Critics**: Operator
+- **Location**: Test Impact
+- **Finding**: The plan says to update `tests/test_issue_poller.py` to "assert RotatingFileHandler instead of FileHandler", but this test file contains no logging-related assertions. It tests dedup, context checking, and plan dispatch -- not `setup_logging()`. The Test Impact entry is a false positive that wastes builder time investigating a non-existent test.
+- **Suggestion**: Remove or correct the `tests/test_issue_poller.py` entry. If logging setup should be tested, add it as a new test task rather than an UPDATE to an existing test.
+
+### Nits
+
+#### 4. remote-update.sh addition underspecified
+- **Severity**: NIT
+- **Critics**: Operator
+- **Location**: Update System / Task 3
+- **Finding**: The plan says to add newsyslog config sync to `scripts/remote-update.sh`, but that script delegates all work to `scripts/update/run.py --cron`. Adding a raw `cp` command to the shell wrapper would break the pattern. The plan should specify whether to modify `remote-update.sh` directly or add a step to the Python update system.
+- **Suggestion**: Clarify that the newsyslog sync step should be added to `scripts/update/run.py` (or a new update module) rather than the shell wrapper, to maintain consistency with the existing update architecture.
+
+### Structural Check Results
+
+| Check | Status | Detail |
+|-------|--------|--------|
+| Required sections | PASS | All 4 required sections present and non-empty |
+| Task numbering | PASS | Tasks 1-5 sequential, no gaps |
+| Dependencies valid | PASS | All Depends On references point to valid task IDs, no cycles |
+| File paths exist | PASS | 7 of 8 exist; `config/newsyslog.valor.conf` intentionally new |
+| Prerequisites met | PASS | No prerequisites declared |
+| Cross-references | PASS | All success criteria map to tasks; no no-gos appear in solution |
+
+### Verdict
+
+**READY TO BUILD** — No blockers. The newsyslog file-descriptor concern (finding 1) and competing rotation mechanisms (finding 2) should be resolved during implementation by the builder choosing one consistent approach. The test impact inaccuracy (finding 3) is a minor correction the builder can make in-flight.
 
 ---
 
