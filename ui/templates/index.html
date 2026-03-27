@@ -39,7 +39,9 @@
                 <th>Chat Group</th>
                 <th style="text-align: right;">Persona</th>
                 <th>Project</th>
-                <th>GitHub</th>
+                <th style="text-align: right;">Repo</th>
+                <th>Issues</th>
+                <th>PRs</th>
             </tr>
         </thead>
         <tbody>
@@ -53,14 +55,14 @@
                     {% endif %}
                 </td>
                 <td>{{ row.project_name }}</td>
+                <td style="text-align: right;">
+                    {% if row.github %}<a href="https://github.com/{{ row.github }}" target="_blank" class="mono text-muted">{{ row.github }}</a>{% else %}<span class="text-muted">-</span>{% endif %}
+                </td>
                 <td>
-                    {% if row.github %}
-                    <a href="https://github.com/{{ row.github }}" target="_blank" class="mono text-muted">{{ row.github }}</a>
-                    <span class="text-muted"> · </span>
-                    <a href="https://github.com/{{ row.github }}/issues" target="_blank" class="text-muted">issues</a>
-                    <span class="text-muted"> · </span>
-                    <a href="https://github.com/{{ row.github }}/pulls" target="_blank" class="text-muted">PRs</a>
-                    {% else %}-{% endif %}
+                    {% if row.github %}<a href="https://github.com/{{ row.github }}/issues" target="_blank" class="text-muted">issues</a>{% else %}<span class="text-muted">-</span>{% endif %}
+                </td>
+                <td>
+                    {% if row.github %}<a href="https://github.com/{{ row.github }}/pulls" target="_blank" class="text-muted">PRs</a>{% else %}<span class="text-muted">-</span>{% endif %}
                 </td>
             </tr>
             {% endfor %}
