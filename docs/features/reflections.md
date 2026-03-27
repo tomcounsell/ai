@@ -41,6 +41,7 @@ reflections:
 | `callable` | string | Dotted Python path (for function type) |
 | `command` | string | Shell command (for agent type) |
 | `enabled` | bool | Whether this reflection is active (default: true) |
+| `timeout` | int | Optional per-reflection timeout in seconds. Defaults: 1800 (30 min) for function, 3600 (60 min) for agent |
 
 ### Registered Reflections
 
@@ -73,9 +74,25 @@ Before enqueuing a reflection, the scheduler checks if it's already running. If 
 
 Reflection status is available via `ReflectionScheduler.format_status()`, showing each reflection's state, time until next run, last duration, and run count. This can be wired to `/queue-status` for Telegram visibility.
 
+### Resource Guards
+
+Every reflection execution includes resource monitoring:
+
+**Memory instrumentation**: `psutil.Process().memory_info().rss` is captured before and after each reflection. The delta is logged. If the delta exceeds 100MB (`MEMORY_DELTA_WARNING_BYTES`), a WARNING is emitted with the reflection name, delta, and absolute RSS values. Memory monitoring is best-effort -- if `psutil` is unavailable, reflections still run.
+
+**Timeout enforcement**: Each reflection has a configurable timeout (via `timeout` field in YAML, or type-based defaults: 30 min for function, 60 min for agent). Function-type reflections are wrapped in `asyncio.wait_for()`. For async callables, this provides true cancellation. For sync callables running via `run_in_executor()`, the `TimeoutError` is raised but the thread cannot be cancelled (detection-only). Timeout errors are logged and the reflection is marked with error status.
+
+**API call cap (DocsAuditor)**: The `DocsAuditor` class (used by `documentation_audit`) accepts a `max_api_calls` parameter (default: 50). Each Anthropic API call increments a counter. When the cap is reached, processing stops gracefully -- remaining files are skipped, partial results are returned, and a WARNING is logged. This prevents unbounded API consumption.
+
+### Log Rotation
+
+`bridge.log` uses `logging.handlers.RotatingFileHandler` with a 10MB max file size and 5 backup files. This prevents unbounded log growth from verbose reflection runs.
+
 ### Bridge Watchdog (External)
 
 The bridge watchdog (`com.valor.bridge-watchdog`) is intentionally NOT in the reflection registry. It must run as an external launchd service because it monitors the bridge process itself -- running it inside the process it monitors defeats its purpose.
+
+When the watchdog detects that the bridge process is not running (via `pgrep`), it calls `crash_tracker.log_crash("bridge_dead_on_watchdog_check")` to record the event. This captures SIGKILL and OOM kills that leave no traceback. The crash tracker's pattern detection requires 3+ crashes in 30 minutes before triggering escalation, so a single false positive from a startup race is harmless.
 
 ## Daily Maintenance Pipeline (14 Units)
 
@@ -398,6 +415,7 @@ The scheduler picks it up on the next tick. No code changes or service restarts 
 |------------|---------|----------|
 | Redis (Popoto ORM) | All reflections | Yes — state persistence |
 | PyYAML | Registry loader | Yes — reads `config/reflections.yaml` |
+| psutil | Memory instrumentation | Optional — memory snapshots degrade gracefully if missing |
 | `ANTHROPIC_API_KEY` | `documentation_audit`, `session_intelligence` | Conditional — LLM reflection and docs audit |
 | `gh` CLI (authenticated) | `task_management`, `session_intelligence`, `daily_report_and_notify`, `branch_plan_cleanup` | Conditional — task cleanup, bug issues |
 | `telethon` | `daily_report_and_notify` | Conditional — Telegram notifications |
@@ -413,7 +431,10 @@ The scheduler picks it up on the next tick. No code changes or service restarts 
 | Telegram post failed | Missing `data/valor.session` | Run `python scripts/telegram_login.py` |
 | Auto-fix not triggering | Confidence criteria not met | Check reflection has pattern >=10 chars and non-empty prevention |
 | State not resuming | Redis connection issue | Verify Redis is running |
-| Unit stuck/timing out | Auto-fix subprocess hung | Check for 10-minute timeout; review `logs/reflections.log` |
+| Unit stuck/timing out | Auto-fix subprocess hung | Check for timeout; review `logs/reflections.log` |
+| Reflection killed (SIGKILL) | Resource-based kill (OOM, ulimit) | Check watchdog crash tracker: `python -c "from monitoring.crash_tracker import get_recent_crashes; print(get_recent_crashes(3600))"` |
+| High memory delta warning | Reflection consumed >100MB | Check `bridge.log` for `HIGH MEMORY DELTA` entries; investigate the flagged reflection |
+| Docs auditor stopped early | API call cap reached | Check `bridge.log` for `API call cap reached`; increase `max_api_calls` if doc count grew |
 
 ## See Also
 
