@@ -15,6 +15,22 @@ from models.agent_session import AgentSession
 # Project root derived from file location (tests/integration/ -> project root)
 _PROJECT_ROOT = str(Path(__file__).parent.parent.parent)
 
+
+def _subprocess_env(**extra) -> dict:
+    """Build env dict for subprocess calls that routes them to the test Redis DB.
+
+    Popoto picks up REDIS_URL at import time. By pointing subprocesses at
+    db=1 (the same DB the redis_test_db fixture uses for non-xdist runs),
+    we prevent test sessions from leaking into production db=0.
+    """
+    import os
+
+    env = {**os.environ, **extra}
+    # Use the same test DB that the redis_test_db conftest fixture selects
+    env["REDIS_URL"] = "redis://127.0.0.1:6379/1"
+    return env
+
+
 # === Fixtures ===
 
 
@@ -186,6 +202,7 @@ class TestJobSchedulerCLI:
             capture_output=True,
             text=True,
             cwd=_PROJECT_ROOT,
+            env=_subprocess_env(),
         )
         assert result.returncode == 0
         assert "schedule" in result.stdout
@@ -198,6 +215,7 @@ class TestJobSchedulerCLI:
             capture_output=True,
             text=True,
             cwd=_PROJECT_ROOT,
+            env=_subprocess_env(),
         )
         assert result.returncode == 0
         data = json.loads(result.stdout)
@@ -224,7 +242,7 @@ class TestJobSchedulerCLI:
             capture_output=True,
             text=True,
             cwd=_PROJECT_ROOT,
-            env={**__import__("os").environ, "PROJECT_KEY": proj},
+            env=_subprocess_env(PROJECT_KEY=proj),
         )
         assert push_result.returncode == 0
         push_data = json.loads(push_result.stdout)
@@ -243,6 +261,7 @@ class TestJobSchedulerCLI:
             capture_output=True,
             text=True,
             cwd=_PROJECT_ROOT,
+            env=_subprocess_env(),
         )
         assert pop_result.returncode == 0
         pop_data = json.loads(pop_result.stdout)
@@ -265,6 +284,7 @@ class TestJobSchedulerCLI:
             capture_output=True,
             text=True,
             cwd=_PROJECT_ROOT,
+            env=_subprocess_env(),
         )
         # Should fail (exit 1) with error JSON
         assert result.returncode == 1
@@ -285,6 +305,7 @@ class TestJobSchedulerCLI:
             capture_output=True,
             text=True,
             cwd=_PROJECT_ROOT,
+            env=_subprocess_env(),
         )
         assert result.returncode == 1
         data = json.loads(result.stdout)
@@ -304,6 +325,7 @@ class TestJobSchedulerCLI:
             capture_output=True,
             text=True,
             cwd=_PROJECT_ROOT,
+            env=_subprocess_env(),
         )
         assert result.returncode == 1
         data = json.loads(result.stdout)
@@ -330,7 +352,7 @@ class TestSelfSchedulingProtection:
             capture_output=True,
             text=True,
             cwd=_PROJECT_ROOT,
-            env={**__import__("os").environ, "PROJECT_KEY": "test-scheduler"},
+            env=_subprocess_env(PROJECT_KEY="test-scheduler"),
         )
         assert result.returncode == 0
         data = json.loads(result.stdout)
@@ -372,6 +394,7 @@ class TestKillCommandIntegration:
             capture_output=True,
             text=True,
             cwd=_PROJECT_ROOT,
+            env=_subprocess_env(),
         )
         assert result.returncode == 0
         assert "kill" in result.stdout
@@ -394,7 +417,7 @@ class TestKillCommandIntegration:
             capture_output=True,
             text=True,
             cwd=_PROJECT_ROOT,
-            env={**__import__("os").environ, "PROJECT_KEY": proj},
+            env=_subprocess_env(PROJECT_KEY=proj),
         )
         assert push_result.returncode == 0
         push_data = json.loads(push_result.stdout)
@@ -412,6 +435,7 @@ class TestKillCommandIntegration:
             capture_output=True,
             text=True,
             cwd=_PROJECT_ROOT,
+            env=_subprocess_env(),
         )
         assert result.returncode == 0
         data = json.loads(result.stdout)
@@ -437,7 +461,7 @@ class TestKillCommandIntegration:
             capture_output=True,
             text=True,
             cwd=_PROJECT_ROOT,
-            env={**__import__("os").environ, "PROJECT_KEY": proj},
+            env=_subprocess_env(PROJECT_KEY=proj),
         )
         assert push_result.returncode == 0
         push_data = json.loads(push_result.stdout)
@@ -455,6 +479,7 @@ class TestKillCommandIntegration:
             capture_output=True,
             text=True,
             cwd=_PROJECT_ROOT,
+            env=_subprocess_env(),
         )
         assert result.returncode == 0
         data = json.loads(result.stdout)
@@ -475,6 +500,7 @@ class TestKillCommandIntegration:
             capture_output=True,
             text=True,
             cwd=_PROJECT_ROOT,
+            env=_subprocess_env(),
         )
         assert result.returncode == 1
         data = json.loads(result.stdout)
@@ -495,6 +521,7 @@ class TestKillCommandIntegration:
             capture_output=True,
             text=True,
             cwd=_PROJECT_ROOT,
+            env=_subprocess_env(),
         )
         assert result.returncode == 1
         data = json.loads(result.stdout)
@@ -520,7 +547,7 @@ class TestKillCommandIntegration:
                 capture_output=True,
                 text=True,
                 cwd=_PROJECT_ROOT,
-                env={**__import__("os").environ, "PROJECT_KEY": proj},
+                env=_subprocess_env(PROJECT_KEY=proj),
             )
             assert push_result.returncode == 0
 
@@ -535,6 +562,7 @@ class TestKillCommandIntegration:
             capture_output=True,
             text=True,
             cwd=_PROJECT_ROOT,
+            env=_subprocess_env(),
         )
         assert result.returncode == 0
         data = json.loads(result.stdout)
@@ -556,6 +584,7 @@ class TestKillCommandIntegration:
             capture_output=True,
             text=True,
             cwd=_PROJECT_ROOT,
+            env=_subprocess_env(),
         )
         assert result.returncode == 0
         data = json.loads(result.stdout)
@@ -579,7 +608,7 @@ class TestKillCommandIntegration:
             capture_output=True,
             text=True,
             cwd=_PROJECT_ROOT,
-            env={**__import__("os").environ, "PROJECT_KEY": proj},
+            env=_subprocess_env(PROJECT_KEY=proj),
         )
         assert push_result.returncode == 0
         job_id = json.loads(push_result.stdout)["job_id"]
@@ -596,6 +625,7 @@ class TestKillCommandIntegration:
             capture_output=True,
             text=True,
             cwd=_PROJECT_ROOT,
+            env=_subprocess_env(),
         )
 
         result = subprocess.run(
@@ -610,6 +640,7 @@ class TestKillCommandIntegration:
             capture_output=True,
             text=True,
             cwd=_PROJECT_ROOT,
+            env=_subprocess_env(),
         )
         assert result.returncode == 0
         data = json.loads(result.stdout)

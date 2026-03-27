@@ -404,11 +404,6 @@ def get_all_sessions(limit: int = 50) -> list[PipelineProgress]:
         return p.completed_at or p.last_activity or p.started_at or p.created_at or 0
 
     for session in all_sessions:
-        # Hide test sessions (created by integration tests with test-* project keys)
-        project_key = getattr(session, "project_key", "") or ""
-        if project_key.startswith("test-"):
-            continue
-
         try:
             pipeline = _session_to_pipeline(session)
         except Exception:
