@@ -7,14 +7,12 @@ All tests use redis_test_db fixture (autouse=True in conftest.py) for isolation.
 """
 
 import asyncio
-import logging
 import time
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from agent.job_queue import (
-    DRAIN_TIMEOUT,
     _active_events,
     _active_workers,
     _pop_job_with_fallback,
