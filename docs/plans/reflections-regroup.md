@@ -4,7 +4,7 @@ type: chore
 appetite: Medium
 owner: Valor
 created: 2026-03-27
-tracking:
+tracking: https://github.com/tomcounsell/ai/issues/566
 last_comment_id:
 ---
 
