@@ -123,10 +123,11 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/reply_to_sessi
 
 ### Key Elements
 
-- **Root resolver**: New async helper `resolve_root_session_id(client, chat_id, reply_to_msg_id, project_key)` in `bridge/context.py` that walks the reply chain and returns the canonical session_id from the oldest human message.
+- **Root resolver**: New async helper `resolve_root_session_id(client, chat_id, reply_to_msg_id, project_key)` in `bridge/context.py`. Uses **Popoto cache-first** lookup: query `TelegramMessage` by `(chat_id, message_id)` to walk the chain without API calls. Falls back to Telegram API chain walk on cache miss, and to `reply_to_msg_id` directly on any exception.
+- **`TelegramMessage.message_id` promoted to `KeyField`**: Enables O(1) indexed lookup by Telegram message ID. Currently a plain `Field` with no index — must be a `KeyField` for `TelegramMessage.query.filter(chat_id=X, message_id=Y)` to be fast.
 - **Session ID derivation fix**: Replace the line at ~line 946 in `telegram_bridge.py` with a call to the root resolver.
-- **Outbound message_id storage**: Modify `send_response_with_files` to return the Telegram Message id; update `_send` callback to pass it to `store_message`.
-- **Graceful fallback**: If chain walk fails, fall back to `reply_to_msg_id` directly. Never block message delivery.
+- **Outbound message_id storage**: Modify `send_response_with_files` to return the Telegram Message object; update `_send` callback to capture message_id and pass it to `store_message`.
+- **Graceful fallback**: Cache miss → API walk → `reply_to_msg_id` direct. Never block message delivery.
 
 ### Flow
 
@@ -134,13 +135,21 @@ User replies to Valor's message → `handle_new_message` detects `is_reply_to_va
 
 ### Technical Approach
 
-1. **`bridge/context.py`** — Add `resolve_root_session_id` async function:
-   - Calls `fetch_reply_chain(client, chat_id, reply_to_msg_id)`
-   - Finds oldest message where `sender != "Valor"`
-   - Returns `f"tg_{project_key}_{chat_id}_{root_msg_id}"`
-   - On any exception: returns `f"tg_{project_key}_{chat_id}_{reply_to_msg_id}"` (fallback)
+1. **`models/telegram.py`** — Promote `message_id` from `Field` to `KeyField`:
+   ```python
+   # Before:
+   message_id = Field(type=int, null=True)
+   # After:
+   message_id = KeyField(null=True)
+   ```
+   This enables `TelegramMessage.query.filter(chat_id=X, message_id=Y)` as a fast indexed lookup.
 
-2. **`bridge/telegram_bridge.py`** (~line 944) — Replace one-liner:
+2. **`bridge/context.py`** — Add `resolve_root_session_id` async function:
+   - **Step 1 — Cache walk**: Starting from `reply_to_msg_id`, loop: query `TelegramMessage.query.filter(chat_id=chat_id, message_id=current_id)` to get the record. If sender is not "Valor", this is the root — return its session_id or derive from its `message_id`. If it's a Valor message and has `reply_to_msg_id`, follow the chain. Cap at 20 hops.
+   - **Step 2 — API fallback**: If any cache lookup misses, fall back to `fetch_reply_chain(client, chat_id, reply_to_msg_id)`, find oldest non-Valor message, derive session_id.
+   - **Step 3 — Final fallback**: On any exception, return `f"tg_{project_key}_{chat_id}_{reply_to_msg_id}"`
+
+3. **`bridge/telegram_bridge.py`** (~line 944) — Replace one-liner:
    ```python
    # Before:
    session_id = f"tg_{project_key}_{event.chat_id}_{message.reply_to_msg_id}"
@@ -151,9 +160,9 @@ User replies to Valor's message → `handle_new_message` detects `is_reply_to_va
    )
    ```
 
-3. **`bridge/response.py`** — Modify `send_response_with_files` to return `Message | None` instead of `bool`. Update all 4 call sites.
+4. **`bridge/response.py`** — Modify `send_response_with_files` to return `Message | None` instead of `bool`. Update all 4 call sites.
 
-4. **`bridge/telegram_bridge.py`** (`_send` callback) — Capture returned message_id, pass to `store_message(message_id=sent_id, ...)`.
+5. **`bridge/telegram_bridge.py`** (`_send` callback) — Capture returned message_id, pass to `store_message(message_id=sent_id, ...)`.
 
 ## Failure Path Test Strategy
 
@@ -220,7 +229,6 @@ User replies to Valor's message → `handle_new_message` detects `is_reply_to_va
 - Semantic routing changes (handled by #318)
 - Multi-hop reply chain caching
 - Changing session_id format or semantics globally
-- Adding DB reverse-lookup as primary path (follow-up once outbound message_ids are populated)
 
 ## Update System
 
@@ -278,6 +286,17 @@ No agent integration required — this is a bridge-internal change in the Telegr
 
 ## Step by Step Tasks
 
+### 0. Schema: Promote `TelegramMessage.message_id` to `KeyField`
+- **Task ID**: build-message-id-keyfield
+- **Depends On**: none
+- **Validates**: `tests/unit/test_model_relationships.py` (no regression), `TelegramMessage.query.filter(chat_id=X, message_id=Y)` works
+- **Assigned To**: session-id-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- Change `message_id = Field(type=int, null=True)` to `message_id = KeyField(null=True)` in `models/telegram.py`
+- Verify existing records are unaffected (KeyField is a superset — no data migration needed)
+- Verify `TelegramMessage.query.filter(chat_id=chat_id, message_id=X)` returns results for known inbound records
+
 ### 1. Prerequisite: Fix outbound message_id storage
 - **Task ID**: build-outbound-msg-id
 - **Depends On**: none
@@ -292,12 +311,13 @@ No agent integration required — this is a bridge-internal change in the Telegr
 
 ### 2. Core fix: Root session_id resolver
 - **Task ID**: build-root-resolver
-- **Depends On**: none
+- **Depends On**: build-message-id-keyfield, build-outbound-msg-id
 - **Validates**: `tests/integration/test_steering.py` (new test), `tests/unit/` (no regression)
 - **Assigned To**: session-id-builder
 - **Agent Type**: builder
 - **Parallel**: false
 - Add `resolve_root_session_id(client, chat_id, reply_to_msg_id, project_key)` async function to `bridge/context.py`
+- Implement **cache-first** strategy: walk `TelegramMessage.query.filter(chat_id=chat_id, message_id=X)` up the chain; fall back to `fetch_reply_chain()` API on cache miss; fall back to `reply_to_msg_id` on any exception
 - Replace session_id derivation at line ~946 of `bridge/telegram_bridge.py` with a call to `resolve_root_session_id`
 - Verify fallback: exception during chain walk returns `f"tg_{project_key}_{chat_id}_{reply_to_msg_id}"`
 
@@ -323,7 +343,7 @@ No agent integration required — this is a bridge-internal change in the Telegr
 
 ### 5. Final Validation
 - **Task ID**: validate-all
-- **Depends On**: build-outbound-msg-id, build-root-resolver, build-steering-tests, document-feature
+- **Depends On**: build-message-id-keyfield, build-outbound-msg-id, build-root-resolver, build-steering-tests, document-feature
 - **Assigned To**: integration-validator
 - **Agent Type**: validator
 - **Parallel**: false
@@ -341,6 +361,7 @@ No agent integration required — this is a bridge-internal change in the Telegr
 | Root resolver exists | `python -c "from bridge.context import resolve_root_session_id"` | exit code 0 |
 | New steering test exists | `grep -r "test_reply_to_valor_response_resolves_root_session" tests/` | exit code 0 |
 | Outbound msg_id stored | `grep -n "message_id=sent" bridge/telegram_bridge.py` | exit code 0 |
+| message_id is KeyField | `grep "message_id = KeyField" models/telegram.py` | exit code 0 |
 
 ## Critique Results
 
@@ -350,4 +371,4 @@ No agent integration required — this is a bridge-internal change in the Telegr
 
 ## Open Questions
 
-1. Should `resolve_root_session_id` attempt a `TelegramMessage` DB lookup first (using `direction="in"` records for the replied-to message_id) as a fast path before the Telegram API walk? The DB lookup avoids API calls but requires that inbound messages are reliably stored with their `message_id` (they appear to be). This is a performance/reliability tradeoff — API walk is authoritative, DB is faster. Recommend: DB-first with API fallback if record not found.
+_Resolved_: `resolve_root_session_id` uses Popoto cache (TelegramMessage) as the primary lookup, with Telegram API chain walk as fallback. `message_id` will be promoted to `KeyField` to enable O(1) indexed lookups. Confirmed by Valor 2026-03-27.
