@@ -287,7 +287,7 @@ async def run_reflection(entry: ReflectionEntry, state: Reflection) -> None:
             entry.name,
             duration,
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         duration = time.time() - start_time
         error_msg = f"TimeoutError: reflection '{entry.name}' exceeded {timeout}s timeout"
         state.mark_completed(duration, error=error_msg)
@@ -322,8 +322,7 @@ async def run_reflection(entry: ReflectionEntry, state: Reflection) -> None:
             )
             if delta > MEMORY_DELTA_WARNING_BYTES:
                 logger.warning(
-                    "[reflection] HIGH MEMORY DELTA for %s: %+.1fMB "
-                    "(before=%.1fMB, after=%.1fMB)",
+                    "[reflection] HIGH MEMORY DELTA for %s: %+.1fMB (before=%.1fMB, after=%.1fMB)",
                     entry.name,
                     delta_mb,
                     mem_before / (1024 * 1024),

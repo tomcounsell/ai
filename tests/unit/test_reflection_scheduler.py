@@ -22,7 +22,6 @@ import yaml
 from agent.reflection_scheduler import (
     DEFAULT_AGENT_TIMEOUT,
     DEFAULT_FUNCTION_TIMEOUT,
-    MEMORY_DELTA_WARNING_BYTES,
     ReflectionEntry,
     ReflectionScheduler,
     _get_memory_rss,
@@ -698,7 +697,5 @@ class TestTimeoutEnforcement:
                 with patch("agent.reflection_scheduler.logger") as mock_logger:
                     await run_reflection(entry, state)
                     # Check that warning was logged about high memory delta
-                    warning_calls = [
-                        str(c) for c in mock_logger.warning.call_args_list
-                    ]
+                    warning_calls = [str(c) for c in mock_logger.warning.call_args_list]
                     assert any("HIGH MEMORY DELTA" in str(c) for c in warning_calls)

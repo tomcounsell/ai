@@ -299,9 +299,7 @@ class DocsAuditor:
         "CLAUDE.md",
     ]
 
-    def __init__(
-        self, repo_root: Path, dry_run: bool = False, max_api_calls: int = 50
-    ) -> None:
+    def __init__(self, repo_root: Path, dry_run: bool = False, max_api_calls: int = 50) -> None:
         self.repo_root = repo_root.resolve()
         self.dry_run = dry_run
         self.max_api_calls = max_api_calls
@@ -529,7 +527,11 @@ class DocsAuditor:
             logger.info("No documentation files found to audit")
             return summary
 
-        logger.info("Auditing %d documentation files (API call cap: %d)", len(docs), self.max_api_calls)
+        logger.info(
+            "Auditing %d documentation files (API call cap: %d)",
+            len(docs),
+            self.max_api_calls,
+        )
 
         for path in docs:
             # Check API call cap before processing next file
