@@ -99,24 +99,24 @@ No prerequisites -- this work uses only existing dependencies (`psutil`, `loggin
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `execute_function_reflection`: already has try/except, test that `asyncio.TimeoutError` from `wait_for` is caught and logged as error status
-- [ ] `DocsAuditor` API call cap: test that exceeding the cap logs a WARNING and stops processing (returns partial results, does not raise)
-- [ ] Memory snapshot failure (e.g., `psutil` import error): test that reflection still runs (memory monitoring is best-effort)
+- [x] `execute_function_reflection`: already has try/except, test that `asyncio.TimeoutError` from `wait_for` is caught and logged as error status
+- [x] `DocsAuditor` API call cap: test that exceeding the cap logs a WARNING and stops processing (returns partial results, does not raise)
+- [x] Memory snapshot failure (e.g., `psutil` import error): test that reflection still runs (memory monitoring is best-effort)
 
 ### Empty/Invalid Input Handling
-- [ ] `timeout: 0` or negative in YAML: test that validator rejects it
-- [ ] `max_api_calls: 0` in DocsAuditor: test that it processes zero files gracefully
+- [x] `timeout: 0` or negative in YAML: test that validator rejects it
+- [x] `max_api_calls: 0` in DocsAuditor: test that it processes zero files gracefully
 
 ### Error State Rendering
-- [ ] Memory warning logs include reflection name, delta, and absolute RSS
-- [ ] Timeout errors in scheduler include the reflection name and configured timeout
+- [x] Memory warning logs include reflection name, delta, and absolute RSS
+- [x] Timeout errors in scheduler include the reflection name and configured timeout
 
 ## Test Impact
 
-- [ ] `tests/unit/test_reflection_scheduler.py::TestRegistryLoading` -- UPDATE: add test for `timeout` field parsing from YAML
-- [ ] `tests/unit/test_reflection_scheduler.py::TestRegistryLoading::test_load_registry_from_project` -- UPDATE: assert `timeout` field is present on loaded entries
-- [ ] `tests/unit/test_bridge_watchdog.py` -- UPDATE: add test that `check_bridge_health` calls `log_crash()` when bridge process is not running
-- [ ] `tests/unit/test_docs_auditor.py` -- UPDATE: add test for API call cap enforcement
+- [x] `tests/unit/test_reflection_scheduler.py::TestRegistryLoading` -- UPDATE: add test for `timeout` field parsing from YAML
+- [x] `tests/unit/test_reflection_scheduler.py::TestRegistryLoading::test_load_registry_from_project` -- UPDATE: assert `timeout` field is present on loaded entries
+- [x] `tests/unit/test_bridge_watchdog.py` -- UPDATE: add test that `check_bridge_health` calls `log_crash()` when bridge process is not running
+- [x] `tests/unit/test_docs_auditor.py` -- UPDATE: add test for API call cap enforcement
 
 ## Rabbit Holes
 
@@ -169,22 +169,22 @@ No agent integration required -- this is bridge-internal infrastructure work. No
 
 ## Documentation
 
-- [ ] Update `docs/features/reflections.md` to document: timeout field in YAML schema, memory instrumentation behavior, log rotation configuration
-- [ ] Update `CLAUDE.md` quick reference to note log rotation (remove any mention of unbounded log growth)
-- [ ] Add entry to `docs/features/README.md` if reflections observability warrants its own section
+- [x] Update `docs/features/reflections.md` to document: timeout field in YAML schema, memory instrumentation behavior, log rotation configuration
+- [x] Update `CLAUDE.md` quick reference to note log rotation (remove any mention of unbounded log growth)
+- [x] Add entry to `docs/features/README.md` if reflections observability warrants its own section
 
 ## Success Criteria
 
-- [ ] `psutil` memory snapshots logged (before/after) for every reflection execution in `reflection_scheduler.py`
-- [ ] Memory delta > 100MB triggers a WARNING log with reflection name and delta
-- [ ] `config/reflections.yaml` supports optional `timeout` field per reflection entry
-- [ ] Function-type reflections wrapped in `asyncio.wait_for()` with configured timeout (default: 30 min)
-- [ ] `bridge.log` uses `RotatingFileHandler` with 10MB max size and 5 backup files
-- [ ] Bridge watchdog calls `crash_tracker.log_crash()` when it detects bridge process is dead
-- [ ] `docs_auditor` has configurable per-run API call cap (default: 50) that stops processing when reached
-- [ ] `python scripts/reflections.py --dry-run` completes without errors after changes
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] `psutil` memory snapshots logged (before/after) for every reflection execution in `reflection_scheduler.py`
+- [x] Memory delta > 100MB triggers a WARNING log with reflection name and delta
+- [x] `config/reflections.yaml` supports optional `timeout` field per reflection entry
+- [x] Function-type reflections wrapped in `asyncio.wait_for()` with configured timeout (default: 30 min)
+- [x] `bridge.log` uses `RotatingFileHandler` with 10MB max size and 5 backup files
+- [x] Bridge watchdog calls `crash_tracker.log_crash()` when it detects bridge process is dead
+- [x] `docs_auditor` has configurable per-run API call cap (default: 50) that stops processing when reached
+- [x] `python scripts/reflections.py --dry-run` completes without errors after changes
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
