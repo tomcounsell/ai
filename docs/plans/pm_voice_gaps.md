@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor
@@ -239,7 +239,14 @@ No agent integration required — this is a bridge-internal change. No MCP serve
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Verdict: READY TO BUILD** (0 blockers, 3 concerns, 1 nit)
+
+Concerns (acknowledged, not blocking):
+1. Prompt hardening relies on LLM compliance — mitigated by two-layer defense (prompt + guard)
+2. No manual acceptance criterion — good practice but not a plan requirement
+3. Parent session Redis expiry edge case — already handled defensively by `get_parent_chat_session()`
+
+Nit: Test class naming (`TestSummarizerBypass` tests bypass guard, not summarizer) — future cleanup
 
 ---
 
