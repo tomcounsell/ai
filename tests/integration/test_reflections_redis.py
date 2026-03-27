@@ -39,7 +39,6 @@ class TestReflectionRunModel:
 
         run = ReflectionRun.load_or_create("2026-03-01")
         assert run.date == "2026-03-01"
-        assert run.current_step == 1
         assert run.completed_steps == []
 
     def test_load_or_create_existing(self):

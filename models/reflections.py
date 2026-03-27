@@ -13,7 +13,6 @@ from popoto import (
     AutoKeyField,
     DictField,
     Field,
-    IntField,
     KeyField,
     ListField,
     Model,
