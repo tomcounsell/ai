@@ -36,12 +36,12 @@ Prevents context pollution by using Telegram's reply-to feature for session mana
 
 | Message Type | Session Behavior |
 |--------------|------------------|
-| Reply to Valor's message | Continue that session |
+| Reply to Valor's message | Resume original session (root-resolved) |
 | New message (no reply) | Fresh session using message ID |
 
-**Session ID format**: `tg_{project}_{chat_id}_{msg_id}`
+**Session ID format**: `tg_{project}_{chat_id}_{root_msg_id}` — where `root_msg_id` is the oldest human message in the reply chain, resolved via `resolve_root_session_id()` in `bridge/context.py`. This ensures replying to any message in a thread (including Valor's responses) always maps to the original session. See [Session Management](session-management.md) for details.
 
-**Location**: Handler in `bridge/telegram_bridge.py` around line 1222
+**Location**: Handler in `bridge/telegram_bridge.py` around line 943
 
 ### 3. Retry with Self-Healing ✅
 

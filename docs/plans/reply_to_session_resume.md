@@ -167,24 +167,24 @@ User replies to Valor's message → `handle_new_message` detects `is_reply_to_va
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `resolve_root_session_id` catches all exceptions and returns fallback session_id — test with mock client that raises `ConnectionError`
-- [ ] `fetch_reply_chain` already catches per-hop exceptions — verify fallback behavior when mid-chain fetch fails
-- [ ] Existing `except (ConnectionError, OSError)` and `except Exception` blocks in the steering check handle failures — no regression expected
+- [x] `resolve_root_session_id` catches all exceptions and returns fallback session_id — test with mock client that raises `ConnectionError`
+- [x] `fetch_reply_chain` already catches per-hop exceptions — verify fallback behavior when mid-chain fetch fails
+- [x] Existing `except (ConnectionError, OSError)` and `except Exception` blocks in the steering check handle failures — no regression expected
 
 ### Empty/Invalid Input Handling
-- [ ] Empty reply chain (Telegram returns no messages) → falls back to `reply_to_msg_id` directly
-- [ ] Chain consisting entirely of Valor messages (bot responding to itself) → uses last available human message_id, or falls back to `reply_to_msg_id`
-- [ ] `reply_to_msg_id=None` guard: `resolve_root_session_id` should not be called with None (guarded at call site by `if is_reply_to_valor and message.reply_to_msg_id`)
+- [x] Empty reply chain (Telegram returns no messages) → falls back to `reply_to_msg_id` directly
+- [x] Chain consisting entirely of Valor messages (bot responding to itself) → uses last available human message_id, or falls back to `reply_to_msg_id`
+- [x] `reply_to_msg_id=None` guard: `resolve_root_session_id` should not be called with None (guarded at call site by `if is_reply_to_valor and message.reply_to_msg_id`)
 
 ### Error State Rendering
-- [ ] If root resolution degrades to fallback, user still receives a response — graceful degradation test
-- [ ] No user-visible errors introduced — resolution happens before steering
+- [x] If root resolution degrades to fallback, user still receives a response — graceful degradation test
+- [x] No user-visible errors introduced — resolution happens before steering
 
 ## Test Impact
 
-- [ ] `tests/integration/test_steering.py` — UPDATE: Add `test_reply_to_valor_response_resolves_root_session` test case verifying reply-to-Valor msg_id resolves to original human-message-based session_id
-- [ ] `tests/unit/test_model_relationships.py` — No change expected (tests `agent_session_id` back-reference, unaffected by this fix)
-- [ ] Call sites of `send_response_with_files` that check return type — UPDATE: assert `Message | None` instead of `bool`
+- [x] `tests/integration/test_steering.py` — UPDATE: Add `test_reply_to_valor_response_resolves_root_session` test case verifying reply-to-Valor msg_id resolves to original human-message-based session_id
+- [x] `tests/unit/test_model_relationships.py` — No change expected (tests `agent_session_id` back-reference, unaffected by this fix)
+- [x] Call sites of `send_response_with_files` that check return type — UPDATE: assert `Message | None` instead of `bool`
 
 ## Rabbit Holes
 
@@ -240,21 +240,21 @@ No agent integration required — this is a bridge-internal change in the Telegr
 
 ## Documentation
 
-- [ ] Update or create `docs/features/session-management.md` to describe reply-chain root resolution behavior
-- [ ] Add entry to `docs/features/README.md` index table if `session-management.md` is new
-- [ ] Add docstring to `resolve_root_session_id` and the updated session_id derivation block in `handle_new_message`
+- [x] Update or create `docs/features/session-management.md` to describe reply-chain root resolution behavior
+- [x] Add entry to `docs/features/README.md` index table if `session-management.md` is new
+- [x] Add docstring to `resolve_root_session_id` and the updated session_id derivation block in `handle_new_message`
 
 ## Success Criteria
 
-- [ ] Reply to any message in a Valor thread (including Valor's responses) resumes the original AgentSession
-- [ ] Dashboard shows exactly one row per conversation thread
-- [ ] If original session is running/active, reply is injected via steering (no new job created)
-- [ ] If original session is completed/dormant, it is resumed with the same session_id
-- [ ] Outbound `TelegramMessage` records have `message_id` populated after the fix
-- [ ] Existing steering tests continue to pass
-- [ ] New test `test_reply_to_valor_response_resolves_root_session` passes
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] Reply to any message in a Valor thread (including Valor's responses) resumes the original AgentSession
+- [x] Dashboard shows exactly one row per conversation thread
+- [x] If original session is running/active, reply is injected via steering (no new job created)
+- [x] If original session is completed/dormant, it is resumed with the same session_id
+- [x] Outbound `TelegramMessage` records have `message_id` populated after the fix
+- [x] Existing steering tests continue to pass
+- [x] New test `test_reply_to_valor_response_resolves_root_session` passes
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 

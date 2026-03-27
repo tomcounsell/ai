@@ -66,6 +66,7 @@ from bridge.context import (  # noqa: E402
     build_context_prefix,  # noqa: F401
     build_conversation_history,  # noqa: F401
     is_status_question,  # noqa: F401
+    resolve_root_session_id,
 )
 from bridge.media import (  # noqa: E402
     MEDIA_DIR,  # noqa: F401
@@ -942,8 +943,12 @@ async def main():
         # Use the is_reply_to_valor flag from should_respond_async
         # (already checked there, no need to query Telegram again)
         if is_reply_to_valor and message.reply_to_msg_id:
-            # Continue the session from the replied message
-            session_id = f"tg_{project_key}_{event.chat_id}_{message.reply_to_msg_id}"
+            # Walk the reply chain to find the root human message so that all
+            # replies in a thread map to the same canonical session_id regardless
+            # of which message in the thread is being replied to.
+            session_id = await resolve_root_session_id(
+                client, event.chat_id, message.reply_to_msg_id, project_key
+            )
             logger.info(f"[routing] Session {session_id} (continuation=True)")
         else:
             # No reply-to: try semantic routing before creating a fresh session
@@ -1617,12 +1622,18 @@ async def main():
                         )
                         if sent:
                             try:
+                                # Capture the Telegram message_id from the returned Message
+                                # object so outbound TelegramMessage records have message_id
+                                # populated. This enables reverse lookup via
+                                # TelegramMessage.query.filter(chat_id=X, message_id=Y).
+                                sent_msg_id = getattr(sent, "id", None)
                                 store_message(
                                     chat_id=chat_id,
                                     content=filtered,  # full content, no truncation
                                     sender="Valor",
                                     timestamp=utc_now(),
                                     message_type="response",
+                                    message_id=sent_msg_id,
                                 )
                             except Exception:
                                 pass

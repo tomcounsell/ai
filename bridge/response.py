@@ -8,7 +8,7 @@ from pathlib import Path
 
 from telethon import TelegramClient
 from telethon.tl.functions.messages import SendReactionRequest
-from telethon.tl.types import ReactionEmoji
+from telethon.tl.types import Message, ReactionEmoji
 
 logger = logging.getLogger(__name__)
 
@@ -374,7 +374,7 @@ async def send_response_with_files(
     chat_id: int | None = None,
     reply_to: int | None = None,
     session=None,
-) -> bool:
+) -> Message | None:
     """
     Send response to Telegram, handling both files and text.
 
@@ -384,7 +384,8 @@ async def send_response_with_files(
     4. Send remaining text (if any) with Markdown formatting
 
     Can be called with event (handler context) or chat_id+reply_to (queue context).
-    Returns True if any content was sent, False otherwise.
+    Returns the sent Message object if text was sent, None if nothing was sent.
+    Callers that only need a truthy/falsy check can still use `if sent:`.
 
     Args:
         session: Optional AgentSession for summarizer context enrichment.
@@ -395,7 +396,7 @@ async def send_response_with_files(
 
     if not _chat_id:
         logger.error("send_response_with_files: no chat_id available")
-        return False
+        return None
 
     # Filter out tool logs before processing
     original_response = response
@@ -410,7 +411,7 @@ async def send_response_with_files(
             )
             response = "Done."
         else:
-            return False
+            return None
 
     text, files = extract_files_from_response(response)
 
@@ -539,13 +540,13 @@ async def send_response_with_files(
     # skip text/summarizer output. This prevents sending both PM
     # self-messages AND a summarized version of the same content.
     # Guard coverage: pm_bypass blocks summarization AND text sending.
+    # Return a sentinel truthy value (True casts to int 1 which is truthy) since
+    # PM self-messages aren't tracked via the text send path.
     if pm_bypass:
-        return True  # Signal that content was "sent" (PM already delivered it)
-
-    # Track if we sent anything
-    sent_content = bool(files)
+        return True  # type: ignore[return-value]  # PM already delivered it
 
     # Send text if there's meaningful content
+    sent_msg = None
     if text and not text.isspace():
         # Sentence-aware truncation at Telegram's 4096-char limit
         if len(text) > 4096:
@@ -554,8 +555,7 @@ async def send_response_with_files(
             # Use markdown parse mode with plain-text fallback
             from bridge.markdown import send_markdown
 
-            await send_markdown(client, _chat_id, text, reply_to=_reply_to)
-            sent_content = True
+            sent_msg = await send_markdown(client, _chat_id, text, reply_to=_reply_to)
         except Exception as e:
             logger.error(f"Failed to send text message to chat {_chat_id} ({len(text)} chars): {e}")
             # Persist to dead-letter queue for later retry
@@ -570,7 +570,13 @@ async def send_response_with_files(
             except Exception as dl_err:
                 logger.error(f"Dead-letter persist also failed: {dl_err}")
 
-    return sent_content
+    # Return the sent Message object if text was sent; fall back to truthy if
+    # only files were sent (no message_id available from file sends).
+    if sent_msg is not None:
+        return sent_msg
+    if files:
+        return True  # type: ignore[return-value]  # files were sent, no text Message object
+    return None
 
 
 def get_processing_emoji(message: str) -> str:

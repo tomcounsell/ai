@@ -72,13 +72,18 @@ Why not a popoto Model: steering messages are ephemeral, consumed once, and don'
 
 #### 2. Bridge Changes (`bridge/telegram_bridge.py`)
 
-In `handle_new_message`, after detecting `is_reply_to_valor` and building the `session_id`:
+In `handle_new_message`, after detecting `is_reply_to_valor`, the bridge resolves the canonical root session_id via `resolve_root_session_id()` (see `docs/features/session-management.md`):
 
-```
+```python
 if is_reply_to_valor and message.reply_to_msg_id:
-    session_id = f"tg_{project_key}_{event.chat_id}_{message.reply_to_msg_id}"
+    # Walk the reply chain to find the original human message's session_id.
+    # This handles replies to Valor's responses correctly — uses Popoto cache
+    # first, falls back to Telegram API, falls back to reply_to_msg_id directly.
+    session_id = await resolve_root_session_id(
+        client, event.chat_id, message.reply_to_msg_id, project_key
+    )
 
-    # NEW: Check if this session is currently running
+    # Check if this session is currently running
     active_sessions = AgentSession.query.filter(session_id=session_id, status="active")
     if active_sessions:
         # Route to steering queue instead of job queue

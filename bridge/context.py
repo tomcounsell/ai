@@ -419,6 +419,133 @@ def format_reply_chain(chain: list[dict]) -> str:
     return "\n".join(lines)
 
 
+async def resolve_root_session_id(
+    client: TelegramClient,
+    chat_id: int,
+    reply_to_msg_id: int,
+    project_key: str,
+) -> str:
+    """Resolve the canonical session_id for a reply-to message chain.
+
+    Walks backward through the reply chain to find the oldest human (non-Valor)
+    message, then derives the session_id from that message's ID. This ensures
+    that all replies in a conversation thread — even replies to Valor's responses
+    — map to the same canonical session_id as the original human message.
+
+    Resolution strategy (in order of preference):
+    1. Cache-first walk: query TelegramMessage.query.filter(chat_id, message_id)
+       to traverse the chain without Telegram API calls.
+    2. API fallback: if any cache lookup misses, call fetch_reply_chain() to
+       walk the chain via the Telegram API.
+    3. Final fallback: on any exception, return a session_id derived directly
+       from reply_to_msg_id (preserves previous behavior).
+
+    Args:
+        client: Telegram client (used for API fallback).
+        chat_id: Telegram chat ID.
+        reply_to_msg_id: message_id of the message being replied to.
+        project_key: Project key for session_id formatting.
+
+    Returns:
+        Canonical session_id string, e.g. "tg_{project_key}_{chat_id}_{root_msg_id}".
+    """
+    fallback = f"tg_{project_key}_{chat_id}_{reply_to_msg_id}"
+
+    try:
+        # ── Step 1: Cache-first walk via TelegramMessage ──────────────────────
+        root_msg_id = await _cache_walk_root(chat_id, reply_to_msg_id)
+        if root_msg_id is not None:
+            session_id = f"tg_{project_key}_{chat_id}_{root_msg_id}"
+            logger.debug(
+                f"[session-root] cache walk resolved {reply_to_msg_id} → "
+                f"{root_msg_id} (session={session_id})"
+            )
+            return session_id
+
+        # ── Step 2: API fallback via fetch_reply_chain ────────────────────────
+        logger.debug(
+            f"[session-root] cache miss for msg_id={reply_to_msg_id}, "
+            f"falling back to Telegram API chain walk"
+        )
+        chain = await fetch_reply_chain(client, chat_id, reply_to_msg_id)
+        # Chain is chronological (oldest first). Find the first non-Valor message.
+        for entry in chain:
+            if entry.get("sender") != "Valor":
+                root_msg_id = entry["message_id"]
+                session_id = f"tg_{project_key}_{chat_id}_{root_msg_id}"
+                logger.debug(
+                    f"[session-root] API chain walk resolved {reply_to_msg_id} → "
+                    f"{root_msg_id} (session={session_id})"
+                )
+                return session_id
+
+        # Chain is empty or all Valor messages — use fallback
+        logger.debug(
+            f"[session-root] chain walk found no human root for msg_id={reply_to_msg_id}, "
+            f"using fallback session_id"
+        )
+        return fallback
+
+    except Exception as exc:
+        # ── Step 3: Final fallback ─────────────────────────────────────────────
+        logger.debug(
+            f"[session-root] exception during root resolution for msg_id={reply_to_msg_id}: "
+            f"{exc}. Using fallback session_id."
+        )
+        return fallback
+
+
+async def _cache_walk_root(chat_id: int, start_msg_id: int, max_hops: int = 20) -> int | None:
+    """Walk the reply chain using TelegramMessage cache records.
+
+    Starting from start_msg_id, follow reply_to_msg_id links through cached
+    TelegramMessage records until we find the oldest non-Valor message.
+
+    Returns:
+        The message_id of the root human message, or None if any cache lookup
+        misses (caller should fall back to the Telegram API).
+    """
+    from models.telegram import TelegramMessage
+
+    current_id = start_msg_id
+    seen = set()
+
+    for _ in range(max_hops):
+        if current_id in seen:
+            break
+        seen.add(current_id)
+
+        try:
+            records = list(
+                TelegramMessage.query.filter(chat_id=str(chat_id), message_id=current_id)
+            )
+        except Exception:
+            # Filter failure means the index isn't usable — signal cache miss
+            return None
+
+        if not records:
+            # Cache miss — caller should fall back to API
+            return None
+
+        record = records[0]
+
+        # If this message was sent by someone other than Valor, it's the root
+        sender = getattr(record, "sender", None)
+        if sender != "Valor":
+            return current_id
+
+        # This is a Valor message — follow its reply_to_msg_id if present
+        parent_id = getattr(record, "reply_to_msg_id", None)
+        if not parent_id:
+            # Valor message with no parent — use it as the best available root
+            return current_id
+
+        current_id = parent_id
+
+    # Hit max_hops — return whatever we landed on
+    return current_id
+
+
 # =============================================================================
 # Link Summarization
 # =============================================================================
