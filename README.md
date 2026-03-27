@@ -136,14 +136,11 @@ Skills are available via MCP servers registered in `.mcp.json`:
 
 ## Reflections (Daily Maintenance)
 
-Valor runs autonomous maintenance daily at 6 AM Pacific:
+Valor runs autonomous maintenance daily at 6 AM Pacific via a 14-unit pipeline with string-keyed state tracking:
 
-1. **clean_legacy** - Remove deprecated patterns
-2. **review_logs** - Analyze yesterday's logs
-3. **check_sentry** - Query for errors
-4. **clean_tasks** - Update Linear issues
-5. **update_docs** - Ensure docs match code
-6. **daily_report** - Summary to supervisor
+**Independent units** (11): `legacy_code_scan`, `log_review`, `task_management`, `documentation_audit`, `skills_audit`, `redis_ttl_cleanup`, `redis_data_quality`, `branch_plan_cleanup`, `feature_docs_audit`, `principal_staleness`, `disk_space_check`
+
+**Merged pipelines** (3): `session_intelligence` (analysis → reflection → auto-fix), `behavioral_learning` (episode close → pattern crystallization), `daily_report_and_notify` (produce report → create GitHub issue)
 
 ## Development
 
