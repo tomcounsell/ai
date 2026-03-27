@@ -24,7 +24,7 @@ class TelegramMessage(Model):
 
     msg_id = AutoKeyField()
     chat_id = KeyField()
-    message_id = Field(type=int, null=True)  # Telegram's message ID
+    message_id = KeyField(null=True)  # Telegram's message ID (KeyField enables O(1) filter lookup)
     direction = KeyField()  # "in" | "out"
     sender = KeyField()
     content = Field(max_length=MSG_MAX_CHARS)
