@@ -11,6 +11,7 @@ from monitoring.bridge_watchdog import (
     HealthStatus,
     _enumerate_claude_processes,
     _parse_elapsed_time,
+    check_bridge_health,
     classify_zombies,
     kill_zombie_processes,
 )
@@ -513,3 +514,92 @@ class TestCheckOnlyOutput:
         output = capsys.readouterr().out
         assert "WARNING" in output
         assert "soft limit" in output
+
+
+# --- Crash detection on bridge death ---
+
+
+class TestCrashDetectionOnBridgeDeath:
+    """Tests that check_bridge_health calls log_crash when bridge is dead."""
+
+    @patch("monitoring.bridge_watchdog._enumerate_claude_processes")
+    @patch("monitoring.bridge_watchdog.get_recent_crashes")
+    @patch("monitoring.bridge_watchdog.detect_crash_pattern")
+    @patch("monitoring.bridge_watchdog.are_logs_fresh")
+    @patch("monitoring.bridge_watchdog.is_bridge_running")
+    @patch("monitoring.bridge_watchdog.log_crash")
+    def test_calls_log_crash_when_bridge_not_running(
+        self,
+        mock_log_crash,
+        mock_running,
+        mock_logs,
+        mock_crash,
+        mock_crashes,
+        mock_enumerate,
+    ):
+        """When bridge is not running, check_bridge_health calls log_crash."""
+        mock_running.return_value = (False, None)
+        mock_logs.return_value = False
+        mock_crash.return_value = (False, None)
+        mock_crashes.return_value = []
+        mock_enumerate.return_value = []
+
+        status = check_bridge_health()
+
+        assert not status.process_running
+        mock_log_crash.assert_called_once_with("bridge_dead_on_watchdog_check")
+
+    @patch("monitoring.bridge_watchdog._enumerate_claude_processes")
+    @patch("monitoring.bridge_watchdog.get_recent_crashes")
+    @patch("monitoring.bridge_watchdog.detect_crash_pattern")
+    @patch("monitoring.bridge_watchdog.are_logs_fresh")
+    @patch("monitoring.bridge_watchdog.is_bridge_running")
+    @patch("monitoring.bridge_watchdog.log_crash")
+    def test_does_not_call_log_crash_when_bridge_running(
+        self,
+        mock_log_crash,
+        mock_running,
+        mock_logs,
+        mock_crash,
+        mock_crashes,
+        mock_enumerate,
+    ):
+        """When bridge is running, log_crash should NOT be called."""
+        mock_running.return_value = (True, 1234)
+        mock_logs.return_value = True
+        mock_crash.return_value = (False, None)
+        mock_crashes.return_value = []
+        mock_enumerate.return_value = []
+
+        status = check_bridge_health()
+
+        assert status.process_running
+        mock_log_crash.assert_not_called()
+
+    @patch("monitoring.bridge_watchdog._enumerate_claude_processes")
+    @patch("monitoring.bridge_watchdog.get_recent_crashes")
+    @patch("monitoring.bridge_watchdog.detect_crash_pattern")
+    @patch("monitoring.bridge_watchdog.are_logs_fresh")
+    @patch("monitoring.bridge_watchdog.is_bridge_running")
+    @patch("monitoring.bridge_watchdog.log_crash")
+    def test_log_crash_failure_does_not_break_health_check(
+        self,
+        mock_log_crash,
+        mock_running,
+        mock_logs,
+        mock_crash,
+        mock_crashes,
+        mock_enumerate,
+    ):
+        """If log_crash raises, check_bridge_health should still return."""
+        mock_running.return_value = (False, None)
+        mock_logs.return_value = False
+        mock_crash.return_value = (False, None)
+        mock_crashes.return_value = []
+        mock_enumerate.return_value = []
+        mock_log_crash.side_effect = Exception("Redis connection failed")
+
+        # Should not raise
+        status = check_bridge_health()
+        assert not status.process_running
+        assert status.recovery_level >= 1
