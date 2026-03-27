@@ -44,8 +44,9 @@ class TestMemoryModel:
         assert required.issubset(field_names), f"Missing fields: {required - field_names}"
 
     def test_memory_has_bloom_filter(self):
-        from models.memory import Memory
         from popoto.fields.existence_filter import ExistenceFilter
+
+        from models.memory import Memory
 
         bloom = Memory._meta.fields.get("bloom")
         assert bloom is not None

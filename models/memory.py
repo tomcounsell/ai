@@ -18,6 +18,8 @@ from config.memory_defaults import apply_defaults
 # Apply tuned defaults before model definition
 apply_defaults()
 
+from popoto.fields.existence_filter import ExistenceFilter  # noqa: E402
+
 from popoto import (  # noqa: E402
     AccessTrackerMixin,
     AutoKeyField,
@@ -29,7 +31,6 @@ from popoto import (  # noqa: E402
     StringField,
     WriteFilterMixin,
 )
-from popoto.fields.existence_filter import ExistenceFilter  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
