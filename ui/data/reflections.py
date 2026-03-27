@@ -110,33 +110,6 @@ def get_schedule() -> list[dict]:
     return with_due + without_due
 
 
-def get_active_ignores() -> list[dict]:
-    """Get all active (non-expired) ignore patterns.
-
-    Returns:
-        List of dicts with pattern, reason, created_at, expires_at, and
-        time_remaining fields.
-    """
-    from models.reflections import ReflectionIgnore
-
-    now = time.time()
-    ignores = []
-    for entry in ReflectionIgnore.get_active():
-        ignores.append(
-            {
-                "pattern": entry.pattern,
-                "reason": entry.reason,
-                "created_at": entry.created_at,
-                "expires_at": entry.expires_at,
-                "time_remaining": entry.expires_at - now if entry.expires_at else 0,
-            }
-        )
-
-    # Sort by expiry (soonest first)
-    ignores.sort(key=lambda x: x["expires_at"] or 0)
-    return ignores
-
-
 def get_run_history(name: str, page: int = 1) -> dict:
     """Get paginated run history for a specific reflection.
 

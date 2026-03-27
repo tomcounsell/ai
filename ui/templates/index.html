@@ -28,37 +28,4 @@
     </div>
     {% endif %}
 </section>
-
-{# ── Ignore Patterns ── #}
-<section id="ignores" class="mt-8">
-    <h2>Ignore Patterns</h2>
-    {% if ignores %}
-    <table class="data-table">
-        <thead>
-            <tr>
-                <th>Pattern</th>
-                <th>Reason</th>
-                <th>Created</th>
-                <th>Expires</th>
-                <th>Remaining</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for entry in ignores %}
-            <tr>
-                <td class="mono">{{ entry.pattern }}</td>
-                <td>{{ entry.reason or '-' }}</td>
-                <td class="mono">{{ format_ts(entry.created_at) }}</td>
-                <td class="mono">{{ format_ts(entry.expires_at) }}</td>
-                <td class="mono">{{ relative_time(entry.time_remaining) }}</td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
-    {% else %}
-    <div class="empty-state-inline">
-        <span class="text-muted">No active ignore patterns</span>
-    </div>
-    {% endif %}
-</section>
 {% endblock %}
