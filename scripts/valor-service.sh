@@ -129,9 +129,17 @@ start_bridge() {
         cat "$PROJECT_DIR/data/upgrade-pending"
     fi
 
-    # Rotate oversized log files before starting
+    # Rotate oversized log files before starting.
+    # All launchd-managed logs (StandardOutPath/StandardErrorPath) are rotated here
+    # because launchd holds file descriptors open — newsyslog alone cannot reliably
+    # rotate actively-written files. This runs on every service start/restart.
     rotate_log "$LOG_DIR/bridge.error.log"
     rotate_log "$LOG_DIR/bridge.log"
+    rotate_log "$LOG_DIR/issue_poller_error.log"
+    rotate_log "$LOG_DIR/issue_poller.log"
+    rotate_log "$LOG_DIR/watchdog.log"
+    rotate_log "$LOG_DIR/reflections.log"
+    rotate_log "$LOG_DIR/reflections_error.log"
 
     echo "Starting Valor bridge..."
 
@@ -407,6 +415,23 @@ UPDATEEOF
 WATCHDOGEOF
     launchctl load "$WATCHDOG_PLIST_PATH"
     echo "Bridge watchdog installed (runs every 60 seconds)"
+
+    # Install newsyslog config for launchd-managed log rotation.
+    # newsyslog is built into macOS and runs hourly — it provides a safety net
+    # for log files that grow between service restarts. The rotate_log function
+    # in start_bridge() handles rotation on each restart; newsyslog catches
+    # files that grow large during long-running service uptime.
+    echo ""
+    echo "Installing newsyslog log rotation config..."
+    NEWSYSLOG_SRC="$PROJECT_DIR/config/newsyslog.valor.conf"
+    NEWSYSLOG_DST="/etc/newsyslog.d/valor.conf"
+    if [ -f "$NEWSYSLOG_SRC" ]; then
+        # Update paths in the config to match this machine's project directory
+        sed "s|/Users/valorengels/src/ai|${PROJECT_DIR}|g" "$NEWSYSLOG_SRC" | sudo tee "$NEWSYSLOG_DST" > /dev/null
+        echo "newsyslog config installed at $NEWSYSLOG_DST"
+    else
+        echo "WARNING: newsyslog config not found at $NEWSYSLOG_SRC"
+    fi
 
     sleep 2
     status_bridge

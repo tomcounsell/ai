@@ -86,7 +86,21 @@ Every reflection execution includes resource monitoring:
 
 ### Log Rotation
 
-`bridge.log` uses `logging.handlers.RotatingFileHandler` with a 10MB max file size and 5 backup files. This prevents unbounded log growth from verbose reflection runs.
+All log files have rotation configured to prevent unbounded growth. Two mechanisms are used depending on who writes the file:
+
+| Log File | Writer | Rotation Mechanism | Max Size | Backups |
+|----------|--------|--------------------|----------|---------|
+| `bridge.log` | Python (RotatingFileHandler) | `logging.handlers.RotatingFileHandler` | 10MB | 5 |
+| `issue_poller.log` | Python (RotatingFileHandler) | `logging.handlers.RotatingFileHandler` | 10MB | 5 |
+| `bridge.error.log` | launchd (StandardErrorPath) | Shell `rotate_log` in `valor-service.sh` | 10MB | 3 |
+| `issue_poller_error.log` | launchd (StandardErrorPath) | Shell `rotate_log` in `valor-service.sh` | 10MB | 3 |
+| `watchdog.log` | launchd (StandardOutPath) | Shell `rotate_log` in `valor-service.sh` | 10MB | 3 |
+| `reflections.log` | launchd (StandardOutPath) | Shell `rotate_log` in `valor-service.sh` | 10MB | 3 |
+| `reflections_error.log` | launchd (StandardErrorPath) | Shell `rotate_log` in `valor-service.sh` | 10MB | 3 |
+
+**Python-rotated files** use `RotatingFileHandler` which rotates automatically during writes. No service restart needed.
+
+**Shell-rotated files** are rotated by the `rotate_log` function in `scripts/valor-service.sh` on every service start/restart. A `newsyslog` config (`config/newsyslog.valor.conf`) provides a safety net for long-running services -- macOS runs newsyslog hourly via launchd. Note: since launchd holds file descriptors open, newsyslog rotation may not be effective until the next service restart. The shell `rotate_log` function is the primary mechanism.
 
 ### Bridge Watchdog (External)
 
