@@ -112,6 +112,18 @@ The memory system also runs in Claude Code CLI sessions via hooks. See [Claude C
 
 Both paths (Telegram agent and Claude Code hooks) write to the same Redis Memory model. Memories are shared across all session types. All memory capabilities (ingestion, recall, deja vu signals, extraction, outcome detection, post-merge learning) now have feature parity across both paths.
 
+## Parity Requirement
+
+The memory system MUST work equally across all agent session types — SDK/Telegram sessions and local Claude Code CLI sessions. Any memory capability added to one path must be implemented in the other. The shared Redis Memory model ensures data-level parity; the gaps below are at the integration layer.
+
+### Current Gaps (to be closed)
+
+| Capability | Claude Code | SDK/Agent | Action |
+|-----------|-------------|-----------|--------|
+| Deja vu signals (vague recognition, novel territory) | Yes | No | Port to `agent/memory_hook.py` |
+| Prompt ingestion (auto-save user input) | Yes (UserPromptSubmit hook) | No (Telegram messages only) | Add ingestion hook or equivalent to SDK path |
+| Post-merge learning extraction | No | Yes (SDLC merge stage) | Port to Claude Code Stop hook or post-merge script |
+
 ## Key Files
 
 | File | Purpose |
