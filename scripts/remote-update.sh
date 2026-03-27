@@ -71,3 +71,16 @@ if [ -f "$REFLECTIONS_PLIST" ]; then
         echo "ERROR: Failed to bootstrap $REFLECTIONS_LABEL"
     fi
 fi
+
+# ── Sync newsyslog log rotation config if changed ────────────────────
+NEWSYSLOG_SRC="$PROJECT_DIR/config/newsyslog.valor.conf"
+NEWSYSLOG_DST="/etc/newsyslog.d/valor.conf"
+if [ -f "$NEWSYSLOG_SRC" ]; then
+    # Generate machine-specific config by replacing default path
+    NEWSYSLOG_RENDERED=$(sed "s|/Users/valorengels/src/ai|${PROJECT_DIR}|g" "$NEWSYSLOG_SRC")
+    if [ ! -f "$NEWSYSLOG_DST" ] || [ "$(cat "$NEWSYSLOG_DST")" != "$NEWSYSLOG_RENDERED" ]; then
+        echo "$NEWSYSLOG_RENDERED" | sudo tee "$NEWSYSLOG_DST" > /dev/null 2>&1 && \
+            echo "newsyslog config updated at $NEWSYSLOG_DST" || \
+            echo "WARNING: Could not install newsyslog config (sudo required)"
+    fi
+fi

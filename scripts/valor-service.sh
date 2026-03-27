@@ -416,6 +416,23 @@ WATCHDOGEOF
     launchctl load "$WATCHDOG_PLIST_PATH"
     echo "Bridge watchdog installed (runs every 60 seconds)"
 
+    # Install newsyslog config for launchd-managed log rotation.
+    # newsyslog is built into macOS and runs hourly — it provides a safety net
+    # for log files that grow between service restarts. The rotate_log function
+    # in start_bridge() handles rotation on each restart; newsyslog catches
+    # files that grow large during long-running service uptime.
+    echo ""
+    echo "Installing newsyslog log rotation config..."
+    NEWSYSLOG_SRC="$PROJECT_DIR/config/newsyslog.valor.conf"
+    NEWSYSLOG_DST="/etc/newsyslog.d/valor.conf"
+    if [ -f "$NEWSYSLOG_SRC" ]; then
+        # Update paths in the config to match this machine's project directory
+        sed "s|/Users/valorengels/src/ai|${PROJECT_DIR}|g" "$NEWSYSLOG_SRC" | sudo tee "$NEWSYSLOG_DST" > /dev/null
+        echo "newsyslog config installed at $NEWSYSLOG_DST"
+    else
+        echo "WARNING: newsyslog config not found at $NEWSYSLOG_SRC"
+    fi
+
     sleep 2
     status_bridge
 }
