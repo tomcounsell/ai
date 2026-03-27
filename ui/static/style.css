@@ -465,6 +465,15 @@ a.link:hover {
     border-color: var(--border-light);
 }
 
+a {
+    text-decoration: none;
+    color: var(--accent);
+}
+
+a:hover {
+    text-decoration: underline;
+}
+
 /* Utility */
 .text-muted {
     color: var(--text-muted);
