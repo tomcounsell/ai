@@ -37,8 +37,7 @@
         <thead>
             <tr>
                 <th>Chat Group</th>
-                <th>Persona</th>
-                <th>Project</th>
+                <th>Persona · Project</th>
                 <th>GitHub</th>
             </tr>
         </thead>
@@ -51,9 +50,17 @@
                     {% elif row.persona == 'project-manager' %}<span class="badge badge-purple">{{ row.persona }}</span>
                     {% else %}<span class="badge badge-skipped">{{ row.persona }}</span>
                     {% endif %}
+                    <span class="text-muted" style="margin-left: 4px;">{{ row.project_name }}</span>
                 </td>
-                <td>{{ row.project_name }}</td>
-                <td class="mono">{{ row.github or '-' }}</td>
+                <td>
+                    {% if row.github %}
+                    <a href="https://github.com/{{ row.github }}" target="_blank" class="mono">{{ row.github }}</a>
+                    <span class="text-muted"> · </span>
+                    <a href="https://github.com/{{ row.github }}/issues" target="_blank" class="text-muted">issues</a>
+                    <span class="text-muted"> · </span>
+                    <a href="https://github.com/{{ row.github }}/pulls" target="_blank" class="text-muted">PRs</a>
+                    {% else %}-{% endif %}
+                </td>
             </tr>
             {% endfor %}
         </tbody>
