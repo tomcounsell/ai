@@ -37,7 +37,7 @@ PLAN_ARG: $ARGUMENTS
 
 1. **Check the user's message**: If the user's message contains `/do-build <something>`, extract `<something>` as PLAN_ARG.
 2. **Check conversation context**: Scan recent messages for an explicitly mentioned plan path (e.g., `docs/plans/foo.md`) or issue number (e.g., `#564`, `issue 564`). Use the most recently referenced one.
-3. **Still ambiguous**: STOP and ask the user: "Which plan should I build? Please provide a plan path (e.g., `docs/plans/foo.md`) or issue number (e.g., `#564`)." Do NOT guess or pick a plan at random.
+3. **Still ambiguous**: STOP and ask the caller (user, SDLC, ChatSession — whoever invoked this): "Which plan should I build? Please provide a plan path (e.g., `docs/plans/foo.md`) or issue number (e.g., `#564`)." Do NOT guess or pick a plan at random.
 
 ## Plan Resolution
 
