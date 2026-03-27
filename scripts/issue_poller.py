@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import logging.handlers
 import os
 import subprocess
 import sys
@@ -563,7 +564,11 @@ def setup_logging() -> None:
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         handlers=[
-            logging.FileHandler(log_dir / "issue_poller.log"),
+            logging.handlers.RotatingFileHandler(
+                log_dir / "issue_poller.log",
+                maxBytes=10 * 1024 * 1024,  # 10MB
+                backupCount=5,
+            ),
             logging.StreamHandler(),
         ],
     )
