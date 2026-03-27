@@ -517,9 +517,7 @@ async def _cache_walk_root(chat_id: int, start_msg_id: int, max_hops: int = 20) 
 
         try:
             records = list(
-                TelegramMessage.query.filter(
-                    chat_id=str(chat_id), message_id=current_id
-                )
+                TelegramMessage.query.filter(chat_id=str(chat_id), message_id=current_id)
             )
         except Exception:
             # Filter failure means the index isn't usable — signal cache miss

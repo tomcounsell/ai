@@ -8,7 +8,7 @@ from pathlib import Path
 
 from telethon import TelegramClient
 from telethon.tl.functions.messages import SendReactionRequest
-from telethon.tl.types import ReactionEmoji
+from telethon.tl.types import Message, ReactionEmoji
 
 logger = logging.getLogger(__name__)
 
@@ -374,7 +374,7 @@ async def send_response_with_files(
     chat_id: int | None = None,
     reply_to: int | None = None,
     session=None,
-) -> "Message | None":
+) -> Message | None:
     """
     Send response to Telegram, handling both files and text.
 
