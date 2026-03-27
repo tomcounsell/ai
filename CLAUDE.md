@@ -368,6 +368,22 @@ No existing tests affected — this is a greenfield feature with no prior test c
 | `docs/features/README.md` | Feature index — look up how things work |
 | `tests/README.md` | Test suite index — feature markers, blind spots, contribution guide |
 
+## GitHub Issue Labels
+
+Use these labels consistently when creating or editing issues:
+
+| Label | When to use |
+|-------|-------------|
+| `bug` | Something is broken or not working as expected |
+| `reflections` | Related to the reflections maintenance system (`scripts/reflections.py`) |
+| `memory` | Related to the subconscious memory system (memory search, bloom filter, recall/extract) |
+| `skills` | Related to skills (`/do-*` commands), tools (MCP/Python), or the SDLC pipeline |
+| `dashboard` | Related to the web UI dashboard (`ui/`) |
+| `bridge` | Related to the Telegram bridge (`bridge/`) |
+| `testing` | Related to the test suite (`tests/`) |
+
+Do NOT use a `feature` label — it adds no signal.
+
 ## Business Context
 
 For business context, project notes, and assets see the work vault: `~/src/work-vault/AI Valor Engels System/`
