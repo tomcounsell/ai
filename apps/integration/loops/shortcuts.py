@@ -9,9 +9,13 @@ except ImportError:
         return args[0] if args else None
 
 
+import logging
+
 from apps.common.models import User
 from apps.common.models.team import Role
 from apps.integration.loops.client import LoopsClient
+
+logger = logging.getLogger(__name__)
 
 
 def send_password_reset_email(user: User, reset_url: str):
@@ -135,4 +139,36 @@ def send_team_membership_email(membership):
     except Exception as e:
         # Log but don't raise
         print(f"Failed to send team membership email to {email}: {str(e)}")
+        return False
+
+
+def send_early_reader_welcome_email(early_reader) -> bool:
+    """Send a welcome email to a new early reader via Loops.
+
+    Args:
+        early_reader: An ``apps.book.models.EarlyReader`` instance.
+
+    Returns:
+        True if the email was sent (or logged in debug mode), False on error.
+    """
+    try:
+        is_test = settings.TESTING if hasattr(settings, "TESTING") else False
+        loops_client = LoopsClient(debug_mode=is_test)
+
+        loops_client.transactional_email(
+            to_email=early_reader.email,
+            transactional_id="__loops_early_reader_welcome_id__",
+            data_variables={
+                "name": early_reader.name,
+                "company": early_reader.company or "",
+                "role": early_reader.get_role_display(),
+            },
+        )
+        return True
+    except Exception as e:
+        logger.exception(
+            "Failed to send early reader welcome email to %s: %s",
+            early_reader.email,
+            e,
+        )
         return False

@@ -65,8 +65,10 @@
             </a>
             <div class="flex gap-6 text-sm" style="font-family: var(--font-sans);">
                 <a href="{% url 'book:landing' %}" class="hover:underline" style="color: var(--color-muted); text-decoration: none;">Home</a>
-                <a href="{% url 'book:announcements' %}" class="hover:underline" style="color: var(--color-muted); text-decoration: none;">Announcements</a>
-                <a href="{{ feedback_url }}" target="_blank" rel="noopener" class="hover:underline" style="color: var(--color-muted); text-decoration: none;">Feedback</a>
+                <a href="{% url 'book:chapters' %}" class="hover:underline" style="color: var(--color-muted); text-decoration: none;">Chapters</a>
+                <a href="{% url 'book:announcements' %}" class="hover:underline" style="color: var(--color-muted); text-decoration: none;">News</a>
+                <a href="{% url 'book:chat' %}" class="hover:underline" style="color: var(--color-muted); text-decoration: none;">Chat</a>
+                <a href="{% url 'book:signup' %}" class="hover:underline" style="color: var(--color-accent); text-decoration: none; font-weight: 500;">Join</a>
             </div>
         </div>
     </nav>

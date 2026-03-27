@@ -280,6 +280,7 @@ PODCAST_DEFAULT_MODEL = "claude-sonnet-4-6"
 # ============================================================================
 # Book Site (blendedworkforce.ai) Settings
 # ============================================================================
+BOOK_CHAT_MODEL = "anthropic:claude-sonnet-4-20250514"
 BOOK_FEEDBACK_FORM_URL = os.environ.get(
     "BOOK_FEEDBACK_FORM_URL", "#feedback-form-coming-soon"
 )

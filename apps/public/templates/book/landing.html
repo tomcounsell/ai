@@ -1,4 +1,5 @@
 {% extends "book/base.html" %}
+{% load static %}
 
 {% block title %}Blended Workforce 2026 — An Annual Field Manual for CEOs{% endblock %}
 {% block meta_description %}A serialized field manual for CEOs on integrating AI employees into human teams. By Tom Counsell and Valor Engels.{% endblock %}
@@ -22,13 +23,18 @@
             By <strong style="color: var(--color-ink);">Tom Counsell</strong> &amp;
             <strong style="color: var(--color-ink);">Valor Engels</strong>
         </p>
+        <a href="{% url 'book:signup' %}"
+           class="inline-block px-8 py-3 rounded text-sm font-medium transition-colors"
+           style="background-color: var(--color-accent); color: var(--color-paper); text-decoration: none;">
+            Become an Early Reader
+        </a>
     </div>
 </section>
 
 <!-- Divider -->
 <div class="max-w-xs mx-auto border-t mb-16" style="border-color: var(--color-accent-light);"></div>
 
-<!-- About the Book -->
+<!-- The Pitch -->
 <section class="pb-16 px-6">
     <div class="max-w-2xl mx-auto">
         <h2 class="text-2xl font-bold mb-6" style="font-family: var(--font-serif);">
@@ -58,25 +64,126 @@
     </div>
 </section>
 
+<!-- Chapter Previews -->
+<section class="py-16 px-6" style="background-color: #f3f1ed;">
+    <div class="max-w-2xl mx-auto">
+        <h2 class="text-2xl font-bold mb-8 text-center" style="font-family: var(--font-serif);">
+            Inside the Book
+        </h2>
+        <div class="space-y-6">
+            <div class="flex gap-4 items-start">
+                <span class="text-2xl font-bold" style="color: var(--color-accent); font-family: var(--font-serif); min-width: 2rem;">1</span>
+                <div>
+                    <h3 class="font-bold mb-1" style="font-family: var(--font-serif);">Your First AI Employee</h3>
+                    <p class="text-sm" style="color: var(--color-muted);">How to scope, hire, and onboard an AI agent into an existing team without disrupting your best people.</p>
+                </div>
+            </div>
+            <div class="flex gap-4 items-start">
+                <span class="text-2xl font-bold" style="color: var(--color-accent); font-family: var(--font-serif); min-width: 2rem;">2</span>
+                <div>
+                    <h3 class="font-bold mb-1" style="font-family: var(--font-serif);">The Blended Org Chart</h3>
+                    <p class="text-sm" style="color: var(--color-muted);">Restructuring reporting lines, accountability, and ownership when some of your team never sleeps.</p>
+                </div>
+            </div>
+            <div class="flex gap-4 items-start">
+                <span class="text-2xl font-bold" style="color: var(--color-accent); font-family: var(--font-serif); min-width: 2rem;">3</span>
+                <div>
+                    <h3 class="font-bold mb-1" style="font-family: var(--font-serif);">Measuring What Matters</h3>
+                    <p class="text-sm" style="color: var(--color-muted);">Performance frameworks that work across carbon and silicon, from OKRs to throughput metrics.</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- Social Proof / Testimonials -->
+{% if testimonials %}
+<section class="py-16 px-6">
+    <div class="max-w-2xl mx-auto">
+        <h2 class="text-2xl font-bold mb-8 text-center" style="font-family: var(--font-serif);">
+            What Early Readers Say
+        </h2>
+        <div class="space-y-8">
+            {% for testimonial in testimonials %}
+            <blockquote class="border-l-4 pl-6" style="border-color: var(--color-accent);">
+                <p class="text-base leading-relaxed mb-2" style="color: var(--color-ink); font-style: italic; font-family: var(--font-serif);">
+                    &ldquo;{{ testimonial.quote }}&rdquo;
+                </p>
+                <footer class="text-sm" style="color: var(--color-muted);">
+                    &mdash; {{ testimonial.author_name }}{% if testimonial.role %}, {{ testimonial.role }}{% endif %}{% if testimonial.company %} at {{ testimonial.company }}{% endif %}
+                </footer>
+            </blockquote>
+            {% endfor %}
+        </div>
+    </div>
+</section>
+{% endif %}
+
+<!-- Companion Repo -->
+<section class="py-16 px-6" style="background-color: #f3f1ed;">
+    <div class="max-w-2xl mx-auto text-center">
+        <h2 class="text-2xl font-bold mb-4" style="font-family: var(--font-serif);">
+            Companion Repository
+        </h2>
+        <p class="text-base mb-6 leading-relaxed" style="color: var(--color-muted);">
+            Every framework in the book comes with working code. Prompt templates,
+            evaluation harnesses, and integration recipes &mdash; all open source.
+        </p>
+        <a href="https://github.com/tomcounsell/blended-workforce"
+           target="_blank" rel="noopener"
+           class="inline-block px-8 py-3 rounded text-sm font-medium border transition-colors"
+           style="border-color: var(--color-accent); color: var(--color-accent); text-decoration: none;">
+            View on GitHub
+        </a>
+    </div>
+</section>
+
+<!-- Series Roadmap -->
+<section class="py-16 px-6">
+    <div class="max-w-2xl mx-auto">
+        <h2 class="text-2xl font-bold mb-8 text-center" style="font-family: var(--font-serif);">
+            Series Roadmap
+        </h2>
+        <div class="grid md:grid-cols-3 gap-6 text-center">
+            <div class="p-6 rounded border" style="border-color: var(--color-accent); background: white;">
+                <p class="text-xs uppercase tracking-wider mb-2" style="color: var(--color-accent);">Now</p>
+                <h3 class="font-bold mb-1" style="font-family: var(--font-serif);">2026 Edition</h3>
+                <p class="text-sm" style="color: var(--color-muted);">Foundation frameworks for your first blended team.</p>
+            </div>
+            <div class="p-6 rounded border" style="border-color: var(--color-border);">
+                <p class="text-xs uppercase tracking-wider mb-2" style="color: var(--color-muted);">Next</p>
+                <h3 class="font-bold mb-1" style="font-family: var(--font-serif);">2027 Edition</h3>
+                <p class="text-sm" style="color: var(--color-muted);">Scaling: from one AI employee to an AI department.</p>
+            </div>
+            <div class="p-6 rounded border" style="border-color: var(--color-border);">
+                <p class="text-xs uppercase tracking-wider mb-2" style="color: var(--color-muted);">Future</p>
+                <h3 class="font-bold mb-1" style="font-family: var(--font-serif);">Annual Editions</h3>
+                <p class="text-sm" style="color: var(--color-muted);">Updated each year as the landscape evolves.</p>
+            </div>
+        </div>
+    </div>
+</section>
+
 <!-- CTA Section -->
 <section class="py-16 px-6" style="background-color: var(--color-ink);">
     <div class="max-w-2xl mx-auto text-center">
         <h2 class="text-2xl font-bold mb-4" style="font-family: var(--font-serif); color: var(--color-paper);">
-            Get the Book
+            Get Early Access
         </h2>
         <p class="mb-8 text-base" style="color: var(--color-accent-light);">
-            Available soon. Join the announcement list to be notified at launch.
+            Sign up as an early reader to get draft chapters, behind-the-scenes updates,
+            and a direct line to the authors.
         </p>
         <div class="flex flex-col sm:flex-row gap-4 justify-center">
-            <a href="{% url 'book:announcements' %}"
+            <a href="{% url 'book:signup' %}"
                class="inline-block px-8 py-3 rounded text-sm font-medium transition-colors"
                style="background-color: var(--color-accent); color: var(--color-paper); text-decoration: none;">
-                View Announcements
+                Become an Early Reader
             </a>
-            <a href="{{ feedback_url }}" target="_blank" rel="noopener"
+            <a href="{% url 'book:chat' %}"
                class="inline-block px-8 py-3 rounded text-sm font-medium border transition-colors"
                style="border-color: var(--color-accent-light); color: var(--color-accent-light); text-decoration: none;">
-                Share Feedback
+                Chat with Valor
             </a>
         </div>
     </div>

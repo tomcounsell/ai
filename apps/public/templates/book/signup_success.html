@@ -1,0 +1,29 @@
+{% extends "book/base.html" %}
+
+{% block title %}Welcome — Blended Workforce 2026{% endblock %}
+
+{% block content %}
+<section class="py-20 px-6">
+    <div class="max-w-lg mx-auto text-center">
+        <h1 class="text-3xl font-bold mb-4" style="font-family: var(--font-serif);">
+            You're In
+        </h1>
+        <p class="text-base mb-6 leading-relaxed" style="color: var(--color-muted);">
+            Thanks for signing up as an early reader. We'll send you draft chapters
+            and updates as they come together. In the meantime, feel free to explore.
+        </p>
+        <div class="flex flex-col sm:flex-row gap-4 justify-center">
+            <a href="{% url 'book:chat' %}"
+               class="inline-block px-8 py-3 rounded text-sm font-medium transition-colors"
+               style="background-color: var(--color-accent); color: var(--color-paper); text-decoration: none;">
+                Chat with Valor
+            </a>
+            <a href="{% url 'book:landing' %}"
+               class="inline-block px-8 py-3 rounded text-sm font-medium border transition-colors"
+               style="border-color: var(--color-accent); color: var(--color-accent); text-decoration: none;">
+                Back to Home
+            </a>
+        </div>
+    </div>
+</section>
+{% endblock %}

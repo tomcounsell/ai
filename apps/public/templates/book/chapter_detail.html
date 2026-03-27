@@ -1,0 +1,84 @@
+{% extends "book/base.html" %}
+
+{% block title %}{{ chapter.title }} — Blended Workforce 2026{% endblock %}
+
+{% block extra_css %}
+<style>
+    .chapter-body h1, .chapter-body h2, .chapter-body h3 {
+        font-family: var(--font-serif);
+        margin-top: 1.5em;
+        margin-bottom: 0.5em;
+    }
+    .chapter-body p {
+        margin-bottom: 1em;
+        line-height: 1.75;
+    }
+    .chapter-body ul, .chapter-body ol {
+        margin-bottom: 1em;
+        padding-left: 1.5em;
+    }
+    .chapter-body li {
+        margin-bottom: 0.25em;
+    }
+    .chapter-body blockquote {
+        border-left: 3px solid var(--color-accent);
+        padding-left: 1em;
+        margin: 1.5em 0;
+        color: var(--color-muted);
+        font-style: italic;
+    }
+    .chapter-body code {
+        background: #f3f1ed;
+        padding: 0.15em 0.4em;
+        border-radius: 3px;
+        font-size: 0.9em;
+    }
+    .chapter-body pre {
+        background: #f3f1ed;
+        padding: 1em;
+        border-radius: 6px;
+        overflow-x: auto;
+        margin-bottom: 1em;
+    }
+    .chapter-body pre code {
+        background: none;
+        padding: 0;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<section class="py-16 px-6">
+    <div class="max-w-2xl mx-auto">
+        <a href="{% url 'book:chapters' %}" class="text-sm mb-6 inline-block" style="color: var(--color-accent); text-decoration: none;">
+            &larr; All Chapters
+        </a>
+
+        <p class="text-sm font-medium mb-2" style="color: var(--color-accent);">
+            Volume {{ chapter.volume }}, Chapter {{ chapter.chapter_number }}
+        </p>
+        <h1 class="text-3xl font-bold mb-2" style="font-family: var(--font-serif);">
+            {{ chapter.title }}
+        </h1>
+        <p class="text-xs mb-10" style="color: var(--color-muted);">
+            Published {{ chapter.published_at|date:"F j, Y" }}
+        </p>
+
+        <div class="chapter-body text-base" style="color: var(--color-ink);">
+            {# Safe: body_html is admin-authored markdown rendered to HTML via DraftChapter.body_html #}
+            {{ chapter.body_html|safe }}
+        </div>
+
+        <div class="mt-12 pt-8 border-t text-center" style="border-color: var(--color-border);">
+            <p class="text-sm mb-4" style="color: var(--color-muted);">
+                This is an early draft. Your feedback helps shape the final book.
+            </p>
+            <a href="{{ feedback_url }}" target="_blank" rel="noopener"
+               class="inline-block px-6 py-2 rounded text-sm font-medium transition-colors"
+               style="background-color: var(--color-accent); color: var(--color-paper); text-decoration: none;">
+                Share Feedback
+            </a>
+        </div>
+    </div>
+</section>
+{% endblock %}

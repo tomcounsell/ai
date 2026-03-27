@@ -1,0 +1,47 @@
+{% extends "book/base.html" %}
+
+{% block title %}Draft Chapters — Blended Workforce 2026{% endblock %}
+
+{% block content %}
+<section class="py-16 px-6">
+    <div class="max-w-2xl mx-auto">
+        <h1 class="text-3xl font-bold mb-2" style="font-family: var(--font-serif);">
+            Draft Chapters
+        </h1>
+        <p class="mb-8 text-sm" style="color: var(--color-muted);">
+            Early reader access. These chapters are works in progress &mdash; your feedback shapes the final book.
+        </p>
+
+        {% if chapters %}
+        <div class="space-y-4">
+            {% for chapter in chapters %}
+            <a href="{% url 'book:chapter_detail' chapter.pk %}"
+               class="block p-6 rounded border transition-colors hover:shadow-sm"
+               style="border-color: var(--color-border); text-decoration: none; color: var(--color-ink);">
+                <div class="flex items-baseline gap-3">
+                    <span class="text-sm font-medium" style="color: var(--color-accent);">
+                        Vol. {{ chapter.volume }}, Ch. {{ chapter.chapter_number }}
+                    </span>
+                    <h2 class="text-lg font-bold" style="font-family: var(--font-serif);">
+                        {{ chapter.title }}
+                    </h2>
+                </div>
+                <p class="text-xs mt-2" style="color: var(--color-muted);">
+                    Published {{ chapter.published_at|date:"F j, Y" }}
+                </p>
+            </a>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="text-center py-16">
+            <p class="text-lg" style="color: var(--color-muted); font-family: var(--font-serif); font-style: italic;">
+                No chapters published yet.
+            </p>
+            <p class="text-sm mt-2" style="color: var(--color-muted);">
+                Check back soon &mdash; new chapters are released regularly.
+            </p>
+        </div>
+        {% endif %}
+    </div>
+</section>
+{% endblock %}

@@ -1,13 +1,7 @@
 from django.utils import timezone
-from django.views.generic import ListView, TemplateView
+from django.views.generic import ListView
 
 from apps.book.models import Announcement
-
-
-class LandingView(TemplateView):
-    """Book landing page with hero section and buying links."""
-
-    template_name = "book/landing.html"
 
 
 class AnnouncementListView(ListView):

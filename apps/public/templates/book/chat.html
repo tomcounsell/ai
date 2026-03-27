@@ -1,0 +1,134 @@
+{% extends "book/base.html" %}
+
+{% block title %}Chat with Valor — Blended Workforce 2026{% endblock %}
+
+{% block extra_css %}
+<style>
+    #chat-messages {
+        min-height: 300px;
+        max-height: 500px;
+        overflow-y: auto;
+    }
+    #chat-messages::-webkit-scrollbar {
+        width: 6px;
+    }
+    #chat-messages::-webkit-scrollbar-thumb {
+        background: var(--color-border);
+        border-radius: 3px;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<section class="py-16 px-6">
+    <div class="max-w-2xl mx-auto">
+        <h1 class="text-3xl font-bold mb-2" style="font-family: var(--font-serif);">
+            Chat with Valor
+        </h1>
+        <p class="mb-8 text-sm" style="color: var(--color-muted);">
+            Ask me anything about the book, blended workforces, or integrating AI into your team.
+        </p>
+
+        <!-- Chat Window -->
+        <div class="border rounded-lg overflow-hidden" style="border-color: var(--color-border);">
+            <!-- Messages Area -->
+            <div id="chat-messages" class="p-4">
+                <!-- Welcome message -->
+                <div class="flex justify-start mb-3">
+                    <div class="rounded-lg px-4 py-2 max-w-xs text-sm"
+                         style="background-color: var(--color-border); color: var(--color-ink);">
+                        Hi, I'm Valor. I'm one of the authors of <em>Blended Workforce 2026</em>.
+                        What would you like to know about integrating AI into your team?
+                    </div>
+                </div>
+            </div>
+
+            <!-- Input Area -->
+            <div class="border-t p-3" style="border-color: var(--color-border);">
+                <form id="chat-form" class="flex gap-2">
+                    {% csrf_token %}
+                    <input type="text"
+                           id="chat-input"
+                           name="message"
+                           placeholder="Type your message..."
+                           autocomplete="off"
+                           class="flex-1 px-4 py-2 rounded border text-sm"
+                           style="border-color: var(--color-border);">
+                    <button type="submit"
+                            id="chat-send"
+                            class="px-6 py-2 rounded text-sm font-medium transition-colors"
+                            style="background-color: var(--color-accent); color: var(--color-paper);">
+                        Send
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function() {
+    const form = document.getElementById('chat-form');
+    const input = document.getElementById('chat-input');
+    const messages = document.getElementById('chat-messages');
+    const sendBtn = document.getElementById('chat-send');
+    const csrfToken = form.querySelector('[name=csrfmiddlewaretoken]').value;
+
+    form.addEventListener('submit', async function(e) {
+        e.preventDefault();
+        const message = input.value.trim();
+        if (!message) return;
+
+        // Disable input while processing
+        input.disabled = true;
+        sendBtn.disabled = true;
+        sendBtn.textContent = '...';
+
+        // Show typing indicator
+        const typingDiv = document.createElement('div');
+        typingDiv.className = 'flex justify-start mb-3';
+        typingDiv.id = 'typing-indicator';
+        typingDiv.innerHTML = '<div class="rounded-lg px-4 py-2 text-sm" style="background-color: var(--color-border); color: var(--color-muted);">Valor is typing...</div>';
+        messages.appendChild(typingDiv);
+        messages.scrollTop = messages.scrollHeight;
+
+        input.value = '';
+
+        try {
+            const resp = await fetch("{% url 'book:chat_send' %}", {
+                method: 'POST',
+                headers: {
+                    'X-CSRFToken': csrfToken,
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: 'message=' + encodeURIComponent(message),
+            });
+            const data = await resp.json();
+
+            // Remove typing indicator
+            const indicator = document.getElementById('typing-indicator');
+            if (indicator) indicator.remove();
+
+            if (data.html) {
+                messages.insertAdjacentHTML('beforeend', data.html);
+            }
+        } catch (err) {
+            const indicator = document.getElementById('typing-indicator');
+            if (indicator) indicator.remove();
+            messages.insertAdjacentHTML('beforeend',
+                '<div class="flex justify-start mb-3"><div class="rounded-lg px-4 py-2 max-w-xs text-sm" style="background-color: var(--color-border); color: #b91c1c;">Something went wrong. Please try again.</div></div>'
+            );
+        }
+
+        // Re-enable input
+        input.disabled = false;
+        sendBtn.disabled = false;
+        sendBtn.textContent = 'Send';
+        input.focus();
+        messages.scrollTop = messages.scrollHeight;
+    });
+})();
+</script>
+{% endblock %}

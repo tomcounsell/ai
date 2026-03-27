@@ -1,0 +1,42 @@
+{% extends "book/base.html" %}
+
+{% block title %}Become an Early Reader — Blended Workforce 2026{% endblock %}
+
+{% block content %}
+<section class="py-16 px-6">
+    <div class="max-w-lg mx-auto">
+        <h1 class="text-3xl font-bold mb-4" style="font-family: var(--font-serif);">
+            Become an Early Reader
+        </h1>
+        <p class="mb-8 text-base leading-relaxed" style="color: var(--color-muted);">
+            Get draft chapters as they are written, share feedback directly with the
+            authors, and help shape the final book.
+        </p>
+
+        <form method="post" action="{% url 'book:signup' %}" class="space-y-5">
+            {% csrf_token %}
+
+            {% for field in form %}
+            <div>
+                <label for="{{ field.id_for_label }}" class="block text-sm font-medium mb-1" style="color: var(--color-ink);">
+                    {{ field.label }}{% if field.field.required %} <span style="color: var(--color-accent);">*</span>{% endif %}
+                </label>
+                {{ field }}
+                {% if field.errors %}
+                <p class="text-xs mt-1" style="color: #b91c1c;">{{ field.errors.0 }}</p>
+                {% endif %}
+                {% if field.help_text %}
+                <p class="text-xs mt-1" style="color: var(--color-muted);">{{ field.help_text }}</p>
+                {% endif %}
+            </div>
+            {% endfor %}
+
+            <button type="submit"
+                    class="w-full px-6 py-3 rounded text-sm font-medium transition-colors"
+                    style="background-color: var(--color-accent); color: var(--color-paper);">
+                Sign Up
+            </button>
+        </form>
+    </div>
+</section>
+{% endblock %}
