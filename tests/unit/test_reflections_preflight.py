@@ -13,7 +13,6 @@ class TestReflectionsPreflight(unittest.TestCase):
             mock_state = MagicMock()
             mock_state.daily_report = []
             mock_state.completed_steps = []
-            mock_state.current_step = 1
             mock_state.date = "2026-03-24"
             mock_state.findings = {}
             mock_state.session_analysis = {}
@@ -33,32 +32,32 @@ class TestReflectionsPreflight(unittest.TestCase):
         """Pre-flight passes when Redis is available."""
         mock_redis.ping.return_value = True
         runner = self._make_runner()
-        assert runner._preflight_check(1, "Clean Up Legacy Code") is True
+        assert runner._preflight_check("legacy_code_scan", "Clean Up Legacy Code") is True
 
     @patch("popoto.redis_db.POPOTO_REDIS_DB")
     def test_preflight_fails_without_redis(self, mock_redis):
         """Pre-flight fails gracefully when Redis is down."""
         mock_redis.ping.side_effect = ConnectionError("Redis down")
         runner = self._make_runner()
-        result = runner._preflight_check(1, "Clean Up Legacy Code")
+        result = runner._preflight_check("legacy_code_scan", "Clean Up Legacy Code")
         assert result is False
         assert "Skipped" in runner.state.daily_report[0]
 
     @patch("shutil.which", return_value=None)
     @patch("popoto.redis_db.POPOTO_REDIS_DB")
     def test_preflight_fails_without_gh_cli(self, mock_redis, mock_which):
-        """Pre-flight for GitHub steps fails when gh CLI is missing."""
+        """Pre-flight for gh-dependent steps fails when gh CLI is missing."""
         mock_redis.ping.return_value = True
         runner = self._make_runner()
-        result = runner._preflight_check(8, "File Bug Issues")
+        result = runner._preflight_check("session_intelligence", "Session Intelligence")
         assert result is False
         assert "gh CLI" in runner.state.daily_report[0]
 
     @patch("shutil.which", return_value="/usr/local/bin/gh")
     @patch("popoto.redis_db.POPOTO_REDIS_DB")
     def test_preflight_passes_with_gh_cli(self, mock_redis, mock_which):
-        """Pre-flight for GitHub steps passes when gh CLI exists."""
+        """Pre-flight for gh-dependent steps passes when gh CLI exists."""
         mock_redis.ping.return_value = True
         runner = self._make_runner()
-        result = runner._preflight_check(8, "File Bug Issues")
+        result = runner._preflight_check("session_intelligence", "Session Intelligence")
         assert result is True
