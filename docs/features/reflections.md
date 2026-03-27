@@ -49,7 +49,7 @@ reflections:
 | `health-check` | 5 min | high | function | Check running jobs for liveness, recover stuck ones |
 | `orphan-recovery` | 30 min | normal | function | Recover stranded AgentSession objects |
 | `stale-branch-cleanup` | daily | low | function | Clean up session branches older than 72 hours |
-| `daily-maintenance` | daily | low | function | Full 16-step maintenance pipeline |
+| `daily-maintenance` | daily | low | function | Full 14-unit maintenance pipeline |
 
 ### State Model (`models/reflection.py`)
 
@@ -77,30 +77,39 @@ Reflection status is available via `ReflectionScheduler.format_status()`, showin
 
 The bridge watchdog (`com.valor.bridge-watchdog`) is intentionally NOT in the reflection registry. It must run as an external launchd service because it monitors the bridge process itself -- running it inside the process it monitors defeats its purpose.
 
-## Daily Maintenance Pipeline (16-Step)
+## Daily Maintenance Pipeline (14 Units)
 
-The `daily-maintenance` reflection runs the full pipeline from `scripts/reflections.py`. The runner loads state from Redis, executes each step in order, and checkpoints after every step. If interrupted, the next run resumes from where it left off. Each step is independently failable — a crash in one step does not block the rest.
+The `daily-maintenance` reflection runs the full pipeline from `scripts/reflections.py`. The runner loads state from Redis, executes each unit in order, and checkpoints after every unit. If interrupted, the next run resumes from where it left off. Each unit is independently failable — a crash in one unit does not block the rest.
 
-### 16-Step Pipeline
+The pipeline has 14 units: 11 independent items and 3 merged pipelines. Completed units are tracked by string key (e.g. `"legacy_code_scan"`), not by integer position. This means units can be reordered or renamed without data migrations — any unknown key in `completed_steps` is simply skipped.
 
-| Step | Name | Description | Scope | Failure Mode |
-|------|------|-------------|-------|--------------|
-| 1 | Clean Up Stale Code | Scans for TODO comments, old-style typing imports | AI repo only | Non-blocking |
-| 2 | Review Logs | Extracts structured errors from log files and Redis BridgeEvent records | Per-project | Non-blocking, skips if `logs/bridge.log` missing |
-| 3 | Check Error Logs (Sentry) | Queries Sentry for unresolved issues | AI repo only | Non-blocking, skips if MCP unavailable |
-| 4 | Clean Up Task Management | Lists open bug issues via `gh issue list` per project | Per-project | Non-blocking, requires `gh` auth |
-| 5 | Audit Documentation | Weekly LLM-powered accuracy audit of `docs/` (see [Documentation Audit](documentation-audit.md)) | AI repo only | Non-blocking, requires `ANTHROPIC_API_KEY` |
-| 6 | Session Analysis | Queries Redis AgentSession and BridgeEvent; computes thrash ratio, detects user corrections | AI repo only | Non-blocking |
-| 7 | LLM Reflection | Claude Haiku categorizes mistakes into 6 categories | AI repo only | Non-blocking, requires `ANTHROPIC_API_KEY` |
-| 8 | File Bug Issues | For high-confidence `code_bug` reflections, creates GitHub issues via `gh issue create` | AI repo only | Non-blocking, requires `gh` auth |
-| 9 | Report Generation | Writes local markdown report to `logs/reflections/report_YYYY-MM-DD.md` | AI repo only | Non-blocking |
-| 10 | GitHub Issue Creation | Posts daily digest issue per project via `gh` CLI; posts summary to Telegram | Per-project | Non-blocking, requires `gh` auth |
-| 11 | Skills Audit | Validates all SKILL.md files against template standards (see [Skills Audit](do-skills-audit.md)) | AI repo only | Non-blocking |
-| 12 | Redis TTL Cleanup | Prunes expired records across all Redis models | AI repo only | Non-blocking |
-| 13 | Redis Data Quality | Surfaces data quality issues: unsummarized links, dead channels, error patterns | AI repo only | Non-blocking |
-| 14 | Branch and Plan Cleanup | Deletes merged branches; ensures plans have open issues; flags completed plans for docs migration | AI repo only | Non-blocking, requires `gh` auth |
-| 15 | Feature Docs Audit | Checks for stale references, README accuracy, plan-masquerading-as-feature, stub docs | AI repo only | Non-blocking |
-| 16 | Disk Space Check | Checks free disk space on project volume; finding if below 10 GB (see [Adding Reflection Tasks](adding-reflection-tasks.md)) | AI repo only | Non-blocking |
+### 14-Unit Pipeline
+
+**Independent units** (each checkpointed individually):
+
+| # | Key | Name | Description | Scope | Failure Mode |
+|---|-----|------|-------------|-------|--------------|
+| 1 | `legacy_code_scan` | Clean Up Legacy Code | Scans for TODO comments, old-style typing imports | AI repo only | Non-blocking |
+| 2 | `log_review` | Review Previous Day's Logs | Extracts structured errors from log files and Redis BridgeEvent records | Per-project | Non-blocking, skips if `logs/bridge.log` missing |
+| 3 | `task_management` | Clean Up Task Management | Lists open bug issues via `gh issue list` per project | Per-project | Non-blocking, requires `gh` auth |
+| 4 | `documentation_audit` | Audit Documentation | Weekly LLM-powered accuracy audit of `docs/` (see [Documentation Audit](documentation-audit.md)) | AI repo only | Non-blocking, requires `ANTHROPIC_API_KEY` |
+| 5 | `skills_audit` | Skills Audit | Validates all SKILL.md files against template standards (see [Skills Audit](do-skills-audit.md)) | AI repo only | Non-blocking |
+| 6 | `redis_ttl_cleanup` | Redis TTL Cleanup | Prunes expired records across all Redis models | AI repo only | Non-blocking |
+| 7 | `redis_data_quality` | Redis Data Quality | Surfaces data quality issues: unsummarized links, dead channels, error patterns | AI repo only | Non-blocking |
+| 8 | `branch_plan_cleanup` | Branch and Plan Cleanup | Deletes merged branches; ensures plans have open issues; flags completed plans for docs migration | AI repo only | Non-blocking, requires `gh` auth |
+| 9 | `feature_docs_audit` | Feature Docs Audit | Checks for stale references, README accuracy, plan-masquerading-as-feature, stub docs | AI repo only | Non-blocking |
+| 10 | `principal_staleness` | Principal Context Staleness | Checks age of PRINCIPAL.md and flags if stale | AI repo only | Non-blocking |
+| 11 | `disk_space_check` | Disk Space Check | Checks free disk space on project volume; finding if below 10 GB (see [Adding Reflection Tasks](adding-reflection-tasks.md)) | AI repo only | Non-blocking |
+
+**Merged pipelines** (sub-steps run internally, one checkpoint for the whole group):
+
+| # | Key | Name | Sub-steps | Description |
+|---|-----|------|-----------|-------------|
+| 12 | `session_intelligence` | Session Intelligence | session_analysis → llm_reflection → auto_fix_bugs | Analyzes sessions, reflects via Haiku, files high-confidence bug issues |
+| 13 | `behavioral_learning` | Behavioral Learning | episode_cycle_close → pattern_crystallization | Closes completed SDLC episodes and crystallizes recurring patterns |
+| 14 | `daily_report_and_notify` | Daily Report & Notify | produce_report → create_github_issue | Writes report, posts GitHub issues, sends Telegram summary (must be last) |
+
+**Removed:** `step_check_sentry` — was a permanent no-op (Sentry MCP never available in standalone mode). Deleted entirely.
 
 ## State & Persistence
 
@@ -113,20 +122,21 @@ One record per calendar date. Acts as the primary state checkpoint for resumabil
 | Field | Type | Purpose |
 |-------|------|---------|
 | `date` | UniqueKeyField | YYYY-MM-DD, one run per day |
-| `current_step` | IntField | Next step to execute (1-16) |
-| `completed_steps` | ListField | Steps already finished, e.g. `[1, 2, 3]` |
-| `daily_report` | ListField | Human-readable log lines per step |
+| `completed_steps` | ListField | Units already finished, e.g. `["legacy_code_scan", "log_review"]` |
+| `daily_report` | ListField | Human-readable log lines per unit |
 | `findings` | DictField | `{category: [finding_strings]}` |
-| `session_analysis` | DictField | Output from session analysis step |
+| `session_analysis` | DictField | Output from session analysis sub-step |
 | `reflections` | ListField | LLM reflection outputs |
 | `auto_fix_attempts` | ListField | Auto-fix attempt records |
-| `step_progress` | DictField | Per-step metrics, e.g. `{"clean_legacy": {"findings": 2}}` |
+| `step_progress` | DictField | Per-unit metrics, e.g. `{"legacy_code_scan": {"findings": 2}}` |
 | `started_at` | SortedField(float) | Unix timestamp, used for cleanup |
 | `dry_run` | Field(bool) | True if `--dry-run` mode |
 
-**Checkpoint cycle**: After each step completes (or fails), the runner saves all state to Redis via `ReflectionRun.save_checkpoint()`. This deletes and recreates the record to handle Popoto's KeyField constraints.
+**Checkpoint cycle**: After each unit completes (or fails), the runner saves all state to Redis via `ReflectionRun.save_checkpoint()`. This deletes and recreates the record to handle Popoto's KeyField constraints.
 
-**Resume scenario**: If reflections crashes during step 7, the next run loads the ReflectionRun for today, sees `completed_steps = [1,2,3,4,5,6]`, and continues from step 7.
+**Resume scenario**: If reflections crashes during `session_intelligence`, the next run loads the ReflectionRun for today, sees `completed_steps = ["legacy_code_scan", ...]`, and continues from `session_intelligence`.
+
+**Legacy migration**: If `completed_steps` contains integers (data from before the string-key refactor), the runner resets it to an empty list. This safely re-runs any steps that ran earlier in the day — all units are idempotent.
 
 ### ReflectionIgnore
 
@@ -142,10 +152,10 @@ Suppresses auto-fix for specific patterns. Each entry has a TTL (default 14 days
 
 **Matching**: Case-insensitive substring match — if either the ignore pattern or the reflection pattern is a substring of the other, it's a match.
 
-**Cleanup**: Expired entries are pruned at the start of each auto-fix step and during Redis TTL cleanup (step 13).
+**Cleanup**: Expired entries are pruned at the start of each auto-fix run (inside `session_intelligence`) and during Redis TTL cleanup (`redis_ttl_cleanup`).
 
 
-## Session Analysis (Step 6)
+## Session Analysis (part of `session_intelligence` pipeline)
 
 Queries Redis for recent sessions and computes quality metrics.
 
@@ -177,7 +187,7 @@ Scans session transcripts for patterns indicating the human corrected the agent:
 
 These regex patterns are defined in `CORRECTION_PATTERNS` and applied to user messages extracted from session transcript files.
 
-## LLM Reflection (Step 7)
+## LLM Reflection (part of `session_intelligence` pipeline)
 
 Flagged sessions are sent to Claude Haiku (`claude-haiku-4-5-20251001`) for categorization:
 
@@ -194,7 +204,7 @@ Each reflection output includes: `category`, `summary`, `pattern`, `prevention`,
 
 **Skip conditions**: Reflection is skipped if there are no session findings, if `ANTHROPIC_API_KEY` is not set, or if the `anthropic` package is not installed.
 
-## File Bug Issues (Step 8)
+## File Bug Issues (part of `session_intelligence` pipeline)
 
 When a reflection is categorized as `code_bug` and meets the confidence threshold, reflections creates a GitHub issue via `gh issue create` with the `bug` label. No code changes are made — a human decides whether and how to fix it.
 
@@ -249,8 +259,8 @@ Each project entry in `~/Desktop/Valor/projects.json`:
 | Field | Required | Notes |
 |-------|----------|-------|
 | `working_directory` | Yes | Must exist on disk to be included |
-| `github.org` / `github.repo` | For issues/tasks | Steps 4 and 10 skip if absent |
-| `telegram.groups` | No | Step 10 skips if absent or empty |
+| `github.org` / `github.repo` | For issues/tasks | `task_management` and `daily_report_and_notify` skip if absent |
+| `telegram.groups` | No | `daily_report_and_notify` skips if absent or empty |
 
 ### Subprocess Scoping
 
@@ -258,7 +268,7 @@ Per-project subprocess calls (`gh issue list`, `gh issue create`) use `cwd=proje
 
 ### Issue Dedup Guard
 
-Step 10 uses two layers of deduplication to prevent duplicate GitHub issues:
+The `daily_report_and_notify` pipeline uses two layers of deduplication to prevent duplicate GitHub issues:
 
 1. **GitHub search** -- `issue_exists_for_date(date, cwd)` queries the target repo for existing issues with the same date title. This catches duplicates across separate reflections runs.
 2. **In-memory guard** -- A module-level `_created_this_run` set in `scripts/reflections_report.py` tracks `(date, cwd)` tuples created during the current process. This prevents race condition duplicates when multiple projects are processed rapidly and GitHub's search index hasn't updated yet. The guard is reset via `reset_dedup_guard()` at the start of each `step_create_github_issue()` call.
@@ -270,24 +280,24 @@ Step 10 uses two layers of deduplication to prevent duplicate GitHub issues:
 ### Graceful Fallbacks
 
 - `working_directory` absent from disk — project excluded from `load_local_projects()`
-- `github` key missing — steps 4 and 10 log a warning and skip that project
-- `telegram.groups` missing or empty — step 10 logs and skips
-- `data/valor.session` missing — step 10 skips silently
-- `TELEGRAM_API_ID`/`TELEGRAM_API_HASH` not set — step 10 skips silently
-- `telethon` not installed — step 10 skips silently
+- `github` key missing — `task_management` and `daily_report_and_notify` log a warning and skip that project
+- `telegram.groups` missing or empty — `daily_report_and_notify` logs and skips
+- `data/valor.session` missing — `daily_report_and_notify` skips silently
+- `TELEGRAM_API_ID`/`TELEGRAM_API_HASH` not set — `daily_report_and_notify` skips silently
+- `telethon` not installed — `daily_report_and_notify` skips silently
 
 ## Findings System
 
-Every step can record findings via `state.add_finding(category, finding_string)`. Findings accumulate in `state.findings` as `{category: [strings]}`.
+Every unit can record findings via `state.add_finding(category, finding_string)`. Findings accumulate in `state.findings` as `{category: [strings]}`.
 
 ### Findings Flow
 
-1. **Collected** — Steps append findings throughout execution
-2. **Checkpointed** — Saved to Redis ReflectionRun after each step
-3. **Reported** — Step 9 writes a local markdown report to `logs/reflections/`
-4. **Published** — Step 10 creates per-project GitHub issues and posts to Telegram
+1. **Collected** — Units append findings throughout execution
+2. **Checkpointed** — Saved to Redis ReflectionRun after each unit
+3. **Reported** — `daily_report_and_notify` writes a local markdown report to `logs/reflections/`
+4. **Published** — `daily_report_and_notify` creates per-project GitHub issues and posts to Telegram
 
-## Redis TTL Cleanup (Step 12)
+## Redis TTL Cleanup (`redis_ttl_cleanup`)
 
 Prunes expired records to keep Redis lean:
 
@@ -301,7 +311,7 @@ Prunes expired records to keep Redis lean:
 | ReflectionRun | 30 days | `cleanup_expired()` |
 | ReflectionIgnore | Per-entry TTL | `cleanup_expired()` |
 
-## Branch and Plan Cleanup (Step 14)
+## Branch and Plan Cleanup (`branch_plan_cleanup`)
 
 | Action | What It Does |
 |--------|--------------|
@@ -309,7 +319,7 @@ Prunes expired records to keep Redis lean:
 | Orphaned plan check | Ensures every `docs/plans/*.md` file has a matching open GitHub issue |
 | Completed plan detection | Flags plans where all checkboxes are checked — needs `/do-docs` then deletion |
 
-## Redis Data Quality (Step 13)
+## Redis Data Quality (`redis_data_quality`)
 
 | Check | What It Finds |
 |-------|---------------|
@@ -374,7 +384,7 @@ The scheduler picks it up on the next tick. No code changes or service restarts 
 | `config/reflections.yaml` | Declarative registry of all reflections |
 | `models/reflection.py` | Reflection state model (per-reflection Redis tracking) |
 | `models/reflections.py` | Legacy models (ReflectionRun for daily pipeline, ReflectionIgnore) |
-| `scripts/reflections.py` | Daily maintenance 15-step runner |
+| `scripts/reflections.py` | Daily maintenance 14-unit runner |
 | `scripts/reflections_report.py` | GitHub issue creation module |
 | `scripts/install_reflections.sh` | launchd installation script (legacy, kept for migration) |
 | `com.valor.reflections.plist` | launchd schedule definition (legacy, kept for migration) |
@@ -388,9 +398,9 @@ The scheduler picks it up on the next tick. No code changes or service restarts 
 |------------|---------|----------|
 | Redis (Popoto ORM) | All reflections | Yes — state persistence |
 | PyYAML | Registry loader | Yes — reads `config/reflections.yaml` |
-| `ANTHROPIC_API_KEY` | Daily maintenance steps 5, 7 | Conditional — LLM reflection and docs audit |
-| `gh` CLI (authenticated) | Daily maintenance steps 4, 8, 10, 14 | Conditional — task cleanup, bug issues |
-| `telethon` | Daily maintenance step 10 | Conditional — Telegram notifications |
+| `ANTHROPIC_API_KEY` | `documentation_audit`, `session_intelligence` | Conditional — LLM reflection and docs audit |
+| `gh` CLI (authenticated) | `task_management`, `session_intelligence`, `daily_report_and_notify`, `branch_plan_cleanup` | Conditional — task cleanup, bug issues |
+| `telethon` | `daily_report_and_notify` | Conditional — Telegram notifications |
 | `~/Desktop/Valor/projects.json` | Multi-repo reflections | Optional — defaults to AI repo only |
 
 ## Troubleshooting
@@ -403,9 +413,9 @@ The scheduler picks it up on the next tick. No code changes or service restarts 
 | Telegram post failed | Missing `data/valor.session` | Run `python scripts/telegram_login.py` |
 | Auto-fix not triggering | Confidence criteria not met | Check reflection has pattern >=10 chars and non-empty prevention |
 | State not resuming | Redis connection issue | Verify Redis is running |
-| Step stuck/timing out | Auto-fix subprocess hung | Check for 10-minute timeout; review `logs/reflections.log` |
+| Unit stuck/timing out | Auto-fix subprocess hung | Check for 10-minute timeout; review `logs/reflections.log` |
 
 ## See Also
 
-- [Documentation Audit](documentation-audit.md) — step 5 deep dive
-- [Skills Audit](do-skills-audit.md) — step 12 deep dive
+- [Documentation Audit](documentation-audit.md) — `documentation_audit` unit deep dive
+- [Skills Audit](do-skills-audit.md) — `skills_audit` unit deep dive
