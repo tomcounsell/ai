@@ -47,4 +47,6 @@ def get_machine_projects() -> list[dict]:
                 }
             )
 
+    persona_order = {"project-manager": 0, "developer": 1, "teammate": 2}
+    rows.sort(key=lambda r: (r["project_name"].lower(), persona_order.get(r["persona"], 99)))
     return rows
