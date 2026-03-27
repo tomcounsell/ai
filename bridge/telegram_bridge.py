@@ -1634,6 +1634,7 @@ async def main():
                                     timestamp=utc_now(),
                                     message_type="response",
                                     message_id=sent_msg_id,
+                                    reply_to_msg_id=reply_to_msg_id,
                                 )
                             except Exception:
                                 pass
