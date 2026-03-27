@@ -69,7 +69,7 @@ The `--check-only` output includes zombie count, PIDs, memory usage, and active 
 
 | Level | Condition | Action |
 |-------|-----------|--------|
-| 1 | Process not running | Simple restart (launchd) |
+| 1 | Process not running | Log crash event via `crash_tracker.log_crash("bridge_dead_on_watchdog_check")` + simple restart (launchd) |
 | 2 | Process running but logs stale | Kill stale + kill zombies + restart |
 | 3 | Lock files present | Kill stale + kill zombies + clear locks + restart |
 | 4 | Crash pattern detected | Kill stale + kill zombies + revert HEAD + restart (if enabled) |
@@ -94,11 +94,11 @@ Zombie cleanup is integrated into recovery levels 2+ to free memory before resta
 
 This is distinct from the loop-level crash guard (which marks sessions as `failed`). The `_safe_abandon_session()` helper handles the common case of race conditions during the abandon flow itself.
 
-### 5. Log Rotation (`scripts/valor-service.sh`)
+### 5. Log Rotation
 
-**Problem**: `bridge.error.log` is stderr redirected by launchd, so Python's `RotatingFileHandler` cannot manage it. The file grows unbounded.
+**`bridge.log`**: Managed by Python's `logging.handlers.RotatingFileHandler` (10MB max, 5 backups). Configured in `bridge/telegram_bridge.py` at startup. Prevents unbounded growth from verbose reflection runs.
 
-**Solution**: The `rotate_log()` function in `valor-service.sh` runs at bridge startup and rotates any log file exceeding 10MB. It keeps 3 backup copies (`.1`, `.2`, `.3`) using a shift pattern. Both `bridge.log` and `bridge.error.log` are rotated.
+**`bridge.error.log`**: Stderr redirected by launchd, so Python's handler cannot manage it. The `rotate_log()` function in `valor-service.sh` runs at bridge startup and rotates it if exceeding 10MB (3 backup copies).
 
 ### 6. Startup Redis Key Cleanup (`bridge/telegram_bridge.py`)
 
