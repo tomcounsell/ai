@@ -33,7 +33,11 @@ You are the **team lead** executing a plan document. You orchestrate work using 
 
 PLAN_ARG: $ARGUMENTS
 
-**If PLAN_ARG is empty or literally `$ARGUMENTS`**: The skill argument substitution did not run. Look at the user's original message in the conversation — they invoked this as `/do-build <argument>`. Extract whatever follows `/do-build` as the value of PLAN_ARG. Do NOT stop or report an error; just use the argument from the message.
+**If PLAN_ARG is empty or literally `$ARGUMENTS`**: The skill argument substitution did not run. Resolve PLAN_ARG using this priority order:
+
+1. **Check the user's message**: If the user's message contains `/do-build <something>`, extract `<something>` as PLAN_ARG.
+2. **Check conversation context**: Scan recent messages for an explicitly mentioned plan path (e.g., `docs/plans/foo.md`) or issue number (e.g., `#564`, `issue 564`). Use the most recently referenced one.
+3. **Still ambiguous**: STOP and ask the user: "Which plan should I build? Please provide a plan path (e.g., `docs/plans/foo.md`) or issue number (e.g., `#564`)." Do NOT guess or pick a plan at random.
 
 ## Plan Resolution
 
