@@ -89,18 +89,18 @@ No prerequisites -- this work uses only existing dependencies (`psutil`, `loggin
 ### Technical Approach
 
 - Add `timeout` field to `ReflectionEntry` dataclass with a per-type default (30 min function, 60 min agent)
-- Wrap `execute_function_reflection()` in `asyncio.wait_for()` using the entry's timeout
+- Wrap `execute_function_reflection()` in `asyncio.wait_for()` using the entry's timeout. **Note:** For sync callables running via `run_in_executor()`, `asyncio.wait_for()` raises `TimeoutError` but cannot cancel the thread — this is detection-only for sync functions. True enforcement would require subprocess execution (out of scope). The problematic `daily-maintenance` callable (`scripts.reflections.run_reflections_async`) is async, so `wait_for` cancellation works correctly for it.
 - Use `psutil.Process(os.getpid()).memory_info().rss` for memory snapshots (cheap, no overhead)
 - Log memory delta as structured field; warn at >100MB delta
 - Replace `logging.FileHandler` with `logging.handlers.RotatingFileHandler(maxBytes=10*1024*1024, backupCount=5)` in `bridge/telegram_bridge.py`
 - In `bridge_watchdog.py::check_bridge_health()`, when `is_bridge_running()` returns False, call `log_crash("bridge_dead_on_watchdog_check")`
-- Add `max_api_calls` parameter to `DocsAuditor.__init__()` (default 50); decrement counter per API call, raise when exhausted
+- Add `max_api_calls` parameter to `DocsAuditor.__init__()` (default 50); decrement counter per API call, log WARNING and stop processing remaining files when reached (return partial results, do not raise)
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
 - [ ] `execute_function_reflection`: already has try/except, test that `asyncio.TimeoutError` from `wait_for` is caught and logged as error status
-- [ ] `DocsAuditor` API call cap: test that exceeding the cap raises a clear exception (not silent truncation)
+- [ ] `DocsAuditor` API call cap: test that exceeding the cap logs a WARNING and stops processing (returns partial results, does not raise)
 - [ ] Memory snapshot failure (e.g., `psutil` import error): test that reflection still runs (memory monitoring is best-effort)
 
 ### Empty/Invalid Input Handling
@@ -323,13 +323,18 @@ No agent integration required -- this is bridge-internal infrastructure work. No
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
-| CONCERN | [agent-type] | [The concern raised] | [How/whether it was addressed] |
+| Severity | Critic | Finding | Resolution |
+|----------|--------|---------|------------|
+| BLOCKER | Skeptic, Operator | `asyncio.wait_for()` cannot cancel sync functions in `run_in_executor` | Documented as detection-only for sync callables; `daily-maintenance` is async so cancellation works for the primary use case |
+| BLOCKER | Adversary | Contradictory API cap behavior (raise vs no-raise) | Reconciled: cap logs WARNING and returns partial results, does not raise |
+| CONCERN | Simplifier | Memory warning threshold (100MB) may be too high | Kept 100MB — it's 1/8 of critical threshold (800MB), provides early warning without noise |
+| CONCERN | Archaeologist | No prior art for resource guards in this repo | Acknowledged — this is greenfield, kept simple |
+| NIT | Operator | Structural checks all passed | No action needed |
 
 ---
 
 ## Open Questions
 
-1. **Memory warning threshold**: The issue suggests 100MB. Is this the right threshold, or should it be lower (50MB) given the bridge's 800MB critical threshold? Higher thresholds miss problems; lower thresholds create noise.
-2. **Deferred `log-health-check` reflection**: The issue's Layer 3 (automated log scanning that posts GitHub issues for recurring error patterns) is deferred to keep this Medium appetite. Should it be tracked as a follow-up issue now, or wait until this ships?
-3. **`docs_auditor` cap of 50 API calls**: With ~30-50 doc files currently in `docs/`, a cap of 50 means it can audit all files. But if the docs directory grows, the cap may need adjustment. Is 50 the right default, or should it be higher (100)?
+1. ~~**Memory warning threshold**: 100MB~~ **Resolved**: Keep 100MB. It's 1/8 of the 800MB critical threshold — early warning without noise.
+2. ~~**Deferred `log-health-check` reflection**~~ **Resolved**: Track as follow-up issue after this ships. Not blocking.
+3. ~~**`docs_auditor` cap of 50 API calls**~~ **Resolved**: Keep 50 as default. It covers current doc count. The parameter is configurable if docs grow.
