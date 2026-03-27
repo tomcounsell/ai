@@ -48,9 +48,12 @@ def get_all_reflections() -> list[dict]:
     registry = _get_registry_map()
     states = {r.name: r for r in Reflection.get_all_states() if r.name}
 
+    now = time.time()
     reflections = []
     for name, config in registry.items():
         state = states.get(name)
+        next_due = state.next_due if state else None
+        due_in_seconds = (next_due - now) if next_due else None
         reflections.append(
             {
                 "name": name,
@@ -60,7 +63,9 @@ def get_all_reflections() -> list[dict]:
                 "enabled": config.get("enabled", True),
                 "execution_type": config.get("execution_type", "unknown"),
                 "last_run": state.last_run if state else None,
-                "next_due": state.next_due if state else None,
+                "next_due": next_due,
+                "due_in_seconds": due_in_seconds,
+                "overdue": due_in_seconds < 0 if due_in_seconds is not None else False,
                 "run_count": state.run_count if state else 0,
                 "last_status": state.last_status if state else "pending",
                 "last_error": state.last_error if state else None,
@@ -71,7 +76,12 @@ def get_all_reflections() -> list[dict]:
             }
         )
 
-    return reflections
+    # Sort: entries with next_due first (soonest first), then entries without
+    with_due = [r for r in reflections if r["next_due"] is not None]
+    without_due = [r for r in reflections if r["next_due"] is None]
+    with_due.sort(key=lambda r: r["next_due"])
+
+    return with_due + without_due
 
 
 def get_schedule() -> list[dict]:

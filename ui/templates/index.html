@@ -29,55 +29,6 @@
     {% endif %}
 </section>
 
-{# ── Schedule ── #}
-<section id="schedule" class="mt-8">
-    <h2>Schedule</h2>
-    {% if schedule %}
-    <table class="data-table">
-        <thead>
-            <tr>
-                <th>Name</th>
-                <th>Status</th>
-                <th>Next Due</th>
-                <th>Time Until</th>
-                <th>Interval</th>
-                <th>Last Run</th>
-                <th>Priority</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for r in schedule %}
-            <tr>
-                <td>
-                    <span class="card-title">{{ r.name }}</span>
-                    {% if not r.enabled %}
-                    <span class="badge badge-skipped">disabled</span>
-                    {% endif %}
-                </td>
-                <td>{{ status_badge(r.last_status) }}</td>
-                <td class="mono">{{ format_ts(r.next_due) }}</td>
-                <td class="mono">
-                    {% if r.overdue %}
-                    <span style="color: var(--red);">{{ relative_time(r.due_in_seconds) }}</span>
-                    {% else %}
-                    {{ relative_time(r.due_in_seconds) }}
-                    {% endif %}
-                </td>
-                <td class="mono">{{ format_interval(r.interval) }}</td>
-                <td class="mono">{{ format_ts(r.last_run) }}</td>
-                <td><span class="badge badge-{{ r.priority }}">{{ r.priority }}</span></td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
-    {% else %}
-    <div class="empty-state">
-        <h3>No reflections scheduled</h3>
-        <p>Add reflections to <code>config/reflections.yaml</code>.</p>
-    </div>
-    {% endif %}
-</section>
-
 {# ── Ignore Patterns ── #}
 <section id="ignores" class="mt-8">
     <h2>Ignore Patterns</h2>
