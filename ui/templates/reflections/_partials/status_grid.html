@@ -16,11 +16,11 @@
             <td>
                 <div class="card-title">{{ r.name }}</div>
                 <div class="text-muted" style="font-size: 12px;">{{ r.description }}</div>
-                {% if not r.enabled %}
-                <span class="badge badge-skipped">disabled</span>
+                {% if r.last_error %}
+                <div style="font-size: 11px; color: var(--red); margin-top: 4px; font-family: var(--font-mono);">{{ r.last_error }}</div>
                 {% endif %}
             </td>
-            <td>{{ status_badge(r.last_status) }}</td>
+            <td>{% if not r.enabled %}<span class="badge badge-skipped">disabled</span>{% else %}{{ status_badge(r.last_status) }}{% endif %}</td>
             <td class="mono">{{ format_ts(r.last_run) }}</td>
             <td class="mono">
                 <span style="display: inline-block; min-width: 5ch;">{{ format_interval(r.interval) }}</span>
@@ -29,13 +29,6 @@
             </td>
             <td><span class="badge badge-{{ r.priority }}">{{ r.priority }}</span></td>
         </tr>
-        {% if r.last_error %}
-        <tr>
-            <td colspan="5" style="padding: 4px 12px 8px;">
-                <div class="log-viewer" style="max-height: 100px; font-size: 11px;">{{ r.last_error }}</div>
-            </td>
-        </tr>
-        {% endif %}
         {% endfor %}
     </tbody>
 </table>
