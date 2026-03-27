@@ -19,6 +19,7 @@ directly from the appropriate sub-module.
 import asyncio
 import json
 import logging
+import logging.handlers
 import os
 import signal
 import subprocess
@@ -525,7 +526,11 @@ logging.basicConfig(
 # bridge.*, tools.*, etc.) inherit it automatically. Without this, only
 # the bridge.telegram_bridge module logger would write to bridge.log.
 root_logger = logging.getLogger()
-file_handler = logging.FileHandler(LOG_DIR / "bridge.log")
+file_handler = logging.handlers.RotatingFileHandler(
+    LOG_DIR / "bridge.log",
+    maxBytes=10 * 1024 * 1024,  # 10MB per file
+    backupCount=5,
+)
 file_handler.setLevel(logging.DEBUG)
 # Use JSON formatter for structured logging (parseable by log aggregation tools)
 # Falls back to plain text if the module can't be imported
@@ -850,8 +855,9 @@ async def main():
         # Save to subconscious memory (non-fatal, never crashes bridge)
         try:
             if text and text.strip() and not getattr(sender, "bot", False):
-                from models.memory import Memory
                 from popoto import InteractionWeight
+
+                from models.memory import Memory
 
                 Memory.safe_save(
                     agent_id=sender_name or "unknown",

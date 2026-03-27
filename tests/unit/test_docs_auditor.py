@@ -583,3 +583,55 @@ class TestNormalizeFilename:
         path = Path("docs/features/OLD_NAME.md")
         result = auditor._normalize_filename(path)
         assert result == Path("docs/features/old-name.md")
+
+
+# ---------------------------------------------------------------------------
+# API call cap enforcement
+# ---------------------------------------------------------------------------
+
+
+class TestApiCallCap:
+    def test_default_cap_is_50(self, repo: Path) -> None:
+        a = DocsAuditor(repo_root=repo, dry_run=True)
+        assert a.max_api_calls == 50
+
+    def test_custom_cap(self, repo: Path) -> None:
+        a = DocsAuditor(repo_root=repo, dry_run=True, max_api_calls=10)
+        assert a.max_api_calls == 10
+
+    def test_cap_stops_processing(self, repo: Path) -> None:
+        """When API call cap is reached, remaining files are skipped."""
+        # Create 5 doc files
+        for i in range(5):
+            (repo / "docs" / f"doc{i}.md").write_text(f"# Doc {i}")
+
+        # Set cap to 2 API calls
+        a = DocsAuditor(repo_root=repo, dry_run=True, max_api_calls=2)
+        mock_verdict = Verdict(action="KEEP", rationale="All good")
+
+        call_count = 0
+
+        def counting_analyze(path):
+            nonlocal call_count
+            call_count += 1
+            a._api_call_count += 1  # simulate what _call_llm_for_verdict does
+            return mock_verdict
+
+        with patch.object(a, "analyze_doc", side_effect=counting_analyze):
+            summary = a.run()
+
+        # Should have stopped after 2 calls (the cap)
+        assert call_count == 2
+        assert len(summary.verdicts) == 2
+
+    def test_zero_cap_processes_no_files(self, repo: Path) -> None:
+        """max_api_calls=0 should process zero files."""
+        (repo / "docs" / "doc.md").write_text("# Doc")
+        a = DocsAuditor(repo_root=repo, dry_run=True, max_api_calls=0)
+
+        mock_verdict = Verdict(action="KEEP", rationale="All good")
+        with patch.object(a, "analyze_doc", return_value=mock_verdict) as mock_analyze:
+            summary = a.run()
+
+        mock_analyze.assert_not_called()
+        assert len(summary.verdicts) == 0

@@ -47,7 +47,12 @@ class TestReflectionRunModel:
 
         ReflectionRun.create(
             date="2026-03-02",
-            completed_steps=["legacy_code_scan", "log_review", "task_management", "documentation_audit"],
+            completed_steps=[
+                "legacy_code_scan",
+                "log_review",
+                "task_management",
+                "documentation_audit",
+            ],
             daily_report=[],
             findings={},
             session_analysis={},
@@ -60,7 +65,10 @@ class TestReflectionRunModel:
 
         run = ReflectionRun.load_or_create("2026-03-02")
         assert run.completed_steps == [
-            "legacy_code_scan", "log_review", "task_management", "documentation_audit"
+            "legacy_code_scan",
+            "log_review",
+            "task_management",
+            "documentation_audit",
         ]
 
     def test_save_checkpoint(self):
@@ -69,8 +77,12 @@ class TestReflectionRunModel:
 
         run = ReflectionRun.load_or_create("2026-03-03")
         run.completed_steps = [
-            "legacy_code_scan", "log_review", "task_management",
-            "documentation_audit", "skills_audit", "redis_ttl_cleanup",
+            "legacy_code_scan",
+            "log_review",
+            "task_management",
+            "documentation_audit",
+            "skills_audit",
+            "redis_ttl_cleanup",
         ]
         run.save_checkpoint()
 
@@ -278,14 +290,20 @@ class TestReflectionsStateSave:
 
         state = ReflectionsState(date="2026-02-25")
         state.completed_steps = [
-            "legacy_code_scan", "log_review", "task_management", "documentation_audit"
+            "legacy_code_scan",
+            "log_review",
+            "task_management",
+            "documentation_audit",
         ]
         state.save()
 
         runs = ReflectionRun.query.filter(date="2026-02-25")
         assert len(runs) == 1
         assert runs[0].completed_steps == [
-            "legacy_code_scan", "log_review", "task_management", "documentation_audit"
+            "legacy_code_scan",
+            "log_review",
+            "task_management",
+            "documentation_audit",
         ]
 
 

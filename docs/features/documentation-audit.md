@@ -105,7 +105,7 @@ Exempt from renaming: `README.md`, `CHANGELOG.md`, `LICENSE.md`, `CONTRIBUTING.m
 ```python
 from scripts.docs_auditor import DocsAuditor
 
-auditor = DocsAuditor(repo_root=Path("."), dry_run=False)
+auditor = DocsAuditor(repo_root=Path("."), dry_run=False, max_api_calls=50)
 summary = auditor.run()
 ```
 

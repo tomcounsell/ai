@@ -285,6 +285,12 @@ def check_bridge_health() -> HealthStatus:
     if not running:
         issues.append("Bridge process not running")
         recovery_level = max(recovery_level, 1)
+        # Record the crash event so crash_tracker has a record of bridge deaths
+        # detected by the watchdog (e.g., SIGKILL, OOM kills leave no traceback)
+        try:
+            log_crash("bridge_dead_on_watchdog_check")
+        except Exception as e:
+            logger.debug(f"Failed to log crash event: {e}")
 
     # Check 2: Logs fresh (only if process is "running")
     logs_fresh = are_logs_fresh()

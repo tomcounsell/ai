@@ -11,6 +11,7 @@ Tests cover:
 
 from __future__ import annotations
 
+import asyncio
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -19,11 +20,15 @@ import pytest
 import yaml
 
 from agent.reflection_scheduler import (
+    DEFAULT_AGENT_TIMEOUT,
+    DEFAULT_FUNCTION_TIMEOUT,
     ReflectionEntry,
     ReflectionScheduler,
+    _get_memory_rss,
     is_reflection_due,
     is_reflection_running,
     load_registry,
+    run_reflection,
 )
 
 # === Registry Loading Tests ===
@@ -486,3 +491,211 @@ class TestRegistryIntegrity:
         names = {e["name"] for e in data["reflections"]}
         expected = {"health-check", "orphan-recovery", "stale-branch-cleanup", "daily-maintenance"}
         assert expected.issubset(names), f"Missing reflections: {expected - names}"
+
+
+# === Timeout Field Tests ===
+
+
+class TestTimeoutField:
+    """Tests for the timeout field on ReflectionEntry."""
+
+    def test_timeout_defaults_to_none(self):
+        entry = ReflectionEntry(
+            name="test",
+            description="",
+            interval=300,
+            priority="low",
+            execution_type="function",
+            callable="some.func",
+        )
+        assert entry.timeout is None
+
+    def test_effective_timeout_function_default(self):
+        entry = ReflectionEntry(
+            name="test",
+            description="",
+            interval=300,
+            priority="low",
+            execution_type="function",
+            callable="some.func",
+        )
+        assert entry.effective_timeout() == DEFAULT_FUNCTION_TIMEOUT
+
+    def test_effective_timeout_agent_default(self):
+        entry = ReflectionEntry(
+            name="test",
+            description="",
+            interval=300,
+            priority="low",
+            execution_type="agent",
+            command="echo hi",
+        )
+        assert entry.effective_timeout() == DEFAULT_AGENT_TIMEOUT
+
+    def test_explicit_timeout_overrides_default(self):
+        entry = ReflectionEntry(
+            name="test",
+            description="",
+            interval=300,
+            priority="low",
+            execution_type="function",
+            callable="some.func",
+            timeout=120,
+        )
+        assert entry.effective_timeout() == 120
+
+    def test_negative_timeout_fails_validation(self):
+        entry = ReflectionEntry(
+            name="test",
+            description="",
+            interval=300,
+            priority="low",
+            execution_type="function",
+            callable="some.func",
+            timeout=-5,
+        )
+        errors = entry.validate()
+        assert any("timeout" in e for e in errors)
+
+    def test_zero_timeout_fails_validation(self):
+        entry = ReflectionEntry(
+            name="test",
+            description="",
+            interval=300,
+            priority="low",
+            execution_type="function",
+            callable="some.func",
+            timeout=0,
+        )
+        errors = entry.validate()
+        assert any("timeout" in e for e in errors)
+
+    def test_positive_timeout_passes_validation(self):
+        entry = ReflectionEntry(
+            name="test",
+            description="",
+            interval=300,
+            priority="low",
+            execution_type="function",
+            callable="some.func",
+            timeout=600,
+        )
+        assert entry.validate() == []
+
+    def test_load_registry_parses_timeout(self):
+        """Timeout field is parsed from YAML."""
+        tmp = Path("/tmp/test_reflections_timeout.yaml")
+        tmp.write_text(
+            yaml.dump(
+                {
+                    "reflections": [
+                        {
+                            "name": "with-timeout",
+                            "interval": 300,
+                            "priority": "low",
+                            "execution_type": "function",
+                            "callable": "some.func",
+                            "timeout": 120,
+                        },
+                        {
+                            "name": "without-timeout",
+                            "interval": 300,
+                            "priority": "low",
+                            "execution_type": "function",
+                            "callable": "some.func",
+                        },
+                    ]
+                }
+            )
+        )
+        entries = load_registry(tmp)
+        assert len(entries) == 2
+        assert entries[0].timeout == 120
+        assert entries[1].timeout is None
+        tmp.unlink()
+
+
+# === Memory Instrumentation Tests ===
+
+
+class TestMemoryInstrumentation:
+    """Tests for psutil memory snapshots."""
+
+    def test_get_memory_rss_returns_int(self):
+        """_get_memory_rss returns an integer (bytes) when psutil is available."""
+        result = _get_memory_rss()
+        # psutil is in pyproject.toml so should be available
+        assert result is not None
+        assert isinstance(result, int)
+        assert result > 0
+
+    def test_get_memory_rss_handles_import_error(self):
+        """_get_memory_rss returns None if psutil is unavailable."""
+        with patch.dict("sys.modules", {"psutil": None}):
+            with patch("builtins.__import__", side_effect=ImportError("no psutil")):
+                result = _get_memory_rss()
+                assert result is None
+
+
+# === Timeout Enforcement Tests ===
+
+
+class TestTimeoutEnforcement:
+    """Tests for asyncio.wait_for timeout in run_reflection."""
+
+    @pytest.mark.asyncio
+    async def test_timeout_error_logged_as_error(self):
+        """TimeoutError from wait_for is caught and logged as error status."""
+        entry = ReflectionEntry(
+            name="slow-reflection",
+            description="",
+            interval=300,
+            priority="low",
+            execution_type="function",
+            callable="some.func",
+            timeout=1,  # 1 second timeout
+        )
+        state = MagicMock()
+
+        # Mock execute_function_reflection to be slow
+        async def slow_func(e):
+            await asyncio.sleep(10)
+
+        with patch("agent.reflection_scheduler.execute_function_reflection", side_effect=slow_func):
+            with patch("agent.reflection_scheduler._get_memory_rss", return_value=100_000_000):
+                await run_reflection(entry, state)
+
+        # Should have marked as completed with a timeout error
+        state.mark_completed.assert_called_once()
+        args, kwargs = state.mark_completed.call_args
+        assert "error" in kwargs or (len(args) > 1 and "Timeout" in str(args[1]))
+        # Check it was called with an error keyword
+        if "error" in kwargs:
+            assert "TimeoutError" in kwargs["error"] or "timeout" in kwargs["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_memory_delta_warning_logged(self):
+        """Memory delta > 100MB triggers a warning log."""
+        entry = ReflectionEntry(
+            name="memory-hog",
+            description="",
+            interval=300,
+            priority="low",
+            execution_type="function",
+            callable="some.func",
+        )
+        state = MagicMock()
+
+        # Simulate 200MB memory increase
+        mem_before = 100 * 1024 * 1024  # 100MB
+        mem_after = 350 * 1024 * 1024  # 350MB (delta = 250MB > 100MB threshold)
+
+        with patch("agent.reflection_scheduler.execute_function_reflection", return_value=None):
+            with patch(
+                "agent.reflection_scheduler._get_memory_rss", side_effect=[mem_before, mem_after]
+            ):
+                with patch("agent.reflection_scheduler.logger") as mock_logger:
+                    await run_reflection(entry, state)
+                    # Check that warning was logged about high memory delta
+                    warning_calls = [str(c) for c in mock_logger.warning.call_args_list]
+                    assert any("HIGH MEMORY DELTA" in str(c) for c in warning_calls)
