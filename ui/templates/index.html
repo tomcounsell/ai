@@ -40,7 +40,6 @@
                 <th>Persona</th>
                 <th>Project</th>
                 <th>GitHub</th>
-                <th>Auto-merge</th>
             </tr>
         </thead>
         <tbody>
@@ -55,7 +54,6 @@
                 </td>
                 <td>{{ row.project_name }}</td>
                 <td class="mono">{{ row.github or '-' }}</td>
-                <td>{% if row.auto_merge %}<span class="badge badge-success">yes</span>{% else %}<span class="text-muted">no</span>{% endif %}</td>
             </tr>
             {% endfor %}
         </tbody>

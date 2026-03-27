@@ -16,7 +16,7 @@ def get_machine_name() -> str:
 def get_machine_projects() -> list[dict]:
     """Return rows for each Telegram group active on this machine.
 
-    Each row has: group_name, persona, project_name, github, auto_merge.
+    Each row has: group_name, persona, project_name, github.
     """
     config_path = Path("~/Desktop/Valor/projects.json").expanduser()
     if not config_path.exists():
@@ -44,7 +44,6 @@ def get_machine_projects() -> list[dict]:
                     "persona": group_cfg.get("persona", ""),
                     "project_name": project.get("name", project_key),
                     "github": github_str,
-                    "auto_merge": project.get("auto_merge", False),
                 }
             )
 

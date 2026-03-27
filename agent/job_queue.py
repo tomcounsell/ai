@@ -1495,7 +1495,7 @@ DRAIN_TIMEOUT = 1.5  # seconds
 _active_workers: dict[str, asyncio.Task] = {}
 _active_events: dict[str, asyncio.Event] = {}
 
-# Project configs registered by the bridge (for auto_merge lookup etc.)
+# Project configs registered by the bridge
 _project_configs: dict[str, dict] = {}
 
 # Callbacks registered by the bridge for sending messages and reactions

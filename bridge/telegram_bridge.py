@@ -850,8 +850,9 @@ async def main():
         # Save to subconscious memory (non-fatal, never crashes bridge)
         try:
             if text and text.strip() and not getattr(sender, "bot", False):
-                from models.memory import Memory
                 from popoto import InteractionWeight
+
+                from models.memory import Memory
 
                 Memory.safe_save(
                     agent_id=sender_name or "unknown",
@@ -1600,7 +1601,6 @@ async def main():
     from agent.job_queue import register_callbacks as register_queue_callbacks
 
     for _pkey, _pconfig in CONFIG.get("projects", {}).items():
-        # Register project config so job queue can read auto_merge etc.
         register_project_config(_pkey, _pconfig)
         _wd = _pconfig.get("working_directory", DEFAULTS.get("working_directory", ""))
         if not _wd:
