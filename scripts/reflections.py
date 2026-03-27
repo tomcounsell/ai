@@ -590,8 +590,14 @@ class ReflectionRunner:
                 logger.debug("Could not save state after Redis-down detection (expected)")
             return False
 
-        # Steps that need gh CLI (bug filing, issue creation)
-        gh_steps = {"session_intelligence", "daily_report_and_notify"}
+        # Steps that need gh CLI (bug filing, issue creation, issue list/view)
+        # task_management and branch_plan_cleanup also call gh CLI but fail soft via try/except
+        gh_steps = {
+            "session_intelligence",
+            "daily_report_and_notify",
+            "task_management",
+            "branch_plan_cleanup",
+        }
         if step_key in gh_steps:
             try:
                 import shutil
