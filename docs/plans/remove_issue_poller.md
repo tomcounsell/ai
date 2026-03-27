@@ -233,7 +233,48 @@ Using builder + validator from Tier 1 core types.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Plan**: docs/plans/remove_issue_poller.md
+**Issue**: #565
+**Critics**: Skeptic, Operator, Archaeologist, Adversary, Simplifier, User
+**Findings**: 3 total (0 blockers, 3 concerns, 0 nits)
+
+### Concerns
+
+#### 1. Task 2 missing `scripts/remote-update.sh` edit
+- **Severity**: CONCERN
+- **Critics**: Operator, Skeptic
+- **Location**: Step by Step Tasks > Task 2 / Update System section
+- **Finding**: The Update System section explicitly states `scripts/remote-update.sh` references `install_issue_poller.sh`, but grep confirms the script does NOT contain that reference -- only `.claude/skills/update/SKILL.md` does. The prose is misleading but the task list is actually correct. No action required, but the Update System section text should be tightened to avoid confusing the builder.
+- **Suggestion**: Edit the Update System section to say "The update skill (`.claude/skills/update/SKILL.md`) and setup skill..." instead of referencing `scripts/remote-update.sh`.
+
+#### 2. Success criterion references `/do-docs` with no corresponding task
+- **Severity**: CONCERN
+- **Critics**: Skeptic, Operator
+- **Location**: Success Criteria
+- **Finding**: Success criterion "Documentation updated (`/do-docs`)" implies running the `/do-docs` skill as a separate step, but no task in the Step by Step Tasks section invokes `/do-docs`. Task 2 handles manual doc edits, which may be sufficient, but the criterion is ambiguous about whether `/do-docs` needs to run separately.
+- **Suggestion**: Either remove the `/do-docs` reference from success criteria (since Task 2 covers all doc edits manually) or add an explicit task to run `/do-docs` after Task 2.
+
+#### 3. No explicit task for log file cleanup verification
+- **Severity**: CONCERN
+- **Critics**: Operator
+- **Location**: Step by Step Tasks > Task 1 / Task 5
+- **Finding**: Task 1 deletes log files (`logs/issue_poller.log`, `logs/issue_poller_error.log`) but Task 5 (validation) does not verify they were removed. This is low-risk since `rm -f` is idempotent, but the validation step is incomplete relative to the deletion step.
+- **Suggestion**: Add a quick check in Task 5: verify `logs/issue_poller.log` does not exist.
+
+### Structural Check Results
+
+| Check | Status | Detail |
+|-------|--------|--------|
+| Required sections | PASS | Documentation, Update System, Agent Integration, Test Impact all present and non-empty |
+| Task numbering | PASS | Tasks 1-5, sequential, no gaps |
+| Dependencies valid | PASS | All `Depends On` references point to valid task IDs |
+| File paths exist | PASS | 16 of 16 referenced files exist (8 to delete, 8 to edit) |
+| Prerequisites met | PASS | No prerequisites declared |
+| Cross-references | PASS | All success criteria map to tasks (with minor `/do-docs` ambiguity noted above); no-gos and rabbit holes do not appear in solution |
+
+### Verdict
+
+**READY TO BUILD** -- No blockers. The three concerns are minor documentation/ambiguity issues that do not affect execution correctness. The plan is thorough, well-scoped, and all referenced files exist as expected.
 
 ---
 
