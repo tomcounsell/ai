@@ -29,7 +29,7 @@ EXTRACTION_PROMPT = (
     '  "tags": list of domain tags (1-3 short keywords)\n'
     "\n"
     "Only include genuinely novel, specific observations.\n"
-    'If none, return: []\n'
+    "If none, return: []\n"
     "\n"
     "Example:\n"
     '[{"category": "decision", "observation": "chose blue-green deployment over rolling updates",'

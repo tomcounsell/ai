@@ -99,12 +99,14 @@ def search(
         filtered_records = result.records
         if category:
             filtered_records = [
-                r for r in filtered_records
+                r
+                for r in filtered_records
                 if (getattr(r, "metadata", None) or {}).get("category") == category
             ]
         if tag:
             filtered_records = [
-                r for r in filtered_records
+                r
+                for r in filtered_records
                 if tag in (getattr(r, "metadata", None) or {}).get("tags", [])
             ]
 

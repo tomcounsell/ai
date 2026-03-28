@@ -218,14 +218,16 @@ class TestParseCategorizedObservations:
 
         from agent.memory_extraction import CATEGORY_IMPORTANCE, _parse_categorized_observations
 
-        raw = json.dumps([
-            {
-                "category": "correction",
-                "observation": "Redis SCAN is preferred over KEYS in production",
-                "file_paths": ["bridge/telegram_bridge.py"],
-                "tags": ["redis", "performance"],
-            }
-        ])
+        raw = json.dumps(
+            [
+                {
+                    "category": "correction",
+                    "observation": "Redis SCAN is preferred over KEYS in production",
+                    "file_paths": ["bridge/telegram_bridge.py"],
+                    "tags": ["redis", "performance"],
+                }
+            ]
+        )
         result = _parse_categorized_observations(raw)
         assert len(result) == 1
         content, importance, metadata = result[0]
@@ -241,12 +243,14 @@ class TestParseCategorizedObservations:
 
         from agent.memory_extraction import _parse_categorized_observations
 
-        raw = json.dumps({
-            "category": "decision",
-            "observation": "chose blue-green deployment over rolling updates",
-            "file_paths": [],
-            "tags": ["deployment"],
-        })
+        raw = json.dumps(
+            {
+                "category": "decision",
+                "observation": "chose blue-green deployment over rolling updates",
+                "file_paths": [],
+                "tags": ["deployment"],
+            }
+        )
         result = _parse_categorized_observations(raw)
         assert len(result) == 1
         assert result[0][2]["category"] == "decision"
