@@ -317,6 +317,61 @@ def _extract_bigrams(text: str) -> set[tuple[str, ...]]:
     return unigrams | bigrams
 
 
+def _persist_outcome_metadata(
+    memories: list,
+    outcome_map: dict[str, str],
+) -> None:
+    """Persist dismissal/acted outcome data in Memory metadata.
+
+    Updates dismissal_count and last_outcome in each memory's metadata dict.
+    When dismissal_count reaches the threshold, decays importance.
+    Resets dismissal_count on "acted" outcomes.
+
+    Runs after ObservationProtocol to avoid conflicting saves.
+    All exceptions are caught per-record -- one failure does not block others.
+    """
+    from config.memory_defaults import (
+        DISMISSAL_DECAY_THRESHOLD,
+        DISMISSAL_IMPORTANCE_DECAY,
+        MIN_IMPORTANCE_FLOOR,
+    )
+
+    for m in memories:
+        mid = getattr(m, "memory_id", "")
+        if mid not in outcome_map:
+            continue
+        outcome = outcome_map[mid]
+        try:
+            meta = getattr(m, "metadata", None) or {}
+            if not isinstance(meta, dict):
+                meta = {}
+
+            if outcome == "dismissed":
+                meta["dismissal_count"] = meta.get("dismissal_count", 0) + 1
+                meta["last_outcome"] = "dismissed"
+                # Check threshold for importance decay
+                if meta["dismissal_count"] >= DISMISSAL_DECAY_THRESHOLD:
+                    current_importance = getattr(m, "importance", 1.0)
+                    new_importance = max(
+                        current_importance * DISMISSAL_IMPORTANCE_DECAY,
+                        MIN_IMPORTANCE_FLOOR,
+                    )
+                    m.importance = new_importance
+                    meta["dismissal_count"] = 0  # reset after decay
+                    logger.debug(
+                        f"[memory_extraction] Decayed importance for {mid}: "
+                        f"{current_importance} -> {new_importance}"
+                    )
+            elif outcome == "acted":
+                meta["dismissal_count"] = 0  # reset on positive signal
+                meta["last_outcome"] = "acted"
+
+            m.metadata = meta
+            m.save()
+        except Exception:
+            continue  # fail-silent per record
+
+
 async def detect_outcomes_async(
     injected_thoughts: list[tuple[str, str]],
     response_text: str,
@@ -384,6 +439,11 @@ async def detect_outcomes_async(
                         f"[memory_extraction] Outcome detection: "
                         f"{acted} acted, {dismissed} dismissed"
                     )
+
+                # Persist dismissal/acted data in metadata
+                # Done after ObservationProtocol to avoid conflicting saves
+                _persist_outcome_metadata(memories, outcome_map)
+
         except Exception as e:
             logger.warning(f"[memory_extraction] ObservationProtocol failed (non-fatal): {e}")
 
