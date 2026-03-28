@@ -1,5 +1,5 @@
 ---
-status: Draft
+status: Critiqued
 type: enhancement
 appetite: Large
 owner: Valor
@@ -380,7 +380,7 @@ If latency consistently exceeds 15ms in testing, reduce `max_clusters` to 2.
 ## Test Impact
 
 - [ ] `tests/unit/test_memory_extraction.py::TestParseCategorizedObservations` -- UPDATE: return type changes from `list[tuple[str, float]]` to `list[tuple[str, float, dict]]`; all 6 test cases in this class need updated assertions
-- [ ] `tests/unit/test_memory_extraction.py::TestExtractObservationsAsync` -- UPDATE: mock Haiku responses need to return JSON format; existing line-based test cases become fallback-path tests
+- [ ] `tests/unit/test_memory_extraction.py::TestRunPostSessionExtraction` -- UPDATE: mock Haiku responses need to return JSON format; existing line-based test cases become fallback-path tests
 - [ ] `tests/unit/test_memory_extraction.py::TestDetectOutcomes` -- UPDATE: add assertions for metadata persistence (dismissal_count, last_outcome) after outcome detection
 - [ ] `tests/unit/test_memory_hook.py::TestCheckAndInject` -- UPDATE: add test cases for multi-query decomposition path (keywords > 5 triggering clustering)
 - [ ] `tests/unit/test_memory_hook.py` -- no changes needed for `TestExtractTopicKeywords` (keyword extraction is unchanged)
@@ -571,7 +571,85 @@ No agent integration changes required. The memory system is an internal pipeline
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Plan**: docs/plans/memory-retrieval-enhancement.md
+**Issue**: #583
+**Critics**: Skeptic, Operator, Archaeologist, Adversary, Simplifier, User
+**Findings**: 0 blockers, 5 concerns, 3 nits
+
+### Structural Check Results
+
+| Check | Status | Detail |
+|-------|--------|--------|
+| Required sections | PASS | Documentation, Update System, Agent Integration, Test Impact all present |
+| Task numbering | PASS | Tasks 1-8 sequential, no gaps |
+| Dependencies valid | PASS | All Depends On references resolve to valid task IDs |
+| File paths exist | PASS | All 11 referenced files exist in the codebase |
+| Prerequisites met | PASS | No prerequisites declared |
+| Cross-references | CONCERN | Test Impact references `TestExtractObservationsAsync` -- class does not exist; actual name is `TestRunPostSessionExtraction` |
+
+### Concerns
+
+#### C1. Test Impact references nonexistent test class
+- **Severity**: CONCERN
+- **Critics**: Archaeologist (structural check)
+- **Location**: Test Impact section, line 383
+- **Finding**: The plan references `tests/unit/test_memory_extraction.py::TestExtractObservationsAsync` but the actual class in that file is `TestRunPostSessionExtraction`. The builder may waste time looking for a class that does not exist.
+- **Suggestion**: Replace `TestExtractObservationsAsync` with `TestRunPostSessionExtraction` in the Test Impact section.
+
+#### C2. Win 2 modifies memories inside detect_outcomes_async but does not re-query them
+- **Severity**: CONCERN
+- **Critics**: Skeptic, Adversary
+- **Location**: Solution, Win 2 section (2b)
+- **Finding**: The plan proposes loading memories via `Memory.query.filter(memory_id=key)` inside `detect_outcomes_async()`, then updating `m.metadata` and calling `m.save()`. However, the current code (line 336-343 of `agent/memory_extraction.py`) already loads memories this way. The concern is that `metadata` is a new field -- old Memory records fetched from Redis will return `{}` for metadata (which is correct), but the plan's code snippet does `meta = getattr(m, "metadata", {}) or {}`. If Popoto's DictField returns `None` for records that were saved before the field was added (rather than the default `dict`), this would silently create metadata on every old record that gets outcome-detected. This is additive and not harmful, but the plan should explicitly acknowledge that old records will gradually gain metadata dicts through outcome detection, not just through extraction.
+- **Suggestion**: Add a note in the Solution section acknowledging that outcome detection will backfill metadata on old records as a side effect (which is actually desirable behavior).
+
+#### C3. _cluster_keywords uses positional splitting which ignores semantic grouping
+- **Severity**: CONCERN
+- **Critics**: Skeptic, Simplifier
+- **Location**: Solution, Win 3 section (3a)
+- **Finding**: The clustering function splits keywords by position (index-based chunking). Keywords are appended in buffer order from `extract_topic_keywords()`, which processes tool calls chronologically. This means keywords from the same tool call are adjacent, so positional splitting roughly groups by tool call. However, if a user works on two interleaved topics (e.g., reading bridge code then memory code then bridge code again), the positional split will produce mixed clusters rather than topical ones. The plan's Rabbit Holes section correctly says "do not build NLP clustering" but does not acknowledge the interleaving limitation.
+- **Suggestion**: This is acceptable for v1. Add a comment in the code noting the limitation and that keyword ordering is chronological by tool call window. No code change needed.
+
+#### C4. Multi-query latency budget assumes ~5ms per ContextAssembler call without measurement
+- **Severity**: CONCERN
+- **Critics**: Operator, Skeptic
+- **Location**: Risks, Risk 2
+- **Finding**: The plan states "each additional ContextAssembler call adds ~5ms" and sets a 15ms budget. The current single-query path is not instrumented, so the baseline is unknown. If a single call already takes 10ms (which is plausible for a Redis round-trip with scoring), then 2-3 calls would exceed 15ms routinely. The 15ms threshold in the latency guard (3d) would fire constantly, producing log noise.
+- **Suggestion**: Before building Win 3, measure the current single-query ContextAssembler latency in production. Set the warning threshold to 2x the measured baseline rather than a fixed 15ms.
+
+#### C5. Bridge parity (Task 6) validates via "manual testing" -- no automated verification
+- **Severity**: CONCERN
+- **Critics**: Operator
+- **Location**: Task 6 (bridge-parity)
+- **Finding**: Task 6 is the only task with "manual testing via Claude Code session" as its validation method. The other tasks reference specific test files. Since the bridge recall() function closely mirrors check_and_inject(), the multi-query path should be testable via the same mock patterns used in test_memory_hook.py.
+- **Suggestion**: Add a unit test for the bridge recall() multi-query path in the memory bridge test suite, even if it duplicates some logic from test_memory_hook.py. This ensures future refactors do not break parity silently.
+
+### Nits
+
+#### N1. Task 3 validates against test file that may not exist yet
+- **Severity**: NIT
+- **Critics**: Archaeologist
+- **Location**: Task 3 (metadata-search-filters)
+- **Finding**: Task 3 validates against `tests/unit/test_memory_search.py` with the note "(create if needed)". The actual existing test file is at `tools/memory_search/tests/test_memory_search.py`. The builder should either use the existing location or create in the unit test directory -- the plan is ambiguous.
+- **Suggestion**: Specify the exact test file path: either `tools/memory_search/tests/test_memory_search.py` (existing) or `tests/unit/test_memory_search.py` (new). Pick one.
+
+#### N2. Extraction prompt example uses single-item JSON array
+- **Severity**: NIT
+- **Critics**: Simplifier
+- **Location**: Solution, Win 1 section (1b)
+- **Finding**: The extraction prompt example shows a single-item array. Haiku models sometimes return a single object `{}` instead of an array `[{}]` when only one observation is found. The JSON parser should handle both `list` and `dict` responses.
+- **Suggestion**: Add a guard in the parser: if `json.loads()` returns a dict instead of a list, wrap it in a list.
+
+#### N3. Success criterion "retrieval latency under 15ms" has no baseline
+- **Severity**: NIT
+- **Critics**: User
+- **Location**: Success Criteria
+- **Finding**: The success criterion "Retrieval latency under 15ms (measured with timing instrumentation)" is meaningful only if the current baseline is known. Without a baseline, "under 15ms" might already be satisfied or might be unachievable.
+- **Suggestion**: Rephrase to "Retrieval latency does not regress more than 2x from baseline (measured before and after multi-query)."
+
+### Verdict
+
+**READY TO BUILD** -- No blockers. The five concerns are acknowledged risks and minor inaccuracies, not plan defects. C1 (wrong test class name) should be fixed before build to avoid confusion, which is done below.
 
 ---
 
