@@ -23,6 +23,7 @@ from popoto import (  # noqa: E402
     AutoKeyField,
     ConfidenceField,
     DecayingSortedField,
+    DictField,
     FloatField,
     KeyField,
     Model,
@@ -52,6 +53,13 @@ class Memory(WriteFilterMixin, AccessTrackerMixin, Model):
         content: The memory content text (max ~500 chars for efficiency).
         importance: Numeric importance score. Human=6.0, Agent=1.0.
         source: Origin type — "human", "agent", or "system".
+        metadata: Optional structured metadata dict with keys:
+            category (str): "correction", "decision", "pattern", "surprise"
+            file_paths (list[str]): Referenced file paths
+            tags (list[str]): Domain tags (1-3 short keywords)
+            tool_names (list[str]): Tool names from the session context
+            dismissal_count (int): Consecutive dismissals before reset
+            last_outcome (str): "acted" or "dismissed"
         relevance: Decay-sorted index, partitioned by project_key.
         confidence: Bayesian confidence, updated by ObservationProtocol.
         bloom: ExistenceFilter for O(1) topic pre-checks.
@@ -63,6 +71,7 @@ class Memory(WriteFilterMixin, AccessTrackerMixin, Model):
     content = StringField(default="")
     importance = FloatField(default=1.0)
     source = StringField(default=SOURCE_AGENT)  # SOURCE_HUMAN, SOURCE_AGENT, SOURCE_SYSTEM
+    metadata = DictField(default=dict)
 
     relevance = DecayingSortedField(
         base_score_field="importance",
