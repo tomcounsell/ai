@@ -94,6 +94,8 @@ Replace `CHAT_NAME` with the group name (e.g. `PM: PsyOptimal`, `Dev: Valor`). T
 | `python -m tools.job_scheduler cleanup --age 30 --dry-run` | Preview stale session cleanup |
 | `python -m tools.job_scheduler cleanup --age 30` | Delete stale killed/abandoned/failed sessions |
 | `python -m tools.memory_search search "query"` | Search memories by query |
+| `python -m tools.memory_search search "query" --category correction` | Search filtered by category |
+| `python -m tools.memory_search search "query" --tag redis` | Search filtered by tag |
 | `python -m tools.memory_search save "content"` | Save a new memory |
 | `python -m tools.memory_search inspect --id <ID>` | Inspect a specific memory |
 | `python -m tools.memory_search inspect --stats` | Show memory statistics |
@@ -206,7 +208,8 @@ Telegram → Python Bridge (Telethon) → ChatSession (read-only, PM persona)
 - Post-session Haiku extraction saves categorized observations (corrections/decisions at 4.0, patterns/surprises at 1.0)
 - Intentional saves via `python -m tools.memory_search save "content"` for project-level learnings (7.0-8.0)
 - Post-merge learning extraction distills PR takeaways into memories (importance=7.0)
-- Outcome detection (bigram overlap) feeds ObservationProtocol to strengthen/weaken memories
+- Outcome detection (bigram overlap) feeds ObservationProtocol to strengthen/weaken memories, plus dismissal tracking with importance decay
+- Multi-query decomposition splits large keyword sets into clusters for broader retrieval coverage
 - **Claude Code hooks** extend memory to CLI sessions via `.claude/hooks/hook_utils/memory_bridge.py` (see `docs/features/claude-code-memory.md`): UserPromptSubmit ingests prompts, PostToolUse recalls with file-based sliding window, Stop extracts observations
 - All memory operations fail silently -- memory system never crashes the agent or hooks
 
