@@ -31,6 +31,8 @@ def search(
     query: str,
     project_key: str | None = None,
     limit: int = 10,
+    category: str | None = None,
+    tag: str | None = None,
 ) -> dict[str, Any]:
     """Search memories by query string using ContextAssembler.
 
@@ -38,10 +40,12 @@ def search(
         query: The search query text.
         project_key: Project partition key. Resolved from env if not provided.
         limit: Maximum number of results to return.
+        category: Filter by metadata category (correction, decision, pattern, surprise).
+        tag: Filter by metadata tag.
 
     Returns:
         Dict with "results" list and "error" key (None if no error).
-        Each result has: content, score, confidence, source, access_count, memory_id.
+        Each result has: content, score, confidence, source, access_count, memory_id, metadata.
     """
     try:
         if not query or not query.strip():
@@ -91,8 +95,22 @@ def search(
         if not result.records:
             return {"results": [], "error": None}
 
+        # Post-retrieval metadata filtering
+        filtered_records = result.records
+        if category:
+            filtered_records = [
+                r for r in filtered_records
+                if (getattr(r, "metadata", None) or {}).get("category") == category
+            ]
+        if tag:
+            filtered_records = [
+                r for r in filtered_records
+                if tag in (getattr(r, "metadata", None) or {}).get("tags", [])
+            ]
+
         results = []
-        for record in result.records[:limit]:
+        for record in filtered_records[:limit]:
+            meta = getattr(record, "metadata", None) or {}
             results.append(
                 {
                     "content": getattr(record, "content", ""),
@@ -101,6 +119,7 @@ def search(
                     "source": getattr(record, "source", ""),
                     "access_count": getattr(record, "access_count", 0),
                     "memory_id": getattr(record, "memory_id", ""),
+                    "metadata": meta,
                 }
             )
 
@@ -188,6 +207,7 @@ def inspect(
             if not record:
                 return {"error": f"Memory not found: {memory_id}"}
 
+            meta = getattr(record, "metadata", None) or {}
             return {
                 "memory_id": getattr(record, "memory_id", ""),
                 "content": getattr(record, "content", ""),
@@ -197,6 +217,7 @@ def inspect(
                 "access_count": getattr(record, "access_count", 0),
                 "project_key": getattr(record, "project_key", ""),
                 "agent_id": getattr(record, "agent_id", ""),
+                "metadata": meta,
             }
 
         if stats:

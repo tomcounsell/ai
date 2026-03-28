@@ -28,6 +28,8 @@ def cmd_search(args: argparse.Namespace) -> int:
         query=args.query,
         project_key=args.project,
         limit=args.limit,
+        category=getattr(args, "category", None),
+        tag=getattr(args, "tag", None),
     )
 
     if result.get("error"):
@@ -54,8 +56,14 @@ def cmd_search(args: argparse.Namespace) -> int:
         confidence = mem.get("confidence", 0.0)
         memory_id = mem.get("memory_id", "")
 
-        print(f"  [{source}] {content}")
-        print(f"    id={memory_id}  confidence={confidence:.2f}")
+        meta = mem.get("metadata", {})
+        category = meta.get("category", "")
+        tags = meta.get("tags", [])
+
+        cat_label = f"[{category}] " if category else ""
+        print(f"  {cat_label}[{source}] {content}")
+        tag_str = f"  tags={','.join(tags)}" if tags else ""
+        print(f"    id={memory_id}  confidence={confidence:.2f}{tag_str}")
         print()
 
     return 0
@@ -110,6 +118,17 @@ def cmd_inspect(args: argparse.Namespace) -> int:
         print(f"  Confidence: {result.get('confidence', 0.0):.2f}")
         print(f"  Access count: {result.get('access_count', 0)}")
         print(f"  Project: {result.get('project_key', '')}")
+        meta = result.get("metadata", {})
+        if meta.get("category"):
+            print(f"  Category: {meta['category']}")
+        if meta.get("tags"):
+            print(f"  Tags: {', '.join(meta['tags'])}")
+        if meta.get("file_paths"):
+            print(f"  File paths: {', '.join(meta['file_paths'])}")
+        if meta.get("dismissal_count"):
+            print(f"  Dismissal count: {meta['dismissal_count']}")
+        if meta.get("last_outcome"):
+            print(f"  Last outcome: {meta['last_outcome']}")
     elif args.stats:
         # Aggregate stats
         print(f"Memory stats for project '{result.get('project_key', '')}':")
@@ -169,6 +188,13 @@ def main() -> int:
         "--limit", "-n", type=int, default=10, help="Max results (default: 10)"
     )
     search_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    search_parser.add_argument(
+        "--category",
+        "-c",
+        choices=["correction", "decision", "pattern", "surprise"],
+        help="Filter by metadata category",
+    )
+    search_parser.add_argument("--tag", "-t", help="Filter by metadata tag")
 
     # save command
     save_parser = subparsers.add_parser("save", help="Save a new memory")
