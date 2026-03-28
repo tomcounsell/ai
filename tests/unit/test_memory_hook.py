@@ -53,6 +53,63 @@ class TestExtractTopicKeywords:
         assert len(keywords) <= 10
 
 
+class TestClusterKeywords:
+    """Test agent/memory_hook.py _cluster_keywords()."""
+
+    def test_empty_list(self):
+        from agent.memory_hook import _cluster_keywords
+
+        assert _cluster_keywords([]) == []
+
+    def test_small_list_single_cluster(self):
+        from agent.memory_hook import _cluster_keywords
+
+        keywords = ["redis", "memory", "bloom"]
+        result = _cluster_keywords(keywords)
+        assert len(result) == 1
+        assert result[0] == keywords
+
+    def test_five_keywords_single_cluster(self):
+        from agent.memory_hook import _cluster_keywords
+
+        keywords = ["a", "b", "c", "d", "e"]
+        result = _cluster_keywords(keywords)
+        assert len(result) == 1
+
+    def test_six_keywords_triggers_decomposition(self):
+        from agent.memory_hook import _cluster_keywords
+
+        keywords = [f"kw{i}" for i in range(6)]
+        result = _cluster_keywords(keywords)
+        assert len(result) >= 2
+
+    def test_large_list_caps_at_max_clusters(self):
+        from agent.memory_hook import _cluster_keywords
+
+        keywords = [f"kw{i}" for i in range(15)]
+        result = _cluster_keywords(keywords, max_clusters=3)
+        assert len(result) <= 3
+
+    def test_all_keywords_preserved(self):
+        from agent.memory_hook import _cluster_keywords
+
+        keywords = [f"kw{i}" for i in range(12)]
+        result = _cluster_keywords(keywords)
+        all_kws = [kw for cluster in result for kw in cluster]
+        assert set(all_kws) == set(keywords)
+
+    def test_no_tiny_trailing_cluster(self):
+        """Trailing clusters with < 2 items are merged into previous."""
+        from agent.memory_hook import _cluster_keywords
+
+        # 7 keywords with max_clusters=3 -> cluster_size=3 -> [3, 3, 1]
+        # The trailing [1] should be merged into the second cluster
+        keywords = [f"kw{i}" for i in range(7)]
+        result = _cluster_keywords(keywords, max_clusters=3)
+        for cluster in result:
+            assert len(cluster) >= 2
+
+
 class TestCheckAndInject:
     """Test agent/memory_hook.py check_and_inject()."""
 

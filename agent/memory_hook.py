@@ -122,6 +122,39 @@ _NOISE_WORDS = frozenset(
 )
 
 
+def _cluster_keywords(keywords: list[str], max_clusters: int = 3) -> list[list[str]]:
+    """Group keywords into topical clusters for multi-query retrieval.
+
+    Simple positional splitting: divides the keyword list into chunks of ~3-5.
+    Falls back to a single cluster when keyword count is small (<=5).
+
+    Args:
+        keywords: Deduplicated keyword list.
+        max_clusters: Maximum number of clusters to produce.
+
+    Returns:
+        List of keyword clusters (each cluster is a list of strings).
+    """
+    if not keywords:
+        return []
+    if len(keywords) <= 5:
+        return [keywords]  # single cluster, no decomposition needed
+
+    # Split into clusters of ~3-5 keywords
+    cluster_size = max(3, len(keywords) // max_clusters)
+    clusters: list[list[str]] = []
+    for i in range(0, len(keywords), cluster_size):
+        chunk = keywords[i : i + cluster_size]
+        if chunk:
+            clusters.append(chunk)
+
+    # Merge tiny trailing cluster into previous
+    if len(clusters) > 1 and len(clusters[-1]) < 2:
+        clusters[-2].extend(clusters.pop())
+
+    return clusters[:max_clusters]
+
+
 def check_and_inject(
     session_id: str,
     tool_name: str,
@@ -196,7 +229,9 @@ def check_and_inject(
                 )
             return None
 
-        # Full assembly — Redis-only, ~5-10ms
+        # Multi-query decomposition — cluster keywords and query each cluster
+        import time
+
         from popoto import ContextAssembler
 
         assembler = ContextAssembler(
@@ -205,15 +240,33 @@ def check_and_inject(
             max_items=MAX_THOUGHTS,
             max_tokens=1000,
         )
-        result = assembler.assemble(
-            query_cues={"topic": " ".join(unique_keywords[:5])},
-            agent_id=project_key,
-            partition_filters={"project_key": project_key},
-        )
+
+        clusters = _cluster_keywords(unique_keywords)
+        all_records = []
+        seen_ids: set[str] = set()
+
+        query_start = time.monotonic()
+        for cluster in clusters:
+            result = assembler.assemble(
+                query_cues={"topic": " ".join(cluster[:5])},
+                agent_id=project_key,
+                partition_filters={"project_key": project_key},
+            )
+            for record in result.records or []:
+                rid = str(getattr(record, "memory_id", "") or "")
+                if rid and rid not in seen_ids:
+                    seen_ids.add(rid)
+                    all_records.append(record)
+
+        elapsed_ms = (time.monotonic() - query_start) * 1000
+        if elapsed_ms > 15:
+            logger.warning(
+                f"[memory_hook] Multi-query took {elapsed_ms:.1f}ms "
+                f"(budget: 15ms, clusters: {len(clusters)})"
+            )
 
         # Deja vu: bloom hits but no strong results signals "vague recognition"
-        # -- something related was seen before but details are unclear
-        if not result.records:
+        if not all_records:
             if bloom_hits >= DEJA_VU_BLOOM_HIT_THRESHOLD:
                 topic_hint = ", ".join(unique_keywords[:3])
                 return (
@@ -226,7 +279,7 @@ def check_and_inject(
         thoughts: list[str] = []
         session_thoughts = _injected_thoughts.setdefault(session_id, [])
 
-        for record in result.records[:MAX_THOUGHTS]:
+        for record in all_records[:MAX_THOUGHTS]:
             content = getattr(record, "content", "")
             if content:
                 thoughts.append(f"<thought>{content}</thought>")

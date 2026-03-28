@@ -248,7 +248,11 @@ def recall(
                 )
             return None
 
-        # Full ContextAssembler query
+        # Multi-query decomposition -- cluster keywords and query each cluster
+        import time
+
+        from agent.memory_hook import _cluster_keywords
+
         project_key = _get_project_key()
 
         from popoto import ContextAssembler
@@ -259,14 +263,33 @@ def recall(
             max_items=MAX_THOUGHTS,
             max_tokens=1000,
         )
-        result = assembler.assemble(
-            query_cues={"topic": " ".join(unique_keywords[:5])},
-            agent_id=project_key,
-            partition_filters={"project_key": project_key},
-        )
+
+        clusters = _cluster_keywords(unique_keywords)
+        all_records = []
+        seen_ids: set[str] = set()
+
+        query_start = time.monotonic()
+        for cluster in clusters:
+            result = assembler.assemble(
+                query_cues={"topic": " ".join(cluster[:5])},
+                agent_id=project_key,
+                partition_filters={"project_key": project_key},
+            )
+            for record in result.records or []:
+                rid = str(getattr(record, "memory_id", "") or "")
+                if rid and rid not in seen_ids:
+                    seen_ids.add(rid)
+                    all_records.append(record)
+
+        elapsed_ms = (time.monotonic() - query_start) * 1000
+        if elapsed_ms > 15:
+            logger.warning(
+                f"[memory_bridge] Multi-query took {elapsed_ms:.1f}ms "
+                f"(budget: 15ms, clusters: {len(clusters)})"
+            )
 
         # Deja vu: bloom hits but no strong results
-        if not result.records:
+        if not all_records:
             _save_sidecar(session_id, state)
             if bloom_hits >= DEJA_VU_BLOOM_HIT_THRESHOLD:
                 topic_hint = ", ".join(unique_keywords[:3])
@@ -280,7 +303,7 @@ def recall(
         thoughts: list[str] = []
         injected = state.get("injected", [])
 
-        for record in result.records[:MAX_THOUGHTS]:
+        for record in all_records[:MAX_THOUGHTS]:
             content = getattr(record, "content", "")
             if content:
                 thoughts.append(f"<thought>{content}</thought>")

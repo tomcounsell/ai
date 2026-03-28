@@ -116,9 +116,10 @@ class TestParseCategorizedObservations:
         raw = "CORRECTION: Redis SCAN is preferred over KEYS in production for large keyspaces"
         result = _parse_categorized_observations(raw)
         assert len(result) == 1
-        content, importance = result[0]
+        content, importance, metadata = result[0]
         assert "Redis SCAN" in content
         assert importance == CATEGORY_IMPORTANCE["correction"]
+        assert isinstance(metadata, dict)
 
     def test_parses_decision_category(self):
         from agent.memory_extraction import CATEGORY_IMPORTANCE, _parse_categorized_observations
@@ -127,6 +128,7 @@ class TestParseCategorizedObservations:
         result = _parse_categorized_observations(raw)
         assert len(result) == 1
         assert result[0][1] == CATEGORY_IMPORTANCE["decision"]
+        assert isinstance(result[0][2], dict)
 
     def test_parses_pattern_category(self):
         from agent.memory_extraction import CATEGORY_IMPORTANCE, _parse_categorized_observations
@@ -176,6 +178,8 @@ class TestParseCategorizedObservations:
         result = _parse_categorized_observations(raw)
         assert len(result) == 1
         assert result[0][1] == DEFAULT_CATEGORY_IMPORTANCE
+        # Line-based fallback returns empty metadata
+        assert result[0][2] == {}
 
     def test_mixed_categorized_and_uncategorized(self):
         """When some lines are categorized, uncategorized lines are dropped."""
@@ -207,6 +211,67 @@ class TestParseCategorizedObservations:
         raw = "CORRECTION: short"
         result = _parse_categorized_observations(raw)
         assert len(result) == 0
+
+    def test_json_array_parsing(self):
+        """JSON array input is parsed with full metadata."""
+        import json
+
+        from agent.memory_extraction import CATEGORY_IMPORTANCE, _parse_categorized_observations
+
+        raw = json.dumps(
+            [
+                {
+                    "category": "correction",
+                    "observation": "Redis SCAN is preferred over KEYS in production",
+                    "file_paths": ["bridge/telegram_bridge.py"],
+                    "tags": ["redis", "performance"],
+                }
+            ]
+        )
+        result = _parse_categorized_observations(raw)
+        assert len(result) == 1
+        content, importance, metadata = result[0]
+        assert "Redis SCAN" in content
+        assert importance == CATEGORY_IMPORTANCE["correction"]
+        assert metadata["category"] == "correction"
+        assert metadata["file_paths"] == ["bridge/telegram_bridge.py"]
+        assert metadata["tags"] == ["redis", "performance"]
+
+    def test_json_bare_dict_wrapped_in_list(self):
+        """A single JSON object (not array) is handled gracefully."""
+        import json
+
+        from agent.memory_extraction import _parse_categorized_observations
+
+        raw = json.dumps(
+            {
+                "category": "decision",
+                "observation": "chose blue-green deployment over rolling updates",
+                "file_paths": [],
+                "tags": ["deployment"],
+            }
+        )
+        result = _parse_categorized_observations(raw)
+        assert len(result) == 1
+        assert result[0][2]["category"] == "decision"
+
+    def test_json_malformed_falls_back_to_line_parser(self):
+        """Malformed JSON falls back to line-based parser."""
+        from agent.memory_extraction import _parse_categorized_observations
+
+        raw = '[{"category": "correction", broken json'
+        # Should not raise, falls back to line-based
+        result = _parse_categorized_observations(raw)
+        assert isinstance(result, list)
+
+    def test_returns_three_tuples(self):
+        """All results are (content, importance, metadata) 3-tuples."""
+        from agent.memory_extraction import _parse_categorized_observations
+
+        raw = "CORRECTION: Redis SCAN is preferred over KEYS in production for large keyspaces"
+        result = _parse_categorized_observations(raw)
+        assert len(result) == 1
+        assert len(result[0]) == 3
 
 
 class TestExtractPostMergeLearning:
@@ -246,6 +311,104 @@ class TestExtractPostMergeLearning:
         assert "Add feature X" in formatted
         assert "Description of the PR" in formatted
         assert "file1.py, file2.py" in formatted
+
+
+class TestPersistOutcomeMetadata:
+    """Test agent/memory_extraction.py _persist_outcome_metadata()."""
+
+    def test_dismissed_increments_count(self):
+        from unittest.mock import MagicMock
+
+        from agent.memory_extraction import _persist_outcome_metadata
+
+        m = MagicMock()
+        m.memory_id = "mem1"
+        m.metadata = {}
+        m.importance = 2.0
+
+        _persist_outcome_metadata([m], {"mem1": "dismissed"})
+
+        assert m.metadata["dismissal_count"] == 1
+        assert m.metadata["last_outcome"] == "dismissed"
+        m.save.assert_called_once()
+
+    def test_acted_resets_dismissal_count(self):
+        from unittest.mock import MagicMock
+
+        from agent.memory_extraction import _persist_outcome_metadata
+
+        m = MagicMock()
+        m.memory_id = "mem1"
+        m.metadata = {"dismissal_count": 2, "last_outcome": "dismissed"}
+        m.importance = 2.0
+
+        _persist_outcome_metadata([m], {"mem1": "acted"})
+
+        assert m.metadata["dismissal_count"] == 0
+        assert m.metadata["last_outcome"] == "acted"
+
+    def test_threshold_breach_decays_importance(self):
+        from unittest.mock import MagicMock
+
+        from agent.memory_extraction import _persist_outcome_metadata
+        from config.memory_defaults import DISMISSAL_DECAY_THRESHOLD
+
+        m = MagicMock()
+        m.memory_id = "mem1"
+        m.metadata = {"dismissal_count": DISMISSAL_DECAY_THRESHOLD - 1}
+        m.importance = 2.0
+
+        _persist_outcome_metadata([m], {"mem1": "dismissed"})
+
+        # Should have decayed importance and reset count
+        assert m.importance < 2.0
+        assert m.metadata["dismissal_count"] == 0
+
+    def test_importance_floor(self):
+        from unittest.mock import MagicMock
+
+        from agent.memory_extraction import _persist_outcome_metadata
+        from config.memory_defaults import (
+            DISMISSAL_DECAY_THRESHOLD,
+            MIN_IMPORTANCE_FLOOR,
+        )
+
+        m = MagicMock()
+        m.memory_id = "mem1"
+        m.metadata = {"dismissal_count": DISMISSAL_DECAY_THRESHOLD - 1}
+        m.importance = 0.1  # already below floor
+
+        _persist_outcome_metadata([m], {"mem1": "dismissed"})
+
+        assert m.importance >= MIN_IMPORTANCE_FLOOR
+
+    def test_save_failure_does_not_crash(self):
+        from unittest.mock import MagicMock
+
+        from agent.memory_extraction import _persist_outcome_metadata
+
+        m = MagicMock()
+        m.memory_id = "mem1"
+        m.metadata = {}
+        m.importance = 2.0
+        m.save.side_effect = Exception("Redis connection error")
+
+        # Should not raise
+        _persist_outcome_metadata([m], {"mem1": "dismissed"})
+
+    def test_none_metadata_defaults_to_empty_dict(self):
+        from unittest.mock import MagicMock
+
+        from agent.memory_extraction import _persist_outcome_metadata
+
+        m = MagicMock()
+        m.memory_id = "mem1"
+        m.metadata = None
+        m.importance = 2.0
+
+        _persist_outcome_metadata([m], {"mem1": "dismissed"})
+
+        assert m.metadata["dismissal_count"] == 1
 
 
 class TestPersonaPromptContainsIntentionalMemory:

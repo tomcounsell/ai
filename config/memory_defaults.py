@@ -54,6 +54,11 @@ INJECTION_BUFFER_SIZE = 9  # total tool calls in rolling buffer
 DEJA_VU_BLOOM_HIT_THRESHOLD = 3  # min bloom hits for "seen something related" thought
 NOVEL_TERRITORY_KEYWORD_THRESHOLD = 7  # min unique keywords with zero bloom hits
 
+# Dismissal tracking -- controls importance decay for chronically dismissed memories
+DISMISSAL_DECAY_THRESHOLD = 3  # consecutive dismissals before importance decays
+DISMISSAL_IMPORTANCE_DECAY = 0.7  # multiply importance by this on threshold breach
+MIN_IMPORTANCE_FLOOR = 0.2  # never decay below this
+
 
 def apply_defaults() -> None:
     """Override popoto Defaults with memory-tuned values.
