@@ -569,87 +569,96 @@ No agent integration changes required. The memory system is an internal pipeline
 | Metadata field works | `python -c "from models.memory import Memory; m = Memory(metadata={'category': 'test'}); print(m.metadata)"` | `{'category': 'test'}` |
 | No key structure changes | `grep -n "KeyField\|AutoKeyField" models/memory.py` | Same fields as before |
 
-## Critique Results
+## Critique Results (v2 -- 2026-03-28)
 
 **Plan**: docs/plans/memory-retrieval-enhancement.md
 **Issue**: #583
 **Critics**: Skeptic, Operator, Archaeologist, Adversary, Simplifier, User
-**Findings**: 0 blockers, 5 concerns, 3 nits
+**Source files verified**: 11 files read and cross-referenced against plan
+**Findings**: 0 blockers, 6 concerns, 3 nits
 
 ### Structural Check Results
 
 | Check | Status | Detail |
 |-------|--------|--------|
-| Required sections | PASS | Documentation, Update System, Agent Integration, Test Impact all present |
+| Required sections | PASS | Documentation, Update System, Agent Integration, Test Impact all present and non-empty |
 | Task numbering | PASS | Tasks 1-8 sequential, no gaps |
 | Dependencies valid | PASS | All Depends On references resolve to valid task IDs |
-| File paths exist | PASS | All 11 referenced files exist in the codebase |
+| File paths exist | PASS | 11 of 13 exist; `memory_bridge.py` is a shorthand (full path `.claude/hooks/hook_utils/memory_bridge.py` exists); `tests/unit/test_memory_search.py` marked "(create if needed)" |
 | Prerequisites met | PASS | No prerequisites declared |
-| Cross-references | CONCERN | Test Impact references `TestExtractObservationsAsync` -- class does not exist; actual name is `TestRunPostSessionExtraction` |
+| Cross-references | PASS | Test Impact class names match actual test file contents (verified against source) |
+| DictField import | PASS | `from popoto import DictField` confirmed importable; default returns `{}` as plan expects |
 
 ### Concerns
 
-#### C1. Test Impact references nonexistent test class
-- **Severity**: CONCERN
-- **Critics**: Archaeologist (structural check)
-- **Location**: Test Impact section, line 383
-- **Finding**: The plan references `tests/unit/test_memory_extraction.py::TestExtractObservationsAsync` but the actual class in that file is `TestRunPostSessionExtraction`. The builder may waste time looking for a class that does not exist.
-- **Suggestion**: Replace `TestExtractObservationsAsync` with `TestRunPostSessionExtraction` in the Test Impact section.
-
-#### C2. Win 2 modifies memories inside detect_outcomes_async but does not re-query them
+#### C1. Win 2b adds m.save() but current ObservationProtocol path does not call m.save()
 - **Severity**: CONCERN
 - **Critics**: Skeptic, Adversary
 - **Location**: Solution, Win 2 section (2b)
-- **Finding**: The plan proposes loading memories via `Memory.query.filter(memory_id=key)` inside `detect_outcomes_async()`, then updating `m.metadata` and calling `m.save()`. However, the current code (line 336-343 of `agent/memory_extraction.py`) already loads memories this way. The concern is that `metadata` is a new field -- old Memory records fetched from Redis will return `{}` for metadata (which is correct), but the plan's code snippet does `meta = getattr(m, "metadata", {}) or {}`. If Popoto's DictField returns `None` for records that were saved before the field was added (rather than the default `dict`), this would silently create metadata on every old record that gets outcome-detected. This is additive and not harmful, but the plan should explicitly acknowledge that old records will gradually gain metadata dicts through outcome detection, not just through extraction.
-- **Suggestion**: Add a note in the Solution section acknowledging that outcome detection will backfill metadata on old records as a side effect (which is actually desirable behavior).
+- **Finding**: The current `detect_outcomes_async()` (lines 329-365 of `agent/memory_extraction.py`) delegates persistence to `ObservationProtocol.on_context_used()`, which internally adjusts confidence on the loaded Memory instances. The plan proposes adding an explicit `m.save()` call after updating metadata. This introduces a second save that may conflict with or duplicate ObservationProtocol's internal persistence. If ObservationProtocol calls `save()` internally, and then the plan's code also calls `m.save()`, the second save could overwrite ObservationProtocol's confidence adjustment (or vice versa, depending on timing and whether Popoto caches field state).
+- **Suggestion**: Verify whether `ObservationProtocol.on_context_used()` calls `save()` internally. If it does, place the metadata update BEFORE the ObservationProtocol call so both changes are persisted in one write. If it does not, the plan's explicit `m.save()` is correct but should be documented as the sole persistence point.
 
-#### C3. _cluster_keywords uses positional splitting which ignores semantic grouping
+#### C2. Read-modify-write race on metadata in multi-session environments
 - **Severity**: CONCERN
-- **Critics**: Skeptic, Simplifier
-- **Location**: Solution, Win 3 section (3a)
-- **Finding**: The clustering function splits keywords by position (index-based chunking). Keywords are appended in buffer order from `extract_topic_keywords()`, which processes tool calls chronologically. This means keywords from the same tool call are adjacent, so positional splitting roughly groups by tool call. However, if a user works on two interleaved topics (e.g., reading bridge code then memory code then bridge code again), the positional split will produce mixed clusters rather than topical ones. The plan's Rabbit Holes section correctly says "do not build NLP clustering" but does not acknowledge the interleaving limitation.
-- **Suggestion**: This is acceptable for v1. Add a comment in the code noting the limitation and that keyword ordering is chronological by tool call window. No code change needed.
+- **Critics**: Adversary
+- **Location**: Solution, Win 2 section (2b); Race Conditions section
+- **Finding**: The plan's Race Conditions section states "No race conditions." However, `detect_outcomes_async()` does a read-modify-write on `m.metadata["dismissal_count"]`: load the memory, read metadata, increment counter, save. If two sessions process outcomes for the same memory_id concurrently (e.g., a bridge session and a Claude Code session finishing at the same time), the last writer wins and a dismissal count increment is lost. This is unlikely but possible.
+- **Suggestion**: Acknowledge this as a known low-probability race in the Race Conditions section. The consequence (losing a single dismissal count) is benign, but the section should not claim "no race conditions."
+
+#### C3. Old records will gain metadata dicts through outcome detection (undocumented backfill)
+- **Severity**: CONCERN
+- **Critics**: Skeptic
+- **Location**: Solution, Win 2 section (2b)
+- **Finding**: The plan's code uses `meta = getattr(m, "metadata", {}) or {}` for old records. When `m.save()` is called, these old records will gain a metadata dict containing `dismissal_count` and `last_outcome`. This is actually desirable behavior but contradicts the Rabbit Holes section which says "Do NOT attempt to backfill metadata on existing Memory records." The backfill is implicit via outcome detection, not explicit, but the plan should acknowledge this.
+- **Suggestion**: Add a note clarifying that outcome detection will naturally backfill metadata on old records as a side effect, and that this is intentional and distinct from the explicit backfill banned in Rabbit Holes.
 
 #### C4. Multi-query latency budget assumes ~5ms per ContextAssembler call without measurement
 - **Severity**: CONCERN
 - **Critics**: Operator, Skeptic
-- **Location**: Risks, Risk 2
-- **Finding**: The plan states "each additional ContextAssembler call adds ~5ms" and sets a 15ms budget. The current single-query path is not instrumented, so the baseline is unknown. If a single call already takes 10ms (which is plausible for a Redis round-trip with scoring), then 2-3 calls would exceed 15ms routinely. The 15ms threshold in the latency guard (3d) would fire constantly, producing log noise.
-- **Suggestion**: Before building Win 3, measure the current single-query ContextAssembler latency in production. Set the warning threshold to 2x the measured baseline rather than a fixed 15ms.
+- **Location**: Risks, Risk 2; Solution, Win 3 section (3d)
+- **Finding**: The plan states "each additional ContextAssembler call adds ~5ms" and sets a 15ms budget. The current single-query path (lines 199-212 of `agent/memory_hook.py`) has no timing instrumentation, so the baseline is unknown. If a single call already takes 10ms (plausible for a Redis round-trip with scoring), then 2-3 calls would exceed 15ms routinely, and the latency guard in 3d would fire on every multi-query invocation, producing log noise.
+- **Suggestion**: Before building Win 3, measure the current single-query ContextAssembler latency. Set the warning threshold to 2x the measured baseline rather than a fixed 15ms.
 
 #### C5. Bridge parity (Task 6) validates via "manual testing" -- no automated verification
 - **Severity**: CONCERN
 - **Critics**: Operator
 - **Location**: Task 6 (bridge-parity)
-- **Finding**: Task 6 is the only task with "manual testing via Claude Code session" as its validation method. The other tasks reference specific test files. Since the bridge recall() function closely mirrors check_and_inject(), the multi-query path should be testable via the same mock patterns used in test_memory_hook.py.
-- **Suggestion**: Add a unit test for the bridge recall() multi-query path in the memory bridge test suite, even if it duplicates some logic from test_memory_hook.py. This ensures future refactors do not break parity silently.
+- **Finding**: Task 6 is the only task with "manual testing via Claude Code session" as its validation method. The bridge `recall()` function (lines 174-305 of `memory_bridge.py`) closely mirrors `check_and_inject()` and uses the same mock-friendly patterns (bloom field, ContextAssembler). It should be testable with the same approach used in `test_memory_hook.py::TestDejaVuSignals`.
+- **Suggestion**: Add a unit test for the bridge `recall()` multi-query path, even if it duplicates some logic from `test_memory_hook.py`.
+
+#### C6. _cluster_keywords returns [keywords] for <=5 keywords -- multi-query never fires for typical sessions
+- **Severity**: CONCERN
+- **Critics**: Skeptic, User
+- **Location**: Solution, Win 3 section (3a)
+- **Finding**: The proposed `_cluster_keywords()` returns `[keywords]` (single cluster, no decomposition) when `len(keywords) <= 5`. The current `check_and_inject()` already caps `unique_keywords` at 15 (line 170 of `agent/memory_hook.py`), and `extract_topic_keywords()` caps per-tool-call keywords at 10 (line 85). However, with `INJECTION_BUFFER_SIZE = 9` and deduplication, many real sessions may produce only 4-6 unique keywords per window. The threshold of >5 to trigger multi-query may rarely be met, meaning Win 3 has limited practical impact unless the threshold is tuned lower.
+- **Suggestion**: After building, measure how often the multi-query path actually fires in production. Consider lowering the threshold to >3 if data shows >5 is rarely reached.
 
 ### Nits
 
-#### N1. Task 3 validates against test file that may not exist yet
+#### N1. Task 3 validates against ambiguous test file path
 - **Severity**: NIT
 - **Critics**: Archaeologist
 - **Location**: Task 3 (metadata-search-filters)
-- **Finding**: Task 3 validates against `tests/unit/test_memory_search.py` with the note "(create if needed)". The actual existing test file is at `tools/memory_search/tests/test_memory_search.py`. The builder should either use the existing location or create in the unit test directory -- the plan is ambiguous.
-- **Suggestion**: Specify the exact test file path: either `tools/memory_search/tests/test_memory_search.py` (existing) or `tests/unit/test_memory_search.py` (new). Pick one.
+- **Finding**: Task 3 validates against `tests/unit/test_memory_search.py` with "(create if needed)". An existing test file lives at `tools/memory_search/tests/`. The builder should know which location to use.
+- **Suggestion**: Specify the exact path. The existing `tools/memory_search/tests/` directory is the natural home.
 
-#### N2. Extraction prompt example uses single-item JSON array
+#### N2. Extraction prompt example may cause Haiku to return dict instead of list
 - **Severity**: NIT
 - **Critics**: Simplifier
 - **Location**: Solution, Win 1 section (1b)
-- **Finding**: The extraction prompt example shows a single-item array. Haiku models sometimes return a single object `{}` instead of an array `[{}]` when only one observation is found. The JSON parser should handle both `list` and `dict` responses.
-- **Suggestion**: Add a guard in the parser: if `json.loads()` returns a dict instead of a list, wrap it in a list.
+- **Finding**: The extraction prompt example shows a single-item JSON array. Haiku models sometimes return a bare `{}` object instead of `[{}]` when only one observation is found. The parser's `isinstance(data, list)` check (line 173 of plan) would silently skip a valid single observation.
+- **Suggestion**: Add a guard: if `json.loads()` returns a `dict` instead of `list`, wrap it in `[data]`.
 
 #### N3. Success criterion "retrieval latency under 15ms" has no baseline
 - **Severity**: NIT
 - **Critics**: User
 - **Location**: Success Criteria
-- **Finding**: The success criterion "Retrieval latency under 15ms (measured with timing instrumentation)" is meaningful only if the current baseline is known. Without a baseline, "under 15ms" might already be satisfied or might be unachievable.
-- **Suggestion**: Rephrase to "Retrieval latency does not regress more than 2x from baseline (measured before and after multi-query)."
+- **Finding**: "Retrieval latency under 15ms" is meaningful only with a known baseline. Without measuring the current single-query latency, this criterion is untestable.
+- **Suggestion**: Rephrase to "Retrieval latency does not regress more than 2x from measured baseline."
 
 ### Verdict
 
-**READY TO BUILD** -- No blockers. The five concerns are acknowledged risks and minor inaccuracies, not plan defects. C1 (wrong test class name) should be fixed before build to avoid confusion, which is done below.
+**READY TO BUILD** -- No blockers. The six concerns are acknowledged risks and minor gaps, not plan defects. C1 (save conflict with ObservationProtocol) is the most actionable -- the builder should verify ObservationProtocol's save behavior before implementing Win 2b. All other concerns can be addressed during implementation without plan revision.
 
 ---
 
