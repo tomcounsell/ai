@@ -12,29 +12,28 @@ crash the agent or block session completion.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
 
 logger = logging.getLogger(__name__)
 
-# Extraction prompt for Haiku — categorized output
+# Extraction prompt for Haiku — structured JSON output
 EXTRACTION_PROMPT = (
-    "Extract novel observations from this agent session response."
-    " Categorize each as:\n"
-    "- CORRECTION: errors caught, assumptions invalidated, user corrections\n"
-    "- DECISION: architectural or design choices made and why\n"
-    "- PATTERN: recurring themes, conventions, best practices noticed\n"
-    "- SURPRISE: unexpected findings, edge cases discovered\n"
+    "Extract novel observations from this agent session response.\n"
+    "Return a JSON array of objects, each with:\n"
+    '  "category": one of "correction", "decision", "pattern", "surprise"\n'
+    '  "observation": the observation text (one sentence, specific)\n'
+    '  "file_paths": list of file paths referenced (empty list if none)\n'
+    '  "tags": list of domain tags (1-3 short keywords)\n'
     "\n"
-    "Return one observation per line in the format: CATEGORY: observation text\n"
-    "Only include genuinely novel, specific observations. Skip generic statements.\n"
-    "If there are no novel observations, return NONE.\n"
+    "Only include genuinely novel, specific observations.\n"
+    'If none, return: []\n'
     "\n"
-    "Example output:\n"
-    "DECISION: chose blue-green deployment over rolling updates\n"
-    "CORRECTION: Redis SCAN is preferred over KEYS in production\n"
-    "PATTERN: all Popoto models use safe_save() as the primary entry point"
+    "Example:\n"
+    '[{"category": "decision", "observation": "chose blue-green deployment over rolling updates",'
+    ' "file_paths": ["deploy/config.yaml"], "tags": ["deployment", "infrastructure"]}]'
 )
 
 # Importance levels for categorized extraction
@@ -128,13 +127,14 @@ async def extract_observations_async(
             project_key = os.environ.get("VALOR_PROJECT_KEY", DEFAULT_PROJECT_KEY)
 
         saved = []
-        for obs_content, importance in parsed[:10]:  # cap at 10 observations
+        for obs_content, importance, metadata in parsed[:10]:  # cap at 10 observations
             m = Memory.safe_save(
                 agent_id=f"extraction-{session_id}",
                 project_key=project_key,
                 content=obs_content[:500],
                 importance=importance,
                 source=SOURCE_AGENT,
+                metadata=metadata,
             )
             if m:
                 saved.append(
@@ -154,45 +154,68 @@ async def extract_observations_async(
         return []
 
 
-def _parse_categorized_observations(raw_text: str) -> list[tuple[str, float]]:
-    """Parse Haiku output into (content, importance) tuples.
+def _parse_categorized_observations(raw_text: str) -> list[tuple[str, float, dict]]:
+    """Parse Haiku output into (content, importance, metadata) tuples.
 
-    Expects lines in the format: CATEGORY: observation text
-    Falls back to flat observations (all at DEFAULT_CATEGORY_IMPORTANCE)
-    if no valid categories are found.
+    Tries JSON parsing first (structured output). Falls back to line-based
+    CATEGORY: text format. Returns empty metadata dict for line-based results.
 
-    Returns list of (content_string, importance_float) tuples.
+    Returns list of (content_string, importance_float, metadata_dict) tuples.
     """
+    # Try JSON first
+    try:
+        data = json.loads(raw_text)
+        # Handle bare dict (single observation) — wrap in list
+        if isinstance(data, dict):
+            data = [data]
+        if isinstance(data, list):
+            results: list[tuple[str, float, dict]] = []
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                category = item.get("category", "").lower()
+                observation = item.get("observation", "")
+                if not observation or len(observation) < 10:
+                    continue
+                importance = CATEGORY_IMPORTANCE.get(category, DEFAULT_CATEGORY_IMPORTANCE)
+                metadata = {
+                    "category": category,
+                    "file_paths": item.get("file_paths", []),
+                    "tags": item.get("tags", []),
+                }
+                results.append((observation, importance, metadata))
+            if results:
+                return results
+    except (json.JSONDecodeError, TypeError):
+        pass  # Fall through to line-based parser
+
+    # Fallback: line-based parser (returns empty metadata)
     lines = [
         line.strip() for line in raw_text.split("\n") if line.strip() and len(line.strip()) > 10
     ]
     if not lines:
         return []
 
-    # Try to parse categorized format
-    categorized: list[tuple[str, float]] = []
+    categorized: list[tuple[str, float, dict]] = []
     uncategorized: list[str] = []
 
     for line in lines:
         matched = False
         for category in CATEGORY_IMPORTANCE:
-            # Match "CATEGORY: text" or "category: text" (case-insensitive prefix)
             prefix = f"{category}:"
             if line.lower().startswith(prefix):
                 content = line[len(prefix) :].strip()
                 if content and len(content) > 10:
-                    categorized.append((content, CATEGORY_IMPORTANCE[category]))
+                    categorized.append((content, CATEGORY_IMPORTANCE[category], {}))
                 matched = True
                 break
         if not matched:
             uncategorized.append(line)
 
-    # If we got some categorized results, use them (drop uncategorized noise)
     if categorized:
         return categorized
 
-    # Fallback: treat all lines as uncategorized observations at default importance
-    return [(line, DEFAULT_CATEGORY_IMPORTANCE) for line in uncategorized]
+    return [(line, DEFAULT_CATEGORY_IMPORTANCE, {}) for line in uncategorized]
 
 
 async def extract_post_merge_learning(
