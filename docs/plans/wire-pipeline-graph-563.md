@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: Critiqued
 type: bug
 appetite: Medium
 owner: Valor
@@ -234,7 +234,7 @@ No agent integration required -- this is a bridge-internal change. The modificat
 - Modify `_record_stage_on_parent()` to accept `stop_reason` and `output_tail` parameters
 - Call `sm.classify_outcome(current_stage, stop_reason, output_tail)` before deciding complete vs fail
 - Route: "success" -> `complete_stage()`, "fail"/"partial" -> `fail_stage()`, "ambiguous" -> `complete_stage()` (safe default)
-- Modify `subagent_stop_hook()` to extract stop_reason from input_data and pass output_tail from outcome summary
+- **CRITIQUE FIX (blocker):** `SubagentStopHookInput` does NOT have a `stop_reason` field. Instead: (a) pass `stop_reason=None` by default (classify_outcome already handles None), and (b) extract output_tail by reading the last 500 chars from `input_data["agent_transcript_path"]` if the file exists, falling back to `_extract_outcome_summary()` output. Create a new `_extract_output_tail(input_data, max_chars=500)` helper that reads the transcript file tail.
 - Wrap classify_outcome call in try/except -- on error, default to complete_stage()
 
 ### 3. Replace coach linear scan with graph API
@@ -246,7 +246,7 @@ No agent integration required -- this is a bridge-internal change. The modificat
 - **Parallel**: true
 - Rewrite `_build_sdlc_stage_coaching()` to accept a session or stage_states dict
 - Create `PipelineStateMachine` from the stage_states and call `sm.next_stage()` to get the graph-determined next stage
-- Handle failed stages: when a stage is failed, use `sm.next_stage("fail")` to route through PATCH
+- **CRITIQUE FIX (concern):** Infer the outcome from stage statuses: if any stage has status "failed", pass outcome="fail" to `sm.next_stage()`; if the last completed stage is "completed", pass outcome="success". The coach does not receive an explicit outcome parameter -- it reads the state that was already written by the subagent_stop hook.
 - Keep the same coaching message format (System Coach prefix, explicit skill directive)
 
 ### 4. Initialize stage_states at session creation
@@ -256,7 +256,8 @@ No agent integration required -- this is a bridge-internal change. The modificat
 - **Assigned To**: pipeline-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- In the bridge intake path (where SDLC classification happens), initialize stage_states on the ChatSession with ISSUE=ready, all others=pending
+- **CRITIQUE FIX (concern):** Initialization must happen as a post-classification read-modify-write (not a parameter to `create_chat()`), since SDLC classification happens after session creation in the bridge flow. The builder must identify the exact call site where `classification_type` is set to "sdlc" and add the stage_states write there.
+- Initialize stage_states on the ChatSession with ISSUE=ready, all others=pending
 - Use `PipelineStateMachine` constructor to generate the initial state dict, then serialize and set on session
 - Ensure non-SDLC sessions are not affected (only initialize when classification_type is "sdlc")
 
@@ -267,7 +268,8 @@ No agent integration required -- this is a bridge-internal change. The modificat
 - **Assigned To**: pipeline-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Remove `_infer_stages_from_history()` function from `ui/data/sdlc.py`
+- **CRITIQUE FIX (concern):** In-flight sessions created before this change will have no `stage_states`. Before removing the inference fallback, add a deprecation log when the fallback is hit, and keep it for one release cycle. Alternatively, backfill existing SDLC sessions with stage_states in the same PR. Builder should choose the simpler approach.
+- Remove `_infer_stages_from_history()` function from `ui/data/sdlc.py` (or deprecate with logging -- see above)
 - Remove its call in `_session_to_pipeline()` (the fallback branch)
 - Keep `_parse_stage_states()` as the sole parsing path
 
@@ -317,8 +319,21 @@ No agent integration required -- this is a bridge-internal change. The modificat
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
-| CONCERN | [agent-type] | [The concern raised] | [How/whether it was addressed] |
+<!-- Populated by /do-plan-critique (war room) on 2026-03-30. -->
+
+| Severity | Critics | Finding | Resolution |
+|----------|---------|---------|------------|
+| BLOCKER | Skeptic, Adversary | `SubagentStopHookInput` has no `stop_reason` field (confirmed: only has `agent_id`, `agent_transcript_path`, `agent_type`, `stop_hook_active`, `hook_event_name`). Plan Task 2 assumes stop_reason is in input_data. Also, `_extract_outcome_summary()` truncates to 200 chars but `classify_outcome()` expects ~500 chars of output_tail. | **Must fix before build.** Builder must either (a) parse the agent transcript file (`agent_transcript_path`) to extract stop_reason and longer output tail, or (b) rely solely on output_tail pattern matching in `classify_outcome()` with stop_reason=None as default. Plan Task 2 must be updated to specify the actual data source. |
+| CONCERN | Skeptic, Operator | Coach `_build_sdlc_stage_coaching()` needs an `outcome` parameter for `sm.next_stage(outcome)`, but the function receives only `stage_progress: dict` with no outcome context. | Builder should infer outcome from stage statuses: if a stage is "failed", use outcome="fail"; if last stage is "completed", use outcome="success". Plan Task 3 should specify this inference logic. |
+| CONCERN | Operator, Simplifier | Task 4 says "initialize stage_states in the bridge intake path" but does not identify the specific file/function. SDLC classification happens after `create_chat()`, so initialization must be a post-classification update. | Builder should identify the exact call site during build. Plan should note this is a read-modify-write after classification, not a parameter to `create_chat()`. |
+| CONCERN | Operator, Archaeologist | Task 5 removes `_infer_stages_from_history()` but in-flight sessions created before this change will have no `stage_states` and will lose their dashboard display. | Builder should either (a) add a backfill migration for existing SDLC sessions, or (b) keep inference as a deprecated fallback with a deprecation log for one cycle. |
+| CONCERN | Skeptic, Operator | `_extract_outcome_summary()` returns max 200 chars but `classify_outcome()` docstring says "last ~500 chars". Pattern matching may miss signals in truncated output. | Builder should create a separate `_extract_output_tail()` with 500-char window for classify_outcome, keeping the existing 200-char summary for logging. |
+| NIT | Simplifier | `bridge/pipeline_state.py` currently has no Pydantic imports. Adding StageStates model introduces a new dependency there. | Non-blocking. Pydantic is already in the process via other bridge modules. |
+| NIT | Simplifier | Verification table has redundant test commands (`pytest tests/ -x -q` subsumes the specific pipeline test command). | Non-blocking. Keep both for convenience during development. |
+
+**Structural checks:** All passed (required sections present, task numbering sequential, dependencies valid, file paths exist, prerequisites met, cross-references consistent).
+
+**Verdict:** NEEDS REVISION -- 1 blocker must be resolved before build. The blocker is that `SubagentStopHookInput` does not contain `stop_reason`, so Task 2 must specify an alternative data source (transcript file parsing or defaulting to None).
 
 ---
 
