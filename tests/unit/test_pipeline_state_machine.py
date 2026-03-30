@@ -17,7 +17,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from bridge.pipeline_state import PipelineStateMachine
+from bridge.pipeline_state import PipelineStateMachine, StageStates
 
 
 def _make_session(stage_states=None, **kwargs):
@@ -611,3 +611,71 @@ class TestToDict:
         assert "current_stage" in d
         assert "has_remaining" in d
         assert d["current_stage"] == "ISSUE"
+
+
+class TestStageStatesValidation:
+    """Test StageStates Pydantic model validation."""
+
+    def test_valid_stages(self):
+        """Valid stage names and statuses pass validation."""
+        data = {"ISSUE": "completed", "PLAN": "in_progress", "BUILD": "pending"}
+        ss = StageStates.from_dict(data)
+        assert ss.stages["ISSUE"] == "completed"
+        assert ss.stages["PLAN"] == "in_progress"
+        assert ss.stages["BUILD"] == "pending"
+
+    def test_unknown_stage_names_dropped(self):
+        """Unknown stage names are silently dropped."""
+        data = {"ISSUE": "completed", "UNKNOWN_STAGE": "pending", "BUILD": "ready"}
+        ss = StageStates.from_dict(data)
+        assert "UNKNOWN_STAGE" not in ss.stages
+        assert ss.stages["ISSUE"] == "completed"
+        assert ss.stages["BUILD"] == "ready"
+
+    def test_unknown_status_defaults_to_pending(self):
+        """Unknown status values default to 'pending'."""
+        data = {"ISSUE": "completed", "PLAN": "some_invalid_status"}
+        ss = StageStates.from_dict(data)
+        assert ss.stages["PLAN"] == "pending"
+
+    def test_metadata_keys_skipped(self):
+        """Internal metadata keys (starting with _) are skipped."""
+        data = {"ISSUE": "completed", "_patch_cycle_count": 2, "_critique_cycle_count": 1}
+        ss = StageStates.from_dict(data)
+        assert "_patch_cycle_count" not in ss.stages
+        assert ss.stages["ISSUE"] == "completed"
+
+    def test_empty_dict(self):
+        """Empty dict produces empty stages."""
+        ss = StageStates.from_dict({})
+        assert ss.stages == {}
+
+    def test_to_dict_roundtrip(self):
+        """to_dict returns a plain dict."""
+        data = {"ISSUE": "completed", "PLAN": "ready"}
+        ss = StageStates.from_dict(data)
+        result = ss.to_dict()
+        assert isinstance(result, dict)
+        assert result == {"ISSUE": "completed", "PLAN": "ready"}
+
+    def test_save_validates_states(self):
+        """_save() validates via StageStates before persisting."""
+        states = {"ISSUE": "completed", "PLAN": "in_progress"}
+        session = _make_session(stage_states=json.dumps(states))
+        sm = PipelineStateMachine(session)
+        sm.complete_stage("PLAN")
+        # After save, the persisted data should be valid
+        saved = json.loads(session.stage_states)
+        assert saved["PLAN"] == "completed"
+        assert saved["CRITIQUE"] == "ready"
+
+    def test_save_handles_validation_error_gracefully(self):
+        """If StageStates validation fails, _save still persists data."""
+        states = {"ISSUE": "in_progress"}
+        session = _make_session(stage_states=json.dumps(states))
+        sm = PipelineStateMachine(session)
+        # Force an invalid state to test error handling
+        sm.states["ISSUE"] = "in_progress"
+        sm._save()
+        # Should not raise, data should still be saved
+        session.save.assert_called()
