@@ -52,7 +52,7 @@ When a group resolves to `PersonaType.TEAMMATE` (via `"teammate"` persona config
 
 - **Messages are stored** in Redis as usual (TelegramMessage records)
 - **No automatic response** -- the system stays completely silent
-- **No Ollama classification** -- skips the `classify_needs_response` call entirely
+- **No Ollama classification** -- skips the `classify_needs_response` call entirely (note: for non-QA groups that do use the classifier, it now returns a 3-way string -- `"respond"`, `"react"`, or `"ignore"` -- see [QA Conversational Humility](qa-conversational-humility.md))
 - **@mention triggers response** -- if a message contains a configured mention trigger (e.g., `@valor`), the system responds
 - **Reply-to-Valor triggers response** -- replying to a previous Valor message continues the conversation
 
