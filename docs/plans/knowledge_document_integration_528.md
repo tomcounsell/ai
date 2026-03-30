@@ -22,13 +22,37 @@ The agent subconsciously recalls relevant knowledge documents during work, scope
 
 ## Prior Art
 
-No prior issues found related to work-vault integration or KnowledgeDocument modeling. This is greenfield work.
+### Existing `tools/knowledge_search/`
+
+The codebase already includes `tools/knowledge_search/__init__.py` -- a SQLite-based knowledge search tool with:
+- Document indexing with content + embeddings stored in SQLite (`~/.valor/knowledge.db`)
+- Fixed-size chunking (default 1000 chars)
+- Semantic search (cosine similarity), keyword search (SQL LIKE), and hybrid search
+- OpenRouter REST API for embeddings (`openai/text-embedding-3-small`)
+- Exposed as MCP tool via `tools/knowledge_search/manifest.json`
+
+**Reconciliation strategy: Replace with KnowledgeDocument system.** The existing tool is a standalone SQLite implementation that duplicates what Popoto provides natively (Redis-backed models with ContentField + EmbeddingField). The new KnowledgeDocument system supersedes it by:
+- Using Popoto models (consistent with Memory and other models in the codebase)
+- Automatic embedding via EmbeddingField (no manual REST calls)
+- Project-scoped isolation (the SQLite tool has no project scoping)
+- Integration with the subconscious memory system (companion memories + bloom filter)
+
+The existing `tools/knowledge_search/` will be preserved during v1 build (no deletion) but the new system is the intended replacement. A follow-up task will migrate any indexed data and remove the SQLite tool.
+
+### Popoto Embedding API
+
+Popoto provides a native embedding framework:
+- `popoto.fields.embedding_field.EmbeddingField` -- auto-generates embeddings on save, stores as .npy files
+- `popoto.embeddings.AbstractEmbeddingProvider` -- provider interface
+- `popoto.embeddings.openai.OpenAIProvider` -- uses `openai` package (installed)
+- `popoto.embeddings.voyage.VoyageProvider` -- uses `voyageai` package (NOT installed)
+- `popoto.configure(embedding_provider=...)` -- sets global default provider
 
 ## Data Flow
 
 1. **Indexing entry point**: File change in `~/work-vault/` detected by `watchdog` filesystem watcher (thread inside bridge process)
 2. **Debounce**: Events collected for ~2 seconds, then unique file paths batch-processed
-3. **KnowledgeDocument upsert**: For each changed file — read content, determine project scope from path, create/update KnowledgeDocument record (ContentField stores content on filesystem, EmbeddingField generates Voyage AI vector)
+3. **KnowledgeDocument upsert**: For each changed file — read content, determine project scope from path, create/update KnowledgeDocument record (ContentField stores content on filesystem, EmbeddingField generates embedding via OpenAI provider)
 4. **Companion Memory creation**: Summarize the document (Haiku call), create/refresh Memory records with `source="knowledge"` and a `reference` JSON pointer. One Memory per major section for large docs, one Memory for small docs.
 5. **Bloom population**: Companion memories land in the bloom filter like any other memory
 6. **Recall (existing flow)**: Tool call window triggers → bloom check → ContextAssembler query → knowledge-sourced thought injected: content summary + reference pointer (tool call with params to read the file)
@@ -37,7 +61,7 @@ No prior issues found related to work-vault integration or KnowledgeDocument mod
 ## Architectural Impact
 
 - **New model**: `KnowledgeDocument` in `models/` — new Popoto model, no changes to existing Memory model fields (only adds `reference` field)
-- **New dependency**: `watchdog` Python package for filesystem monitoring, `voyageai` for embeddings (via `popoto[voyage]`)
+- **New dependency**: `watchdog` Python package for filesystem monitoring (embeddings use `popoto.embeddings.openai.OpenAIProvider` -- `openai` package already installed)
 - **Memory model extension**: Adding a `reference` StringField to Memory — generic JSON pointer, backwards-compatible (defaults to empty string)
 - **Bridge extension**: Watchdog thread starts with bridge process, stops on shutdown
 - **Coupling**: Low — KnowledgeDocument is a standalone model. The only touchpoint with existing code is the new `reference` field on Memory and the watchdog thread in the bridge.
@@ -57,8 +81,9 @@ No prior issues found related to work-vault integration or KnowledgeDocument mod
 
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
-| `VOYAGE_API_KEY` | `python -c "from dotenv import dotenv_values; assert dotenv_values('.env').get('VOYAGE_API_KEY')"` | Voyage AI embedding generation |
-| `popoto[voyage]` | `python -c "import voyageai"` | Voyage AI SDK |
+| `OPENAI_API_KEY` | `python -c "from dotenv import dotenv_values; assert dotenv_values('.env').get('OPENAI_API_KEY')"` | OpenAI embedding generation via popoto OpenAIProvider |
+| `openai` | `python -c "import openai"` | OpenAI SDK (already installed) |
+| `numpy` | `python -c "import numpy"` | Required by EmbeddingField for vector operations |
 | `watchdog` | `python -c "import watchdog"` | Filesystem event monitoring |
 
 Run all checks: `python scripts/check_prerequisites.py docs/plans/knowledge_document_integration_528.md`
@@ -67,11 +92,11 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/knowledge_docu
 
 ### Key Elements
 
-- **KnowledgeDocument model**: Popoto model backed by real files on disk. ContentField for content, EmbeddingField (Voyage AI) for semantic search. Keyed by file path, scoped by project_key.
+- **KnowledgeDocument model**: Popoto model backed by real files on disk. ContentField for content, EmbeddingField (OpenAI `text-embedding-3-small` via `popoto.embeddings.openai.OpenAIProvider`) for semantic search. Keyed by file path, scoped by project_key.
 - **Generic reference pointer on Memory**: New `reference` StringField — JSON blob pointing to a tool call, URL, entity, or any actionable next step. Enables knowledge-sourced memories to tell the agent exactly how to retrieve the full content.
 - **Filesystem watcher**: `watchdog` thread inside the bridge process monitors `~/work-vault/` for file changes. On startup, does a full mtime scan to catch changes missed while bridge was down.
 - **Indexer**: Processes file changes — creates/updates KnowledgeDocument, generates companion Memory records with summaries and reference pointers. Handles deletes (orphan cleanup).
-- **Scope resolver**: Maps file paths to project_key + scope (client vs company-wide) using projects.json knowledge_base field and work-vault CLAUDE.md classifications.
+- **Scope resolver**: Maps file paths to project_key + scope (client vs company-wide) using projects.json `knowledge_base` field as the single source of truth. No CLAUDE.md parsing.
 
 ### Flow
 
@@ -84,11 +109,11 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/knowledge_docu
 ### Technical Approach
 
 - KnowledgeDocument uses `ContentField(store="filesystem")` — content stays on disk, Redis holds reference hash only
-- EmbeddingField with `VoyageProvider(model="voyage-3")` for 1024-dim vectors
+- EmbeddingField with `OpenAIProvider(model="text-embedding-3-small", dim=1536)` from `popoto.embeddings.openai` -- consistent with existing knowledge_search tool's model choice, and `openai` package is already installed. Configure via `popoto.configure(embedding_provider=OpenAIProvider())` at app startup.
 - Companion memories use `source="knowledge"` to distinguish from conversational observations
 - Reference field is a JSON string: `{"tool": "read_file", "params": {"file_path": "/path/to/doc.md"}}` or other shapes for non-file references
 - Watchdog uses `Observer` with `FileSystemEventHandler` subclass, debounced via threading.Timer
-- Scope resolution: parse file path against projects.json knowledge_base mappings. If path is under a client project folder → that project_key. If under company-wide folder → special "company" project_key. Unknown paths → skip.
+- Scope resolution: projects.json `knowledge_base` mappings are the **single source of truth** (no CLAUDE.md parsing). If path is under a project's knowledge_base directory → that project_key with scope "client". If under ~/work-vault/ root but not under any project subfolder → project_key "company" with scope "company-wide". Unknown paths → skip.
 - On bridge startup: full scan compares file mtimes against KnowledgeDocument `last_modified` timestamps
 - Companion Memory summarization via Haiku (cheap, fast) — one call per document, output is the memory content
 - Large documents (>2000 words): split by top-level headings, one companion Memory per section
@@ -98,7 +123,7 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/knowledge_docu
 
 ### Exception Handling Coverage
 - [ ] Watchdog handler must catch all exceptions — a crash in the watcher thread must not take down the bridge
-- [ ] Voyage API failures (rate limit, network) must log warning and skip embedding, not crash indexer
+- [ ] OpenAI embedding API failures (rate limit, network) must log warning and skip embedding, not crash indexer
 - [ ] Haiku summarization failures must fall back to first-N-chars truncation for companion memory content
 
 ### Empty/Invalid Input Handling
@@ -125,8 +150,8 @@ No existing tests affected — this is a greenfield feature. The new `reference`
 ## Risks
 
 ### Risk 1: Embedding costs
-**Impact:** Voyage API costs scale with number and size of work-vault documents
-**Mitigation:** Only re-embed on file change (not on every startup). Track `content_hash` to skip unchanged files. Batch embedding calls.
+**Impact:** OpenAI embedding API costs scale with number and size of work-vault documents
+**Mitigation:** Only re-embed on file change (not on every startup). Track `content_hash` to skip unchanged files. Batch embedding calls. `text-embedding-3-small` is one of the cheapest embedding models available.
 
 ### Risk 2: Companion memory pollution
 **Impact:** Too many knowledge-sourced memories could crowd out conversational observations in recall
@@ -163,8 +188,9 @@ No existing tests affected — this is a greenfield feature. The new `reference`
 
 ## Update System
 
-- New Python dependencies: `watchdog`, `popoto[voyage]` (voyageai SDK) — must be added to `pyproject.toml` and propagated via update script
-- `VOYAGE_API_KEY` must be set in `.env` on all machines — add to update checklist / setup docs
+- New Python dependency: `watchdog` — must be added to `pyproject.toml` and propagated via update script
+- `OPENAI_API_KEY` must be set in `.env` on all machines (likely already present for other OpenAI usage) — verify during setup
+- `popoto.configure(embedding_provider=OpenAIProvider())` must be called at bridge startup before any KnowledgeDocument operations — add to bridge initialization
 - No changes to the update script itself — the watchdog starts automatically with the bridge
 
 ## Agent Integration
@@ -251,7 +277,7 @@ No new MCP server or tool needed. The agent already has `read_file` access — t
 - **Assigned To**: model-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Create `models/knowledge_document.py` with: `doc_id` (AutoKeyField), `file_path` (KeyField), `project_key` (KeyField), `scope` (StringField — "client" or "company-wide"), `content` (ContentField), `embedding` (EmbeddingField with VoyageProvider), `content_hash` (StringField — for skip-if-unchanged), `last_modified` (FloatField — file mtime)
+- Create `models/knowledge_document.py` with: `doc_id` (AutoKeyField), `file_path` (KeyField), `project_key` (KeyField), `scope` (StringField — "client" or "company-wide"), `content` (ContentField), `embedding` (EmbeddingField with source="content" using the global OpenAIProvider set via popoto.configure()), `content_hash` (StringField — for skip-if-unchanged), `last_modified` (FloatField — file mtime)
 - Implement `safe_upsert(file_path, project_key, scope)` class method
 - Write unit tests for model creation, upsert, and deletion
 
@@ -263,8 +289,10 @@ No new MCP server or tool needed. The agent already has `read_file` access — t
 - **Agent Type**: builder
 - **Parallel**: true
 - Create `tools/knowledge/scope_resolver.py`
-- Load projects.json, map knowledge_base paths to project_keys
-- Classify paths as client-scoped or company-wide using work-vault CLAUDE.md rules
+- Load projects.json, map `knowledge_base` paths to project_keys — projects.json is the **single source of truth** for scope resolution (no CLAUDE.md parsing)
+- A file path under a project's `knowledge_base` directory maps to that project_key with scope "client"
+- A file path under `~/work-vault/` root (not under any project subfolder) maps to scope "company-wide" with project_key "company"
+- Paths outside known mappings return None (skip)
 - Return `(project_key, scope)` for any given file path, or None if path should be skipped
 - Unit tests for all scope classifications
 
@@ -293,9 +321,11 @@ No new MCP server or tool needed. The agent already has `read_file` access — t
 - `KnowledgeWatcher` class: wraps watchdog Observer, watches ~/work-vault/
 - Debounce: collect events for 2s via threading.Timer, then batch-process unique paths
 - Filter: only .md and .txt files, skip hidden files/dirs and _archive_
-- `start()` / `stop()` methods for bridge lifecycle
+- `start()` / `stop()` / `is_healthy()` methods for bridge lifecycle
+- `is_healthy()` returns True if the watcher thread is alive and the Observer is running — bridge calls this every 60s and auto-restarts the watcher if dead
 - On start: register watchdog, then run `full_scan()` for catch-up
 - All exceptions caught — watcher crash must not affect bridge
+- Log warning when watcher thread dies unexpectedly; log info when auto-restarted
 
 ### 6. Integrate watcher with bridge
 - **Task ID**: build-bridge-integration
@@ -305,7 +335,9 @@ No new MCP server or tool needed. The agent already has `read_file` access — t
 - **Agent Type**: builder
 - **Parallel**: false
 - Import and start KnowledgeWatcher in bridge startup
+- Call `popoto.configure(embedding_provider=OpenAIProvider())` before starting watcher
 - Stop watcher on bridge shutdown
+- Add periodic liveness check: bridge calls `watcher.is_healthy()` every 60s (piggyback on existing bridge health loop or add asyncio.create_task). If unhealthy, log warning and call `watcher.stop(); watcher.start()` to auto-restart.
 - Add health logging: "Knowledge watcher started, monitoring N files"
 
 ### 7. Validate end-to-end flow
@@ -352,6 +384,7 @@ No new MCP server or tool needed. The agent already has `read_file` access — t
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | KnowledgeDocument model importable | `python -c "from models.knowledge_document import KnowledgeDocument"` | exit code 0 |
 | Memory reference field exists | `python -c "from models.memory import Memory; m = Memory(content='test', reference='{}')"` | exit code 0 |
+| Popoto configured | `python -c "import popoto; from popoto.embeddings.openai import OpenAIProvider; popoto.configure(embedding_provider=OpenAIProvider())"` | exit code 0 |
 | Scope resolver works | `python -c "from tools.knowledge.scope_resolver import resolve_scope; print(resolve_scope('/tmp/test.md'))"` | exit code 0 |
 | Feature docs exist | `test -f docs/features/knowledge-documents.md` | exit code 0 |
 
@@ -370,6 +403,7 @@ No new MCP server or tool needed. The agent already has `read_file` access — t
 - **Location**: Solution > Technical Approach, Task 2
 - **Finding**: The plan specifies `EmbeddingField with VoyageProvider(model="voyage-3")` but `from popoto.providers.voyage import VoyageProvider` raises `ModuleNotFoundError: No module named 'popoto.providers'`. The `voyageai` package is also not installed. The entire embedding pipeline depends on a provider class that does not exist in the installed popoto version.
 - **Suggestion**: Verify the correct import path for EmbeddingField's provider configuration by checking popoto docs or source. If VoyageProvider is not yet shipped in popoto, this is a hard dependency that must be resolved before build. The plan should include a spike task to confirm the EmbeddingField provider API and correct the import path. Also add `pip install voyageai` and `pip install popoto[voyage]` as explicit pre-build setup steps.
+- **Resolution**: Switched to `OpenAIProvider` from `popoto.embeddings.openai` -- `openai` package is already installed. VoyageProvider exists in popoto but requires uninstalled `voyageai` package. OpenAIProvider uses `text-embedding-3-small` (1536-dim), consistent with the existing knowledge_search tool's model choice.
 
 #### 2. Existing `tools/knowledge_search/` tool not addressed in Prior Art
 - **Severity**: BLOCKER
@@ -377,6 +411,7 @@ No new MCP server or tool needed. The agent already has `read_file` access — t
 - **Location**: Prior Art, Solution
 - **Finding**: The plan states "No prior issues found related to work-vault integration or KnowledgeDocument modeling. This is greenfield work." However, `tools/knowledge_search/__init__.py` already implements a full knowledge base search system with document indexing, chunking, semantic/keyword/hybrid search using SQLite + OpenRouter embeddings. This is directly overlapping functionality. The plan creates a parallel system (Popoto + Voyage) without acknowledging or replacing the existing one, risking two competing knowledge search implementations.
 - **Suggestion**: The plan must address the existing `tools/knowledge_search/` tool: either (a) replace it with the new KnowledgeDocument system and delete the old code, (b) integrate with it, or (c) explicitly scope the two as different layers with a clear boundary. Add this to the Prior Art section and add a task for migration/cleanup.
+- **Resolution**: Prior Art section now documents the existing tool and states reconciliation strategy: KnowledgeDocument system supersedes it (Popoto-native, project-scoped, memory-integrated). Existing tool preserved during v1; follow-up task to migrate and remove.
 
 ### Concerns
 
@@ -386,6 +421,7 @@ No new MCP server or tool needed. The agent already has `read_file` access — t
 - **Location**: Solution > Filesystem watcher, Task 5, Failure Path Test Strategy
 - **Finding**: The plan says "watcher crash must not take down the bridge" and Task 5 says "all exceptions caught." However, the bridge startup (`bridge/telegram_bridge.py`) runs in an asyncio event loop, and the plan adds a `watchdog` thread (OS-level threading.Timer + Observer). If the watchdog thread raises an unhandled exception in its event callback, Python's default behavior is to silently kill only that thread -- but if the thread holds a lock or is mid-write to Redis/Popoto, it could leave corrupted state. The plan has no health-check or restart mechanism for a dead watcher thread.
 - **Suggestion**: Add a periodic liveness check (e.g., bridge checks watcher thread `is_alive()` every 60s and restarts it if dead). Log a warning when the watcher thread dies. This is mentioned vaguely in "Watchdog thread health is visible in bridge status/logs" but should be an explicit task with a concrete implementation.
+- **Resolution**: Added `is_healthy()` method to KnowledgeWatcher (Task 5) and 60s periodic liveness check with auto-restart in bridge integration (Task 6).
 
 #### 4. Scope resolver depends on work-vault CLAUDE.md classifications but no parsing spec
 - **Severity**: CONCERN
@@ -393,6 +429,7 @@ No new MCP server or tool needed. The agent already has `read_file` access — t
 - **Location**: Solution > Scope resolver, Task 3
 - **Finding**: The plan says the scope resolver "classifies paths as client-scoped or company-wide using work-vault CLAUDE.md rules" but does not specify how to parse that CLAUDE.md file. If the CLAUDE.md format changes, the resolver silently misclassifies files. Additionally, projects.json already has `knowledge_base` fields per project -- it is unclear why the resolver also needs to parse CLAUDE.md instead of just using the projects.json mappings exclusively.
 - **Suggestion**: Specify whether scope resolution uses projects.json `knowledge_base` mappings alone (simpler, more reliable) or also parses CLAUDE.md (more complex, fragile). If CLAUDE.md is needed, document the expected format and add a validation step. Consider using projects.json as the single source of truth for scope.
+- **Resolution**: Clarified that projects.json `knowledge_base` mappings are the single source of truth for scope resolution. No CLAUDE.md parsing. Paths under a project's knowledge_base dir map to that project; paths under ~/work-vault/ root map to "company-wide".
 
 ### Structural Check Results
 
@@ -402,14 +439,16 @@ No new MCP server or tool needed. The agent already has `read_file` access — t
 | Task numbering | PASS | Sequential 1-9, no gaps |
 | Dependencies valid | PASS | All Depends On references point to valid task IDs |
 | File paths exist | PARTIAL | 5 of 15 referenced files exist (10 are intentionally new files to be created) |
-| Prerequisites met | FAIL | `voyageai` not installed; `VoyageProvider` import path invalid |
+| Prerequisites met | PASS | `openai` installed; `OpenAIProvider` import path verified at `popoto.embeddings.openai`; `watchdog` to be installed |
 | Cross-references | PASS | Success criteria map to tasks; no-gos not in solution |
 
 ### Verdict
 
-**NEEDS REVISION** -- 2 blockers must be resolved before build:
-1. The VoyageProvider/voyageai dependency must be verified as actually available (import path, package installation) or the embedding approach must be revised.
-2. The existing `tools/knowledge_search/` system must be addressed -- either replaced, integrated, or explicitly scoped as a separate concern with rationale.
+**REVISED** -- Both blockers resolved:
+1. ~~VoyageProvider/voyageai dependency~~ -- Replaced with `OpenAIProvider` from `popoto.embeddings.openai` (uses `openai` package, already installed). Configured via `popoto.configure()` at bridge startup.
+2. ~~Existing `tools/knowledge_search/` not addressed~~ -- Prior Art section now documents the existing SQLite-based tool and states the reconciliation strategy: KnowledgeDocument system supersedes it; existing tool preserved during v1, follow-up task to migrate and remove.
+3. Watchdog liveness concern -- Added `is_healthy()` method and 60s periodic check with auto-restart in bridge integration task.
+4. Scope resolver CLAUDE.md parsing concern -- Clarified that projects.json `knowledge_base` mappings are the single source of truth; no CLAUDE.md parsing.
 
 ---
 
