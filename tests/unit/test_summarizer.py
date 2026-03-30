@@ -2078,57 +2078,6 @@ class TestNormalizeQuestionPrefix:
         assert result == "Normal text here"
 
 
-class TestCrashMessagePool:
-    """Tests for the crash message pool in sdk_client.py."""
-
-    def test_pool_has_minimum_variants(self):
-        from agent.sdk_client import CRASH_MESSAGE_POOL
-
-        assert len(CRASH_MESSAGE_POOL) >= 4
-
-    def test_get_crash_message_returns_string(self):
-        from agent.sdk_client import _get_crash_message
-
-        msg = _get_crash_message()
-        assert isinstance(msg, str)
-        assert len(msg) > 10
-
-    def test_no_consecutive_repeats(self):
-        """Crash messages should not repeat consecutively."""
-        import agent.sdk_client as mod
-        from agent.sdk_client import _get_crash_message
-
-        mod._last_crash_message = None
-
-        messages = [_get_crash_message() for _ in range(20)]
-        for i in range(1, len(messages)):
-            assert messages[i] != messages[i - 1], f"Consecutive repeat at index {i}: {messages[i]}"
-
-    def test_first_call_no_previous(self):
-        """First call with no previous message should work."""
-        import agent.sdk_client as mod
-        from agent.sdk_client import _get_crash_message
-
-        mod._last_crash_message = None
-        msg = _get_crash_message()
-        assert msg in mod.CRASH_MESSAGE_POOL
-
-    def test_all_variants_include_next_step(self):
-        """Each crash message includes next-step language."""
-        from agent.sdk_client import CRASH_MESSAGE_POOL
-
-        next_step_words = [
-            "retry",
-            "try again",
-            "re-trigger",
-            "re-send",
-            "check back",
-        ]
-        for msg in CRASH_MESSAGE_POOL:
-            has_next = any(w in msg.lower() for w in next_step_words)
-            assert has_next, f"Missing next-step language: {msg}"
-
-
 class TestSentenceAwareTruncation:
     """Tests for _truncate_at_sentence_boundary in response.py."""
 

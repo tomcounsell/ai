@@ -38,12 +38,22 @@ class TestRegistryLoading:
     """Tests for loading and validating config/reflections.yaml."""
 
     def test_load_registry_from_project(self):
-        """Registry file exists and loads with valid entries."""
+        """Registry file exists and parses valid entries (some may be disabled)."""
+        import yaml
+
+        registry_path = Path(__file__).parent.parent.parent / "config" / "reflections.yaml"
+        assert registry_path.exists(), "Registry file should exist"
+        with open(registry_path) as f:
+            data = yaml.safe_load(f)
+        all_names = [r["name"] for r in data["reflections"]]
+        assert "health-check" in all_names
+        assert "daily-maintenance" in all_names
+
+    def test_load_registry_returns_only_enabled(self):
+        """load_registry() filters out disabled entries."""
         entries = load_registry()
-        assert len(entries) > 0, "Registry should have at least one entry"
-        names = [e.name for e in entries]
-        assert "health-check" in names
-        assert "daily-maintenance" in names
+        for entry in entries:
+            assert entry.enabled, f"Disabled entry '{entry.name}' should not be returned"
 
     def test_load_registry_validates_entries(self):
         """Invalid entries are skipped with warnings."""
@@ -343,10 +353,12 @@ class TestReflectionScheduler:
     """Tests for the ReflectionScheduler class."""
 
     def test_scheduler_loads_registry(self):
-        """Scheduler loads registry on load()."""
+        """Scheduler loads registry on load() — returns only enabled entries."""
         scheduler = ReflectionScheduler()
         scheduler.load()
-        assert len(scheduler._entries) > 0
+        # All reflections may be disabled; just verify load() doesn't crash
+        # and _entries is a list
+        assert isinstance(scheduler._entries, list)
 
     def test_scheduler_format_status_empty(self):
         """Format status with no entries."""
@@ -359,6 +371,18 @@ class TestReflectionScheduler:
         """Format status shows reflection info."""
         scheduler = ReflectionScheduler()
         scheduler.load()
+        # Inject a synthetic entry since all real ones may be disabled
+        scheduler._entries = [
+            ReflectionEntry(
+                name="health-check",
+                description="Test entry",
+                interval=300,
+                priority="high",
+                execution_type="function",
+                callable="some.func",
+                enabled=True,
+            )
+        ]
         # Mock the Reflection.get_or_create to avoid Redis dependency
         with patch("agent.reflection_scheduler.Reflection") as mock_reflection:
             mock_state = MagicMock()

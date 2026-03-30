@@ -855,9 +855,8 @@ async def main():
         # Save to subconscious memory (non-fatal, never crashes bridge)
         try:
             if text and text.strip() and not getattr(sender, "bot", False):
-                from popoto import InteractionWeight
-
                 from models.memory import Memory
+                from popoto import InteractionWeight
 
                 Memory.safe_save(
                     agent_id=sender_name or "unknown",

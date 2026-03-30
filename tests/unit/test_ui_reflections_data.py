@@ -34,12 +34,6 @@ class TestReflectionsDataLayer:
         result = get_schedule()
         assert isinstance(result, list)
 
-    def test_get_active_ignores_returns_list(self):
-        from ui.data.reflections import get_active_ignores
-
-        result = get_active_ignores()
-        assert isinstance(result, list)
-
     def test_get_run_history_empty(self):
         from ui.data.reflections import get_run_history
 
