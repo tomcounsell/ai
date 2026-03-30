@@ -6,9 +6,8 @@ import logging
 import re
 from pathlib import Path
 
-from utils.api_keys import get_anthropic_api_key
-
 from config.enums import ChatMode, ClassificationType, PersonaType
+from utils.api_keys import get_anthropic_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -770,7 +769,7 @@ async def should_respond_async(
 
     # Config-driven Q&A groups: passive listener (mention/reply only, skip Ollama)
     chat_mode = resolve_chat_mode(project, chat_title, is_dm=False)
-    if chat_mode == "qa":
+    if chat_mode == ChatMode.QA:
         mentions = telegram_config.get("mention_triggers", DEFAULT_MENTIONS)
         text_lower = text.lower()
         if any(mention.lower() in text_lower for mention in mentions):

@@ -18,6 +18,7 @@ import json as _json
 import logging
 import time
 
+from config.enums import ChatMode, ClassificationType, SessionType
 from popoto import (
     AutoKeyField,
     Field,
@@ -27,8 +28,6 @@ from popoto import (
     Model,
     SortedField,
 )
-
-from config.enums import ChatMode, ClassificationType, SessionType
 
 logger = logging.getLogger(__name__)
 
@@ -218,12 +217,29 @@ class AgentSession(Model):
     def qa_mode(self) -> bool:
         """Backward-compatible property: True when session is in Q&A mode.
 
-        Reads session_mode first, falls back to _qa_mode_legacy for
-        pre-migration sessions still in Redis.
+        Reads session_mode first, falls back to the legacy ``qa_mode`` Redis
+        hash field for pre-migration sessions.  The legacy Popoto field was
+        renamed to ``_qa_mode_legacy`` to avoid colliding with this property,
+        but old sessions still store the value under the original ``qa_mode``
+        key.  We read both to cover all cases.
         """
         if self.session_mode == ChatMode.QA:
             return True
-        return bool(self._qa_mode_legacy)
+        # Check the renamed Popoto field first (new sessions written post-migration)
+        if self._qa_mode_legacy:
+            return True
+        # Fallback: read the original "qa_mode" hash field from Redis directly,
+        # since Popoto only knows about "_qa_mode_legacy" and cannot see the old key.
+        try:
+            from popoto.redis_db import POPOTO_REDIS_DB
+
+            raw = POPOTO_REDIS_DB.hget(str(self.db_key), "qa_mode")
+            if raw is not None:
+                # Popoto encodes booleans; True is b'\xc1', False is b'\xc0'
+                return raw == b"\xc1"
+        except Exception:
+            pass
+        return False
 
     @qa_mode.setter
     def qa_mode(self, value: bool) -> None:
