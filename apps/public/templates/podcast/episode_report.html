@@ -32,3 +32,25 @@
   </div>
 </div>
 {% endblock %}
+
+{% block webmcp %}
+<script type="application/json" id="report-meta">
+{"slug":"{{ episode.slug }}","title":"{{ episode.title|escapejs }}","episode_number":{{ episode.episode_number }},"podcast_slug":"{{ podcast.slug }}","podcast_title":"{{ podcast.title|escapejs }}"}
+</script>
+<script>
+(function() {
+    if (!navigator.modelContext) return;
+    var mc = navigator.modelContext;
+    var meta = JSON.parse(document.getElementById('report-meta').textContent);
+
+    mc.registerResource('site://podcast/' + meta.podcast_slug + '/episode/' + meta.slug + '/report', {
+        name: 'Report: ' + meta.title,
+        description: 'Full research report for episode ' + meta.episode_number + ' of ' + meta.podcast_title
+    }, function() {
+        var reportEl = document.querySelector('.prose.prose-sm.max-w-none.text-gray-700');
+        var text = reportEl ? reportEl.innerText : '';
+        return { contents: [{ text: text, mimeType: 'text/plain' }] };
+    });
+})();
+</script>
+{% endblock %}

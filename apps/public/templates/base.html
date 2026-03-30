@@ -97,6 +97,13 @@ Block Structure:
     <!-- Base JavaScript -->
     <script src="{% static 'js/base.js' %}?v=3" defer></script>
 
+    <!-- WebMCP: Expose page tools to AI agents via navigator.modelContext -->
+    <script src="https://cdn.jsdelivr.net/npm/@mcp-b/webmcp-polyfill@2.2.0/dist/index.iife.js"
+            integrity="sha384-pDEW+qO88VUM9Sc51I/8WTrZ96Y4+/z5FcEtbWz8SW/hp49pD50r9YjNc0+IzXjU"
+            crossorigin="anonymous"
+            onerror="console.warn('WebMCP polyfill failed to load — page works normally without it.')"
+            defer></script>
+
     <!-- Page-specific CSS -->
     {% block extra_css %}{% endblock extra_css %}
     {% block extra_head %}{% endblock extra_head %}
@@ -175,5 +182,10 @@ Block Structure:
 
 <!-- Page-specific JavaScript -->
 {% block scripts %}{% endblock %}
+
+<!-- WebMCP: Page-specific tool registrations for AI agents.
+     Override this block in page templates to register tools via navigator.modelContext.
+     Empty by default — pages opt in by providing registrations. -->
+{% block webmcp %}{% endblock %}
 </body>
 </html>

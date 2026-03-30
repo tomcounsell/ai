@@ -98,7 +98,7 @@
   {% endif %}
 
   <!-- Rich Show Notes -->
-  <div class="mb-6 prose prose-sm max-w-none text-gray-700">
+  <div class="mb-6 prose prose-sm max-w-none text-gray-700" data-webmcp="show-notes">
     {% episode_show_notes episode %}
   </div>
 
@@ -141,4 +141,43 @@
     </a>
   </div>
 </div>
+{% endblock %}
+
+{% block webmcp %}
+{% url 'podcast:episode_report' slug=podcast.slug episode_slug=episode.slug as report_url %}
+<script type="application/json" id="episode-meta">
+{"slug":"{{ episode.slug }}","title":"{{ episode.title|escapejs }}","description":"{{ episode.description|escapejs|default:'' }}","episode_number":{{ episode.episode_number }},"published_at":"{{ episode.published_at|date:'c'|default:'' }}","audio_duration_seconds":{% if episode.audio_duration_seconds %}{{ episode.audio_duration_seconds }}{% else %}null{% endif %},"is_explicit":{% if episode.is_explicit %}true{% else %}false{% endif %},"audio_url":"{{ episode.audio_url|default:''|escapejs }}","has_report":{% if episode.report_text %}true{% else %}false{% endif %},"podcast_slug":"{{ podcast.slug }}","podcast_title":"{{ podcast.title|escapejs }}"}
+</script>
+<script>
+(function() {
+    if (!navigator.modelContext) return;
+    var mc = navigator.modelContext;
+    var meta = JSON.parse(document.getElementById('episode-meta').textContent);
+
+    mc.registerResource('site://podcast/' + meta.podcast_slug + '/episode/' + meta.slug, {
+        name: 'Episode: ' + meta.title,
+        description: 'Episode metadata including title, number, publish date, duration, and audio URL'
+    }, function() {
+        return { contents: [{ text: JSON.stringify(meta, null, 2), mimeType: 'application/json' }] };
+    });
+
+    var showNotesEl = document.querySelector('[data-webmcp="show-notes"]');
+    mc.registerResource('site://podcast/' + meta.podcast_slug + '/episode/' + meta.slug + '/show-notes', {
+        name: 'Show Notes: ' + meta.title,
+        description: 'Episode show notes content as rendered text'
+    }, function() {
+        var text = showNotesEl ? showNotesEl.innerText : '';
+        return { contents: [{ text: text, mimeType: 'text/plain' }] };
+    });
+
+    if (meta.has_report) {
+        mc.registerResource('site://podcast/' + meta.podcast_slug + '/episode/' + meta.slug + '/report', {
+            name: 'Report: ' + meta.title,
+            description: 'Full research report for this episode (available at the report page)'
+        }, function() {
+            return { contents: [{ text: 'The full report is available at: {{ report_url }}', mimeType: 'text/plain' }] };
+        });
+    }
+})();
+</script>
 {% endblock %}
