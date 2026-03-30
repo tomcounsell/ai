@@ -79,9 +79,6 @@ Replace `CHAT_NAME` with the group name (e.g. `PM: PsyOptimal`, `Dev: Valor`). T
 | `python scripts/reflections.py --ignore "pattern"` | Silence a bug pattern for 14 days |
 | `./scripts/install_reflections.sh` | Install reflections launchd schedule |
 | `tail -f logs/reflections.log` | Stream reflections logs |
-| `python scripts/issue_poller.py` | Run issue poller manually (polls GitHub for new issues) |
-| `./scripts/install_issue_poller.sh` | Install issue poller launchd schedule (5-min interval) |
-| `tail -f logs/issue_poller.log` | Stream issue poller logs |
 | `python scripts/autoexperiment.py --target observer --iterations 50` | Run autoexperiment on observer prompt |
 | `python scripts/autoexperiment.py --target summarizer --dry-run` | Dry-run autoexperiment on summarizer |
 | `python scripts/autoexperiment.py --list-targets` | List autoexperiment targets |

@@ -99,10 +99,9 @@ After update, reinstall launchd plists to pick up any template changes:
 ```bash
 cd ~/src/ai
 ./scripts/install_reflections.sh
-./scripts/install_issue_poller.sh
 ```
 
-The install scripts substitute `__PROJECT_DIR__` and `__HOME_DIR__` placeholders with the current machine's paths. This ensures plists work on any machine without hardcoded usernames.
+The install script substitutes `__PROJECT_DIR__` and `__HOME_DIR__` placeholders with the current machine's paths. This ensures plists work on any machine without hardcoded usernames.
 
 ## Troubleshooting
 

@@ -98,9 +98,10 @@ def redis_test_db(request):
     Also resets the async Redis connection to use the same db, since popoto v1.0.0b2
     maintains a separate _POPOTO_ASYNC_REDIS_DB connection.
     """
-    import popoto.redis_db as rdb
     import redis
     import redis.asyncio as aioredis
+
+    import popoto.redis_db as rdb
 
     # Determine per-worker db number for xdist isolation
     worker_id = getattr(request.config, "workerinput", {}).get("workerid", "")
@@ -163,7 +164,6 @@ FEATURE_MAP = {
     "skill_outcome": "sdlc",
     "skills_audit": "sdlc",
     "steering": "sdlc",
-    "issue_poller": "sdlc",
     "cross_repo_build": "sdlc",
     "session_status": "sessions",
     "session_stuck": "sessions",

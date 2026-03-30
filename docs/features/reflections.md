@@ -91,9 +91,7 @@ All log files have rotation configured to prevent unbounded growth. Two mechanis
 | Log File | Writer | Rotation Mechanism | Max Size | Backups |
 |----------|--------|--------------------|----------|---------|
 | `bridge.log` | Python (RotatingFileHandler) | `logging.handlers.RotatingFileHandler` | 10MB | 5 |
-| `issue_poller.log` | Python (RotatingFileHandler) | `logging.handlers.RotatingFileHandler` | 10MB | 5 |
 | `bridge.error.log` | launchd (StandardErrorPath) | Shell `rotate_log` in `valor-service.sh` | 10MB | 3 |
-| `issue_poller_error.log` | launchd (StandardErrorPath) | Shell `rotate_log` in `valor-service.sh` | 10MB | 3 |
 | `watchdog.log` | launchd (StandardOutPath) | Shell `rotate_log` in `valor-service.sh` | 10MB | 3 |
 | `reflections.log` | launchd (StandardOutPath) | Shell `rotate_log` in `valor-service.sh` | 10MB | 3 |
 | `reflections_error.log` | launchd (StandardErrorPath) | Shell `rotate_log` in `valor-service.sh` | 10MB | 3 |
