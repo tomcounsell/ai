@@ -5,7 +5,7 @@ appetite: Medium
 owner: Valor
 created: 2026-03-30
 tracking: https://github.com/tomcounsell/ai/issues/589
-last_comment_id:
+last_comment_id: 4154388316
 ---
 
 # QA Conversational Humility
@@ -316,8 +316,16 @@ All changes are internal to existing modules. The bridge imports and calls these
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
-| CONCERN | [agent-type] | [The concern raised] | [How/whether it was addressed] |
+<!-- Populated by /do-plan-critique (war room). -->
+| # | CONCERN | CRITIC | STATUS |
+|---|---------|--------|--------|
+| 1 | 3-way return type change silently breaks callers (non-empty string is truthy) | Operator | BLOCKING -- use enum or backward-compatible wrapper |
+| 2 | Task 4 must enumerate all classify_needs_response call sites (routing.py:801 missing) | Archaeologist | BLOCKING -- add explicit call site list |
+| 3 | Dual-layer tone enforcement (Layer 1 + Layer 2) may double-process and degrade quality | Skeptic | NON-BLOCKING -- consider dropping Layer 2 |
+| 4 | Ollama 3-way classification unreliable on 1.7B model; use token matching for react | Adversary | NON-BLOCKING -- two-stage approach recommended |
+| 5 | "2-4 sentences" target too aggressive for complex technical questions | Skeptic | NON-BLOCKING -- use qualitative brevity guidance |
+| 6 | Fast-path acknowledgment set duplicated between ignore and react | Operator | NON-BLOCKING -- merge into single classification dict |
+| 7 | CLI sanitizer regex could strip legitimate technical discussion | Adversary | NON-BLOCKING -- tighten regex to command-like patterns only |
 
 ---
 
