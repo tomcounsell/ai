@@ -18,8 +18,6 @@ from config.memory_defaults import apply_defaults
 # Apply tuned defaults before model definition
 apply_defaults()
 
-from popoto.fields.existence_filter import ExistenceFilter  # noqa: E402
-
 from popoto import (  # noqa: E402
     AccessTrackerMixin,
     AutoKeyField,
@@ -32,6 +30,7 @@ from popoto import (  # noqa: E402
     StringField,
     WriteFilterMixin,
 )
+from popoto.fields.existence_filter import ExistenceFilter  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +38,7 @@ logger = logging.getLogger(__name__)
 SOURCE_HUMAN = "human"
 SOURCE_AGENT = "agent"
 SOURCE_SYSTEM = "system"
+SOURCE_KNOWLEDGE = "knowledge"
 
 
 class Memory(WriteFilterMixin, AccessTrackerMixin, Model):
@@ -53,7 +53,11 @@ class Memory(WriteFilterMixin, AccessTrackerMixin, Model):
         project_key: Project partition key for isolation.
         content: The memory content text (max ~500 chars for efficiency).
         importance: Numeric importance score. Human=6.0, Agent=1.0.
-        source: Origin type — "human", "agent", or "system".
+        source: Origin type — "human", "agent", "system", or "knowledge".
+        reference: Generic JSON pointer for actionable next steps. Used by
+            knowledge-sourced memories to point to the source file, e.g.
+            {"tool": "read_file", "params": {"file_path": "/path/to/doc.md"}}.
+            Empty string for memories without a reference.
         metadata: Optional structured metadata dict with keys:
             category (str): "correction", "decision", "pattern", "surprise"
             file_paths (list[str]): Referenced file paths
@@ -71,7 +75,10 @@ class Memory(WriteFilterMixin, AccessTrackerMixin, Model):
     project_key = KeyField()
     content = StringField(default="")
     importance = FloatField(default=1.0)
-    source = StringField(default=SOURCE_AGENT)  # SOURCE_HUMAN, SOURCE_AGENT, SOURCE_SYSTEM
+    source = StringField(
+        default=SOURCE_AGENT
+    )  # SOURCE_HUMAN, SOURCE_AGENT, SOURCE_SYSTEM, SOURCE_KNOWLEDGE
+    reference = StringField(default="")  # Generic JSON pointer (e.g. tool call, URL, entity)
     metadata = DictField(default=dict)
 
     relevance = DecayingSortedField(

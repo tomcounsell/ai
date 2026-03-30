@@ -1443,6 +1443,9 @@ async def main():
 
         await record_message_processed(event.chat_id, message.id)
 
+    # Mutable ref for knowledge watcher (populated later, read by shutdown handler)
+    _knowledge_watcher_ref: list = [None]
+
     # Register signal handlers for graceful shutdown
     loop = asyncio.get_event_loop()
 
@@ -1474,6 +1477,13 @@ async def main():
         orphans = _cleanup_orphaned_claude_processes()
         if orphans:
             logger.info(f"Killed {orphans} SDK subprocess(es) during shutdown")
+
+        # Stop knowledge watcher if running
+        try:
+            if _knowledge_watcher_ref and _knowledge_watcher_ref[0] is not None:
+                _knowledge_watcher_ref[0].stop()
+        except Exception:
+            pass
 
         # Write final last-connected timestamp before shutting down
         _write_last_connected()
@@ -1789,6 +1799,29 @@ async def main():
         except Exception as e2:
             logger.error(f"Failed to start fallback health monitor: {e2}")
 
+    # Start knowledge document watcher (monitors ~/work-vault/ for file changes)
+    try:
+        from bridge.knowledge_watcher import KnowledgeWatcher
+
+        # Configure popoto embedding provider before starting watcher
+        try:
+            import popoto
+            from popoto.embeddings.openai import OpenAIProvider
+
+            popoto.configure(embedding_provider=OpenAIProvider())
+            logger.info("Configured popoto OpenAI embedding provider")
+        except Exception as e:
+            logger.warning(f"Failed to configure embedding provider: {e}")
+
+        _kw = KnowledgeWatcher()
+        if _kw.start():
+            _knowledge_watcher_ref[0] = _kw
+            logger.info("Knowledge document watcher started")
+        else:
+            logger.warning("Knowledge document watcher failed to start")
+    except Exception as e:
+        logger.error(f"Failed to start knowledge watcher: {e}")
+
     # Start message query polling loop
     async def message_query_loop():
         """Poll for message query requests every second."""
@@ -1863,6 +1896,21 @@ async def main():
                         )
                 except Exception as e:
                     logger.debug(f"[heartbeat] Zombie cleanup error: {e}")
+
+            # Knowledge watcher liveness check every 60s (piggyback on heartbeat)
+            if _knowledge_watcher_ref[0] is not None:
+                try:
+                    _kw = _knowledge_watcher_ref[0]
+                    if not _kw.is_healthy():
+                        logger.warning("[heartbeat] Knowledge watcher unhealthy, restarting...")
+                        _kw.stop()
+                        if _kw.start():
+                            logger.info("[heartbeat] Knowledge watcher restarted successfully")
+                        else:
+                            logger.error("[heartbeat] Knowledge watcher restart failed")
+                            _knowledge_watcher_ref[0] = None
+                except Exception as e:
+                    logger.debug(f"[heartbeat] Knowledge watcher check error: {e}")
 
             # Log heartbeat every 4th tick (~2min) for watchdog
             if uptime_min > 0 and uptime_min % 2 == 0:

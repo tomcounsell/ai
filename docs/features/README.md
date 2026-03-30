@@ -49,6 +49,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Job Hierarchy](job-scheduling.md#parent-child-job-hierarchy) | Parent-child job decomposition with completion propagation, progress tracking, and orphan/stuck parent self-healing | Shipped |
 | [Job Queue Reliability](job-queue.md) | KeyField index fixes, Event-based drain guard, delete-and-recreate pattern, orphan recovery | Shipped |
 | [Job Self-Scheduling](job-scheduling.md) | Agent-initiated queue operations: schedule SDLC jobs, deferred execution, 4-tier priority, queue manipulation | Shipped |
+| [Knowledge Document Integration](knowledge-document-integration.md) | Indexes work-vault markdown/text files into the memory system with project-scoped isolation, filesystem watching, and companion memories for subconscious recall | Shipped |
 | [Link Content Summarization](link-summarization.md) | Auto-fetch and summarize shared links via Perplexity API | Shipped |
 | [Lint Auto-Fix](lint-auto-fix.md) | Automatic lint/format fixing via pre-commit hook and PostToolUse hook, eliminating agent churn loops | Shipped |
 | [Memory Search Tool](memory-search-tool.md) | Direct interface for searching, saving, inspecting, and forgetting memories from the Memory model | Shipped |
