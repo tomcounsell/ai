@@ -357,7 +357,59 @@ No new MCP server or tool needed. The agent already has `read_file` access — t
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Plan**: docs/plans/knowledge_document_integration_528.md
+**Issue**: #528
+**Critics**: Skeptic, Operator, Archaeologist, Adversary, Simplifier, User
+**Findings**: 4 total (2 blockers, 2 concerns, 0 nits)
+
+### Blockers
+
+#### 1. VoyageProvider import path does not exist
+- **Severity**: BLOCKER
+- **Critics**: Skeptic, Adversary
+- **Location**: Solution > Technical Approach, Task 2
+- **Finding**: The plan specifies `EmbeddingField with VoyageProvider(model="voyage-3")` but `from popoto.providers.voyage import VoyageProvider` raises `ModuleNotFoundError: No module named 'popoto.providers'`. The `voyageai` package is also not installed. The entire embedding pipeline depends on a provider class that does not exist in the installed popoto version.
+- **Suggestion**: Verify the correct import path for EmbeddingField's provider configuration by checking popoto docs or source. If VoyageProvider is not yet shipped in popoto, this is a hard dependency that must be resolved before build. The plan should include a spike task to confirm the EmbeddingField provider API and correct the import path. Also add `pip install voyageai` and `pip install popoto[voyage]` as explicit pre-build setup steps.
+
+#### 2. Existing `tools/knowledge_search/` tool not addressed in Prior Art
+- **Severity**: BLOCKER
+- **Critics**: Archaeologist, Simplifier
+- **Location**: Prior Art, Solution
+- **Finding**: The plan states "No prior issues found related to work-vault integration or KnowledgeDocument modeling. This is greenfield work." However, `tools/knowledge_search/__init__.py` already implements a full knowledge base search system with document indexing, chunking, semantic/keyword/hybrid search using SQLite + OpenRouter embeddings. This is directly overlapping functionality. The plan creates a parallel system (Popoto + Voyage) without acknowledging or replacing the existing one, risking two competing knowledge search implementations.
+- **Suggestion**: The plan must address the existing `tools/knowledge_search/` tool: either (a) replace it with the new KnowledgeDocument system and delete the old code, (b) integrate with it, or (c) explicitly scope the two as different layers with a clear boundary. Add this to the Prior Art section and add a task for migration/cleanup.
+
+### Concerns
+
+#### 3. Watchdog thread crash isolation is specified but not architecturally enforced
+- **Severity**: CONCERN
+- **Critics**: Operator, Skeptic
+- **Location**: Solution > Filesystem watcher, Task 5, Failure Path Test Strategy
+- **Finding**: The plan says "watcher crash must not take down the bridge" and Task 5 says "all exceptions caught." However, the bridge startup (`bridge/telegram_bridge.py`) runs in an asyncio event loop, and the plan adds a `watchdog` thread (OS-level threading.Timer + Observer). If the watchdog thread raises an unhandled exception in its event callback, Python's default behavior is to silently kill only that thread -- but if the thread holds a lock or is mid-write to Redis/Popoto, it could leave corrupted state. The plan has no health-check or restart mechanism for a dead watcher thread.
+- **Suggestion**: Add a periodic liveness check (e.g., bridge checks watcher thread `is_alive()` every 60s and restarts it if dead). Log a warning when the watcher thread dies. This is mentioned vaguely in "Watchdog thread health is visible in bridge status/logs" but should be an explicit task with a concrete implementation.
+
+#### 4. Scope resolver depends on work-vault CLAUDE.md classifications but no parsing spec
+- **Severity**: CONCERN
+- **Critics**: Skeptic, Adversary
+- **Location**: Solution > Scope resolver, Task 3
+- **Finding**: The plan says the scope resolver "classifies paths as client-scoped or company-wide using work-vault CLAUDE.md rules" but does not specify how to parse that CLAUDE.md file. If the CLAUDE.md format changes, the resolver silently misclassifies files. Additionally, projects.json already has `knowledge_base` fields per project -- it is unclear why the resolver also needs to parse CLAUDE.md instead of just using the projects.json mappings exclusively.
+- **Suggestion**: Specify whether scope resolution uses projects.json `knowledge_base` mappings alone (simpler, more reliable) or also parses CLAUDE.md (more complex, fragile). If CLAUDE.md is needed, document the expected format and add a validation step. Consider using projects.json as the single source of truth for scope.
+
+### Structural Check Results
+
+| Check | Status | Detail |
+|-------|--------|--------|
+| Required sections | PASS | All 4 required sections present and non-empty |
+| Task numbering | PASS | Sequential 1-9, no gaps |
+| Dependencies valid | PASS | All Depends On references point to valid task IDs |
+| File paths exist | PARTIAL | 5 of 15 referenced files exist (10 are intentionally new files to be created) |
+| Prerequisites met | FAIL | `voyageai` not installed; `VoyageProvider` import path invalid |
+| Cross-references | PASS | Success criteria map to tasks; no-gos not in solution |
+
+### Verdict
+
+**NEEDS REVISION** -- 2 blockers must be resolved before build:
+1. The VoyageProvider/voyageai dependency must be verified as actually available (import path, package installation) or the embedding approach must be revised.
+2. The existing `tools/knowledge_search/` system must be addressed -- either replaced, integrated, or explicitly scoped as a separate concern with rationale.
 
 ---
 
