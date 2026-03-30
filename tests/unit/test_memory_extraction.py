@@ -329,7 +329,7 @@ class TestPostMergeJsonParsing:
     async def test_json_response_extracts_metadata(self):
         """When Haiku returns JSON, metadata is parsed and passed to safe_save."""
         import json
-        from unittest.mock import AsyncMock, MagicMock, patch
+        from unittest.mock import MagicMock, patch
 
         from agent.memory_extraction import extract_post_merge_learning
 
@@ -427,9 +427,7 @@ class TestPostMergeJsonParsing:
             patch("models.memory.Memory", mock_memory),
             patch("models.memory.SOURCE_AGENT", "agent"),
         ):
-            result = await extract_post_merge_learning(
-                "Add recall weights", "Description", "diff"
-            )
+            result = await extract_post_merge_learning("Add recall weights", "Description", "diff")
 
         assert result is not None
         # Should have used the raw JSON text since observation was too short
