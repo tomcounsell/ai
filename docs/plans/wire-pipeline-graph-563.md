@@ -1,5 +1,5 @@
 ---
-status: Critiqued
+status: Merged
 type: bug
 appetite: Medium
 owner: Valor
