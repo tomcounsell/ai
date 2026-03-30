@@ -203,7 +203,7 @@ No agent integration required -- this is internal plumbing. No new MCP servers, 
 - **Agent Type**: builder
 - **Parallel**: true
 - Create `models/dedup.py` with `DedupRecord` model (KeyField for chat_id, set-like storage, Meta.ttl = 7200)
-- Create `models/seen_issue.py` with `SeenIssue` model (KeyField for org/repo, set storage, no TTL)
+- ~~Create `models/seen_issue.py` with `SeenIssue` model~~ — removed in #565, no longer applicable
 - Create `models/telemetry.py` with `ObserverTelemetry` model (counter fields, list field, daily rollup with 7-day TTL)
 - Register all new models in `models/__init__.py`
 
