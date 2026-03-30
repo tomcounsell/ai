@@ -4,7 +4,7 @@
 
 This document defines the RSS feed standards for the Yudame Research Podcast. The specification follows [podcast-standard.org](https://podcast-standard.org/podcast_standard/) best practices and ensures compatibility with major podcast platforms (Apple Podcasts, Spotify, Google Podcasts, etc.).
 
-**Feed URL:** `https://research.yuda.me/podcast/feed.xml`
+**Feed URL:** `https://research.bwforce.ai/podcast/feed.xml`
 
 **Feed Type:** Episodic (newest episodes first)
 
@@ -16,14 +16,14 @@ These elements MUST be present in the `<channel>` section:
 
 ### Core Metadata
 - `<title>` - Yudame Research Podcast
-- `<link>` - https://research.yuda.me/
+- `<link>` - https://research.bwforce.ai/
 - `<description>` - Brief podcast description (plain text)
 - `<language>` - **en-us**
 
 ### Contact & Rights
 - `<copyright>` - **© 2025 Yudame Inc. For research and educational use.**
-- `<managingEditor>` - **valor@yuda.me (Valor Engels)**
-- `<webMaster>` - **valor@yuda.me (Valor Engels)**
+- `<managingEditor>` - **valor@yudame.org (Valor Engels)**
+- `<webMaster>` - **valor@yudame.org (Valor Engels)**
 - `<lastBuildDate>` - Auto-update on each feed modification (RFC 2822 format)
 - `<ttl>` - **1440** (podcast apps should check daily)
 
@@ -32,7 +32,7 @@ These elements MUST be present in the `<channel>` section:
 - `<itunes:summary>` - Longer description for iTunes
 - `<itunes:owner>` - Owner contact for platform communication
   - `<itunes:name>` - **Valor Engels**
-  - `<itunes:email>` - **valor@yuda.me**
+  - `<itunes:email>` - **valor@yudame.org**
 - `<itunes:explicit>` - Content rating (**no**)
 - `<itunes:category>` - Multiple categories supported:
   - **Science** (primary)
@@ -47,7 +47,7 @@ These elements MUST be present in the `<channel>` section:
 xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"
 xmlns:content="http://purl.org/rss/1.0/modules/content/"
 xmlns:podcast="https://podcastindex.org/namespace/1.0"
-xmlns:research="https://research.yuda.me/namespace/1.0"
+xmlns:research="https://research.bwforce.ai/namespace/1.0"
 ```
 
 ---
@@ -64,13 +64,13 @@ These elements MUST be present in each `<item>`:
   - Format: `<![CDATA[<p>Description...</p><p><strong>Key Sources:</strong></p><ul><li><a href="url">Source Name</a></li></ul>]]>`
 - `<pubDate>` - Publication date in RFC 2822 format
 - `<enclosure>` - Audio file reference
-  - `url` - Direct link to MP3 file (https://research.yuda.me/podcast/episodes/...)
+  - `url` - Direct link to MP3 file (https://research.bwforce.ai/podcast/episodes/...)
   - `length` - File size in bytes (exact)
   - `type` - **audio/mpeg**
 - `<guid>` - **Episode URL** (ensures uniqueness even with same-day publishes)
   - Set `isPermaLink="true"` (default)
-  - Format: `https://research.yuda.me/podcast/episodes/YYYY-MM-DD-slug/YYYY-MM-DD-slug.mp3`
-- `<author>` - **valor@yuda.me (Valor Engels)**
+  - Format: `https://research.bwforce.ai/podcast/episodes/YYYY-MM-DD-slug/YYYY-MM-DD-slug.mp3`
+- `<author>` - **valor@yudame.org (Valor Engels)**
 
 ### iTunes Episode Data
 - `<itunes:author>` - **Valor Engels**
@@ -96,7 +96,7 @@ These elements MUST be present in each `<item>`:
 - ✓ REQUIRED: `<itunes:keywords>` - Comma-separated keywords for discoverability
 - ✓ REQUIRED: `<content:encoded>` - Rich HTML show notes with clickable source links
 - ✓ REQUIRED: `<itunes:episodeType>` - Episode type: `full`, `trailer`, or `bonus`
-- ✓ REQUIRED: `<author>` - **valor@yuda.me (Valor Engels)**
+- ✓ REQUIRED: `<author>` - **valor@yudame.org (Valor Engels)**
 
 **For Series Episodes (BOTH approaches for maximum compatibility):**
 - ✓ REQUIRED: `<itunes:season>` - Season number (for player compatibility)
@@ -149,7 +149,7 @@ These elements MUST be present in each `<item>`:
 - **Chosen approach:** Use episode audio file URL as GUID
 - **Rationale:** Unique even when publishing multiple episodes same day (due to unique slug)
 - **Permanence:** URLs should never change once published
-- **Format:** `https://research.yuda.me/podcast/episodes/YYYY-MM-DD-slug/YYYY-MM-DD-slug.mp3`
+- **Format:** `https://research.bwforce.ai/podcast/episodes/YYYY-MM-DD-slug/YYYY-MM-DD-slug.mp3`
 - **Attribute:** `isPermaLink="true"` (default, can be omitted)
 
 ### HTML Encoding
@@ -237,7 +237,7 @@ podcast/episodes/series-name/epN-topic-slug/
 - Style: Minimalist, contemporary, sophisticated modernism
 - Logo: Yellow triangular "A" mark
 - Includes: Waveforms, microphone icon, circuit patterns
-- URL: research.yuda.me displayed at bottom
+- URL: research.bwforce.ai displayed at bottom
 
 ### Episode Cover Art
 - **Location:** Episode directory (`cover.png`)
@@ -252,8 +252,8 @@ podcast/episodes/series-name/epN-topic-slug/
 ### Image URLs
 - Use versioning parameter for cache busting: `cover.png?v=1`
 - Increment version if image is replaced
-- Channel art URL: `https://research.yuda.me/podcast/yudame-research-podcast.jpg`
-- Episode art URL format: `https://research.yuda.me/podcast/episodes/[path]/cover.png?v=1`
+- Channel art URL: `https://research.bwforce.ai/podcast/yudame-research-podcast.jpg`
+- Episode art URL format: `https://research.bwforce.ai/podcast/episodes/[path]/cover.png?v=1`
 
 ---
 
@@ -275,7 +275,7 @@ Before publishing an episode, verify:
 - [ ] Audio file size matches actual file size in bytes (verify with `ls -l`)
 - [ ] Duration matches audio file length (verify with `ffmpeg -i`)
 - [ ] GUID uses episode audio file URL
-- [ ] `<author>` is valor@yuda.me (Valor Engels)
+- [ ] `<author>` is valor@yudame.org (Valor Engels)
 - [ ] Keywords include key topics and frameworks
 - [ ] Episode image has proper Yudame branding (if used)
 - [ ] For series: `<itunes:season>`, `<itunes:episode>`, and `<research:series>` all present
@@ -391,4 +391,4 @@ Before publishing an episode, verify:
 - **Apple Podcasts:** [Podcasts Connect Specifications](https://help.apple.com/itc/podcasts_connect/)
 - **Podcast Namespace:** [Podcasting 2.0](https://github.com/Podcastindex-org/podcast-namespace)
 - **RSS 2.0 Specification:** [RSS Advisory Board](https://www.rssboard.org/rss-specification)
-- **Yudame Brand:** [yuda.me](https://yuda.me)
+- **Yudame Brand:** [yudame.org](https://yudame.org)

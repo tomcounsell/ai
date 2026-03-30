@@ -43,15 +43,15 @@ Read `podcast/feed.xml` to analyze:
 
 ✓ Contact & Rights:
 - [ ] `<copyright>` = "© 2025 Yudame Inc. For research and educational use."
-- [ ] `<managingEditor>` = "valor@yuda.me (Valor Engels)"
-- [ ] `<webMaster>` = "valor@yuda.me (Valor Engels)"
+- [ ] `<managingEditor>` = "valor@yudame.org (Valor Engels)"
+- [ ] `<webMaster>` = "valor@yudame.org (Valor Engels)"
 - [ ] `<lastBuildDate>` present in RFC 2822 format
 - [ ] `<ttl>` = "1440"
 
 ✓ iTunes Metadata:
 - [ ] `<itunes:author>` = "Valor Engels"
 - [ ] `<itunes:summary>` present
-- [ ] `<itunes:owner>` with name and email (valor@yuda.me)
+- [ ] `<itunes:owner>` with name and email (valor@yudame.org)
 - [ ] `<itunes:explicit>` = "no"
 - [ ] `<itunes:category>` includes: Science, Education, Technology
 - [ ] `<itunes:image>` present with valid URL
@@ -73,7 +73,7 @@ Read `podcast/feed.xml` to analyze:
 - [ ] `<content:encoded>` present with HTML CDATA format
   - [ ] Contains clickable source links
   - [ ] Properly formatted with `<![CDATA[...]]>`
-- [ ] `<author>` = "valor@yuda.me (Valor Engels)"
+- [ ] `<author>` = "valor@yudame.org (Valor Engels)"
 - [ ] `<pubDate>` in RFC 2822 format
 - [ ] `<enclosure>` with url, length (bytes), type="audio/mpeg"
 - [ ] `<guid>` uses episode audio file URL

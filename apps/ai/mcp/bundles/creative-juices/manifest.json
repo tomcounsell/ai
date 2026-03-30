@@ -9,12 +9,12 @@
     "name": "Tom Counsell",
     "url": "https://github.com/tomcounsell"
   },
-  "homepage": "https://ai.yuda.me/mcp/creative-juices",
+  "homepage": "https://app.bwforce.ai/mcp/creative-juices",
   "repository": {
     "type": "git",
     "url": "https://github.com/yudame/cuttlefish"
   },
-  "documentation": "https://ai.yuda.me/mcp/creative-juices/README.md",
+  "documentation": "https://app.bwforce.ai/mcp/creative-juices/README.md",
   "license": "MIT",
   "keywords": [
     "creativity",

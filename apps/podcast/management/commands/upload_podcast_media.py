@@ -33,7 +33,7 @@ from django.core.management.base import BaseCommand, CommandError
 from apps.podcast.models import Podcast
 
 # Old URL prefix that needs replacing
-OLD_URL_PREFIX = "https://research.yuda.me/"
+OLD_URL_PREFIX = "https://research.bwforce.ai/"
 
 # Mapping from podcast slug -> series directory name(s) in the source repo
 PODCAST_TO_SERIES = {

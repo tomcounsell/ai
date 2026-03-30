@@ -172,7 +172,7 @@ class Command(BaseCommand):
                         slug=podcast_slug,
                         description=defn["description"],
                         author_name="Yudame Research",
-                        author_email="podcast@yuda.me",
+                        author_email="podcast@yudame.org",
                         language="en",
                         privacy=defn["privacy"],
                     )
@@ -184,7 +184,7 @@ class Command(BaseCommand):
                         "title": defn["title"],
                         "description": defn["description"],
                         "author_name": "Yudame Research",
-                        "author_email": "podcast@yuda.me",
+                        "author_email": "podcast@yudame.org",
                         "language": "en",
                         "privacy": defn["privacy"],
                     },

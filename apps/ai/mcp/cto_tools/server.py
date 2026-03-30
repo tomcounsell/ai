@@ -862,7 +862,7 @@ def main():
 
     Supports two modes:
     - stdio (default): For local development and testing
-    - streamable-http: For production hosting at ai.yuda.me
+    - streamable-http: For production hosting at app.bwforce.ai
 
     Set MCP_TRANSPORT environment variable to switch modes.
     """
@@ -871,7 +871,7 @@ def main():
     transport = os.getenv("MCP_TRANSPORT", "stdio")
 
     if transport == "streamable-http":
-        # Production mode - HTTP transport for hosting at ai.yuda.me
+        # Production mode - HTTP transport for hosting at app.bwforce.ai
         logger.info("Starting CTO Tools MCP server in HTTP mode")
         mcp.run(transport="streamable-http")
     else:

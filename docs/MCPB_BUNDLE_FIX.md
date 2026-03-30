@@ -76,7 +76,7 @@ with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
     "run",
     "--with", "mcp",
     "--with", "httpx",
-    "https://ai.yuda.me/mcp/creative-juices/client.py"  # ❌ External URL
+    "https://app.bwforce.ai/mcp/creative-juices/client.py"  # ❌ External URL
 ]
 ```
 
@@ -168,7 +168,7 @@ Use `${__dirname}` to reference bundled files:
 #!/usr/bin/env node
 const http = require('https');
 
-const HOSTED_SERVICE_URL = 'https://ai.yuda.me/mcp/creative-juices/serve';
+const HOSTED_SERVICE_URL = 'https://app.bwforce.ai/mcp/creative-juices/serve';
 
 // Read from stdin, forward to hosted service, write to stdout
 process.stdin.on('data', async (chunk) => {

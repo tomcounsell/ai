@@ -215,7 +215,7 @@ def populate_episode_fields(
         podcast_slug = episode.podcast.slug
         episode_slug = episode.slug
         audio_url = (
-            f"https://research.yuda.me/podcast/episodes/"
+            f"https://research.bwforce.ai/podcast/episodes/"
             f"{podcast_slug}/{episode_slug}/{audio_path.name}"
         )
         if not dry_run:
@@ -246,7 +246,7 @@ def populate_episode_fields(
         podcast_slug = episode.podcast.slug
         episode_slug = episode.slug
         cover_url = (
-            f"https://research.yuda.me/podcast/episodes/"
+            f"https://research.bwforce.ai/podcast/episodes/"
             f"{podcast_slug}/{episode_slug}/{cover_path.name}"
         )
         if verbose:
@@ -333,11 +333,10 @@ def create_artifacts(
 
         # Keep root-level *_transcript.json as artifacts (has timing data),
         # but skip duplicates in subdirectories
-        if path.name.endswith("_transcript.json"):
-            if len(rel_path.parts) > 1:
-                if verbose:
-                    stdout(f"  SKIP (duplicate transcript): {rel_str}")
-                continue
+        if path.name.endswith("_transcript.json") and len(rel_path.parts) > 1:
+            if verbose:
+                stdout(f"  SKIP (duplicate transcript): {rel_str}")
+            continue
 
         # Skip files that are mapped to Episode fields
         if rel_str in ("report.md", "sources.md", "transcript.txt"):
@@ -353,7 +352,7 @@ def create_artifacts(
             podcast_slug = episode.podcast.slug
             episode_slug = episode.slug
             pdf_url = (
-                f"https://research.yuda.me/podcast/episodes/"
+                f"https://research.bwforce.ai/podcast/episodes/"
                 f"{podcast_slug}/{episode_slug}/{rel_str}"
             )
             # Attempt text extraction; fall back to URL-only on failure

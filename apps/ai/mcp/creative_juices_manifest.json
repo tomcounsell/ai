@@ -3,9 +3,9 @@
   "version": "1.0.0",
   "description": "MCP server that generates random creative prompts and strategic questions to help LLMs think outside the box",
   "author": "Tom Counsell",
-  "homepage": "https://ai.yuda.me/mcp/creative-juices",
+  "homepage": "https://app.bwforce.ai/mcp/creative-juices",
   "repository": "https://github.com/yudame/cuttlefish",
-  "documentation": "https://ai.yuda.me/mcp/creative-juices/README.md",
+  "documentation": "https://app.bwforce.ai/mcp/creative-juices/README.md",
 
   "tools": [
     {
@@ -89,8 +89,8 @@
     "localStorage": false
   },
   "oauth": {
-    "authorizationUrl": "https://ai.yuda.me/mcp/oauth/authorize",
-    "tokenUrl": "https://ai.yuda.me/mcp/oauth/token",
+    "authorizationUrl": "https://app.bwforce.ai/mcp/oauth/authorize",
+    "tokenUrl": "https://app.bwforce.ai/mcp/oauth/token",
     "scopes": ["mcp:read", "mcp:write"],
     "autoApprove": true
   },

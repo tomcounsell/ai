@@ -104,7 +104,7 @@ def main():
 1. **MCPB Bundle Distribution (Preferred)**
    - One-click `.mcpb` bundles for Claude Desktop installation
    - Bundle contains Node.js proxy client (no dependencies - Node.js ships with Claude)
-   - Proxy forwards to hosted server at `https://ai.yuda.me/mcp/{server-name}/serve`
+   - Proxy forwards to hosted server at `https://app.bwforce.ai/mcp/{server-name}/serve`
    - Examples: Creative Juices, CTO Tools
    - Benefits: Zero config, always latest version, works out-of-the-box
 
@@ -124,14 +124,14 @@ def main():
 
 The easiest way to install our MCP servers:
 
-1. Download: `https://ai.yuda.me/mcp/{server-name}/download.mcpb`
+1. Download: `https://app.bwforce.ai/mcp/{server-name}/download.mcpb`
 2. Open Claude Desktop → Settings → Extensions
 3. Click "Install from file"
 4. Select downloaded `.mcpb` file
 
 **Available bundles:**
-- Creative Juices: https://ai.yuda.me/mcp/creative-juices/download.mcpb
-- CTO Tools: https://ai.yuda.me/mcp/cto-tools/download.mcpb
+- Creative Juices: https://app.bwforce.ai/mcp/creative-juices/download.mcpb
+- CTO Tools: https://app.bwforce.ai/mcp/cto-tools/download.mcpb
 
 ### Direct Hosted Connection (For Non-Claude Clients)
 
@@ -141,7 +141,7 @@ For MCP clients that support HTTP/SSE transport:
 {
   "mcpServers": {
     "creative-juices": {
-      "url": "https://ai.yuda.me/mcp/creative-juices/serve"
+      "url": "https://app.bwforce.ai/mcp/creative-juices/serve"
     }
   }
 }
@@ -174,7 +174,7 @@ For MCP clients that support HTTP/SSE transport:
 3. **Create documentation page:** `apps/ai/mcp/{name}_web.html`
 4. **Update URLs:** Add routes for serve endpoint and docs page
 5. **Add to homepage:** Include in MCP servers section
-6. **Test hosted endpoint:** Verify at `https://ai.yuda.me/mcp/{name}/serve`
+6. **Test hosted endpoint:** Verify at `https://app.bwforce.ai/mcp/{name}/serve`
 
 ### Installation Guide Format
 
@@ -184,7 +184,7 @@ For MCP clients that support HTTP/SSE transport:
 {
   "mcpServers": {
     "server-name": {
-      "url": "https://ai.yuda.me/mcp/server-name/serve"
+      "url": "https://app.bwforce.ai/mcp/server-name/serve"
     }
   }
 }
@@ -310,7 +310,7 @@ The endpoint is deployed automatically with the main Django app on Render:
 - No separate service needed
 - No ASGI/async server needed (uses `asyncio.run()` in view)
 - CSRF exempt for MCP client compatibility
-- Available at: `https://ai.yuda.me/mcp/{name}/serve`
+- Available at: `https://app.bwforce.ai/mcp/{name}/serve`
 
 **That's it!** Just commit and push - the endpoint will be live when Django deploys.
 
@@ -320,8 +320,8 @@ The endpoint is deployed automatically with the main Django app on Render:
 
 ### Creative Juices Server (Hosted)
 **File:** `apps/ai/mcp/creative_juices_server.py`
-**URL:** `https://ai.yuda.me/mcp/creative-juices/serve`
-**Docs:** `https://ai.yuda.me/mcp/creative-juices`
+**URL:** `https://app.bwforce.ai/mcp/creative-juices/serve`
+**Docs:** `https://app.bwforce.ai/mcp/creative-juices`
 
 Shows:
 - Hosted MCP server pattern (no local installation)
@@ -333,8 +333,8 @@ Shows:
 
 ### CTO Tools Server (Hosted)
 **File:** `apps/ai/mcp/cto_tools_server.py`
-**URL:** `https://ai.yuda.me/mcp/cto-tools/serve`
-**Docs:** `https://ai.yuda.me/mcp/cto-tools`
+**URL:** `https://app.bwforce.ai/mcp/cto-tools/serve`
+**Docs:** `https://app.bwforce.ai/mcp/cto-tools`
 
 Shows:
 - Hosted MCP server for engineering leadership

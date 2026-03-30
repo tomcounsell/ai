@@ -183,7 +183,7 @@ The roadmap includes additional tools:
 ✅ Documentation updated
 ✅ Landing page enhanced
 
-Ready for deployment at `https://ai.yuda.me/mcp/cto-tools/`
+Ready for deployment at `https://app.bwforce.ai/mcp/cto-tools/`
 
 ## Impact
 

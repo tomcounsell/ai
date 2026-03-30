@@ -401,7 +401,7 @@ If optional keys are missing, the pipeline logs a warning, creates a "[SKIPPED: 
 
 - **Workspace**: Yudame (`tea-cldfmjeg1b2c73f6rrug`)
 - **Repo**: `yudame/cuttlefish` (private)
-- **Production URL**: `https://ai.yuda.me` (custom domain) / `https://cuttlefish-ea1h.onrender.com`
+- **Production URL**: `https://app.bwforce.ai` (custom domain) / `https://cuttlefish-ea1h.onrender.com`
 
 ### Services
 

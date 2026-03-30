@@ -32,7 +32,7 @@
 
 [1-2 compelling sentences highlighting key topics, major stories/events covered, and main takeaways.]
 
-Full research report: https://research.yuda.me/podcast/episodes/[YYYY-MM-DD-slug]/report.md
+Full research report: https://research.bwforce.ai/podcast/episodes/[YYYY-MM-DD-slug]/report.md
 
 ---
 
@@ -116,7 +116,7 @@ Full research report: https://research.yuda.me/podcast/episodes/[YYYY-MM-DD-slug
 ### Voiced CTA (for audio - included in episodeFocus prompt)
 > "[Brief natural language CTA that hosts can voice at end of episode]"
 >
-> Example: "If you want to go deeper on this, we've linked the full research report in the show notes with all the studies and sources we mentioned. You can find it at research.yuda.me."
+> Example: "If you want to go deeper on this, we've linked the full research report in the show notes with all the studies and sources we mentioned. You can find it at research.bwforce.ai."
 
 ---
 
@@ -207,7 +207,7 @@ Full research report: https://research.yuda.me/podcast/episodes/[YYYY-MM-DD-slug
 
 <h2>Full Research Report</h2>
 <p>Read the complete research synthesis with all citations at:
-<a href="https://research.yuda.me/podcast/episodes/[slug]/report.md">research.yuda.me/podcast/episodes/[slug]/report.md</a></p>
+<a href="https://research.bwforce.ai/podcast/episodes/[slug]/report.md">research.bwforce.ai/podcast/episodes/[slug]/report.md</a></p>
 ```
 
 **Format notes:**
@@ -229,7 +229,7 @@ Full research report: https://research.yuda.me/podcast/episodes/[YYYY-MM-DD-slug
 
 ### Podcast Namespace Tags
 ```xml
-<podcast:transcript url="https://research.yuda.me/podcast/episodes/[slug]/transcript.txt" type="text/plain" />
+<podcast:transcript url="https://research.bwforce.ai/podcast/episodes/[slug]/transcript.txt" type="text/plain" />
 ```
 
 ---

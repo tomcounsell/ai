@@ -203,7 +203,7 @@ def generate_html(
 
     # Get config values
     podcast_title = config.get("podcast_title", "Yudame Research")
-    website_url = config.get("website_url", "https://research.yuda.me")
+    website_url = config.get("website_url", "https://research.bwforce.ai")
     podcast_slug = config.get("podcast_slug", "yudame-research")
 
     # Get episode slug for URLs
@@ -506,7 +506,7 @@ def main():
     output_path = episode_dir / args.output
     output_path.write_text(html)
     print(f"\nCreated: {output_path}")
-    website_url = config.get("website_url", "https://research.yuda.me")
+    website_url = config.get("website_url", "https://research.bwforce.ai")
     print(f"URL: {website_url}/podcast/episodes/{episode_dir.name}/")
 
     return 0

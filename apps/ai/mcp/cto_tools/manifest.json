@@ -2,7 +2,7 @@
   "name": "CTO Tools",
   "version": "1.1.0",
   "description": "Engineering leadership and security tools for CTOs, including weekly team reviews and risk correlation",
-  "homepage": "https://ai.yuda.me/mcp/cto-tools",
+  "homepage": "https://app.bwforce.ai/mcp/cto-tools",
   "repository": {
     "type": "git",
     "url": "https://github.com/yudame/cuttlefish"
@@ -10,7 +10,7 @@
   "license": "MIT",
   "author": {
     "name": "Yuda",
-    "url": "https://yuda.me"
+    "url": "https://yudame.org"
   },
   "mcp": {
     "protocol": "stdio",
@@ -74,10 +74,10 @@
     "localStorage": false
   },
   "oauth": {
-    "authorizationUrl": "https://ai.yuda.me/mcp/oauth/authorize",
-    "tokenUrl": "https://ai.yuda.me/mcp/oauth/token",
+    "authorizationUrl": "https://app.bwforce.ai/mcp/oauth/authorize",
+    "tokenUrl": "https://app.bwforce.ai/mcp/oauth/token",
     "scopes": ["mcp:read", "mcp:write"],
     "autoApprove": true
   },
-  "documentation": "https://ai.yuda.me/mcp/cto-tools/README.md"
+  "documentation": "https://app.bwforce.ai/mcp/cto-tools/README.md"
 }

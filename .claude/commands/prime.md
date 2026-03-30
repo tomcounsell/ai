@@ -116,7 +116,7 @@ settings/
 uv run python -m apps.ai.mcp.creative_juices_server
 ```
 
-**Deployment**: https://ai.yuda.me/mcp/creative-juices (Django-hosted)
+**Deployment**: https://app.bwforce.ai/mcp/creative-juices (Django-hosted)
 **Authentication**: None required (stateless, public tools)
 **Privacy**: No data collection, fully local operation
 
@@ -352,7 +352,7 @@ Reusable model behaviors in `apps/common/behaviors/`:
 
 ### Django Web Deployment Flow
 
-1. **User requests URL** → https://ai.yuda.me/mcp/creative-juices
+1. **User requests URL** → https://app.bwforce.ai/mcp/creative-juices
 2. **Django routing** → `settings/urls.py` → `apps/ai/urls.py`
 3. **View executed** → `CreativeJuicesLandingView.get()`
 4. **File loaded** → `apps/ai/mcp/creative_juices_web.html`
@@ -434,8 +434,8 @@ uv run python manage.py collectstatic
 uv run gunicorn settings.wsgi:application --bind 0.0.0.0:8000
 
 # Test MCP endpoints
-curl https://ai.yuda.me/mcp/creative-juices
-curl https://ai.yuda.me/mcp/creative-juices/manifest.json
+curl https://app.bwforce.ai/mcp/creative-juices
+curl https://app.bwforce.ai/mcp/creative-juices/manifest.json
 ```
 
 ### Render MCP Deployment

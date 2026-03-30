@@ -4,7 +4,7 @@
 
 ## Overview
 
-Creative Juices is an MCP (Model Context Protocol) server hosted at `https://ai.yuda.me/mcp/creative-juices/serve` that provides randomness tools for divergent thinking.
+Creative Juices is an MCP (Model Context Protocol) server hosted at `https://app.bwforce.ai/mcp/creative-juices/serve` that provides randomness tools for divergent thinking.
 
 ## Tools Provided
 
@@ -34,14 +34,14 @@ See `CREATIVE_JUICES_DEPLOYMENT.md` for ASGI server configuration.
 ## Production Deployment
 
 Creative Juices is deployed as an HTTP-based MCP server at:
-**https://ai.yuda.me/mcp/creative-juices/serve**
+**https://app.bwforce.ai/mcp/creative-juices/serve**
 
 See `CREATIVE_JUICES_DEPLOYMENT.md` for full deployment guide.
 
 ### MCPB Bundle Distribution
 
 The server is also available as a one-click installable `.mcpb` bundle for Claude Desktop:
-**https://ai.yuda.me/mcp/creative-juices/download.mcpb**
+**https://app.bwforce.ai/mcp/creative-juices/download.mcpb**
 
 **Architecture:**
 - Bundle contains a Node.js proxy client that forwards MCP protocol to the hosted server

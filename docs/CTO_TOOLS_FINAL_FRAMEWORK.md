@@ -226,7 +226,7 @@ Claude, use CTO Tools for a comprehensive review including development patterns 
 
 ### Documentation & Web Assets
 - `apps/ai/mcp/CTO_TOOLS_README.md` - Installation and usage guide
-- `apps/ai/templates/mcp/cto_tools.html` - Django template for landing page at ai.yuda.me/mcp/cto-tools
+- `apps/ai/templates/mcp/cto_tools.html` - Django template for landing page at app.bwforce.ai/mcp/cto-tools
 - `apps/ai/mcp/cto_tools_manifest.json` - Web manifest for browser installation
 
 ## Real-World Usage Pattern

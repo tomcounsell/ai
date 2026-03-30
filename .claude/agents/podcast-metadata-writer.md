@@ -62,7 +62,7 @@ You will receive:
 
 [1-2 compelling sentences highlighting the most interesting findings and what listeners will learn. Include the link to full research.]
 
-Full research report: https://research.yuda.me/apps/podcast/pending-episodes/[episode-path]/report.md
+Full research report: https://research.bwforce.ai/apps/podcast/pending-episodes/[episode-path]/report.md
 
 ---
 
@@ -157,7 +157,7 @@ Full research report: https://research.yuda.me/apps/podcast/pending-episodes/[ep
   <li><a href="[URL]">[Tool]</a> - [Description]</li>
 </ul>
 
-<p><a href="https://research.yuda.me/apps/podcast/pending-episodes/[path]/report.md">Read the full research report</a></p>
+<p><a href="https://research.bwforce.ai/apps/podcast/pending-episodes/[path]/report.md">Read the full research report</a></p>
 ```
 
 ---
@@ -172,9 +172,9 @@ Full research report: https://research.yuda.me/apps/podcast/pending-episodes/[ep
 <itunes:episodeType>full</itunes:episodeType>
 <itunes:episode>[N if series]</itunes:episode>
 <itunes:keywords>[comma-separated keywords]</itunes:keywords>
-<enclosure url="https://research.yuda.me/apps/podcast/pending-episodes/[path]/[file].mp3"
+<enclosure url="https://research.bwforce.ai/apps/podcast/pending-episodes/[path]/[file].mp3"
            length="[bytes]" type="audio/mpeg"/>
-<podcast:transcript url="https://research.yuda.me/apps/podcast/pending-episodes/[path]/transcript.txt"
+<podcast:transcript url="https://research.bwforce.ai/apps/podcast/pending-episodes/[path]/transcript.txt"
                     type="text/plain"/>
 ```
 ```
@@ -231,7 +231,7 @@ The orchestrator does not need the full metadata in context - the Django feed vi
 
 **Config-Aware Metadata:**
 Read `episode_config.json` from the episode directory to get feed-specific settings:
-- `website_url` - Base URL for resource links (default: https://research.yuda.me)
+- `website_url` - Base URL for resource links (default: https://research.bwforce.ai)
 - `podcast_slug` - Podcast identifier for feed URLs
 - `is_public` - Affects CTA language and resource gating
 - `companion_access` - Whether companion resources are public or gated

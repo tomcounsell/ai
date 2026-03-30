@@ -2,10 +2,10 @@
 CTO Tools MCP Client - Thin proxy to hosted service.
 
 This client forwards MCP protocol calls to the hosted CTO Tools server
-at ai.yuda.me. Users can install with zero dependencies using uvx.
+at app.bwforce.ai. Users can install with zero dependencies using uvx.
 
 Installation (one-click via .mcpb file):
-    Download cto-tools.mcpb from ai.yuda.me/mcp/cto-tools/download.mcpb
+    Download cto-tools.mcpb from app.bwforce.ai/mcp/cto-tools/download.mcpb
 
 Manual installation:
     Add to claude_desktop_config.json:
@@ -17,7 +17,7 @@ Manual installation:
             "run",
             "--with", "mcp",
             "--with", "httpx",
-            "https://ai.yuda.me/mcp/cto-tools/client.py"
+            "https://app.bwforce.ai/mcp/cto-tools/client.py"
           ]
         }
       }
@@ -40,7 +40,7 @@ except ImportError:
     sys.exit(1)
 
 # Hosted service URL
-HOSTED_SERVICE_URL = "https://ai.yuda.me/mcp/cto-tools/serve"
+HOSTED_SERVICE_URL = "https://app.bwforce.ai/mcp/cto-tools/serve"
 
 
 async def forward_to_hosted_service():

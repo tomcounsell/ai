@@ -20,12 +20,12 @@ CSRF_COOKIE_SECURE = True
 # Production logging handled in settings/logging.py
 
 # Override hostname if needed
-HOSTNAME = os.environ.get("HOSTNAME", "ai.yuda.me")
+HOSTNAME = os.environ.get("HOSTNAME", "app.bwforce.ai")
 ALLOWED_HOSTS = ALLOWED_HOSTS + [HOSTNAME]
 
 # CSRF trusted origins for Django 4.0+ (required for POST requests)
 CSRF_TRUSTED_ORIGINS = [
-    "https://ai.yuda.me",
+    "https://app.bwforce.ai",
     "https://cuttlefish-ea1h.onrender.com",
     "https://blendedworkforce.ai",
     "https://www.blendedworkforce.ai",

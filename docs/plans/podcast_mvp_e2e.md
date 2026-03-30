@@ -260,8 +260,8 @@ No other documentation changes needed until the MVP is validated.
 
 - `DJANGO_SETTINGS_MODULE=settings pytest apps/podcast/tests/ -v` — podcast tests pass
 - `DJANGO_SETTINGS_MODULE=settings pytest -v` — full suite passes
-- `curl -s https://ai.yuda.me/podcast/<slug>/feed.xml | xmllint --noout -` — feed is valid XML
-- `curl -s https://ai.yuda.me/health/deep/` — production health check passes
+- `curl -s https://app.bwforce.ai/podcast/<slug>/feed.xml | xmllint --noout -` — feed is valid XML
+- `curl -s https://app.bwforce.ai/health/deep/` — production health check passes
 
 ---
 

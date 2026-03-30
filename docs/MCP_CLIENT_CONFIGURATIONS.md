@@ -27,7 +27,7 @@ For hosted MCP servers (like our Creative Juices and CTO Tools):
 {
   "mcpServers": {
     "server-name": {
-      "url": "https://ai.yuda.me/mcp/server-name/serve"
+      "url": "https://app.bwforce.ai/mcp/server-name/serve"
     }
   }
 }
@@ -45,7 +45,7 @@ For hosted MCP servers (like our Creative Juices and CTO Tools):
 
 ```bash
 # HTTP servers (recommended for hosted MCP servers)
-claude mcp add --transport http creative-juices https://ai.yuda.me/mcp/creative-juices/serve
+claude mcp add --transport http creative-juices https://app.bwforce.ai/mcp/creative-juices/serve
 
 # Stdio servers (local executables)
 claude mcp add --transport stdio server-name --env API_KEY=value -- npx -y package-name@latest
@@ -95,10 +95,10 @@ Edit `claude_desktop_config.json`:
 {
   "mcpServers": {
     "creative-juices": {
-      "url": "https://ai.yuda.me/mcp/creative-juices/serve"
+      "url": "https://app.bwforce.ai/mcp/creative-juices/serve"
     },
     "cto-tools": {
-      "url": "https://ai.yuda.me/mcp/cto-tools/serve"
+      "url": "https://app.bwforce.ai/mcp/cto-tools/serve"
     }
   }
 }
@@ -130,7 +130,7 @@ Edit `claude_desktop_config.json`:
 {
   "mcpServers": {
     "creative-juices": {
-      "url": "https://ai.yuda.me/mcp/creative-juices/serve",
+      "url": "https://app.bwforce.ai/mcp/creative-juices/serve",
       "headers": {"Authorization": "Bearer token"},
       "alwaysAllow": ["tool1", "tool2"],
       "disabled": false
@@ -187,7 +187,7 @@ Edit `claude_desktop_config.json`:
 {
   "mcpServers": {
     "creative-juices": {
-      "url": "https://ai.yuda.me/mcp/creative-juices/serve"
+      "url": "https://app.bwforce.ai/mcp/creative-juices/serve"
     }
   }
 }
@@ -223,7 +223,7 @@ Edit `claude_desktop_config.json`:
   "servers": {
     "creative-juices": {
       "type": "http",
-      "url": "https://ai.yuda.me/mcp/creative-juices/serve",
+      "url": "https://app.bwforce.ai/mcp/creative-juices/serve",
       "headers": {"Authorization": "Bearer ${input:token}"}
     },
     "local-server": {
@@ -271,7 +271,7 @@ gemini mcp add [options] <name> <commandOrUrl> [args...]
 
 ```bash
 # HTTP transport (hosted servers)
-gemini mcp add --transport http creative-juices https://ai.yuda.me/mcp/creative-juices/serve
+gemini mcp add --transport http creative-juices https://app.bwforce.ai/mcp/creative-juices/serve
 
 # SSE transport with authentication
 gemini mcp add --transport sse secure-server https://api.example.com/sse/ \
@@ -396,7 +396,7 @@ gemini mcp remove <name> # Delete a server
   "servers": {
     "creative-juices": {
       "type": "http",
-      "url": "https://ai.yuda.me/mcp/creative-juices/serve"
+      "url": "https://app.bwforce.ai/mcp/creative-juices/serve"
     },
     "local-server": {
       "type": "stdio",
@@ -506,7 +506,7 @@ For hosted servers behind proxies:
 {
   "mcpServers": {
     "creative-juices": {
-      "url": "https://ai.yuda.me/mcp/creative-juices/serve",
+      "url": "https://app.bwforce.ai/mcp/creative-juices/serve",
       "headers": {
         "Authorization": "Bearer YOUR_TOKEN",
         "X-Custom-Header": "value"
@@ -524,7 +524,7 @@ Adjust connection timeouts:
 {
   "mcpServers": {
     "server-name": {
-      "url": "https://ai.yuda.me/mcp/server-name/serve",
+      "url": "https://app.bwforce.ai/mcp/server-name/serve",
       "timeout": 30000
     }
   }
@@ -543,7 +543,7 @@ Adjust connection timeouts:
 {
   "mcpServers": {
     "creative-juices": {
-      "url": "https://ai.yuda.me/mcp/creative-juices/serve"
+      "url": "https://app.bwforce.ai/mcp/creative-juices/serve"
     }
   }
 }
@@ -560,7 +560,7 @@ Adjust connection timeouts:
         "run",
         "--with", "mcp",
         "--with", "httpx",
-        "https://ai.yuda.me/mcp/creative-juices/client.py"
+        "https://app.bwforce.ai/mcp/creative-juices/client.py"
       ]
     }
   }
@@ -575,7 +575,7 @@ Adjust connection timeouts:
 {
   "mcpServers": {
     "cto-tools": {
-      "url": "https://ai.yuda.me/mcp/cto-tools/serve"
+      "url": "https://app.bwforce.ai/mcp/cto-tools/serve"
     }
   }
 }
@@ -606,7 +606,7 @@ Adjust connection timeouts:
 
 **Test hosted server:**
 ```bash
-curl -X POST https://ai.yuda.me/mcp/creative-juices/serve \
+curl -X POST https://app.bwforce.ai/mcp/creative-juices/serve \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"initialize","params":{},"id":1}'
 ```

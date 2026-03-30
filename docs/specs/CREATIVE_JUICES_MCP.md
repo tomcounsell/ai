@@ -195,12 +195,12 @@ uv run pytest apps/ai/tests/test_mcp_creative_juices.py -v
 
 ### Web Deployment
 
-The Creative Juices MCP is deployed via Django at **https://ai.yuda.me/mcp/creative-juices**
+The Creative Juices MCP is deployed via Django at **https://app.bwforce.ai/mcp/creative-juices**
 
 **Available URLs**:
-- Landing page: https://ai.yuda.me/mcp/creative-juices
-- Manifest: https://ai.yuda.me/mcp/creative-juices/manifest.json
-- README: https://ai.yuda.me/mcp/creative-juices/README.md
+- Landing page: https://app.bwforce.ai/mcp/creative-juices
+- Manifest: https://app.bwforce.ai/mcp/creative-juices/manifest.json
+- README: https://app.bwforce.ai/mcp/creative-juices/README.md
 
 See [DEPLOYMENT.md](../../apps/ai/mcp/DEPLOYMENT.md) for full deployment details.
 

@@ -44,7 +44,7 @@ if not SECRET_KEY and (LOCAL or DEBUG):
 
 # Hosts configuration
 ALLOWED_HOSTS = [
-    "ai.yuda.me",
+    "app.bwforce.ai",
     "cuttlefish-ea1h.onrender.com",
     "blendedworkforce.ai",
     "www.blendedworkforce.ai",
@@ -58,8 +58,8 @@ if LOCAL:
 else:
     CORS_ORIGIN_WHITELIST = [
         "https://cuttlefish-ea1h.onrender.com",
-        "https://ai.yuda.me",
-        "https://*.yuda.me",
+        "https://app.bwforce.ai",
+        "https://*.bwforce.ai",
         "https://blendedworkforce.ai",
         "https://www.blendedworkforce.ai",
         # 'https://s3.amazonaws.com',
@@ -70,9 +70,9 @@ else:
 
 # Hostname configuration
 if PRODUCTION:
-    HOSTNAME = "ai.yuda.me"
+    HOSTNAME = "app.bwforce.ai"
 elif STAGE:
-    HOSTNAME = "stage.yuda.me"
+    HOSTNAME = "stage.bwforce.ai"
 else:
     try:
         HOSTNAME = socket.gethostname()
