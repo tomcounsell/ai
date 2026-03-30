@@ -1768,6 +1768,24 @@ async def main():
 
     asyncio.create_task(_run_catchup())
 
+    # Start message reconciler (detects live-session gaps)
+    try:
+        from agent.job_queue import enqueue_job as _reconciler_enqueue
+        from bridge.reconciler import reconciler_loop
+
+        asyncio.create_task(
+            reconciler_loop(
+                client=client,
+                monitored_groups=ALL_MONITORED_GROUPS,
+                should_respond_fn=should_respond_async,
+                enqueue_job_fn=_reconciler_enqueue,
+                find_project_fn=find_project_for_chat,
+            )
+        )
+        logger.info("Message reconciler started")
+    except Exception as e:
+        logger.error(f"Failed to start message reconciler: {e}")
+
     # Start session watchdog
     try:
         from monitoring.session_watchdog import watchdog_loop
