@@ -299,6 +299,14 @@ def recall(
                 )
             return None
 
+        # Re-rank by category weights (corrections/decisions surface higher)
+        try:
+            from agent.memory_hook import _apply_category_weights
+
+            all_records = _apply_category_weights(all_records)
+        except Exception:
+            pass  # fail silent -- use unranked order
+
         # Format as thought blocks
         thoughts: list[str] = []
         injected = state.get("injected", [])

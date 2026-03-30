@@ -155,6 +155,56 @@ def _cluster_keywords(keywords: list[str], max_clusters: int = 3) -> list[list[s
     return clusters[:max_clusters]
 
 
+def _apply_category_weights(records: list) -> list:
+    """Re-rank memory records by applying category-based weight multipliers.
+
+    After ContextAssembler returns scored results, multiply each record's
+    effective score by its category weight, then re-sort descending.
+    Records with missing or malformed metadata get the default weight (1.0).
+
+    Args:
+        records: List of Memory records from ContextAssembler.
+
+    Returns:
+        Re-sorted list of records (same objects, new order).
+    """
+    if not records:
+        return records
+
+    try:
+        from config.memory_defaults import CATEGORY_RECALL_WEIGHTS
+
+        default_weight = CATEGORY_RECALL_WEIGHTS.get("default", 1.0)
+
+        def _get_weight(record: Any) -> float:
+            try:
+                meta = getattr(record, "metadata", None)
+                if not isinstance(meta, dict):
+                    return default_weight
+                category = meta.get("category", "")
+                if not isinstance(category, str):
+                    return default_weight
+                return CATEGORY_RECALL_WEIGHTS.get(category, default_weight)
+            except Exception:
+                return default_weight
+
+        def _get_score(record: Any) -> float:
+            try:
+                return float(getattr(record, "score", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        # Sort by weighted score descending
+        return sorted(
+            records,
+            key=lambda r: _get_score(r) * _get_weight(r),
+            reverse=True,
+        )
+    except Exception:
+        # Fail silent -- return unmodified order
+        return records
+
+
 def check_and_inject(
     session_id: str,
     tool_name: str,
@@ -274,6 +324,9 @@ def check_and_inject(
                     f"{topic_hint} before, but the details are unclear.</thought>"
                 )
             return None
+
+        # Re-rank by category weights (corrections/decisions surface higher)
+        all_records = _apply_category_weights(all_records)
 
         # Format as <thought> blocks
         thoughts: list[str] = []

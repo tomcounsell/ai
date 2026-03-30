@@ -59,6 +59,18 @@ DISMISSAL_DECAY_THRESHOLD = 3  # consecutive dismissals before importance decays
 DISMISSAL_IMPORTANCE_DECAY = 0.7  # multiply importance by this on threshold breach
 MIN_IMPORTANCE_FLOOR = 0.2  # never decay below this
 
+# Category recall weights -- post-query re-ranking multipliers for memory recall.
+# After ContextAssembler returns scored results, each result's effective score is
+# multiplied by the weight for its category before re-sorting. Higher weight = more
+# likely to surface. Set all to 1.0 to disable re-ranking (no-op).
+CATEGORY_RECALL_WEIGHTS: dict[str, float] = {
+    "correction": 1.5,
+    "decision": 1.3,
+    "pattern": 1.0,
+    "surprise": 1.0,
+    "default": 1.0,
+}
+
 
 def apply_defaults() -> None:
     """Override popoto Defaults with memory-tuned values.

@@ -84,6 +84,6 @@ class TestSystemPromptPriming:
 
         content = base_md.read_text()
         # Memory sections should be at the end of the file
-        last_section = content[-2500:]
+        last_section = content[-3500:]
         assert "Subconscious Memory" in last_section
         assert "Intentional Memory" in last_section

@@ -274,6 +274,127 @@ class TestDejaVuSignals:
         _tool_buffers.pop(session, None)
 
 
+class TestApplyCategoryWeights:
+    """Test agent/memory_hook.py _apply_category_weights()."""
+
+    def test_empty_list_returns_empty(self):
+        from agent.memory_hook import _apply_category_weights
+
+        assert _apply_category_weights([]) == []
+
+    def test_none_metadata_gets_default_weight(self):
+        from unittest.mock import MagicMock
+
+        from agent.memory_hook import _apply_category_weights
+
+        record = MagicMock()
+        record.metadata = None
+        record.score = 1.0
+        result = _apply_category_weights([record])
+        assert len(result) == 1
+        assert result[0] is record
+
+    def test_missing_category_gets_default_weight(self):
+        from unittest.mock import MagicMock
+
+        from agent.memory_hook import _apply_category_weights
+
+        record = MagicMock()
+        record.metadata = {}
+        record.score = 1.0
+        result = _apply_category_weights([record])
+        assert len(result) == 1
+
+    def test_correction_ranks_higher_than_pattern(self):
+        from unittest.mock import MagicMock
+
+        from agent.memory_hook import _apply_category_weights
+
+        correction = MagicMock()
+        correction.metadata = {"category": "correction"}
+        correction.score = 1.0
+
+        pattern = MagicMock()
+        pattern.metadata = {"category": "pattern"}
+        pattern.score = 1.0
+
+        result = _apply_category_weights([pattern, correction])
+        # correction (weight 1.5) should rank before pattern (weight 1.0)
+        assert result[0] is correction
+        assert result[1] is pattern
+
+    def test_decision_ranks_higher_than_pattern(self):
+        from unittest.mock import MagicMock
+
+        from agent.memory_hook import _apply_category_weights
+
+        decision = MagicMock()
+        decision.metadata = {"category": "decision"}
+        decision.score = 1.0
+
+        pattern = MagicMock()
+        pattern.metadata = {"category": "pattern"}
+        pattern.score = 1.0
+
+        result = _apply_category_weights([pattern, decision])
+        assert result[0] is decision
+
+    def test_high_score_pattern_beats_low_score_correction(self):
+        from unittest.mock import MagicMock
+
+        from agent.memory_hook import _apply_category_weights
+
+        correction = MagicMock()
+        correction.metadata = {"category": "correction"}
+        correction.score = 0.5
+
+        pattern = MagicMock()
+        pattern.metadata = {"category": "pattern"}
+        pattern.score = 1.0
+
+        result = _apply_category_weights([correction, pattern])
+        # pattern (1.0 * 1.0 = 1.0) beats correction (0.5 * 1.5 = 0.75)
+        assert result[0] is pattern
+
+    def test_non_dict_metadata_gets_default_weight(self):
+        from unittest.mock import MagicMock
+
+        from agent.memory_hook import _apply_category_weights
+
+        record = MagicMock()
+        record.metadata = "not a dict"
+        record.score = 1.0
+        result = _apply_category_weights([record])
+        assert len(result) == 1
+
+    def test_non_string_category_gets_default_weight(self):
+        from unittest.mock import MagicMock
+
+        from agent.memory_hook import _apply_category_weights
+
+        record = MagicMock()
+        record.metadata = {"category": 123}
+        record.score = 1.0
+        result = _apply_category_weights([record])
+        assert len(result) == 1
+
+    def test_preserves_all_records(self):
+        from unittest.mock import MagicMock
+
+        from agent.memory_hook import _apply_category_weights
+
+        records = []
+        for i in range(5):
+            r = MagicMock()
+            r.metadata = {"category": "pattern"}
+            r.score = float(i)
+            records.append(r)
+
+        result = _apply_category_weights(records)
+        assert len(result) == 5
+        assert set(id(r) for r in result) == set(id(r) for r in records)
+
+
 class TestGetInjectedThoughts:
     """Test agent/memory_hook.py get_injected_thoughts()."""
 
