@@ -317,9 +317,7 @@ async def extract_post_merge_learning(
         )
 
         if m:
-            logger.info(
-                f"[memory_extraction] Post-merge learning saved: {content_text[:100]}"
-            )
+            logger.info(f"[memory_extraction] Post-merge learning saved: {content_text[:100]}")
             return {
                 "content": content_text[:500],
                 "memory_id": getattr(m, "memory_id", ""),
