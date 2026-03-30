@@ -82,6 +82,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [SDLC Observer](sdlc-observer.md) | Web dashboard for real-time SDLC pipeline tracking with stage indicators, event timelines, and artifact links at `/sdlc/` | Shipped |
 | [SDLC Pipeline Integrity](sdlc-pipeline-integrity.md) | Session continuation hardening, deterministic URL construction, merge guard hook, and MERGE pipeline stage | Shipped |
 | [SDLC Stage Handoff](sdlc-stage-handoff.md) | Structured GitHub issue comments for cross-stage context relay -- each stage posts findings on completion and reads prior stage context on start | Shipped |
+| [Standardized Enums](standardized-enums.md) | StrEnum definitions for session types, personas, classifications, and chat modes replacing magic strings | Shipped |
 | [SDLC-First Routing](sdlc-first-routing.md) | Automatic work request classification (Ollama/Haiku) and orchestrator routing for SDLC vs conversational requests, with cross-repo `gh` resolution via `GH_REPO` env var | Shipped |
 | [Semantic Doc Impact Finder](semantic-doc-impact-finder.md) | Two-stage semantic search (embedding recall + LLM reranking) for finding docs affected by code changes | Shipped |
 | [Semantic Session Routing](semantic-session-routing.md) | Semantic matching of unthreaded messages to active sessions with declared expectations via structured summarizer output | Shipped |

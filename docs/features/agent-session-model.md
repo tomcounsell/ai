@@ -12,7 +12,7 @@ The `cancelled` status is a terminal state set explicitly by the PM via `cancel_
 
 **Queue-phase:** `job_id`, `project_key`, `status`, `priority`, `message_text`, `sender_name`, `chat_id`, `message_id`, `auto_continue_count`, `started_at`
 
-**Session-phase:** `turn_count`, `tool_call_count`, `log_path`, `summary`, `branch_name`, `tags`, `classification_type`, `qa_mode`
+**Session-phase:** `turn_count`, `tool_call_count`, `log_path`, `summary`, `branch_name`, `tags`, `classification_type`, `session_mode`
 
 **Semantic routing:** `context_summary` (what the session is about), `expectations` (what the agent needs from the human)
 
@@ -38,7 +38,9 @@ Pipeline stage state is stored in the `stage_states` JSON field on AgentSession,
 | `PipelineStateMachine.get_display_progress()` | `dict` | Maps stage names to status (`completed`, `in_progress`, `pending`, `failed`) |
 | `record_stage_completion(session, stage)` | `None` | Convenience helper that starts and completes a stage atomically |
 
-`is_sdlc` (property) returns `True` if either (1) `stage_states` contains any non-pending/non-ready stage, or (2) `classification_type == "sdlc"` for freshly-classified sessions.
+`is_sdlc` (property) returns `True` if either (1) `stage_states` contains any non-pending/non-ready stage, or (2) `classification_type == ClassificationType.SDLC` for freshly-classified sessions.
+
+String fields like `session_type`, `classification_type`, and `session_mode` use `StrEnum` members from `config/enums.py` (`SessionType`, `ClassificationType`, `ChatMode`). The `session_mode` field replaces the deprecated `qa_mode` boolean -- a backward-compatible `qa_mode` property reads `session_mode` first and falls back to the legacy `_qa_mode_legacy` field. See [Standardized Enums](standardized-enums.md).
 
 `_get_stage_states_dict()` parses the `stage_states` JSON field into a dict. It handles `None`, `dict`, and JSON string inputs.
 
