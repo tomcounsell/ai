@@ -4,7 +4,7 @@
 
 ChatSession Q&A mode adds a fast path for informational queries. When a user asks a question (e.g., "where is the observer prompt?", "what tests are failing?"), the ChatSession answers directly using read-only tools instead of spawning a full DevSession. This reduces latency and cost for simple lookups while preserving the full SDLC pipeline for actual work requests.
 
-Q&A mode is not a new session type. It is a routing decision within the existing ChatSession, gated by a binary intent classifier.
+Q&A mode is not a new session type. It is a routing decision within the existing ChatSession, gated by a binary intent classifier. Q&A sessions are indicated by the `session_mode` field set to `ChatMode.QA` (from `config/enums.py`). The legacy `qa_mode` boolean field is deprecated but preserved for backward compatibility with in-flight Redis sessions via a property on `AgentSession`.
 
 ## Architecture
 

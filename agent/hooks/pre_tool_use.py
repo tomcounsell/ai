@@ -9,6 +9,8 @@ from typing import Any
 
 from claude_agent_sdk import HookContext, PreToolUseHookInput
 
+from config.enums import SessionType
+
 logger = logging.getLogger(__name__)
 
 # Known SDLC stages for extraction from dev-session prompts
@@ -52,7 +54,7 @@ SENSITIVE_FRAGMENTS = (
 
 def _is_pm_session() -> bool:
     """Check if the current session is a PM (ChatSession)."""
-    return os.environ.get("SESSION_TYPE") == "chat"
+    return os.environ.get("SESSION_TYPE") == SessionType.CHAT
 
 
 def _is_pm_allowed_write(file_path: str) -> bool:

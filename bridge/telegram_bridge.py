@@ -106,6 +106,7 @@ from bridge.routing import (  # noqa: E402
     should_respond_async,
     should_respond_sync,  # noqa: F401
 )
+from config.enums import ChatMode, SessionType  # noqa: E402
 from tools.link_analysis import (  # noqa: E402
     extract_urls,
     extract_youtube_urls,
@@ -1433,13 +1434,13 @@ async def main():
 
         _classification = classification_result.get("type")
         _chat_mode = resolve_chat_mode(project, chat_title, is_dm=is_dm)
-        if _chat_mode == "dev":
-            _session_type = "dev"  # DevSession — Dev persona, full permissions
+        if _chat_mode == ChatMode.DEV:
+            _session_type = SessionType.DEV  # DevSession — Dev persona, full permissions
             logger.info(
                 f"[{project_name}] Dev mode (config-driven): {chat_title!r} → session_type=dev"
             )
         else:
-            _session_type = "chat"  # ChatSession — PM persona, handles both SDLC and Q&A
+            _session_type = SessionType.CHAT  # ChatSession — PM persona, handles both SDLC and Q&A
 
         # Enqueue: session_type drives ChatSession vs DevSession creation.
         depth = await enqueue_job(

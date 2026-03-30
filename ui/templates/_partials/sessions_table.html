@@ -4,7 +4,7 @@
         <tr>
             <th>Project</th>
             <th>Name</th>
-            <th>Type</th>
+            <th>Persona</th>
             <th>Status</th>
             <th>SDLC Stages</th>
             <th>Started</th>
@@ -53,7 +53,7 @@
             </td>
             <td>
                 {% if s.session_type %}
-                <span class="badge badge-{{ 'blue' if s.session_type == 'dev' else ('green' if s.session_type == 'Q&A' else 'purple') }}">{{ s.session_type | upper }}</span>
+                <span class="badge badge-{{ 'blue' if s.session_type == 'Dev' else ('green' if s.session_type == 'Q&A' else 'purple') }}">{{ s.session_type }}</span>
                 {% else %}
                 <span class="text-muted">-</span>
                 {% endif %}

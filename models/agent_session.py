@@ -18,6 +18,7 @@ import json as _json
 import logging
 import time
 
+from config.enums import ChatMode, ClassificationType, SessionType
 from popoto import (
     AutoKeyField,
     Field,
@@ -37,9 +38,9 @@ STEERING_QUEUE_MAX = 10  # Max buffered steering messages per session
 # SDLC stages in pipeline order
 SDLC_STAGES = ["ISSUE", "PLAN", "CRITIQUE", "BUILD", "TEST", "REVIEW", "DOCS", "MERGE"]
 
-# Valid session types
-SESSION_TYPE_CHAT = "chat"
-SESSION_TYPE_DEV = "dev"
+# Backward-compatible aliases (import from config.enums for new code)
+SESSION_TYPE_CHAT = SessionType.CHAT
+SESSION_TYPE_DEV = SessionType.DEV
 
 
 class AgentSession(Model):
@@ -135,11 +136,14 @@ class AgentSession(Model):
     # === Watchdog fields ===
     watchdog_unhealthy = Field(null=True)  # Reason string when flagged unhealthy, None when healthy
 
-    # === Q&A mode flag ===
-    # Set to True when intent classifier routes to Q&A mode. Separate from
-    # classification_type (which holds the bridge's original classification
-    # like "question", "bug", etc.) to avoid dual-purposing that field.
-    qa_mode = Field(type=bool, null=True)
+    # === Session mode (replaces qa_mode) ===
+    # Stores ChatMode enum value ("qa" or None) to indicate Q&A routing.
+    # Replaces the boolean qa_mode field with a string-typed enum field.
+    session_mode = Field(null=True)
+
+    # Legacy field kept for backward compatibility with in-flight Redis sessions.
+    # New code should use session_mode instead. Will be removed in a future cleanup.
+    _qa_mode_legacy = Field(type=bool, null=True)
 
     # === Semantic routing fields ===
     context_summary = Field(null=True, max_length=200)  # What this session is about
@@ -208,6 +212,39 @@ class AgentSession(Model):
     def is_dev(self) -> bool:
         """Whether this is a DevSession (Dev persona, full permissions)."""
         return self.session_type == SESSION_TYPE_DEV
+
+    @property
+    def qa_mode(self) -> bool:
+        """Backward-compatible property: True when session is in Q&A mode.
+
+        Reads session_mode first, falls back to the legacy ``qa_mode`` Redis
+        hash field for pre-migration sessions.  The legacy Popoto field was
+        renamed to ``_qa_mode_legacy`` to avoid colliding with this property,
+        but old sessions still store the value under the original ``qa_mode``
+        key.  We read both to cover all cases.
+        """
+        if self.session_mode == ChatMode.QA:
+            return True
+        # Check the renamed Popoto field first (new sessions written post-migration)
+        if self._qa_mode_legacy:
+            return True
+        # Fallback: read the original "qa_mode" hash field from Redis directly,
+        # since Popoto only knows about "_qa_mode_legacy" and cannot see the old key.
+        try:
+            from popoto.redis_db import POPOTO_REDIS_DB
+
+            raw = POPOTO_REDIS_DB.hget(str(self.db_key), "qa_mode")
+            if raw is not None:
+                # Popoto encodes booleans; True is b'\xc1', False is b'\xc0'
+                return raw == b"\xc1"
+        except Exception:
+            pass
+        return False
+
+    @qa_mode.setter
+    def qa_mode(self, value: bool) -> None:
+        """Backward-compatible setter: writes to session_mode."""
+        self.session_mode = ChatMode.QA if value else None
 
     @property
     def current_stage(self) -> str | None:
@@ -566,7 +603,7 @@ class AgentSession(Model):
             return True
 
         # Secondary: classification_type for freshly-classified sessions
-        if self.classification_type == "sdlc":
+        if self.classification_type == ClassificationType.SDLC:
             return True
 
         return False

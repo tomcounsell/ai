@@ -30,6 +30,8 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
+from config.enums import SessionType
+
 logger = logging.getLogger(__name__)
 
 # Rate limit: max scheduled jobs per hour per project
@@ -248,7 +250,7 @@ def cmd_schedule(args: argparse.Namespace) -> int:
     priority = args.priority or "normal"
 
     # Session type: explicit flag > default (chat for issue-based work)
-    session_type = getattr(args, "session_type", None) or "chat"
+    session_type = getattr(args, "session_type", None) or SessionType.CHAT
 
     # Parent job inheritance
     parent_job_id = getattr(args, "parent_job", None)
@@ -1002,7 +1004,7 @@ def main():
     sched.add_argument("--after", help="Defer execution until this ISO 8601 datetime")
     sched.add_argument(
         "--session-type",
-        choices=["chat", "dev"],
+        choices=[SessionType.CHAT, SessionType.DEV],
         help="Session type: chat (PM orchestrates) or dev (direct execution). "
         "Default: chat for issue/PR work, dev for hotfixes.",
     )

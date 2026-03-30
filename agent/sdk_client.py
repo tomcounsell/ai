@@ -39,6 +39,7 @@ from claude_agent_sdk import (
 from agent.agent_definitions import get_agent_definitions
 from agent.hooks import build_hooks_config
 from agent.worktree_manager import WORKTREES_DIR, validate_workspace
+from config.enums import ChatMode, ClassificationType, PersonaType, SessionType
 from utils.github_patterns import ISSUE_NUMBER_RE as _ISSUE_NUMBER_RE
 from utils.github_patterns import PR_NUMBER_RE as _PR_NUMBER_RE
 
@@ -920,12 +921,12 @@ class ValorAgent:
         # own messages via tools/send_telegram.py (issue #497).
         # chat_id comes from the project config; reply_to is resolved from
         # the AgentSession's telegram_message_id in _extract_sdlc_env_vars below.
-        if self.session_type == "chat" and self.chat_id:
+        if self.session_type == SessionType.CHAT and self.chat_id:
             env["TELEGRAM_CHAT_ID"] = str(self.chat_id)
 
         # PM sessions: inject Sentry auth token so sentry-cli works without
         # manual export. Token is stored in ~/Desktop/Valor/.env (iCloud-synced).
-        if self.session_type == "chat":
+        if self.session_type == SessionType.CHAT:
             sentry_env = Path.home() / "Desktop" / "Valor" / ".env"
             if sentry_env.exists():
                 for line in sentry_env.read_text().splitlines():
@@ -1290,18 +1291,18 @@ def _resolve_persona(
         Persona name string (e.g., "developer", "project-manager", "teammate").
     """
     if not project:
-        return "teammate" if is_dm else "developer"
+        return PersonaType.TEAMMATE if is_dm else PersonaType.DEVELOPER
 
     telegram_config = project.get("telegram", {})
 
     # DMs use the dm_persona config
     if is_dm:
-        return telegram_config.get("dm_persona", "teammate")
+        return telegram_config.get("dm_persona", PersonaType.TEAMMATE)
 
     # PM mode projects always use project-manager persona
-    project_mode = project.get("mode", "dev")
-    if project_mode == "pm":
-        return "project-manager"
+    project_mode = project.get("mode", ChatMode.DEV)
+    if project_mode == ChatMode.PM:
+        return PersonaType.PROJECT_MANAGER
 
     # Group chats: look up persona from the groups dict
     if chat_title:
@@ -1314,7 +1315,7 @@ def _resolve_persona(
                         if persona:
                             return persona
 
-    return "developer"
+    return PersonaType.DEVELOPER
 
 
 async def get_agent_response_sdk(
@@ -1375,15 +1376,15 @@ async def get_agent_response_sdk(
         project_working_dir = AI_REPO_ROOT
 
     # Check project mode: "pm" channels bypass SDLC classification entirely
-    project_mode = project.get("mode", "dev") if project else "dev"
+    project_mode = project.get("mode", ChatMode.DEV) if project else ChatMode.DEV
     # Treat any unrecognized mode as "dev" (safe default)
-    if project_mode not in ("dev", "pm"):
+    if project_mode not in (ChatMode.DEV, ChatMode.PM):
         logger.warning(f"[{request_id}] Unknown project mode '{project_mode}', treating as 'dev'")
-        project_mode = "dev"
+        project_mode = ChatMode.DEV
 
-    if project_mode == "pm":
+    if project_mode == ChatMode.PM:
         # PM mode: skip classification, always use "question", work in project dir
-        classification = "question"
+        classification = ClassificationType.QUESTION
         working_dir = project_working_dir
         logger.info(f"[{request_id}] PM mode: cwd={working_dir}, skipping SDLC classification")
     else:
@@ -1414,14 +1415,14 @@ async def get_agent_response_sdk(
             if _re_cls.search(
                 r"(?:issue|pr|pull request)\s+#?\d+", message.lower()
             ) or _re_cls.match(r"^#\d+$", message.strip().lower()):
-                classification = "sdlc"
+                classification = ClassificationType.SDLC
                 logger.info(
                     f"[{request_id}] Fast-path SDLC classification (PR/issue reference in message)"
                 )
             else:
-                classification = "question"
+                classification = ClassificationType.QUESTION
 
-        if classification == "sdlc" and project_working_dir != AI_REPO_ROOT:
+        if classification == ClassificationType.SDLC and project_working_dir != AI_REPO_ROOT:
             working_dir = AI_REPO_ROOT
             logger.info(
                 f"[{request_id}] SDLC routed: orchestrator in ai/, target={project_working_dir}"
@@ -1467,7 +1468,11 @@ async def get_agent_response_sdk(
             pass
 
     # Cross-repo SDLC: inject target repo context
-    if project_mode != "pm" and classification == "sdlc" and project_working_dir != AI_REPO_ROOT:
+    if (
+        project_mode != ChatMode.PM
+        and classification == ClassificationType.SDLC
+        and project_working_dir != AI_REPO_ROOT
+    ):
         github_config = project.get("github", {}) if project else {}
         github_org = github_config.get("org", "")
         github_repo = github_config.get("repo", "")
@@ -1480,13 +1485,13 @@ async def get_agent_response_sdk(
     # ChatSession routing: classify intent and choose Q&A or PM dispatch path.
     # Q&A mode answers informational queries directly without spawning DevSession.
     _qa_mode = False
-    if _session_type == "chat":
+    if _session_type == SessionType.CHAT:
         # Config-driven mode bypass: skip classifier when mode is already known
         from bridge.routing import resolve_chat_mode as _resolve_mode
 
         _config_mode = _resolve_mode(project, chat_title, is_dm=(chat_title is None))
 
-        if _config_mode == "qa":
+        if _config_mode == ChatMode.QA:
             # DMs and Q&A-persona groups: skip classifier, go straight to Q&A
             _qa_mode = True
             logger.info(
@@ -1510,12 +1515,12 @@ async def get_agent_response_sdk(
 
                     for _s in _QASession.query.filter(session_id=session_id):
                         if _s.status in ("running", "active", "pending"):
-                            _s.qa_mode = True
+                            _s.session_mode = ChatMode.QA
                             _s.save()
                             break
                 except Exception:
                     pass  # Best-effort
-        elif _config_mode in ("pm", "dev"):
+        elif _config_mode in (ChatMode.PM, ChatMode.DEV):
             # PM/Dev persona groups: skip classifier, use PM dispatch (not Q&A)
             logger.info(f"[{request_id}] Config-driven {_config_mode} mode, skipping classifier")
         else:
@@ -1541,7 +1546,7 @@ async def get_agent_response_sdk(
 
                             for _s in _QASession.query.filter(session_id=session_id):
                                 if _s.status in ("running", "active", "pending"):
-                                    _s.qa_mode = True
+                                    _s.session_mode = ChatMode.QA
                                     _s.save()
                                     break
                         except Exception:
@@ -1600,7 +1605,7 @@ async def get_agent_response_sdk(
     enriched_message += f"\nMESSAGE: {message}"
 
     # Log prompt summary before sending to agent
-    has_worker_rules = project_mode != "pm"
+    has_worker_rules = project_mode != ChatMode.PM
     logger.info(
         f"[{request_id}] Sending to agent: {len(enriched_message)} chars, "
         f"classification={classification}, "
@@ -1609,8 +1614,8 @@ async def get_agent_response_sdk(
     wr_label = "yes" if has_worker_rules else "no (pm mode)"
     is_dm = chat_title is None
     # ChatSession always uses PM persona; otherwise resolve from config
-    if _session_type == "chat":
-        persona = "project-manager"
+    if _session_type == SessionType.CHAT:
+        persona = PersonaType.PROJECT_MANAGER
     else:
         persona = _resolve_persona(project, chat_title, is_dm=is_dm)
     logger.info(
@@ -1631,15 +1636,15 @@ async def get_agent_response_sdk(
         custom_system_prompt = None
         _permission_mode = "bypassPermissions"  # Default: full permissions
 
-        if _session_type == "chat":
+        if _session_type == SessionType.CHAT:
             # ChatSession: PM persona, full permissions but hook-restricted.
             # Can write to docs/ and use gh CLI. Code writes blocked by pre_tool_use hook.
             custom_system_prompt = load_pm_system_prompt(working_dir)
             logger.info(f"[{request_id}] ChatSession mode: PM persona, bypassPermissions")
-        elif project_mode == "pm":
+        elif project_mode == ChatMode.PM:
             # PM mode: use PM system prompt (no WORKER_RULES, loads work-vault CLAUDE.md)
             custom_system_prompt = load_pm_system_prompt(working_dir)
-        elif persona == "teammate":
+        elif persona == PersonaType.TEAMMATE:
             # Teammate persona: casual mode, no WORKER_RULES
             try:
                 custom_system_prompt = load_persona_prompt("teammate")
@@ -1652,8 +1657,8 @@ async def get_agent_response_sdk(
         # set GH_REPO so all gh commands automatically target the correct repo.
         _gh_repo = None
         is_cross_repo_sdlc = (
-            project_mode != "pm"
-            and classification == "sdlc"
+            project_mode != ChatMode.PM
+            and classification == ClassificationType.SDLC
             and project_working_dir != AI_REPO_ROOT
         )
         if is_cross_repo_sdlc:
@@ -1685,7 +1690,7 @@ async def get_agent_response_sdk(
         logger.info(f"[{request_id}] SDK responded in {elapsed:.1f}s ({len(response)} chars)")
 
         # Record response time metric for Q&A observability
-        if _session_type == "chat":
+        if _session_type == SessionType.CHAT:
             try:
                 from agent.qa_metrics import record_response_time
 

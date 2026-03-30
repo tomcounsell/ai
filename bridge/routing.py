@@ -6,6 +6,7 @@ import logging
 import re
 from pathlib import Path
 
+from config.enums import ChatMode, ClassificationType, PersonaType
 from utils.api_keys import get_anthropic_api_key
 
 logger = logging.getLogger(__name__)
@@ -182,9 +183,9 @@ def is_team_chat(chat_title: str | None) -> bool:
 
 # Mapping from persona field values in projects.json to mode strings.
 PERSONA_TO_MODE = {
-    "teammate": "qa",
-    "project-manager": "pm",
-    "developer": "dev",
+    PersonaType.TEAMMATE: ChatMode.QA,
+    PersonaType.PROJECT_MANAGER: ChatMode.PM,
+    PersonaType.DEVELOPER: ChatMode.DEV,
 }
 
 
@@ -211,7 +212,7 @@ def resolve_chat_mode(
     """
     # DMs are always Q&A
     if is_dm:
-        return "qa"
+        return ChatMode.QA
 
     # Look up persona from group config in projects.json
     if project and chat_title:
@@ -234,9 +235,9 @@ def resolve_chat_mode(
     # Title prefix fallback
     if chat_title:
         if chat_title.startswith("Dev:"):
-            return "dev"
+            return ChatMode.DEV
         if chat_title.startswith("PM:"):
-            return "pm"
+            return ChatMode.PM
 
     # Unconfigured -- caller should fall through to existing behavior
     return None
@@ -466,7 +467,7 @@ def classify_work_request(message: str) -> str:
         r"^#\d+$", text_lower
     ):
         logger.info(f"[routing] Classified as sdlc (issue/PR reference): {text[:120]}")
-        return "sdlc"
+        return ClassificationType.SDLC
 
     # Fast path: short acknowledgments / continuation commands
     first_word = text_lower.split()[0] if text_lower.split() else ""
@@ -483,7 +484,7 @@ def classify_work_request(message: str) -> str:
         logger.warning(f"Work request classification failed: {e}")
         # Conservative default: treat as question (no SDLC overhead)
         logger.info(f"[routing] Classified as question (fallback): {text[:120]}")
-        return "question"
+        return ClassificationType.QUESTION
 
 
 def _get_principal_priorities_for_classification() -> str:
@@ -540,9 +541,9 @@ def _classify_work_request_llm(text: str) -> str:
         )
         result = response["message"]["content"].strip().lower()
         if "sdlc" in result:
-            return "sdlc"
+            return ClassificationType.SDLC
         if "question" in result:
-            return "question"
+            return ClassificationType.QUESTION
         logger.debug(f"Ollama returned ambiguous classification: {result}")
     except Exception as e:
         logger.debug(f"Ollama classification failed, trying Haiku: {e}")
@@ -554,7 +555,7 @@ def _classify_work_request_llm(text: str) -> str:
         client = _get_anthropic_client()
         if not client:
             logger.debug("No API key for Haiku classification fallback")
-            return "question"
+            return ClassificationType.QUESTION
 
         response = client.messages.create(
             model=MODEL_FAST,
@@ -563,11 +564,11 @@ def _classify_work_request_llm(text: str) -> str:
         )
         result = response.content[0].text.strip().lower()
         if "sdlc" in result:
-            return "sdlc"
-        return "question"
+            return ClassificationType.SDLC
+        return ClassificationType.QUESTION
     except Exception as e:
         logger.debug(f"Haiku classification fallback also failed: {e}")
-        return "question"
+        return ClassificationType.QUESTION
 
 
 async def classify_work_request_async(message: str) -> str:
@@ -768,7 +769,7 @@ async def should_respond_async(
 
     # Config-driven Q&A groups: passive listener (mention/reply only, skip Ollama)
     chat_mode = resolve_chat_mode(project, chat_title, is_dm=False)
-    if chat_mode == "qa":
+    if chat_mode == ChatMode.QA:
         mentions = telegram_config.get("mention_triggers", DEFAULT_MENTIONS)
         text_lower = text.lower()
         if any(mention.lower() in text_lower for mention in mentions):

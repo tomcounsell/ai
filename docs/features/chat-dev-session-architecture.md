@@ -2,10 +2,12 @@
 
 ## Overview
 
-The AgentSession model uses a **session_type discriminator** to distinguish between two session roles:
+The AgentSession model uses a **session_type discriminator** (`SessionType` enum from `config/enums.py`) to distinguish between two session roles:
 
-- **ChatSession** (`session_type="chat"`): Read-only Agent SDK session with PM persona. Owns the Telegram conversation, orchestrates work, and spawns DevSessions.
-- **DevSession** (`session_type="dev"`): Full-permission Agent SDK session with Dev persona. Executes a single assigned SDLC stage and reports the result back to the PM.
+- **ChatSession** (`session_type=SessionType.CHAT`): Read-only Agent SDK session with PM persona. Owns the Telegram conversation, orchestrates work, and spawns DevSessions.
+- **DevSession** (`session_type=SessionType.DEV`): Full-permission Agent SDK session with Dev persona. Executes a single assigned SDLC stage and reports the result back to the PM.
+
+Session types, persona identifiers, and classification types are defined as `StrEnum` members in `config/enums.py`. See [Standardized Enums](standardized-enums.md) for the full enum reference.
 
 This replaces the previous architecture where a single undifferentiated AgentSession handled both orchestration and execution. The PM (ChatSession) now orchestrates the pipeline stage-by-stage, spawning one DevSession per stage.
 

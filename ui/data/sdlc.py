@@ -305,18 +305,22 @@ def _parse_history(history_list: list | None) -> list[PipelineEvent]:
     return events
 
 
-def _resolve_session_type(session) -> str | None:
-    """Map session_type + qa_mode into a dashboard display type.
+def _resolve_persona_display(session) -> str | None:
+    """Map session_type + session_mode into a dashboard display persona.
 
-    chat + qa_mode=True  → "Q&A"
-    chat + qa_mode=False → "PM"
-    dev                  → "dev"
+    chat + session_mode="qa"  → "Q&A"
+    chat (otherwise)          → "PM"
+    dev                       → "Dev"
     """
     raw = getattr(session, "session_type", None)
+    if raw is None:
+        return None
     if raw == "chat":
-        if getattr(session, "qa_mode", False):
+        if getattr(session, "session_mode", None) == "qa" or getattr(session, "qa_mode", False):
             return "Q&A"
         return "PM"
+    if raw == "dev":
+        return "Dev"
     return _safe_str(raw)
 
 
@@ -366,7 +370,7 @@ def _session_to_pipeline(session) -> PipelineProgress:
     return PipelineProgress(
         job_id=_safe_str(session.job_id) or "",
         session_id=_safe_str(session.session_id),
-        session_type=_resolve_session_type(session),
+        session_type=_resolve_persona_display(session),
         status=_safe_str(session.status),
         slug=slug,
         message_text=_safe_str(session.message_text),
