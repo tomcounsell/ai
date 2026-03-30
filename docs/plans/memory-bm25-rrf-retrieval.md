@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Critiqued
 type: enhancement
 appetite: Medium
 owner: Valor
@@ -328,11 +328,93 @@ No agent integration required -- the BM25 retrieval upgrade is internal to the m
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+Critique run: 2026-03-30. Six parallel critics reviewed against the actual popoto codebase (local install at /Users/valorengels/src/popoto).
+
+### BLOCKER 1: popoto version not yet released (Skeptic)
+
+The plan says "Bump `popoto>=X.Y.Z` in `pyproject.toml` once published." But popoto's own pyproject.toml still reads `version = "1.4.2"` even though BM25Field (PR #306) was merged after the 1.4.2 tag. There is no released version containing BM25Field. The prerequisite ("popoto must be released with PR #306 included") is not met.
+
+**Resolution required**: Either (a) bump popoto's version and publish a new release before starting BUILD, or (b) pin to a git ref / local editable install. The plan must specify which approach and who owns it.
+
+### BLOCKER 2: `fuse()` is NOT a top-level import (Operator)
+
+The plan repeatedly references `from popoto import fuse` and calls `fuse(bm25_list, relevance_list, confidence_list, k=RRF_K)` as a standalone function. This is wrong. The actual API is:
+
+```python
+Memory.query.fuse(
+    keyword=BM25Field.search(Memory, "bm25", query_text, limit=50),
+    relevance=[(key, score), ...],  # time-decay ranked tuples
+    confidence=[(key, score), ...],  # confidence ranked tuples
+    k=60,
+    limit=10,
+)
+```
+
+`fuse()` is a method on QuerySet/QueryBuilder, not a free function. It takes `**ranked_lists` as keyword arguments where each value is a list of `(redis_key, score)` tuples. It returns hydrated model instances.
+
+**Resolution required**: Update the Data Flow diagram, Technical Approach, and all task descriptions to use `Memory.query.fuse()` instead of standalone `fuse()`. Update import statements accordingly.
+
+### BLOCKER 3: No method to get ranked (key, score) tuples from DecayingSortedField/ConfidenceField (Operator)
+
+The plan assumes `Memory.relevance.get_ranked(partition=project_key)` and `Memory.confidence.get_ranked()` exist. They do not. Neither DecayingSortedField nor ConfidenceField has a `get_ranked()` method that returns `(redis_key, score)` tuples suitable for `fuse()`.
+
+The available methods on DecayingSortedField are: `between`, `filter_query`, `get_sortedset_db_key`, `get_partitioned_sortedset_db_key`. On ConfidenceField: `get_confidence`, `get_confidence_data`. None return the `(key, score)` tuple format that `fuse()` expects.
+
+**Resolution required**: The builder must figure out how to produce `(key, score)` tuples from these fields. Options: (a) use Redis ZRANGEBYSCORE WITHSCORES directly via the sorted set keys, (b) query all records in partition and extract scores manually, or (c) check if popoto has an undocumented API for this. The plan should acknowledge this gap explicitly so the builder is not surprised.
+
+### BLOCKER 4: BM25Field constructor uses `source` not `source_field` (Skeptic)
+
+The plan shows `bm25 = BM25Field(source_field="content")`. The actual constructor signature is `BM25Field(source="content")`. The parameter is named `source`, not `source_field`.
+
+**Resolution required**: Fix the code snippet in the Technical Approach section.
+
+### WARNING 1: `tools/memory_search` uses ContextAssembler (Archaeologist)
+
+Open Question 2 asked "Need to verify at build time whether this module uses ContextAssembler directly." Answer: yes, it does. `tools/memory_search/__init__.py` lines 81-93 import and use ContextAssembler for the `search()` function. This is a third retrieval path that must be upgraded, not two.
+
+**Resolution required**: Add `tools/memory_search/__init__.py` as a third retrieval path to the Solution section. Add a build task between steps 5 and 6 to upgrade it. Update Test Impact to include `tools/memory_search/tests/test_memory_search.py`.
+
+### WARNING 2: BM25Field.search returns (redis_key, score) not record IDs (Operator)
+
+The plan says `keyword_search()` returns "BM25-ranked record IDs." It actually returns `list[tuple[str, float]]` where the first element is a full Redis key (e.g., `Memory:abc123`), not a bare memory_id. This is the correct format for `fuse()` input, but any code that treats these as memory IDs will break.
+
+**Resolution required**: Clarify in the Technical Approach that BM25Field.search returns Redis keys, and that `fuse()` handles hydration internally.
+
+### WARNING 3: `_apply_category_weights` relies on `record.score` attribute (Simplifier)
+
+The current `_apply_category_weights()` reads `getattr(record, "score", 0.0)`. Records returned by `fuse()` will have an `_rrf_score` or similar attribute, not `score` (which comes from ContextAssembler). If the attribute name changes, category re-ranking silently becomes a no-op (all scores = 0.0, order unchanged).
+
+**Resolution required**: Verify what score attribute `fuse()` attaches to returned instances and update `_apply_category_weights` accordingly. Also update its docstring which currently references ContextAssembler.
+
+### WARNING 4: Config constants BM25_K1 and BM25_B may be redundant (Simplifier)
+
+BM25Field already has `BM25_K1 = 1.2` and `BM25_B = 0.75` as class-level defaults, and these match the values the plan proposes to add to `config/memory_defaults.py`. Adding separate config constants is fine for documentation, but there is no mechanism to pass custom k1/b to `BM25Field.search()` -- those values are read from the field instance at search time, set during field construction. If the plan intends to tune k1/b, they must be passed to the BM25Field constructor: `bm25 = BM25Field(source="content", BM25_K1=1.2, BM25_B=0.75)`.
+
+**Resolution required**: Decide whether config constants feed into the field constructor or are purely documentary. Update the plan accordingly.
+
+### NOTE 1: Open Questions are now answered (Archaeologist)
+
+- **Open Question 1** (exact API surface): Fully answered by this critique. `BM25Field.search(model, field_name, query, limit)` returns `[(key, score)]`. `Memory.query.fuse(k=60, limit=10, **ranked_lists)` returns hydrated instances. No `get_ranked()` on decay/confidence fields.
+- **Open Question 2** (tools/memory_search.py): Confirmed -- it uses ContextAssembler and needs upgrading. See WARNING 1.
+
+### NOTE 2: Plan is well-structured (User/Adversary consensus)
+
+The failure path strategy, rabbit holes, race condition analysis, and risk mitigations are solid. The incremental BM25 index approach (no backfill required) is pragmatic. The bloom pre-check preservation is correct. The plan correctly identifies that category re-ranking should stay as post-fusion rather than becoming a 4th RRF signal.
+
+### Summary
+
+| Severity | Count | Items |
+|----------|-------|-------|
+| BLOCKER  | 4     | popoto not released, fuse() API wrong, no get_ranked(), BM25Field constructor param |
+| WARNING  | 4     | 3rd retrieval path missing, Redis key vs ID, score attribute, config k1/b redundancy |
+| NOTE     | 2     | Open questions answered, plan structure solid |
+
+All 4 blockers must be resolved in the plan before proceeding to BUILD.
 
 ---
 
 ## Open Questions
 
-1. **Exact popoto API surface**: The method signatures for `keyword_search()`, `get_ranked()`, and `fuse()` need to be confirmed from the popoto PR #306 source at build time. The plan is intentionally flexible on these details.
-2. **tools/memory_search.py**: Need to verify at build time whether this module uses ContextAssembler directly and needs the same upgrade.
+1. ~~**Exact popoto API surface**: The method signatures for `keyword_search()`, `get_ranked()`, and `fuse()` need to be confirmed from the popoto PR #306 source at build time.~~ RESOLVED by critique -- see Critique Results for exact signatures.
+2. ~~**tools/memory_search.py**: Need to verify at build time whether this module uses ContextAssembler directly.~~ RESOLVED -- yes, it does. Must be upgraded as a third retrieval path.
+3. **NEW: How to produce (key, score) tuples from DecayingSortedField and ConfidenceField for fuse() input.** The plan must specify the approach before BUILD begins.
