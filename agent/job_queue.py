@@ -30,7 +30,7 @@ from agent.branch_manager import (
 from agent.worktree_manager import WORKTREES_DIR, validate_workspace
 from bridge.response import REACTION_COMPLETE, REACTION_ERROR, REACTION_SUCCESS
 from bridge.session_logs import save_session_snapshot
-from config.enums import ChatMode, SessionType
+from config.enums import ChatMode, ClassificationType, SessionType
 from models.agent_session import AgentSession
 
 logger = logging.getLogger(__name__)
@@ -363,6 +363,25 @@ async def _push_job(
         stable_job_id=uuid.uuid4().hex,
         depends_on=depends_on,
     )
+
+    # Initialize stage_states for SDLC sessions so the dashboard shows
+    # pipeline progress from the start (not just after a dev-session runs).
+    if classification_type == ClassificationType.SDLC:
+        try:
+
+            def _init_stage_states():
+                from bridge.pipeline_state import PipelineStateMachine
+
+                sessions = list(AgentSession.query.filter(session_id=session_id, status="pending"))
+                if sessions and not sessions[0].stage_states:
+                    sm = PipelineStateMachine(sessions[0])
+                    # PipelineStateMachine.__init__ already sets ISSUE=ready, rest=pending
+                    sm._save()
+                    logger.info(f"Initialized stage_states for SDLC session {session_id}")
+
+            await asyncio.to_thread(_init_stage_states)
+        except Exception as e:
+            logger.warning(f"Failed to initialize stage_states for {session_id}: {e}")
 
     # Log lifecycle transition for newly created pending job
     try:

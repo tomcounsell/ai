@@ -197,7 +197,7 @@ class TestSubagentStopDevSessionCompletion:
         with patch("agent.hooks.subagent_stop._register_dev_session_completion") as mock_register:
             result = asyncio.run(subagent_stop_hook(input_data, None, mock_hook_context))
 
-            mock_register.assert_called_once_with("dev-agent-xyz")
+            mock_register.assert_called_once_with("dev-agent-xyz", input_data=input_data)
             assert result == {}
 
     def test_ignores_non_dev_session_agents(self, mock_hook_context):

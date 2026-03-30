@@ -192,14 +192,24 @@ def _get_project_metadata(project_key: str | None) -> tuple[str | None, dict | N
 
 
 def _infer_stages_from_history(history_list: list | None) -> list["StageState"]:
-    """Infer SDLC stage states from session history entries.
+    """DEPRECATED: Infer SDLC stage states from session history entries.
 
-    Fallback for sessions created before stage_states was populated (pre-#492).
-    Scans history for [stage] entries and marks referenced stages as completed
-    (assuming sequential pipeline progression).
+    This fallback exists for in-flight sessions created before stage_states
+    was eagerly initialized at session creation (pre-#563). It will be removed
+    in a future release once all existing sessions have stage_states populated.
+
+    New sessions get stage_states initialized in _push_job() when
+    classification_type is "sdlc", so this path should only fire for
+    legacy sessions.
 
     Returns empty list if no stage info found in history.
     """
+    logger.warning(
+        "DEPRECATED: _infer_stages_from_history() called. "
+        "This session lacks stage_states -- it was created before eager initialization (#563). "
+        "This fallback will be removed in a future release."
+    )
+
     if not history_list or not isinstance(history_list, list):
         return []
 

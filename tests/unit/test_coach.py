@@ -288,14 +288,16 @@ class TestSdlcStageCoaching:
     """Tests for SDLC stage progress coaching (Tier 1c)."""
 
     def test_plan_completed_build_pending_mentions_do_build(self):
-        """After PLAN completes, coaching should mention /do-build."""
+        """After PLAN and CRITIQUE complete, coaching should mention /do-build."""
         progress = {
             "ISSUE": "completed",
             "PLAN": "completed",
+            "CRITIQUE": "completed",
             "BUILD": "pending",
             "TEST": "pending",
             "REVIEW": "pending",
             "DOCS": "pending",
+            "MERGE": "pending",
         }
         msg = _build_sdlc_stage_coaching(progress)
         assert msg is not None
@@ -304,15 +306,33 @@ class TestSdlcStageCoaching:
         assert "PLAN" in msg  # mentions completed stage
         assert "BUILD" in msg  # mentions next stage
 
+    def test_plan_completed_critique_pending_mentions_critique(self):
+        """After PLAN completes, coaching should mention /do-plan-critique."""
+        progress = {
+            "ISSUE": "completed",
+            "PLAN": "completed",
+            "CRITIQUE": "pending",
+            "BUILD": "pending",
+            "TEST": "pending",
+            "REVIEW": "pending",
+            "DOCS": "pending",
+            "MERGE": "pending",
+        }
+        msg = _build_sdlc_stage_coaching(progress)
+        assert msg is not None
+        assert "/do-plan-critique" in msg
+
     def test_build_completed_test_pending_mentions_do_test(self):
         """After BUILD completes, coaching should mention /do-test."""
         progress = {
             "ISSUE": "completed",
             "PLAN": "completed",
+            "CRITIQUE": "completed",
             "BUILD": "completed",
             "TEST": "pending",
             "REVIEW": "pending",
             "DOCS": "pending",
+            "MERGE": "pending",
         }
         msg = _build_sdlc_stage_coaching(progress)
         assert msg is not None
@@ -323,10 +343,12 @@ class TestSdlcStageCoaching:
         progress = {
             "ISSUE": "completed",
             "PLAN": "completed",
+            "CRITIQUE": "completed",
             "BUILD": "completed",
             "TEST": "completed",
             "REVIEW": "pending",
             "DOCS": "pending",
+            "MERGE": "pending",
         }
         msg = _build_sdlc_stage_coaching(progress)
         assert msg is not None
@@ -337,10 +359,12 @@ class TestSdlcStageCoaching:
         progress = {
             "ISSUE": "completed",
             "PLAN": "completed",
+            "CRITIQUE": "completed",
             "BUILD": "completed",
             "TEST": "completed",
             "REVIEW": "completed",
             "DOCS": "pending",
+            "MERGE": "pending",
         }
         msg = _build_sdlc_stage_coaching(progress)
         assert msg is not None
@@ -351,10 +375,12 @@ class TestSdlcStageCoaching:
         progress = {
             "ISSUE": "completed",
             "PLAN": "completed",
+            "CRITIQUE": "completed",
             "BUILD": "completed",
             "TEST": "completed",
             "REVIEW": "completed",
             "DOCS": "completed",
+            "MERGE": "completed",
         }
         msg = _build_sdlc_stage_coaching(progress)
         assert msg is None
@@ -374,10 +400,12 @@ class TestSdlcStageCoaching:
         progress = {
             "ISSUE": "pending",
             "PLAN": "pending",
+            "CRITIQUE": "pending",
             "BUILD": "pending",
             "TEST": "pending",
             "REVIEW": "pending",
             "DOCS": "pending",
+            "MERGE": "pending",
         }
         msg = _build_sdlc_stage_coaching(progress)
         assert msg is None
@@ -387,10 +415,12 @@ class TestSdlcStageCoaching:
         progress = {
             "ISSUE": "completed",
             "PLAN": "in_progress",
+            "CRITIQUE": "pending",
             "BUILD": "pending",
             "TEST": "pending",
             "REVIEW": "pending",
             "DOCS": "pending",
+            "MERGE": "pending",
         }
         msg = _build_sdlc_stage_coaching(progress)
         assert msg is not None
@@ -401,10 +431,12 @@ class TestSdlcStageCoaching:
         progress = {
             "ISSUE": "completed",
             "PLAN": "completed",
+            "CRITIQUE": "completed",
             "BUILD": "pending",
             "TEST": "pending",
             "REVIEW": "pending",
             "DOCS": "pending",
+            "MERGE": "pending",
         }
         msg = _build_sdlc_stage_coaching(progress)
         assert msg is not None
@@ -415,14 +447,52 @@ class TestSdlcStageCoaching:
         progress = {
             "ISSUE": "pending",
             "PLAN": "pending",
+            "CRITIQUE": "pending",
             "BUILD": "pending",
             "TEST": "pending",
             "REVIEW": "pending",
             "DOCS": "pending",
+            "MERGE": "pending",
         }
         # All pending with nothing completed -> returns None
         msg = _build_sdlc_stage_coaching(progress)
         assert msg is None
+
+    def test_failed_test_routes_to_patch(self):
+        """When TEST has failed, coaching should route to PATCH via graph."""
+        progress = {
+            "ISSUE": "completed",
+            "PLAN": "completed",
+            "CRITIQUE": "completed",
+            "BUILD": "completed",
+            "TEST": "failed",
+            "PATCH": "pending",
+            "REVIEW": "pending",
+            "DOCS": "pending",
+            "MERGE": "pending",
+        }
+        msg = _build_sdlc_stage_coaching(progress)
+        assert msg is not None
+        assert "/do-patch" in msg
+        assert "Failed: TEST" in msg
+
+    def test_failed_review_routes_to_patch(self):
+        """When REVIEW has failed, coaching should route to PATCH via graph."""
+        progress = {
+            "ISSUE": "completed",
+            "PLAN": "completed",
+            "CRITIQUE": "completed",
+            "BUILD": "completed",
+            "TEST": "completed",
+            "REVIEW": "failed",
+            "PATCH": "pending",
+            "DOCS": "pending",
+            "MERGE": "pending",
+        }
+        msg = _build_sdlc_stage_coaching(progress)
+        assert msg is not None
+        assert "/do-patch" in msg
+        assert "Failed: REVIEW" in msg
 
 
 class TestSdlcCoachingIntegration:
@@ -434,10 +504,12 @@ class TestSdlcCoachingIntegration:
         progress = {
             "ISSUE": "completed",
             "PLAN": "completed",
+            "CRITIQUE": "completed",
             "BUILD": "pending",
             "TEST": "pending",
             "REVIEW": "pending",
             "DOCS": "pending",
+            "MERGE": "pending",
         }
         msg = build_coaching_message(classification, sdlc_stage_progress=progress)
         assert "[System Coach]" in msg
@@ -455,10 +527,12 @@ class TestSdlcCoachingIntegration:
         all_done = {
             "ISSUE": "completed",
             "PLAN": "completed",
+            "CRITIQUE": "completed",
             "BUILD": "completed",
             "TEST": "completed",
             "REVIEW": "completed",
             "DOCS": "completed",
+            "MERGE": "completed",
         }
         msg = build_coaching_message(
             classification,
@@ -478,10 +552,12 @@ class TestSdlcCoachingIntegration:
         progress = {
             "ISSUE": "completed",
             "PLAN": "completed",
+            "CRITIQUE": "completed",
             "BUILD": "pending",
             "TEST": "pending",
             "REVIEW": "pending",
             "DOCS": "pending",
+            "MERGE": "pending",
         }
         msg = build_coaching_message(classification, sdlc_stage_progress=progress)
         assert "Do something specific." in msg
@@ -495,10 +571,12 @@ class TestSdlcCoachingIntegration:
         progress = {
             "ISSUE": "completed",
             "PLAN": "completed",
+            "CRITIQUE": "completed",
             "BUILD": "pending",
             "TEST": "pending",
             "REVIEW": "pending",
             "DOCS": "pending",
+            "MERGE": "pending",
         }
         msg = build_coaching_message(classification, sdlc_stage_progress=progress)
         assert "concrete proof" in msg  # Heuristic rejection coaching
