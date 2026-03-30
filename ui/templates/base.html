@@ -10,6 +10,10 @@
     {% block head %}{% endblock %}
 </head>
 <body>
+    <div class="health-bar" hx-get="/_partials/health/" hx-trigger="load, every 10s" hx-swap="innerHTML">
+        <span class="badge badge-pending">bridge: ...</span>
+        <span class="badge badge-ok">web: ok</span>
+    </div>
     <main class="container">
         {% block content %}{% endblock %}
     </main>

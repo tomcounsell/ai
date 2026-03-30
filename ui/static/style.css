@@ -168,7 +168,7 @@ h3 {
     text-transform: lowercase;
 }
 
-.badge-success {
+.badge-ok, .badge-success {
     color: var(--green);
     background: var(--green-bg);
 }
@@ -614,6 +614,17 @@ a:hover {
 
 @keyframes spin {
     to { transform: rotate(360deg); }
+}
+
+/* Health indicator bar */
+.health-bar {
+    position: fixed;
+    top: 12px;
+    right: 24px;
+    z-index: 100;
+    display: flex;
+    gap: 6px;
+    align-items: center;
 }
 
 /* Page title (no nav) */
