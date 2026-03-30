@@ -22,7 +22,6 @@ ALL_MONITORED_GROUPS = []
 ACTIVE_PROJECTS = []
 RESPOND_TO_DMS = True
 DM_WHITELIST = set()
-DM_WHITELIST_CONFIG = {}
 
 # =============================================================================
 # Constants
@@ -241,23 +240,6 @@ def resolve_chat_mode(
 
     # Unconfigured -- caller should fall through to existing behavior
     return None
-
-
-# =============================================================================
-# User Permissions
-# =============================================================================
-
-
-def get_user_permissions(sender_id: int | None) -> str:
-    """Get the permission level for a whitelisted user.
-
-    Returns:
-        "full" - Can do anything (default)
-        "qa_only" - Q&A only, no code changes allowed
-    """
-    if not sender_id or sender_id not in DM_WHITELIST_CONFIG:
-        return "full"
-    return DM_WHITELIST_CONFIG[sender_id].get("permissions", "full")
 
 
 # =============================================================================

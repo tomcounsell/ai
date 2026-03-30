@@ -95,7 +95,6 @@ Edit `.env` and ensure these are set:
 | `TELEGRAM_PHONE` | Yes | With country code, e.g. `+1234567890` |
 | `TELEGRAM_PASSWORD` | If 2FA on | Telegram 2FA password |
 | `TELEGRAM_SESSION_NAME` | No | Defaults to `valor_bridge` |
-| `TELEGRAM_DM_WHITELIST` | No | Comma-separated names, e.g. `Tom` |
 
 If any required values are placeholder/missing, ask the user to provide them. The shared API keys file at `~/src/.env` may have `ANTHROPIC_API_KEY` and other keys -- check there first.
 

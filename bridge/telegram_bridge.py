@@ -98,7 +98,6 @@ from bridge.routing import (  # noqa: E402
     classify_needs_response_async,  # noqa: F401
     extract_at_mentions,  # noqa: F401
     find_project_for_chat,
-    get_user_permissions,  # noqa: F401
     get_valor_usernames,  # noqa: F401
     is_message_for_others,  # noqa: F401
     is_message_for_valor,  # noqa: F401
@@ -580,35 +579,13 @@ RESPOND_TO_DMS = any(
 )
 
 # DM whitelist - only respond to DMs from these Telegram user IDs
-# Loaded from ~/Desktop/Valor/dm_whitelist.json
-# Falls back to TELEGRAM_DM_WHITELIST env var
-# Format: {"users": {"123456": {"name": "Name", "permissions": "full|qa_only"}}}
+# Loaded from projects.json dms.whitelist array
+# All DM users get uniform qa_only access (no per-user permission levels)
 DM_WHITELIST: set[int] = set()
-DM_WHITELIST_CONFIG: dict[int, dict] = {}  # Full config per user for permissions lookup
-_dm_whitelist_path = Path.home() / "Desktop" / "Valor" / "dm_whitelist.json"
-if _dm_whitelist_path.exists():
-    try:
-        _wl_config = json.loads(_dm_whitelist_path.read_text())
-        _users = _wl_config.get("users", {})
-        for uid, user_info in _users.items():
-            uid_int = int(uid)
-            DM_WHITELIST.add(uid_int)
-            # Handle both old format (string name) and new format (dict with permissions)
-            if isinstance(user_info, str):
-                DM_WHITELIST_CONFIG[uid_int] = {
-                    "name": user_info,
-                    "permissions": "full",
-                }
-            else:
-                DM_WHITELIST_CONFIG[uid_int] = user_info
-    except (json.JSONDecodeError, ValueError, OSError) as e:
-        logger.warning(f"Failed to load DM whitelist from {_dm_whitelist_path}: {e}")
-if not DM_WHITELIST:
-    for _id in os.getenv("TELEGRAM_DM_WHITELIST", "").split(","):
-        _id = _id.strip()
-        if _id.isdigit():
-            DM_WHITELIST.add(int(_id))
-            DM_WHITELIST_CONFIG[int(_id)] = {"permissions": "full"}
+_whitelist_entries = CONFIG.get("dms", {}).get("whitelist", [])
+for _entry in _whitelist_entries:
+    if isinstance(_entry, dict) and "id" in _entry:
+        DM_WHITELIST.add(int(_entry["id"]))
 
 # Propagate config to routing module so imported functions work correctly
 _routing_module.CONFIG = CONFIG
@@ -617,7 +594,6 @@ _routing_module.GROUP_TO_PROJECT = GROUP_TO_PROJECT
 _routing_module.ALL_MONITORED_GROUPS = ALL_MONITORED_GROUPS
 _routing_module.RESPOND_TO_DMS = RESPOND_TO_DMS
 _routing_module.DM_WHITELIST = DM_WHITELIST
-_routing_module.DM_WHITELIST_CONFIG = DM_WHITELIST_CONFIG
 _routing_module.DEFAULT_MENTIONS = DEFAULTS.get("telegram", {}).get(
     "mention_triggers", ["@valor", "valor", "hey valor"]
 )
@@ -629,7 +605,6 @@ import bridge.context as _context_module  # noqa: E402
 
 _context_module.CONFIG = CONFIG
 _context_module.DEFAULTS = DEFAULTS
-_context_module.DM_WHITELIST_CONFIG = DM_WHITELIST_CONFIG
 _context_module._BRIDGE_PROJECT_DIR = _BRIDGE_PROJECT_DIR
 
 # Re-export LINK_COLLECTORS from context module (used by handler)

@@ -170,10 +170,7 @@ ACTIVE_PROJECTS=valor,popoto
 
 ### DM Whitelist
 
-Control who can DM Valor:
-```bash
-TELEGRAM_DM_WHITELIST=Tom,alice,bob
-```
+DM access is controlled via the `dms.whitelist` array in `~/Desktop/Valor/projects.json`. Each entry has `id`, `name`, and `username` fields. Users not in the whitelist are silently ignored.
 
 ## Service Management
 
