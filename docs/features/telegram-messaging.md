@@ -83,7 +83,7 @@ Chat names are resolved in order:
 | Reading | Redis (Popoto `TelegramMessage` model) | Messages stored by bridge |
 | Sending | Telethon (direct API) | Real-time message delivery |
 | Chat names | Redis (Popoto `Chat` model) | Group name → chat_id mapping |
-| User names | `dm_whitelist.json` | Username → user_id mapping |
+| User names | `projects.json` (`dms.whitelist`) | Name → user_id mapping |
 
 ## Files
 

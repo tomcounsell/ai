@@ -27,7 +27,6 @@ logger = logging.getLogger(__name__)
 
 CONFIG = {}
 DEFAULTS = {}
-DM_WHITELIST_CONFIG = {}
 _BRIDGE_PROJECT_DIR = None
 
 
@@ -119,23 +118,6 @@ def filter_tool_logs(response: str) -> str:
 
 
 # =============================================================================
-# User Permissions
-# =============================================================================
-
-
-def get_user_permissions(sender_id: int | None) -> str:
-    """Get the permission level for a whitelisted user.
-
-    Returns:
-        "full" - Can do anything (default)
-        "qa_only" - Q&A only, no code changes allowed
-    """
-    if not sender_id or sender_id not in DM_WHITELIST_CONFIG:
-        return "full"
-    return DM_WHITELIST_CONFIG[sender_id].get("permissions", "full")
-
-
-# =============================================================================
 # Context Building
 # =============================================================================
 
@@ -144,9 +126,8 @@ def build_context_prefix(project: dict | None, is_dm: bool, sender_id: int | Non
     """Build project context to inject into agent prompt."""
     context_parts = []
 
-    # Check user permissions - Q&A restrictions only apply to DMs
-    permissions = get_user_permissions(sender_id)
-    if permissions == "qa_only" and is_dm:
+    # All DM users get uniform qa_only access - no per-user permission levels
+    if is_dm:
         context_parts.append(
             "RESTRICTION: This user has Q&A-only access. "
             "Do NOT make any code changes, file edits, git commits, or run destructive commands. "
