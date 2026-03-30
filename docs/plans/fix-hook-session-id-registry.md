@@ -5,7 +5,7 @@ appetite: Small
 owner: Valor
 created: 2026-03-30
 tracking: https://github.com/tomcounsell/ai/issues/597
-last_comment_id:
+last_comment_id: 4153837579
 ---
 
 # Fix Hook Session ID Resolution via Bridge-Level Registry
