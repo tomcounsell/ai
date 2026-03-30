@@ -150,23 +150,24 @@ def _start_pipeline_stage(parent_session_id: str, stage: str) -> None:
         )
 
 
-def _maybe_register_dev_session(tool_input: dict[str, Any]) -> None:
+def _maybe_register_dev_session(tool_input: dict[str, Any], claude_uuid: str | None = None) -> None:
     """Register a DevSession in Redis when the Agent tool spawns a dev-session.
 
-    Reads VALOR_SESSION_ID from env to find the parent ChatSession.
-    Creates an AgentSession record with session_type=dev and parent linkage.
+    Uses the session registry to resolve the bridge session ID from the
+    Claude Code UUID (issue #597). Falls back gracefully if not found.
     """
-    import os
-
+    from agent.hooks.session_registry import resolve
     from models.agent_session import AgentSession
 
     subagent_type = tool_input.get("type", "")
     if subagent_type != "dev-session":
         return
 
-    parent_session_id = os.environ.get("VALOR_SESSION_ID")
+    parent_session_id = resolve(claude_uuid)
     if not parent_session_id:
-        logger.debug("[pre_tool_use] VALOR_SESSION_ID not set, skipping DevSession registration")
+        logger.debug(
+            "[pre_tool_use] No bridge session in registry, skipping DevSession registration"
+        )
         return
 
     try:
@@ -216,7 +217,8 @@ async def pre_tool_use_hook(
 
     # Detect Agent tool spawning a dev-session
     if tool_name == "Agent":
-        _maybe_register_dev_session(tool_input)
+        claude_uuid = input_data.get("session_id")
+        _maybe_register_dev_session(tool_input, claude_uuid=claude_uuid)
         return {}
 
     # Only inspect write-capable tools
