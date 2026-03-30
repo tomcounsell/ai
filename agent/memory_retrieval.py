@@ -77,17 +77,10 @@ def get_relevance_ranked(
 
         from models.memory import Memory
 
-        sorted_set_key = DecayingSortedField.get_sortedset_db_key(
-            Memory, "relevance", project_key
-        )
-        results = POPOTO_REDIS_DB.zrevrange(
-            sorted_set_key.redis_key, 0, limit - 1, withscores=True
-        )
+        sorted_set_key = DecayingSortedField.get_sortedset_db_key(Memory, "relevance", project_key)
+        results = POPOTO_REDIS_DB.zrevrange(sorted_set_key.redis_key, 0, limit - 1, withscores=True)
         # Results are [(bytes_key, float_score), ...]
-        return [
-            (k.decode() if isinstance(k, bytes) else str(k), float(s))
-            for k, s in results
-        ]
+        return [(k.decode() if isinstance(k, bytes) else str(k), float(s)) for k, s in results]
     except Exception as e:
         logger.warning(f"[memory_retrieval] relevance ranked fetch failed: {e}")
         return []
@@ -159,9 +152,9 @@ def retrieve_memories(
         RRF score descending. Empty list on any error.
     """
     try:
-        from config.memory_defaults import RRF_K
         from popoto import BM25Field
 
+        from config.memory_defaults import RRF_K
         from models.memory import Memory
 
         if rrf_k is None:
