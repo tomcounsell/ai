@@ -52,7 +52,9 @@ def _extract_output_tail(input_data: dict, max_chars: int = 500) -> str:
     return _extract_outcome_summary(input_data)
 
 
-def _register_dev_session_completion(agent_id: str, input_data: dict | None = None) -> None:
+def _register_dev_session_completion(
+    agent_id: str, input_data: dict | None = None, claude_uuid: str | None = None
+) -> None:
     """Mark a DevSession as completed in Redis and record SDLC stage completion.
 
     Looks up the DevSession by parent ChatSession and updates its status.
@@ -63,10 +65,15 @@ def _register_dev_session_completion(agent_id: str, input_data: dict | None = No
         agent_id: The agent ID of the completing dev-session.
         input_data: The SubagentStopHookInput dict, used to extract output_tail
             for outcome classification.
+        claude_uuid: The Claude Code session UUID for registry lookup (issue #597).
     """
-    parent_session_id = os.environ.get("VALOR_SESSION_ID")
+    from agent.hooks.session_registry import resolve
+
+    parent_session_id = resolve(claude_uuid)
     if not parent_session_id:
-        logger.debug("[subagent_stop] VALOR_SESSION_ID not set, skipping DevSession completion")
+        logger.debug(
+            "[subagent_stop] No bridge session in registry, skipping DevSession completion"
+        )
         return
 
     try:
@@ -298,11 +305,15 @@ async def subagent_stop_hook(
 
     # Register DevSession completion in Redis for parent ChatSession tracking
     if agent_type == "dev-session":
-        _register_dev_session_completion(agent_id, input_data=input_data)
+        # Issue #597: Use session registry instead of os.environ for bridge session ID
+        from agent.hooks.session_registry import resolve
+
+        claude_uuid = input_data.get("session_id")
+        _register_dev_session_completion(agent_id, input_data=input_data, claude_uuid=claude_uuid)
 
         # Resolve current stage before it gets marked complete
         current_stage = None
-        session_id = os.environ.get("VALOR_SESSION_ID")
+        session_id = resolve(claude_uuid)
         if session_id:
             stages_str = _get_stage_states(session_id)
             if stages_str:

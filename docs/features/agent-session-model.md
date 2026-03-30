@@ -73,11 +73,11 @@ Stage transitions are managed by the `PipelineStateMachine` in `bridge/pipeline_
 | 2 | Direct `session_id` match | Works when caller has the bridge session_id |
 | 3 | `task_list_id` match | Fallback for hook contexts with Claude Code UUID |
 
-**Why three tiers?** Claude Code hooks receive Claude Code's internal UUID as `session_id`, which does not match the bridge's `AgentSession.session_id` (format: `tg_valor_{chat_id}_{msg_id}`). The `VALOR_SESSION_ID` env var bridges this gap by giving hooks a direct path to the correct session. The `task_list_id` fallback provides belt-and-suspenders redundancy.
+**Why three tiers?** Claude Code hooks receive Claude Code's internal UUID as `session_id`, which does not match the bridge's `AgentSession.session_id` (format: `tg_valor_{chat_id}_{msg_id}`). The hook session registry (see below) bridges this gap by giving hooks a direct path to the correct session. The `task_list_id` fallback provides belt-and-suspenders redundancy.
 
 ### VALOR_SESSION_ID Environment Variable
 
-Set by `agent/sdk_client.py` in `_create_options()` alongside `CLAUDE_CODE_TASK_LIST_ID`. Propagated to all Claude Code subprocesses including hooks.
+Set by `agent/sdk_client.py` in `_create_options()` alongside `CLAUDE_CODE_TASK_LIST_ID`. Propagated to all Claude Code subprocesses.
 
 ```python
 # In sdk_client.py _create_options():
@@ -86,6 +86,8 @@ if session_id:
 ```
 
 The env var is only set when `session_id` is non-None (i.e., when the SDK is invoked from the bridge with a real session). Local Claude Code sessions without bridge context will not have this env var set, and `_find_session()` falls back to the other lookup paths.
+
+**Important**: This env var is available inside the Claude Code subprocess (for shell scripts, Python tools via Bash) but is **not** available to hooks. Hooks execute in the parent bridge process, not the subprocess. For hook-side session resolution, use the session registry (`agent/hooks/session_registry.py`) which maps Claude Code UUIDs to bridge session IDs via `resolve(claude_uuid)`. See [Session Isolation: Hook Session Registry](session-isolation.md#hook-session-registry-issue-597) for details.
 
 ### task_list_id Persistence
 
