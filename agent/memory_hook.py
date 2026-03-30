@@ -1,7 +1,7 @@
 """Subconscious memory thought injection for PostToolUse hook.
 
-Checks ExistenceFilter for topic relevance, assembles context via
-ContextAssembler, and returns <thought> blocks via additionalContext.
+Checks ExistenceFilter for topic relevance, retrieves memories via
+BM25 + RRF fusion, and returns <thought> blocks via additionalContext.
 
 Rate-limited via sliding window: every WINDOW_SIZE tool calls, extracts
 topic keywords from the current window plus previous windows in the buffer.
@@ -158,12 +158,12 @@ def _cluster_keywords(keywords: list[str], max_clusters: int = 3) -> list[list[s
 def _apply_category_weights(records: list) -> list:
     """Re-rank memory records by applying category-based weight multipliers.
 
-    After ContextAssembler returns scored results, multiply each record's
+    After RRF fusion returns scored results, multiply each record's
     effective score by its category weight, then re-sort descending.
     Records with missing or malformed metadata get the default weight (1.0).
 
     Args:
-        records: List of Memory records from ContextAssembler.
+        records: List of Memory records with `score` attribute (RRF score).
 
     Returns:
         Re-sorted list of records (same objects, new order).
@@ -279,17 +279,10 @@ def check_and_inject(
                 )
             return None
 
-        # Multi-query decomposition — cluster keywords and query each cluster
+        # Multi-query decomposition — cluster keywords and retrieve via BM25 + RRF
         import time
 
-        from popoto import ContextAssembler
-
-        assembler = ContextAssembler(
-            model_class=Memory,
-            score_weights={"relevance": 0.6, "confidence": 0.3},
-            max_items=MAX_THOUGHTS,
-            max_tokens=1000,
-        )
+        from agent.memory_retrieval import retrieve_memories
 
         clusters = _cluster_keywords(unique_keywords)
         all_records = []
@@ -297,12 +290,13 @@ def check_and_inject(
 
         query_start = time.monotonic()
         for cluster in clusters:
-            result = assembler.assemble(
-                query_cues={"topic": " ".join(cluster[:5])},
-                agent_id=project_key,
-                partition_filters={"project_key": project_key},
+            cluster_query = " ".join(cluster[:5])
+            records = retrieve_memories(
+                query_text=cluster_query,
+                project_key=project_key,
+                limit=MAX_THOUGHTS,
             )
-            for record in result.records or []:
+            for record in records:
                 rid = str(getattr(record, "memory_id", "") or "")
                 if rid and rid not in seen_ids:
                     seen_ids.add(rid)
