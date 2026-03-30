@@ -89,7 +89,17 @@ def start_transcript(
             if classification_type:
                 s.classification_type = classification_type
             if chat_id is not None:
-                s.chat_id = str(chat_id)
+                # chat_id is a KeyField — mutating it after creation silently
+                # creates a new Redis record (orphaning the old one).  Only set
+                # it when the existing value is empty (initial population).
+                if not s.chat_id:
+                    s.chat_id = str(chat_id)
+                elif str(s.chat_id) != str(chat_id):
+                    logger.warning(
+                        f"chat_id mismatch for session {session_id}: "
+                        f"existing={s.chat_id}, incoming={chat_id} — "
+                        f"skipping mutation (KeyField is immutable after creation)"
+                    )
             if correlation_id:
                 s.correlation_id = correlation_id
             s.save()

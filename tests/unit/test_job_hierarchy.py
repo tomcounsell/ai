@@ -149,77 +149,44 @@ class TestFinalizeParent:
             setattr(session, k, v)
         return session
 
-    @patch("agent.job_queue.AgentSession")
-    @patch("agent.job_queue._extract_job_fields")
-    def test_transition_parent_completed(self, mock_extract, mock_model):
-        """_transition_parent transitions parent to completed and re-links children."""
+    def test_transition_parent_completed(self):
+        """_transition_parent transitions parent to completed via direct mutation."""
         from agent.job_queue import _transition_parent
 
-        child1 = self._make_session(job_id="c1", parent_job_id="p1")
         parent = self._make_session(job_id="p1", status="waiting_for_children")
-        parent.get_children.return_value = [child1]
-
-        # _extract_job_fields is called for parent first, then for each child
-        mock_extract.side_effect = [
-            {"status": "waiting_for_children", "completed_at": None},
-            {"status": "running", "parent_job_id": "p1"},
-        ]
-        new_parent = MagicMock()
-        new_parent.job_id = "p1-new"
-        # First create() returns new parent, second returns re-created child
-        new_child = MagicMock()
-        new_child.job_id = "c1-new"
-        mock_model.create.side_effect = [new_parent, new_child]
 
         _transition_parent(parent, "completed")
 
-        # Parent should be deleted and recreated
-        parent.delete.assert_called_once()
-        first_create_kwargs = mock_model.create.call_args_list[0][1]
-        assert first_create_kwargs["status"] == "completed"
-        assert first_create_kwargs["completed_at"] is not None
+        # status is an IndexedField — direct mutation, no delete-and-recreate
+        assert parent.status == "completed"
+        assert parent.completed_at is not None
+        parent.save.assert_called_once()
 
-        # Child should be deleted and recreated with new parent_job_id
-        child1.delete.assert_called_once()
-        second_create_kwargs = mock_model.create.call_args_list[1][1]
-        assert second_create_kwargs["parent_job_id"] == "p1-new"
-
-    @patch("agent.job_queue.AgentSession")
-    @patch("agent.job_queue._extract_job_fields")
-    def test_transition_parent_failed(self, mock_extract, mock_model):
-        """_transition_parent transitions parent to failed when child fails."""
+    def test_transition_parent_failed(self):
+        """_transition_parent transitions parent to failed via direct mutation."""
         from agent.job_queue import _transition_parent
 
         parent = self._make_session(job_id="p1", status="waiting_for_children")
-        parent.get_children.return_value = []
-        mock_extract.return_value = {"status": "waiting_for_children", "completed_at": None}
-        new_parent = MagicMock()
-        new_parent.job_id = "p1-new"
-        mock_model.create.return_value = new_parent
 
         _transition_parent(parent, "failed")
 
-        call_kwargs = mock_model.create.call_args[1]
-        assert call_kwargs["status"] == "failed"
+        assert parent.status == "failed"
+        assert parent.completed_at is not None
+        parent.save.assert_called_once()
 
-    @patch("agent.job_queue.AgentSession")
-    @patch("agent.job_queue._extract_job_fields")
-    def test_transition_parent_waiting_no_completed_at(self, mock_extract, mock_model):
+    def test_transition_parent_waiting_no_completed_at(self):
         """_transition_parent does not set completed_at for non-terminal status."""
         from agent.job_queue import _transition_parent
 
         parent = self._make_session(job_id="p1", status="running")
-        parent.get_children.return_value = []
-        mock_extract.return_value = {"status": "running", "completed_at": None}
-        new_parent = MagicMock()
-        new_parent.job_id = "p1-new"
-        mock_model.create.return_value = new_parent
+        parent.completed_at = None
 
         _transition_parent(parent, "waiting_for_children")
 
-        call_kwargs = mock_model.create.call_args[1]
-        assert call_kwargs["status"] == "waiting_for_children"
-        assert call_kwargs["completed_at"] is None
+        # Non-terminal status should not set completed_at
+        assert parent.status == "waiting_for_children"
+        assert parent.completed_at is None
+        parent.save.assert_called_once()
 
     @patch("agent.job_queue._transition_parent")
     @patch("agent.job_queue.AgentSession")

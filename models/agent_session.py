@@ -18,7 +18,6 @@ import json as _json
 import logging
 import time
 
-from config.enums import ChatMode, ClassificationType, SessionType
 from popoto import (
     AutoKeyField,
     Field,
@@ -29,6 +28,8 @@ from popoto import (
     Model,
     SortedField,
 )
+
+from config.enums import ChatMode, ClassificationType, SessionType
 
 logger = logging.getLogger(__name__)
 
@@ -130,10 +131,6 @@ class AgentSession(Model):
     # === Tracing ===
     correlation_id = Field(null=True)  # End-to-end request tracing ID
 
-    # === Stall retry fields ===
-    retry_count = Field(type=int, default=0)  # Stall retry attempt count
-    last_stall_reason = Field(null=True)  # Diagnostic context from last stall
-
     # === Watchdog fields ===
     watchdog_unhealthy = Field(null=True)  # Reason string when flagged unhealthy, None when healthy
 
@@ -166,8 +163,6 @@ class AgentSession(Model):
     # === DevSession fields (null when session_type="chat") ===
     parent_chat_session_id = KeyField(null=True)  # Logical FK -> ChatSession
     slug = Field(null=True)  # Derives branch, plan path, worktree
-    artifacts = Field(null=True)  # JSON: {issue_url, plan_url, pr_url, ...}
-
     # === Job hierarchy fields ===
     # Links child jobs to their parent for job decomposition (issue #359).
     # When set, this job is a child of the referenced parent job.

@@ -237,9 +237,6 @@ _JOB_FIELDS = [
     # Semantic routing fields — must be preserved across delete-and-recreate
     "context_summary",
     "expectations",
-    # Stall retry fields — must be preserved across delete-and-recreate
-    "retry_count",
-    "last_stall_reason",
     # Steering fields — must be preserved across delete-and-recreate
     "queued_steering_messages",
     # Tracing fields — must be preserved across delete-and-recreate
@@ -257,7 +254,6 @@ _JOB_FIELDS = [
     "result_text",
     "parent_chat_session_id",
     "slug",
-    "artifacts",
     # === PM self-messaging fields ===
     "pm_sent_message_ids",
 ]
@@ -842,10 +838,7 @@ def cancel_job(job_id: str) -> bool:
     job.status = "cancelled"
     job.completed_at = time.time()
     job.save()
-    logger.info(
-        f"[pm-controls] Cancelled job {job_id} "
-        f"(stable_job_id={job.stable_job_id})"
-    )
+    logger.info(f"[pm-controls] Cancelled job {job_id} (stable_job_id={job.stable_job_id})")
     return True
 
 
@@ -903,8 +896,9 @@ def retry_job(stable_job_id: str) -> AgentSession | None:
                 deps = pending.depends_on
                 if not deps or stable_job_id not in deps:
                     continue
-                # Replace old stable_job_id with new one using delete-and-recreate
-                # (ListField values require recreating the object to update indexes)
+                # Delete-and-recreate required: depends_on is a ListField whose
+                # contents are used in filter queries.  Popoto does not update
+                # secondary indexes on in-place list mutation.
                 updated_deps = [new_stable_id if d == stable_job_id else d for d in deps]
                 pending_fields = _extract_job_fields(pending)
                 pending.delete()
