@@ -200,7 +200,10 @@ tests/
 | unit | `test_memory_hook.py` | 135 | PostToolUse thought injection, sliding window |
 | unit | `test_memory_extraction.py` | 107 | Post-session Haiku extraction, outcome detection |
 | unit | `test_memory_ingestion.py` | 89 | Telegram message memory ingestion |
+| integration | `test_memory_lifecycle.py` | 23 | Save-search-recall cycle, bloom filter, decay, write filter, confidence, dismissal, category re-ranking, knowledge companions, project isolation |
+| integration | `test_memory_injection_pipeline.py` | 15 | Full check_and_inject flow, sliding window, novel territory, deja vu, multi-query clustering, session cleanup |
 | integration | `test_redis_models.py` | 30 | Popoto model CRUD |
+| ai_judge | `test_memory_usefulness.py` | 7 | AI-judged retrieval relevance, extraction quality, thought injection quality (requires Ollama) |
 
 ### `monitoring` — Observability
 
