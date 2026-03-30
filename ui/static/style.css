@@ -616,12 +616,15 @@ a:hover {
     to { transform: rotate(360deg); }
 }
 
-/* Health indicator bar */
+/* Page header with health indicator */
+.page-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 24px;
+}
+
 .health-bar {
-    position: fixed;
-    top: 12px;
-    right: 24px;
-    z-index: 100;
     display: flex;
     gap: 6px;
     align-items: center;
@@ -632,7 +635,7 @@ a:hover {
     font-size: 20px;
     font-weight: 600;
     color: var(--text-secondary);
-    margin-bottom: 24px;
+    margin-bottom: 0;
     font-family: var(--font-mono);
 }
 
