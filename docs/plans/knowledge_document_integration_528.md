@@ -1,5 +1,5 @@
 ---
-status: Building
+status: Done
 type: feature
 appetite: Medium
 owner: Valor
