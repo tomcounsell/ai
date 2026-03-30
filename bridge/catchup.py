@@ -86,6 +86,10 @@ async def scan_for_missed_messages(
         project_key = project.get("_key", "unknown")
         working_dir = project.get("working_directory", "")
 
+        # Use dialog.id (includes -100 prefix for supergroups) to match
+        # the event handler's event.chat_id format.
+        chat_id = dialog.id
+
         logger.info(f"[catchup] Scanning {chat_title} for missed messages...")
 
         try:
@@ -123,7 +127,7 @@ async def scan_for_missed_messages(
                 # Skip messages already processed (Redis dedup)
                 from bridge.dedup import is_duplicate_message
 
-                if await is_duplicate_message(dialog.entity.id, message.id):
+                if await is_duplicate_message(chat_id, message.id):
                     logger.info(
                         f"[catchup] {chat_title}: msg {message.id} "
                         f"already processed (Redis dedup) - skip"
@@ -155,7 +159,7 @@ async def scan_for_missed_messages(
                         self.chat_id = chat_id
                         self.is_private = False
 
-                minimal_event = MinimalEvent(message, dialog.entity.id)
+                minimal_event = MinimalEvent(message, chat_id)
 
                 should_respond, is_reply_to_valor = await should_respond_fn(
                     client,
@@ -183,7 +187,7 @@ async def scan_for_missed_messages(
                 )
 
                 # Build session ID for this message
-                session_id = f"tg_{project_key}_{dialog.entity.id}_{message.id}"
+                session_id = f"tg_{project_key}_{chat_id}_{message.id}"
 
                 await enqueue_job_fn(
                     project_key=project_key,
@@ -191,7 +195,7 @@ async def scan_for_missed_messages(
                     working_dir=working_dir,
                     message_text=text,
                     sender_name=sender_name,
-                    chat_id=str(dialog.entity.id),
+                    chat_id=str(chat_id),
                     telegram_message_id=message.id,
                     chat_title=chat_title,
                     priority="low",  # Lower priority than real-time messages
@@ -201,7 +205,7 @@ async def scan_for_missed_messages(
                 # Record in Redis dedup to prevent re-enqueue on next scan
                 from bridge.dedup import record_message_processed
 
-                await record_message_processed(dialog.entity.id, message.id)
+                await record_message_processed(chat_id, message.id)
                 queued += 1
 
         except Exception as e:

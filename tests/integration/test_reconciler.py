@@ -30,12 +30,16 @@ def _make_message(msg_id, text=None, out=False, minutes_ago=2):
     return msg
 
 
-def _make_dialog(chat_title, entity_id=100):
-    """Create a mock Telegram dialog."""
+def _make_dialog(chat_title, entity_id=100, chat_id=None):
+    """Create a mock Telegram dialog.
+
+    chat_id defaults to -100{entity_id} to match Telethon's supergroup format.
+    """
     dialog = MagicMock()
     dialog.entity = MagicMock()
     dialog.entity.title = chat_title
     dialog.entity.id = entity_id
+    dialog.id = chat_id if chat_id is not None else -(1000000000000 + entity_id)
     return dialog
 
 
@@ -110,7 +114,7 @@ class TestReconcilerGapDetection:
             for job in enqueued:
                 assert job["project_key"] == "builders"
                 assert job["priority"] == "low"
-                assert job["chat_id"] == str(entity_id)
+                assert job["chat_id"] == str(-(1000000000000 + entity_id))
                 assert job["sender_name"] == "Alice"
 
             # Second scan: should find no new gaps (6 and 7 now in dedup)

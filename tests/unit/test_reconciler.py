@@ -28,12 +28,18 @@ def _make_message(msg_id, text="hello", out=False, minutes_ago=1):
     return msg
 
 
-def _make_dialog(chat_title, entity_id=100):
-    """Create a mock Telegram dialog."""
+def _make_dialog(chat_title, entity_id=100, chat_id=None):
+    """Create a mock Telegram dialog.
+
+    chat_id defaults to -100{entity_id} to match Telethon's supergroup format.
+    The event handler uses dialog.id (negative), while dialog.entity.id is the
+    raw entity ID (positive). The reconciler must use dialog.id.
+    """
     dialog = MagicMock()
     dialog.entity = MagicMock()
     dialog.entity.title = chat_title
     dialog.entity.id = entity_id
+    dialog.id = chat_id if chat_id is not None else -(1000000000000 + entity_id)
     return dialog
 
 
@@ -240,8 +246,9 @@ class TestReconcileOnce:
         assert call_kwargs["message_text"] == "missed message"
         assert call_kwargs["priority"] == "low"
         assert call_kwargs["telegram_message_id"] == 555
-        assert call_kwargs["chat_id"] == "200"
-        record_fn.assert_called_once_with(200, 555)
+        expected_chat_id = -(1000000000000 + 200)
+        assert call_kwargs["chat_id"] == str(expected_chat_id)
+        record_fn.assert_called_once_with(expected_chat_id, 555)
 
     @pytest.mark.asyncio
     async def test_old_message_outside_lookback_is_skipped(self):
