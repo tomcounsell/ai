@@ -54,6 +54,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Lint Auto-Fix](lint-auto-fix.md) | Automatic lint/format fixing via pre-commit hook and PostToolUse hook, eliminating agent churn loops | Shipped |
 | [Memory Search Tool](memory-search-tool.md) | Direct interface for searching, saving, inspecting, and forgetting memories from the Memory model | Shipped |
 | [Message Pipeline](message-pipeline.md) | Deferred enrichment pipeline for fast message acknowledgment and zero-loss restarts | Shipped |
+| [Message Reconciler](message-reconciler.md) | Periodic background scan detecting and recovering Telegram messages missed during live bridge connections | Shipped |
 | [Mid-Session Steering](mid-session-steering.md) | End-to-end steering flow for injecting reply-to messages into running agent sessions | Shipped |
 | [Observer Agent](observer-agent.md) | Deterministic SDLC steer/deliver router — no LLM calls, rules-based pipeline progression | Shipped |
 | [OOP Audit](do-oop-audit.md) | Prompt-only audit skill scanning Python classes for 14 structural anti-patterns with framework detection and severity grouping | Shipped |
