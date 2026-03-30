@@ -105,7 +105,9 @@ Agents can deliberately persist high-level concepts using `python -m tools.memor
 
 ### Flow 6: Post-Merge Learning Extraction
 
-After a PR merges, `extract_post_merge_learning()` in `agent/memory_extraction.py` distills the single most important project-level takeaway from the PR title, body, and diff summary. The learning is saved as a Memory with importance 7.0. This captures architectural decisions and conventions established by shipped code.
+After a PR merges, `extract_post_merge_learning()` in `agent/memory_extraction.py` distills the single most important project-level takeaway from the PR title, body, and diff summary. The learning is saved as a Memory with importance 7.0 and structured metadata (category, tags, file_paths) matching the post-session extraction schema. This captures architectural decisions and conventions established by shipped code.
+
+The extraction prompt requests structured JSON output. If Haiku returns valid JSON, the observation, category, tags, and file_paths are parsed and passed as metadata to `Memory.safe_save()`. If Haiku returns non-JSON (plain text), the text is saved with a default metadata of `{"category": "decision"}`. This ensures all memory creation paths produce consistent metadata.
 
 The function is designed to be called from the SDLC merge stage or a post-merge script. It returns None gracefully if no meaningful takeaway is found or if the API call fails.
 
@@ -121,6 +123,31 @@ The memory system also runs in Claude Code CLI sessions via hooks. See [Claude C
 - Bridge module: `.claude/hooks/hook_utils/memory_bridge.py`
 
 Both paths (Telegram agent and Claude Code hooks) write to the same Redis Memory model. Memories are shared across all session types. All memory capabilities (ingestion, recall, deja vu signals, extraction, outcome detection, post-merge learning, multi-query decomposition) now have feature parity across both paths.
+
+## Category-Weighted Recall
+
+After ContextAssembler returns scored results, `_apply_category_weights()` re-ranks them by multiplying each record's score by a category-specific weight before sorting. This ensures that corrections and decisions -- higher-signal memory types -- surface preferentially over patterns and surprises when scores are similar.
+
+**Weight table** (from `CATEGORY_RECALL_WEIGHTS` in `config/memory_defaults.py`):
+
+| Category | Weight | Effect |
+|----------|--------|--------|
+| `correction` | 1.5 | Boosted -- past mistakes should be top of mind |
+| `decision` | 1.3 | Boosted -- architectural choices are high-value context |
+| `pattern` | 1.0 | Neutral -- general observations keep existing rank |
+| `surprise` | 1.0 | Neutral |
+| `default` | 1.0 | Fallback for records with missing or unknown category |
+
+**Mechanism:**
+1. ContextAssembler returns scored records (relevance + confidence weighted)
+2. `_apply_category_weights(records)` reads `metadata.category` from each record
+3. Effective score = `record.score * category_weight`
+4. Records are re-sorted by effective score descending
+5. Top `MAX_THOUGHTS` records are formatted as `<thought>` blocks
+
+**Fail-safe:** If metadata is None, not a dict, or missing the category key, the default weight (1.0) is used. If `CATEGORY_RECALL_WEIGHTS` cannot be imported, records are returned in their original order.
+
+Both `check_and_inject()` (SDK/Telegram path) and `recall()` (Claude Code hooks path) apply the same re-ranking. The bridge imports `_apply_category_weights` from `agent.memory_hook`.
 
 ## Structured Metadata
 
@@ -182,9 +209,7 @@ The memory system MUST work equally across all agent session types — SDK/Teleg
 
 | Capability | Claude Code | SDK/Agent | Action |
 |-----------|-------------|-----------|--------|
-| Deja vu signals (vague recognition, novel territory) | Yes | No | Port to `agent/memory_hook.py` |
 | Prompt ingestion (auto-save user input) | Yes (UserPromptSubmit hook) | No (Telegram messages only) | Add ingestion hook or equivalent to SDK path |
-| Post-merge learning extraction | No | Yes (SDLC merge stage) | Port to Claude Code Stop hook or post-merge script |
 
 ## Key Files
 
@@ -224,6 +249,7 @@ All tuning constants are in `config/memory_defaults.py`. Call `apply_defaults()`
 | `DISMISSAL_DECAY_THRESHOLD` | 3 | Consecutive dismissals before importance decays |
 | `DISMISSAL_IMPORTANCE_DECAY` | 0.7 | Importance multiplier on threshold breach |
 | `MIN_IMPORTANCE_FLOOR` | 0.2 | Minimum importance after decay (never drops below this) |
+| `CATEGORY_RECALL_WEIGHTS` | `{correction: 1.5, decision: 1.3, pattern: 1.0, surprise: 1.0, default: 1.0}` | Post-query re-ranking multipliers by category |
 
 ## Error Handling
 
@@ -254,4 +280,5 @@ No schema migrations are involved. Redis keys can be flushed without side effect
 - Intentional saves: [#521](https://github.com/tomcounsell/ai/issues/521) (PR [#524](https://github.com/tomcounsell/ai/pull/524))
 - Prior art: Issue #394 (original agent memory integration layer)
 - Retrieval enhancement: [#583](https://github.com/tomcounsell/ai/issues/583) (PR [#584](https://github.com/tomcounsell/ai/pull/584)) -- structured metadata, dismissal tracking, multi-query decomposition
+- Metadata-aware recall: [#586](https://github.com/tomcounsell/ai/issues/586) -- category-weighted recall re-ranking, post-merge metadata parity, retrieval recipes
 - Downstream: Issue #395 (multi-persona memory partitioning), Issue #393 (behavioral episode memory)
