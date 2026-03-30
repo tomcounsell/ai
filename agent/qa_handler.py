@@ -39,7 +39,7 @@ def build_qa_instructions() -> str:
         "- Use read-only tools: Bash (git log, git status, gh issue view, "
         "gh pr list, cat, grep, find), Read, Glob, Grep\n"
         "- EXCEPTION: You MAY create GitHub issues when explicitly asked "
-        "(using `gh issue create` or the /do-issue skill). Issue creation "
+        "by invoking the /do-issue skill. Issue creation "
         "is a lightweight action that does not modify the codebase.\n"
         "- Do NOT write files, create branches, run tests, or modify code\n"
         "- Do NOT use the Agent tool to spawn sub-agents\n"
