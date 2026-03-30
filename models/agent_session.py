@@ -28,6 +28,8 @@ from popoto import (
     SortedField,
 )
 
+from config.enums import ChatMode, SessionType
+
 logger = logging.getLogger(__name__)
 
 MSG_MAX_CHARS = 20_000
@@ -37,9 +39,9 @@ STEERING_QUEUE_MAX = 10  # Max buffered steering messages per session
 # SDLC stages in pipeline order
 SDLC_STAGES = ["ISSUE", "PLAN", "CRITIQUE", "BUILD", "TEST", "REVIEW", "DOCS", "MERGE"]
 
-# Valid session types
-SESSION_TYPE_CHAT = "chat"
-SESSION_TYPE_DEV = "dev"
+# Backward-compatible aliases (import from config.enums for new code)
+SESSION_TYPE_CHAT = SessionType.CHAT
+SESSION_TYPE_DEV = SessionType.DEV
 
 
 class AgentSession(Model):
@@ -135,11 +137,14 @@ class AgentSession(Model):
     # === Watchdog fields ===
     watchdog_unhealthy = Field(null=True)  # Reason string when flagged unhealthy, None when healthy
 
-    # === Q&A mode flag ===
-    # Set to True when intent classifier routes to Q&A mode. Separate from
-    # classification_type (which holds the bridge's original classification
-    # like "question", "bug", etc.) to avoid dual-purposing that field.
-    qa_mode = Field(type=bool, null=True)
+    # === Session mode (replaces qa_mode) ===
+    # Stores ChatMode enum value ("qa" or None) to indicate Q&A routing.
+    # Replaces the boolean qa_mode field with a string-typed enum field.
+    session_mode = Field(null=True)
+
+    # Legacy field kept for backward compatibility with in-flight Redis sessions.
+    # New code should use session_mode instead. Will be removed in a future cleanup.
+    _qa_mode_legacy = Field(type=bool, null=True)
 
     # === Semantic routing fields ===
     context_summary = Field(null=True, max_length=200)  # What this session is about
@@ -208,6 +213,22 @@ class AgentSession(Model):
     def is_dev(self) -> bool:
         """Whether this is a DevSession (Dev persona, full permissions)."""
         return self.session_type == SESSION_TYPE_DEV
+
+    @property
+    def qa_mode(self) -> bool:
+        """Backward-compatible property: True when session is in Q&A mode.
+
+        Reads session_mode first, falls back to _qa_mode_legacy for
+        pre-migration sessions still in Redis.
+        """
+        if self.session_mode == ChatMode.QA:
+            return True
+        return bool(self._qa_mode_legacy)
+
+    @qa_mode.setter
+    def qa_mode(self, value: bool) -> None:
+        """Backward-compatible setter: writes to session_mode."""
+        self.session_mode = ChatMode.QA if value else None
 
     @property
     def current_stage(self) -> str | None:
