@@ -79,6 +79,26 @@ The pipeline graph is the backbone of stage routing. Mandatory gate enforcement 
 
 Stage tracking is handled by `PipelineStateMachine` in `bridge/pipeline_state.py`, which uses the pipeline graph for transitions. The state machine's `has_remaining_stages()` method uses `get_next_stage()` to check if a non-terminal next stage exists, correctly handling cycles and the PATCH routing-only stage.
 
+## Runtime Wiring (PR #601)
+
+As of PR #601, the pipeline graph is fully wired into the runtime execution path. Previously, `classify_outcome()`, `fail_stage()`, and the graph-based routing were well-tested but never called in production.
+
+### Outcome Classification
+
+When a DevSession completes, the `subagent_stop_hook` calls `classify_outcome(stage, stop_reason, output_tail)` on the PipelineStateMachine. This uses a two-tier approach:
+1. SDK stop_reason: anything other than "end_turn" is a process failure
+2. Deterministic tail patterns scoped by stage (e.g., "changes requested" in REVIEW output -> fail)
+
+The result routes to `complete_stage()` (success/ambiguous) or `fail_stage()` (fail/partial), which triggers the appropriate graph edge.
+
+### Coach Graph-Based Routing
+
+The coach (`bridge/coach.py`) uses `PipelineStateMachine.next_stage(outcome)` to determine the next stage from the graph, replacing the previous linear scan of `DISPLAY_STAGES`. It infers the outcome from stage statuses written by the subagent_stop hook.
+
+### Stage States Initialization
+
+SDLC sessions have `stage_states` initialized eagerly at session creation (ISSUE=ready, all others=pending), eliminating the need for the dashboard inference fallback (`_infer_stages_from_history()`), which is now deprecated.
+
 ## Integration
 
 The coach (`bridge/coach.py`) imports `DISPLAY_STAGES` and `STAGE_TO_SKILL` from the graph module instead of maintaining its own hardcoded copies.
@@ -90,7 +110,8 @@ ChatSession orchestration uses the graph for pipeline progression. Individual `/
 | File | Role |
 |------|------|
 | `bridge/pipeline_graph.py` | Canonical graph definition |
-| `agent/job_queue.py` | Nudge loop uses graph for routing decisions |
-| `bridge/coach.py` | Imports `DISPLAY_STAGES` and `STAGE_TO_SKILL` (no local copies) |
-| `bridge/pipeline_state.py` | `PipelineStateMachine` — stage tracking and transitions using the graph |
+| `agent/hooks/subagent_stop.py` | Calls `classify_outcome()` and routes to `complete_stage()`/`fail_stage()` |
+| `agent/job_queue.py` | Nudge loop uses graph for routing decisions; initializes `stage_states` for SDLC sessions |
+| `bridge/coach.py` | Uses `PipelineStateMachine.next_stage(outcome)` for graph-based routing |
+| `bridge/pipeline_state.py` | `PipelineStateMachine` -- stage tracking, outcome classification, and transitions using the graph |
 | `tests/unit/test_pipeline_graph.py` | 27 tests covering all routing scenarios |

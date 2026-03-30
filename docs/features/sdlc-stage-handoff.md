@@ -16,9 +16,11 @@ When a DevSession completes, the `subagent_stop_hook` in `agent/hooks/subagent_s
 
 1. Resolves the tracking issue number from `SDLC_TRACKING_ISSUE` env var, `SDLC_ISSUE_NUMBER` env var, or plan frontmatter (`tracking:` field)
 2. Extracts the current stage name from the PipelineStateMachine stage states
-3. Extracts an outcome summary from the subagent's return value via `_extract_outcome_summary()`
-4. Calls `post_stage_comment()` from `utils/issue_comments.py` to post a structured markdown comment
-5. All of this is wrapped in try/except -- comment posting never crashes the hook
+3. Extracts an output tail (last ~500 chars) via `_extract_output_tail()` for outcome classification
+4. Calls `classify_outcome(stage, stop_reason, output_tail)` on the PipelineStateMachine to determine success/fail/ambiguous
+5. Routes to `complete_stage()` (success or ambiguous) or `fail_stage()` (fail or partial) based on the classification
+6. Calls `post_stage_comment()` from `utils/issue_comments.py` to post a structured markdown comment
+7. All of this is wrapped in try/except -- classification and comment posting never crash the hook
 
 ### On Stage Start (ChatSession Prompt Enrichment)
 
@@ -52,6 +54,48 @@ Focus testing on error handling paths -- the happy path is straightforward.
 
 The `<!-- sdlc-stage-comment -->` HTML comment marker enables reliable filtering of stage comments from regular human comments on the issue.
 
+## Outcome Classification and Failure Routing
+
+As of PR #601, every dev-session completion triggers outcome classification before stage routing. This wires the previously-dead `classify_outcome()` and `fail_stage()` code paths into production.
+
+### Classification Flow
+
+```
+DevSession completes
+  -> _extract_output_tail(input_data)    # last ~500 chars from transcript
+  -> sm.classify_outcome(stage, stop_reason, output_tail)
+      |
+      +-- Tier 1: SDK stop_reason != "end_turn" -> "fail"
+      +-- Tier 2: Deterministic tail patterns scoped by stage -> "success" / "fail"
+      +-- Default: "ambiguous"
+  -> Route:
+      "success" or "ambiguous" -> sm.complete_stage()
+      "fail" or "partial"      -> sm.fail_stage()
+```
+
+### Failure Routing via Pipeline Graph
+
+When `fail_stage()` fires, the pipeline graph (`PIPELINE_EDGES` in `bridge/pipeline_graph.py`) determines the next stage. Key failure edges:
+
+| Current Stage | Outcome | Next Stage |
+|---------------|---------|------------|
+| TEST | fail | PATCH |
+| REVIEW | fail | PATCH |
+| PATCH | success | TEST |
+| PATCH | fail | TEST |
+
+This enables automatic PATCH cycles: a REVIEW that finds issues routes to PATCH, which routes back to TEST, which routes back to REVIEW. The cycle is bounded by `MAX_PATCH_CYCLES` (default 3) -- when reached, `get_next_stage()` returns None and the coach escalates to human review.
+
+### Coach Integration
+
+The coach (`bridge/coach.py`) uses graph-based routing via `PipelineStateMachine.next_stage(outcome)` instead of the previous linear scan of `DISPLAY_STAGES`. It infers the outcome from stage statuses: if any stage has status "failed", it passes `outcome="fail"` to get the graph-determined next stage.
+
+### Safe Defaults
+
+- `classify_outcome()` errors default to `complete_stage()` (never crashes)
+- "ambiguous" classification defaults to success (avoids false PATCH triggers)
+- `SubagentStopHookInput` lacks a `stop_reason` field, so `stop_reason=None` is passed by default -- classification relies primarily on output tail pattern matching
+
 ## Key Components
 
 ### `utils/issue_comments.py`
@@ -67,9 +111,11 @@ All GitHub interactions use the `gh` CLI via subprocess with a 10-second timeout
 
 ### `agent/hooks/subagent_stop.py`
 
-Extended with two new functions:
+Extended with these functions:
 
 - `_resolve_tracking_issue()` -- Resolves the tracking issue number from environment variables (`SDLC_TRACKING_ISSUE`, `SDLC_ISSUE_NUMBER`) or by parsing plan frontmatter. Returns int or None.
+- `_extract_output_tail(input_data, max_chars=500)` -- Reads the last ~500 chars from the agent transcript file for outcome classification. Falls back to `_extract_outcome_summary()` if the transcript is unavailable.
+- `_record_stage_on_parent(parent_session_id, stop_reason, output_tail)` -- Loads the parent ChatSession, calls `classify_outcome()` on its PipelineStateMachine, and routes to `complete_stage()` or `fail_stage()` based on the result. Errors default to `complete_stage()`.
 - `_post_stage_comment_on_completion(input_data, current_stage)` -- Called after `_register_dev_session_completion()`. Posts the stage comment, wrapped in try/except so failures are non-fatal.
 
 ### `agent/sdk_client.py`
@@ -97,8 +143,9 @@ Extended with two new functions:
 
 ## Related
 
+- [Pipeline Graph](pipeline-graph.md) -- Canonical graph defining stage transitions and failure edges
 - [Pipeline State Machine](pipeline-state-machine.md) -- Stage tracking that the hook reads from
 - [Observer Agent](observer-agent.md) -- SDLC routing that triggers stage transitions
 - [Skill Context Injection](skill-context-injection.md) -- Environment variable propagation pattern
-- GitHub Issue: [#520](https://github.com/tomcounsell/ai/issues/520)
-- PR: [#523](https://github.com/tomcounsell/ai/pull/523)
+- GitHub Issue: [#520](https://github.com/tomcounsell/ai/issues/520) (stage handoff), [#563](https://github.com/tomcounsell/ai/issues/563) (graph wiring)
+- PR: [#523](https://github.com/tomcounsell/ai/pull/523) (stage handoff), [#601](https://github.com/tomcounsell/ai/pull/601) (graph wiring)
