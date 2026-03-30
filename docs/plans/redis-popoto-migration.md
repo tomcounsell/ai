@@ -17,7 +17,7 @@ Four files create their own `redis.Redis()` or `redis.from_url()` clients and us
 **Current behavior:**
 - `monitoring/health.py` creates `redis.Redis(host="localhost", port=6379, ...)` just to ping and read memory info
 - `bridge/dedup.py` creates `redis.from_url()` with a module-level `_redis_client` cache, uses manual `expire()` calls
-- `scripts/issue_poller.py` creates `redis.Redis()` for seen-issue set tracking and distributed lock
+- ~~`scripts/issue_poller.py`~~ — removed in #565, no longer needs migration
 - `monitoring/telemetry.py` (exists in worktrees, pending merge) creates `redis.Redis()` for observer telemetry counters and event lists
 
 **Desired outcome:**
@@ -38,7 +38,7 @@ Four files create their own `redis.Redis()` or `redis.from_url()` clients and us
 
 2. **`bridge/dedup.py`**: Telegram message arrives -> `is_duplicate_message(chat_id, msg_id)` checks Redis set -> if not duplicate, `record_message_processed()` adds to set, trims to 50, sets 2h TTL. Data flow: `bridge/telegram_bridge.py` -> `dedup.py` -> Redis set per chat.
 
-3. **`scripts/issue_poller.py`**: Cron trigger -> `acquire_lock()` via `SET NX EX` -> `fetch_open_issues()` -> `is_seen()` checks Redis set -> processes unseen issues -> `mark_seen()` adds to set -> `release_lock()`. Lock is atomic; seen-set is persistent.
+3. ~~**`scripts/issue_poller.py`**~~ — removed in #565, no longer needs migration.
 
 4. **`monitoring/telemetry.py`** (worktree): Observer agent calls `record_decision()` / `record_interjection()` -> increments hash counters and appends to capped list -> `get_health()` reads counters for dashboard. All data has daily rollup keys with 7-day TTL.
 
@@ -82,8 +82,8 @@ No user-facing flow changes. All changes are internal plumbing -- callers of eac
 ### Technical Approach
 
 - **Tier 1 (direct model migration)**: `bridge/dedup.py` and `monitoring/telemetry.py` get full Popoto models replacing all raw Redis operations
-- **Tier 2 (partial migration)**: `scripts/issue_poller.py` gets a `SeenIssue` model for set tracking; the distributed lock stays as raw Redis `SET NX EX` but uses `POPOTO_REDIS_DB` instead of its own connection
-- **Tier 3 (connection swap only)**: `monitoring/health.py` replaces `redis.Redis(host="localhost", ...)` with `POPOTO_REDIS_DB` -- no model needed since it only reads transient server state
+- ~~**Tier 2 (partial migration)**~~: `scripts/issue_poller.py` — removed in #565, no longer needs migration
+- **Tier 2 (connection swap only)**: `monitoring/health.py` replaces `redis.Redis(host="localhost", ...)` with `POPOTO_REDIS_DB` -- no model needed since it only reads transient server state
 - Each migration is independent and can be built/tested in isolation
 - Existing public function signatures are preserved to avoid breaking callers
 
@@ -92,12 +92,12 @@ No user-facing flow changes. All changes are internal plumbing -- callers of eac
 ### Exception Handling Coverage
 - [ ] `bridge/dedup.py` has `except Exception` blocks in both `is_duplicate_message` and `record_message_processed` -- tests must verify these log warnings and return safe defaults (False / None)
 - [ ] `monitoring/health.py` has `except Exception` in `check_database` -- test must verify it returns UNHEALTHY status on connection failure
-- [ ] `scripts/issue_poller.py` lock operations -- test must verify `acquire_lock` returns False on Redis failure
+- ~~`scripts/issue_poller.py`~~ — removed in #565, no longer applicable
 - [ ] `monitoring/telemetry.py` wraps all writes in try/except -- tests must verify telemetry failures never propagate to callers
 
 ### Empty/Invalid Input Handling
 - [ ] `bridge/dedup.py`: test with chat_id=None, message_id=0, negative message_id
-- [ ] `scripts/issue_poller.py`: test `mark_seen` and `is_seen` with empty org/repo strings
+- ~~`scripts/issue_poller.py`~~ — removed in #565, no longer applicable
 
 ### Error State Rendering
 - [ ] No user-visible output in any of these modules -- error state rendering is not applicable
@@ -136,16 +136,11 @@ No existing tests affected for `bridge/dedup.py` -- it currently has zero test c
 **State prerequisite:** Redis must be available
 **Mitigation:** The current behavior (set-based dedup) is inherently idempotent -- `sadd` is safe under concurrent access. Popoto model saves are also idempotent for this use case. No additional locking needed.
 
-### Race 2: Issue poller distributed lock
-**Location:** `scripts/issue_poller.py` -- `acquire_lock` / `release_lock`
-**Trigger:** Two poller cron jobs running simultaneously
-**Data prerequisite:** None
-**State prerequisite:** Lock key must not exist for acquisition to succeed
-**Mitigation:** The lock stays as raw Redis `SET NX EX` (atomic) -- this is explicitly preserved in the migration. Using `POPOTO_REDIS_DB` for the connection does not change the atomicity.
+### ~~Race 2: Issue poller distributed lock~~
+Removed in #565 -- issue poller no longer exists.
 
 ## No-Gos (Out of Scope)
 
-- Migrating the distributed lock in `issue_poller.py` to a Popoto model (atomic `SET NX EX` required)
 - Migrating `agent/steering.py` (intentional transient FIFO design)
 - Migrating `agent/job_queue.py` ORM-repair code (intentionally raw)
 - Building data migration scripts for existing Redis keys (data is ephemeral)
@@ -161,15 +156,15 @@ No agent integration required -- this is internal plumbing. No new MCP servers, 
 
 ## Documentation
 
-- [ ] Update `docs/features/issue-poller.md` to note that seen-issue tracking uses a Popoto model
-- [ ] Add inline docstrings to new model classes in `models/dedup.py`, `models/seen_issue.py`, and `models/telemetry.py`
+- ~~Update `docs/features/issue-poller.md`~~ — removed in #565, no longer applicable
+- [ ] Add inline docstrings to new model classes in `models/dedup.py` and `models/telemetry.py`
 - [ ] Add entries to `models/__init__.py` for new models
 
 ## Success Criteria
 
 - [ ] `monitoring/health.py` uses `POPOTO_REDIS_DB` instead of `redis.Redis()` -- no standalone client instantiation
 - [ ] `bridge/dedup.py` uses a Popoto model with `Meta.ttl` -- no `redis.from_url()` or manual `expire()` calls
-- [ ] `scripts/issue_poller.py` seen-tracking uses a Popoto model; only the distributed lock retains raw Redis via `POPOTO_REDIS_DB`
+- ~~`scripts/issue_poller.py`~~ — removed in #565, no longer applicable
 - [ ] `monitoring/telemetry.py` uses a Popoto model -- no `redis.Redis()` instantiation
 - [ ] Zero standalone `redis.Redis()` or `redis.from_url()` outside test fixtures and `agent/job_queue.py`
 - [ ] New tests for `bridge/dedup.py` covering duplicate detection, recording, TTL, and error handling
@@ -234,17 +229,8 @@ No agent integration required -- this is internal plumbing. No new MCP servers, 
 - Remove `_redis_client`, `_get_redis()`, and `redis.from_url()` usage
 - Preserve existing public API: `is_duplicate_message()`, `record_message_processed()`
 
-### 4. Migrate Issue Poller Seen-Tracking (Tier 2)
-- **Task ID**: build-poller
-- **Depends On**: build-models
-- **Validates**: `pytest tests/unit/ -x -q`
-- **Assigned To**: model-builder
-- **Agent Type**: builder
-- **Parallel**: false
-- Rewrite `seen_key()`, `mark_seen()`, `is_seen()` to use `SeenIssue` model
-- Replace `get_redis_client()` with `POPOTO_REDIS_DB` for the lock operations only
-- Keep `acquire_lock()` and `release_lock()` using raw `POPOTO_REDIS_DB.set(NX=True, EX=...)` for atomicity
-- Remove standalone `redis.Redis()` instantiation
+### ~~4. Migrate Issue Poller Seen-Tracking (Tier 2)~~
+Removed in #565 -- issue poller no longer exists. Skip this task.
 
 ### 5. Migrate Telemetry (Tier 1)
 - **Task ID**: build-telemetry
@@ -259,8 +245,8 @@ No agent integration required -- this is internal plumbing. No new MCP servers, 
 
 ### 6. Write Tests
 - **Task ID**: build-tests
-- **Depends On**: build-dedup, build-poller, build-telemetry, build-health
-- **Validates**: `pytest tests/unit/test_dedup.py tests/unit/test_issue_poller.py -x -q`
+- **Depends On**: build-dedup, build-telemetry, build-health
+- **Validates**: `pytest tests/unit/test_dedup.py -x -q`
 - **Assigned To**: test-writer
 - **Agent Type**: test-engineer
 - **Parallel**: false
@@ -274,7 +260,7 @@ No agent integration required -- this is internal plumbing. No new MCP servers, 
 - **Assigned To**: model-builder
 - **Agent Type**: documentarian
 - **Parallel**: false
-- Update `docs/features/issue-poller.md` to reference Popoto model for seen-tracking
+- ~~Update `docs/features/issue-poller.md`~~ — removed in #565, no longer applicable
 - Ensure all new model files have complete docstrings
 
 ### 8. Final Validation
@@ -295,8 +281,8 @@ No agent integration required -- this is internal plumbing. No new MCP servers, 
 | Tests pass | `pytest tests/unit/ -x -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| No raw Redis clients | `grep -rn 'redis\.Redis(\|redis\.from_url(' --include='*.py' bridge/ monitoring/ scripts/issue_poller.py` | exit code 1 |
-| Models registered | `python -c "from models.dedup import DedupRecord; from models.seen_issue import SeenIssue"` | exit code 0 |
+| No raw Redis clients | `grep -rn 'redis\.Redis(\|redis\.from_url(' --include='*.py' bridge/ monitoring/` | exit code 1 |
+| Models registered | `python -c "from models.dedup import DedupRecord"` | exit code 0 |
 
 ## Critique Results
 
