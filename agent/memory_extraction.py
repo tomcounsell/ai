@@ -45,7 +45,7 @@ CATEGORY_IMPORTANCE = {
 }
 DEFAULT_CATEGORY_IMPORTANCE = 1.0  # fallback for uncategorized
 
-# Post-merge extraction prompt
+# Post-merge extraction prompt -- requests structured JSON with metadata
 POST_MERGE_EXTRACTION_PROMPT = (
     "You are reviewing a merged pull request. Extract the single most"
     " important project-level takeaway — knowledge that would help a"
@@ -54,8 +54,13 @@ POST_MERGE_EXTRACTION_PROMPT = (
     "Focus on architectural decisions, design patterns chosen, or"
     " conventions established. Skip implementation details.\n"
     "\n"
-    "Return a single sentence. If there is no meaningful project-level"
-    " takeaway, return NONE.\n"
+    "Return a JSON object with these fields:\n"
+    '  "observation": the takeaway (one sentence, specific)\n'
+    '  "category": one of "decision", "correction", "pattern", "surprise"\n'
+    '  "tags": list of domain tags (1-3 short keywords)\n'
+    '  "file_paths": list of key file paths from the diff (up to 5)\n'
+    "\n"
+    "If there is no meaningful project-level takeaway, return NONE.\n"
     "\n"
     "PR Title: {title}\n"
     "PR Description: {body}\n"
@@ -284,18 +289,39 @@ async def extract_post_merge_learning(
 
             project_key = os.environ.get("VALOR_PROJECT_KEY", DEFAULT_PROJECT_KEY)
 
+        # Try to parse structured JSON response for metadata
+        content_text = raw_text
+        metadata: dict = {"category": "decision"}  # default for post-merge
+        try:
+            parsed = json.loads(raw_text)
+            if isinstance(parsed, dict):
+                observation = parsed.get("observation", "")
+                if observation and len(observation) >= 20:
+                    content_text = observation
+                    metadata = {
+                        "category": parsed.get("category", "decision"),
+                        "tags": parsed.get("tags", []),
+                        "file_paths": parsed.get("file_paths", []),
+                    }
+        except (json.JSONDecodeError, TypeError):
+            # Non-JSON response -- use raw text with default metadata
+            pass
+
         m = Memory.safe_save(
             agent_id="post-merge",
             project_key=project_key,
-            content=raw_text[:500],
+            content=content_text[:500],
             importance=7.0,
             source=SOURCE_AGENT,
+            metadata=metadata,
         )
 
         if m:
-            logger.info(f"[memory_extraction] Post-merge learning saved: {raw_text[:100]}")
+            logger.info(
+                f"[memory_extraction] Post-merge learning saved: {content_text[:100]}"
+            )
             return {
-                "content": raw_text[:500],
+                "content": content_text[:500],
                 "memory_id": getattr(m, "memory_id", ""),
             }
 
