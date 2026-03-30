@@ -3,7 +3,7 @@
 Reflections - Autonomous Daily Maintenance System
 
 A long-running process that performs daily self-directed maintenance tasks.
-14 units: 11 independent items + 3 merged pipelines.
+15 units: 12 independent items + 3 merged pipelines.
 
 Independent units:
 1. legacy_code_scan — Clean Up Stale Code
@@ -17,11 +17,12 @@ Independent units:
 9. feature_docs_audit   — Feature Docs Audit
 10. principal_staleness — Principal Context Staleness
 11. disk_space_check    — Disk Space Check
+12. pr_review_audit     — PR Review Audit
 
 Merged pipelines (sub-steps run internally, one checkpoint per pipeline):
-12. session_intelligence    — Session Analysis + LLM Reflection + Bug Filing
-13. behavioral_learning     — Episode Cycle-Close + Pattern Crystallization
-14. daily_report_and_notify — Daily Report + GitHub Issues + Telegram (must be last)
+13. session_intelligence    — Session Analysis + LLM Reflection + Bug Filing
+14. behavioral_learning     — Episode Cycle-Close + Pattern Crystallization
+15. daily_report_and_notify — Daily Report + GitHub Issues + Telegram (must be last)
 
 All persistence is Redis-backed via Popoto models (see models/ directory).
 State: ReflectionRun | Ignore patterns: ReflectionIgnore
@@ -472,6 +473,179 @@ def extract_errors_from_redis(target_date: str) -> list[dict[str, str]]:
     return errors
 
 
+# --- PR Review Audit helpers ---
+
+# Regex patterns for structured review findings from do-pr-review SKILL.md.
+# Expected format in review comments:
+#   **Severity:** blocker | tech_debt | nit
+#   **File:** path/to/file.py
+#   **Code:** `some_code()`
+#   **Issue:** Description of the problem
+#   **Fix:** Suggested fix
+_FINDING_SEVERITY_RE = re.compile(r"\*\*Severity:\*\*\s*(blocker|tech_debt|nit)", re.IGNORECASE)
+_FINDING_FILE_RE = re.compile(r"\*\*File:\*\*\s*`?([^\n`]+)`?")
+_FINDING_CODE_RE = re.compile(r"\*\*Code:\*\*\s*`?([^\n`]+)`?")
+_FINDING_ISSUE_RE = re.compile(r"\*\*Issue:\*\*\s*(.+?)(?=\n\*\*|\Z)", re.DOTALL)
+_FINDING_FIX_RE = re.compile(r"\*\*Fix:\*\*\s*(.+?)(?=\n\*\*|\Z)", re.DOTALL)
+
+# Severity classification mapping
+SEVERITY_MAP = {
+    "blocker": "critical",
+    "tech_debt": "standard",
+    "nit": "trivial",
+}
+
+# GitHub label mapping
+SEVERITY_LABELS = {
+    "critical": "critical",
+    "standard": "tech-debt",
+    "trivial": "nit",
+}
+
+
+def parse_review_findings(body: str) -> list[dict[str, str]]:
+    """Extract structured findings from a PR review comment body.
+
+    Parses the do-pr-review structured format with **Severity:**, **File:**,
+    **Code:**, **Issue:**, and **Fix:** fields. Only comments containing at
+    minimum a Severity and Issue field are considered valid findings.
+
+    Args:
+        body: The review comment body text.
+
+    Returns:
+        List of finding dicts with keys: severity, file_path, code,
+        issue_description, suggested_fix. The severity is already mapped
+        to the classified value (critical/standard/trivial).
+    """
+    if not body:
+        return []
+
+    findings = []
+
+    # Split on severity markers to handle multiple findings in one comment
+    # Find all severity matches and their positions
+    severity_matches = list(_FINDING_SEVERITY_RE.finditer(body))
+    if not severity_matches:
+        return []
+
+    for i, sev_match in enumerate(severity_matches):
+        # Extract the section for this finding (from this severity to the next, or end)
+        start = sev_match.start()
+        end = severity_matches[i + 1].start() if i + 1 < len(severity_matches) else len(body)
+        section = body[start:end]
+
+        raw_severity = sev_match.group(1).lower()
+        severity = SEVERITY_MAP.get(raw_severity, "standard")
+
+        # Issue is required (minimum: Severity + Issue)
+        issue_match = _FINDING_ISSUE_RE.search(section)
+        if not issue_match:
+            continue
+
+        file_match = _FINDING_FILE_RE.search(section)
+        code_match = _FINDING_CODE_RE.search(section)
+        fix_match = _FINDING_FIX_RE.search(section)
+
+        findings.append(
+            {
+                "severity": severity,
+                "raw_severity": raw_severity,
+                "file_path": file_match.group(1).strip() if file_match else "",
+                "code": code_match.group(1).strip() if code_match else "",
+                "issue_description": issue_match.group(1).strip(),
+                "suggested_fix": fix_match.group(1).strip() if fix_match else "",
+            }
+        )
+
+    return findings
+
+
+def check_finding_addressed(pr_commits: list[dict], review_timestamp: str, file_path: str) -> bool:
+    """Check if a finding was addressed by a commit after the review.
+
+    Uses file-level heuristic: if the file was modified in any commit after
+    the review comment timestamp, consider the finding addressed.
+
+    Args:
+        pr_commits: List of commit dicts from gh api (with 'commit.committer.date'
+            and 'files' keys).
+        review_timestamp: ISO 8601 timestamp of the review comment.
+        file_path: Path of the file referenced in the finding.
+
+    Returns:
+        True if the file was modified after the review, False otherwise.
+    """
+    if not file_path or not pr_commits:
+        return False
+
+    for commit in pr_commits:
+        commit_date = commit.get("commit", {}).get("committer", {}).get("date", "")
+        if not commit_date:
+            continue
+        # Compare timestamps lexicographically (ISO 8601 sorts correctly)
+        if commit_date > review_timestamp:
+            files = commit.get("files", [])
+            for f in files:
+                if f.get("filename", "") == file_path:
+                    return True
+    return False
+
+
+def format_audit_issue_body(
+    pr_number: int,
+    pr_title: str,
+    pr_url: str,
+    unaddressed: list[dict],
+) -> str:
+    """Format the GitHub issue body for unaddressed PR review findings.
+
+    Groups findings by severity and includes original review links.
+
+    Args:
+        pr_number: The PR number.
+        pr_title: The PR title.
+        pr_url: URL to the PR.
+        unaddressed: List of unaddressed finding dicts (with review_url added).
+
+    Returns:
+        Markdown-formatted issue body.
+    """
+    lines = [
+        "## Unaddressed PR Review Findings",
+        "",
+        f"**Source PR:** [{pr_title}]({pr_url}) (#{pr_number})",
+        "",
+    ]
+
+    # Group by severity
+    by_severity: dict[str, list[dict]] = {}
+    for finding in unaddressed:
+        sev = finding.get("severity", "standard")
+        by_severity.setdefault(sev, []).append(finding)
+
+    for severity in ["critical", "standard", "trivial"]:
+        group = by_severity.get(severity, [])
+        if not group:
+            continue
+        lines.append(f"### {severity.title()} ({len(group)})")
+        lines.append("")
+        for finding in group:
+            lines.append(f"- **File:** `{finding.get('file_path', 'N/A')}`")
+            if finding.get("code"):
+                lines.append(f"  **Code:** `{finding['code']}`")
+            lines.append(f"  **Issue:** {finding.get('issue_description', 'N/A')}")
+            if finding.get("suggested_fix"):
+                lines.append(f"  **Fix:** {finding['suggested_fix']}")
+            if finding.get("review_url"):
+                lines.append(f"  [Review comment]({finding['review_url']})")
+            lines.append("")
+
+    lines.append("---")
+    lines.append("*Filed automatically by the reflections PR review audit (step 20).*")
+    return "\n".join(lines)
+
+
 class ReflectionRunner:
     """Runs the reflections maintenance process.
 
@@ -494,6 +668,7 @@ class ReflectionRunner:
             ("feature_docs_audit", "Feature Docs Audit", self.step_feature_docs_audit),
             ("principal_staleness", "Principal Context Staleness", self.step_principal_staleness),
             ("disk_space_check", "Disk Space Check", self.step_disk_space_check),
+            ("pr_review_audit", "PR Review Audit", self.step_pr_review_audit),
             ("session_intelligence", "Session Intelligence", self.step_session_intelligence),
             ("behavioral_learning", "Behavioral Learning", self.step_behavioral_learning),
             ("daily_report_and_notify", "Daily Report & Notify", self.step_daily_report_and_notify),
@@ -597,6 +772,7 @@ class ReflectionRunner:
             "daily_report_and_notify",
             "task_management",
             "branch_plan_cleanup",
+            "pr_review_audit",
         }
         if step_key in gh_steps:
             try:
@@ -1028,7 +1204,7 @@ class ReflectionRunner:
             }
             return
 
-        dry_run = getattr(self.state, "_dry_run", False)
+        dry_run = self.state.dry_run
 
         prune_ignore_log()
         ignore_entries = load_ignore_log()
@@ -1782,9 +1958,8 @@ class ReflectionRunner:
         """
         import time as _time
 
-        from models.cyclic_episode import CyclicEpisode
-
         from models.agent_session import AgentSession
+        from models.cyclic_episode import CyclicEpisode
         from scripts.fingerprint_classifier import classify_session
 
         cutoff = _time.time() - 86400  # past 24 hours
@@ -2121,6 +2296,347 @@ class ReflectionRunner:
             "findings": len(findings),
         }
 
+    async def step_pr_review_audit(self) -> None:
+        """Step 20: Audit merged PRs for unaddressed review findings.
+
+        Scans recently merged PRs across all configured projects, extracts
+        structured review findings (using the do-pr-review format), checks
+        whether each finding was addressed by subsequent commits, and files
+        GitHub issues for unaddressed findings grouped by PR.
+
+        Data flow:
+        1. For each project with github config, fetch merged PRs since last audit
+        2. For each PR, fetch review comments and parse structured findings
+        3. Check if findings were addressed via commit history (file-level)
+        4. Deduplicate against Redis PRReviewAudit model
+        5. File one GitHub issue per PR with unaddressed findings
+        6. Record audited comments in Redis for dedup
+
+        Respects dry_run: when True, logs findings but skips issue creation
+        and Redis writes. Skips entirely if Redis is unavailable (caught by
+        preflight). Each project is processed independently with error isolation.
+        """
+        from models.reflections import PRReviewAudit
+
+        dry_run = self.state.dry_run
+        prs_scanned = 0
+        findings_total = 0
+        findings_unaddressed = 0
+        issues_filed = 0
+
+        # Determine time window: last successful audit or yesterday
+        last_run = PRReviewAudit.last_successful_run()
+        if last_run:
+            last_audit_date = datetime.fromtimestamp(last_run, tz=UTC).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
+        else:
+            last_audit_date = (utc_now() - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        # Convert to date-only for gh search query
+        search_date = last_audit_date[:10]
+
+        for project in self.projects:
+            slug = project["slug"]
+            github_config = project.get("github")
+            if not github_config:
+                continue
+
+            repo = github_config.get("repo", "")
+            if not repo:
+                continue
+
+            project_wd = project["working_directory"]
+
+            try:
+                # Fetch merged PRs since last audit (cap at 20)
+                pr_result = subprocess.run(
+                    [
+                        "gh",
+                        "pr",
+                        "list",
+                        "--repo",
+                        repo,
+                        "--state",
+                        "merged",
+                        "--limit",
+                        "20",
+                        "--search",
+                        f"merged:>={search_date}",
+                        "--json",
+                        "number,title,url,mergedAt",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    cwd=project_wd,
+                )
+
+                if pr_result.returncode != 0:
+                    logger.warning(
+                        "PR review audit: gh pr list failed for %s: %s",
+                        slug,
+                        pr_result.stderr[:200],
+                    )
+                    continue
+
+                prs = json.loads(pr_result.stdout) if pr_result.stdout.strip() else []
+                if not prs:
+                    logger.info(f"PR review audit: no merged PRs for {slug} since {search_date}")
+                    continue
+
+                if len(prs) >= 20:
+                    logger.warning(
+                        "PR review audit: hit 20-PR cap for %s, some PRs may be skipped", slug
+                    )
+
+                for pr in prs:
+                    pr_number = pr.get("number")
+                    pr_title = pr.get("title", "")
+                    pr_url = pr.get("url", "")
+                    prs_scanned += 1
+
+                    try:
+                        # Fetch review comments (both review-level and inline)
+                        comments_result = subprocess.run(
+                            [
+                                "gh",
+                                "api",
+                                f"repos/{repo}/pulls/{pr_number}/comments",
+                                "--paginate",
+                            ],
+                            capture_output=True,
+                            text=True,
+                            timeout=30,
+                            cwd=project_wd,
+                        )
+
+                        reviews_result = subprocess.run(
+                            [
+                                "gh",
+                                "api",
+                                f"repos/{repo}/pulls/{pr_number}/reviews",
+                                "--paginate",
+                            ],
+                            capture_output=True,
+                            text=True,
+                            timeout=30,
+                            cwd=project_wd,
+                        )
+
+                        # Collect all comment bodies with metadata
+                        all_comments: list[dict] = []
+
+                        if comments_result.returncode == 0 and comments_result.stdout.strip():
+                            for comment in json.loads(comments_result.stdout):
+                                all_comments.append(
+                                    {
+                                        "id": comment.get("id", 0),
+                                        "body": comment.get("body", ""),
+                                        "created_at": comment.get("created_at", ""),
+                                        "html_url": comment.get("html_url", ""),
+                                    }
+                                )
+
+                        if reviews_result.returncode == 0 and reviews_result.stdout.strip():
+                            for review in json.loads(reviews_result.stdout):
+                                body = review.get("body", "")
+                                if body and body.strip():
+                                    all_comments.append(
+                                        {
+                                            "id": review.get("id", 0),
+                                            "body": body,
+                                            "created_at": review.get("submitted_at", ""),
+                                            "html_url": review.get("html_url", ""),
+                                        }
+                                    )
+
+                        if not all_comments:
+                            continue
+
+                        # Fetch PR commits for address detection
+                        commits_result = subprocess.run(
+                            [
+                                "gh",
+                                "api",
+                                f"repos/{repo}/pulls/{pr_number}/commits",
+                                "--paginate",
+                            ],
+                            capture_output=True,
+                            text=True,
+                            timeout=30,
+                            cwd=project_wd,
+                        )
+
+                        pr_commits: list[dict] = []
+                        if commits_result.returncode == 0 and commits_result.stdout.strip():
+                            pr_commits = json.loads(commits_result.stdout)
+
+                        # Parse findings from each comment
+                        unaddressed_for_pr: list[dict] = []
+
+                        for comment in all_comments:
+                            comment_findings = parse_review_findings(comment["body"])
+                            if not comment_findings:
+                                continue
+
+                            for finding_idx, finding in enumerate(comment_findings):
+                                findings_total += 1
+                                comment_key = f"{repo}:{pr_number}:{comment['id']}:{finding_idx}"
+
+                                # Dedup check
+                                if PRReviewAudit.is_audited(comment_key):
+                                    continue
+
+                                # Address check
+                                if check_finding_addressed(
+                                    pr_commits,
+                                    comment["created_at"],
+                                    finding["file_path"],
+                                ):
+                                    # Mark as audited even if addressed
+                                    if not dry_run:
+                                        PRReviewAudit.mark_audited(
+                                            comment_key=comment_key,
+                                            repo=repo,
+                                            pr_number=pr_number,
+                                            severity=finding["severity"],
+                                            issue_url=None,
+                                        )
+                                    continue
+
+                                findings_unaddressed += 1
+                                finding["review_url"] = comment["html_url"]
+                                finding["comment_key"] = comment_key
+                                unaddressed_for_pr.append(finding)
+
+                        if not unaddressed_for_pr:
+                            continue
+
+                        # File one GitHub issue per PR with all unaddressed findings
+                        severity_labels = set()
+                        for f in unaddressed_for_pr:
+                            label = SEVERITY_LABELS.get(f["severity"], "tech-debt")
+                            severity_labels.add(label)
+
+                        labels = ["pr-review-audit"] + sorted(severity_labels)
+                        issue_title = f"PR #{pr_number}: unaddressed review findings"
+                        issue_body = format_audit_issue_body(
+                            pr_number, pr_title, pr_url, unaddressed_for_pr
+                        )
+
+                        if dry_run:
+                            logger.info(
+                                "PR review audit: [DRY RUN] would file issue for PR #%d "
+                                "(%d unaddressed findings) in %s",
+                                pr_number,
+                                len(unaddressed_for_pr),
+                                slug,
+                            )
+                            self.state.add_finding(
+                                f"{slug}:pr_review_audit",
+                                f"[DRY RUN] Would file issue for PR #{pr_number}: "
+                                f"{len(unaddressed_for_pr)} unaddressed findings",
+                            )
+                            continue
+
+                        try:
+                            issue_result = subprocess.run(
+                                [
+                                    "gh",
+                                    "issue",
+                                    "create",
+                                    "--repo",
+                                    repo,
+                                    "--title",
+                                    issue_title,
+                                    "--body",
+                                    issue_body,
+                                ]
+                                + [arg for label in labels for arg in ("--label", label)],
+                                capture_output=True,
+                                text=True,
+                                timeout=30,
+                                cwd=project_wd,
+                            )
+
+                            issue_url = ""
+                            if issue_result.returncode == 0:
+                                issue_url = issue_result.stdout.strip()
+                                issues_filed += 1
+                                logger.info(
+                                    "PR review audit: filed issue %s for PR #%d in %s",
+                                    issue_url,
+                                    pr_number,
+                                    slug,
+                                )
+                            else:
+                                logger.warning(
+                                    "PR review audit: gh issue create failed for PR #%d in %s: %s",
+                                    pr_number,
+                                    slug,
+                                    issue_result.stderr[:200],
+                                )
+
+                            # Mark all findings as audited in Redis
+                            for f in unaddressed_for_pr:
+                                PRReviewAudit.mark_audited(
+                                    comment_key=f["comment_key"],
+                                    repo=repo,
+                                    pr_number=pr_number,
+                                    severity=f["severity"],
+                                    issue_url=issue_url,
+                                )
+
+                            self.state.add_finding(
+                                f"{slug}:pr_review_audit",
+                                f"Filed issue for PR #{pr_number}: "
+                                f"{len(unaddressed_for_pr)} unaddressed findings -> {issue_url}",
+                            )
+
+                        except Exception as e:
+                            logger.warning(
+                                "PR review audit: issue creation failed for PR #%d in %s: %s",
+                                pr_number,
+                                slug,
+                                str(e)[:200],
+                            )
+
+                    except Exception as e:
+                        logger.warning(
+                            "PR review audit: failed processing PR #%d in %s: %s",
+                            pr_number,
+                            slug,
+                            str(e)[:200],
+                        )
+                        continue
+
+            except Exception as e:
+                logger.warning(
+                    "PR review audit: failed for project %s: %s",
+                    slug,
+                    str(e)[:200],
+                )
+                continue
+
+        self.state.step_progress["pr_review_audit"] = {
+            "prs_scanned": prs_scanned,
+            "findings_total": findings_total,
+            "findings_unaddressed": findings_unaddressed,
+            "issues_filed": issues_filed,
+            "dry_run": dry_run,
+        }
+
+        if findings_unaddressed > 0:
+            logger.info(
+                "PR review audit: %d unaddressed findings across %d PRs, %d issues filed",
+                findings_unaddressed,
+                prs_scanned,
+                issues_filed,
+            )
+        else:
+            logger.info("PR review audit: scanned %d PRs, no unaddressed findings", prs_scanned)
+
     async def step_session_intelligence(self) -> None:
         """Pipeline: Session Analysis → LLM Reflection → Bug Filing.
 
@@ -2226,6 +2742,7 @@ class ReflectionsState:
     session_analysis: dict[str, Any] = field(default_factory=dict)
     reflections: list[dict[str, str]] = field(default_factory=list)
     auto_fix_attempts: list[dict] = field(default_factory=list)
+    dry_run: bool = False
 
     def save(self) -> None:
         """Save state to Redis ReflectionRun model."""
@@ -2249,7 +2766,7 @@ class ReflectionsState:
             auto_fix_attempts=self.auto_fix_attempts,
             step_progress=self.step_progress,
             started_at=started_at,
-            dry_run=getattr(self, "_dry_run", False),
+            dry_run=self.dry_run,
         )
 
     def add_finding(self, category: str, finding: str) -> None:
@@ -2298,7 +2815,7 @@ async def main() -> None:
 
     runner = ReflectionRunner()
     if args.dry_run:
-        runner.state._dry_run = True
+        runner.state.dry_run = True
         logger.info("DRY RUN mode — no side effects will be triggered")
     await runner.run()
 
