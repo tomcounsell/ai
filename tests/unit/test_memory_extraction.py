@@ -312,6 +312,130 @@ class TestExtractPostMergeLearning:
         assert "Description of the PR" in formatted
         assert "file1.py, file2.py" in formatted
 
+    def test_post_merge_prompt_requests_structured_json(self):
+        """Verify the prompt asks for structured JSON with metadata fields."""
+        from agent.memory_extraction import POST_MERGE_EXTRACTION_PROMPT
+
+        assert "category" in POST_MERGE_EXTRACTION_PROMPT
+        assert "tags" in POST_MERGE_EXTRACTION_PROMPT
+        assert "file_paths" in POST_MERGE_EXTRACTION_PROMPT
+        assert "JSON" in POST_MERGE_EXTRACTION_PROMPT
+
+
+class TestPostMergeJsonParsing:
+    """Test JSON parsing in extract_post_merge_learning()."""
+
+    @pytest.mark.asyncio
+    async def test_json_response_extracts_metadata(self):
+        """When Haiku returns JSON, metadata is parsed and passed to safe_save."""
+        import json
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from agent.memory_extraction import extract_post_merge_learning
+
+        json_response = json.dumps(
+            {
+                "observation": "Post-query re-ranking is safer than pre-query filtering",
+                "category": "decision",
+                "tags": ["memory", "recall"],
+                "file_paths": ["agent/memory_hook.py"],
+            }
+        )
+
+        mock_message = MagicMock()
+        mock_message.content = [MagicMock(text=json_response)]
+
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = mock_message
+
+        mock_memory = MagicMock()
+        mock_memory.safe_save.return_value = MagicMock(memory_id="test-id")
+
+        with (
+            patch("anthropic.Anthropic", return_value=mock_client),
+            patch("utils.api_keys.get_anthropic_api_key", return_value="fake-key"),
+            patch("models.memory.Memory", mock_memory),
+            patch("models.memory.SOURCE_AGENT", "agent"),
+        ):
+            result = await extract_post_merge_learning(
+                "Add recall weights", "Description", "agent/memory_hook.py"
+            )
+
+        assert result is not None
+        # Verify safe_save was called with metadata
+        call_kwargs = mock_memory.safe_save.call_args[1]
+        assert call_kwargs["metadata"]["category"] == "decision"
+        assert call_kwargs["metadata"]["tags"] == ["memory", "recall"]
+        assert call_kwargs["metadata"]["file_paths"] == ["agent/memory_hook.py"]
+
+    @pytest.mark.asyncio
+    async def test_non_json_response_uses_default_metadata(self):
+        """When Haiku returns plain text, default metadata is used."""
+        from unittest.mock import MagicMock, patch
+
+        from agent.memory_extraction import extract_post_merge_learning
+
+        mock_message = MagicMock()
+        mock_message.content = [
+            MagicMock(text="Post-query re-ranking is safer than pre-query filtering")
+        ]
+
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = mock_message
+
+        mock_memory = MagicMock()
+        mock_memory.safe_save.return_value = MagicMock(memory_id="test-id")
+
+        with (
+            patch("anthropic.Anthropic", return_value=mock_client),
+            patch("utils.api_keys.get_anthropic_api_key", return_value="fake-key"),
+            patch("models.memory.Memory", mock_memory),
+            patch("models.memory.SOURCE_AGENT", "agent"),
+        ):
+            result = await extract_post_merge_learning(
+                "Add recall weights", "Description", "diff summary"
+            )
+
+        assert result is not None
+        call_kwargs = mock_memory.safe_save.call_args[1]
+        assert call_kwargs["metadata"]["category"] == "decision"
+
+    @pytest.mark.asyncio
+    async def test_json_short_observation_falls_back_to_raw(self):
+        """When JSON observation is too short, falls back to raw text."""
+        import json
+        from unittest.mock import MagicMock, patch
+
+        from agent.memory_extraction import extract_post_merge_learning
+
+        json_response = json.dumps(
+            {"observation": "short", "category": "pattern", "tags": [], "file_paths": []}
+        )
+
+        mock_message = MagicMock()
+        mock_message.content = [MagicMock(text=json_response)]
+
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = mock_message
+
+        mock_memory = MagicMock()
+        mock_memory.safe_save.return_value = MagicMock(memory_id="test-id")
+
+        with (
+            patch("anthropic.Anthropic", return_value=mock_client),
+            patch("utils.api_keys.get_anthropic_api_key", return_value="fake-key"),
+            patch("models.memory.Memory", mock_memory),
+            patch("models.memory.SOURCE_AGENT", "agent"),
+        ):
+            result = await extract_post_merge_learning(
+                "Add recall weights", "Description", "diff"
+            )
+
+        assert result is not None
+        # Should have used the raw JSON text since observation was too short
+        call_kwargs = mock_memory.safe_save.call_args[1]
+        assert json_response[:100] in call_kwargs["content"]
+
 
 class TestPersistOutcomeMetadata:
     """Test agent/memory_extraction.py _persist_outcome_metadata()."""
@@ -444,3 +568,12 @@ class TestPersonaPromptContainsIntentionalMemory:
         persona_path = pathlib.Path("config/personas/_base.md")
         content = persona_path.read_text()
         assert "When NOT to Save" in content
+
+    def test_persona_has_when_to_search(self):
+        import pathlib
+
+        persona_path = pathlib.Path("config/personas/_base.md")
+        content = persona_path.read_text()
+        assert "When to Search" in content
+        assert "--category correction" in content
+        assert "--tag" in content
