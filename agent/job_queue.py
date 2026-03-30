@@ -22,7 +22,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from config.enums import SessionType
 from agent.branch_manager import (
     get_branch_state,
     get_plan_context,
@@ -31,6 +30,7 @@ from agent.branch_manager import (
 from agent.worktree_manager import WORKTREES_DIR, validate_workspace
 from bridge.response import REACTION_COMPLETE, REACTION_ERROR, REACTION_SUCCESS
 from bridge.session_logs import save_session_snapshot
+from config.enums import ChatMode, SessionType
 from models.agent_session import AgentSession
 
 logger = logging.getLogger(__name__)
@@ -2111,7 +2111,9 @@ async def _execute_job(job: Job) -> None:
         # Use reduced nudge cap for Q&A sessions
         _effective_nudge_cap = MAX_NUDGE_COUNT
         if agent_session:
-            if getattr(agent_session, "session_mode", None) == "qa" or getattr(agent_session, "qa_mode", False):
+            if getattr(agent_session, "session_mode", None) == ChatMode.QA or getattr(
+                agent_session, "qa_mode", False
+            ):
                 from agent.qa_handler import QA_MAX_NUDGE_COUNT
 
                 _effective_nudge_cap = QA_MAX_NUDGE_COUNT
@@ -2388,7 +2390,14 @@ async def _execute_job(job: Job) -> None:
     # Skip if a continuation job was enqueued (defer reaction to that job)
     if react_cb and not chat_state.defer_reaction:
         # Q&A sessions: clear the processing reaction instead of setting completion emoji
-        if agent_session and (getattr(agent_session, "session_mode", None) == "qa" or getattr(agent_session, "qa_mode", False)) and not task.error:
+        if (
+            agent_session
+            and (
+                getattr(agent_session, "session_mode", None) == ChatMode.QA
+                or getattr(agent_session, "qa_mode", False)
+            )
+            and not task.error
+        ):
             emoji = None  # Clear reaction
         elif task.error:
             emoji = REACTION_ERROR

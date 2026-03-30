@@ -31,6 +31,7 @@ import anthropic
 import httpx
 
 from bridge.message_quality import PROCESS_NARRATION_PATTERNS as _PROCESS_NARRATION_PATTERNS
+from config.enums import ChatMode
 from config.models import MODEL_FAST, OPENROUTER_HAIKU
 from utils.api_keys import get_anthropic_api_key
 
@@ -958,7 +959,9 @@ def _build_summary_prompt(
                 recent = history[-5:]  # Last 5 entries
                 context_parts.append("Recent history: " + " | ".join(str(e) for e in recent))
         # Signal Q&A mode so the LLM uses prose format
-        if getattr(session, "session_mode", None) == "qa" or getattr(session, "qa_mode", False):
+        if getattr(session, "session_mode", None) == ChatMode.QA or getattr(
+            session, "qa_mode", False
+        ):
             context_parts.append("qa_mode=True (use conversational prose, no bullets or emoji)")
         if context_parts:
             context_section = "\n\nSession context:\n" + "\n".join(context_parts) + "\n"
@@ -1348,7 +1351,9 @@ def _compose_structured_summary(summary_text: str, session=None, is_completion: 
 
     # Q&A bypass: return prose directly without emoji prefix, bullet parsing,
     # or structured template. The LLM summary is already in conversational form.
-    if session and (getattr(session, "session_mode", None) == "qa" or getattr(session, "qa_mode", False)):
+    if session and (
+        getattr(session, "session_mode", None) == ChatMode.QA or getattr(session, "qa_mode", False)
+    ):
         return summary_text.strip()
 
     # Parse questions from LLM output

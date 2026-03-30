@@ -217,11 +217,15 @@ class AgentSession(Model):
     def qa_mode(self) -> bool:
         """Backward-compatible property: True when session is in Q&A mode.
 
-        Reads session_mode first, falls back to the legacy ``qa_mode`` Redis
-        hash field for pre-migration sessions.  The legacy Popoto field was
-        renamed to ``_qa_mode_legacy`` to avoid colliding with this property,
-        but old sessions still store the value under the original ``qa_mode``
-        key.  We read both to cover all cases.
+        Reads session_mode first, falls back to the legacy ``_qa_mode_legacy``
+        Popoto field and a direct Redis hget for the original ``qa_mode`` key.
+
+        Note: The Popoto field ``_qa_mode_legacy`` stores under Redis key
+        ``_qa_mode_legacy``, NOT ``qa_mode``.  This means it does NOT read
+        data written by pre-rename sessions (which stored under ``qa_mode``).
+        The direct hget fallback on line ~236 covers that case.  The
+        ``_qa_mode_legacy`` check is defense-in-depth for any sessions that
+        may have written to the renamed field directly.
         """
         if self.session_mode == ChatMode.QA:
             return True

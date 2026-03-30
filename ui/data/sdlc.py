@@ -15,6 +15,8 @@ import time
 
 from pydantic import BaseModel
 
+from config.enums import ChatMode
+
 logger = logging.getLogger(__name__)
 
 # SDLC stages in pipeline order (matches models/agent_session.py)
@@ -316,24 +318,26 @@ def _resolve_persona_display(session) -> str | None:
     if raw is None:
         return None
     if raw == "chat":
-        if getattr(session, "session_mode", None) == "qa" or getattr(session, "qa_mode", False):
+        if getattr(session, "session_mode", None) == ChatMode.QA or getattr(
+            session, "qa_mode", False
+        ):
             return "Q&A"
         return "PM"
-    if raw == "dev":
+    if raw == ChatMode.DEV:
         return "Dev"
     return _safe_str(raw)
 
 
 def _safe_str(val, default: str | None = None) -> str | None:
     """Return val as a string if it's a real value, else default."""
-    if val is None or not isinstance(val, (str, int, float, bool)):
+    if val is None or not isinstance(val, str | int | float | bool):
         return default
     return str(val)
 
 
 def _safe_float(val) -> float | None:
     """Return val as a float if it's a real number, else None."""
-    if isinstance(val, (int, float)):
+    if isinstance(val, int | float):
         return float(val)
     if isinstance(val, str):
         try:
