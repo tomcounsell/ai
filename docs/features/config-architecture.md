@@ -65,14 +65,15 @@ from config.paths import PROJECT_ROOT, DATA_DIR, CONFIG_DIR, VALOR_DIR, LOGS_DIR
 
 ### Credentials Location
 
-All Google auth credentials, DM whitelist, and calendar config live in `~/Desktop/Valor/`:
+All Google auth credentials and calendar config live in `~/Desktop/Valor/`:
 
 | File | Purpose |
 |------|---------|
 | `~/Desktop/Valor/google_credentials.json` | OAuth client credentials (from Google Cloud Console) |
 | `~/Desktop/Valor/google_token.json` | OAuth token (auto-generated) |
-| `~/Desktop/Valor/dm_whitelist.json` | Telegram DM whitelist |
 | `~/Desktop/Valor/calendar_config.json` | Calendar project-to-ID mapping |
+
+Note: The DM whitelist is stored in the `dms.whitelist` array within `projects.json`, not as a separate file.
 
 Override with `GOOGLE_CREDENTIALS_DIR` env var if needed.
 
