@@ -98,12 +98,31 @@ Agents can deliberately persist high-level concepts using `python -m tools.memor
 
 **Importance tier hierarchy** (lower to higher):
 1. Generic agent observations: 1.0 (Flow 3 default for patterns/surprises)
-2. Enhanced extraction corrections/decisions: 4.0 (Flow 3 categorized)
-3. Human Telegram messages: 6.0 (Flow 1)
-4. Agent-identified architectural decisions: 7.0 (Flow 5 intentional)
-5. Human-directed saves (corrections, explicit requests): 8.0 (Flow 5 intentional)
+2. Knowledge document companions: 3.0 (Flow 6 indexer)
+3. Enhanced extraction corrections/decisions: 4.0 (Flow 3 categorized)
+4. Human Telegram messages: 6.0 (Flow 1)
+5. Agent-identified architectural decisions: 7.0 (Flow 5 intentional)
+6. Human-directed saves (corrections, explicit requests): 8.0 (Flow 5 intentional)
 
-### Flow 6: Post-Merge Learning Extraction
+### Flow 6: Knowledge Document Ingestion
+
+The knowledge document integration system indexes work-vault files as companion memories. See [Knowledge Document Integration](knowledge-document-integration.md) for full details.
+
+1. `KnowledgeWatcher` (bridge thread) detects file changes in `~/work-vault/` via watchdog
+2. `index_file()` reads content, resolves project scope, upserts `KnowledgeDocument` (Redis + filesystem)
+3. Haiku summarizes the document content (fallback: first 500 chars)
+4. Companion Memory records are created with `source="knowledge"`, `importance=3.0`, and a `reference` JSON pointer to the source file
+5. Companion memories enter the bloom filter and surface as `<thought>` blocks during related work
+6. The agent reads the full file on demand using the reference pointer
+
+**Importance tier:** Knowledge memories sit at 3.0 -- above agent observations (1.0) but below human messages (6.0). Large documents (>2000 words) are split by top-level headings, producing one companion memory per section.
+
+**Reference pointer format:**
+```json
+{"tool": "read_file", "params": {"file_path": "/path/to/doc.md"}}
+```
+
+### Flow 7: Post-Merge Learning Extraction
 
 After a PR merges, `extract_post_merge_learning()` in `agent/memory_extraction.py` distills the single most important project-level takeaway from the PR title, body, and diff summary. The learning is saved as a Memory with importance 7.0 and structured metadata (category, tags, file_paths) matching the post-session extraction schema. This captures architectural decisions and conventions established by shipped code.
 
@@ -164,6 +183,8 @@ Memory records carry an optional `metadata` DictField with structured data from 
 | `dismissal_count` | `int` | Outcome tracking | Consecutive dismissals before last reset |
 | `last_outcome` | `str` | Outcome tracking | `"acted"` or `"dismissed"` |
 
+Additionally, the Memory model has a top-level `reference` StringField (not inside metadata) for actionable pointers. Knowledge-sourced memories use this to store a JSON tool call pointing to the source file. See [Knowledge Document Integration](knowledge-document-integration.md).
+
 **Querying by metadata:** The `memory_search` CLI supports post-retrieval filtering:
 
 ```bash
@@ -215,7 +236,7 @@ The memory system MUST work equally across all agent session types — SDK/Teleg
 
 | File | Purpose |
 |------|---------|
-| `models/memory.py` | Memory model (Level 3 popoto: decay, confidence, write filter, access tracker, bloom, DictField metadata) |
+| `models/memory.py` | Memory model (Level 3 popoto: decay, confidence, write filter, access tracker, bloom, DictField metadata, reference pointer) |
 | `config/memory_defaults.py` | Tuned Defaults overrides for popoto constants and dismissal tracking thresholds |
 | `agent/memory_hook.py` | PostToolUse thought injection with sliding window rate limiting, multi-query decomposition via `_cluster_keywords()` (Telegram agent path) |
 | `agent/memory_extraction.py` | Post-session JSON extraction with line-based fallback, bigram outcome detection, dismissal tracking via `_persist_outcome_metadata()`, post-merge learning extraction |
@@ -226,6 +247,10 @@ The memory system MUST work equally across all agent session types — SDK/Teleg
 | `.claude/hooks/user_prompt_submit.py` | Claude Code prompt ingestion hook and AgentSession creation |
 | `.claude/hooks/post_tool_use.py` | Claude Code PostToolUse hook with memory recall and AgentSession activity tracking |
 | `.claude/hooks/stop.py` | Claude Code Stop hook with extraction, AgentSession completion, and post-merge learning |
+| `models/knowledge_document.py` | KnowledgeDocument model for indexed work-vault files |
+| `tools/knowledge/indexer.py` | Knowledge indexer pipeline (index, delete, full scan, companion memories) |
+| `tools/knowledge/scope_resolver.py` | File path to project scope resolution via projects.json |
+| `bridge/knowledge_watcher.py` | Filesystem watcher for work-vault changes (watchdog + debounce) |
 | `config/personas/_base.md` | Thought priming instruction for agents |
 
 ## Configuration
