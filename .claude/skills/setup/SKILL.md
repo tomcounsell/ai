@@ -313,23 +313,6 @@ launchctl list | grep com.valor.reflections
 
 If the output shows the `com.valor.reflections` label, the scheduler is installed. It will run `scripts/reflections.py` daily at 6 AM, performing log review, session analysis, LLM reflection, and memory consolidation.
 
-## Step 8b: Install Issue Poller
-
-Install the issue poller plist (polls GitHub every 5 minutes):
-
-```bash
-cd ~/src/ai
-./scripts/install_issue_poller.sh
-```
-
-Verify it loaded:
-
-```bash
-launchctl list | grep com.valor.issue-poller
-```
-
-**Note:** All plist templates use `__PROJECT_DIR__` and `__HOME_DIR__` placeholders. The install scripts substitute these with the actual paths for the current machine via `sed`. This means plists work on any machine without hardcoded usernames.
-
 ## Step 9: Start the Bridge
 
 Ensure the logs directory exists, then start the bridge as a background process:

@@ -59,7 +59,6 @@ tests/
 ├── e2e/                     # Full-stack synthetic flows
 ├── performance/             # Benchmarks and endurance
 ├── ai_judge/                # AI judge validation
-└── test_issue_poller.py     # GitHub issue polling
 ```
 
 ## Test Index by Feature
@@ -252,7 +251,6 @@ tests/
 
 | Level | File | Tests | Description |
 |-------|------|------:|-------------|
-| root | `test_issue_poller.py` | 25 | GitHub issue polling |
 | e2e | `test_telegram_flow.py` | — | Live Telegram flow stubs |
 
 ## Fixtures

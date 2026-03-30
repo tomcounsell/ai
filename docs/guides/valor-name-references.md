@@ -88,12 +88,10 @@ References where "Valor" is a **brand/product name** for the tooling itself — 
 | File | Service Labels |
 |------|---------------|
 | `com.valor.reflections.plist` | `com.valor.reflections` |
-| `com.valor.issue-poller.plist` | `com.valor.issue-poller` |
 | `scripts/valor-service.sh` | `com.valor.bridge`, `com.valor.update`, `com.valor.bridge-watchdog` |
 | `scripts/update/service.py` | `com.valor.reflections`, `com.valor.daydream` (old), `com.valor.caffeinate` |
 | `monitoring/bridge_watchdog.py` | `com.valor.bridge` |
 | `scripts/install_reflections.sh` | `com.valor.reflections`, `com.valor.daydream` |
-| `scripts/install_issue_poller.sh` | `com.valor.issue-poller` |
 | `scripts/remote-update.sh` | `com.valor.reflections`, `com.valor.daydream` |
 
 ### B4. Data Paths
@@ -113,7 +111,6 @@ References where "Valor" is a **brand/product name** for the tooling itself — 
 | `scripts/auto-revert.sh` | `valor-service.sh` reference |
 | `scripts/calendar_hook.sh` | `EXCLUDED_PROJECTS="valor"`, `valor-calendar` |
 | `scripts/calendar_prompt_hook.sh` | `EXCLUDED_PROJECTS="valor"`, `valor-calendar` |
-| `scripts/issue_poller.py` | `valor-telegram` CLI call |
 | `scripts/update/verify.py` | `valor-calendar` path checks |
 | `scripts/update/run.py` | `com.valor.reflections.plist` |
 | `scripts/update/__init__.py` | `"Modular update system for Valor"` |
