@@ -1189,9 +1189,9 @@ async def _job_health_check() -> None:
     4. If no live worker for job.chat_id AND pending > JOB_HEALTH_MIN_RUNNING:
        start a worker. This replaces the old _recover_stalled_pending mechanism.
 
-    Recovery uses delete-and-recreate (required by Popoto KeyField) but ONLY
-    for jobs whose worker is confirmed dead. Jobs with a live worker on the
-    same chat_id are never touched.
+    Recovery resets status to 'pending' via direct mutation and save.
+    Status is an IndexedField, so no delete-and-recreate is needed.
+    Only jobs whose worker is confirmed dead are touched.
     """
     now = time.time()
     checked = 0

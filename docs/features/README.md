@@ -71,7 +71,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Popoto Redis Expansion](popoto-redis-expansion.md) | Migration from JSONL/JSON file state to Redis for atomicity and queries | Shipped |
 | [Race Condition Analysis](race-condition-analysis.md) | Structured concurrency analysis section in plan template with soft validator for async code | Shipped |
 | [Reaction Semantics](reaction-semantics.md) | Emoji reaction protocol for message delivery feedback and silent loss prevention | Shipped |
-| [Redis Model Relationships](redis-models.md) | Cross-references between Popoto models, project_key on all models, enrichment metadata ownership on TelegramMessage | Shipped |
+| [Redis Model Relationships](redis-models.md) | Cross-references between Popoto models, project_key on all models, enrichment metadata ownership on TelegramMessage, field type semantics (KeyField vs IndexedField) | Shipped |
 | [Reflections](reflections.md) | Unified reflection scheduler with declarative YAML registry, Redis state tracking, skip-if-running guard; subsumes health check, orphan recovery, branch cleanup, and 15-unit daily maintenance pipeline (including PR review audit) | Shipped |
 | [Reflections Dashboard](reflections-dashboard.md) | Web dashboard for monitoring reflection scheduler execution, run history, and ignore patterns at `/reflections/` | Shipped |
 | [Remote Update](remote-update.md) | Telegram command and cron for remote system updates across machines | Shipped |
