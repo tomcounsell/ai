@@ -19,8 +19,8 @@ Human Message (Telegram)                    Agent Session
         |                            _cluster_keywords()
   Haiku Extraction  <---+             (multi-query split)
   JSON -> metadata       |                   |
-  importance=AGENT (1.0) |           ContextAssembler x N
-        |                |            (per cluster query)
+  importance=AGENT (1.0) |     BM25 + RRF fusion per cluster
+        |                |      (keyword + relevance + confidence)
         v                |                   |
   Outcome Detection -----+                   v
   (bigram overlap)                    <thought> blocks
@@ -44,7 +44,7 @@ Telegram messages are saved as Memory records immediately on receipt in `bridge/
 2. `store_message()` saves to TelegramMessage (existing behavior)
 3. `Memory.safe_save()` creates a Memory record with `InteractionWeight.HUMAN` (6.0) importance
 4. ExistenceFilter bloom index is updated automatically on save
-5. Memory is immediately available for future ContextAssembler queries
+5. Memory is immediately available for future BM25 + RRF retrieval queries
 
 Empty text, bot messages, and media-only messages are skipped.
 
@@ -57,7 +57,7 @@ The PostToolUse hook in `agent/health_check.py` checks for relevant memories on 
 3. Every 3rd call, topic keywords are extracted from the buffer
 4. `ExistenceFilter.might_exist()` does an O(1) bloom check
 5. If positive and >5 unique keywords: `_cluster_keywords()` splits keywords into topical clusters (max 3 clusters of ~3-5 keywords each); otherwise uses a single query
-6. `ContextAssembler.assemble()` runs per cluster, results are merged and deduplicated by `memory_id`
+6. `retrieve_memories()` runs per cluster using BM25 + RRF fusion (keyword match, temporal relevance, confidence), results are merged and deduplicated by `memory_id`
 7. Results are formatted as `<thought>content</thought>` blocks (max 3)
 8. Returned via `additionalContext` in the hook response
 9. Injected thoughts are tracked for later outcome detection
@@ -145,7 +145,7 @@ Both paths (Telegram agent and Claude Code hooks) write to the same Redis Memory
 
 ## Category-Weighted Recall
 
-After ContextAssembler returns scored results, `_apply_category_weights()` re-ranks them by multiplying each record's score by a category-specific weight before sorting. This ensures that corrections and decisions -- higher-signal memory types -- surface preferentially over patterns and surprises when scores are similar.
+After RRF fusion returns scored results, `_apply_category_weights()` re-ranks them by multiplying each record's RRF score by a category-specific weight before sorting. This ensures that corrections and decisions -- higher-signal memory types -- surface preferentially over patterns and surprises when scores are similar.
 
 **Weight table** (from `CATEGORY_RECALL_WEIGHTS` in `config/memory_defaults.py`):
 
@@ -158,9 +158,9 @@ After ContextAssembler returns scored results, `_apply_category_weights()` re-ra
 | `default` | 1.0 | Fallback for records with missing or unknown category |
 
 **Mechanism:**
-1. ContextAssembler returns scored records (relevance + confidence weighted)
+1. `retrieve_memories()` fuses BM25 keyword match, temporal relevance, and confidence via RRF
 2. `_apply_category_weights(records)` reads `metadata.category` from each record
-3. Effective score = `record.score * category_weight`
+3. Effective score = `record.score * category_weight` (where score is the RRF fusion score)
 4. Records are re-sorted by effective score descending
 5. Top `MAX_THOUGHTS` records are formatted as `<thought>` blocks
 
@@ -192,7 +192,7 @@ python -m tools.memory_search search "query" --category correction
 python -m tools.memory_search search "query" --tag redis
 ```
 
-Metadata filtering happens after ContextAssembler returns results (ContextAssembler does not support field-level filtering). The `inspect` command displays metadata when present.
+Metadata filtering happens after retrieval returns results. The `inspect` command displays metadata when present.
 
 ## Dismissal Tracking
 
@@ -213,7 +213,7 @@ When the keyword buffer produces more than 5 unique keywords, `_cluster_keywords
 
 **Mechanism:**
 1. `_cluster_keywords(keywords, max_clusters=3)` divides the list into chunks of ~3-5 keywords
-2. Each cluster is queried separately via `ContextAssembler.assemble()`
+2. Each cluster is queried separately via `retrieve_memories()` (BM25 + RRF fusion)
 3. Results are merged and deduplicated by `memory_id`
 4. Tiny trailing clusters (<2 keywords) are merged into the previous cluster
 5. For <=5 keywords, a single query is used (no decomposition)
@@ -236,9 +236,10 @@ The memory system MUST work equally across all agent session types — SDK/Teleg
 
 | File | Purpose |
 |------|---------|
-| `models/memory.py` | Memory model (Level 3 popoto: decay, confidence, write filter, access tracker, bloom, DictField metadata, reference pointer) |
-| `config/memory_defaults.py` | Tuned Defaults overrides for popoto constants and dismissal tracking thresholds |
+| `models/memory.py` | Memory model (Level 3 popoto: decay, confidence, BM25, write filter, access tracker, bloom, DictField metadata, reference pointer) |
+| `config/memory_defaults.py` | Tuned Defaults overrides for popoto constants, RRF tuning, and dismissal tracking thresholds |
 | `agent/memory_hook.py` | PostToolUse thought injection with sliding window rate limiting, multi-query decomposition via `_cluster_keywords()` (Telegram agent path) |
+| `agent/memory_retrieval.py` | BM25 + RRF fusion retrieval: `retrieve_memories()`, `rrf_fuse()`, ranked signal accessors |
 | `agent/memory_extraction.py` | Post-session JSON extraction with line-based fallback, bigram outcome detection, dismissal tracking via `_persist_outcome_metadata()`, post-merge learning extraction |
 | `agent/health_check.py` | Integration point: `watchdog_hook()` calls `check_and_inject()` |
 | `agent/messenger.py` | Integration point: `_run_work()` calls `run_post_session_extraction()` |
@@ -265,7 +266,7 @@ All tuning constants are in `config/memory_defaults.py`. Call `apply_defaults()`
 | `MEMORY_INITIAL_CONFIDENCE` | 0.5 | Starting confidence (neutral) |
 | `MEMORY_ACTED_SIGNAL` | 0.85 | Confidence boost when agent acts on a memory |
 | `MEMORY_CONTRADICTED_SIGNAL` | 0.15 | Confidence penalty when agent contradicts a memory |
-| `MEMORY_SURFACING_THRESHOLD` | 0.4 | Minimum score for ContextAssembler to surface a memory |
+| `RRF_K` | 60 | Reciprocal Rank Fusion constant: higher = more uniform blending across signal lists |
 | `MAX_THOUGHTS_PER_INJECTION` | 3 | Maximum thought blocks per injection event |
 | `INJECTION_WINDOW_SIZE` | 3 | Tool calls per sliding window |
 | `INJECTION_BUFFER_SIZE` | 9 | Total tool calls in rolling buffer |
