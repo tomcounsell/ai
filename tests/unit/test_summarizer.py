@@ -36,7 +36,8 @@ def _mock_session_with_stages(stage_dict, links=None):
     session.issue_url = (links or {}).get("issue")
     session.plan_url = (links or {}).get("plan")
     session.pr_url = (links or {}).get("pr")
-    session.qa_mode = False  # Default: not a Q&A session
+    session.session_mode = None  # Default: not a Q&A session
+    session.qa_mode = False
     return session
 
 
@@ -1090,6 +1091,7 @@ class TestComposeStructuredSummary:
         from unittest.mock import MagicMock
 
         session = MagicMock()
+        session.session_mode = "qa"
         session.qa_mode = True
         session.session_id = None  # Skip Redis refresh
 
@@ -1105,10 +1107,11 @@ class TestComposeStructuredSummary:
         assert "bridge uses Telethon" in result
 
     def test_qa_mode_false_still_gets_structured(self):
-        """Non-Q&A sessions with qa_mode=False still get structured formatting."""
+        """Non-Q&A sessions with session_mode=None still get structured formatting."""
         from unittest.mock import MagicMock
 
         session = MagicMock()
+        session.session_mode = None
         session.qa_mode = False
         session.session_id = None
         session.status = "completed"
@@ -1138,6 +1141,7 @@ class TestNoMessageEcho:
         session.message_text = "continue"
         session.status = "running"
         session.is_sdlc = True
+        session.session_mode = None
         session.qa_mode = False
 
         result = _compose_structured_summary(
@@ -1156,6 +1160,7 @@ class TestNoMessageEcho:
         session._get_history_list.return_value = ["[user] What time is it?"]
         session.message_text = "What time is it?"
         session.status = "completed"
+        session.session_mode = None
         session.qa_mode = False
         session.get_links.return_value = {}
 
@@ -1280,6 +1285,7 @@ class TestComposeStructuredSummaryWithSession:
     def test_qa_mode_session_returns_prose(self):
         """Q&A session bypasses all structured formatting."""
         session = _mock_session_with_stages({})
+        session.session_mode = "qa"
         session.qa_mode = True
         session.session_id = None  # Skip Redis refresh
         session.message_text = "How does the bridge work?"
