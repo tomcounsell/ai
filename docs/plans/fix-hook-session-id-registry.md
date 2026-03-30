@@ -147,8 +147,8 @@ No agent integration required -- this is a bridge-internal change. The registry 
 
 ## Documentation
 
-- [ ] Update `docs/features/session-isolation.md` to document the session ID registry as the hook-side resolution mechanism (replacing the env var approach for hooks)
-- [ ] Add inline docstrings on the new `agent/hooks/session_registry.py` module
+- [x] Update `docs/features/session-isolation.md` to document the session ID registry as the hook-side resolution mechanism (replacing the env var approach for hooks)
+- [x] Add inline docstrings on the new `agent/hooks/session_registry.py` module
 
 ## Success Criteria
 
@@ -161,7 +161,7 @@ No agent integration required -- this is a bridge-internal change. The registry 
 - [ ] Concurrent sessions maintain isolated registry entries
 - [ ] Registry entries cleaned up after query completes
 - [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
