@@ -415,7 +415,7 @@ class TestAutoFixStep:
         from scripts.reflections import ReflectionRunner
 
         runner = ReflectionRunner()
-        runner.state._dry_run = True
+        runner.state.dry_run = True
         runner.state.reflections = [
             {
                 "category": "code_bug",
@@ -448,7 +448,7 @@ class TestAutoFixStep:
         from scripts.reflections import ReflectionRunner
 
         runner = ReflectionRunner()
-        runner.state._dry_run = False
+        runner.state.dry_run = False
         runner.state.reflections = [
             {
                 "category": "code_bug",
@@ -482,7 +482,7 @@ class TestAutoFixStep:
         from scripts.reflections import ReflectionRunner
 
         runner = ReflectionRunner()
-        runner.state._dry_run = True
+        runner.state.dry_run = True
         runner.state.reflections = [
             {
                 "category": "misunderstanding",  # not code_bug
@@ -535,7 +535,7 @@ class TestAutoFixStep:
         from scripts.reflections import ReflectionRunner
 
         runner = ReflectionRunner()
-        runner.state._dry_run = False
+        runner.state.dry_run = False
         runner.state.reflections = [
             {
                 "category": "code_bug",
@@ -622,7 +622,7 @@ class TestCLIFlags:
         assert entries[0].reason == "known issue"
 
     def test_dry_run_flag_sets_state(self, tmp_path, monkeypatch):
-        """--dry-run sets runner.state._dry_run = True."""
+        """--dry-run sets runner.state.dry_run = True."""
         import asyncio
         import sys
         from unittest.mock import patch
@@ -639,7 +639,7 @@ class TestCLIFlags:
         with patch.object(reflections_mod.ReflectionRunner, "run", fake_run):
             asyncio.run(reflections_mod.main())
 
-        assert captured_runner["instance"].state._dry_run is True
+        assert captured_runner["instance"].state.dry_run is True
 
 
 # --- Step 14 Branch and Plan Cleanup ---

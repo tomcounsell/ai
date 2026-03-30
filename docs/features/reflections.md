@@ -106,13 +106,13 @@ The bridge watchdog (`com.valor.bridge-watchdog`) is intentionally NOT in the re
 
 When the watchdog detects that the bridge process is not running (via `pgrep`), it calls `crash_tracker.log_crash("bridge_dead_on_watchdog_check")` to record the event. This captures SIGKILL and OOM kills that leave no traceback. The crash tracker's pattern detection requires 3+ crashes in 30 minutes before triggering escalation, so a single false positive from a startup race is harmless.
 
-## Daily Maintenance Pipeline (14 Units)
+## Daily Maintenance Pipeline (15 Units)
 
 The `daily-maintenance` reflection runs the full pipeline from `scripts/reflections.py`. The runner loads state from Redis, executes each unit in order, and checkpoints after every unit. If interrupted, the next run resumes from where it left off. Each unit is independently failable — a crash in one unit does not block the rest.
 
-The pipeline has 14 units: 11 independent items and 3 merged pipelines. Completed units are tracked by string key (e.g. `"legacy_code_scan"`), not by integer position. This means units can be reordered or renamed without data migrations — any unknown key in `completed_steps` is simply skipped.
+The pipeline has 15 units: 12 independent items and 3 merged pipelines. Completed units are tracked by string key (e.g. `"legacy_code_scan"`), not by integer position. This means units can be reordered or renamed without data migrations — any unknown key in `completed_steps` is simply skipped.
 
-### 14-Unit Pipeline
+### 15-Unit Pipeline
 
 **Independent units** (each checkpointed individually):
 
@@ -129,20 +129,21 @@ The pipeline has 14 units: 11 independent items and 3 merged pipelines. Complete
 | 9 | `feature_docs_audit` | Feature Docs Audit | Checks for stale references, README accuracy, plan-masquerading-as-feature, stub docs | AI repo only | Non-blocking |
 | 10 | `principal_staleness` | Principal Context Staleness | Checks age of PRINCIPAL.md and flags if stale | AI repo only | Non-blocking |
 | 11 | `disk_space_check` | Disk Space Check | Checks free disk space on project volume; finding if below 10 GB (see [Adding Reflection Tasks](adding-reflection-tasks.md)) | AI repo only | Non-blocking |
+| 12 | `pr_review_audit` | PR Review Audit | Scans merged PRs for unaddressed review findings from do-pr-review, files GitHub issues with severity labels | Per-project | Non-blocking, requires `gh` auth |
 
 **Merged pipelines** (sub-steps run internally, one checkpoint for the whole group):
 
 | # | Key | Name | Sub-steps | Description |
 |---|-----|------|-----------|-------------|
-| 12 | `session_intelligence` | Session Intelligence | session_analysis → llm_reflection → auto_fix_bugs | Analyzes sessions, reflects via Haiku, files high-confidence bug issues |
-| 13 | `behavioral_learning` | Behavioral Learning | episode_cycle_close → pattern_crystallization | Closes completed SDLC episodes and crystallizes recurring patterns |
-| 14 | `daily_report_and_notify` | Daily Report & Notify | produce_report → create_github_issue | Writes report, posts GitHub issues, sends Telegram summary (must be last) |
+| 13 | `session_intelligence` | Session Intelligence | session_analysis → llm_reflection → auto_fix_bugs | Analyzes sessions, reflects via Haiku, files high-confidence bug issues |
+| 14 | `behavioral_learning` | Behavioral Learning | episode_cycle_close → pattern_crystallization | Closes completed SDLC episodes and crystallizes recurring patterns |
+| 15 | `daily_report_and_notify` | Daily Report & Notify | produce_report → create_github_issue | Writes report, posts GitHub issues, sends Telegram summary (must be last) |
 
 **Removed:** `step_check_sentry` — was a permanent no-op (Sentry MCP never available in standalone mode). Deleted entirely.
 
 ## State & Persistence
 
-All reflections state lives in Redis via two Popoto models defined in `models/reflections.py`.
+All reflections state lives in Redis via three Popoto models defined in `models/reflections.py`.
 
 ### ReflectionRun
 
@@ -182,6 +183,26 @@ Suppresses auto-fix for specific patterns. Each entry has a TTL (default 14 days
 **Matching**: Case-insensitive substring match — if either the ignore pattern or the reflection pattern is a substring of the other, it's a match.
 
 **Cleanup**: Expired entries are pruned at the start of each auto-fix run (inside `session_intelligence`) and during Redis TTL cleanup (`redis_ttl_cleanup`).
+
+### PRReviewAudit
+
+Deduplication tracker for PR review audit findings. Prevents re-filing GitHub issues for already-audited review comments.
+
+| Field | Type | Purpose |
+|-------|------|---------|
+| `audit_id` | AutoKeyField | UUID |
+| `repo` | KeyField | GitHub repo slug (e.g. "tomcounsell/ai") |
+| `pr_number` | IntField | Pull request number |
+| `comment_id` | UniqueKeyField | Composite dedup key: `{repo}:{pr_number}:{comment_id}:{finding_index}` |
+| `severity` | Field | Classified severity (critical, standard, trivial) |
+| `filed_issue_url` | Field(null) | URL of the filed GitHub issue, if any |
+| `audited_at` | SortedField(float) | Timestamp when audited (for TTL cleanup and time window lookback) |
+
+**Dedup key format**: `{repo}:{pr_number}:{comment_id}:{finding_index}`. A single review comment may contain multiple structured findings; the finding_index ensures each is tracked independently.
+
+**Time window lookback**: `PRReviewAudit.last_successful_run()` returns the most recent `audited_at` timestamp, used by the PR review audit step to determine which PRs to scan. Falls back to yesterday if no prior audits exist. This closes multi-day gaps when reflections is down.
+
+**Cleanup**: Records older than 90 days are pruned via `cleanup_expired()` during Redis TTL cleanup (`redis_ttl_cleanup`).
 
 
 ## Session Analysis (part of `session_intelligence` pipeline)
@@ -270,7 +291,7 @@ python scripts/reflections.py --ignore "pattern text here" --reason "Intentional
 
 Reflections reads `~/Desktop/Valor/projects.json`, filters to repos present on the current machine via `load_local_projects()`, and runs per-project analysis. A machine with only `ai` checked out analyzes only `ai`; a machine with four repos analyzes all four.
 
-**Per-project steps**: 2 (Log Review), 4 (Task Cleanup), 11 (GitHub Issues + Telegram)
+**Per-project steps**: 2 (Log Review), 4 (Task Cleanup), 11 (GitHub Issues + Telegram), 12 (PR Review Audit)
 **AI-only steps**: Everything else runs once from the AI repo root
 
 ### Configuration
@@ -339,6 +360,39 @@ Prunes expired records to keep Redis lean:
 | BridgeEvent | 7 days | `cleanup_old()` |
 | ReflectionRun | 30 days | `cleanup_expired()` |
 | ReflectionIgnore | Per-entry TTL | `cleanup_expired()` |
+| PRReviewAudit | 90 days | `cleanup_expired()` |
+
+## PR Review Audit (`pr_review_audit`)
+
+Scans merged PRs for unaddressed review findings and files GitHub issues. This is the safety net for when the PM merges a PR with tech debt, test gaps, or nits left behind -- items that would otherwise silently disappear.
+
+### How It Works
+
+1. **PR discovery**: For each project with a `github` config, fetches merged PRs since the last successful audit via `gh pr list --state merged --search "merged:>={date}"`
+2. **Review parsing**: Fetches review comments and parses the structured do-pr-review format (`**Severity:**`, `**File:**`, `**Code:**`, `**Issue:**`, `**Fix:**`)
+3. **Address check**: For each finding, checks if the referenced file was modified in commits after the review comment timestamp (file-level heuristic)
+4. **Deduplication**: Checks Redis `PRReviewAudit` model to skip already-audited findings
+5. **Issue filing**: Files one GitHub issue per PR with unaddressed findings, grouped by severity, with labels `pr-review-audit` plus severity-specific labels (`critical`, `tech-debt`, `nit`)
+
+### Severity Classification
+
+| Review Format | Classification | GitHub Label |
+|--------------|----------------|--------------|
+| `blocker` | critical | `critical` |
+| `tech_debt` | standard | `tech-debt` |
+| `nit` | trivial | `nit` |
+
+### Safety Properties
+
+- **Per-project isolation** -- A failure on one project does not block others
+- **Rate limited** -- Processes at most 20 merged PRs per project per run
+- **Dedup** -- Redis-backed `PRReviewAudit` model prevents re-filing for audited comments
+- **Dry-run safe** -- When `--dry-run` is set, logs findings but skips issue creation and Redis writes
+- **Structured format only** -- Only parses well-formed do-pr-review findings; ignores free-text comments
+
+### Findings Namespacing
+
+Findings are added to `state.findings` with key `{slug}:pr_review_audit`. Step progress is recorded in `state.step_progress["pr_review_audit"]` with metrics: `prs_scanned`, `findings_total`, `findings_unaddressed`, `issues_filed`.
 
 ## Branch and Plan Cleanup (`branch_plan_cleanup`)
 
@@ -412,8 +466,8 @@ The scheduler picks it up on the next tick. No code changes or service restarts 
 | `agent/reflection_scheduler.py` | Unified scheduler: registry loader, schedule evaluator, executor |
 | `config/reflections.yaml` | Declarative registry of all reflections |
 | `models/reflection.py` | Reflection state model (per-reflection Redis tracking) |
-| `models/reflections.py` | Core models (ReflectionRun for daily pipeline, ReflectionIgnore) |
-| `scripts/reflections.py` | Daily maintenance 14-unit runner |
+| `models/reflections.py` | Core models: ReflectionRun (daily pipeline state), ReflectionIgnore (auto-fix suppression), PRReviewAudit (PR review dedup) |
+| `scripts/reflections.py` | Daily maintenance 15-unit runner |
 | `scripts/reflections_report.py` | GitHub issue creation module |
 | `scripts/install_reflections.sh` | launchd installation script (kept for manual invocation) |
 | `com.valor.reflections.plist` | launchd schedule definition (kept for manual invocation) |
@@ -429,7 +483,7 @@ The scheduler picks it up on the next tick. No code changes or service restarts 
 | PyYAML | Registry loader | Yes — reads `config/reflections.yaml` |
 | psutil | Memory instrumentation | Optional — memory snapshots degrade gracefully if missing |
 | `ANTHROPIC_API_KEY` | `documentation_audit`, `session_intelligence` | Conditional — LLM reflection and docs audit |
-| `gh` CLI (authenticated) | `task_management`, `session_intelligence`, `daily_report_and_notify`, `branch_plan_cleanup` | Conditional — task cleanup, bug issues |
+| `gh` CLI (authenticated) | `task_management`, `session_intelligence`, `daily_report_and_notify`, `branch_plan_cleanup`, `pr_review_audit` | Conditional — task cleanup, bug issues, PR review audit |
 | `telethon` | `daily_report_and_notify` | Conditional — Telegram notifications |
 | `~/Desktop/Valor/projects.json` | Multi-repo reflections | Optional — defaults to AI repo only |
 
