@@ -200,9 +200,16 @@ For each file, replace raw string literals and comparisons with enum imports:
 - [ ] `tests/unit/test_dev_session_registration.py` -- UPDATE: replace `session.session_type == "dev"` with enum comparison
 - [ ] `tests/unit/test_health_check.py` -- UPDATE: replace `mock_session.session_type = "dev"` with enum
 - [ ] `tests/unit/test_steer_child.py` -- UPDATE: replace string literals with enums
+- [ ] `tests/unit/test_routing_mode.py` -- UPDATE: replace persona string literals with `PersonaType` enum imports
+- [ ] `tests/unit/test_pm_channels.py` -- UPDATE: replace persona string literals with `PersonaType` enum imports
+- [ ] `tests/unit/test_persona_loading.py` -- UPDATE: replace persona string literals with `PersonaType` enum imports
+- [ ] `tests/unit/test_job_scheduler_persona.py` -- UPDATE: replace persona string literals with `PersonaType` enum imports
+- [ ] `tests/unit/test_work_request_classifier.py` -- UPDATE: replace `"sdlc"`/`"question"` string literals with `ClassificationType` enum imports
+- [ ] `tests/unit/test_cross_repo_gh_resolution.py` -- UPDATE: replace classification string literals with `ClassificationType` enum imports
 - [ ] `tests/integration/test_bridge_routing.py` (15+ tests) -- UPDATE: replace string comparisons with enum imports
 - [ ] `tests/integration/test_job_queue_session_type.py` (8+ tests) -- UPDATE: replace `SESSION_TYPE_CHAT`/`SESSION_TYPE_DEV` imports and string literals
 - [ ] `tests/e2e/test_context_propagation.py` -- UPDATE: replace `SESSION_TYPE_CHAT`/`SESSION_TYPE_DEV` imports
+- [ ] `tests/e2e/test_message_pipeline.py` -- UPDATE: replace classification string literals with `ClassificationType` enum imports
 
 ## Rabbit Holes
 
@@ -262,7 +269,7 @@ No agent integration required -- enums are internal to the bridge/agent/model la
 - [ ] `grep -rn '"sdlc"\|"question"' bridge/routing.py agent/sdk_client.py` returns zero hits outside comments/docstrings and LLM prompt strings
 - [ ] Dashboard sessions table header shows "Persona" not "Type"
 - [ ] `qa_mode` field deprecated with backward-compatible property; `session_mode` field active
-- [ ] All 24 affected test files pass
+- [ ] All affected test files pass (see Test Impact section for full list)
 - [ ] Tests pass (`/do-test`)
 - [ ] Lint clean (`python -m ruff check .`)
 - [ ] Documentation updated (`/do-docs`)
@@ -308,7 +315,7 @@ No agent integration required -- enums are internal to the bridge/agent/model la
 - Update `agent/sdk_client.py`: replace all `== "chat"` comparisons
 - Update `agent/job_queue.py`: replace default params and comparisons
 - Update `agent/hooks/pre_tool_use.py`: compare against `SessionType.CHAT`
-- Update `tools/job_scheduler.py`: replace default value
+- Update `tools/job_scheduler.py`: replace default value and `choices=["chat", "dev"]` argparse definition with `SessionType` enum members
 
 ### 3. Replace classification_type magic strings
 - **Task ID**: replace-classification
@@ -343,7 +350,7 @@ No agent integration required -- enums are internal to the bridge/agent/model la
 - Add backward-compatible `qa_mode` property that reads `session_mode`
 - Keep `qa_mode` Field temporarily (renamed to `_qa_mode_legacy`) for Redis backward compatibility
 - Update writers: `agent/sdk_client.py`, `agent/job_queue.py`
-- Update readers: `bridge/summarizer.py`, `agent/job_queue.py`, `ui/data/sdlc.py`
+- Update readers: `bridge/summarizer.py`, `agent/job_queue.py` (summarizer + nudge loop qa_mode checks at lines ~2113 and ~2390), `ui/data/sdlc.py`
 
 ### 6. Rename dashboard Type column to Persona
 - **Task ID**: rename-dashboard-column
@@ -363,7 +370,7 @@ No agent integration required -- enums are internal to the bridge/agent/model la
 - **Assigned To**: enum-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Update all 24 affected test files to use enum imports instead of string literals
+- Update all affected test files (see Test Impact section) to use enum imports instead of string literals
 - Replace `session.qa_mode = True/False` with `session.session_mode` assignments
 - Replace `SESSION_TYPE_CHAT`/`SESSION_TYPE_DEV` imports to come from `config.enums`
 
@@ -415,7 +422,59 @@ No agent integration required -- enums are internal to the bridge/agent/model la
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Critique run**: 2026-03-30
+**Verdict**: NEEDS REVISION (2 blockers found, resolved inline below)
+**Post-revision verdict**: READY TO BUILD
+
+### Blockers (resolved)
+
+#### 1. Missing test files in Test Impact section
+- **Severity**: BLOCKER (resolved)
+- **Critics**: Archaeologist, Operator
+- **Location**: ## Test Impact
+- **Finding**: Seven test files that use persona/classification magic strings are missing from the Test Impact section. These tests will break during the migration but are not tracked.
+- **Resolution**: Added the missing test files to the Test Impact section below.
+
+#### 2. Incomplete qa_mode reader list in Step 5
+- **Severity**: BLOCKER (resolved)
+- **Critics**: Operator, Adversary
+- **Location**: ### 5. Replace qa_mode with session_mode
+- **Finding**: `agent/job_queue.py` reads `qa_mode` at lines 2113 and 2390 (nudge cap and reaction clearing) but is not listed in Step 5's reader list. These code paths would silently break.
+- **Resolution**: Added `agent/job_queue.py` nudge loop to Step 5 reader list below.
+
+### Concerns
+
+#### 3. CLI choices hardcoded in job_scheduler
+- **Severity**: CONCERN
+- **Critics**: Operator
+- **Location**: ### 2. Replace session_type magic strings
+- **Finding**: `tools/job_scheduler.py` has `choices=["chat", "dev"]` in its argparse definition (line 1005). The plan mentions replacing the default value but not the choices list. Using `SessionType` enum members for choices would be more consistent.
+- **Resolution**: Noted in Step 2 task list.
+
+#### 4. No Prior Art section
+- **Severity**: CONCERN
+- **Critics**: Archaeologist
+- **Location**: ## Prior Art
+- **Finding**: The Prior Art section states "No prior issues found" which is accurate -- this is greenfield enum standardization. No action needed but noted for completeness.
+
+### Nits
+
+#### 5. Success criteria grep commands may false-positive on comments
+- **Severity**: NIT
+- **Critics**: Simplifier
+- **Location**: ## Success Criteria
+- **Finding**: The grep-based success criteria use `grep -v '#'` to exclude comments, but `#` appears in legitimate non-comment contexts (e.g., issue references). The builder should use judgment, not strictly enforce zero hits.
+
+### Structural Check Results
+
+| Check | Status | Detail |
+|-------|--------|--------|
+| Required sections | PASS | All 4 required sections present |
+| Task numbering | PASS | Sequential 1-10, no gaps |
+| Dependencies valid | PASS | All task IDs resolve correctly |
+| File paths exist | PASS | 13/13 source files exist; 2 new files (config/enums.py, tests/unit/test_enums.py) to be created |
+| Test file paths | PASS | All 13 test files in Test Impact section exist |
+| Cross-references | PASS | All success criteria map to tasks; no no-gos conflict with solution |
 
 ---
 
