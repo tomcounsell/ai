@@ -22,6 +22,7 @@ from config.enums import ChatMode, ClassificationType, SessionType
 from popoto import (
     AutoKeyField,
     Field,
+    IndexedField,
     IntField,
     KeyField,
     ListField,
@@ -71,7 +72,7 @@ class AgentSession(Model):
     session_id = Field()  # Telegram-derived session identifier (e.g., tg_project_chatid_msgid)
     session_type = KeyField(null=True)  # "chat" or "dev" — discriminator
     project_key = KeyField()
-    status = KeyField(default="pending")
+    status = IndexedField(default="pending")  # Non-key field with secondary index for .filter()
 
     # === Queue fields (from RedisJob) ===
     priority = Field(default="normal")  # urgent | high | normal | low
