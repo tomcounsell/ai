@@ -28,7 +28,7 @@ from popoto import (
     SortedField,
 )
 
-from config.enums import ChatMode, SessionType
+from config.enums import ChatMode, ClassificationType, SessionType
 
 logger = logging.getLogger(__name__)
 
@@ -587,7 +587,7 @@ class AgentSession(Model):
             return True
 
         # Secondary: classification_type for freshly-classified sessions
-        if self.classification_type == "sdlc":
+        if self.classification_type == ClassificationType.SDLC:
             return True
 
         return False

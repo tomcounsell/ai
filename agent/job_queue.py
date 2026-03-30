@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from config.enums import SessionType
 from agent.branch_manager import (
     get_branch_state,
     get_plan_context,
@@ -295,7 +296,7 @@ async def _push_job(
     scheduling_depth: int = 0,
     parent_job_id: str | None = None,
     telegram_message_key: str | None = None,
-    session_type: str = "chat",
+    session_type: str = SessionType.CHAT,
     depends_on: list[str] | None = None,
 ) -> int:
     """Create a job in Redis and return the pending queue depth for this chat.
@@ -1615,7 +1616,7 @@ async def enqueue_job(
     scheduling_depth: int = 0,
     parent_job_id: str | None = None,
     telegram_message_key: str | None = None,
-    session_type: str = "chat",
+    session_type: str = SessionType.CHAT,
 ) -> int:
     """
     Add a job to Redis and ensure worker is running.
@@ -2110,7 +2111,7 @@ async def _execute_job(job: Job) -> None:
         # Use reduced nudge cap for Q&A sessions
         _effective_nudge_cap = MAX_NUDGE_COUNT
         if agent_session:
-            if getattr(agent_session, "qa_mode", False):
+            if getattr(agent_session, "session_mode", None) == "qa" or getattr(agent_session, "qa_mode", False):
                 from agent.qa_handler import QA_MAX_NUDGE_COUNT
 
                 _effective_nudge_cap = QA_MAX_NUDGE_COUNT
@@ -2387,7 +2388,7 @@ async def _execute_job(job: Job) -> None:
     # Skip if a continuation job was enqueued (defer reaction to that job)
     if react_cb and not chat_state.defer_reaction:
         # Q&A sessions: clear the processing reaction instead of setting completion emoji
-        if agent_session and getattr(agent_session, "qa_mode", False) and not task.error:
+        if agent_session and (getattr(agent_session, "session_mode", None) == "qa" or getattr(agent_session, "qa_mode", False)) and not task.error:
             emoji = None  # Clear reaction
         elif task.error:
             emoji = REACTION_ERROR

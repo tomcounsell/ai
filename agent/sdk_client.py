@@ -36,6 +36,7 @@ from claude_agent_sdk import (
     TextBlock,
 )
 
+from config.enums import ChatMode, SessionType
 from agent.agent_definitions import get_agent_definitions
 from agent.hooks import build_hooks_config
 from agent.worktree_manager import WORKTREES_DIR, validate_workspace
@@ -920,12 +921,12 @@ class ValorAgent:
         # own messages via tools/send_telegram.py (issue #497).
         # chat_id comes from the project config; reply_to is resolved from
         # the AgentSession's telegram_message_id in _extract_sdlc_env_vars below.
-        if self.session_type == "chat" and self.chat_id:
+        if self.session_type == SessionType.CHAT and self.chat_id:
             env["TELEGRAM_CHAT_ID"] = str(self.chat_id)
 
         # PM sessions: inject Sentry auth token so sentry-cli works without
         # manual export. Token is stored in ~/Desktop/Valor/.env (iCloud-synced).
-        if self.session_type == "chat":
+        if self.session_type == SessionType.CHAT:
             sentry_env = Path.home() / "Desktop" / "Valor" / ".env"
             if sentry_env.exists():
                 for line in sentry_env.read_text().splitlines():
@@ -1480,7 +1481,7 @@ async def get_agent_response_sdk(
     # ChatSession routing: classify intent and choose Q&A or PM dispatch path.
     # Q&A mode answers informational queries directly without spawning DevSession.
     _qa_mode = False
-    if _session_type == "chat":
+    if _session_type == SessionType.CHAT:
         # Config-driven mode bypass: skip classifier when mode is already known
         from bridge.routing import resolve_chat_mode as _resolve_mode
 
@@ -1510,7 +1511,7 @@ async def get_agent_response_sdk(
 
                     for _s in _QASession.query.filter(session_id=session_id):
                         if _s.status in ("running", "active", "pending"):
-                            _s.qa_mode = True
+                            _s.session_mode = ChatMode.QA
                             _s.save()
                             break
                 except Exception:
@@ -1541,7 +1542,7 @@ async def get_agent_response_sdk(
 
                             for _s in _QASession.query.filter(session_id=session_id):
                                 if _s.status in ("running", "active", "pending"):
-                                    _s.qa_mode = True
+                                    _s.session_mode = ChatMode.QA
                                     _s.save()
                                     break
                         except Exception:
@@ -1609,7 +1610,7 @@ async def get_agent_response_sdk(
     wr_label = "yes" if has_worker_rules else "no (pm mode)"
     is_dm = chat_title is None
     # ChatSession always uses PM persona; otherwise resolve from config
-    if _session_type == "chat":
+    if _session_type == SessionType.CHAT:
         persona = "project-manager"
     else:
         persona = _resolve_persona(project, chat_title, is_dm=is_dm)
@@ -1631,7 +1632,7 @@ async def get_agent_response_sdk(
         custom_system_prompt = None
         _permission_mode = "bypassPermissions"  # Default: full permissions
 
-        if _session_type == "chat":
+        if _session_type == SessionType.CHAT:
             # ChatSession: PM persona, full permissions but hook-restricted.
             # Can write to docs/ and use gh CLI. Code writes blocked by pre_tool_use hook.
             custom_system_prompt = load_pm_system_prompt(working_dir)
@@ -1685,7 +1686,7 @@ async def get_agent_response_sdk(
         logger.info(f"[{request_id}] SDK responded in {elapsed:.1f}s ({len(response)} chars)")
 
         # Record response time metric for Q&A observability
-        if _session_type == "chat":
+        if _session_type == SessionType.CHAT:
             try:
                 from agent.qa_metrics import record_response_time
 
