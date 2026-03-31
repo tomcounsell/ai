@@ -22,6 +22,10 @@
     --blue-bg: rgba(88, 166, 255, 0.15);
     --purple: #bc8cff;
     --purple-bg: rgba(188, 140, 255, 0.15);
+    --orange: #db6d28;
+    --orange-bg: rgba(219, 109, 40, 0.15);
+    --cyan: #39d2c0;
+    --cyan-bg: rgba(57, 210, 192, 0.15);
     --font-mono: "SF Mono", "Cascadia Code", "Fira Code", monospace;
     --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
     --radius: 6px;
@@ -168,14 +172,29 @@ h3 {
     text-transform: lowercase;
 }
 
-.badge-ok, .badge-success {
-    color: var(--green);
-    background: var(--green-bg);
+.badge-running {
+    color: var(--blue);
+    background: var(--blue-bg);
 }
 
-.badge-running, .badge-pending, .badge-in-progress {
+.badge-pending, .badge-in-progress {
     color: var(--yellow);
     background: var(--yellow-bg);
+}
+
+.badge-active {
+    color: var(--cyan);
+    background: var(--cyan-bg);
+}
+
+.badge-dormant {
+    color: var(--purple);
+    background: var(--purple-bg);
+}
+
+.badge-waiting_for_children {
+    color: var(--orange);
+    background: var(--orange-bg);
 }
 
 .badge-error, .badge-failed {
@@ -183,12 +202,23 @@ h3 {
     background: var(--red-bg);
 }
 
-.badge-skipped {
+.badge-abandoned, .badge-killed {
     color: var(--text-muted);
     background: var(--bg-tertiary);
 }
 
+.badge-superseded, .badge-skipped {
+    color: var(--text-muted);
+    background: var(--bg-tertiary);
+    opacity: 0.7;
+}
+
 .badge-completed {
+    color: var(--green);
+    background: var(--green-bg);
+}
+
+.badge-ok, .badge-success {
     color: var(--green);
     background: var(--green-bg);
 }
@@ -206,11 +236,6 @@ h3 {
 .badge-green {
     color: var(--green);
     background: var(--green-bg);
-}
-
-.badge-active, .badge-waiting_for_children {
-    color: var(--yellow);
-    background: var(--yellow-bg);
 }
 
 /* Cards and panels */
