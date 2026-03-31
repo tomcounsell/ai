@@ -25,7 +25,7 @@ The agent has no control over its own output. It generates raw text, the summari
 
 **Desired outcome:**
 
-On session stop, the agent gets a **review gate**: the summarizer produces a draft, and the agent chooses to (a) send it as-is, (b) edit it, (c) replace with emoji reaction, (d) send nothing, or (e) continue working. Both PM and Teammate personas get this capability. The Teammate persona is a proper conversational persona, not just "QA mode."
+On session stop, the agent gets a **review gate**: the summarizer produces a draft, and the agent chooses to (a) send it as-is, (b) edit it, (c) replace with emoji reaction, (d) send nothing, or (e) continue working. All personas (PM, Teammate, Dev) get this capability when the session was triggered by a Telegram message. Classification is advisory and mutable — the agent can override it at any point.
 
 ## Prior Art
 
@@ -109,7 +109,7 @@ No prerequisites — builds on existing Stop hook, summarizer, and `set_reaction
 - **Teammate persona**: Rename QA/teammate mode to a proper Teammate persona with conversational guidelines (clarify, multi-perspective, humble framing).
 - **Classification as context**: Ollama classification result passed as advisory text in the session prompt, not a hard gate.
 - **React-only + silence paths**: Agent can choose emoji reaction or no response — handled by the bridge based on the agent's stop-hook decision.
-- **Shared infrastructure**: Both PM and Teammate personas use the same stop-hook review gate. PM gets it for SDLC status messages; Teammate gets it for conversational responses.
+- **Shared infrastructure**: All personas (PM, Teammate, Dev) use the same stop-hook review gate **when the session was created by a Telegram message**. Subagent sessions and programmatically-spawned sessions skip the gate — they don't have a conversation to respond to.
 
 ### Flow
 
@@ -126,12 +126,13 @@ No prerequisites — builds on existing Stop hook, summarizer, and `set_reaction
 
 **False-stop detection:**
 - Agent output contains promise-like patterns ("I started...", "Let me check...") without substantive content
-- Stop hook detects this via simple heuristics and suggests CONTINUE
-- Agent can agree (CONTINUE) or override (SEND/EDIT/etc.)
+- Stop hook detects this via simple heuristics and suggests CONTINUE in the review prompt
+- Agent decides whether to continue or deliver — no cap, no counter, just a suggestion
 
 ### Technical Approach
 
 **Component 1 — Stop hook review gate** (`agent/hooks/stop.py`):
+- **Activation rule**: Only fires when the session has an originating Telegram message (i.e., `TELEGRAM_CHAT_ID` and `TELEGRAM_REPLY_TO` env vars are set). Subagent sessions, programmatic sessions, and local Claude Code sessions skip the gate entirely — they have no conversation to respond to.
 - On first stop attempt: read agent's raw output from transcript, run summarizer to get draft
 - Return `{"decision": "block", "reason": "DELIVERY REVIEW\n\nDraft message:\n{draft}\n\nChoose:\n- SEND (deliver as-is)\n- EDIT: your revised message\n- REACT: emoji (e.g. REACT: 😁)\n- SILENT (no response)\n- CONTINUE (keep working)"}`
 - On second stop: parse agent's response for delivery choice, write to session, allow stop
@@ -142,8 +143,8 @@ No prerequisites — builds on existing Stop hook, summarizer, and `set_reaction
 - After session completes, check AgentSession for delivery instruction field
 - `delivery_action: "send"` + `delivery_text: "..."` → send via `send_response_with_files()`
 - `delivery_action: "react"` + `delivery_emoji: "😁"` → call `set_reaction()`, no text
-- `delivery_action: "silent"` → set completion emoji, send nothing
-- `delivery_action: None` (no review gate ran) → fall through to existing summarizer path (backward compat)
+- `delivery_action: "silent"` → truly nothing sent, no emoji, no text
+- `delivery_action: None` (no review gate ran, e.g. subagent/programmatic session) → fall through to existing summarizer path (backward compat)
 - This field is checked BEFORE the summarizer runs, so the summarizer only fires as safety net when no delivery instruction exists
 
 **Component 3 — Teammate persona prompt** (`agent/teammate_handler.py` → rename to `agent/qa_handler.py`):
@@ -185,7 +186,7 @@ No prerequisites — builds on existing Stop hook, summarizer, and `set_reaction
 
 ### Error State Rendering
 - [ ] If delivery_action is set but bridge can't execute (Telegram API error) → dead-letter queue (existing path)
-- [ ] If agent enters infinite CONTINUE loop → cap at 3 review-gate cycles, then force SEND
+- [ ] If agent keeps choosing CONTINUE → existing nudge cap (50) is the safety backstop; no additional cap on review gate
 
 ## Test Impact
 
@@ -200,7 +201,7 @@ No prerequisites — builds on existing Stop hook, summarizer, and `set_reaction
 - **Replacing the summarizer entirely**: The summarizer is still useful as a draft generator. Don't remove it — change who calls it (stop hook) and who has final say (agent).
 - **Complex NLU for false-stop detection**: Simple heuristics ("I started", "Let me check" without substantive content) are enough. Don't build a classifier for this.
 - **Making the review gate async/streaming**: The stop hook is synchronous in the SDK. Don't try to stream the draft. The agent sees the whole thing at once and decides.
-- **Per-persona review gate behavior**: Both PM and Teammate use the same mechanism. Don't special-case. The persona prompt shapes what the agent decides, not the gate itself.
+- **Per-persona review gate behavior**: All personas use the same mechanism when Telegram-triggered. Don't special-case. The persona prompt shapes what the agent decides, not the gate itself.
 - **3-way classifier changes**: Don't change `classify_needs_response()`. The agent overrides classification from inside the session.
 
 ## Risks
@@ -215,7 +216,7 @@ No prerequisites — builds on existing Stop hook, summarizer, and `set_reaction
 
 ### Risk 3: CONTINUE loop — agent never actually stops
 **Impact:** Session runs forever, burning tokens.
-**Mitigation:** Cap review-gate cycles at 3. After 3 CONTINUEs, force SEND with the latest draft. Log a warning.
+**Mitigation:** CONTINUE is a suggestion, not a forced loop. The agent decides whether to continue — it has full context of what it's done and what remains. The existing nudge cap (50) is the safety backstop for runaway sessions. No additional cap needed on the review gate itself.
 
 ## Race Conditions
 
@@ -231,7 +232,7 @@ No prerequisites — builds on existing Stop hook, summarizer, and `set_reaction
 - CLI syntax stripping/sanitizing in response.py (fix root cause instead)
 - Bookend subagents (intake/review) — the stop hook IS the review step
 - New MCP server for Telegram
-- Changes to DevSession behavior (only ChatSession personas affected)
+- Adding the review gate to subagent or programmatically-spawned sessions (only Telegram-triggered sessions get it)
 - Modifying the summarizer itself (it stays the same, just called from a new location)
 
 ## Update System
@@ -263,13 +264,14 @@ All changes use existing infrastructure. No `.mcp.json` changes.
 - [ ] Stop hook presents draft + choices to agent before delivery
 - [ ] Agent can SEND, EDIT, REACT, SILENT, or CONTINUE from the review gate
 - [ ] Summarizer output is used as draft, not as final message (agent has last word)
-- [ ] Both PM and Teammate personas get the review gate
+- [ ] All personas (PM, Teammate, Dev) get the review gate when Telegram-triggered; subagent/programmatic sessions skip it
 - [ ] Teammate prompt enforces clarification-first, multi-perspective, conversational tone
 - [ ] Classification result passed as context to agent (advisory, not hard gate)
 - [ ] `valor-telegram send` CLI example removed from persona prompt
 - [ ] React-only path works: agent chooses REACT → bridge sets emoji, no text sent
-- [ ] False-stop detection: agent can CONTINUE when it hasn't actually finished
+- [ ] False-stop detection: CONTINUE suggested when output looks like a promise, not a deliverable
 - [ ] Review gate skipped when agent already sent messages mid-session (`has_pm_messages()`)
+- [ ] SILENT means truly silent — no emoji, no text
 - [ ] Existing tests updated and passing
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
@@ -318,12 +320,12 @@ All changes use existing infrastructure. No `.mcp.json` changes.
 - **Agent Type**: builder
 - **Parallel**: false
 - Enhance `agent/hooks/stop.py`:
+  - Activation rule: only fire when `TELEGRAM_CHAT_ID` and `TELEGRAM_REPLY_TO` env vars are set (Telegram-triggered session)
   - On first stop: read transcript, run summarizer for draft, return `{"decision": "block", "reason": "<review prompt with draft + choices>"}`
   - Track review state (in-memory dict keyed by session_id, or flag on AgentSession)
   - On second stop: parse agent's delivery choice, write to AgentSession delivery fields, return `{}`
   - Skip gate when `has_pm_messages()` is true
-  - Cap CONTINUE cycles at 3
-- Add false-stop heuristics: detect "I started...", "Let me check..." without substance → suggest CONTINUE
+- Add false-stop heuristics: detect "I started...", "Let me check..." without substance → suggest CONTINUE (no cap, just a suggestion)
 - Create unit tests for review gate logic (parsing choices, edge cases)
 
 ### 3. Wire delivery execution in bridge
@@ -337,7 +339,7 @@ All changes use existing infrastructure. No `.mcp.json` changes.
   - Check `session.delivery_action` before running summarizer
   - If `"send"`: use `session.delivery_text` as the final message (skip summarizer)
   - If `"react"`: call `set_reaction()` with `session.delivery_emoji`, send no text
-  - If `"silent"`: set completion emoji, send no text
+  - If `"silent"`: truly nothing — no emoji, no text, session just ends
   - If `None`: fall through to existing summarizer path (backward compat)
 
 ### 4. Rename teammate_handler → qa_handler and rewrite prompt
@@ -423,6 +425,5 @@ All changes use existing infrastructure. No `.mcp.json` changes.
 
 ## Open Questions
 
-1. **Review gate for all sessions or opt-in?** Currently scoped to both PM and Teammate. Should DevSessions also get the review gate (they produce code, not messages — probably not)?
-2. **CONTINUE cap**: 3 cycles feels right. Should the cap be configurable per-persona, or is a fixed cap sufficient?
-3. **Silence behavior**: When agent chooses SILENT, should we still set a completion emoji (like the existing 🏆) or truly nothing? Leaning toward a subtle "seen" reaction (👀) to acknowledge the message was received.
+1. **Summarizer call in the stop hook**: The summarizer is currently async and expects a session object. The stop hook has access to `session_id` and `transcript_path`. Should the hook call the summarizer directly (importing it), or write a request to Redis and wait for the bridge to process it? Direct import is simpler but couples the hook to the summarizer.
+2. **Review gate prompt format**: Should the choices be presented as a structured format (JSON-like) for reliable parsing, or natural language that the agent responds to conversationally? Structured is easier to parse; natural language is more flexible.
