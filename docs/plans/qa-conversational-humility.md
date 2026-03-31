@@ -133,13 +133,15 @@ No prerequisites — builds on existing Stop hook, summarizer, and `set_reaction
 
 **Component 1 — Stop hook review gate** (`agent/hooks/stop.py`):
 - **Activation rule**: Only fires when the session has an originating Telegram message (i.e., `TELEGRAM_CHAT_ID` and `TELEGRAM_REPLY_TO` env vars are set). Subagent sessions, programmatic sessions, and local Claude Code sessions skip the gate entirely — they have no conversation to respond to.
-- On first stop attempt: read agent's raw output from transcript, run summarizer to get draft
-- Return `{"decision": "block", "reason": "DELIVERY REVIEW\n\nDraft message:\n{draft}\n\nChoose:\n- SEND (deliver as-is)\n- EDIT: your revised message\n- REACT: emoji (e.g. REACT: 😁)\n- SILENT (no response)\n- CONTINUE (keep working)"}`
-- On second stop: parse agent's response for delivery choice, write to session, allow stop
-- Use a session-level flag (e.g., `delivery_reviewed: true` on AgentSession or in-memory) to distinguish first vs. second stop
-- For sessions where the agent already used `send_telegram.py` mid-session (`has_pm_messages()` is true), skip the review gate entirely — the agent already handled delivery
+- **How it works mechanically**:
+  1. First stop: hook reads agent's raw output from transcript file (`input_data["transcript_path"]`, same pattern as `subagent_stop.py`). Calls summarizer via lazy import (`from bridge.summarizer import summarize_response` — hooks run in the parent bridge process, not a subprocess, so all bridge imports are available). Returns `{"decision": "block", "reason": "<review prompt with draft + choices>"}`. The SDK injects the `reason` text as feedback to the agent.
+  2. Agent sees the draft and choices, responds with its delivery decision (e.g., "SEND", "EDIT: revised text", "REACT: 😁", "SILENT", "CONTINUE"), then tries to stop again.
+  3. Second stop: hook reads the agent's latest output from the transcript tail (last ~500 chars, same `_extract_output_tail` pattern from `subagent_stop.py`). Parses the delivery choice. Writes to AgentSession delivery fields. Returns `{}` (allow stop).
+- Use an in-memory dict keyed by session_id to track review state (first stop vs. second stop). Module-level `_review_state: dict[str, bool] = {}` — cleared when session completes.
+- Skip gate when `has_pm_messages()` is true (agent already handled delivery mid-session)
+- **Observability**: Log review gate activation, draft length, agent's delivery choice, and elapsed time at INFO level
 
-**Component 2 — Delivery execution** (`bridge/response.py` or `agent/job_queue.py`):
+**Component 2 — Delivery execution** (`bridge/response.py`):
 - After session completes, check AgentSession for delivery instruction field
 - `delivery_action: "send"` + `delivery_text: "..."` → send via `send_response_with_files()`
 - `delivery_action: "react"` + `delivery_emoji: "😁"` → call `set_reaction()`, no text
@@ -195,6 +197,7 @@ No prerequisites — builds on existing Stop hook, summarizer, and `set_reaction
 - [ ] `tests/unit/test_config_driven_routing.py` — NO CHANGE: `classify_needs_response` interface unchanged.
 - [ ] `tests/e2e/test_message_pipeline.py` — NO CHANGE: classifier interface unchanged.
 - [ ] `tests/unit/test_summarizer.py` — NO CHANGE: summarizer still works the same, just called from stop hook instead of bridge.
+- [ ] `tests/unit/test_stop_hook.py` — UPDATE: existing tests for SDLC branch enforcement must still pass; add new tests for review gate (draft generation, choice parsing, delivery field writes, activation rule).
 
 ## Rabbit Holes
 
@@ -241,9 +244,9 @@ No update system changes required — code changes propagate via `git pull`. No 
 
 ## Agent Integration
 
-No new MCP server needed. Changes are internal to the agent hooks and bridge response pipeline:
+No new MCP server needed. Changes are internal to the agent hooks and bridge response pipeline. **Note**: hooks run in the parent bridge process (not the Claude Code subprocess), so all bridge/model imports are available via lazy import.
 
-- `agent/hooks/stop.py` — enhanced with review gate logic (runs summarizer, presents choices)
+- `agent/hooks/stop.py` — enhanced with review gate logic (lazy-imports summarizer, presents choices)
 - `agent/sdk_client.py` — passes classification context to agent, injects Telegram env vars for teammate sessions
 - `agent/teammate_handler.py` → `agent/qa_handler.py` — renamed, prompt rewritten with conversational guidelines
 - `models/agent_session.py` — 3 new nullable fields for delivery instructions
@@ -418,12 +421,17 @@ All changes use existing infrastructure. No `.mcp.json` changes.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
-| CONCERN | [agent-type] | [The concern raised] | [How/whether it was addressed] |
+| # | CONCERN | CRITIC | STATUS |
+|---|---------|--------|--------|
+| 1 | Stop hook can't read agent's delivery choice — StopHookInput has no raw output field | Archaeologist | RESOLVED — hook reads transcript tail via `transcript_path` (same pattern as `subagent_stop.py`) |
+| 2 | Stop hook can't import summarizer (subprocess isolation) | Skeptic | RESOLVED — hooks run in parent bridge process (confirmed by `session_registry.py` docs), lazy import works |
+| 3 | Delivery execution location unspecified (response.py vs job_queue.py) | Operator | RESOLVED — committed to `bridge/response.py` |
+| 4 | `test_stop_hook.py` missing from Test Impact | Operator | RESOLVED — added to Test Impact section |
+| 5 | Review gate adds latency to every session | Skeptic | ACCEPTED — ~500ms Haiku call + 1 agent turn. Skipped when `has_pm_messages()` true. |
+| 6 | `qa_handler` rename may not be needed if Teammate is a proper persona | Simplifier | NOTED — rename still useful for clarity (teammate_handler → qa_handler) but open to keeping `teammate_handler` if preferred |
 
 ---
 
 ## Open Questions
 
-1. **Summarizer call in the stop hook**: The summarizer is currently async and expects a session object. The stop hook has access to `session_id` and `transcript_path`. Should the hook call the summarizer directly (importing it), or write a request to Redis and wait for the bridge to process it? Direct import is simpler but couples the hook to the summarizer.
-2. **Review gate prompt format**: Should the choices be presented as a structured format (JSON-like) for reliable parsing, or natural language that the agent responds to conversationally? Structured is easier to parse; natural language is more flexible.
+None — all questions resolved during spike and critique phases.
