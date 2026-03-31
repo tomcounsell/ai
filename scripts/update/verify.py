@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 
 # Ensure PATH includes common tool locations (launchd has minimal PATH)
@@ -637,6 +639,48 @@ def verify_models(project_dir: Path) -> list[str]:
     return errors
 
 
+def _check_bridge_heartbeat(project_dir: Path, max_age_seconds: int = 300) -> str | None:
+    """Check bridge log for a recent heartbeat, proving Telegram is connected.
+
+    Returns a short status string (e.g. "uptime=5m") if a recent heartbeat
+    is found, or None if no evidence of a healthy bridge.
+    """
+    log_path = project_dir / "logs" / "bridge.log"
+    if not log_path.exists():
+        return None
+
+    # Read last ~50 lines efficiently
+    try:
+        tail = subprocess.run(
+            ["tail", "-50", str(log_path)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        lines = tail.stdout.strip().splitlines()
+    except Exception:
+        return None
+
+    # Look for the most recent heartbeat line
+    # Format: {"timestamp": "...", ... "message": "[heartbeat] Bridge alive (uptime=2m, workers=0)"}
+    heartbeat_re = re.compile(r"\[heartbeat\] Bridge alive \(uptime=(\d+m), workers=(\d+)\)")
+    for line in reversed(lines):
+        match = heartbeat_re.search(line)
+        if not match:
+            continue
+        # Verify timestamp is recent
+        try:
+            ts_match = re.search(r'"timestamp":\s*"([^"]+)"', line)
+            if ts_match:
+                ts = datetime.fromisoformat(ts_match.group(1).replace("Z", "+00:00"))
+                age = (datetime.now(UTC) - ts).total_seconds()
+                if age <= max_age_seconds:
+                    return f"uptime={match.group(1)}"
+        except (ValueError, TypeError):
+            continue
+    return None
+
+
 def check_telegram_session(project_dir: Path) -> ToolCheck:
     """Check if the Telegram session file exists and is authorized.
 
@@ -710,7 +754,16 @@ def check_telegram_session(project_dir: Path) -> ToolCheck:
             error="Session expired/invalid. Run: python scripts/telegram_login.py",
         )
     else:
-        # Connection error, timeout, etc. — session file exists, don't block on it
+        # Direct auth check failed (often because bridge holds the session lock).
+        # Fall back to checking bridge logs for recent heartbeats.
+        bridge_status = _check_bridge_heartbeat(project_dir)
+        if bridge_status:
+            return ToolCheck(
+                name="telegram_session",
+                available=True,
+                version=f"connected (via bridge heartbeat, {bridge_status})",
+            )
+        # No heartbeat either — genuinely unknown
         detail = auth_status.replace("error:", "", 1)
         return ToolCheck(
             name="telegram_session",
