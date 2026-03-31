@@ -129,6 +129,7 @@ _BRIDGE_PROJECT_DIR = Path(__file__).parent.parent
 # Flood-backoff and last-connected file paths
 _FLOOD_BACKOFF_FILE = _BRIDGE_PROJECT_DIR / "data" / "flood-backoff"
 _LAST_CONNECTED_FILE = _BRIDGE_PROJECT_DIR / "data" / "last_connected"
+_bridge_was_connected = False  # Set True after successful Telegram auth
 
 # Staleness threshold: ignore flood-backoff files older than 24 hours
 _FLOOD_BACKOFF_MAX_AGE_SECONDS = 24 * 3600
@@ -831,8 +832,9 @@ async def main():
         # Save to subconscious memory (non-fatal, never crashes bridge)
         try:
             if text and text.strip() and not getattr(sender, "bot", False):
-                from models.memory import Memory
                 from popoto import InteractionWeight
+
+                from models.memory import Memory
 
                 Memory.safe_save(
                     agent_id=sender_name or "unknown",
@@ -1486,7 +1488,10 @@ async def main():
             pass
 
         # Write final last-connected timestamp before shutting down
-        _write_last_connected()
+        # Only if we actually connected successfully (don't poison catchup
+        # lookback when bridge exits due to auth failure)
+        if _bridge_was_connected:
+            _write_last_connected()
 
         logger.info("Waiting 2s for in-flight tasks to finish...")
         await asyncio.sleep(2)
@@ -1570,6 +1575,8 @@ async def main():
                 _cleanup_session_locks()
             await asyncio.sleep(wait_time)
     logger.info("Connected to Telegram")
+    global _bridge_was_connected
+    _bridge_was_connected = True
     _clear_flood_backoff()
     _write_last_connected()
 
@@ -1805,9 +1812,8 @@ async def main():
 
         # Configure popoto embedding provider before starting watcher
         try:
-            from popoto.embeddings.openai import OpenAIProvider
-
             import popoto
+            from popoto.embeddings.openai import OpenAIProvider
 
             popoto.configure(embedding_provider=OpenAIProvider())
             logger.info("Configured popoto OpenAI embedding provider")
