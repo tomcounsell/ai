@@ -29,8 +29,8 @@ def _filter_format_timestamp(ts: float | None) -> str:
     """Jinja2 filter: format Unix timestamp to humanized relative time."""
     if ts is None:
         return "-"
-    dt = datetime.datetime.fromtimestamp(ts, tz=datetime.UTC)
-    now = utc_now()
+    dt = datetime.datetime.fromtimestamp(ts, tz=datetime.UTC).astimezone()
+    now = utc_now().astimezone()
     diff = now - dt
 
     if diff.total_seconds() < 0:
