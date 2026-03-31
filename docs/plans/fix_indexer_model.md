@@ -162,7 +162,39 @@ No agent integration required -- the knowledge indexer is called by the knowledg
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Critics**: Skeptic, Operator, Adversary, Simplifier (Archaeologist and User skipped per Small appetite)
+**Findings**: 2 total (0 blockers, 2 concerns, 0 nits)
+
+### Concerns
+
+#### 1. Unrelated popoto regression test smuggled into scope
+- **Severity**: CONCERN
+- **Critics**: Simplifier, Skeptic
+- **Location**: Step by Step Tasks / Task 1 bullet 4, Success Criteria #4, Test Impact (new tests)
+- **Finding**: The popoto long-filename regression test (">255 chars") addresses a different bug (`popoto>=1.4.4` pin) that is unrelated to the stale model ID problem. It fails the Simplifier test: removing it still fully solves the stated problem.
+- **Suggestion**: Remove the popoto regression test from this plan. If it is needed, file a separate issue or add it to a general test-coverage sweep.
+
+#### 2. Silent degradation not addressed
+- **Severity**: CONCERN
+- **Critics**: Operator
+- **Location**: Solution / Technical Approach
+- **Finding**: The fallback path (line 121-122) logs at `debug` level when Haiku summarization fails, making production failures invisible. The plan fixes the immediate 404 but does not improve observability for future model staleness.
+- **Suggestion**: Consider upgrading the log level from `debug` to `warning` in the fallback path, so future model ID failures surface in production logs. This is a one-line change and fits the Small appetite. Alternatively, note this as out of scope and file a follow-up.
+
+### Structural Check Results
+
+| Check | Status | Detail |
+|-------|--------|--------|
+| Required sections | PASS | Documentation, Update System, Agent Integration, Test Impact all present |
+| Task numbering | PASS | Tasks 1-2, sequential, no gaps |
+| Dependencies valid | PASS | Task 2 depends on build-fix-model (Task 1 ID), valid |
+| File paths exist | PASS | 4 of 4 referenced files exist |
+| Prerequisites met | PASS | No prerequisites defined |
+| Cross-references | PASS | All success criteria map to tasks; no-gos not in solution |
+
+### Verdict
+
+**READY TO BUILD** -- No blockers. Two concerns are acknowledged: (1) the popoto regression test is scope creep that should be removed or filed separately, and (2) the silent fallback logging could be improved but is not required for the fix.
 
 ---
 
