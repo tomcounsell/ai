@@ -402,14 +402,12 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             log("WARN: Bridge not running after restart", v)
             result.warnings.append("Bridge not running after restart")
 
-        # Restart web UI if it was running
-        if service.is_webui_running():
-            if service.restart_webui(project_dir):
-                log("Web UI restarted (port 8500)", v)
-            else:
-                result.warnings.append("Web UI restart failed")
+        # Always restart web UI to pick up code/dep changes
+        if service.restart_webui(project_dir):
+            log("Web UI restarted (port 8500)", v)
         else:
-            log("Web UI not running, skipping", v)
+            log("WARN: Web UI failed to start", v)
+            result.warnings.append("Web UI failed to start")
 
         # Check update cron
         if service.is_update_cron_installed():
