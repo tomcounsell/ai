@@ -23,9 +23,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from popoto.exceptions import ModelException
-
 from models.agent_session import AgentSession
+from popoto.exceptions import ModelException
 
 logger = logging.getLogger(__name__)
 

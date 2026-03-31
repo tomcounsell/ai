@@ -7,7 +7,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from popoto.exceptions import ModelException
 
 from monitoring.session_watchdog import (
     assess_session_health,
@@ -16,6 +15,7 @@ from monitoring.session_watchdog import (
     detect_repetition,
     read_recent_tool_calls,
 )
+from popoto.exceptions import ModelException
 
 # ---------------------------------------------------------------------------
 # Helpers
