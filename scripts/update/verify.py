@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from scripts.update.service import is_bridge_running
+
 # Ensure PATH includes common tool locations (launchd has minimal PATH)
 _EXTRA_PATHS = [
     str(Path.home() / ".pyenv" / "shims"),
@@ -701,7 +703,15 @@ def check_telegram_session(project_dir: Path) -> ToolCheck:
             error="No session file in data/. Run: python scripts/telegram_login.py",
         )
 
-    # Check authorization using Telethon (connect-only, no SendCodeRequest).
+    # If the bridge is already running, it holds a lock on the session file.
+    # Opening a second Telethon client causes SQLite lock contention and
+    # produces false "unauthorized" results. Trust the running bridge instead.
+    if is_bridge_running():
+        return ToolCheck(
+            name="telegram_session", available=True, version="authorized (bridge running)"
+        )
+
+    # Bridge is NOT running — safe to check authorization directly.
     # Outputs one of: authorized, unauthorized, flood:NNN, error:MESSAGE
     check_script = (
         "import asyncio, os, sys; "
