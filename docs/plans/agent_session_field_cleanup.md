@@ -38,6 +38,22 @@ The [`AgentSession`](../../models/agent_session.py) model has grown to ~50 field
 - **[#530](https://github.com/tomcounsell/ai/issues/530)**: OOP audit of AgentSession god-object — Identified structural debt, now closed.
 - **[#608](https://github.com/tomcounsell/ai/issues/608)**: Rename "job" terminology to "agent_session" — Open, complementary but independent scope.
 
+## Spike Results
+
+### spike-1: Popoto DatetimeField backward compatibility with float data
+- **Assumption**: "DatetimeField can gracefully read existing float timestamp data from Redis"
+- **Method**: code-read
+- **Finding**: Popoto's `decode_custom_types` returns raw floats unchanged (they're not tagged dicts), and the model constructor accepts them without type-checking. So existing float data won't crash on read — it passes through as a raw float. However, DatetimeField methods (like `auto_now`) expect `datetime` objects. **Migration is required**: read the float, convert with `datetime.fromtimestamp()`, re-save. This is a standard schema migration, not a Popoto limitation.
+- **Confidence**: high (confirmed by Popoto maintainer)
+- **Impact on plan**: A migration script is needed as a build task. Property-level fallback is NOT sufficient — the data must be converted. Added as Step 1.5 in tasks.
+
+### spike-2: SortedField score compatibility
+- **Assumption**: "Changing SortedField from type=float to type=datetime breaks existing sorted set scores"
+- **Method**: code-read
+- **Finding**: Safe. SortedField's `convert_to_numeric()` converts datetime via `.timestamp()` which produces the same Unix float. Existing float scores in the sorted set remain valid. No migration needed for sorted set indexes — only the hash field values need conversion.
+- **Confidence**: high
+- **Impact on plan**: No additional work for SortedField scores.
+
 ## Data Flow
 
 AgentSession is created and mutated across the full message lifecycle:
@@ -139,15 +155,15 @@ No prerequisites — this work modifies only internal model fields with no exter
 
 ## Rabbit Holes
 
-- **Full Redis data migration**: Migrating all existing float timestamps and flat history strings in Redis is tempting but low-value — sessions expire after 90 days. Better to handle gracefully in property accessors (detect float vs datetime) and let old data age out.
+- **Over-engineering the migration script**: The migration is a simple loop — read float, convert, save. Don't add rollback logic, progress tracking, or batch processing. Sessions are small, the loop is fast.
 - **Caching derived properties**: `session_events` scan is O(n) but capped at 20 entries. Adding `@functools.lru_cache` or `__slots__` optimization is premature.
 - **Refactoring PipelineStateMachine**: The state machine reads `stage_states` which becomes a derived property. Tempting to refactor the state machine itself, but it should just call the property — separate concern.
 
 ## Risks
 
 ### Risk 1: Redis data format incompatibility
-**Impact:** Existing sessions become unreadable after field type changes (float→datetime, string→dict)
-**Mitigation:** Property accessors detect and handle both formats during transition period. Sessions expire after 90 days, so old format ages out naturally. Optional migration script for immediate cleanup.
+**Impact:** Existing sessions with float timestamps won't work correctly with DatetimeField methods (e.g., `auto_now` comparison)
+**Mitigation:** One-time migration script runs before deployment. Popoto reads raw floats without crashing — the migration loop reads the float, converts with `datetime.fromtimestamp()`, and re-saves in proper format. SortedField scores need no migration (same numeric scale).
 
 ### Risk 2: Breakage scope
 **Impact:** ~161 timestamp occurrences across ~44 files means high chance of missed callers
@@ -273,6 +289,17 @@ No agent integration required — AgentSession is used internally by the bridge,
 - Update `models/agent_session.py`: change field types, rename fields, add DictFields, add property accessors, remove dead fields and trivial methods
 - Update `_JOB_FIELDS` in `agent/job_queue.py` to match new field names
 
+### 1.5. Migration script
+- **Task ID**: build-migration
+- **Depends On**: build-model
+- **Validates**: manual run against test Redis
+- **Assigned To**: model-builder
+- **Agent Type**: builder
+- **Parallel**: true (with build-bridge, build-agent, build-tools-ui)
+- Create `scripts/migrate_datetime_fields.py` — loop all AgentSessions, convert float timestamps to datetime, convert flat history strings to SessionEvent dicts
+- Recipe: `for s in AgentSession.query.all(): if isinstance(s.created_at, float): s.created_at = datetime.fromtimestamp(s.created_at, tz=timezone.utc); s.save()`
+- Run as part of deployment before restarting bridge
+
 ### 2. Update bridge callers
 - **Task ID**: build-bridge
 - **Depends On**: build-model
@@ -378,7 +405,7 @@ No agent integration required — AgentSession is used internally by the bridge,
 
 ## Open Questions
 
-1. **Migration strategy for existing Redis data:** Should we write a one-time migration script to convert existing float timestamps and flat history strings, or let old sessions age out naturally (90-day TTL)? The property accessors can handle both formats during transition.
+1. ~~**Migration strategy for existing Redis data**~~ — **Resolved:** One-time migration script (spike-1 confirmed Popoto reads floats without crashing, simple convert-and-save loop). Added as build task 1.5.
 
 2. **SessionEvent cap:** Currently `HISTORY_MAX_ENTRIES = 20`. With richer event data (summaries, delivered messages), should this cap increase? Higher cap means more Redis storage per session but preserves more interaction history.
 
