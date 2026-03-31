@@ -104,11 +104,14 @@ Based on the assessment, invoke exactly ONE sub-skill and return.
 | 5 | Branch exists, no PR | `/do-build` with plan path | Build must create the PR — resume build |
 | 6 | Tests failing | `/do-patch` then `/do-test` | Fix what is broken |
 | 7 | PR exists, no review | `/do-pr-review {pr_number}` | Code is ready for review |
-| 8 | PR review has blockers or nits | `/do-patch` | Address review feedback |
-| 9 | Review APPROVED, docs NOT done (see Step 3) | `/do-docs` | Docs are required before merge |
-| 10 | Review APPROVED, docs done, ready to merge | Report done | PM delivers to human |
+| 8 | PR review has findings (blockers, nits, OR tech debt) | `/do-patch` | ALL findings must be addressed |
+| 8b | Patch applied after review findings | `/do-pr-review {pr_number}` | Re-review is REQUIRED after every patch |
+| 9 | Review APPROVED with zero findings, docs NOT done (see Step 3) | `/do-docs` | Docs are required before merge |
+| 10 | Review APPROVED with zero findings, docs done, ready to merge | Report done | PM delivers to human |
 
-**Row 9 is the critical gate**: A clean review does NOT mean "all stages complete." You MUST run Step 3's docs check before dispatching row 10. If you cannot confirm docs are done, dispatch `/do-docs`.
+**Row 8/8b is the patch-review cycle**: A "minimum approve" with unresolved nits or tech debt is NOT sufficient. Every finding from the review — blockers, nits, suggestions, and tech debt — must be patched or explicitly annotated with inline comments explaining why the finding was left in place. After patching, a fresh `/do-pr-review` is mandatory to verify all findings were addressed. This cycle repeats until the review returns zero unresolved findings.
+
+**Row 9 is the docs gate**: A clean review does NOT mean "all stages complete." You MUST run Step 3's docs check before dispatching row 10. If you cannot confirm docs are done, dispatch `/do-docs`.
 
 **CRITICAL**: Before dispatching `/do-pr-review`, verify a PR actually exists by checking the output of `gh pr list`. If no PR exists for this branch, dispatch `/do-build` instead — it handles PR creation. Never send `/do-pr-review` without a real PR number.
 
