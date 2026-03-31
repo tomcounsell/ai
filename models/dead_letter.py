@@ -14,6 +14,6 @@ class DeadLetter(Model):
     chat_id = KeyField()
     project_key = KeyField(null=True)
     reply_to = Field(type=int, null=True)
-    text = Field(max_length=20_000)
+    text = Field()
     created_at = SortedField(type=float)
     attempts = IntField(default=0)

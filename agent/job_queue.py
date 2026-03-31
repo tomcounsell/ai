@@ -96,8 +96,6 @@ def classify_nudge_action(
 # Backward compatibility alias
 RedisJob = AgentSession
 
-MSG_MAX_CHARS = 20_000  # ~5k tokens — reasonable context limit for agent input
-
 # Nudge loop: single nudge model for bridge output routing.
 # The bridge has ONE response to any non-completion: nudge.
 # ChatSession owns all SDLC intelligence; the bridge just keeps it working.
@@ -1495,18 +1493,6 @@ def register_callbacks(
         _response_callbacks[project_key] = response_callback
 
 
-def _truncate_to_limit(text: str, label: str) -> str:
-    """Truncate text to MSG_MAX_CHARS, keeping the tail (most recent context)."""
-    if len(text) <= MSG_MAX_CHARS:
-        return text
-    original_len = len(text)
-    text = "...[truncated]\n" + text[-(MSG_MAX_CHARS - 15) :]
-    logger.warning(
-        f"Truncated {label}: {original_len} -> {len(text)} chars (kept last {MSG_MAX_CHARS} chars)"
-    )
-    return text
-
-
 # === Restart Flag (written by remote-update.sh) ===
 
 _RESTART_FLAG = Path(__file__).parent.parent / "data" / "restart-requested"
@@ -1579,9 +1565,11 @@ async def enqueue_job(
     Add a job to Redis and ensure worker is running.
     Returns queue depth after push.
     """
-    message_text = _truncate_to_limit(message_text, "message_text")
+    from tools.field_utils import log_large_field
+
+    log_large_field("message_text", message_text)
     if revival_context:
-        revival_context = _truncate_to_limit(revival_context, "revival_context")
+        log_large_field("revival_context", revival_context)
 
     depth = await _push_job(
         project_key=project_key,

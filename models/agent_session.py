@@ -33,7 +33,6 @@ from config.enums import ChatMode, ClassificationType, SessionType
 
 logger = logging.getLogger(__name__)
 
-MSG_MAX_CHARS = 20_000
 HISTORY_MAX_ENTRIES = 20
 STEERING_QUEUE_MAX = 10  # Max buffered steering messages per session
 
@@ -81,13 +80,13 @@ class AgentSession(Model):
     scheduling_depth = Field(type=int, default=0)  # Self-scheduling chain depth (cap at 3)
     created_at = SortedField(type=float, partition_by="project_key")
     working_dir = Field()
-    message_text = Field(max_length=MSG_MAX_CHARS)
+    message_text = Field()
     sender_name = Field(null=True)
     sender_id = Field(type=int, null=True)
     chat_id = KeyField(null=True)
     telegram_message_id = Field(type=int, null=True)
     chat_title = Field(null=True)
-    revival_context = Field(null=True, max_length=MSG_MAX_CHARS)
+    revival_context = Field(null=True)
     work_item_slug = Field(null=True)
     task_list_id = Field(null=True)
     classification_type = Field(null=True)  # Actively used by is_sdlc, session_tags, job_scheduler
@@ -105,8 +104,8 @@ class AgentSession(Model):
 
     turn_count = IntField(default=0)
     tool_call_count = IntField(default=0)
-    log_path = Field(null=True, max_length=1000)
-    summary = Field(null=True, max_length=50_000)
+    log_path = Field(null=True)
+    summary = Field(null=True)
     branch_name = Field(null=True)
     tags = ListField(null=True)
     classification_confidence = Field(type=float, null=True)  # Paired with classification_type
@@ -144,15 +143,15 @@ class AgentSession(Model):
     _qa_mode_legacy = Field(type=bool, null=True)
 
     # === Semantic routing fields ===
-    context_summary = Field(null=True, max_length=200)  # What this session is about
-    expectations = Field(null=True, max_length=500)  # What the agent needs from the human
+    context_summary = Field(null=True)  # What this session is about
+    expectations = Field(null=True)  # What the agent needs from the human
 
     # === Steering fields ===
     # Buffered human replies during active pipelines
     queued_steering_messages = ListField(null=True)
 
     # === ChatSession delivery field ===
-    result_text = Field(null=True, max_length=MSG_MAX_CHARS)  # What was delivered to Telegram
+    result_text = Field(null=True)  # What was delivered to Telegram
 
     # === PM self-messaging ===
     # Telegram message IDs sent by the PM via send_telegram tool during this session.
