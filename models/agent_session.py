@@ -311,11 +311,13 @@ class AgentSession(Model):
             **kwargs: Additional AgentSession fields to set.
         """
         now = time.time()
+        chat_id = kwargs.pop("chat_id", None) or f"local{int(now) % 10000}"
         session = cls(
             session_id=session_id,
             session_type=SESSION_TYPE_DEV,
             project_key=project_key,
             working_dir=working_dir,
+            chat_id=chat_id,
             created_at=now,
             started_at=now,
             last_activity=now,

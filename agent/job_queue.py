@@ -1235,23 +1235,37 @@ async def _job_health_check() -> None:
                 reason = f"exceeded timeout ({int(running_seconds)}s > {timeout}s)"
 
         if should_recover:
+            is_local = worker_key.startswith("local")
             logger.warning(
-                "[job-health] Recovering stuck job %s (chat=%s, session=%s): %s",
+                "[job-health] Recovering stuck job %s (chat=%s, session=%s, local=%s): %s",
                 job.job_id,
                 worker_key,
                 job.session_id,
+                is_local,
                 reason,
             )
-            job.status = "pending"
-            job.priority = "high"
-            job.started_at = None
-            job.save()
-            logger.info(
-                "[job-health] Recovered job %s (chat=%s)",
-                job.job_id,
-                worker_key,
-            )
-            _ensure_worker(worker_key)
+            if is_local:
+                # Local CLI sessions have no bridge worker to resume them —
+                # mark abandoned instead of resetting to pending
+                job.status = "abandoned"
+                job.completed_at = now
+                job.save()
+                logger.info(
+                    "[job-health] Marked local job %s as abandoned (chat=%s)",
+                    job.job_id,
+                    worker_key,
+                )
+            else:
+                job.status = "pending"
+                job.priority = "high"
+                job.started_at = None
+                job.save()
+                logger.info(
+                    "[job-health] Recovered job %s (chat=%s)",
+                    job.job_id,
+                    worker_key,
+                )
+                _ensure_worker(worker_key)
             recovered += 1
 
     # === Check PENDING jobs ===
@@ -1272,13 +1286,27 @@ async def _job_health_check() -> None:
             continue
         pending_seconds = now - created_at
         if pending_seconds > JOB_HEALTH_MIN_RUNNING:
-            logger.info(
-                "[job-health] Starting worker for orphaned pending job %s (chat=%s, pending %.0fs)",
-                job.job_id,
-                worker_key,
-                pending_seconds,
-            )
-            _ensure_worker(worker_key)
+            if worker_key.startswith("local"):
+                # Local CLI sessions can't be resumed by bridge workers
+                logger.info(
+                    "[job-health] Marking orphaned local pending job %s "
+                    "as abandoned (chat=%s, pending %.0fs)",
+                    job.job_id,
+                    worker_key,
+                    pending_seconds,
+                )
+                job.status = "abandoned"
+                job.completed_at = now
+                job.save()
+            else:
+                logger.info(
+                    "[job-health] Starting worker for orphaned pending "
+                    "job %s (chat=%s, pending %.0fs)",
+                    job.job_id,
+                    worker_key,
+                    pending_seconds,
+                )
+                _ensure_worker(worker_key)
             workers_started += 1
 
     if checked > 0:

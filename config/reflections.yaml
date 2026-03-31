@@ -32,7 +32,7 @@ reflections:
     priority: high
     execution_type: function
     callable: "agent.job_queue._job_health_check"
-    enabled: false
+    enabled: true
 
   - name: orphan-recovery
     description: "Recover AgentSession objects stranded by index corruption"
