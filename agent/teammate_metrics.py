@@ -28,7 +28,6 @@ def _get_redis():
         return _redis_client
     try:
         import redis
-
         from config.redis_config import get_redis_url
 
         _redis_client = redis.Redis.from_url(get_redis_url(), decode_responses=True)

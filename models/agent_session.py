@@ -18,7 +18,6 @@ import json as _json
 import logging
 import time
 
-from config.enums import ClassificationType, SessionType
 from popoto import (
     AutoKeyField,
     Field,
@@ -29,6 +28,8 @@ from popoto import (
     Model,
     SortedField,
 )
+
+from config.enums import ClassificationType, SessionType
 
 logger = logging.getLogger(__name__)
 
