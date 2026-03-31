@@ -27,7 +27,7 @@ def linkify_references(text: str, project_key: str | None = None) -> str:
 
     # Look up GitHub org/repo from registered project config
     try:
-        from agent.job_queue import get_project_config
+        from agent.agent_session_queue import get_project_config
 
         config = get_project_config(str(project_key))
         github_config = config.get("github", {})

@@ -40,7 +40,7 @@ class TestFormatDuration:
 
 def _make_fake_session(
     session_id="sess-001",
-    job_id="job-001",
+    agent_session_id="session-001",
     status="active",
     created_at=None,
     started_at=None,
@@ -52,7 +52,7 @@ def _make_fake_session(
     now = time.time()
     mock = MagicMock()
     mock.session_id = session_id
-    mock.job_id = job_id
+    mock.agent_session_id = agent_session_id
     mock.status = status
     mock.created_at = created_at or now - 300
     mock.started_at = started_at or now - 200

@@ -70,7 +70,7 @@ SKILL_DETECTORS: dict[str, dict] = {
 def build_coaching_message(
     classification,
     plan_file: str | None = None,
-    job_message_text: str | None = None,
+    session_message_text: str | None = None,
     sdlc_stage_progress: dict | None = None,
 ) -> str:
     """Build a context-aware coaching message for auto-continue.
@@ -83,7 +83,7 @@ def build_coaching_message(
     Args:
         classification: ClassificationResult from the summarizer.
         plan_file: Path to the active plan document, if any.
-        job_message_text: Original message text that triggered the job.
+        session_message_text: Original message text that triggered the session.
         sdlc_stage_progress: Dict mapping stage names to statuses from
             AgentSession.get_stage_progress(). When provided with remaining
             stages, triggers Tier 1c SDLC pipeline coaching.
@@ -134,7 +134,7 @@ def build_coaching_message(
         return _build_skill_coaching_with_file_pointer(plan_file)
 
     # Tier 2b: Detect skill from message text (no plan file available)
-    detected = _detect_active_skill(job_message_text)
+    detected = _detect_active_skill(session_message_text)
     if detected:
         return _build_generic_skill_coaching(detected)
 

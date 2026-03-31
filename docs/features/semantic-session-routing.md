@@ -74,7 +74,7 @@ Create new session           |
 
 ### Phase 3: Active Session Steering (#318)
 
-When semantic routing matches an unthreaded message to a session that is currently **running or active**, the message is pushed to the session's steering queue (`agent/steering.py`) instead of creating a competing job. The Observer picks up the message at its next checkpoint.
+When semantic routing matches an unthreaded message to a session that is currently **running or active**, the message is pushed to the session's steering queue (`agent/steering.py`) instead of creating a competing session. The Observer picks up the message at its next checkpoint.
 
 **Decision matrix:**
 

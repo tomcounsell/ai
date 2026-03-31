@@ -5,8 +5,9 @@ class TestMemoryIngestion:
     """Test Memory.save() for Telegram messages."""
 
     def test_human_message_creates_memory(self):
-        from models.memory import Memory
         from popoto import InteractionWeight
+
+        from models.memory import Memory
 
         m = Memory.safe_save(
             agent_id="test-user",

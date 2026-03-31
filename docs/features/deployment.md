@@ -118,7 +118,7 @@ Every machine automatically polls for updates from `origin/main` every 30 minute
 1. `com.valor.update` fires every 1800 seconds (30 minutes) via `StartInterval`
 2. Runs `scripts/remote-update.sh`, which calls the update orchestrator (`scripts/update/run.py --cron`)
 3. If new commits are detected: pulls changes, syncs dependencies (if dep files changed), writes `data/restart-requested`
-4. The bridge job queue detects the restart flag and triggers a graceful restart after in-flight jobs complete
+4. The bridge session queue detects the restart flag and triggers a graceful restart after in-flight sessions complete
 
 **Verify polling is active:**
 ```bash

@@ -392,7 +392,7 @@ class TestAgentSession:
         # Popoto UniqueKeyField + KeyField limitation: changing a KeyField value
         # changes the db_key, causing pre_save's is_self check to fail. The
         # workaround is delete + recreate (same pattern used in production code
-        # which catches the exception). See agent/job_queue.py:690-694.
+        # which catches the exception). See agent/agent_session_queue.py:690-694.
         s.delete()
         AgentSession.create(
             session_id="tg_valor_200",

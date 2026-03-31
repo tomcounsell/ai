@@ -130,7 +130,7 @@ Jobs are queued per `chat_id` so different chat groups (even for the same projec
 ### Per-Chat Workers
 - `_ensure_worker(chat_id)` -- starts a worker per chat
 - `_worker_loop(chat_id)` -- processes jobs for a chat
-- `_pop_job(chat_id)` -- pops by chat_id
+- `_pop_agent_session(chat_id)` -- pops by chat_id
 - Callbacks remain per `project_key` (Telegram client is project-scoped)
 
 ### Steering Messages
@@ -226,7 +226,7 @@ The `dev-session` agent is defined in `agent/agent_definitions.py`:
 |------|---------|
 | `models/agent_session.py` | AgentSession model with session_type discriminator |
 | `agent/agent_definitions.py` | Agent registry including dev-session |
-| `agent/job_queue.py` | Queue with nudge loop and per-chat workers |
+| `agent/agent_session_queue.py` | Queue with nudge loop and per-chat workers |
 | `agent/sdk_client.py` | SDK client (classification from session, not re-classified) |
 
 ## Migration

@@ -75,7 +75,7 @@ The sessions table column previously labeled "Type" is now "Persona" with displa
 | `bridge/routing.py` | PersonaType, ClassificationType, `resolve_persona()` |
 | `bridge/summarizer.py` | session_mode checks with PersonaType.TEAMMATE |
 | `agent/sdk_client.py` | SessionType, PersonaType for comparisons |
-| `agent/job_queue.py` | SessionType defaults, session_mode reads |
+| `agent/agent_session_queue.py` | SessionType defaults, session_mode reads |
 | `agent/hooks/pre_tool_use.py` | SessionType for env var comparison |
 | `tools/job_scheduler.py` | SessionType for choices and defaults |
 | `ui/data/sdlc.py` | Renamed display function, unified badge colors |

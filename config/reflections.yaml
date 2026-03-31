@@ -27,11 +27,11 @@
 
 reflections:
   - name: health-check
-    description: "Check running jobs for liveness and timeout, recover stuck ones"
+    description: "Check running sessions for liveness and timeout, recover stuck ones"
     interval: 300  # 5 minutes
     priority: high
     execution_type: function
-    callable: "agent.job_queue._job_health_check"
+    callable: "agent.agent_session_queue._agent_session_health_check"
     enabled: true
 
   - name: orphan-recovery
@@ -39,7 +39,7 @@ reflections:
     interval: 1800  # 30 minutes
     priority: normal
     execution_type: function
-    callable: "agent.job_queue.recover_orphaned_jobs_all_projects"
+    callable: "agent.agent_session_queue.recover_orphaned_agent_sessions_all_projects"
     enabled: false
 
   - name: stale-branch-cleanup
@@ -47,7 +47,7 @@ reflections:
     interval: 86400  # daily
     priority: low
     execution_type: function
-    callable: "agent.job_queue.cleanup_stale_branches_all_projects"
+    callable: "agent.agent_session_queue.cleanup_stale_branches_all_projects"
     enabled: false
 
   - name: daily-maintenance

@@ -118,13 +118,13 @@ complete_transcript(
 
 ## Integration Points
 
-The session transcript module is integrated at the job lifecycle boundaries in `agent/job_queue.py`:
+The session transcript module is integrated at the session lifecycle boundaries in `agent/agent_session_queue.py`:
 
-- **Session start**: `start_transcript()` called when a job begins processing
-- **Session end**: `complete_transcript()` called when the job completes or fails
+- **Session start**: `start_transcript()` called when a session begins processing
+- **Session end**: `complete_transcript()` called when the session completes or fails
 
 The `AgentSession` model is used everywhere:
-- `agent/job_queue.py` - Creates/updates AgentSession at job boundaries
+- `agent/agent_session_queue.py` - Creates/updates AgentSession at session boundaries
 - `agent/sdk_client.py` - Marks session as failed on SDK errors
 - `agent/health_check.py` - Updates tool_call_count during sessions
 - `monitoring/session_watchdog.py` - Monitors active sessions for health issues
@@ -143,4 +143,4 @@ from models.agent_session import AgentSession
 deleted = AgentSession.cleanup_expired(max_age_days=90)
 ```
 
-This is called automatically by the reflections maintenance job (step 13: "Redis TTL Cleanup").
+This is called automatically by the reflections maintenance task (step 13: "Redis TTL Cleanup").

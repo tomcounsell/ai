@@ -1,4 +1,4 @@
-"""Tests for job scheduling: scheduled_after, 4-tier priority, FIFO, and CLI tool."""
+"""Tests for session scheduling: scheduled_after, 4-tier priority, FIFO, and CLI tool."""
 
 import asyncio
 import json
@@ -9,7 +9,11 @@ from pathlib import Path
 
 import pytest
 
-from agent.job_queue import PRIORITY_RANK, _extract_job_fields, _pop_job
+from agent.agent_session_queue import (
+    PRIORITY_RANK,
+    _extract_agent_session_fields,
+    _pop_agent_session,
+)
 from models.agent_session import AgentSession
 
 # Project root derived from file location (tests/integration/ -> project root)
@@ -93,52 +97,52 @@ class TestPriorityRank:
         assert set(PRIORITY_RANK.keys()) == {"urgent", "high", "normal", "low"}
 
 
-# === _pop_job Tests ===
+# === _pop_agent_session Tests ===
 
 
 class TestPopJob:
     def test_fifo_ordering(self):
-        """Within same priority, oldest job (FIFO) is popped first."""
+        """Within same priority, oldest session (FIFO) is popped first."""
         _create_pending(created_at=time.time() - 100, message="old")
         _create_pending(created_at=time.time(), message="new")
 
-        job = asyncio.get_event_loop().run_until_complete(_pop_job("test-chat"))
-        assert job is not None
-        assert "old" in job.message_text
+        session = asyncio.run(_pop_agent_session("test-chat"))
+        assert session is not None
+        assert "old" in session.message_text
 
     def test_priority_ordering(self):
         """Higher priority jobs are popped before lower priority ones."""
         _create_pending(priority="low", message="low-prio")
         _create_pending(priority="urgent", message="urgent-prio")
 
-        job = asyncio.get_event_loop().run_until_complete(_pop_job("test-chat"))
-        assert job is not None
-        assert "urgent" in job.message_text
+        session = asyncio.run(_pop_agent_session("test-chat"))
+        assert session is not None
+        assert "urgent" in session.message_text
 
     def test_scheduled_after_future_skipped(self):
         """Jobs with scheduled_after in the future are skipped."""
         future = time.time() + 3600  # 1 hour from now
         _create_pending(scheduled_after=future, message="deferred")
 
-        job = asyncio.get_event_loop().run_until_complete(_pop_job("test-chat"))
-        assert job is None  # No eligible jobs
+        session = asyncio.run(_pop_agent_session("test-chat"))
+        assert session is None  # No eligible sessions
 
     def test_scheduled_after_past_eligible(self):
         """Jobs with scheduled_after in the past are eligible."""
         past = time.time() - 60  # 1 minute ago
         _create_pending(scheduled_after=past, message="ready")
 
-        job = asyncio.get_event_loop().run_until_complete(_pop_job("test-chat"))
-        assert job is not None
-        assert "ready" in job.message_text
+        session = asyncio.run(_pop_agent_session("test-chat"))
+        assert session is not None
+        assert "ready" in session.message_text
 
     def test_scheduled_after_none_eligible(self):
         """Jobs with no scheduled_after are always eligible."""
         _create_pending(message="immediate")
 
-        job = asyncio.get_event_loop().run_until_complete(_pop_job("test-chat"))
-        assert job is not None
-        assert "immediate" in job.message_text
+        session = asyncio.run(_pop_agent_session("test-chat"))
+        assert session is not None
+        assert "immediate" in session.message_text
 
     def test_mixed_deferred_and_immediate(self):
         """Only immediate jobs are popped when deferred jobs exist."""
@@ -146,18 +150,18 @@ class TestPopJob:
         _create_pending(scheduled_after=future, message="deferred", priority="urgent")
         _create_pending(message="immediate", priority="low")
 
-        job = asyncio.get_event_loop().run_until_complete(_pop_job("test-chat"))
-        assert job is not None
-        assert "immediate" in job.message_text
+        session = asyncio.run(_pop_agent_session("test-chat"))
+        assert session is not None
+        assert "immediate" in session.message_text
 
     def test_unknown_priority_defaults_normal(self):
         """Unknown priority values default to normal ranking."""
         _create_pending(priority="unknown", message="unknown-prio")
         _create_pending(priority="low", message="low-prio")
 
-        job = asyncio.get_event_loop().run_until_complete(_pop_job("test-chat"))
-        assert job is not None
-        assert "unknown" in job.message_text  # normal rank < low rank
+        session = asyncio.run(_pop_agent_session("test-chat"))
+        assert session is not None
+        assert "unknown" in session.message_text  # normal rank < low rank
 
 
 # === AgentSession Model Tests ===
@@ -180,11 +184,11 @@ class TestAgentSessionFields:
         session = _create_pending()
         assert session.priority == "normal"
 
-    def test_extract_job_fields_includes_new_fields(self):
-        """_extract_job_fields preserves scheduled_after and scheduling_depth."""
+    def test_extract_agent_session_fields_includes_new_fields(self):
+        """_extract_agent_session_fields preserves scheduled_after and scheduling_depth."""
         future = time.time() + 3600
         session = _create_pending(scheduled_after=future, scheduling_depth=1)
-        fields = _extract_job_fields(session)
+        fields = _extract_agent_session_fields(session)
         assert "scheduled_after" in fields
         assert "scheduling_depth" in fields
         assert float(fields["scheduled_after"]) == pytest.approx(future, abs=1)
@@ -198,7 +202,7 @@ class TestJobSchedulerCLI:
     def test_help(self):
         """Tool responds to --help."""
         result = subprocess.run(
-            [sys.executable, "-m", "tools.job_scheduler", "--help"],
+            [sys.executable, "-m", "tools.agent_session_scheduler", "--help"],
             capture_output=True,
             text=True,
             cwd=_PROJECT_ROOT,
@@ -211,7 +215,14 @@ class TestJobSchedulerCLI:
     def test_status_command(self):
         """Status command returns valid JSON."""
         result = subprocess.run(
-            [sys.executable, "-m", "tools.job_scheduler", "status", "--project", "test-scheduler"],
+            [
+                sys.executable,
+                "-m",
+                "tools.agent_session_scheduler",
+                "status",
+                "--project",
+                "test-scheduler",
+            ],
             capture_output=True,
             text=True,
             cwd=_PROJECT_ROOT,
@@ -223,7 +234,7 @@ class TestJobSchedulerCLI:
         assert "running_count" in data
 
     def test_push_and_pop(self):
-        """Push a job and pop it back."""
+        """Push a session and pop it back."""
         # Use unique project key to avoid interference
         proj = f"test-pushpop-{time.time_ns()}"
 
@@ -232,7 +243,7 @@ class TestJobSchedulerCLI:
             [
                 sys.executable,
                 "-m",
-                "tools.job_scheduler",
+                "tools.agent_session_scheduler",
                 "push",
                 "--message",
                 "test push message",
@@ -253,7 +264,7 @@ class TestJobSchedulerCLI:
             [
                 sys.executable,
                 "-m",
-                "tools.job_scheduler",
+                "tools.agent_session_scheduler",
                 "pop",
                 "--project",
                 proj,
@@ -274,7 +285,7 @@ class TestJobSchedulerCLI:
             [
                 sys.executable,
                 "-m",
-                "tools.job_scheduler",
+                "tools.agent_session_scheduler",
                 "schedule",
                 "--issue",
                 "999999999",
@@ -292,15 +303,15 @@ class TestJobSchedulerCLI:
         assert data["status"] == "error"
 
     def test_cancel_nonexistent(self):
-        """Cancelling nonexistent job returns error."""
+        """Cancelling nonexistent session returns error."""
         result = subprocess.run(
             [
                 sys.executable,
                 "-m",
-                "tools.job_scheduler",
+                "tools.agent_session_scheduler",
                 "cancel",
-                "--job-id",
-                "nonexistent-job-id",
+                "--agent-session-id",
+                "nonexistent-session-id",
             ],
             capture_output=True,
             text=True,
@@ -312,15 +323,15 @@ class TestJobSchedulerCLI:
         assert data["status"] == "error"
 
     def test_bump_nonexistent(self):
-        """Bumping nonexistent job returns error."""
+        """Bumping nonexistent session returns error."""
         result = subprocess.run(
             [
                 sys.executable,
                 "-m",
-                "tools.job_scheduler",
+                "tools.agent_session_scheduler",
                 "bump",
-                "--job-id",
-                "nonexistent-job-id",
+                "--agent-session-id",
+                "nonexistent-session-id",
             ],
             capture_output=True,
             text=True,
@@ -342,7 +353,7 @@ class TestSelfSchedulingProtection:
             [
                 sys.executable,
                 "-m",
-                "tools.job_scheduler",
+                "tools.agent_session_scheduler",
                 "push",
                 "--message",
                 "depth test",
@@ -360,7 +371,7 @@ class TestSelfSchedulingProtection:
 
     def test_depth_cap_enforced(self):
         """Cannot schedule beyond MAX_SCHEDULING_DEPTH via direct function call."""
-        from tools.job_scheduler import MAX_SCHEDULING_DEPTH, _get_scheduling_depth
+        from tools.agent_session_scheduler import MAX_SCHEDULING_DEPTH, _get_scheduling_depth
 
         # Test the constant
         assert MAX_SCHEDULING_DEPTH == 3
@@ -390,7 +401,7 @@ class TestKillCommandIntegration:
     def test_kill_cli_help(self):
         """Kill subcommand shows in help output."""
         result = subprocess.run(
-            [sys.executable, "-m", "tools.job_scheduler", "--help"],
+            [sys.executable, "-m", "tools.agent_session_scheduler", "--help"],
             capture_output=True,
             text=True,
             cwd=_PROJECT_ROOT,
@@ -399,15 +410,15 @@ class TestKillCommandIntegration:
         assert result.returncode == 0
         assert "kill" in result.stdout
 
-    def test_kill_by_job_id_pending(self):
-        """Kill a pending job by job_id via CLI (push then kill)."""
+    def test_kill_by_agent_session_id_pending(self):
+        """Kill a pending session by agent_session_id via CLI (push then kill)."""
         proj = f"test-killid-{time.time_ns()}"
 
         push_result = subprocess.run(
             [
                 sys.executable,
                 "-m",
-                "tools.job_scheduler",
+                "tools.agent_session_scheduler",
                 "push",
                 "--message",
                 "kill-me-pending",
@@ -421,16 +432,16 @@ class TestKillCommandIntegration:
         )
         assert push_result.returncode == 0
         push_data = json.loads(push_result.stdout)
-        job_id = push_data["job_id"]
+        agent_session_id = push_data["agent_session_id"]
 
         result = subprocess.run(
             [
                 sys.executable,
                 "-m",
-                "tools.job_scheduler",
+                "tools.agent_session_scheduler",
                 "kill",
-                "--job-id",
-                job_id,
+                "--agent-session-id",
+                agent_session_id,
             ],
             capture_output=True,
             text=True,
@@ -441,17 +452,17 @@ class TestKillCommandIntegration:
         data = json.loads(result.stdout)
         assert data["status"] == "killed"
         assert data["count"] == 1
-        assert data["jobs"][0]["previous_status"] == "pending"
+        assert data["sessions"][0]["previous_status"] == "pending"
 
     def test_kill_by_session_id(self):
-        """Kill a pending job by session_id via CLI (push then kill)."""
+        """Kill a pending session by session_id via CLI (push then kill)."""
         proj = f"test-killsess-{time.time_ns()}"
 
         push_result = subprocess.run(
             [
                 sys.executable,
                 "-m",
-                "tools.job_scheduler",
+                "tools.agent_session_scheduler",
                 "push",
                 "--message",
                 "kill-by-session",
@@ -471,7 +482,7 @@ class TestKillCommandIntegration:
             [
                 sys.executable,
                 "-m",
-                "tools.job_scheduler",
+                "tools.agent_session_scheduler",
                 "kill",
                 "--session-id",
                 session_id,
@@ -487,14 +498,14 @@ class TestKillCommandIntegration:
         assert data["count"] == 1
 
     def test_kill_nonexistent_job(self):
-        """Kill with nonexistent job_id returns error."""
+        """Kill with nonexistent agent_session_id returns error."""
         result = subprocess.run(
             [
                 sys.executable,
                 "-m",
-                "tools.job_scheduler",
+                "tools.agent_session_scheduler",
                 "kill",
-                "--job-id",
+                "--agent-session-id",
                 "nonexistent-kill-target",
             ],
             capture_output=True,
@@ -513,7 +524,7 @@ class TestKillCommandIntegration:
             [
                 sys.executable,
                 "-m",
-                "tools.job_scheduler",
+                "tools.agent_session_scheduler",
                 "kill",
                 "--session-id",
                 "nonexistent-kill-session",
@@ -529,7 +540,7 @@ class TestKillCommandIntegration:
         assert "not found" in data["message"].lower()
 
     def test_kill_all_with_pending_jobs(self):
-        """Kill --all removes all pending jobs created via CLI."""
+        """Kill --all removes all pending sessions created via CLI."""
         proj = f"test-killall-{time.time_ns()}"
 
         for i in range(2):
@@ -537,7 +548,7 @@ class TestKillCommandIntegration:
                 [
                     sys.executable,
                     "-m",
-                    "tools.job_scheduler",
+                    "tools.agent_session_scheduler",
                     "push",
                     "--message",
                     f"pending-{i}",
@@ -555,7 +566,7 @@ class TestKillCommandIntegration:
             [
                 sys.executable,
                 "-m",
-                "tools.job_scheduler",
+                "tools.agent_session_scheduler",
                 "kill",
                 "--all",
             ],
@@ -577,7 +588,7 @@ class TestKillCommandIntegration:
             [
                 sys.executable,
                 "-m",
-                "tools.job_scheduler",
+                "tools.agent_session_scheduler",
                 "kill",
                 "--all",
             ],
@@ -591,14 +602,14 @@ class TestKillCommandIntegration:
         assert data["status"] in ("ok", "killed")
 
     def test_status_shows_killed_count(self):
-        """Status command includes killed_count after killing a job."""
+        """Status command includes killed_count after killing a session."""
         proj = f"test-killstatus-{time.time_ns()}"
 
         push_result = subprocess.run(
             [
                 sys.executable,
                 "-m",
-                "tools.job_scheduler",
+                "tools.agent_session_scheduler",
                 "push",
                 "--message",
                 "to-be-killed",
@@ -611,16 +622,16 @@ class TestKillCommandIntegration:
             env=_subprocess_env(PROJECT_KEY=proj),
         )
         assert push_result.returncode == 0
-        job_id = json.loads(push_result.stdout)["job_id"]
+        agent_session_id = json.loads(push_result.stdout)["agent_session_id"]
 
         subprocess.run(
             [
                 sys.executable,
                 "-m",
-                "tools.job_scheduler",
+                "tools.agent_session_scheduler",
                 "kill",
-                "--job-id",
-                job_id,
+                "--agent-session-id",
+                agent_session_id,
             ],
             capture_output=True,
             text=True,
@@ -632,7 +643,7 @@ class TestKillCommandIntegration:
             [
                 sys.executable,
                 "-m",
-                "tools.job_scheduler",
+                "tools.agent_session_scheduler",
                 "status",
                 "--project",
                 proj,
@@ -648,13 +659,13 @@ class TestKillCommandIntegration:
         assert data["killed_count"] >= 1
 
     def test_kill_sets_status_to_killed(self):
-        """Verify _kill_job transitions status from pending to killed in Redis."""
-        from tools.job_scheduler import _kill_job
+        """Verify _kill_agent_session transitions status from pending to killed in Redis."""
+        from tools.agent_session_scheduler import _kill_agent_session
 
         session = _create_pending(message="direct-kill-test")
         original_session_id = session.session_id
 
-        result = _kill_job(session, skip_process_kill=True)
+        result = _kill_agent_session(session, skip_process_kill=True)
 
         assert result["status"] == "killed"
         assert result["previous_status"] == "pending"

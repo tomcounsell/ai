@@ -81,7 +81,7 @@ The resolver never blocks message delivery:
 
 ## Race Conditions
 
-Two rapid replies both derive the same root session_id before either is processed. This is handled by `enqueue_job()`'s same-session_id supersede logic (lines 318–336 of `telegram_bridge.py`). No shared mutable state in the chain walk.
+Two rapid replies both derive the same root session_id before either is processed. This is handled by `enqueue_agent_session()`'s same-session_id supersede logic (lines 318–336 of `telegram_bridge.py`). No shared mutable state in the chain walk.
 
 ## Related Features
 

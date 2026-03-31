@@ -116,7 +116,7 @@ ChatSession orchestration uses the graph for pipeline progression. Individual `/
 |------|------|
 | `bridge/pipeline_graph.py` | Canonical graph definition |
 | `agent/hooks/subagent_stop.py` | Calls `classify_outcome()` and routes to `complete_stage()`/`fail_stage()` |
-| `agent/job_queue.py` | Nudge loop uses graph for routing decisions; initializes `stage_states` for SDLC sessions |
+| `agent/agent_session_queue.py` | Nudge loop uses graph for routing decisions; initializes `stage_states` for SDLC sessions |
 | `bridge/coach.py` | Uses `PipelineStateMachine.next_stage(outcome)` for graph-based routing |
 | `bridge/pipeline_state.py` | `PipelineStateMachine` -- stage tracking, outcome classification, and transitions using the graph |
 | `tests/unit/test_pipeline_graph.py` | 27 tests covering all routing scenarios |

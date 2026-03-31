@@ -64,7 +64,7 @@ class TestCatchupRedisDedup:
                 monitored_groups=["dev: valor"],
                 projects_config={},
                 should_respond_fn=AsyncMock(return_value=(True, False)),
-                enqueue_job_fn=enqueue_fn,
+                enqueue_agent_session_fn=enqueue_fn,
                 find_project_fn=find_project,
             )
 
@@ -122,7 +122,7 @@ class TestCatchupRedisDedup:
                 monitored_groups=["dev: valor"],
                 projects_config={},
                 should_respond_fn=mock_should_respond,
-                enqueue_job_fn=enqueue_fn,
+                enqueue_agent_session_fn=enqueue_fn,
                 find_project_fn=find_project,
             )
 
@@ -151,26 +151,26 @@ class TestCompletedSessionGuard:
         # Verify the guard exists in the code
         from pathlib import Path
 
-        job_queue_code = Path("agent/job_queue.py").read_text()
+        queue_code = Path("agent/agent_session_queue.py").read_text()
 
         # The guard should check session_status == "completed" (in classify_nudge_action)
-        assert 'session_status == "completed"' in job_queue_code
+        assert 'session_status == "completed"' in queue_code
         # It should deliver to chat without nudge
-        assert "delivering without nudge" in job_queue_code
+        assert "delivering without nudge" in queue_code
 
     def test_guard_is_before_nudge_routing(self):
         """The completed-session guard must come before the nudge routing logic."""
         from pathlib import Path
 
-        job_queue_code = Path("agent/job_queue.py").read_text()
+        queue_code = Path("agent/agent_session_queue.py").read_text()
 
         # Find positions
-        guard_pos = job_queue_code.find("Session already completed")
-        nudge_pos = job_queue_code.find("await _enqueue_nudge(")
+        guard_pos = queue_code.find("Session already completed")
+        nudge_pos = queue_code.find("await _enqueue_nudge(")
 
         # Guard should be BEFORE the nudge call site
-        assert guard_pos > 0, "completed-session guard not found in job_queue.py"
-        assert nudge_pos > 0, "await _enqueue_nudge() call not found in job_queue.py"
+        assert guard_pos > 0, "completed-session guard not found in agent_session_queue.py"
+        assert nudge_pos > 0, "await _enqueue_nudge() call not found in agent_session_queue.py"
         assert guard_pos < nudge_pos, "completed-session guard should be before nudge call"
 
 
@@ -196,7 +196,7 @@ class TestCatchupCodeStructure:
 
         catchup_code = Path("bridge/catchup.py").read_text()
 
-        enqueue_pos = catchup_code.find("await enqueue_job_fn(")
+        enqueue_pos = catchup_code.find("await enqueue_agent_session_fn(")
         record_pos = catchup_code.find("record_message_processed")
 
         assert record_pos > enqueue_pos, (

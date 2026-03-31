@@ -3,7 +3,7 @@
 Tests check_stalled_sessions (detection) and fix_unhealthy_session (abandon).
 The old stall retry mechanisms (_recover_stalled_pending, _kill_stalled_worker,
 _enqueue_stall_retry) were deleted in the bridge-resilience refactor.
-Recovery is now handled by the unified _job_health_check in agent/job_queue.py.
+Recovery is now handled by the unified _agent_session_health_check in agent/agent_session_queue.py.
 """
 
 import time
@@ -34,13 +34,13 @@ def _make_agent_session(
     last_activity="DEFAULT",
     project_key="test",
     chat_id="12345",
-    job_id="job-001",
+    agent_session_id="session-001",
     history=None,
 ):
     now = time.time()
     ns = SimpleNamespace(
         session_id=session_id,
-        job_id=job_id,
+        agent_session_id=agent_session_id,
         status=status,
         started_at=now - 60 if started_at == "DEFAULT" else started_at,
         created_at=now - 120 if created_at == "DEFAULT" else created_at,

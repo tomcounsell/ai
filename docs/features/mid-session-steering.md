@@ -2,14 +2,14 @@
 
 ## Overview
 
-Mid-session steering allows a user to send a reply-to message in Telegram that gets injected into a currently running agent session, enabling real-time course correction without waiting for the agent to finish. This is distinct from creating a new job or resuming a completed session.
+Mid-session steering allows a user to send a reply-to message in Telegram that gets injected into a currently running agent session, enabling real-time course correction without waiting for the agent to finish. This is distinct from creating a new session or resuming a completed session.
 
 ## How It Works
 
 ### End-to-End Flow
 
 1. **User sends a message** that triggers agent work (e.g., "fix the auth bug").
-2. **Bridge creates a job**, worker picks it up, session status transitions `pending` -> `running`.
+2. **Bridge enqueues a session**, worker picks it up, session status transitions `pending` -> `running`.
 3. **Agent starts executing** -- the session is now in `running` status.
 4. **User sends a reply-to message** to steer the agent (e.g., "actually, focus on OAuth specifically").
 5. **Bridge steering check** queries for sessions with matching `session_id` in `running` or `active` status.
@@ -24,11 +24,11 @@ The agent session goes through these statuses during execution:
 
 | Status | Set By | Meaning | Steerable? |
 |--------|--------|---------|------------|
-| `pending` | Job creation | Queued, waiting for worker | No (race window logged) |
-| `running` | `_pop_job()` | Worker picked up job, agent executing | **Yes** |
-| `active` | `_execute_job()` | Auto-continue deferred | **Yes** |
+| `pending` | Session creation | Queued, waiting for worker | No (race window logged) |
+| `running` | `_pop_agent_session()` | Worker picked up session, agent executing | **Yes** |
+| `active` | `_execute_agent_session()` | Auto-continue deferred | **Yes** |
 | `dormant` | Summarizer | Paused on open question | No |
-| `completed` | Job completion | Work finished | No |
+| `completed` | Session completion | Work finished | No |
 | `failed` | Error handler | Work failed | No |
 
 The steering check queries for both `running` (primary) and `active` (fallback) statuses, since both represent "agent is currently working."
@@ -51,7 +51,7 @@ Telegram Reply
 Bridge (telegram_bridge.py)
     |-- Query AgentSession: status in ("running", "active")
     |-- Match found? --> push_steering_message() --> Redis steering:{session_id}
-    |-- No match? --> Fall through to job queue
+    |-- No match? --> Fall through to session queue
     |
 Agent (health_check.py - PostToolUse hook)
     |-- Every tool call: pop_steering_message()
@@ -74,20 +74,20 @@ The steering check in the bridge uses differentiated error handling:
 
 - **`ConnectionError` / `OSError`**: Logged at ERROR level with full traceback. These indicate Redis or database connectivity issues.
 - **Other exceptions**: Also logged at ERROR level with traceback for visibility. Previously these were silently swallowed with a WARNING log.
-- **No matching session**: Not logged (expected case for non-running threads). The message falls through to the normal job queue.
+- **No matching session**: Not logged (expected case for non-running threads). The message falls through to the normal session queue.
 - **Pending session detected**: Logged at INFO level for observability during the `pending` -> `running` race window.
 
 ## Race Conditions
 
 ### Race 1: Reply during `pending` -> `running` transition
 
-Between job creation and worker pickup (~100ms), a reply could arrive when the session is in `pending` status. The steering check detects this and logs it. The message falls through to the job queue and will be processed normally.
+Between session creation and worker pickup (~100ms), a reply could arrive when the session is in `pending` status. The steering check detects this and logs it. The message falls through to the session queue and will be processed normally.
 
-### Race 2: Reply during session delete/recreate in `_pop_job`
+### Race 2: Reply during session delete/recreate in `_pop_agent_session`
 
-The `_pop_job()` method briefly deletes and recreates the session (two Redis commands). This window is sub-millisecond. If the steering check hits this window, the message falls through to the job queue -- not lost, just slightly delayed.
+The `_pop_agent_session()` method briefly deletes and recreates the session (two Redis commands). This window is sub-millisecond. If the steering check hits this window, the message falls through to the session queue -- not lost, just slightly delayed.
 
-### Race 3: Reply after job completion but before cleanup
+### Race 3: Reply after session completion but before cleanup
 
 If a steering message arrives just as the agent finishes, `pop_all_steering_messages` cleanup runs and logs any unconsumed messages. The message was too late to affect the agent -- correct behavior.
 

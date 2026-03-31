@@ -44,15 +44,15 @@ After the orchestrator completes, audit Redis for stale or abandoned sessions/jo
 
 ```bash
 # Preview stale sessions (killed/abandoned/failed older than 30 min)
-cd ~/src/ai && python -m tools.job_scheduler cleanup --age 30 --dry-run
+cd ~/src/ai && python -m tools.agent_session_scheduler cleanup --age 30 --dry-run
 
 # List any non-terminal sessions that might be stuck
-python -m tools.job_scheduler list --status running,pending
+python -m tools.agent_session_scheduler list --status running,pending
 ```
 
 Report findings:
 - **Clean**: "No stale sessions or jobs"
-- **Stale found**: Show the dry-run output and ask whether to clean up. If approved: `python -m tools.job_scheduler cleanup --age 30`
+- **Stale found**: Show the dry-run output and ask whether to clean up. If approved: `python -m tools.agent_session_scheduler cleanup --age 30`
 
 **Important**: Never change session status via `s.status = ...; s.save()` — Popoto's KeyField creates a new record and orphans the old one. Use `s.delete()` for cleanup, or use the `cleanup` command which does this correctly.
 

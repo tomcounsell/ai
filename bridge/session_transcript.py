@@ -70,7 +70,7 @@ def start_transcript(
 
     log_path = str(_transcript_path(session_id))
 
-    # Look up existing session (created by _push_job at enqueue time) and
+    # Look up existing session (created by _push_agent_session at enqueue time) and
     # update it with transcript-phase fields. Only create a new one if no
     # session exists (defensive fallback for standalone transcript usage).
     try:

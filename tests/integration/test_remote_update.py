@@ -1,5 +1,6 @@
 """Tests for remote update: shell script, bridge intercept, restart flag lifecycle."""
 
+import asyncio
 import os
 import subprocess
 from pathlib import Path
@@ -139,37 +140,37 @@ class TestRemoteUpdateScript:
 
 
 class TestRestartFlag:
-    """Test restart flag lifecycle in job_queue.py."""
+    """Test restart flag lifecycle in agent_session_queue.py."""
 
     def setup_method(self):
         """Ensure clean state for each test."""
-        from agent.job_queue import _RESTART_FLAG
+        from agent.agent_session_queue import _RESTART_FLAG
 
         _RESTART_FLAG.parent.mkdir(parents=True, exist_ok=True)
         _RESTART_FLAG.unlink(missing_ok=True)
 
     def teardown_method(self):
         """Clean up flag after each test."""
-        from agent.job_queue import _RESTART_FLAG
+        from agent.agent_session_queue import _RESTART_FLAG
 
         _RESTART_FLAG.unlink(missing_ok=True)
 
     def test_check_restart_flag_returns_false_when_no_flag(self):
-        from agent.job_queue import _check_restart_flag
+        from agent.agent_session_queue import _check_restart_flag
 
         assert _check_restart_flag() is False
 
     def test_check_restart_flag_returns_true_when_flag_exists_and_no_jobs(self):
-        from agent.job_queue import _RESTART_FLAG, _check_restart_flag
+        from agent.agent_session_queue import _RESTART_FLAG, _check_restart_flag
 
         _RESTART_FLAG.write_text("2026-02-02T10:00:00Z 3 commit(s)")
 
-        with patch("agent.job_queue.RedisJob") as mock_redis:
-            mock_redis.query.filter.return_value = []
+        with patch("agent.agent_session_queue.AgentSession") as mock_session:
+            mock_session.query.filter.return_value = []
             assert _check_restart_flag() is True
 
     def test_check_restart_flag_defers_when_jobs_running(self):
-        from agent.job_queue import (
+        from agent.agent_session_queue import (
             _RESTART_FLAG,
             _active_workers,
             _check_restart_flag,
@@ -183,31 +184,31 @@ class TestRestartFlag:
         _active_workers["testproject"] = mock_task
 
         try:
-            with patch("agent.job_queue.AgentSession") as mock_session:
-                # Return running jobs for the project
+            with patch("agent.agent_session_queue.AgentSession") as mock_session:
+                # Return running sessions for the project
                 mock_session.query.filter.return_value = [MagicMock()]
                 assert _check_restart_flag() is False
         finally:
             _active_workers.pop("testproject", None)
 
     def test_clear_restart_flag_removes_file(self):
-        from agent.job_queue import _RESTART_FLAG, clear_restart_flag
+        from agent.agent_session_queue import _RESTART_FLAG, clear_restart_flag
 
         _RESTART_FLAG.write_text("test content")
         assert clear_restart_flag() is True
         assert not _RESTART_FLAG.exists()
 
     def test_clear_restart_flag_returns_false_when_no_file(self):
-        from agent.job_queue import clear_restart_flag
+        from agent.agent_session_queue import clear_restart_flag
 
         assert clear_restart_flag() is False
 
     def test_trigger_restart_removes_flag_and_sends_sigterm(self):
-        from agent.job_queue import _RESTART_FLAG, _trigger_restart
+        from agent.agent_session_queue import _RESTART_FLAG, _trigger_restart
 
         _RESTART_FLAG.write_text("test")
 
-        with patch("agent.job_queue.os.kill") as mock_kill:
+        with patch("agent.agent_session_queue.os.kill") as mock_kill:
             _trigger_restart()
 
         assert not _RESTART_FLAG.exists()
@@ -223,41 +224,42 @@ class TestWorkerRestartCheck:
     """Test that the worker loop checks the restart flag between jobs."""
 
     def setup_method(self):
-        from agent.job_queue import _RESTART_FLAG
+        from agent.agent_session_queue import _RESTART_FLAG
 
         _RESTART_FLAG.parent.mkdir(parents=True, exist_ok=True)
         _RESTART_FLAG.unlink(missing_ok=True)
 
     def teardown_method(self):
-        from agent.job_queue import _RESTART_FLAG
+        from agent.agent_session_queue import _RESTART_FLAG
 
         _RESTART_FLAG.unlink(missing_ok=True)
 
     @pytest.mark.asyncio
     async def test_worker_checks_flag_when_queue_empty(self):
         """Worker should check restart flag when queue becomes empty."""
-        from agent.job_queue import _RESTART_FLAG
+        from agent.agent_session_queue import _RESTART_FLAG
 
         _RESTART_FLAG.write_text("2026-02-02T10:00:00Z 1 commit(s)")
 
         with (
-            patch("agent.job_queue._pop_job", return_value=None),
-            patch("agent.job_queue._check_restart_flag", return_value=True) as mock_check,
-            patch("agent.job_queue._trigger_restart") as mock_restart,
+            patch("agent.agent_session_queue._pop_agent_session", return_value=None),
+            patch("agent.agent_session_queue._check_restart_flag", return_value=True) as mock_check,
+            patch("agent.agent_session_queue._trigger_restart") as mock_restart,
         ):
-            from agent.job_queue import _worker_loop
+            from agent.agent_session_queue import _worker_loop
 
-            await _worker_loop("testproject")
+            event = asyncio.Event()
+            await _worker_loop("testproject", event)
 
         mock_check.assert_called_once()
         mock_restart.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_worker_checks_flag_after_job_completion(self):
-        """Worker should check restart flag after completing a job."""
-        mock_job = MagicMock()
-        mock_job.job_id = "test-123"
-        mock_job.project_key = "testproject"
+        """Worker should check restart flag after completing a session."""
+        mock_session_entry = MagicMock()
+        mock_session_entry.agent_session_id = "test-123"
+        mock_session_entry.project_key = "testproject"
 
         call_count = 0
 
@@ -265,21 +267,22 @@ class TestWorkerRestartCheck:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                return mock_job
+                return mock_session_entry
             return None
 
         with (
-            patch("agent.job_queue._pop_job", side_effect=pop_side_effect),
-            patch("agent.job_queue._execute_job", new_callable=AsyncMock),
-            patch("agent.job_queue._complete_job", new_callable=AsyncMock),
-            patch("agent.job_queue._check_restart_flag", return_value=True) as mock_check,
-            patch("agent.job_queue._trigger_restart") as mock_restart,
+            patch("agent.agent_session_queue._pop_agent_session", side_effect=pop_side_effect),
+            patch("agent.agent_session_queue._execute_agent_session", new_callable=AsyncMock),
+            patch("agent.agent_session_queue._complete_agent_session", new_callable=AsyncMock),
+            patch("agent.agent_session_queue._check_restart_flag", return_value=True) as mock_check,
+            patch("agent.agent_session_queue._trigger_restart") as mock_restart,
         ):
-            from agent.job_queue import _worker_loop
+            from agent.agent_session_queue import _worker_loop
 
-            await _worker_loop("testproject")
+            event = asyncio.Event()
+            await _worker_loop("testproject", event)
 
-        # Should have been called at least once (after job completion)
+        # Should have been called at least once (after session completion)
         assert mock_check.call_count >= 1
         mock_restart.assert_called()
 

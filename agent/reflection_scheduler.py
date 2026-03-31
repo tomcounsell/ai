@@ -2,7 +2,7 @@
 
 Replaces the scattered scheduling mechanisms (launchd plists, asyncio loops,
 startup hooks) with a single lightweight scheduler that reads from
-config/reflections.yaml and enqueues due reflections as jobs.
+config/reflections.yaml and enqueues due reflections as sessions.
 
 Architecture:
 - Registry: config/reflections.yaml declares all reflections
@@ -161,7 +161,7 @@ def _resolve_callable(dotted_path: str) -> Any:
     """Resolve a dotted Python path to a callable.
 
     Args:
-        dotted_path: e.g. "agent.job_queue._job_health_check"
+        dotted_path: e.g. "agent.agent_session_queue._agent_session_health_check"
 
     Returns:
         The callable object.
@@ -273,7 +273,7 @@ async def run_reflection(entry: ReflectionEntry, state: Reflection) -> None:
                 timeout=timeout,
             )
         else:
-            # Agent-type reflections are enqueued to the job queue
+            # Agent-type reflections are enqueued to the session queue
             # instead of executed directly
             await asyncio.wait_for(
                 _enqueue_agent_reflection(entry),
@@ -436,7 +436,7 @@ class ReflectionScheduler:
                         lambda t, name=entry.name: self._running_tasks.pop(name, None)
                     )
                 else:
-                    # Agent-type reflections are enqueued to job queue
+                    # Agent-type reflections are enqueued to session queue
                     await run_reflection(entry, state)
 
                 enqueued += 1

@@ -44,11 +44,11 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Hooks & Session Logging](hooks-session-logging.md) | Claude Code hooks for session event capture and structured logging | Shipped |
 | [Image Vision Support](image-vision.md) | Ollama LLaVA image descriptions for visual content in Telegram | Shipped |
 | [Intake Classifier](intake-classifier.md) | Haiku-powered message intent triage (interjection/new_work/acknowledgment) for bridge routing | Shipped |
-| [Job Dependency Tracking](job-dependency-tracking.md) | Sibling dependency graph, branch-session mapping, checkpoint/restore, PM controls, session observability | Shipped |
-| [Job Health Monitor](job-health-monitor.md) | Detects and recovers stuck running jobs in the queue | Shipped |
-| [Job Hierarchy](job-scheduling.md#parent-child-job-hierarchy) | Parent-child job decomposition with completion propagation, progress tracking, and orphan/stuck parent self-healing | Shipped |
-| [Job Queue Reliability](job-queue.md) | KeyField index fixes, Event-based drain guard, delete-and-recreate pattern, orphan recovery | Shipped |
-| [Job Self-Scheduling](job-scheduling.md) | Agent-initiated queue operations: schedule SDLC jobs, deferred execution, 4-tier priority, queue manipulation | Shipped |
+| [Agent Session Dependency Tracking](agent-session-dependency-tracking.md) | Sibling dependency graph, branch-session mapping, checkpoint/restore, PM controls, session observability | Shipped |
+| [Agent Session Health Monitor](agent-session-health-monitor.md) | Detects and recovers stuck running sessions in the queue | Shipped |
+| [Agent Session Hierarchy](agent-session-scheduling.md#parent-child-session-hierarchy) | Parent-child session decomposition with completion propagation, progress tracking, and orphan/stuck parent self-healing | Shipped |
+| [Agent Session Queue Reliability](agent-session-queue.md) | KeyField index fixes, Event-based drain guard, delete-and-recreate pattern, orphan recovery | Shipped |
+| [Agent Session Scheduling](agent-session-scheduling.md) | Agent-initiated queue operations: schedule SDLC sessions, deferred execution, 4-tier priority, queue manipulation | Shipped |
 | [Knowledge Document Integration](knowledge-document-integration.md) | Indexes work-vault markdown/text files into the memory system with project-scoped isolation, filesystem watching, and companion memories for subconscious recall | Shipped |
 | [Link Content Summarization](link-summarization.md) | Auto-fetch and summarize shared links via Perplexity API | Shipped |
 | [Lint Auto-Fix](lint-auto-fix.md) | Automatic lint/format fixing via pre-commit hook and PostToolUse hook, eliminating agent churn loops | Shipped |
@@ -76,7 +76,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Reflections Dashboard](reflections-dashboard.md) | Web dashboard for monitoring reflection scheduler execution, run history, and ignore patterns at `/reflections/` | Shipped |
 | [Remote Update](remote-update.md) | Telegram command and cron for remote system updates across machines | Shipped |
 | [Review Workflow Screenshots](review-workflow-screenshots.md) | Screenshot capture during review for visual validation | Shipped |
-| [Scale Job Queue (Popoto + Worktrees)](scale-job-queue-with-popoto-and-worktrees.md) | Redis persistence and git worktrees for parallel build execution | Shipped |
+| [Scale Agent Session Queue (Popoto + Worktrees)](scale-agent-session-queue-with-popoto-and-worktrees.md) | Redis persistence and git worktrees for parallel build execution | Shipped |
 | [SDK Modernization](sdk-modernization.md) | Upgrade to SDK v0.1.35 with programmatic agents and expanded hooks | Shipped |
 | [SDLC Critique Stage](sdlc-critique-stage.md) | Automated plan validation between PLAN and BUILD stages with parallel war-room critics and inline source file verification | Shipped |
 | [SDLC Enforcement](sdlc-enforcement.md) | Quality gates for code sessions: user-level hooks, pipeline stage model, settings merger, cross-repo enforcement | Shipped |

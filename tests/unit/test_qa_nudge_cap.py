@@ -1,6 +1,6 @@
 """Tests for Teammate reduced nudge cap in the nudge loop."""
 
-from agent.job_queue import MAX_NUDGE_COUNT, classify_nudge_action
+from agent.agent_session_queue import MAX_NUDGE_COUNT, classify_nudge_action
 from agent.teammate_handler import TEAMMATE_MAX_NUDGE_COUNT
 
 
@@ -49,7 +49,7 @@ class TestTeammateReactionClearing:
         session = MagicMock()
         session.session_mode = "teammate"
 
-        # The reaction logic in job_queue.py checks session_mode and returns None
+        # The reaction logic in agent_session_queue.py checks session_mode and returns None
         # for successful Teammate sessions. We test the conditional directly.
         task_error = False
         if session and getattr(session, "session_mode", None) == "teammate" and not task_error:

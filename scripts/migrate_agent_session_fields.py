@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""Migrate AgentSession Redis field names for issue #473.
+"""Migrate AgentSession Redis hash field names for the job->agent_session rename.
 
-Renames:
-  message_id -> telegram_message_id
-  trigger_message_id -> telegram_message_key
+Renames hash fields in existing Redis records:
+  job_id -> agent_session_id
+  parent_job_id -> parent_agent_session_id
+  stable_job_id -> stable_agent_session_id
 
-For each AgentSession record in Redis:
-1. Copy old field value to new field name
-2. HDEL old field name from the Redis hash
-3. Save the updated record
+Works at the raw Redis level because Popoto can't load records whose
+AutoKeyField hash name doesn't match the model definition.
+
+After renaming fields, re-saves each record to rebuild sorted sets
+and field indices (IndexedField, SortedField).
 
 Usage:
   python scripts/migrate_agent_session_fields.py --dry-run
@@ -20,20 +22,25 @@ import logging
 import sys
 from pathlib import Path
 
-# Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 FIELD_RENAMES = {
-    "message_id": "telegram_message_id",
-    "trigger_message_id": "telegram_message_key",
+    "job_id": "agent_session_id",
+    "parent_job_id": "parent_agent_session_id",
+    "stable_job_id": "stable_agent_session_id",
 }
 
 
 def migrate_field_names(dry_run: bool = True) -> dict:
-    """Rename fields on all AgentSession records in Redis.
+    """Rename hash fields on all AgentSession records in Redis.
+
+    Operates at the raw Redis level:
+    1. Scan for all AgentSession:* hash keys
+    2. For each key, rename old hash fields to new names via HSET + HDEL
+    3. Re-load and save via Popoto to rebuild indices
 
     Args:
         dry_run: If True, log what would happen without making changes.
@@ -41,87 +48,108 @@ def migrate_field_names(dry_run: bool = True) -> dict:
     Returns:
         Dict with migration stats.
     """
-    from models.agent_session import AgentSession
+    import popoto
+
+    redis_client = popoto.redis_db.get_REDIS_DB()
 
     stats = {
-        "total_sessions": 0,
+        "total_records": 0,
         "migrated": 0,
-        "skipped_no_data": 0,
+        "skipped_already_migrated": 0,
+        "re_indexed": 0,
         "errors": 0,
     }
-    # Per-field stats
     for old_name in FIELD_RENAMES:
-        stats[f"copied_{old_name}"] = 0
+        stats[f"renamed_{old_name}"] = 0
 
-    all_sessions = AgentSession.query.all()
-    stats["total_sessions"] = len(all_sessions)
-    logger.info(f"Found {len(all_sessions)} AgentSession records")
+    # Find all AgentSession hash keys (exclude index/sorted-set keys)
+    all_keys = redis_client.keys("AgentSession:*")
+    hash_keys = [k for k in all_keys if b":_sorted_set:" not in k and b":_field_index:" not in k]
+    stats["total_records"] = len(hash_keys)
+    logger.info(f"Found {len(hash_keys)} AgentSession hash records")
 
-    for session in all_sessions:
+    for key in hash_keys:
+        key_str = key.decode() if isinstance(key, bytes) else key
         try:
-            changed = False
+            needs_rename = False
+
             for old_name, new_name in FIELD_RENAMES.items():
-                # Read old field value directly from Redis hash
-                old_val = None
-                try:
-                    old_val = getattr(session, old_name, None)
-                except Exception:
-                    pass
-
-                # Also try reading from the Redis hash directly
-                if old_val is None:
-                    try:
-                        import popoto
-
-                        redis_client = popoto.redis_db.REDIS
-                        key = session._key
-                        raw = redis_client.hget(key, old_name)
-                        if raw is not None:
-                            old_val = raw.decode() if isinstance(raw, bytes) else raw
-                    except Exception:
-                        pass
-
+                old_val = redis_client.hget(key, old_name)
                 if old_val is None:
                     continue
 
-                # Check if new field already has a value
-                new_val = getattr(session, new_name, None)
+                # Check if new field already exists
+                new_val = redis_client.hget(key, new_name)
                 if new_val is not None:
                     continue
 
-                stats[f"copied_{old_name}"] += 1
-                changed = True
+                needs_rename = True
+                stats[f"renamed_{old_name}"] += 1
+                logger.info(f"  {key_str}: {old_name} -> {new_name}")
 
                 if not dry_run:
-                    setattr(session, new_name, old_val)
+                    redis_client.hset(key, new_name, old_val)
+                    redis_client.hdel(key, old_name)
 
-            if changed:
+            if needs_rename:
                 stats["migrated"] += 1
-                if not dry_run:
-                    session.save()
-
-                    # HDEL old field names from Redis hash
-                    try:
-                        import popoto
-
-                        redis_client = popoto.redis_db.REDIS
-                        key = session._key
-                        for old_name in FIELD_RENAMES:
-                            redis_client.hdel(key, old_name)
-                    except Exception as e:
-                        logger.warning(f"Failed to HDEL old fields from {session.job_id}: {e}")
             else:
-                stats["skipped_no_data"] += 1
+                stats["skipped_already_migrated"] += 1
 
         except Exception as e:
             stats["errors"] += 1
-            logger.error(f"Error migrating session {session.job_id}: {e}")
+            logger.error(f"Error migrating {key_str}: {e}")
+
+    # Phase 2: Re-save via Popoto to rebuild indices (creates new-format keys)
+    if not dry_run and stats["migrated"] > 0:
+        logger.info("Rebuilding Popoto indices by re-saving all records...")
+        from models.agent_session import AgentSession
+
+        try:
+            sessions = AgentSession.query.all()
+            for session in sessions:
+                try:
+                    session.save()
+                    stats["re_indexed"] += 1
+                except Exception as e:
+                    logger.warning(f"Failed to re-index session {session.agent_session_id}: {e}")
+        except Exception as e:
+            logger.error(f"Failed to rebuild indices: {e}")
+
+        # Phase 3: Delete old-format keys
+        # Popoto orders KeyFields alphabetically by name. Renaming job_id
+        # to agent_session_id changed the key order (agent_session_id < chat_id
+        # but job_id > chat_id). The re-save created new keys; delete the old ones.
+        import re
+
+        uuid_re = re.compile(rb"^[0-9a-f]{32}$")
+        refreshed = redis_client.keys("AgentSession:*")
+        old_deleted = 0
+        for key in refreshed:
+            if b":_sorted_set:" in key or b":_field_index:" in key:
+                continue
+            parts = key.split(b":")
+            # New-format keys have UUID (agent_session_id) as first value
+            if len(parts) > 1 and not uuid_re.match(parts[1]):
+                redis_client.delete(key)
+                old_deleted += 1
+        stats["old_keys_deleted"] = old_deleted
+        if old_deleted:
+            logger.info(f"Deleted {old_deleted} old-format Redis keys")
+
+        # Clean stale Popoto index references
+        try:
+            AgentSession.query.keys(clean=True)
+        except Exception:
+            pass
 
     return stats
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Migrate AgentSession field names in Redis")
+    parser = argparse.ArgumentParser(
+        description="Migrate AgentSession Redis field names (job -> agent_session)"
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -140,15 +168,13 @@ def main():
 
     if not args.dry_run and stats["migrated"] > 0:
         logger.info(
-            f"Successfully migrated {stats['migrated']} sessions. "
-            f"Old field names have been removed from Redis hashes."
+            f"Successfully migrated {stats['migrated']} records. "
+            f"Re-indexed {stats['re_indexed']} records."
         )
     elif args.dry_run and stats["migrated"] > 0:
-        logger.info(
-            f"Would migrate {stats['migrated']} sessions. Run without --dry-run to apply changes."
-        )
+        logger.info(f"Would migrate {stats['migrated']} records. Run without --dry-run to apply.")
     else:
-        logger.info("No sessions needed migration.")
+        logger.info("No records needed migration.")
 
 
 if __name__ == "__main__":

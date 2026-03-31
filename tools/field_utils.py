@@ -18,7 +18,7 @@ def log_large_field(
 
     This is an observability-only helper. It never truncates, rejects, or
     modifies the value. Use it at high-traffic storage entry points
-    (e.g., job enqueue, TelegramMessage creation) to surface unexpectedly
+    (e.g., session enqueue, TelegramMessage creation) to surface unexpectedly
     large values for investigation.
 
     Args:

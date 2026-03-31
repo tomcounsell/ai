@@ -33,7 +33,7 @@ INTAKE CLASSIFIER (new, #320)
     +-- new_work -> fall through to enqueue (current behavior)
     |
     v
-enqueue_job() (existing path)
+enqueue_agent_session() (existing path)
 ```
 
 ## Classification Categories
@@ -91,7 +91,7 @@ This prevents "ok" from accidentally completing a running session (Risk 3).
 | `bridge/telegram_bridge.py` | Calls `classify_message_intent_async()` after the reply-to fast path |
 | `models/agent_session.py` | `push_steering_message()` buffers interjections for Observer |
 | `agent/steering.py` | `push_steering_message()` pushes to Redis for PostToolUse hook |
-| `agent/job_queue.py` | Nudge loop processes `queued_steering_messages` populated by the intake classifier |
+| `agent/agent_session_queue.py` | Nudge loop processes `queued_steering_messages` populated by the intake classifier |
 
 ## Testing
 

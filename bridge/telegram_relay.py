@@ -1,6 +1,6 @@
 """Telegram message relay: processes the PM outbox queue.
 
-Async task that runs in the bridge's event loop alongside the job queue
+Async task that runs in the bridge's event loop alongside the session queue
 consumer. Polls Redis for PM-authored messages queued by
 tools/send_telegram.py and sends them via Telethon.
 

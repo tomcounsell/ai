@@ -1,4 +1,4 @@
-"""Tests for persona-aware scheduling restrictions in job_scheduler.
+"""Tests for persona-aware scheduling restrictions in agent_session_scheduler.
 
 Validates:
 1. Teammate persona is blocked from schedule operations
@@ -10,7 +10,7 @@ Validates:
 
 from unittest.mock import patch
 
-from tools.job_scheduler import _check_persona_permission
+from tools.agent_session_scheduler import _check_persona_permission
 
 
 class TestPersonaGate:

@@ -24,7 +24,7 @@ Every 3 minutes (configurable via `RECONCILE_INTERVAL_SECONDS`):
 2. Filters to messages within the lookback window (default 10 minutes)
 3. Checks each message against dedup records (`is_duplicate_message()`)
 4. Skips outgoing messages, empty-text messages, and messages that fail routing (`should_respond_async()`)
-5. Enqueues qualifying missed messages via `enqueue_job()` with `priority="low"`
+5. Enqueues qualifying missed messages via `enqueue_agent_session()` with `priority="low"`
 6. Records dispatched messages in dedup to prevent future re-dispatch
 
 ### Data Flow
@@ -40,7 +40,7 @@ reconciler_loop (every 3min)
     |           no text? --> skip
     |           is_duplicate? --> skip
     |           should_respond? no --> skip
-    |           enqueue_job(priority="low")
+    |           enqueue_agent_session(priority="low")
     |           record_message_processed()
     |
     +-- log summary: "Scanned N group(s), recovered M message(s)"
@@ -82,7 +82,7 @@ grep reconciler logs/bridge.log
 
 ## Race Conditions
 
-A message could arrive at the event handler and the reconciler simultaneously before either records it in dedup. The job queue handles duplicate session IDs gracefully (second enqueue is a no-op), so this is a benign race with no user-visible effect.
+A message could arrive at the event handler and the reconciler simultaneously before either records it in dedup. The session queue handles duplicate session IDs gracefully (second enqueue is a no-op), so this is a benign race with no user-visible effect.
 
 ## API Cost
 

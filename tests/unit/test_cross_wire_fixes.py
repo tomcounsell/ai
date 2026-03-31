@@ -48,7 +48,7 @@ class TestClassifierInformationalCompletion:
         explanation = (
             "Here's how the routing system handles messages: When a Telegram message "
             "arrives, the bridge extracts metadata (chat_id, sender, thread info) and "
-            "creates an AgentSession in Redis. The job queue picks up the session and "
+            "creates an AgentSession in Redis. The session queue picks up the session and "
             "spawns a Claude Code subprocess with the appropriate system prompt."
         )
         result = _classify_with_heuristics(explanation)
@@ -63,7 +63,7 @@ class TestClassifierInformationalCompletion:
         qa_answer = (
             "The summarizer feature works by classifying agent output into five categories: "
             "status_update, completion, question, blocker, and error. When an output is "
-            "classified as a status update, the bridge automatically re-enqueues the job "
+            "classified as a status update, the bridge automatically re-enqueues the session "
             "to continue the session. Completions are delivered to the user via Telegram. "
             "The classifier uses an LLM with few-shot examples to make these decisions."
         )

@@ -1,7 +1,7 @@
 """Tests for Bridge-AgentSession-SDK connectivity gap fixes (issue #209).
 
 Verifies:
-1. task_list_id persistence in _execute_job (Fix 1)
+1. task_list_id persistence in _execute_agent_session (Fix 1)
 2. complete_transcript field preservation through status changes (Fix 2)
 3. start_transcript lookup-and-update instead of dual creation (Fix 3)
 4. VALOR_SESSION_ID env var in _find_session resolution chain (Fix 4)
@@ -22,7 +22,7 @@ from models.agent_session import AgentSession
 
 @pytest.fixture
 def pending_session(redis_test_db):
-    """Create an AgentSession as _push_job would (status=pending with queue fields)."""
+    """Create an AgentSession as _push_agent_session would (status=pending with queue fields)."""
     return AgentSession.create(
         session_id="tg_valor_-5051_12345",
         project_key="valor",
@@ -38,7 +38,7 @@ def pending_session(redis_test_db):
 
 @pytest.fixture
 def running_session(redis_test_db):
-    """Create an AgentSession in running state (after job pickup)."""
+    """Create an AgentSession in running state (after session pickup)."""
     return AgentSession.create(
         session_id="tg_valor_-5051_12345",
         project_key="valor",
@@ -68,11 +68,11 @@ def running_session(redis_test_db):
 
 
 class TestTaskListIdPersistence:
-    """Fix 1: _execute_job persists task_list_id on the AgentSession."""
+    """Fix 1: _execute_agent_session persists task_list_id on the AgentSession."""
 
     def test_task_list_id_persisted_after_save(self, redis_test_db):
         """Simulates the Fix 1 code path: find session, set task_list_id, save."""
-        # Create session as _push_job would
+        # Create session as _push_agent_session would
         s = AgentSession.create(
             session_id="tg_valor_-5051_99999",
             project_key="valor",
@@ -81,7 +81,7 @@ class TestTaskListIdPersistence:
         )
         assert s.task_list_id is None
 
-        # Simulate _execute_job: set task_list_id and save
+        # Simulate _execute_agent_session: set task_list_id and save
         s.task_list_id = "thread--5051-99999"
         s.save()
 
@@ -100,7 +100,7 @@ class TestTaskListIdPersistence:
             work_item_slug="bridge-sdk-fix",
         )
 
-        # Simulate _execute_job computing task_list_id from slug
+        # Simulate _execute_agent_session computing task_list_id from slug
         s.task_list_id = "bridge-sdk-fix"
         s.save()
 
@@ -237,7 +237,7 @@ class TestNoDualSessionCreation:
         assert found[0].log_path == log_path
 
     def test_preserves_queue_fields_on_update(self, pending_session):
-        """start_transcript preserves queue-phase fields from _push_job."""
+        """start_transcript preserves queue-phase fields from _push_agent_session."""
         from bridge.session_transcript import start_transcript
 
         start_transcript(
@@ -248,7 +248,7 @@ class TestNoDualSessionCreation:
 
         found = list(AgentSession.query.filter(session_id=pending_session.session_id))
         s = found[0]
-        # Queue fields from _push_job should still be present
+        # Queue fields from _push_agent_session should still be present
         assert s.message_text == "SDLC 209"
         assert s.priority == "high"
         assert s.sender_id == 12345

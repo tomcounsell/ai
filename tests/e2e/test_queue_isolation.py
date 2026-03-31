@@ -45,7 +45,7 @@ class TestPerChatQueueIsolation:
         assert len(b_sessions) == 1
         assert a_sessions[0].sender_name == "Alice"
         assert b_sessions[0].sender_name == "Bob"
-        assert a_sessions[0].job_id != b_sessions[0].job_id
+        assert a_sessions[0].agent_session_id != b_sessions[0].agent_session_id
 
     def test_steering_messages_isolated_between_sessions(self):
         """Steering messages pushed to one session must not appear in another."""
@@ -128,5 +128,5 @@ class TestPerChatQueueIsolation:
             message_text="same message",
         )
 
-        assert s1.job_id != s2.job_id
+        assert s1.agent_session_id != s2.agent_session_id
         assert s1.chat_id != s2.chat_id

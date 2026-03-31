@@ -53,7 +53,7 @@ class TestBuildCoachingMessage:
             rejected=True,
             coaching_message="Show the test results.",
         )
-        msg = build_coaching_message(classification, job_message_text="/do-build foo.md")
+        msg = build_coaching_message(classification, session_message_text="/do-build foo.md")
         assert "Show the test results." in msg
         assert "Implementing" not in msg
 
@@ -117,14 +117,16 @@ class TestBuildCoachingMessage:
     def test_skill_detected_from_message(self):
         """When /do-build is in message text, skill-specific coaching is used."""
         classification = _make_classification(OutputType.STATUS_UPDATE)
-        msg = build_coaching_message(classification, job_message_text="/do-build docs/plans/foo.md")
+        msg = build_coaching_message(
+            classification, session_message_text="/do-build docs/plans/foo.md"
+        )
         assert "[System Coach]" in msg
         assert "Implementing" in msg  # From SKILL_DETECTORS description
 
     def test_no_skill_no_rejection_returns_continue(self):
         """Plain status update with no context returns 'continue'."""
         classification = _make_classification(OutputType.STATUS_UPDATE)
-        msg = build_coaching_message(classification, plan_file=None, job_message_text="hello")
+        msg = build_coaching_message(classification, plan_file=None, session_message_text="hello")
         assert msg == "continue"
 
     def test_nonexistent_plan_file_falls_through_to_skill(self):
@@ -133,7 +135,7 @@ class TestBuildCoachingMessage:
         msg = build_coaching_message(
             classification,
             plan_file="/nonexistent/plan.md",
-            job_message_text="/do-test",
+            session_message_text="/do-test",
         )
         # Nonexistent file is ignored, falls through to /do-test skill coaching
         assert "[System Coach]" in msg
@@ -537,7 +539,7 @@ class TestSdlcCoachingIntegration:
         msg = build_coaching_message(
             classification,
             sdlc_stage_progress=all_done,
-            job_message_text="/do-build foo.md",
+            session_message_text="/do-build foo.md",
         )
         # Should fall through to skill-aware coaching since SDLC coaching returns None
         assert "[System Coach]" in msg
@@ -585,7 +587,7 @@ class TestSdlcCoachingIntegration:
     def test_existing_coaching_without_sdlc_unchanged(self):
         """Existing coaching behavior is not affected when sdlc_stage_progress is absent."""
         classification = _make_classification(OutputType.STATUS_UPDATE)
-        msg = build_coaching_message(classification, plan_file=None, job_message_text="hello")
+        msg = build_coaching_message(classification, plan_file=None, session_message_text="hello")
         assert msg == "continue"
 
 

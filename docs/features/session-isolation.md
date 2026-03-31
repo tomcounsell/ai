@@ -29,7 +29,7 @@ The env var is set in `ValorAgent._create_options()` and passed through `get_age
 ### Model Fields
 
 - `AgentSession.work_item_slug` -- Redis model field storing the active slug for a session. Set when `/do-plan {slug}` runs.
-- `Job.work_item_slug` -- Propagated from the session to each job for task list routing.
+- `Job.work_item_slug` -- Propagated from the session to each session for task list routing.
 - `Job.task_list_id` -- The computed task list ID (either slug or thread-derived).
 
 ### Tier Transition
@@ -96,7 +96,7 @@ Experiments validated the approach before implementation:
 | `scripts/post_merge_cleanup.py` | CLI script for post-merge worktree and branch cleanup |
 | `agent/hooks/session_registry.py` | Maps Claude Code UUIDs to bridge session IDs for hook-side resolution |
 | `agent/sdk_client.py` | Injects `CLAUDE_CODE_TASK_LIST_ID` into SDK environment; registers/unregisters sessions in the hook registry |
-| `agent/job_queue.py` | Computes task list ID in `_execute_job()` and passes to SDK |
+| `agent/agent_session_queue.py` | Computes task list ID in `_execute_agent_session()` and passes to SDK |
 | `models/agent_session.py` | `AgentSession` model with `work_item_slug` field |
 | `docs/features/task-list-isolation.md` | Experiment results for CLAUDE_CODE_TASK_LIST_ID behavior |
 | `docs/features/worktree-sdk-compatibility.md` | Experiment results for SDK + worktree compatibility |
@@ -105,7 +105,7 @@ Experiments validated the approach before implementation:
 
 Sessions transition to the **Complete** state when work is finished. Two mechanisms signal completion:
 
-1. **Automatic** -- `mark_work_done()` is called in `agent/job_queue.py` when a job finishes successfully. This is the primary completion mechanism.
+1. **Automatic** -- `mark_work_done()` is called in `agent/agent_session_queue.py` when a session finishes successfully. This is the primary completion mechanism.
 2. **Human signal** -- The thumbs-up emoji reaction (👍) in the Telegram group chat serves as a visual acknowledgment between humans that work is done.
 
 Note: **Telethon cannot receive emoji reaction events** for user accounts (Telegram API limitation). The 👍 reaction is purely a human-to-human signal -- it does not trigger any programmatic state change. No reaction handler is needed in the bridge.
@@ -114,7 +114,7 @@ Note: **Telethon cannot receive emoji reaction events** for user accounts (Teleg
 
 When spawning a Claude Code subprocess, `_create_options()` in `agent/sdk_client.py` decides whether to set `continue_conversation=True`. Previously, this was set for any non-None `session_id`, which could cause fresh sessions to reuse stale Claude Code session files on disk -- leaking context between unrelated conversations (see issue #232).
 
-Now, `_has_prior_session(session_id)` queries the AgentSession Redis model to check if a prior job ran for this session_id with a status of `completed`, `running`, `active`, or `dormant`. Only when a prior session exists is `continue_conversation` (and `resume`) set to True. This prevents cross-contamination between concurrent DM and group conversations while preserving reply-thread continuation (which reuses the original session_id and thus has a prior AgentSession record).
+Now, `_has_prior_session(session_id)` queries the AgentSession Redis model to check if a prior session ran for this session_id with a status of `completed`, `running`, `active`, or `dormant`. Only when a prior session exists is `continue_conversation` (and `resume`) set to True. This prevents cross-contamination between concurrent DM and group conversations while preserving reply-thread continuation (which reuses the original session_id and thus has a prior AgentSession record).
 
 The check fails safe: if Redis is unavailable, `_has_prior_session()` returns False (don't continue), ensuring fresh sessions never accidentally inherit stale context.
 
@@ -126,9 +126,9 @@ The session continuation gate was extended to fix three compounding bugs that ca
 
 2. **Watchdog count scoping**: The health check hook (`agent/health_check.py`) uses the session registry (see below) for tool count tracking instead of Claude Code's internal session ID. A `reset_session_count()` function is called at the start of each SDK query to clear stale counts from prior runs. This prevents continuation sessions from inheriting inflated tool counts that trigger premature health check kills.
 
-3. **Deterministic record selection**: When re-reading `AgentSession` records (in both `job_queue.py` and `bridge/observer.py`), the code now filters by active statuses (`running`, `active`, `pending`) first, then falls back to all records, sorted by `created_at` descending. This ensures the newest relevant record is always selected when duplicates exist. Additionally, `_push_job()` marks old completed records as `superseded` to prevent ambiguity.
+3. **Deterministic record selection**: When re-reading `AgentSession` records (in both `agent_session_queue.py` and `bridge/observer.py`), the code now filters by active statuses (`running`, `active`, `pending`) first, then falls back to all records, sorted by `created_at` descending. This ensures the newest relevant record is always selected when duplicates exist. Additionally, `_push_agent_session()` marks old completed records as `superseded` to prevent ambiguity.
 
-The `claude_session_uuid` field is included in `_JOB_FIELDS` so it is preserved across the delete-and-recreate pattern used by `_enqueue_continuation()`.
+The `claude_session_uuid` field is included in `_AGENT_SESSION_FIELDS` so it is preserved across the delete-and-recreate pattern used by `_enqueue_continuation()`.
 
 ### Hook Session Registry (Issue #597)
 
@@ -164,7 +164,7 @@ This is particularly relevant for long-running SDLC sessions that may accumulate
 
 ## Auto-Continue and Session Scope
 
-The auto-continue system uses job re-enqueue rather than steering queue injection. When a status update triggers auto-continue, a new job is enqueued through the normal job queue with the same session context:
+The auto-continue system uses session re-enqueue rather than steering queue injection. When a status update triggers auto-continue, a new session is enqueued through the normal session queue with the same session context:
 
 - `session_id` -- preserves thread identity
 - `work_item_slug` -- preserves slug-scoped task list binding
@@ -178,7 +178,7 @@ See [Reaction Semantics](reaction-semantics.md) for details on the re-enqueue de
 
 In addition to mechanical routing (reply-to message ID), sessions can be matched semantically. When the summarizer produces structured output, it extracts `context_summary` and `expectations` fields that describe what a session is working on and what it needs from the human. Unthreaded messages are then evaluated against sessions with expectations, and high-confidence matches are routed based on session status:
 
-- **Active/running sessions**: The message is pushed to the session's steering queue (`push_steering_message`). The user gets an ack ("Noted — I'll incorporate this on my next checkpoint.") and the Observer picks it up at its next stop. No competing job is created.
+- **Active/running sessions**: The message is pushed to the session's steering queue (`push_steering_message`). The user gets an ack ("Noted — I'll incorporate this on my next checkpoint.") and the Observer picks it up at its next stop. No competing session is created.
 - **Dormant sessions**: The session is resumed using the matched session_id (existing behavior).
 
 This complements the isolation model: sessions remain isolated, but messages can find their way to the correct session even without explicit reply-to threading. See [Semantic Session Routing](semantic-session-routing.md) for full details.
@@ -186,7 +186,7 @@ This complements the isolation model: sessions remain isolated, but messages can
 ## See Also
 
 - [Semantic Session Routing](semantic-session-routing.md) -- Semantic matching of unthreaded messages to sessions with expectations
-- [Scale Job Queue (Popoto + Worktrees)](scale-job-queue-with-popoto-and-worktrees.md) -- The parallel execution foundation that this feature enables
+- [Scale Session Queue (Popoto + Worktrees)](scale-agent-session-queue-with-popoto-and-worktrees.md) -- The parallel execution foundation that this feature enables
 - [Session Watchdog](session-watchdog.md) -- Active session monitoring that works alongside isolation
 - [Bridge Workflow Gaps](bridge-workflow-gaps.md) -- Auto-continue, output classification, session logs
 - GitHub Issue [#62](https://github.com/tomcounsell/ai/issues/62) -- Tracking issue with experiment details

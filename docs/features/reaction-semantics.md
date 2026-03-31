@@ -42,11 +42,11 @@ The full list of 75+ validated working reactions is maintained in `VALIDATED_REA
 
 ## Auto-Continue Integration
 
-Reactions interact with the auto-continue system. When auto-continue is active, reaction updates are deferred until the final job completes.
+Reactions interact with the auto-continue system. When auto-continue is active, reaction updates are deferred until the final session completes.
 
 ### Flow
 
-1. Agent completes a turn. The nudge loop in `agent/job_queue.py` decides whether to **nudge** (auto-continue) or **deliver** (send to Telegram).
+1. Agent completes a turn. The nudge loop in `agent/agent_session_queue.py` decides whether to **nudge** (auto-continue) or **deliver** (send to Telegram).
 2. If Observer decides **STEER**: suppress the output, re-enqueue with coaching message, defer reaction.
 3. If Observer decides **DELIVER**: send the response and set the appropriate reaction based on content.
 4. The auto-continue counter resets when the human sends a new message.
@@ -64,7 +64,7 @@ Reactions interact with the auto-continue system. When auto-continue is active, 
 
 The original auto-continue implementation injected a "continue" message into the agent's steering queue. This created a race condition: if the agent had already exited its processing loop, the steering message was silently dropped, and the user received no response at all.
 
-The fix re-enqueues a new job through the normal job queue. This guarantees the message is processed because it follows the same path as any incoming Telegram message, with full session context (session_id, work_item_slug, task_list_id) preserved.
+The fix re-enqueues a new session through the normal session queue. This guarantees the message is processed because it follows the same path as any incoming Telegram message, with full session context (session_id, work_item_slug, task_list_id) preserved.
 
 ## Silent Loss Prevention
 
@@ -74,7 +74,7 @@ Three paths to silent text loss have been identified and guarded:
 
 **Problem:** Steering queue injection could race with agent exit, dropping the "continue" message silently.
 
-**Fix:** Replace steering queue injection with job re-enqueue through the normal job queue.
+**Fix:** Replace steering queue injection with session re-enqueue through the normal session queue.
 
 ### 2. Tool Log Filtering
 
@@ -93,9 +93,9 @@ Three paths to silent text loss have been identified and guarded:
 | File | Role |
 |------|------|
 | `bridge/response.py` | Reaction constants, OutputType enum, MAX_AUTO_CONTINUES, filter_tool_logs |
-| `agent/job_queue.py` | Reaction selection logic, auto-continue re-enqueue, has_communicated() check |
+| `agent/agent_session_queue.py` | Reaction selection logic, auto-continue re-enqueue, has_communicated() check |
 | `agent/messenger.py` | BossMessenger with `has_communicated()` tracking, BackgroundTask with internal health watchdog |
-| `agent/job_queue.py` | Nudge loop: output routing decisions via `classify_nudge_action()` |
+| `agent/agent_session_queue.py` | Nudge loop: output routing decisions via `classify_nudge_action()` |
 | `tests/test_reply_delivery.py` | Tests for steering drain, reaction selection, filter fallback |
 
 ## See Also

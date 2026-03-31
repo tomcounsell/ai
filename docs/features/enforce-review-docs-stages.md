@@ -1,6 +1,6 @@
 # Mandatory REVIEW and DOCS Stage Enforcement
 
-Ensures that every SDLC job completing BUILD must also complete REVIEW and DOCS before the Observer delivers output to Telegram.
+Ensures that every SDLC session completing BUILD must also complete REVIEW and DOCS before the Observer delivers output to Telegram.
 
 ## Problem
 
@@ -10,11 +10,11 @@ The pipeline graph defined correct edges (TEST -> REVIEW -> DOCS -> MERGE), but 
 
 ### Hard Delivery Gates
 
-> **Note**: The Observer Agent (`bridge/observer.py`) was removed as part of the ChatSession/DevSession architecture redesign. Mandatory gate enforcement is now handled by ChatSession orchestration and the nudge loop in `agent/job_queue.py`. The gate check functions in `agent/goal_gates.py` remain the source of truth for deterministic stage validation.
+> **Note**: The Observer Agent (`bridge/observer.py`) was removed as part of the ChatSession/DevSession architecture redesign. Mandatory gate enforcement is now handled by ChatSession orchestration and the nudge loop in `agent/agent_session_queue.py`. The gate check functions in `agent/goal_gates.py` remain the source of truth for deterministic stage validation.
 
 ### State Machine Stage Transitions (`bridge/pipeline_state.py`)
 
-Stage completion is now managed by the `PipelineStateMachine`. Stages can only complete via explicit `complete_stage()` calls at job completion time — no transcript parsing or pattern matching. This eliminates false completions entirely.
+Stage completion is now managed by the `PipelineStateMachine`. Stages can only complete via explicit `complete_stage()` calls at session completion time — no transcript parsing or pattern matching. This eliminates false completions entirely.
 
 ### `has_remaining_stages()` (`bridge/pipeline_state.py`)
 

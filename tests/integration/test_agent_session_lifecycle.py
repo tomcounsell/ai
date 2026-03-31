@@ -6,7 +6,7 @@ Covers the gaps identified in PR #180 review:
 3. Summarizer composition (_compose_structured_summary)
 4. Summarizer with session context (summarize_response with session param)
 5. Markdown send (send_markdown fallback behavior)
-6. Backward compat (SessionLog shim, RedisJob alias, sender property)
+6. Backward compat (SessionLog shim, sender property)
 7. Full lifecycle simulations (SDLC, Teammate, chit-chat)
 """
 
@@ -89,7 +89,7 @@ def qa_session(redis_test_db):
         created_at=time.time(),
         started_at=time.time(),
         last_activity=time.time(),
-        message_text="How does the job queue work?",
+        message_text="How does the session queue work?",
         turn_count=3,
         tool_call_count=5,
     )
@@ -313,7 +313,7 @@ class TestComposeStructuredSummary:
         from bridge.summarizer import _compose_structured_summary
 
         result = _compose_structured_summary(
-            "The job queue uses FILO ordering per project.",
+            "The session queue uses FILO ordering per project.",
             session=qa_session,
             is_completion=True,
         )
@@ -399,7 +399,9 @@ class TestSummarizeWithSession:
         long_text = "Here is a very long explanation. " * 200
         mock_haiku = AsyncMock(
             return_value=StructuredSummary(
-                context_summary="", response="The job queue uses FILO ordering.", expectations=None
+                context_summary="",
+                response="The session queue uses FILO ordering.",
+                expectations=None,
             )
         )
 
@@ -518,17 +520,12 @@ class TestEscapeMarkdown:
 
 
 class TestBackwardCompatibility:
-    """Tests for SessionLog shim, RedisJob alias, and sender property."""
+    """Tests for SessionLog shim and sender property."""
 
     def test_session_log_is_agent_session(self):
         from models.session_log import SessionLog
 
         assert SessionLog is AgentSession
-
-    def test_redis_job_is_agent_session(self):
-        from agent.job_queue import RedisJob
-
-        assert RedisJob is AgentSession
 
     def test_models_init_exports_both(self):
         from models import AgentSession as AgentSessionAlias
@@ -577,7 +574,7 @@ class TestSDLCLifecycle:
         )
         assert s.status == "pending"
 
-        # 2. Simulate job pickup -- delete and recreate as running
+        # 2. Simulate session pickup -- delete and recreate as running
         fields = {
             "session_id": s.session_id,
             "project_key": s.project_key,
@@ -681,7 +678,7 @@ class TestSDLCClassificationTypeLifecycle:
         """
         from bridge.summarizer import _compose_structured_summary
 
-        # Simulate the continuation session (created by _push_job with propagated type)
+        # Simulate the continuation session (created by _push_agent_session with propagated type)
         s = AgentSession.create(
             session_id="sdlc-continued-1",
             project_key="test",
@@ -730,19 +727,19 @@ class TestQALifecycle:
             chat_id="600",
             sender_name="Kevin",
             created_at=time.time(),
-            message_text="How does the job queue work?",
+            message_text="How does the session queue work?",
         )
-        s.append_history("user", "How does the job queue work?")
+        s.append_history("user", "How does the session queue work?")
 
         result = _compose_structured_summary(
-            "The job queue uses a FILO stack with per-project sequential workers.",
+            "The session queue uses a FILO stack with per-project sequential workers.",
             session=s,
             is_completion=True,
         )
 
         # Should have emoji + label + answer, no stages, no links
         assert "✅" in result
-        assert "job queue" in result.lower()
+        assert "session queue" in result.lower()
         assert "FILO" in result
         assert "☑" not in result
         assert "☐" not in result

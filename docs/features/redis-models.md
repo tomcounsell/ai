@@ -51,8 +51,8 @@ When a Telegram message triggers an agent session:
 
 1. **Bridge stores TelegramMessage** with media, URL, and classification metadata
 2. **Bridge enqueues AgentSession** with `telegram_message_key` pointing to the TelegramMessage's `msg_id`
-3. **Job worker resolves TelegramMessage** via `telegram_message_key` to get enrichment parameters
-4. **Job worker sets back-reference**: `TelegramMessage.agent_session_id = AgentSession.job_id`
+3. **Session worker resolves TelegramMessage** via `telegram_message_key` to get enrichment parameters
+4. **Session worker sets back-reference**: `TelegramMessage.agent_session_id = AgentSession.job_id`
 
 This bidirectional link enables:
 - Looking up which session processed a given message
@@ -61,7 +61,7 @@ This bidirectional link enables:
 
 ### Fallback Path
 
-For sessions created before the migration (no `telegram_message_key`), the job worker falls back to reading enrichment fields directly from AgentSession. These fields are retained on AgentSession for backward compatibility with pre-existing records.
+For sessions created before the migration (no `telegram_message_key`), the session worker falls back to reading enrichment fields directly from AgentSession. These fields are retained on AgentSession for backward compatibility with pre-existing records.
 
 ## project_key
 
@@ -138,14 +138,14 @@ Popoto field types have different implications for how records behave on mutatio
 | `project_key` | KeyField | No | Set once at creation |
 | `chat_id` | KeyField | No | Set once at creation |
 | `parent_chat_session_id` | KeyField | No | Set once at creation (DevSession only) |
-| `parent_job_id` | KeyField | No | Set once at creation (child jobs only) |
-| `stable_job_id` | KeyField | No | Set once at creation, never changes |
+| `parent_agent_session_id` | KeyField | No | Set once at creation (child jobs only) |
+| `stable_agent_session_id` | KeyField | No | Set once at creation, never changes |
 | `status` | IndexedField | Yes | Mutate and save directly; no delete-and-recreate |
 
 The `status` field was changed from KeyField to IndexedField (popoto >= 1.4.3) to eliminate the delete-and-recreate overhead on every lifecycle transition (pending -> running -> active -> completed). This removed the primary source of duplicate session records in the dashboard.
 
 ### Where Delete-and-Recreate Is Still Needed
 
-With `status` as an IndexedField, the delete-and-recreate pattern is no longer needed for status transitions. All status transitions (job pickup, completion, failure, recovery, watchdog marking, nudge re-enqueue) use direct field mutation and `.save()`.
+With `status` as an IndexedField, the delete-and-recreate pattern is no longer needed for status transitions. All status transitions (session pickup, completion, failure, recovery, watchdog marking, nudge re-enqueue) use direct field mutation and `.save()`.
 
-The delete-and-recreate pattern remains in `agent/job_queue.py` only in the `_JOB_FIELDS` list, which defines the fields to copy if a record ever needs to be re-created for KeyField changes. In practice, no current code path changes a KeyField value after creation -- the `bridge/session_transcript.py` module guards against `chat_id` mutation by logging a warning and skipping the write if the value would change.
+The delete-and-recreate pattern remains in `agent/agent_session_queue.py` only in the `_AGENT_SESSION_FIELDS` list, which defines the fields to copy if a record ever needs to be re-created for KeyField changes. In practice, no current code path changes a KeyField value after creation -- the `bridge/session_transcript.py` module guards against `chat_id` mutation by logging a warning and skipping the write if the value would change.

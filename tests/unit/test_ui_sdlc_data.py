@@ -128,19 +128,21 @@ class TestPipelineProgress:
     def test_display_name_with_slug(self):
         from ui.data.sdlc import PipelineProgress
 
-        p = PipelineProgress(job_id="123", slug="my-feature")
+        p = PipelineProgress(agent_session_id="123", slug="my-feature")
         assert p.display_name == "my-feature"
 
     def test_display_name_with_message(self):
         from ui.data.sdlc import PipelineProgress
 
-        p = PipelineProgress(job_id="123", message_text="Build the web UI for reflections")
+        p = PipelineProgress(
+            agent_session_id="123", message_text="Build the web UI for reflections"
+        )
         assert p.display_name == "Build the web UI for reflections"
 
     def test_display_name_truncated(self):
         from ui.data.sdlc import PipelineProgress
 
-        p = PipelineProgress(job_id="123", message_text="A" * 100)
+        p = PipelineProgress(agent_session_id="123", message_text="A" * 100)
         assert len(p.display_name) < 100
         assert "..." in p.display_name
 
@@ -148,34 +150,34 @@ class TestPipelineProgress:
         from ui.data.sdlc import PipelineProgress
 
         for status in ("pending", "running", "active", "waiting_for_children"):
-            p = PipelineProgress(job_id="123", status=status)
+            p = PipelineProgress(agent_session_id="123", status=status)
             assert p.is_active, f"Expected {status} to be active"
 
     def test_is_complete_states(self):
         from ui.data.sdlc import PipelineProgress
 
         for status in ("completed", "failed"):
-            p = PipelineProgress(job_id="123", status=status)
+            p = PipelineProgress(agent_session_id="123", status=status)
             assert p.is_complete
 
     def test_duration_calculation(self):
         from ui.data.sdlc import PipelineProgress
 
         now = time.time()
-        p = PipelineProgress(job_id="123", started_at=now - 100, completed_at=now)
+        p = PipelineProgress(agent_session_id="123", started_at=now - 100, completed_at=now)
         assert abs(p.duration - 100) < 1
 
     def test_duration_none_when_no_start(self):
         from ui.data.sdlc import PipelineProgress
 
-        p = PipelineProgress(job_id="123")
+        p = PipelineProgress(agent_session_id="123")
         assert p.duration is None
 
     def test_project_name_field(self):
         from ui.data.sdlc import PipelineProgress
 
         p = PipelineProgress(
-            job_id="123",
+            agent_session_id="123",
             project_key="popoto",
             project_name="Popoto ORM",
         )
@@ -184,7 +186,7 @@ class TestPipelineProgress:
     def test_project_name_defaults_none(self):
         from ui.data.sdlc import PipelineProgress
 
-        p = PipelineProgress(job_id="123", project_key="popoto")
+        p = PipelineProgress(agent_session_id="123", project_key="popoto")
         assert p.project_name is None
 
     def test_project_metadata_field(self):
@@ -195,7 +197,7 @@ class TestPipelineProgress:
             "tech_stack": "Python, Redis",
         }
         p = PipelineProgress(
-            job_id="123",
+            agent_session_id="123",
             project_key="popoto",
             project_metadata=metadata,
         )
@@ -375,7 +377,7 @@ class TestHistoryFallback:
         from ui.data.sdlc import _session_to_pipeline
 
         mock_session = MagicMock()
-        mock_session.job_id = "test-123"
+        mock_session.agent_session_id = "test-123"
         mock_session.session_id = "sess-1"
         mock_session.session_type = "chat"
         mock_session.status = "running"
@@ -461,7 +463,7 @@ class TestRetentionFilter:
 
         now = time.time()
         p = PipelineProgress(
-            job_id="123",
+            agent_session_id="123",
             status="completed",
             completed_at=now - 3600,  # 1 hour ago
         )
@@ -475,7 +477,7 @@ class TestRetentionFilter:
         now = time.time()
         # Session with only created_at set
         p = PipelineProgress(
-            job_id="123",
+            agent_session_id="123",
             status="completed",
             created_at=now - 3600,
             last_activity=None,
@@ -512,5 +514,5 @@ class TestSdlcQueryFunctions:
     def test_get_pipeline_detail_not_found(self):
         from ui.data.sdlc import get_pipeline_detail
 
-        result = get_pipeline_detail("nonexistent-job-id-12345")
+        result = get_pipeline_detail("nonexistent-session-id-12345")
         assert result is None

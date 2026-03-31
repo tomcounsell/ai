@@ -14,7 +14,7 @@ The previous system inferred pipeline stage status by parsing agent transcripts 
 Stage status is set programmatically at the points where transitions actually happen:
 - `start_stage()` in the PreToolUse hook when the PM dispatches a dev-session for an SDLC stage
 - `complete_stage()` in the SubagentStop hook when the dev-session returns successfully
-- `fail_stage()` when the job fails
+- `fail_stage()` when the session fails
 
 State is persisted as a JSON dict on `AgentSession.stage_states` -- one Redis field, no history parsing.
 
@@ -109,7 +109,7 @@ Falls back to `"ambiguous"` for the Observer LLM to handle.
 - **PreToolUse hook** (`agent/hooks/pre_tool_use.py`): Calls `start_stage()` when the PM dispatches a dev-session, marking the stage as `in_progress`
 - **SubagentStop hook** (`agent/hooks/subagent_stop.py`): Calls `complete_stage()` when the dev-session returns, marking the stage as `completed`
 - **ChatSession**: Uses state machine for stage queries and outcome classification
-- **Job Queue** (`agent/job_queue.py`): Creates state machine in `send_to_chat()`, applies transitions from Observer decisions
+- **Job Queue** (`agent/agent_session_queue.py`): Creates state machine in `send_to_chat()`, applies transitions from Observer decisions
 - **Summarizer** (`bridge/summarizer.py`): Reads `get_display_progress()` for Telegram stage rendering
 
 ## What Was Deleted

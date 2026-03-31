@@ -54,7 +54,7 @@ work examples:
 - "ok fix that" -> work 0.95
 - "Merge PR 42" -> work 0.99
 - "Make the tests pass" -> work 0.98
-- "Refactor the job queue" -> work 0.97
+- "Refactor the session queue" -> work 0.97
 - "Can you update the docs?" -> work 0.93
 - "Complete issue 499" -> work 0.99
 - "Run the SDLC pipeline on this" -> work 0.99

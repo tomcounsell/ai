@@ -45,7 +45,7 @@ Simple emoji + bullets format, no stage line or link footer. Still summarized vi
 ### Q&A Mode (Prose)
 ```
 The bridge connects Telegram to Claude via Telethon. See bridge/telegram_bridge.py
-for the main entry point. The nudge loop in agent/job_queue.py handles delivery
+for the main entry point. The nudge loop in agent/agent_session_queue.py handles delivery
 routing based on stop_reason classification.
 ```
 
@@ -95,7 +95,7 @@ No checkbox icons are used. The ISSUE stage label includes the issue number when
 - `bridge/summarizer.py`: `summarize_response()` (always-summarize entry point), `_strip_process_narration()` (pre-summarization cleanup), `_compose_structured_summary()` (template renderer), `_parse_summary_and_questions()` (question extractor), `_normalize_question_prefix()` (legacy `?` to `>>` conversion), `_render_stage_progress()`, `_render_link_footer()`, `_linkify_references()` (auto-link PR/Issue refs)
 - `bridge/response.py`: Always calls summarizer for non-empty text, passes `AgentSession` via `session=` kwarg. `_truncate_at_sentence_boundary()` ensures clean truncation at Telegram's 4096-char limit.
 - `bridge/telegram_bridge.py`: `_send` callback accepts and forwards `session` parameter
-- `agent/job_queue.py`: `SendCallback` type includes session parameter, `send_to_chat()` uses `classify_nudge_action()` for routing decisions and passes `agent_session`
+- `agent/agent_session_queue.py`: `SendCallback` type includes session parameter, `send_to_chat()` uses `classify_nudge_action()` for routing decisions and passes `agent_session`
 - `bridge/markdown.py`: `send_markdown()` with plain-text fallback
 
 ## Session Freshness
@@ -118,7 +118,7 @@ Diagnostic logging in `_compose_structured_summary()` confirms when stage progre
 ## Callback Chain
 
 ```
-agent/job_queue.py send_to_chat()
+agent/agent_session_queue.py send_to_chat()
   → send_cb(chat_id, msg, message_id, agent_session)
   → bridge/telegram_bridge.py _send(chat_id, text, reply_to, session)
   → bridge/response.py send_response_with_files(..., session=session)

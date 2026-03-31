@@ -6,7 +6,7 @@ meaningful progress or is stuck in a loop.
 
 Kill mechanism: PostToolUse hooks cannot stop CLI execution (continue_: False
 is ignored). Instead, the watchdog sets watchdog_unhealthy on the AgentSession
-model. The nudge loop in job_queue.py checks this field before auto-continuing.
+model. The nudge loop in agent_session_queue.py checks this field before auto-continuing.
 When flagged unhealthy, the nudge loop delivers output to Telegram instead of
 sending "Keep working".
 """
@@ -51,7 +51,7 @@ def _set_unhealthy(session_id: str, reason: str) -> None:
 def is_session_unhealthy(session_id: str) -> str | None:
     """Check if a session has been flagged unhealthy by the watchdog.
 
-    Called by the nudge loop in job_queue.py before auto-continuing.
+    Called by the nudge loop in agent_session_queue.py before auto-continuing.
 
     Returns:
         The reason string if unhealthy, None if healthy.

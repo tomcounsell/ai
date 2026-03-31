@@ -49,13 +49,13 @@ logger = logging.getLogger(__name__)
 # === Client Registry ===
 # Module-level registry of active SDK clients keyed by session_id.
 # In-memory only (intentionally not persisted). On crash/reboot, the dict
-# is empty and recovered jobs create fresh clients. See plan doc for
+# is empty and recovered sessions create fresh clients. See plan doc for
 # crash safety analysis.
 _active_clients: dict[str, "ClaudeSDKClient"] = {}
 
 # === Stop Reason Registry ===
 # Stores the stop_reason from the most recent ResultMessage for each session.
-# Populated by ValorAgent.query(), consumed by job_queue after query completes.
+# Populated by ValorAgent.query(), consumed by session_queue after query completes.
 # In-memory only — cleared when the session finishes.
 _session_stop_reasons: dict[str, str] = {}
 
@@ -75,7 +75,7 @@ SDK_INACTIVITY_TIMEOUT_SECONDS = int(os.environ.get("SDK_INACTIVITY_TIMEOUT_SECO
 class CircuitOpenError(RuntimeError):
     """Raised when the Anthropic circuit breaker is open.
 
-    The worker loop catches this specifically to leave the job as pending
+    The worker loop catches this specifically to leave the session as pending
     (instead of marking it failed) so the health check can retry when
     the circuit closes.
     """
@@ -188,7 +188,7 @@ def _has_prior_session(session_id: str) -> bool:
 
     Used by _create_options() to decide whether to set continue_conversation=True.
     Only returns True if an AgentSession with this session_id has been previously
-    saved (i.e., a prior job ran for this conversation thread). This prevents
+    saved (i.e., a prior session ran for this conversation thread). This prevents
     fresh sessions from reusing stale Claude Code session files on disk.
 
     See issue #232 for the cross-wire bug this fixes.
@@ -827,7 +827,7 @@ class ValorAgent:
         chat_id: str | None = None,
         project_key: str | None = None,
         message_id: int | None = None,
-        job_id: str | None = None,
+        agent_session_id: str | None = None,
         gh_repo: str | None = None,
         target_repo: str | None = None,
         session_type: str | None = None,
@@ -844,7 +844,8 @@ class ValorAgent:
             chat_id: Optional chat ID for routing context injection.
             project_key: Optional project key for routing context injection.
             message_id: Optional message ID for routing context injection.
-            job_id: Optional job ID injected as JOB_ID env var for child job spawning.
+            agent_session_id: Optional session ID injected as
+                AGENT_SESSION_ID env var for child session spawning.
             gh_repo: Optional GitHub repo (org/repo) to set as GH_REPO env var.
                 When set, all `gh` CLI commands in the subprocess automatically
                 target this repo without needing explicit --repo flags.
@@ -865,7 +866,7 @@ class ValorAgent:
         self.chat_id = chat_id
         self.project_key = project_key
         self.message_id = message_id
-        self.job_id = job_id
+        self.agent_session_id = agent_session_id
         self.gh_repo = gh_repo or None  # Normalize empty string to None
         self.target_repo = target_repo
         self.session_type = session_type
@@ -902,10 +903,10 @@ class ValorAgent:
         if session_id:
             env["VALOR_SESSION_ID"] = session_id
 
-        # Pass job_id so the agent can reference its own job when spawning children
-        # via `schedule_job --parent-job $JOB_ID` (issue #359)
-        if self.job_id:
-            env["JOB_ID"] = self.job_id
+        # Pass agent_session_id so the agent can reference its own session when spawning children
+        # via `schedule_session --parent-session $AGENT_SESSION_ID` (issue #359)
+        if self.agent_session_id:
+            env["AGENT_SESSION_ID"] = self.agent_session_id
 
         # Cross-repo gh resolution: set GH_REPO so all `gh` CLI commands in the
         # subprocess automatically target the correct repo (issue #375). This is
@@ -996,7 +997,7 @@ class ValorAgent:
             )
             raise CircuitOpenError(
                 "Anthropic service unavailable (circuit breaker open). "
-                "Job will remain pending and retry when service recovers."
+                "Session will remain pending and retry when service recovers."
             )
 
         # Bug 2 fix (issue #374): Reset watchdog tool counts at query start
@@ -1211,7 +1212,7 @@ class ValorAgent:
                 # Clean up activity tracking — session is done
                 clear_session_activity(session_id)
                 # Note: _session_stop_reasons is NOT cleaned here — it's consumed
-                # by get_stop_reason() in job_queue after query returns. The pop()
+                # by get_stop_reason() in session_queue after query returns. The pop()
                 # in get_stop_reason() handles cleanup. If the nudge loop never runs
                 # (crash), entries are tiny (session_id -> str) and cleared on restart.
                 logger.debug(f"Unregistered active client for session {session_id}")
@@ -1346,7 +1347,7 @@ async def get_agent_response_sdk(
     sender_id: int | None = None,
     task_list_id: str | None = None,
     correlation_id: str | None = None,
-    job_id: str | None = None,
+    agent_session_id: str | None = None,
 ) -> str:
     """Get agent response using Claude Agent SDK.
 
@@ -1373,7 +1374,7 @@ async def get_agent_response_sdk(
         sender_id: Telegram user ID (for permission checking)
         task_list_id: Optional task list ID to scope sub-agent Task storage
         correlation_id: Optional end-to-end tracing ID from the bridge
-        job_id: Optional job ID for child job spawning (issue #359)
+        agent_session_id: Optional session ID for child session spawning (issue #359)
 
     Returns:
         The assistant's response text
@@ -1426,7 +1427,7 @@ async def get_agent_response_sdk(
 
         if not classification:
             # Fallback: check for PR/issue references before defaulting to question.
-            # The async classifier can lose the race with job pickup, so this
+            # The async classifier can lose the race with session pickup, so this
             # fast-path catches messages like "Complete PR 478" that must be SDLC.
             import re as _re_cls
 
@@ -1644,7 +1645,7 @@ async def get_agent_response_sdk(
     try:
         # Extract project_key from config for env var injection
         _project_key = project.get("name", "valor").lower().replace(" ", "-") if project else None
-        # Extract message_id from the job context (passed through _execute_job)
+        # Extract message_id from the session context (passed through _execute_agent_session)
         _message_id = None  # message_id not available at this layer
 
         logger.info(f"[{request_id}] Resolved persona: {persona}")
@@ -1697,7 +1698,7 @@ async def get_agent_response_sdk(
             chat_id=chat_id,
             project_key=_project_key,
             message_id=_message_id,
-            job_id=job_id,
+            agent_session_id=agent_session_id,
             gh_repo=_gh_repo,
             target_repo=project_working_dir,
             session_type=_session_type,

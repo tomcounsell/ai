@@ -182,7 +182,7 @@ class TestAgentSessionCompletion:
         mock_session = MagicMock()
         mock_session.status = "running"
 
-        mock_sidecar = {"agent_session_job_id": "job-123"}
+        mock_sidecar = {"agent_session_id": "session-123"}
 
         with (
             patch(
@@ -208,11 +208,11 @@ class TestAgentSessionCompletion:
                 from hook_utils.memory_bridge import load_agent_session_sidecar
 
                 sidecar = load_agent_session_sidecar(session_id)
-                job_id = sidecar.get("agent_session_job_id")
-                if job_id:
+                agent_session_id = sidecar.get("agent_session_id")
+                if agent_session_id:
                     from models.agent_session import AgentSession
 
-                    agent_session = AgentSession.query.get(job_id)
+                    agent_session = AgentSession.query.get(agent_session_id)
                     if agent_session:
                         stop_reason = hook_input.get("stop_reason", "unknown")
                         if stop_reason in ("error", "crash"):
@@ -231,7 +231,7 @@ class TestAgentSessionCompletion:
         mock_session = MagicMock()
         mock_session.status = "running"
 
-        mock_sidecar = {"agent_session_job_id": "job-456"}
+        mock_sidecar = {"agent_session_id": "session-456"}
 
         with (
             patch(
@@ -249,11 +249,11 @@ class TestAgentSessionCompletion:
                 from hook_utils.memory_bridge import load_agent_session_sidecar
 
                 sidecar = load_agent_session_sidecar(session_id)
-                job_id = sidecar.get("agent_session_job_id")
-                if job_id:
+                agent_session_id = sidecar.get("agent_session_id")
+                if agent_session_id:
                     from models.agent_session import AgentSession
 
-                    agent_session = AgentSession.query.get(job_id)
+                    agent_session = AgentSession.query.get(agent_session_id)
                     if agent_session:
                         stop_reason = hook_input.get("stop_reason", "unknown")
                         if stop_reason in ("error", "crash"):
@@ -267,7 +267,7 @@ class TestAgentSessionCompletion:
         assert mock_session.status == "failed"
 
     def test_no_sidecar_skips_gracefully(self):
-        """No error when sidecar has no agent_session_job_id."""
+        """No error when sidecar has no agent_session_id."""
         with patch(
             "hook_utils.memory_bridge.load_agent_session_sidecar",
             return_value={},
@@ -277,8 +277,8 @@ class TestAgentSessionCompletion:
                 from hook_utils.memory_bridge import load_agent_session_sidecar
 
                 sidecar = load_agent_session_sidecar("no-session")
-                job_id = sidecar.get("agent_session_job_id")
-                assert job_id is None
+                agent_session_id = sidecar.get("agent_session_id")
+                assert agent_session_id is None
             except Exception:
                 pass
 

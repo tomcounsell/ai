@@ -88,7 +88,7 @@ Teammate sessions bypass structured formatting entirely:
 - `_compose_structured_summary()` returns the LLM summary directly without emoji prefix, bullet parsing, or structured template
 - `SUMMARIZER_SYSTEM_PROMPT` includes a teammate format rule: respond in prose, no bullets, no status emoji
 
-### `agent/job_queue.py`
+### `agent/agent_session_queue.py`
 
 In the nudge loop, checks the session's `session_mode` field:
 
@@ -112,4 +112,4 @@ In the nudge loop, checks the session's `session_mode` field:
 | `bridge/summarizer.py` | Teammate prose bypass in `_compose_structured_summary()` and prompt context |
 | `agent/teammate_metrics.py` | Redis-backed classification and response time counters |
 | `agent/sdk_client.py` | Integration point: classifier call and instruction injection |
-| `agent/job_queue.py` | Integration point: reduced nudge cap for teammate sessions |
+| `agent/agent_session_queue.py` | Integration point: reduced nudge cap for teammate sessions |

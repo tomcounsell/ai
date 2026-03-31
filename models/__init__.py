@@ -4,7 +4,7 @@ Provides fast, queryable Redis models for all persistent data:
 - TelegramMessage: incoming/outgoing Telegram messages (source of truth)
 - Link: URLs shared in Telegram chats
 - Chat: Telegram chat ID to name mapping
-- AgentSession: unified agent work lifecycle (replaces RedisJob + SessionLog)
+- AgentSession: unified agent work lifecycle
 - BridgeEvent: structured bridge events for analytics
 - DeadLetter: failed message queue
 - Reflection: per-reflection scheduler state (unified recurring task tracking)

@@ -54,7 +54,7 @@ def _list_children(parent_id: str) -> int:
     for child in running:
         slug_info = f" slug={child.slug}" if child.slug else ""
         stage_info = f" stage={child.current_stage}" if child.current_stage else ""
-        print(f"  {child.job_id}{slug_info}{stage_info} status={child.status}")
+        print(f"  {child.agent_session_id}{slug_info}{stage_info} status={child.status}")
 
     return 0
 
