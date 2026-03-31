@@ -39,7 +39,7 @@ Create an environment group named `cuttlefish` in the Render dashboard with thes
 # Django Core
 SECRET_KEY=<generate-random-secret-key>
 DEBUG=False
-ALLOWED_HOSTS=cuttlefish-production.onrender.com,app.bwforce.ai
+ALLOWED_HOSTS=cuttlefish-production.onrender.com,ai.yuda.me
 ```
 
 ### Auto-configured Variables
@@ -52,16 +52,16 @@ These are set automatically by `render.yaml`:
 
 ## Custom Domain Setup
 
-To use `app.bwforce.ai` domain:
+To use `ai.yuda.me` domain:
 
 1. **Add Custom Domain in Render**:
    - Go to your service settings
    - Click "Custom Domains"
-   - Add `app.bwforce.ai`
+   - Add `ai.yuda.me`
 
 2. **Configure DNS**:
    ```
-   CNAME  app.bwforce.ai  cuttlefish-production.onrender.com
+   CNAME  ai.yuda.me  cuttlefish-production.onrender.com
    ```
 
 3. **SSL Certificate**: Render automatically provisions SSL certificates
@@ -170,8 +170,8 @@ Tasks are defined with `@task` decorator and enqueued with `.enqueue()`. In dev/
 
 The MCP servers are accessible via Django:
 
-- **Creative Juices Landing**: https://app.bwforce.ai/mcp/creative-juices
-- **Creative Juices Manifest**: https://app.bwforce.ai/mcp/creative-juices/manifest.json
+- **Creative Juices Landing**: https://ai.yuda.me/mcp/creative-juices
+- **Creative Juices Manifest**: https://ai.yuda.me/mcp/creative-juices/manifest.json
 
 These are served by Django views and work automatically once deployed.
 
@@ -305,7 +305,7 @@ After deployment:
 
 1. **Verify Health**: Check https://your-app.onrender.com/health/
 2. **Test MCP Endpoints**: Visit MCP landing pages
-3. **Add Custom Domain**: Configure DNS for app.bwforce.ai
+3. **Add Custom Domain**: Configure DNS for ai.yuda.me
 5. **Monitor**: Set up alerts in Render dashboard
 6. **Document URLs**: Update team documentation with production URLs
 

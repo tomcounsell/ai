@@ -480,14 +480,14 @@ mcp-inspector uv run python -m apps.ai.mcp.cto_tools_server
    - `LINEAR_API_KEY=lin_api_...`
    - Any custom connector API keys
 
-3. **Web hosting URL**: https://app.bwforce.ai/mcp/cto-tools
+3. **Web hosting URL**: https://ai.yuda.me/mcp/cto-tools
 
 4. **Client configuration** (HTTP mode):
 ```json
 {
   "mcpServers": {
     "cto-tools": {
-      "url": "https://app.bwforce.ai/mcp/cto-tools/serve"
+      "url": "https://ai.yuda.me/mcp/cto-tools/serve"
     }
   }
 }

@@ -11,7 +11,7 @@ version = "0.1.0"
 description = "Multi-tool MCP Server Platform - B2B SaaS for various integrations via Model Context Protocol"
 readme = "README.md"
 authors = [
-    {name = "Tom Counsell", email = "tom@yudame.org"}
+    {name = "Tom Counsell", email = "tom@yuda.me"}
 ]
 license = "MIT"
 classifiers = [

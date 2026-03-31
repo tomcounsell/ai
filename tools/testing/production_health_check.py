@@ -13,7 +13,7 @@ except ImportError:
     print("Error: requests library not found. Install with: pip install requests")
     sys.exit(1)
 
-PRODUCTION_BASE_URL = "https://app.bwforce.ai"
+PRODUCTION_BASE_URL = "https://ai.yuda.me"
 
 ENDPOINTS_TO_CHECK = [
     # (url, expected_status, check_cors, description)

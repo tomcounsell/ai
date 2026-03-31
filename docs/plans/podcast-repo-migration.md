@@ -205,7 +205,7 @@ research repo                     cuttlefish repo
 - **Don't refactor the tools during migration** — Move them as-is, then improve later. Rewriting `update_feed.py` to use Django models instead of static XML is a separate task (part of `private-podcast-feeds.md`).
 - **Don't integrate tools with Django yet** — The Python tools are standalone CLI scripts. Making them Django management commands or services is future work. Move them into `apps/podcast/tools/` as standalone scripts first.
 - **Don't migrate episode content in this plan** — Episode data import into the Django hosting platform is a separate task. This plan moves the production system, not the produced content.
-- **Don't publish new episodes until the new system is built** — The GitHub Pages feed at `research.bwforce.ai` stays as-is (frozen). No new episodes until cuttlefish private feeds are operational.
+- **Don't publish new episodes until the new system is built** — The GitHub Pages feed at `research.yuda.me` stays as-is (frozen). No new episodes until cuttlefish private feeds are operational.
 - **Don't strip podcast-specific content from research skills** — The Perplexity/Gemini/GPT-Researcher/ChatGPT skills are general-purpose but may contain podcast-helpful context. Move them as-is without removing anything.
 
 ## Risks

@@ -14,7 +14,7 @@ tracking: https://github.com/yudame/cuttlefish/issues/54
 The podcast workflow produces identical content packaging regardless of whether an episode targets a public or private feed. Sponsor breaks, CTAs, persona stories, companion resource gating, and depth assumptions are all hardcoded for the public "Yudame Research" feed.
 
 **Current behavior:**
-Every episode gets the same public-facing branding ("Welcome to Yuda Me Research by Valor Engels..."), the same CTA ("subscribe and share"), the same sponsor splice point placeholder, and the same companion resource links pointing to `research.bwforce.ai`. Private feed episodes go through the same pipeline and then require manual post-processing to strip/replace these elements.
+Every episode gets the same public-facing branding ("Welcome to Yuda Me Research by Valor Engels..."), the same CTA ("subscribe and share"), the same sponsor splice point placeholder, and the same companion resource links pointing to `research.yuda.me`. Private feed episodes go through the same pipeline and then require manual post-processing to strip/replace these elements.
 
 **Desired outcome:**
 Episode metadata declares its target feed (public or private). The content plan, metadata, NotebookLM prompt, and companion resources automatically adapt their packaging based on feed type - while sharing the same research pipeline (Phases 1-7) and core content.
@@ -289,7 +289,7 @@ No agent integration required beyond updating existing agent prompt files. The c
 - Verify `notebooklm_prompt.py` output differs between public and private episodes
 - Verify content_plan-enhanced template has conditional sections
 - Verify metadata-enhanced template has conditional URLs
-- Verify no remaining hardcoded `research.bwforce.ai` in agent/skill files (except as defaults)
+- Verify no remaining hardcoded `research.yuda.me` in agent/skill files (except as defaults)
 - Run all success criteria checks
 
 ### 6. Final Validation
@@ -307,7 +307,7 @@ No agent integration required beyond updating existing agent prompt files. The c
 - `DJANGO_SETTINGS_MODULE=settings uv run python -c "from apps.podcast.tools.episode_config import load_config; print(load_config('/tmp/test'))"` - verify default config loads
 - `uv run python apps/podcast/tools/setup_episode.py --podcast stablecoin --slug test --title Test && cat apps/podcast/pending-episodes/stablecoin/test/episode_config.json` - verify config snapshot written
 - `DJANGO_SETTINGS_MODULE=settings uv run python -c "from apps.podcast.models import Podcast; p = Podcast.objects.get(slug='stablecoin'); print(p.config.depth_level, p.config.sponsor_break)"` - verify PodcastConfig accessible via OneToOne
-- `grep -r 'research.bwforce.ai' .claude/agents/podcast-*.md .claude/skills/podcast-episode-planner/` - verify no remaining hardcoded public URLs in agent prompts (should only appear as defaults)
+- `grep -r 'research.yuda.me' .claude/agents/podcast-*.md .claude/skills/podcast-episode-planner/` - verify no remaining hardcoded public URLs in agent prompts (should only appear as defaults)
 
 ---
 

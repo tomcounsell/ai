@@ -3,7 +3,7 @@
 **Version:** 1.1.0
 **Last Updated:** December 9, 2025
 **Status:** Production
-**URL:** https://app.bwforce.ai/mcp/cto-tools/serve
+**URL:** https://ai.yuda.me/mcp/cto-tools/serve
 
 ## Table of Contents
 
@@ -58,7 +58,7 @@ graph TB
         Client[MCP Client]
     end
 
-    subgraph "app.bwforce.ai (Django)"
+    subgraph "ai.yuda.me (Django)"
         OAuth[OAuth Server<br/>RFC 7636 + 7591 + 8414]
         MCPView[MCP Server View<br/>JSON-RPC 2.0]
         Tools[FastMCP Tools]
@@ -167,10 +167,10 @@ sequenceDiagram
 **Response** (RFC 8414):
 ```json
 {
-  "issuer": "https://app.bwforce.ai",
-  "authorization_endpoint": "https://app.bwforce.ai/mcp/oauth/authorize",
-  "token_endpoint": "https://app.bwforce.ai/mcp/oauth/token",
-  "registration_endpoint": "https://app.bwforce.ai/mcp/oauth/register",
+  "issuer": "https://ai.yuda.me",
+  "authorization_endpoint": "https://ai.yuda.me/mcp/oauth/authorize",
+  "token_endpoint": "https://ai.yuda.me/mcp/oauth/token",
+  "registration_endpoint": "https://ai.yuda.me/mcp/oauth/register",
   "scopes_supported": ["mcp:read", "mcp:write"],
   "response_types_supported": ["code"],
   "grant_types_supported": ["authorization_code"],
@@ -312,7 +312,7 @@ sequenceDiagram
   "description": "MCP server for CTO and engineering leadership tools",
   "protocol": "MCP",
   "authentication": true,
-  "endpoint": "https://app.bwforce.ai/mcp/cto-tools/serve"
+  "endpoint": "https://ai.yuda.me/mcp/cto-tools/serve"
 }
 ```
 
@@ -1151,10 +1151,10 @@ gunicorn settings.wsgi:application
 
 ### Domain Configuration
 
-- **Production URL**: `https://app.bwforce.ai`
-- **MCP Endpoint**: `https://app.bwforce.ai/mcp/cto-tools/serve`
-- **OAuth Metadata**: `https://app.bwforce.ai/.well-known/oauth-authorization-server`
-- **Manifest**: `https://app.bwforce.ai/mcp/cto-tools/manifest.json`
+- **Production URL**: `https://ai.yuda.me`
+- **MCP Endpoint**: `https://ai.yuda.me/mcp/cto-tools/serve`
+- **OAuth Metadata**: `https://ai.yuda.me/.well-known/oauth-authorization-server`
+- **Manifest**: `https://ai.yuda.me/mcp/cto-tools/manifest.json`
 
 ### SSL/TLS
 
@@ -1382,14 +1382,14 @@ response['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
 
 ```bash
 # 1. Discover OAuth metadata
-curl https://app.bwforce.ai/.well-known/oauth-authorization-server
+curl https://ai.yuda.me/.well-known/oauth-authorization-server
 
 # Response:
 {
-  "issuer": "https://app.bwforce.ai",
-  "authorization_endpoint": "https://app.bwforce.ai/mcp/oauth/authorize",
-  "token_endpoint": "https://app.bwforce.ai/mcp/oauth/token",
-  "registration_endpoint": "https://app.bwforce.ai/mcp/oauth/register",
+  "issuer": "https://ai.yuda.me",
+  "authorization_endpoint": "https://ai.yuda.me/mcp/oauth/authorize",
+  "token_endpoint": "https://ai.yuda.me/mcp/oauth/token",
+  "registration_endpoint": "https://ai.yuda.me/mcp/oauth/register",
   "scopes_supported": ["mcp:read", "mcp:write"],
   "response_types_supported": ["code"],
   "grant_types_supported": ["authorization_code"],
@@ -1398,7 +1398,7 @@ curl https://app.bwforce.ai/.well-known/oauth-authorization-server
 }
 
 # 2. Register client
-curl -X POST https://app.bwforce.ai/mcp/oauth/register \
+curl -X POST https://ai.yuda.me/mcp/oauth/register \
   -H "Content-Type: application/json" \
   -d '{"redirect_uris": ["http://localhost:3000/callback"]}'
 
@@ -1414,13 +1414,13 @@ curl -X POST https://app.bwforce.ai/mcp/oauth/register \
 
 # 3. Get authorization code (browser redirect)
 # Navigate to:
-https://app.bwforce.ai/mcp/oauth/authorize?client_id=abc123xyz&redirect_uri=http://localhost:3000/callback&response_type=code&code_challenge=CHALLENGE&code_challenge_method=S256&state=xyz
+https://ai.yuda.me/mcp/oauth/authorize?client_id=abc123xyz&redirect_uri=http://localhost:3000/callback&response_type=code&code_challenge=CHALLENGE&code_challenge_method=S256&state=xyz
 
 # Redirects to:
 http://localhost:3000/callback?code=AUTH_CODE&state=xyz
 
 # 4. Exchange code for token
-curl -X POST https://app.bwforce.ai/mcp/oauth/token \
+curl -X POST https://ai.yuda.me/mcp/oauth/token \
   -H "Content-Type: application/json" \
   -d '{
     "grant_type": "authorization_code",
@@ -1438,7 +1438,7 @@ curl -X POST https://app.bwforce.ai/mcp/oauth/token \
 }
 
 # 5. Discover MCP server
-curl https://app.bwforce.ai/mcp/cto-tools/serve
+curl https://ai.yuda.me/mcp/cto-tools/serve
 
 # Response:
 {
@@ -1447,11 +1447,11 @@ curl https://app.bwforce.ai/mcp/cto-tools/serve
   "description": "MCP server for CTO and engineering leadership tools",
   "protocol": "MCP",
   "authentication": true,
-  "endpoint": "https://app.bwforce.ai/mcp/cto-tools/serve"
+  "endpoint": "https://ai.yuda.me/mcp/cto-tools/serve"
 }
 
 # 6. Initialize MCP session
-curl -X POST https://app.bwforce.ai/mcp/cto-tools/serve \
+curl -X POST https://ai.yuda.me/mcp/cto-tools/serve \
   -H "Authorization: Bearer def456uvw" \
   -H "Content-Type: application/json" \
   -d '{
@@ -1480,7 +1480,7 @@ curl -X POST https://app.bwforce.ai/mcp/cto-tools/serve \
 }
 
 # 7. Send initialized notification
-curl -X POST https://app.bwforce.ai/mcp/cto-tools/serve \
+curl -X POST https://ai.yuda.me/mcp/cto-tools/serve \
   -H "Authorization: Bearer def456uvw" \
   -H "Content-Type: application/json" \
   -d '{
@@ -1495,7 +1495,7 @@ curl -X POST https://app.bwforce.ai/mcp/cto-tools/serve \
 }
 
 # 8. List tools
-curl -X POST https://app.bwforce.ai/mcp/cto-tools/serve \
+curl -X POST https://ai.yuda.me/mcp/cto-tools/serve \
   -H "Authorization: Bearer def456uvw" \
   -H "Content-Type: application/json" \
   -d '{
@@ -1527,7 +1527,7 @@ curl -X POST https://app.bwforce.ai/mcp/cto-tools/serve \
 }
 
 # 9. Call a tool
-curl -X POST https://app.bwforce.ai/mcp/cto-tools/serve \
+curl -X POST https://ai.yuda.me/mcp/cto-tools/serve \
   -H "Authorization: Bearer def456uvw" \
   -H "Content-Type: application/json" \
   -d '{
@@ -1564,7 +1564,7 @@ curl -X POST https://app.bwforce.ai/mcp/cto-tools/serve \
 **Fix**: Verify metadata endpoint returns:
 ```json
 {
-  "registration_endpoint": "https://app.bwforce.ai/mcp/oauth/register"
+  "registration_endpoint": "https://ai.yuda.me/mcp/oauth/register"
 }
 ```
 
@@ -1650,8 +1650,8 @@ DATABASE_URL=<render-postgres-url>
 ```json
 {
   "oauth": {
-    "authorizationUrl": "https://app.bwforce.ai/mcp/oauth/authorize",
-    "tokenUrl": "https://app.bwforce.ai/mcp/oauth/token"
+    "authorizationUrl": "https://ai.yuda.me/mcp/oauth/authorize",
+    "tokenUrl": "https://ai.yuda.me/mcp/oauth/token"
   }
 }
 ```

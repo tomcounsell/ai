@@ -281,7 +281,7 @@
 > [Reference to opening hook] + [Core takeaway]
 
 **Call-to-Action (Wave 4, Task C1.2):**
-> "If you want to go deeper, check out [related episode/resource]. You can find the full research report with all sources at research.bwforce.ai/podcast/episodes/[slug]/report.md"
+> "If you want to go deeper, check out [related episode/resource]. You can find the full research report with all sources at research.yuda.me/podcast/episodes/[slug]/report.md"
 
 ---
 

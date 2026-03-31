@@ -131,7 +131,7 @@ def main():
 
     Supports two modes:
     - stdio (default): For local development and testing
-    - streamable-http: For production hosting at app.bwforce.ai
+    - streamable-http: For production hosting at ai.yuda.me
 
     Set MCP_TRANSPORT environment variable to switch modes.
     """
@@ -140,7 +140,7 @@ def main():
     transport = os.getenv("MCP_TRANSPORT", "stdio")
 
     if transport == "streamable-http":
-        # Production mode - HTTP transport for hosting at app.bwforce.ai
+        # Production mode - HTTP transport for hosting at ai.yuda.me
         # This will be run as a separate service on Render
         logger.info("Starting Creative Juices MCP server in HTTP mode")
         mcp.run(transport="streamable-http")

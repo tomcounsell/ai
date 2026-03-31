@@ -4,7 +4,7 @@
  * Creative Juices MCP Client - Node.js Proxy
  *
  * Forwards MCP protocol messages from stdin to the hosted service at
- * app.bwforce.ai and returns responses to stdout.
+ * ai.yuda.me and returns responses to stdout.
  *
  * This allows users to use Creative Juices with zero local dependencies
  * since Node.js ships with Claude Desktop.
@@ -13,7 +13,7 @@
 const https = require('https');
 const http = require('http');
 
-const HOSTED_SERVICE_URL = 'https://app.bwforce.ai/mcp/creative-juices/serve';
+const HOSTED_SERVICE_URL = 'https://ai.yuda.me/mcp/creative-juices/serve';
 
 // Buffer for collecting stdin data
 let stdinBuffer = '';

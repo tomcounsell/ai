@@ -38,7 +38,7 @@ class TestDomainRoutingMiddleware:
     def test_cuttlefish_domain_no_urlconf_override(self):
         middleware = self._make_middleware()
         factory = RequestFactory()
-        request = factory.get("/", HTTP_HOST="app.bwforce.ai")
+        request = factory.get("/", HTTP_HOST="ai.yuda.me")
         middleware(request)
         assert request.site_name == "cuttlefish"
         assert not hasattr(request, "urlconf")

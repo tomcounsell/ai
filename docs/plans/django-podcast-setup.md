@@ -11,7 +11,7 @@ tracking: https://github.com/yudame/cuttlefish/issues/35
 
 ## Problem
 
-The podcast production system was migrated from a static site repo (`research`) into `cuttlefish/apps/podcast/`, but it's just a collection of CLI tools — no Django integration. Meanwhile, the live podcast is served from GitHub Pages at `research.bwforce.ai` as static HTML/XML files.
+The podcast production system was migrated from a static site repo (`research`) into `cuttlefish/apps/podcast/`, but it's just a collection of CLI tools — no Django integration. Meanwhile, the live podcast is served from GitHub Pages at `research.yuda.me` as static HTML/XML files.
 
 **Current behavior:**
 - 33+ episodes across 7 topic areas served from static GitHub Pages
@@ -47,7 +47,7 @@ The models are straightforward, the admin is mostly auto-generated, RSS generati
 |-------------|---------------|---------|
 | PostgreSQL running | `pg_isready` | Database |
 | Cuttlefish DB exists | `psql -d cuttlefish -c "SELECT 1"` | Database |
-| Static feed accessible | `curl -s https://research.bwforce.ai/podcast/feed.xml \| head -5` | Data import source |
+| Static feed accessible | `curl -s https://research.yuda.me/podcast/feed.xml \| head -5` | Data import source |
 
 ## Solution
 
@@ -58,7 +58,7 @@ The models are straightforward, the admin is mostly auto-generated, RSS generati
 - **RSS feed view**: Generates valid `feed.xml` from database for each Podcast. Includes iTunes/Podcasting 2.0 namespace tags.
 - **Public views**: Minimal podcast listing page and episode detail page (title, description, companion links, audio download).
 - **Admin**: Register models with Unfold admin. Basic list/filter/search. Inline episode management.
-- **Data import command**: Management command that parses `research.bwforce.ai/podcast/feed.xml` and creates Podcast + Episode records.
+- **Data import command**: Management command that parses `research.yuda.me/podcast/feed.xml` and creates Podcast + Episode records.
 
 ### Data Model
 
@@ -119,7 +119,7 @@ Note: Report and sources are served at deterministic URLs via routing
 - Use `Timestampable` behavior mixin on both models
 - RSS feed: Compile from DB content using a Django template with proper XML content type, cached. Replicates the existing feed.xml structure exactly.
 - Public views: Use `MainContentView` pattern for pages, templates in `apps/public/templates/podcast/`
-- Audio URLs: Store as URLField pointing to `research.bwforce.ai` for now (R2 migration later)
+- Audio URLs: Store as URLField pointing to `research.yuda.me` for now (R2 migration later)
 - Episode ordering: `episode_number` within a podcast (ascending in DB, most recent first in feeds). Re-releases update `published_at` to bust player caches but keep their episode number.
 - Import command: Parse XML with `xml.etree.ElementTree`, extract iTunes namespace metadata
 
@@ -128,7 +128,7 @@ Note: Report and sources are served at deterministic URLs via routing
 - **Don't build private feed auth yet** — The access control model (secret URLs, tokens, etc.) is a separate feature. Just add `is_public` boolean to Podcast for now.
 - **Don't build an audio player** — MVP episode pages just link to the MP3. An embedded player is future work.
 - **Don't integrate with the CLI tools** — The existing `update_feed.py` and other tools stay as-is. A "publish from pending-episodes to database" bridge is future work.
-- **Don't migrate audio files to R2** — Audio stays on `research.bwforce.ai` for MVP. R2 is v2.
+- **Don't migrate audio files to R2** — Audio stays on `research.yuda.me` for MVP. R2 is v2.
 - **Don't build subscriber management** — No user accounts or subscription tracking in this MVP.
 - **Don't parse show notes from static HTML pages** — Import what's in `feed.xml` only. The static episode HTML pages have additional content but it's not worth scraping for MVP.
 
@@ -186,7 +186,7 @@ No agent integration required — this is a Django web feature. Future MCP tools
 - [ ] `/podcast/` shows a listing of public podcasts
 - [ ] `/podcast/{slug}/` shows episodes for a podcast
 - [ ] `/podcast/{slug}/{episode-slug}/` shows an episode detail page
-- [ ] `import_podcast_feed` management command successfully imports all episodes from research.bwforce.ai
+- [ ] `import_podcast_feed` management command successfully imports all episodes from research.yuda.me
 - [ ] Imported episodes have correct titles, descriptions, audio URLs, durations, and dates
 - [ ] All existing tests still pass
 - [ ] New models have test coverage

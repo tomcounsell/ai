@@ -145,7 +145,7 @@ def generate_image(
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
-                "HTTP-Referer": "https://research.bwforce.ai",
+                "HTTP-Referer": "https://research.yuda.me",
                 "X-Title": "Yudame Research Podcast Cover Generator",
             },
             json={
@@ -249,7 +249,7 @@ def generate_cover_image(prompt: str, api_key: str) -> bytes:
         headers={
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
-            "HTTP-Referer": "https://research.bwforce.ai",
+            "HTTP-Referer": "https://research.yuda.me",
             "X-Title": "Yudame Research Podcast Cover Generator",
         },
         json={
@@ -432,7 +432,7 @@ def main():
         log("\nNext step: Add branding with add_logo_watermark.py")
         log("\nTo use in feed.xml, add this line to the episode <item>:")
         log(
-            f'  <itunes:image href="https://research.bwforce.ai/podcast/episodes/{episode_dir.name}/{output_filename}?v=1"/>'
+            f'  <itunes:image href="https://research.yuda.me/podcast/episodes/{episode_dir.name}/{output_filename}?v=1"/>'
         )
 
     return 0

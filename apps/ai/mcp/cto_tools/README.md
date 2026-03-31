@@ -20,7 +20,7 @@ CTO Tools is a Model Context Protocol (MCP) server that provides structured fram
 
 Download and install the `.mcpb` bundle in Claude Desktop:
 
-**https://app.bwforce.ai/mcp/cto-tools/download.mcpb**
+**https://ai.yuda.me/mcp/cto-tools/download.mcpb**
 
 1. Click the download link above
 2. Open Claude Desktop → Settings → Extensions
@@ -30,7 +30,7 @@ Download and install the `.mcpb` bundle in Claude Desktop:
 
 **Architecture:**
 - Bundle contains a Node.js proxy client (no Python/uvx needed)
-- Connects to hosted server at `https://app.bwforce.ai/mcp/cto-tools/serve`
+- Connects to hosted server at `https://ai.yuda.me/mcp/cto-tools/serve`
 - Zero dependencies (Node.js ships with Claude Desktop)
 
 ### Option 2: Direct Hosted Connection
@@ -41,7 +41,7 @@ For clients that support HTTP/SSE MCP servers directly:
 {
   "mcpServers": {
     "cto-tools": {
-      "url": "https://app.bwforce.ai/mcp/cto-tools/serve"
+      "url": "https://ai.yuda.me/mcp/cto-tools/serve"
     }
   }
 }
@@ -294,7 +294,7 @@ Future tools planned:
 
 ## Support
 
-- **Documentation**: https://app.bwforce.ai/mcp/cto-tools
+- **Documentation**: https://ai.yuda.me/mcp/cto-tools
 - **Repository**: https://github.com/tomcounsell/cuttlefish
 - **Issues**: https://github.com/tomcounsell/cuttlefish/issues
 
@@ -304,4 +304,4 @@ MIT License - See repository for details
 
 ---
 
-Part of the [Cuttlefish AI Integration Platform](https://app.bwforce.ai)
+Part of the [Cuttlefish AI Integration Platform](https://ai.yuda.me)

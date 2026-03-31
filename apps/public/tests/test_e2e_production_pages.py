@@ -10,7 +10,7 @@ import pytest
 from playwright.sync_api import Page, expect
 
 # Use environment variable to allow testing different environments
-PRODUCTION_URL = os.environ.get("PRODUCTION_URL", "https://app.bwforce.ai")
+PRODUCTION_URL = os.environ.get("PRODUCTION_URL", "https://ai.yuda.me")
 
 
 @pytest.fixture

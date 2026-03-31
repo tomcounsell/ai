@@ -215,7 +215,7 @@ def populate_episode_fields(
         podcast_slug = episode.podcast.slug
         episode_slug = episode.slug
         audio_url = (
-            f"https://research.bwforce.ai/podcast/episodes/"
+            f"https://research.yuda.me/podcast/episodes/"
             f"{podcast_slug}/{episode_slug}/{audio_path.name}"
         )
         if not dry_run:
@@ -246,7 +246,7 @@ def populate_episode_fields(
         podcast_slug = episode.podcast.slug
         episode_slug = episode.slug
         cover_url = (
-            f"https://research.bwforce.ai/podcast/episodes/"
+            f"https://research.yuda.me/podcast/episodes/"
             f"{podcast_slug}/{episode_slug}/{cover_path.name}"
         )
         if verbose:
@@ -352,7 +352,7 @@ def create_artifacts(
             podcast_slug = episode.podcast.slug
             episode_slug = episode.slug
             pdf_url = (
-                f"https://research.bwforce.ai/podcast/episodes/"
+                f"https://research.yuda.me/podcast/episodes/"
                 f"{podcast_slug}/{episode_slug}/{rel_str}"
             )
             # Attempt text extraction; fall back to URL-only on failure

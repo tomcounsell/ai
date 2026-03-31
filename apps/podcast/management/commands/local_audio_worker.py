@@ -3,10 +3,10 @@ Local audio worker that polls production for pending audio generation jobs.
 
 Usage:
     # Poll every 5 seconds with up to 3 concurrent jobs
-    uv run python manage.py local_audio_worker --base-url https://app.bwforce.ai
+    uv run python manage.py local_audio_worker --base-url https://ai.yuda.me
 
     # Custom interval and concurrency
-    uv run python manage.py local_audio_worker --base-url https://app.bwforce.ai --interval 10 --max-concurrent 1
+    uv run python manage.py local_audio_worker --base-url https://ai.yuda.me --interval 10 --max-concurrent 1
 
 The worker:
   1. Polls GET {base_url}/api/podcast/pending-audio/ for episodes needing audio
@@ -50,7 +50,7 @@ class Command(BaseCommand):
         parser.add_argument(
             "--base-url",
             required=True,
-            help="Base URL of the production server (e.g. https://app.bwforce.ai)",
+            help="Base URL of the production server (e.g. https://ai.yuda.me)",
         )
         parser.add_argument(
             "--interval",

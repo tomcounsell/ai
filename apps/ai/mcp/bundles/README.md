@@ -55,7 +55,7 @@ cd cto-tools && zip -r ../../cto-tools.mcpb manifest.json client.js && cd ..
 These bundles use a **hybrid architecture**:
 
 1. **Local client**: Node.js proxy script bundled in the `.mcpb`
-2. **Remote server**: Actual MCP server hosted at `app.bwforce.ai`
+2. **Remote server**: Actual MCP server hosted at `ai.yuda.me`
 
 ### Why Node.js?
 
@@ -73,7 +73,7 @@ Benefits:
 1. User installs `.mcpb` file in Claude Desktop
 2. Claude Desktop extracts bundle to local directory
 3. When tool is called, Claude runs `node ${__dirname}/client.js`
-4. Client proxy forwards stdin/stdout to `https://app.bwforce.ai/mcp/*/serve`
+4. Client proxy forwards stdin/stdout to `https://ai.yuda.me/mcp/*/serve`
 5. Hosted Django server processes MCP protocol requests
 6. Response flows back through proxy to Claude
 
@@ -126,7 +126,7 @@ curl -O http://localhost:8000/mcp/creative-juices/download.mcpb
 
 ### Claude Desktop Testing
 
-1. Download `.mcpb` file from `https://app.bwforce.ai/mcp/*/download.mcpb`
+1. Download `.mcpb` file from `https://ai.yuda.me/mcp/*/download.mcpb`
 2. Open Claude Desktop → Settings → Extensions
 3. Click "Install from file"
 4. Select the downloaded `.mcpb` file
@@ -175,7 +175,7 @@ unzip -l creative-juices.mcpb
 **Fix:**
 ```bash
 # Test hosted endpoint directly
-curl -X POST https://app.bwforce.ai/mcp/creative-juices/serve \
+curl -X POST https://ai.yuda.me/mcp/creative-juices/serve \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"tools/list","params":{},"id":1}'
 
@@ -188,7 +188,7 @@ node -c client.js
 The built `.mcpb` files are:
 1. Committed to the repository at `apps/ai/mcp/*.mcpb`
 2. Served by Django views at `/mcp/*/download.mcpb`
-3. Available for download at `https://app.bwforce.ai/mcp/*/download.mcpb`
+3. Available for download at `https://ai.yuda.me/mcp/*/download.mcpb`
 
 No separate deployment needed - the bundles deploy with the Django app.
 

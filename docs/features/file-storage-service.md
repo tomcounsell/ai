@@ -48,7 +48,7 @@ Podcast audio and cover art are routed to the correct bucket based on `Podcast.i
 
 Private podcast RSS feeds require a `token` query parameter matching `SUPABASE_USER_ACCESS_TOKEN`:
 ```
-https://app.bwforce.ai/podcast/private-show/feed.xml?token=<SUPABASE_USER_ACCESS_TOKEN>
+https://ai.yuda.me/podcast/private-show/feed.xml?token=<SUPABASE_USER_ACCESS_TOKEN>
 ```
 
 The feed view (`PodcastFeedView`) validates the token, then generates fresh signed URLs for all episode audio and cover art before rendering the RSS XML. Private feeds set `Cache-Control: no-store` to prevent caching of signed URLs.

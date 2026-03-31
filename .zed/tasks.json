@@ -77,7 +77,7 @@
   },
   {
     "label": "Audio Worker",
-    "command": "uv run python manage.py local_audio_worker --base-url https://app.bwforce.ai",
+    "command": "uv run python manage.py local_audio_worker --base-url https://ai.yuda.me",
     "env": {
       "DJANGO_SETTINGS_MODULE": "settings",
       "PYTHONUNBUFFERED": "1"

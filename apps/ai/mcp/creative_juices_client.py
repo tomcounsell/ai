@@ -2,10 +2,10 @@
 Creative Juices MCP Client - Thin proxy to hosted service.
 
 This client forwards MCP protocol calls to the hosted Creative Juices server
-at app.bwforce.ai. Users can install with zero dependencies using uvx.
+at ai.yuda.me. Users can install with zero dependencies using uvx.
 
 Installation (one-click via .mcpb file):
-    Download creative-juices.mcpb from app.bwforce.ai/mcp/creative-juices/download.mcpb
+    Download creative-juices.mcpb from ai.yuda.me/mcp/creative-juices/download.mcpb
 
 Manual installation:
     Add to claude_desktop_config.json:
@@ -17,7 +17,7 @@ Manual installation:
             "run",
             "--with", "mcp",
             "--with", "httpx",
-            "https://app.bwforce.ai/mcp/creative-juices/client.py"
+            "https://ai.yuda.me/mcp/creative-juices/client.py"
           ]
         }
       }
@@ -40,7 +40,7 @@ except ImportError:
     sys.exit(1)
 
 # Hosted service URL
-HOSTED_SERVICE_URL = "https://app.bwforce.ai/mcp/creative-juices/serve"
+HOSTED_SERVICE_URL = "https://ai.yuda.me/mcp/creative-juices/serve"
 
 
 async def forward_to_hosted_service():

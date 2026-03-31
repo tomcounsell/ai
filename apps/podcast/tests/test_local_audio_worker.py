@@ -33,7 +33,7 @@ class LocalAudioWorkerAPIKeyTestCase(TestCase):
             call_command(
                 "local_audio_worker",
                 "--base-url",
-                "https://app.bwforce.ai",
+                "https://ai.yuda.me",
                 stdout=StringIO(),
                 stderr=StringIO(),
             )
@@ -47,7 +47,7 @@ class LocalAudioWorkerAPIKeyTestCase(TestCase):
                 call_command(
                     "local_audio_worker",
                     "--base-url",
-                    "https://app.bwforce.ai",
+                    "https://ai.yuda.me",
                     stdout=StringIO(),
                     stderr=StringIO(),
                 )
@@ -71,14 +71,14 @@ class PollPendingTestCase(TestCase):
         mock_get.return_value = mock_response
 
         cmd = Command()
-        episodes = cmd._poll_pending("https://app.bwforce.ai", "test-key")
+        episodes = cmd._poll_pending("https://ai.yuda.me", "test-key")
 
         self.assertEqual(len(episodes), 2)
         self.assertEqual(episodes[0]["id"], 1)
         self.assertEqual(episodes[1]["title"], "Another Episode")
 
         mock_get.assert_called_once_with(
-            "https://app.bwforce.ai/api/podcast/pending-audio/",
+            "https://ai.yuda.me/api/podcast/pending-audio/",
             headers={"Authorization": "Bearer test-key"},
             timeout=30,
         )
@@ -92,7 +92,7 @@ class PollPendingTestCase(TestCase):
         mock_get.return_value = mock_response
 
         cmd = Command()
-        episodes = cmd._poll_pending("https://app.bwforce.ai", "test-key")
+        episodes = cmd._poll_pending("https://ai.yuda.me", "test-key")
 
         self.assertEqual(episodes, [])
 
@@ -109,7 +109,7 @@ class PollPendingTestCase(TestCase):
 
         cmd = Command()
         with self.assertRaises(httpx.HTTPStatusError):
-            cmd._poll_pending("https://app.bwforce.ai", "test-key")
+            cmd._poll_pending("https://ai.yuda.me", "test-key")
 
 
 class SendCallbackTestCase(TestCase):
@@ -125,7 +125,7 @@ class SendCallbackTestCase(TestCase):
 
         cmd = Command()
         cmd._send_callback(
-            "https://app.bwforce.ai",
+            "https://ai.yuda.me",
             "test-key",
             episode_id=42,
             audio_url="https://storage.example.com/podcast/audio.mp3",
@@ -133,7 +133,7 @@ class SendCallbackTestCase(TestCase):
         )
 
         mock_post.assert_called_once_with(
-            "https://app.bwforce.ai/api/podcast/episodes/42/audio-callback/",
+            "https://ai.yuda.me/api/podcast/episodes/42/audio-callback/",
             headers={
                 "Authorization": "Bearer test-key",
                 "Content-Type": "application/json",
@@ -159,7 +159,7 @@ class SendCallbackTestCase(TestCase):
         cmd = Command()
         with self.assertRaises(httpx.HTTPStatusError):
             cmd._send_callback(
-                "https://app.bwforce.ai",
+                "https://ai.yuda.me",
                 "test-key",
                 episode_id=999,
                 audio_url="https://storage.example.com/audio.mp3",
@@ -199,7 +199,7 @@ class ProcessEpisodeTestCase(TestCase):
         }
 
         cmd = Command()
-        cmd._process_episode("https://app.bwforce.ai", "test-key", episode_data)
+        cmd._process_episode("https://ai.yuda.me", "test-key", episode_data)
 
         # Verify generate was called with None instructions (no content_plan.md)
         mock_generate.assert_called_once()
@@ -217,7 +217,7 @@ class ProcessEpisodeTestCase(TestCase):
 
         # Verify callback was called
         mock_callback.assert_called_once_with(
-            "https://app.bwforce.ai",
+            "https://ai.yuda.me",
             "test-key",
             42,
             "https://storage.example.com/podcast/test-podcast/test-ep/audio.mp3",
@@ -259,7 +259,7 @@ class ProcessEpisodeTestCase(TestCase):
         }
 
         cmd = Command()
-        cmd._process_episode("https://app.bwforce.ai", "key", episode_data)
+        cmd._process_episode("https://ai.yuda.me", "key", episode_data)
 
         self.assertIn("brief.md", written_files)
         self.assertEqual(written_files["brief.md"], "Brief content")

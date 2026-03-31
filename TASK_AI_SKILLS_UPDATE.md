@@ -10,7 +10,7 @@ The `yudame/ai-skills` repository should be updated to reflect these new install
 
 ## Repository Information
 - **Public Repo**: https://github.com/yudame/ai-skills
-- **Purpose**: Hosts user-facing documentation for publicly available MCP servers hosted at app.bwforce.ai
+- **Purpose**: Hosts user-facing documentation for publicly available MCP servers hosted at ai.yuda.me
 
 ## Files to Add/Update in yudame/ai-skills
 
@@ -33,7 +33,7 @@ Create installation guide that covers:
 ```markdown
 ## One-Click Installation
 
-Download: https://app.bwforce.ai/mcp/creative-juices/download.mcpb
+Download: https://ai.yuda.me/mcp/creative-juices/download.mcpb
 Double-click to install.
 ```
 
@@ -43,7 +43,7 @@ Show JSON config for each client pointing to:
 {
   "mcpServers": {
     "creative-juices": {
-      "url": "https://app.bwforce.ai/mcp/creative-juices/serve"
+      "url": "https://ai.yuda.me/mcp/creative-juices/serve"
     }
   }
 }
@@ -86,12 +86,12 @@ yudame/ai-skills/
 - [ ] Test all installation methods
 - [ ] Create PR or push to main branch
 
-## Key URLs (all hosted at app.bwforce.ai)
+## Key URLs (all hosted at ai.yuda.me)
 
-- **Landing Page**: https://app.bwforce.ai/mcp/creative-juices
-- **HTTP Endpoint**: https://app.bwforce.ai/mcp/creative-juices/serve
-- **Bundle Download**: https://app.bwforce.ai/mcp/creative-juices/download.mcpb
-- **Manifest**: https://app.bwforce.ai/mcp/creative-juices/manifest.json
+- **Landing Page**: https://ai.yuda.me/mcp/creative-juices
+- **HTTP Endpoint**: https://ai.yuda.me/mcp/creative-juices/serve
+- **Bundle Download**: https://ai.yuda.me/mcp/creative-juices/download.mcpb
+- **Manifest**: https://ai.yuda.me/mcp/creative-juices/manifest.json
 
 ## Future Considerations
 

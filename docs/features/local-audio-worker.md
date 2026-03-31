@@ -49,7 +49,7 @@ Lists episodes whose workflow is paused waiting for audio generation.
 **Request:**
 ```bash
 curl -H "Authorization: Bearer $LOCAL_WORKER_API_KEY" \
-  https://app.bwforce.ai/api/podcast/pending-audio/
+  https://ai.yuda.me/api/podcast/pending-audio/
 ```
 
 **Response (200):**
@@ -92,7 +92,7 @@ curl -X POST \
   -H "Authorization: Bearer $LOCAL_WORKER_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"audio_url": "https://storage.example.com/audio.mp3", "audio_file_size_bytes": 12345678}' \
-  https://app.bwforce.ai/api/podcast/episodes/42/audio-callback/
+  https://ai.yuda.me/api/podcast/episodes/42/audio-callback/
 ```
 
 **Request body:**
@@ -124,7 +124,7 @@ curl -X POST \
 ## Management Command
 
 ```bash
-uv run python manage.py local_audio_worker --base-url https://app.bwforce.ai
+uv run python manage.py local_audio_worker --base-url https://ai.yuda.me
 ```
 
 ### Flags
@@ -139,10 +139,10 @@ uv run python manage.py local_audio_worker --base-url https://app.bwforce.ai
 
 ```bash
 # Standard usage against production
-uv run python manage.py local_audio_worker --base-url https://app.bwforce.ai
+uv run python manage.py local_audio_worker --base-url https://ai.yuda.me
 
 # Slower polling, single job at a time
-uv run python manage.py local_audio_worker --base-url https://app.bwforce.ai --interval 30 --max-concurrent 1
+uv run python manage.py local_audio_worker --base-url https://ai.yuda.me --interval 30 --max-concurrent 1
 
 # Local development (against local Django server)
 uv run python manage.py local_audio_worker --base-url http://localhost:8000

@@ -23,7 +23,7 @@ DEFAULT_CONFIG = {
     "podcast_title": "Yudame Research",
     "privacy": "public",
     "uses_private_bucket": False,
-    "website_url": "https://research.bwforce.ai",
+    "website_url": "https://research.yuda.me",
     "opening_script": "",
     "closing_script": "",
     "depth_level": "accessible",
