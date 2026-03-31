@@ -16,6 +16,8 @@ import os
 import re
 from pathlib import Path
 
+from config.models import HAIKU
+
 logger = logging.getLogger(__name__)
 
 # Importance level for knowledge-sourced memories
@@ -101,7 +103,7 @@ def _summarize_content(content: str, file_path: str) -> str:
         filename = os.path.basename(file_path)
 
         response = client.messages.create(
-            model="claude-haiku-4-20250414",
+            model=HAIKU,
             max_tokens=300,
             messages=[
                 {
