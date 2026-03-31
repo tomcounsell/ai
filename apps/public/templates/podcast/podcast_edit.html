@@ -131,39 +131,3 @@
   </div>
 </form>
 {% endblock %}
-
-{% block webmcp %}
-{% url 'podcast:edit' slug=podcast.slug as edit_podcast_url %}
-<script type="application/json" id="edit-podcast-ctx">
-{"slug":"{{ podcast.slug }}","title":"{{ podcast.title|escapejs }}"}
-</script>
-<script>
-(function() {
-    if (!navigator.modelContext) return;
-    var mc = navigator.modelContext;
-    var ctx = JSON.parse(document.getElementById('edit-podcast-ctx').textContent);
-
-    mc.registerTool('how_to_edit_podcast', {
-        name: 'How to Edit Podcast',
-        description: 'Instructions for editing podcast settings including metadata, cover art, and platform links.',
-        inputSchema: { type: 'object', properties: {} }
-    }, function() {
-        return { content: [{ type: 'text', text: 'ACTION: Edit podcast "' + ctx.title + '"\n' +
-            'URL: {{ edit_podcast_url }}\n' +
-            'METHOD: POST form submission with multipart/form-data (supports file upload)\n\n' +
-            'FIELDS:\n' +
-            '- cover_image (optional): Upload new cover art. Max 5MB, recommended 3000x3000 PNG or JPG.\n' +
-            '- title (required): Podcast title\n' +
-            '- description (optional): Podcast description\n' +
-            '- author_name (optional): Author display name\n' +
-            '- author_email (optional): Author contact email\n' +
-            '- language (optional): Language code, e.g. "en"\n' +
-            '- website_url (optional): External website URL\n' +
-            '- spotify_url (optional): Spotify show URL\n' +
-            '- apple_podcasts_url (optional): Apple Podcasts URL\n\n' +
-            'SUBMIT: Click "Save Changes" button\n' +
-            'AFTER: Redirects to the podcast detail page with updated information' }] };
-    });
-})();
-</script>
-{% endblock %}

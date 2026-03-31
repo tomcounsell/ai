@@ -92,33 +92,3 @@
   </div>
 </form>
 {% endblock %}
-
-{% block webmcp %}
-{% url 'podcast:episode_create' slug=podcast.slug as create_episode_url %}
-<script type="application/json" id="create-episode-ctx">
-{"podcast_slug":"{{ podcast.slug }}","podcast_title":"{{ podcast.title|escapejs }}"}
-</script>
-<script>
-(function() {
-    if (!navigator.modelContext) return;
-    var mc = navigator.modelContext;
-    var ctx = JSON.parse(document.getElementById('create-episode-ctx').textContent);
-
-    mc.registerTool('create_episode_guide', {
-        name: 'Create Episode Guide',
-        description: 'Instructions for filling out the episode creation form, including field descriptions and what happens after submission.',
-        inputSchema: { type: 'object', properties: {} }
-    }, function() {
-        return { content: [{ type: 'text', text: 'ACTION: Create a new episode for podcast "' + ctx.podcast_title + '"\n' +
-            'URL: {{ create_episode_url }}\n' +
-            'METHOD: POST form submission\n\n' +
-            'FIELDS:\n' +
-            '- title (required): Episode title, max 200 characters. Example: "The Future of AI Alignment"\n' +
-            '- description (required): Detailed topic description. This text becomes the research prompt for the AI research pipeline. Be specific about what aspects to cover, key questions to answer, and any particular angles or perspectives to explore.\n' +
-            '- tags (optional): Comma-separated tags for categorization. Example: "AI, productivity, deep-dive"\n\n' +
-            'SUBMIT: Click "Create Episode" button\n' +
-            'AFTER: Creates a draft episode and redirects to the episode workflow page where the automated 12-phase research and production pipeline begins.' }] };
-    });
-})();
-</script>
-{% endblock %}
