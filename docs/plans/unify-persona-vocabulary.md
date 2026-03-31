@@ -520,7 +520,65 @@ No agent integration required. No MCP server changes, no `.mcp.json` modificatio
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Plan**: docs/plans/unify-persona-vocabulary.md
+**Issue**: #599
+**Critics**: Skeptic, Operator, Archaeologist, Adversary, Simplifier, User
+**Findings**: 5 total (0 blockers, 3 concerns, 2 nits)
+
+### Concerns
+
+#### 1. Missing files from scope audit
+- **Severity**: CONCERN
+- **Critics**: Skeptic, Operator
+- **Location**: Scope table, Task 12 (validate-all)
+- **Finding**: Two Python files contain "Q&A" string references not listed in the plan's scope: `tools/job_scheduler.py` (line 4, docstring) and `bridge/coach.py` (line 356, comment). The Success Criteria require `grep -r "Q&A" --include="*.py"` to return zero results, so these must be updated or the grep will fail validation.
+- **Suggestion**: Add both files to Task 7 or Task 8 scope. The fixes are trivial (docstring/comment text changes) but must be tracked to satisfy the zero-match grep criterion.
+
+#### 2. Summarizer dual-check pattern will break if qa_mode property is deleted
+- **Severity**: CONCERN
+- **Critics**: Skeptic, Adversary
+- **Location**: Technical Approach section 8 (summarizer.py), Task 7
+- **Finding**: `bridge/summarizer.py` lines 962-963 and 1355 use a dual-check pattern: `getattr(session, "session_mode", None) == ChatMode.QA or getattr(session, "qa_mode", False)`. The plan says to replace `ChatMode.QA` with `PersonaType.TEAMMATE` and replace `qa_mode` attribute checks with `session_mode` comparison. However, since `qa_mode` is being *deleted* from `agent_session.py` (Task 2), the `getattr(session, "qa_mode", False)` fallback will silently return False -- harmless but dead code if not removed. The plan's description in section 8 says "replace `qa_mode` attribute checks with `session_mode == PersonaType.TEAMMATE`" which is correct, but the Task 7 validation grep `grep -c "ChatMode\|qa_mode\|resolve_chat_mode"` would catch leftover `qa_mode` references. This is properly handled but worth calling out: the builder must remove both halves of the `or` and consolidate to a single `session_mode == PersonaType.TEAMMATE` check.
+- **Suggestion**: Make the Task 7 description more explicit: "Remove the dual-check `or getattr(session, 'qa_mode', False)` pattern entirely -- consolidate to a single `session_mode == PersonaType.TEAMMATE` check."
+
+#### 3. Dashboard _resolve_persona_display uses ChatMode.DEV for non-persona comparison
+- **Severity**: CONCERN
+- **Critics**: Skeptic
+- **Location**: ui/data/sdlc.py lines 336
+- **Finding**: `_resolve_persona_display()` at line 336 checks `if raw == ChatMode.DEV` where `raw` is `session_type` (not session_mode). Since `ChatMode.DEV == "dev"` and `SessionType.DEV == "dev"`, this comparison works by string equality, but the plan's proposed replacement code in section 11 correctly uses `session_type` string checks instead. However, the existing code also lacks handling for `session_mode` with new PersonaType values. The plan's proposed function returns "Developer" for `session_type == "dev"` and "Project Manager" for `session_type == "chat"` but only checks for Teammate via `session_mode == PersonaType.TEAMMATE` -- meaning a ChatSession that is NOT in teammate mode shows as "Project Manager", which is the current behavior. This is fine but the plan's proposed code snippet should also handle the case where `session_mode == PersonaType.DEVELOPER` or `session_mode == PersonaType.PROJECT_MANAGER` is set explicitly.
+- **Suggestion**: Revise the proposed `_resolve_persona_display()` to check `session_mode` first (if set, map PersonaType to display label), then fall back to session_type-based inference. This future-proofs against explicit persona assignment.
+
+### Nits
+
+#### 4. Intent classifier prompt uses "Q&A" in one conceptual reference
+- **Severity**: NIT
+- **Critics**: Simplifier
+- **Location**: agent/intent_classifier.py, module docstring line 1
+- **Finding**: The module docstring says "Binary intent classifier for ChatSession Q&A mode." This will need updating but is not listed explicitly in Task 6's bullet points (only "Update module docstring" is mentioned generically).
+- **Suggestion**: No action needed -- the generic "Update module docstring" instruction in Task 6 covers this. Just noting for completeness.
+
+#### 5. config/enums.py ChatMode docstring references resolve_chat_mode
+- **Severity**: NIT
+- **Critics**: Archaeologist
+- **Location**: config/enums.py line 43
+- **Finding**: The `ChatMode` docstring says "Maps 1:1 with the return values of resolve_chat_mode()." This is deleted with the enum (Task 1), so no concern -- just noting that the docstring at line 9 (`from config.enums import SessionType, PersonaType, ClassificationType, ChatMode`) also needs the `ChatMode` import removed from the usage example.
+- **Suggestion**: Already covered by Task 1 ("Update module docstring to remove ChatMode from import example").
+
+### Structural Check Results
+
+| Check | Status | Detail |
+|-------|--------|--------|
+| Required sections | PASS | All 4 required sections present and non-empty |
+| Task numbering | PASS | Sequential 1-13 |
+| Dependencies valid | PASS | All Depends On references resolve to valid Task IDs |
+| File paths exist | PASS | All 32 referenced file paths exist on disk |
+| Prerequisites met | PASS | No prerequisites declared |
+| Cross-references | PASS | No rabbit holes in tasks, no no-gos in solution |
+| Circular dependencies | PASS | No cycles in dependency graph |
+
+### Verdict
+
+**READY TO BUILD** -- No blockers. The three concerns are minor scope gaps (two missing files with "Q&A" in docstrings, and clarifications on existing task descriptions) that can be addressed during build without plan revision. The plan is thorough, mechanically sound, and well-structured with clear validation commands for every task.
 
 ---
 
