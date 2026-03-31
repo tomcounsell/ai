@@ -72,10 +72,9 @@ def get_relevance_ranked(
         List of (redis_key, score) tuples. Empty list on any error.
     """
     try:
+        from models.memory import Memory
         from popoto import DecayingSortedField
         from popoto.redis_db import POPOTO_REDIS_DB
-
-        from models.memory import Memory
 
         sorted_set_key = DecayingSortedField.get_sortedset_db_key(Memory, "relevance", project_key)
         results = POPOTO_REDIS_DB.zrevrange(sorted_set_key.redis_key, 0, limit - 1, withscores=True)
@@ -102,6 +101,7 @@ def get_confidence_ranked(
     """
     try:
         import msgpack
+
         from popoto.redis_db import POPOTO_REDIS_DB
 
         # ConfidenceField stores data in a hash at $ConfidencF:Memory:confidence:data
@@ -152,10 +152,9 @@ def retrieve_memories(
         RRF score descending. Empty list on any error.
     """
     try:
-        from popoto import BM25Field
-
         from config.memory_defaults import RRF_K
         from models.memory import Memory
+        from popoto import BM25Field
 
         if rrf_k is None:
             rrf_k = RRF_K
