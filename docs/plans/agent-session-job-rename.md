@@ -382,8 +382,17 @@ Add a post-pull hook or documented step: `python -c "from models.agent_session i
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
-| CONCERN | [agent-type] | [The concern raised] | [How/whether it was addressed] |
+<!-- Populated by /do-plan-critique (war room) on 2026-03-31. Verdict: NEEDS REVISION (1 blocker). -->
+
+| Severity | Critics | Finding | Resolution |
+|----------|---------|---------|------------|
+| BLOCKER | Skeptic, Operator | Task 1 references `docs/deployment.md` for Redis flush docs but that file does not exist | |
+| CONCERN | Operator | `.mcp.json` update mentioned in Agent Integration and Task 4 is a no-op (no job references exist) -- creates builder confusion | |
+| CONCERN | Skeptic | Plan lists 10 test files but issue #608 recon says 12 -- 2 may be missing from Test Impact | |
+| CONCERN | Operator | Redis flush is a manual 3-step procedure with no automation guard in `remote-update.sh` for multi-machine deploy | |
+| CONCERN | Adversary | Phase atomicity claim ("no half-renamed states") has no enforcement -- mid-phase interruption leaves broken imports | |
+| NIT | Simplifier | `class Job` disposition in Task 2 has OR branch -- plan should commit to removal since issue established it is a thin wrapper | |
+| NIT | Skeptic | Success criterion "grep returns only false positives" requires human judgment -- needs a known-exceptions definition | |
 
 ---
 
