@@ -78,7 +78,7 @@ class TestPushJobAsyncWrapping:
         # Set up mocks
         old_session = MagicMock()
         old_session.status = "completed"
-        old_session.agent_session_id = "old-job"
+        old_session.agent_session_id = "old-session"
         mock_agent_session.query.filter.return_value = [old_session]
         mock_agent_session.async_create = AsyncMock(return_value=MagicMock())
         mock_agent_session.query.async_count = AsyncMock(return_value=1)
@@ -112,7 +112,7 @@ class TestEnqueueContinuationAsyncWrapping:
         mock_rj = MagicMock()
         mock_rj.session_id = "sess-1"
         mock_rj.project_key = "test"
-        job = mock_rj
+        session = mock_rj
 
         # Return a session from filter
         existing_session = MagicMock()
@@ -126,7 +126,7 @@ class TestEnqueueContinuationAsyncWrapping:
             with patch("agent.agent_session_queue._ensure_worker"):
                 asyncio.run(
                     _enqueue_nudge(
-                        job=job,
+                        session=session,
                         branch_name="test-branch",
                         task_list_id="tl-1",
                         auto_continue_count=1,

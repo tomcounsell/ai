@@ -16,20 +16,20 @@ from agent.agent_session_queue import MAX_NUDGE_COUNT, SendToChatResult
 from models.agent_session import AgentSession
 
 
-def _make_test_job(session_id: str, chat_id: str = "test_chat") -> MagicMock:
+def _make_test_session(session_id: str, chat_id: str = "test_chat") -> MagicMock:
     """Create a minimal mock Job for send_to_chat testing."""
-    job = MagicMock()
-    job.project_key = "valor"
-    job.session_id = session_id
-    job.chat_id = chat_id
-    job.telegram_message_id = 1
-    job.auto_continue_count = 0
-    job.message_text = "test message"
-    job.sender_name = "Test"
-    job.telegram_message_key = None
-    job.work_item_slug = None
-    job.task_list_id = None
-    return job
+    session = MagicMock()
+    session.project_key = "valor"
+    session.session_id = session_id
+    session.chat_id = chat_id
+    session.telegram_message_id = 1
+    session.auto_continue_count = 0
+    session.message_text = "test message"
+    session.sender_name = "Test"
+    session.telegram_message_key = None
+    session.work_item_slug = None
+    session.task_list_id = None
+    return session
 
 
 @pytest.mark.e2e

@@ -49,13 +49,13 @@ logger = logging.getLogger(__name__)
 # === Client Registry ===
 # Module-level registry of active SDK clients keyed by session_id.
 # In-memory only (intentionally not persisted). On crash/reboot, the dict
-# is empty and recovered jobs create fresh clients. See plan doc for
+# is empty and recovered sessions create fresh clients. See plan doc for
 # crash safety analysis.
 _active_clients: dict[str, "ClaudeSDKClient"] = {}
 
 # === Stop Reason Registry ===
 # Stores the stop_reason from the most recent ResultMessage for each session.
-# Populated by ValorAgent.query(), consumed by job_queue after query completes.
+# Populated by ValorAgent.query(), consumed by session_queue after query completes.
 # In-memory only — cleared when the session finishes.
 _session_stop_reasons: dict[str, str] = {}
 
@@ -188,7 +188,7 @@ def _has_prior_session(session_id: str) -> bool:
 
     Used by _create_options() to decide whether to set continue_conversation=True.
     Only returns True if an AgentSession with this session_id has been previously
-    saved (i.e., a prior job ran for this conversation thread). This prevents
+    saved (i.e., a prior session ran for this conversation thread). This prevents
     fresh sessions from reusing stale Claude Code session files on disk.
 
     See issue #232 for the cross-wire bug this fixes.
@@ -844,7 +844,8 @@ class ValorAgent:
             chat_id: Optional chat ID for routing context injection.
             project_key: Optional project key for routing context injection.
             message_id: Optional message ID for routing context injection.
-            agent_session_id: Optional job ID injected as JOB_ID env var for child session spawning.
+            agent_session_id: Optional session ID injected as
+                AGENT_SESSION_ID env var for child session spawning.
             gh_repo: Optional GitHub repo (org/repo) to set as GH_REPO env var.
                 When set, all `gh` CLI commands in the subprocess automatically
                 target this repo without needing explicit --repo flags.
@@ -902,10 +903,10 @@ class ValorAgent:
         if session_id:
             env["VALOR_SESSION_ID"] = session_id
 
-        # Pass agent_session_id so the agent can reference its own job when spawning children
-        # via `schedule_job --parent-job $JOB_ID` (issue #359)
+        # Pass agent_session_id so the agent can reference its own session when spawning children
+        # via `schedule_session --parent-session $AGENT_SESSION_ID` (issue #359)
         if self.agent_session_id:
-            env["JOB_ID"] = self.agent_session_id
+            env["AGENT_SESSION_ID"] = self.agent_session_id
 
         # Cross-repo gh resolution: set GH_REPO so all `gh` CLI commands in the
         # subprocess automatically target the correct repo (issue #375). This is
@@ -1211,7 +1212,7 @@ class ValorAgent:
                 # Clean up activity tracking — session is done
                 clear_session_activity(session_id)
                 # Note: _session_stop_reasons is NOT cleaned here — it's consumed
-                # by get_stop_reason() in job_queue after query returns. The pop()
+                # by get_stop_reason() in session_queue after query returns. The pop()
                 # in get_stop_reason() handles cleanup. If the nudge loop never runs
                 # (crash), entries are tiny (session_id -> str) and cleared on restart.
                 logger.debug(f"Unregistered active client for session {session_id}")
@@ -1373,7 +1374,7 @@ async def get_agent_response_sdk(
         sender_id: Telegram user ID (for permission checking)
         task_list_id: Optional task list ID to scope sub-agent Task storage
         correlation_id: Optional end-to-end tracing ID from the bridge
-        agent_session_id: Optional job ID for child session spawning (issue #359)
+        agent_session_id: Optional session ID for child session spawning (issue #359)
 
     Returns:
         The assistant's response text
@@ -1426,7 +1427,7 @@ async def get_agent_response_sdk(
 
         if not classification:
             # Fallback: check for PR/issue references before defaulting to question.
-            # The async classifier can lose the race with job pickup, so this
+            # The async classifier can lose the race with session pickup, so this
             # fast-path catches messages like "Complete PR 478" that must be SDLC.
             import re as _re_cls
 

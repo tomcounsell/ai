@@ -1,4 +1,4 @@
-"""Unit tests for job hierarchy: parent-child session decomposition (issue #359).
+"""Unit tests for session hierarchy: parent-child session decomposition (issue #359).
 
 Tests cover:
 - AgentSession.parent_agent_session_id field
@@ -6,7 +6,7 @@ Tests cover:
 - _finalize_parent() completion propagation logic
 - _transition_parent() status transitions
 - _agent_session_hierarchy_health_check() orphan and stuck parent detection
-- job_scheduler --parent-job flag and children subcommand
+- job_scheduler --parent-session flag and children subcommand
 """
 
 import time
@@ -25,7 +25,7 @@ class TestAgentSessionHierarchyHelpers:
     def _make_session(self, **kwargs):
         """Create a mock AgentSession with given attributes."""
         session = MagicMock()
-        session.agent_session_id = kwargs.get("agent_session_id", "test-job-1")
+        session.agent_session_id = kwargs.get("agent_session_id", "test-session-1")
         session.session_id = kwargs.get("session_id", "test-session-1")
         session.status = kwargs.get("status", "pending")
         session.parent_agent_session_id = kwargs.get("parent_agent_session_id", None)
@@ -365,15 +365,15 @@ class TestFinalizeParent:
 
 
 # ===================================================================
-# Job scheduler --parent-job flag
+# Job scheduler --parent-session flag
 # ===================================================================
 
 
-class TestSchedulerParentJob:
-    """Test the --parent-job argument parsing and validation."""
+class TestSchedulerParentSession:
+    """Test the --parent-session argument parsing and validation."""
 
-    def test_schedule_help_includes_parent_job(self):
-        """The schedule subcommand accepts --parent-job flag."""
+    def test_schedule_help_includes_parent_session(self):
+        """The schedule subcommand accepts --parent-session flag."""
         import sys
 
         from tools.agent_session_scheduler import main
@@ -423,8 +423,8 @@ class TestJobFieldsIncludesParentJobId:
 # ===================================================================
 
 
-class TestValorAgentJobIdInjection:
-    """Test that JOB_ID is injected into the env."""
+class TestValorAgentSessionIdInjection:
+    """Test that AGENT_SESSION_ID is injected into the env."""
 
     @patch("agent.sdk_client.load_system_prompt", return_value="test prompt")
     def test_agent_session_id_in_create_options_env(self, mock_prompt):
@@ -432,10 +432,10 @@ class TestValorAgentJobIdInjection:
 
         agent = ValorAgent(
             working_dir="/tmp/test",
-            agent_session_id="test-job-123",
+            agent_session_id="test-session-123",
         )
         options = agent._create_options(session_id="test-session")
-        assert options.env.get("JOB_ID") == "test-job-123"
+        assert options.env.get("AGENT_SESSION_ID") == "test-session-123"
 
     @patch("agent.sdk_client.load_system_prompt", return_value="test prompt")
     def test_no_agent_session_id_when_not_set(self, mock_prompt):
@@ -443,4 +443,4 @@ class TestValorAgentJobIdInjection:
 
         agent = ValorAgent(working_dir="/tmp/test")
         options = agent._create_options(session_id="test-session")
-        assert "JOB_ID" not in options.env
+        assert "AGENT_SESSION_ID" not in options.env

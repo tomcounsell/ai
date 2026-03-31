@@ -646,7 +646,7 @@ class AgentSession(Model):
             logger.warning(f"Failed to clear steering messages for session {self.session_id}: {e}")
         return messages
 
-    # === Job hierarchy helpers ===
+    # === Session hierarchy helpers ===
 
     def get_parent(self) -> "AgentSession | None":
         """Return the parent AgentSession if this is a child session.

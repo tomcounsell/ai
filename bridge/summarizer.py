@@ -412,7 +412,7 @@ There is no future execution. The agent cannot "will do" anything — it has alr
 Any "I will", "I'll", "going forward", "from now on", "next time" language is an empty promise \
 UNLESS the agent already made the change in this session and shows evidence. \
 The only exception is scheduling/queuing a session that will execute later AND report back \
-via Telegram (e.g., "I've queued a build job — you'll get a message when it completes"). \
+via Telegram (e.g., "I've queued a build session — you'll get a message when it completes"). \
 Otherwise the only honest responses are: "I did X (proof)" or "I didn't do X (why)."
 
 Input: "Will do. I'll update the config next time."
@@ -495,7 +495,7 @@ def _detect_empty_promise(text_lower: str) -> bool:
         r"\b(?:saved|written|created)\b.*\bmemory\b",
         r"https?://github\.com/.+/commit/",  # GitHub commit URLs
         r"\brestarted?\b.*\b(?:bridge|service)\b",  # service restart
-        r"\b(?:scheduled|queued)\b.*\bjob[_-]?[a-f0-9]{6,}\b",  # job ID
+        r"\b(?:scheduled|queued)\b.*\bsession[_-]?[a-f0-9]{6,}\b",  # session ID
     ]
 
     has_evidence = any(re.search(p, text_lower) for p in evidence_patterns)

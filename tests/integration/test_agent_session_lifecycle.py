@@ -313,7 +313,7 @@ class TestComposeStructuredSummary:
         from bridge.summarizer import _compose_structured_summary
 
         result = _compose_structured_summary(
-            "The job queue uses FILO ordering per project.",
+            "The session queue uses FILO ordering per project.",
             session=qa_session,
             is_completion=True,
         )
@@ -399,7 +399,9 @@ class TestSummarizeWithSession:
         long_text = "Here is a very long explanation. " * 200
         mock_haiku = AsyncMock(
             return_value=StructuredSummary(
-                context_summary="", response="The job queue uses FILO ordering.", expectations=None
+                context_summary="",
+                response="The session queue uses FILO ordering.",
+                expectations=None,
             )
         )
 
@@ -572,7 +574,7 @@ class TestSDLCLifecycle:
         )
         assert s.status == "pending"
 
-        # 2. Simulate job pickup -- delete and recreate as running
+        # 2. Simulate session pickup -- delete and recreate as running
         fields = {
             "session_id": s.session_id,
             "project_key": s.project_key,
@@ -730,14 +732,14 @@ class TestQALifecycle:
         s.append_history("user", "How does the session queue work?")
 
         result = _compose_structured_summary(
-            "The job queue uses a FILO stack with per-project sequential workers.",
+            "The session queue uses a FILO stack with per-project sequential workers.",
             session=s,
             is_completion=True,
         )
 
         # Should have emoji + label + answer, no stages, no links
         assert "✅" in result
-        assert "job queue" in result.lower()
+        assert "session queue" in result.lower()
         assert "FILO" in result
         assert "☑" not in result
         assert "☐" not in result

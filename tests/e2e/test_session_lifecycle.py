@@ -86,7 +86,7 @@ class TestSessionStatusTransitions:
 
         assert session.status == "pending"
 
-        # Worker picks up job
+        # Worker picks up session
         session.status = "running"
         session.started_at = time.time()
         session.save()

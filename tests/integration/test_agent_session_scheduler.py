@@ -1,4 +1,4 @@
-"""Tests for job scheduling: scheduled_after, 4-tier priority, FIFO, and CLI tool."""
+"""Tests for session scheduling: scheduled_after, 4-tier priority, FIFO, and CLI tool."""
 
 import asyncio
 import json
@@ -102,47 +102,47 @@ class TestPriorityRank:
 
 class TestPopJob:
     def test_fifo_ordering(self):
-        """Within same priority, oldest job (FIFO) is popped first."""
+        """Within same priority, oldest session (FIFO) is popped first."""
         _create_pending(created_at=time.time() - 100, message="old")
         _create_pending(created_at=time.time(), message="new")
 
-        job = asyncio.run(_pop_agent_session("test-chat"))
-        assert job is not None
-        assert "old" in job.message_text
+        session = asyncio.run(_pop_agent_session("test-chat"))
+        assert session is not None
+        assert "old" in session.message_text
 
     def test_priority_ordering(self):
         """Higher priority jobs are popped before lower priority ones."""
         _create_pending(priority="low", message="low-prio")
         _create_pending(priority="urgent", message="urgent-prio")
 
-        job = asyncio.run(_pop_agent_session("test-chat"))
-        assert job is not None
-        assert "urgent" in job.message_text
+        session = asyncio.run(_pop_agent_session("test-chat"))
+        assert session is not None
+        assert "urgent" in session.message_text
 
     def test_scheduled_after_future_skipped(self):
         """Jobs with scheduled_after in the future are skipped."""
         future = time.time() + 3600  # 1 hour from now
         _create_pending(scheduled_after=future, message="deferred")
 
-        job = asyncio.run(_pop_agent_session("test-chat"))
-        assert job is None  # No eligible jobs
+        session = asyncio.run(_pop_agent_session("test-chat"))
+        assert session is None  # No eligible sessions
 
     def test_scheduled_after_past_eligible(self):
         """Jobs with scheduled_after in the past are eligible."""
         past = time.time() - 60  # 1 minute ago
         _create_pending(scheduled_after=past, message="ready")
 
-        job = asyncio.run(_pop_agent_session("test-chat"))
-        assert job is not None
-        assert "ready" in job.message_text
+        session = asyncio.run(_pop_agent_session("test-chat"))
+        assert session is not None
+        assert "ready" in session.message_text
 
     def test_scheduled_after_none_eligible(self):
         """Jobs with no scheduled_after are always eligible."""
         _create_pending(message="immediate")
 
-        job = asyncio.run(_pop_agent_session("test-chat"))
-        assert job is not None
-        assert "immediate" in job.message_text
+        session = asyncio.run(_pop_agent_session("test-chat"))
+        assert session is not None
+        assert "immediate" in session.message_text
 
     def test_mixed_deferred_and_immediate(self):
         """Only immediate jobs are popped when deferred jobs exist."""
@@ -150,18 +150,18 @@ class TestPopJob:
         _create_pending(scheduled_after=future, message="deferred", priority="urgent")
         _create_pending(message="immediate", priority="low")
 
-        job = asyncio.run(_pop_agent_session("test-chat"))
-        assert job is not None
-        assert "immediate" in job.message_text
+        session = asyncio.run(_pop_agent_session("test-chat"))
+        assert session is not None
+        assert "immediate" in session.message_text
 
     def test_unknown_priority_defaults_normal(self):
         """Unknown priority values default to normal ranking."""
         _create_pending(priority="unknown", message="unknown-prio")
         _create_pending(priority="low", message="low-prio")
 
-        job = asyncio.run(_pop_agent_session("test-chat"))
-        assert job is not None
-        assert "unknown" in job.message_text  # normal rank < low rank
+        session = asyncio.run(_pop_agent_session("test-chat"))
+        assert session is not None
+        assert "unknown" in session.message_text  # normal rank < low rank
 
 
 # === AgentSession Model Tests ===
@@ -303,7 +303,7 @@ class TestJobSchedulerCLI:
         assert data["status"] == "error"
 
     def test_cancel_nonexistent(self):
-        """Cancelling nonexistent job returns error."""
+        """Cancelling nonexistent session returns error."""
         result = subprocess.run(
             [
                 sys.executable,
@@ -311,7 +311,7 @@ class TestJobSchedulerCLI:
                 "tools.agent_session_scheduler",
                 "cancel",
                 "--agent-session-id",
-                "nonexistent-job-id",
+                "nonexistent-session-id",
             ],
             capture_output=True,
             text=True,
@@ -323,7 +323,7 @@ class TestJobSchedulerCLI:
         assert data["status"] == "error"
 
     def test_bump_nonexistent(self):
-        """Bumping nonexistent job returns error."""
+        """Bumping nonexistent session returns error."""
         result = subprocess.run(
             [
                 sys.executable,
@@ -331,7 +331,7 @@ class TestJobSchedulerCLI:
                 "tools.agent_session_scheduler",
                 "bump",
                 "--agent-session-id",
-                "nonexistent-job-id",
+                "nonexistent-session-id",
             ],
             capture_output=True,
             text=True,

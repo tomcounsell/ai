@@ -22,7 +22,7 @@ from agent.agent_session_queue import (
 from models.agent_session import AgentSession
 
 
-def _create_test_job(**overrides) -> AgentSession:
+def _create_test_session(**overrides) -> AgentSession:
     """Create an AgentSession with sensible defaults for testing."""
     defaults = {
         "project_key": "test",
@@ -125,20 +125,20 @@ class TestWorkerLoopDrain:
 
     @pytest.mark.asyncio
     async def test_worker_picks_up_second_job_via_event(self):
-        """When a second job is enqueued during execution, the Event should wake the worker."""
+        """When a second session is enqueued during execution, the Event should wake the worker."""
         chat_id = "two_job_chat"
         event = asyncio.Event()
-        jobs_executed = []
+        sessions_executed = []
 
         # Create two jobs
-        _create_test_job(chat_id=chat_id, message_text="job A")
+        _create_test_session(chat_id=chat_id, message_text="session A")
 
-        async def fake_execute(job):
-            """Track executed jobs and enqueue a second job during first execution."""
-            jobs_executed.append(job.message_text)
-            if len(jobs_executed) == 1:
-                # Simulate second job arriving during first job execution
-                _create_test_job(chat_id=chat_id, message_text="job B")
+        async def fake_execute(session):
+            """Track executed sessions and enqueue a second session during first execution."""
+            sessions_executed.append(session.message_text)
+            if len(sessions_executed) == 1:
+                # Simulate second session arriving during first session execution
+                _create_test_session(chat_id=chat_id, message_text="session B")
                 event.set()  # Signal the worker
 
         with (
@@ -149,26 +149,26 @@ class TestWorkerLoopDrain:
         ):
             await _worker_loop(chat_id, event)
 
-        assert "job A" in jobs_executed
-        assert "job B" in jobs_executed
-        assert len(jobs_executed) == 2
+        assert "session A" in sessions_executed
+        assert "session B" in sessions_executed
+        assert len(sessions_executed) == 2
 
     @pytest.mark.asyncio
     async def test_worker_drain_fallback_finds_job(self):
         """When Event doesn't fire, the sync fallback should find pending sessions."""
         chat_id = "fallback_drain_chat"
         event = asyncio.Event()
-        jobs_executed = []
+        sessions_executed = []
 
-        # Create first job
-        _create_test_job(chat_id=chat_id, message_text="job A")
+        # Create first session
+        _create_test_session(chat_id=chat_id, message_text="session A")
 
-        async def fake_execute(job):
-            """After first job, create another without setting the event."""
-            jobs_executed.append(job.message_text)
-            if len(jobs_executed) == 1:
-                # Create second job but DON'T set the event (simulates the race)
-                _create_test_job(chat_id=chat_id, message_text="job B (fallback)")
+        async def fake_execute(session):
+            """After first session, create another without setting the event."""
+            sessions_executed.append(session.message_text)
+            if len(sessions_executed) == 1:
+                # Create second session but DON'T set the event (simulates the race)
+                _create_test_session(chat_id=chat_id, message_text="session B (fallback)")
 
         with (
             patch("agent.agent_session_queue._execute_agent_session", side_effect=fake_execute),
@@ -178,8 +178,8 @@ class TestWorkerLoopDrain:
         ):
             await _worker_loop(chat_id, event)
 
-        assert "job A" in jobs_executed
-        assert "job B (fallback)" in jobs_executed
+        assert "session A" in sessions_executed
+        assert "session B (fallback)" in sessions_executed
 
 
 class TestExitTimeDiagnostic:
@@ -190,19 +190,19 @@ class TestExitTimeDiagnostic:
         """When pending sessions exist at exit time, a WARNING should be logged."""
         chat_id = "exit_diag_chat"
         event = asyncio.Event()
-        jobs_executed = []
+        sessions_executed = []
 
-        # Create initial job
-        _create_test_job(chat_id=chat_id, message_text="initial job")
+        # Create initial session
+        _create_test_session(chat_id=chat_id, message_text="initial session")
 
         call_count = 0
 
-        # We need _pop_agent_session to return None after the first job (simulating the race),
+        # We need _pop_agent_session to return None after the first session (simulating the race),
         # but _pop_agent_session_with_fallback to find the orphan on the exit-time check
         original_fallback = _pop_agent_session_with_fallback
 
-        async def fake_execute(job):
-            jobs_executed.append(job.message_text)
+        async def fake_execute(session):
+            sessions_executed.append(session.message_text)
 
         async def mock_pop_agent_session_with_fallback(cid):
             nonlocal call_count
@@ -219,19 +219,19 @@ class TestExitTimeDiagnostic:
             patch("agent.agent_session_queue._check_restart_flag", return_value=False),
             patch("agent.agent_session_queue.DRAIN_TIMEOUT", 0.05),
         ):
-            # Create an orphan job that the drain guard misses but exit-time scan finds
+            # Create an orphan session that the drain guard misses but exit-time scan finds
             async def delayed_create():
                 await asyncio.sleep(0.02)
-                _create_test_job(chat_id=chat_id, message_text="orphan job")
+                _create_test_session(chat_id=chat_id, message_text="orphan session")
 
-            # Run worker and delayed job creation concurrently
+            # Run worker and delayed session creation concurrently
             create_task = asyncio.create_task(delayed_create())
             await _worker_loop(chat_id, event)
             await create_task
 
-        # The orphan job should have been found and executed via exit-time scan
+        # The orphan session should have been found and executed via exit-time scan
         # (or at minimum, the worker should have processed both jobs)
-        assert len(jobs_executed) >= 1  # At minimum the initial job
+        assert len(sessions_executed) >= 1  # At minimum the initial session
 
 
 class TestPopJobWithFallbackErrorHandling:

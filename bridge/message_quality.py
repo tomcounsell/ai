@@ -54,7 +54,7 @@ def is_narration_only(text: str) -> bool:
         "Let me look at the code. Now let me examine the tests."
 
     Examples that return False:
-        "Let me check the config. Found the issue in agent/job_queue.py line 42."
+        "Let me check the config. Found the issue in agent/agent_session_queue.py line 42."
         "Let me look at the logs.\n```\nERROR: connection refused\n```"
         "" (empty string)
 

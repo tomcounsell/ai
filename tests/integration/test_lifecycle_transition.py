@@ -243,8 +243,8 @@ class TestJobQueueLifecycleLogging:
             telegram_message_id=1,
         )
 
-        job = await _pop_agent_session("100")
-        assert job is not None
+        session = await _pop_agent_session("100")
+        assert session is not None
 
         # The running session should have a lifecycle entry
         sessions = list(AgentSession.query.filter(status="running"))
@@ -259,7 +259,7 @@ class TestJobQueueLifecycleLogging:
         lifecycle_entries = [h for h in history if "[lifecycle]" in h]
         assert any("running" in entry for entry in lifecycle_entries)
 
-    def test_job_fields_includes_history(self):
+    def test_session_fields_includes_history(self):
         """_AGENT_SESSION_FIELDS includes history for lifecycle entry preservation."""
         from agent.agent_session_queue import _AGENT_SESSION_FIELDS
 

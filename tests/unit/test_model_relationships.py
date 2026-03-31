@@ -22,7 +22,7 @@ import pytest
 def _make_mock_agent_session(**overrides):
     """Create a mock AgentSession with sensible defaults."""
     defaults = {
-        "agent_session_id": "job-001",
+        "agent_session_id": "session-001",
         "session_id": "tg_test_12345_100",
         "project_key": "test-project",
         "status": "pending",
@@ -214,7 +214,7 @@ class TestBackReferenceSetting:
 
         # Simulate job_queue.py:1461-1471
         telegram_message_key = "tm-001"
-        agent_session_id = "job-abc"
+        agent_session_id = "session-abc"
 
         if telegram_message_key:
             trigger_msgs = [tm]
@@ -222,22 +222,22 @@ class TestBackReferenceSetting:
                 trigger_msgs[0].agent_session_id = agent_session_id
                 trigger_msgs[0].save()
 
-        assert tm.agent_session_id == "job-abc"
+        assert tm.agent_session_id == "session-abc"
         tm.save.assert_called_once()
 
     def test_agent_session_id_not_overwritten(self):
         """Back-reference should not overwrite existing agent_session_id."""
         tm = MagicMock()
-        tm.agent_session_id = "job-existing"
+        tm.agent_session_id = "session-existing"
         tm.save = MagicMock()
 
         if True:  # telegram_message_key is set
             trigger_msgs = [tm]
             if trigger_msgs and not trigger_msgs[0].agent_session_id:
-                trigger_msgs[0].agent_session_id = "job-new"
+                trigger_msgs[0].agent_session_id = "session-new"
                 trigger_msgs[0].save()
 
-        assert tm.agent_session_id == "job-existing"
+        assert tm.agent_session_id == "session-existing"
         tm.save.assert_not_called()
 
     def test_no_back_reference_when_no_trigger(self):
@@ -496,7 +496,7 @@ class TestAgentSessionIdAlias:
 
             id = AgentSession.id
 
-        assert FakeSession("job-xyz").id == "job-xyz"
+        assert FakeSession("session-xyz").id == "session-xyz"
         assert FakeSession(None).id is None
 
 

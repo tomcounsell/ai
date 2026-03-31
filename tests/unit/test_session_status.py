@@ -40,7 +40,7 @@ class TestFormatDuration:
 
 def _make_fake_session(
     session_id="sess-001",
-    agent_session_id="job-001",
+    agent_session_id="session-001",
     status="active",
     created_at=None,
     started_at=None,

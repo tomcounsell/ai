@@ -2,7 +2,7 @@
 
 Validates:
 1. cmd_kill with nonexistent agent_session_id returns structured error
-2. cmd_kill with empty --job-id returns error
+2. cmd_kill with empty --agent-session-id returns error
 3. cmd_kill --all with no sessions returns "nothing to kill"
 4. _find_process_by_session_id returns None for unknown session
 5. _kill_process handles ProcessLookupError (already dead)
@@ -47,11 +47,11 @@ def _make_status_args(**kwargs) -> argparse.Namespace:
     return argparse.Namespace(**defaults)
 
 
-class _FakeJob:
+class _FakeSession:
     """Minimal stand-in for AgentSession in unit tests."""
 
     def __init__(
-        self, agent_session_id="job-123", session_id="sess-abc", status="running", **extra
+        self, agent_session_id="session-123", session_id="sess-abc", status="running", **extra
     ):
         self.agent_session_id = agent_session_id
         self.session_id = session_id
@@ -73,16 +73,16 @@ class _FakeJob:
 class _FakeQuery:
     """Minimal stand-in for AgentSession.query with filter()."""
 
-    def __init__(self, jobs_by_status=None):
-        self._jobs = jobs_by_status or {}
+    def __init__(self, sessions_by_status=None):
+        self._sessions = sessions_by_status or {}
 
     def filter(self, **kwargs):
         status = kwargs.get("status")
         project = kwargs.get("project_key")
-        jobs = self._jobs.get(status, [])
+        sessions = self._sessions.get(status, [])
         if project:
-            return [j for j in jobs if True]  # project filtering not modeled
-        return jobs
+            return [s for s in sessions if True]  # project filtering not modeled
+        return sessions
 
 
 # ---------------------------------------------------------------------------
@@ -235,9 +235,13 @@ class TestKillProcess:
 class TestKillJob:
     @patch("tools.agent_session_scheduler._find_process_by_session_id", return_value=None)
     def test_sets_status_to_killed(self, _mock_find):
-        """_kill_agent_session transitions job status to 'killed' via delete-and-recreate."""
-        job = _FakeJob(agent_session_id="job-abc", session_id="sess-1", status="running")
-        created_job = _FakeJob(agent_session_id="job-new", session_id="sess-1", status="killed")
+        """_kill_agent_session transitions session status to 'killed' via delete-and-recreate."""
+        session = _FakeSession(
+            agent_session_id="session-abc", session_id="sess-1", status="running"
+        )
+        created_job = _FakeSession(
+            agent_session_id="session-new", session_id="sess-1", status="killed"
+        )
 
         fake_fields = {
             "session_id": "sess-1",
@@ -254,11 +258,11 @@ class TestKillJob:
                 "models.agent_session.AgentSession.create", return_value=created_job
             ) as mock_create,
         ):
-            result = _kill_agent_session(job)
+            result = _kill_agent_session(session)
 
         assert result["status"] == "killed"
         assert result["previous_status"] == "running"
-        assert job._deleted is True
+        assert session._deleted is True
         # Verify the create call used status="killed"
         create_kwargs = mock_create.call_args[1]
         assert create_kwargs["status"] == "killed"
@@ -266,8 +270,12 @@ class TestKillJob:
 
     def test_skip_process_kill_for_pending(self):
         """For pending sessions, skip_process_kill=True skips process termination."""
-        job = _FakeJob(agent_session_id="job-pend", session_id="sess-2", status="pending")
-        created_job = _FakeJob(agent_session_id="job-new", session_id="sess-2", status="killed")
+        session = _FakeSession(
+            agent_session_id="session-pend", session_id="sess-2", status="pending"
+        )
+        created_job = _FakeSession(
+            agent_session_id="session-new", session_id="sess-2", status="killed"
+        )
 
         with (
             patch(
@@ -277,7 +285,7 @@ class TestKillJob:
             patch("models.agent_session.AgentSession.create", return_value=created_job),
             patch("tools.agent_session_scheduler._find_process_by_session_id") as mock_find,
         ):
-            result = _kill_agent_session(job, skip_process_kill=True)
+            result = _kill_agent_session(session, skip_process_kill=True)
 
         mock_find.assert_not_called()
         assert result["status"] == "killed"
@@ -289,8 +297,12 @@ class TestKillJob:
     )
     def test_kills_process_when_running(self, mock_kill_proc, mock_find):
         """For running sessions, _kill_agent_session finds and kills the process."""
-        job = _FakeJob(agent_session_id="job-run", session_id="sess-3", status="running")
-        created_job = _FakeJob(agent_session_id="job-new", session_id="sess-3", status="killed")
+        session = _FakeSession(
+            agent_session_id="session-run", session_id="sess-3", status="running"
+        )
+        created_job = _FakeSession(
+            agent_session_id="session-new", session_id="sess-3", status="killed"
+        )
 
         with (
             patch(
@@ -299,7 +311,7 @@ class TestKillJob:
             ),
             patch("models.agent_session.AgentSession.create", return_value=created_job),
         ):
-            result = _kill_agent_session(job)
+            result = _kill_agent_session(session)
 
         mock_find.assert_called_once_with("sess-3")
         mock_kill_proc.assert_called_once_with(42)
@@ -315,10 +327,10 @@ class TestKillJob:
 class TestCmdKill:
     def test_nonexistent_agent_session_id_returns_error(self, capsys):
         """cmd_kill with a agent_session_id that doesn't exist returns structured error."""
-        fake_query = _FakeQuery(jobs_by_status={})
+        fake_query = _FakeQuery(sessions_by_status={})
 
         with patch("models.agent_session.AgentSession.query", fake_query), patch("time.sleep"):
-            ret = cmd_kill(_make_args(agent_session_id="nonexistent-job"))
+            ret = cmd_kill(_make_args(agent_session_id="nonexistent-session"))
 
         assert ret == 1
         output = json.loads(capsys.readouterr().out)
@@ -326,7 +338,7 @@ class TestCmdKill:
         assert "not found" in output["message"]
 
     def test_empty_agent_session_id_returns_error(self, capsys):
-        """cmd_kill with empty --job-id returns error."""
+        """cmd_kill with empty --agent-session-id returns error."""
         ret = cmd_kill(_make_args(agent_session_id="  "))
         assert ret == 1
         output = json.loads(capsys.readouterr().out)
@@ -341,9 +353,9 @@ class TestCmdKill:
         assert output["status"] == "error"
         assert "empty" in output["message"].lower()
 
-    def test_kill_all_with_no_jobs(self, capsys):
+    def test_kill_all_with_no_sessions(self, capsys):
         """cmd_kill --all with no running/pending sessions returns 'nothing to kill'."""
-        fake_query = _FakeQuery(jobs_by_status={})
+        fake_query = _FakeQuery(sessions_by_status={})
 
         with patch("models.agent_session.AgentSession.query", fake_query):
             ret = cmd_kill(_make_args(all=True))
@@ -354,25 +366,25 @@ class TestCmdKill:
 
     def test_kill_all_kills_running_and_pending(self, capsys):
         """cmd_kill --all kills both running and pending sessions."""
-        running_job = _FakeJob(agent_session_id="run-1", session_id="s-1", status="running")
-        pending_job = _FakeJob(agent_session_id="pend-1", session_id="s-2", status="pending")
+        running_job = _FakeSession(agent_session_id="run-1", session_id="s-1", status="running")
+        pending_job = _FakeSession(agent_session_id="pend-1", session_id="s-2", status="pending")
         fake_query = _FakeQuery(
-            jobs_by_status={
+            sessions_by_status={
                 "running": [running_job],
                 "pending": [pending_job],
             }
         )
 
-        created_jobs = [
-            _FakeJob(agent_session_id="new-1", status="killed"),
-            _FakeJob(agent_session_id="new-2", status="killed"),
+        created_sessions = [
+            _FakeSession(agent_session_id="new-1", status="killed"),
+            _FakeSession(agent_session_id="new-2", status="killed"),
         ]
         create_call_count = [0]
 
         def fake_create(**kwargs):
-            job = created_jobs[create_call_count[0]]
+            session = created_sessions[create_call_count[0]]
             create_call_count[0] += 1
-            return job
+            return session
 
         with (
             patch("models.agent_session.AgentSession.query", fake_query),
@@ -391,11 +403,15 @@ class TestCmdKill:
         assert output["count"] == 2
 
     def test_kill_specific_job_by_id(self, capsys):
-        """cmd_kill --job-id finds and kills the target job."""
-        target = _FakeJob(agent_session_id="target-job", session_id="s-target", status="running")
-        other = _FakeJob(agent_session_id="other-job", session_id="s-other", status="running")
-        fake_query = _FakeQuery(jobs_by_status={"running": [other, target]})
-        created = _FakeJob(agent_session_id="new-target", status="killed")
+        """cmd_kill --agent-session-id finds and kills the target session."""
+        target = _FakeSession(
+            agent_session_id="target-session", session_id="s-target", status="running"
+        )
+        other = _FakeSession(
+            agent_session_id="other-session", session_id="s-other", status="running"
+        )
+        fake_query = _FakeQuery(sessions_by_status={"running": [other, target]})
+        created = _FakeSession(agent_session_id="new-target", status="killed")
 
         with (
             patch("models.agent_session.AgentSession.query", fake_query),
@@ -406,16 +422,16 @@ class TestCmdKill:
             ),
             patch("tools.agent_session_scheduler._find_process_by_session_id", return_value=None),
         ):
-            ret = cmd_kill(_make_args(agent_session_id="target-job"))
+            ret = cmd_kill(_make_args(agent_session_id="target-session"))
 
         assert ret == 0
         output = json.loads(capsys.readouterr().out)
         assert output["status"] == "killed"
         assert output["count"] == 1
-        assert output["sessions"][0]["agent_session_id"] == "target-job"
+        assert output["sessions"][0]["agent_session_id"] == "target-session"
 
     def test_no_identifier_returns_error(self, capsys):
-        """cmd_kill with no --job-id, --session-id, or --all returns error."""
+        """cmd_kill with no --agent-session-id, --session-id, or --all returns error."""
         ret = cmd_kill(_make_args())
         assert ret == 1
         output = json.loads(capsys.readouterr().out)
@@ -423,12 +439,12 @@ class TestCmdKill:
         assert "required" in output["message"].lower()
 
     def test_kill_by_session_id(self, capsys):
-        """cmd_kill --session-id finds and kills the target job."""
-        target = _FakeJob(
-            agent_session_id="job-sess", session_id="target-session", status="running"
+        """cmd_kill --session-id finds and kills the target session."""
+        target = _FakeSession(
+            agent_session_id="session-entry", session_id="target-session", status="running"
         )
-        fake_query = _FakeQuery(jobs_by_status={"running": [target]})
-        created = _FakeJob(agent_session_id="new-sess", status="killed")
+        fake_query = _FakeQuery(sessions_by_status={"running": [target]})
+        created = _FakeSession(agent_session_id="new-sess", status="killed")
 
         with (
             patch("models.agent_session.AgentSession.query", fake_query),
@@ -448,7 +464,7 @@ class TestCmdKill:
 
     def test_nonexistent_session_id_returns_error(self, capsys):
         """cmd_kill --session-id with unknown session returns error."""
-        fake_query = _FakeQuery(jobs_by_status={})
+        fake_query = _FakeQuery(sessions_by_status={})
 
         with patch("models.agent_session.AgentSession.query", fake_query):
             ret = cmd_kill(_make_args(session_id="nonexistent-session"))
@@ -482,9 +498,9 @@ class TestCmdKill:
 class TestStatusIncludesKilled:
     def test_status_includes_killed_count(self, capsys):
         """cmd_status output includes killed_count and killed_sessions."""
-        killed_job = _FakeJob(agent_session_id="k-1", session_id="sk-1", status="killed")
+        killed_job = _FakeSession(agent_session_id="k-1", session_id="sk-1", status="killed")
         fake_query = _FakeQuery(
-            jobs_by_status={
+            sessions_by_status={
                 "pending": [],
                 "running": [],
                 "completed": [],
@@ -511,7 +527,7 @@ class TestStatusIncludesKilled:
     def test_status_no_killed_sessions(self, capsys):
         """cmd_status with no killed jobs omits killed_sessions key."""
         fake_query = _FakeQuery(
-            jobs_by_status={
+            sessions_by_status={
                 "pending": [],
                 "running": [],
                 "completed": [],

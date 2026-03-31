@@ -1,7 +1,7 @@
-"""Tests for job health monitor: detect and recover stuck running sessions.
+"""Tests for session health monitor: detect and recover stuck running sessions.
 
 Tests cover:
-- started_at field on AgentSession (set when job transitions to running)
+- started_at field on AgentSession (set when session transitions to running)
 - _get_agent_session_timeout() returning correct timeouts based on message_text
 - _agent_session_health_check() detecting and recovering dead workers and timed-out jobs
 - CLI functions: format_duration, show_status, flush_stuck, flush_session
@@ -19,7 +19,7 @@ from agent.agent_session_queue import (
 from models.agent_session import AgentSession
 
 
-def _create_test_job(**overrides) -> AgentSession:
+def _create_test_session(**overrides) -> AgentSession:
     """Create an AgentSession with sensible defaults for testing."""
     defaults = {
         "project_key": "test",
@@ -46,18 +46,18 @@ class TestStartedAtField:
 
     def test_started_at_defaults_to_none(self):
         """A newly created AgentSession should have started_at=None."""
-        job = _create_test_job()
-        assert job.started_at is None
+        session = _create_test_session()
+        assert session.started_at is None
 
     @pytest.mark.asyncio
     async def test_pop_agent_session_sets_started_at(self):
         """When _pop_agent_session transitions a session to running, started_at should be set."""
-        _create_test_job()
+        _create_test_session()
         before = time.time()
-        job = await _pop_agent_session("123")
+        session = await _pop_agent_session("123")
         after = time.time()
 
-        assert job is not None
+        assert session is not None
         # Verify the AgentSession in Redis has started_at set
         running_jobs = AgentSession.query.filter(project_key="test", status="running")
         assert len(running_jobs) == 1
@@ -68,8 +68,8 @@ class TestStartedAtField:
         """started_at should be included in _extract_agent_session_fields."""
         from agent.agent_session_queue import _extract_agent_session_fields
 
-        job = _create_test_job(started_at=12345.0)
-        fields = _extract_agent_session_fields(job)
+        session = _create_test_session(started_at=12345.0)
+        fields = _extract_agent_session_fields(session)
         assert "started_at" in fields
         assert fields["started_at"] == 12345.0
 
@@ -84,8 +84,8 @@ class TestGetJobTimeout:
             _get_agent_session_timeout,
         )
 
-        job = _create_test_job(message_text="hello, please fix the bug")
-        timeout = _get_agent_session_timeout(job)
+        session = _create_test_session(message_text="hello, please fix the bug")
+        timeout = _get_agent_session_timeout(session)
         assert timeout == AGENT_SESSION_TIMEOUT_DEFAULT
 
     def test_build_job_timeout(self):
@@ -95,8 +95,8 @@ class TestGetJobTimeout:
             _get_agent_session_timeout,
         )
 
-        job = _create_test_job(message_text="/do-build docs/plans/my-feature.md")
-        timeout = _get_agent_session_timeout(job)
+        session = _create_test_session(message_text="/do-build docs/plans/my-feature.md")
+        timeout = _get_agent_session_timeout(session)
         assert timeout == AGENT_SESSION_TIMEOUT_BUILD
 
     def test_build_job_timeout_case_sensitive(self):
@@ -106,8 +106,8 @@ class TestGetJobTimeout:
             _get_agent_session_timeout,
         )
 
-        job = _create_test_job(message_text="/DO-BUILD something")
-        timeout = _get_agent_session_timeout(job)
+        session = _create_test_session(message_text="/DO-BUILD something")
+        timeout = _get_agent_session_timeout(session)
         # /do-build is lowercase in the plan, so uppercase shouldn't match
         assert timeout == AGENT_SESSION_TIMEOUT_DEFAULT
 
@@ -118,22 +118,22 @@ class TestGetJobTimeout:
             _get_agent_session_timeout,
         )
 
-        job = _create_test_job(message_text="")
+        session = _create_test_session(message_text="")
         # Override message_text to empty/None after creation
-        timeout = _get_agent_session_timeout(job)
+        timeout = _get_agent_session_timeout(session)
         assert timeout == AGENT_SESSION_TIMEOUT_DEFAULT
 
 
 class TestJobHealthCheck:
     """Tests for _agent_session_health_check().
 
-    Note: _agent_session_health_check uses `job.chat_id or project_key` as the worker key.
-    Default chat_id in _create_test_job is "123", so workers must be keyed by "123".
+    Note: _agent_session_health_check uses `session.chat_id or project_key` as the worker key.
+    Default chat_id in _create_test_session is "123", so workers must be keyed by "123".
     Recovery calls _ensure_worker which spawns real asyncio tasks, so cleanup must
     cancel all workers after each test.
     """
 
-    # The default chat_id used by _create_test_job
+    # The default chat_id used by _create_test_session
     WORKER_KEY = "123"
 
     @pytest.fixture(autouse=True)
@@ -157,7 +157,7 @@ class TestJobHealthCheck:
         from agent.agent_session_queue import _agent_session_health_check
 
         # Create a running session that has been running long enough
-        _create_test_job(
+        _create_test_session(
             status="running",
             started_at=time.time() - 600,  # 10 minutes ago
             session_id="dead_worker_session",
@@ -184,7 +184,7 @@ class TestJobHealthCheck:
         """A running session with no entry in _active_workers should be recovered."""
         from agent.agent_session_queue import _agent_session_health_check
 
-        _create_test_job(
+        _create_test_session(
             status="running",
             started_at=time.time() - 600,  # 10 minutes ago
             session_id="orphan_session",
@@ -207,7 +207,7 @@ class TestJobHealthCheck:
         """A running session with an alive worker under timeout should NOT be recovered."""
         from agent.agent_session_queue import _agent_session_health_check
 
-        _create_test_job(
+        _create_test_session(
             status="running",
             started_at=time.time() - 60,  # 1 minute ago (under 5min guard)
             session_id="alive_session",
@@ -219,7 +219,7 @@ class TestJobHealthCheck:
 
         await _agent_session_health_check()
 
-        # The job should still be running
+        # The session should still be running
         running = AgentSession.query.filter(project_key="test", status="running")
         assert len(running) == 1
         assert running[0].session_id == "alive_session"
@@ -229,19 +229,19 @@ class TestJobHealthCheck:
 
     @pytest.mark.asyncio
     async def test_recovers_timed_out_job_with_alive_worker(self):
-        """A job that exceeded timeout should be recovered even if worker is alive."""
+        """A session that exceeded timeout should be recovered even if worker is alive."""
         from agent.agent_session_queue import (
             AGENT_SESSION_TIMEOUT_DEFAULT,
             _agent_session_health_check,
         )
 
-        _create_test_job(
+        _create_test_session(
             status="running",
             started_at=time.time() - AGENT_SESSION_TIMEOUT_DEFAULT - 100,  # past timeout
             session_id="timeout_session",
         )
 
-        # Worker is alive but job has exceeded timeout
+        # Worker is alive but session has exceeded timeout
         live_task = asyncio.Future()
         _active_workers[self.WORKER_KEY] = live_task
 
@@ -259,7 +259,7 @@ class TestJobHealthCheck:
         """Sessions running < AGENT_SESSION_HEALTH_MIN_RUNNING not recovered (race guard)."""
         from agent.agent_session_queue import _agent_session_health_check
 
-        _create_test_job(
+        _create_test_session(
             status="running",
             started_at=time.time() - 60,  # Only 1 minute ago (under 5min guard)
             session_id="recent_session",
@@ -282,8 +282,8 @@ class TestJobHealthCheck:
         """Jobs without started_at (legacy) should still be checked for dead workers."""
         from agent.agent_session_queue import _agent_session_health_check
 
-        # A running session with no started_at (legacy job that predates this field)
-        _create_test_job(
+        # A running session with no started_at (legacy session that predates this field)
+        _create_test_session(
             status="running",
             session_id="legacy_session",
         )
@@ -308,7 +308,7 @@ class TestJobHealthCheck:
         from agent.agent_session_queue import _agent_session_health_check
 
         # Create only a pending session
-        _create_test_job(status="pending")
+        _create_test_session(status="pending")
 
         await _agent_session_health_check()
 

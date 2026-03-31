@@ -112,10 +112,10 @@ class TestPopJobLogging:
         ):
             from agent.agent_session_queue import _pop_agent_session
 
-            job = await _pop_agent_session("chat_2")
+            session = await _pop_agent_session("chat_2")
 
         # Job should still be returned (failure is non-fatal)
-        assert job is not None
+        assert session is not None
         # Verify warning was logged
         warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert any(
@@ -134,17 +134,17 @@ class TestEnqueueContinuationSessionLookupLogging:
         """When no AgentSession exists for the session_id, an error is logged
         and the function falls back to enqueue_agent_session."""
 
-        mock_job = MagicMock()
-        mock_job.project_key = "test-project"
-        mock_job.session_id = "nonexistent-session-999"
-        mock_job.working_dir = "/tmp/test"
-        mock_job.message_text = "continue"
-        mock_job.sender_name = "Test"
-        mock_job.chat_id = "chat_3"
-        mock_job.telegram_message_id = 3
-        mock_job.work_item_slug = None
-        mock_job.task_list_id = None
-        mock_job.classification_type = None
+        mock_session_entry = MagicMock()
+        mock_session_entry.project_key = "test-project"
+        mock_session_entry.session_id = "nonexistent-session-999"
+        mock_session_entry.working_dir = "/tmp/test"
+        mock_session_entry.message_text = "continue"
+        mock_session_entry.sender_name = "Test"
+        mock_session_entry.chat_id = "chat_3"
+        mock_session_entry.telegram_message_id = 3
+        mock_session_entry.work_item_slug = None
+        mock_session_entry.task_list_id = None
+        mock_session_entry.classification_type = None
 
         from unittest.mock import AsyncMock as _AsyncMock
 
@@ -155,7 +155,7 @@ class TestEnqueueContinuationSessionLookupLogging:
             from agent.agent_session_queue import _enqueue_nudge
 
             await _enqueue_nudge(
-                job=mock_job,
+                session=mock_session_entry,
                 branch_name="session/test",
                 task_list_id="tl",
                 auto_continue_count=1,

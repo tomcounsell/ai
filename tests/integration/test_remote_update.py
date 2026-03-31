@@ -257,9 +257,9 @@ class TestWorkerRestartCheck:
     @pytest.mark.asyncio
     async def test_worker_checks_flag_after_job_completion(self):
         """Worker should check restart flag after completing a session."""
-        mock_job = MagicMock()
-        mock_job.agent_session_id = "test-123"
-        mock_job.project_key = "testproject"
+        mock_session_entry = MagicMock()
+        mock_session_entry.agent_session_id = "test-123"
+        mock_session_entry.project_key = "testproject"
 
         call_count = 0
 
@@ -267,7 +267,7 @@ class TestWorkerRestartCheck:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                return mock_job
+                return mock_session_entry
             return None
 
         with (
@@ -282,7 +282,7 @@ class TestWorkerRestartCheck:
             event = asyncio.Event()
             await _worker_loop("testproject", event)
 
-        # Should have been called at least once (after job completion)
+        # Should have been called at least once (after session completion)
         assert mock_check.call_count >= 1
         mock_restart.assert_called()
 

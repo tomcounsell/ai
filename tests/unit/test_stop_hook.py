@@ -182,7 +182,7 @@ class TestAgentSessionCompletion:
         mock_session = MagicMock()
         mock_session.status = "running"
 
-        mock_sidecar = {"agent_session_agent_session_id": "job-123"}
+        mock_sidecar = {"agent_session_agent_session_id": "session-123"}
 
         with (
             patch(
@@ -231,7 +231,7 @@ class TestAgentSessionCompletion:
         mock_session = MagicMock()
         mock_session.status = "running"
 
-        mock_sidecar = {"agent_session_agent_session_id": "job-456"}
+        mock_sidecar = {"agent_session_agent_session_id": "session-456"}
 
         with (
             patch(

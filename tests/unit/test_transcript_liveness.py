@@ -142,7 +142,7 @@ class TestCheckStalledSessionsWithTranscript:
         # last_activity is old (would normally trigger stall)
         session = SimpleNamespace(
             session_id="transcript-fresh",
-            agent_session_id="job-001",
+            agent_session_id="session-001",
             status="active",
             started_at=now - 3600,
             created_at=now - 3600,
@@ -191,7 +191,7 @@ class TestCheckStalledSessionsWithTranscript:
         now = time.time()
         session = SimpleNamespace(
             session_id="transcript-stale",
-            agent_session_id="job-002",
+            agent_session_id="session-002",
             status="active",
             started_at=now - 3600,
             created_at=now - 3600,
@@ -231,7 +231,7 @@ class TestCheckStalledSessionsWithTranscript:
         now = time.time()
         session = SimpleNamespace(
             session_id="pending-session",
-            agent_session_id="job-003",
+            agent_session_id="session-003",
             status="pending",
             started_at=None,
             created_at=now - (STALL_THRESHOLD_PENDING + 60),

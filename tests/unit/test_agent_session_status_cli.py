@@ -27,18 +27,18 @@ class TestJobStatusCli(unittest.TestCase):
     @patch("agent.agent_session_queue.AgentSession")
     @patch("agent.agent_session_queue._active_workers", {})
     def test_shows_jobs(self, mock_session_cls):
-        """Status with jobs shows job info."""
-        job = MagicMock()
-        job.chat_id = "chat-123"
-        job.project_key = "valor"
-        job.status = "running"
-        job.agent_session_id = "job-001"
-        job.created_at = 1000000.0
-        job.started_at = 1000000.0
-        job.message_text = "Hello world"
-        job.session_id = "sess-abc"
-        job.correlation_id = "corr-xyz"
-        mock_session_cls.query.all.return_value = [job]
+        """Status with sessions shows session info."""
+        session = MagicMock()
+        session.chat_id = "chat-123"
+        session.project_key = "valor"
+        session.status = "running"
+        session.agent_session_id = "session-001"
+        session.created_at = 1000000.0
+        session.started_at = 1000000.0
+        session.message_text = "Hello world"
+        session.session_id = "sess-abc"
+        session.correlation_id = "corr-xyz"
+        mock_session_cls.query.all.return_value = [session]
 
         from agent.agent_session_queue import _cli_show_status
 
@@ -52,5 +52,5 @@ class TestJobStatusCli(unittest.TestCase):
         assert "valor" in output
         assert "chat-123" in output
         assert "running" in output
-        assert "job-001" in output
+        assert "session-001" in output
         assert "Total:" in output

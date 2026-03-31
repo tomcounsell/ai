@@ -514,5 +514,5 @@ class TestSdlcQueryFunctions:
     def test_get_pipeline_detail_not_found(self):
         from ui.data.sdlc import get_pipeline_detail
 
-        result = get_pipeline_detail("nonexistent-job-id-12345")
+        result = get_pipeline_detail("nonexistent-session-id-12345")
         assert result is None

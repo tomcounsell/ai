@@ -20,7 +20,7 @@ from agent.agent_session_queue import _push_agent_session, enqueue_agent_session
 from models.agent_session import AgentSession
 
 # ---------------------------------------------------------------------------
-# Helpers — mirror existing test_job_queue_race.py patterns
+# Helpers — mirror existing test_agent_session_queue_race.py patterns
 # ---------------------------------------------------------------------------
 
 

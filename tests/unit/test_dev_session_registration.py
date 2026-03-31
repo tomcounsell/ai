@@ -63,7 +63,7 @@ class TestPreToolUseDevSessionDetection:
         input_data = self._make_agent_input()
 
         with patch("models.agent_session.AgentSession.create_dev") as mock_create:
-            mock_create.return_value = MagicMock(agent_session_id="dev-job-1")
+            mock_create.return_value = MagicMock(agent_session_id="dev-session-1")
 
             result = asyncio.run(pre_tool_use_hook(input_data, "tool-use-123", mock_hook_context))
 

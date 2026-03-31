@@ -34,7 +34,7 @@ def _make_agent_session(
     last_activity="DEFAULT",
     project_key="test",
     chat_id="12345",
-    agent_session_id="job-001",
+    agent_session_id="session-001",
     history=None,
 ):
     now = time.time()

@@ -194,7 +194,7 @@ class TestNonSdlcDelivery:
 
 
 class TestPmSentMessageIds:
-    """Tests for pm_sent_message_ids field preserved in job queue (issue #497)."""
+    """Tests for pm_sent_message_ids field preserved in session queue (issue #497)."""
 
     def test_pm_sent_message_ids_in_job_fields(self):
         """pm_sent_message_ids should be in the _AGENT_SESSION_FIELDS list for preservation."""

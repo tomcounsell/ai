@@ -163,7 +163,7 @@ def _check_persona_permission(action_type: str) -> dict | None:
 
 
 def cmd_schedule(args: argparse.Namespace) -> int:
-    """Schedule an SDLC job for a GitHub issue."""
+    """Schedule an SDLC session for a GitHub issue."""
     # Persona gate
     perm = _check_persona_permission("schedule")
     if perm:
@@ -181,7 +181,7 @@ def cmd_schedule(args: argparse.Namespace) -> int:
             {
                 "status": "error",
                 "message": f"Scheduling depth cap reached ({MAX_SCHEDULING_DEPTH}). "
-                "Cannot schedule further jobs from a self-scheduled session.",
+                "Cannot schedule further sessions from a self-scheduled session.",
             }
         )
         return 1
@@ -253,19 +253,19 @@ def cmd_schedule(args: argparse.Namespace) -> int:
     # Session type: explicit flag > default (chat for issue-based work)
     session_type = getattr(args, "session_type", None) or SessionType.CHAT
 
-    # Parent job inheritance
-    parent_agent_session_id = getattr(args, "parent_job", None)
+    # Parent session inheritance
+    parent_agent_session_id = getattr(args, "parent_session", None)
     parent_session = None
     if parent_agent_session_id:
         if not parent_agent_session_id.strip():
-            _output({"status": "error", "message": "--parent-job cannot be empty."})
+            _output({"status": "error", "message": "--parent-session cannot be empty."})
             return 1
         parent_session = _get_parent_session(parent_agent_session_id)
         if parent_session is None:
             _output(
                 {
                     "status": "error",
-                    "message": f"Parent job {parent_agent_session_id} not found.",
+                    "message": f"Parent session {parent_agent_session_id} not found.",
                 }
             )
             return 1
@@ -363,15 +363,15 @@ def cmd_schedule(args: argparse.Namespace) -> int:
         _output(
             {
                 "status": "error",
-                "message": f"Failed to enqueue job: {e}",
+                "message": f"Failed to enqueue session: {e}",
             }
         )
         return 1
 
 
 def _format_agent_session_info(j, include_children: bool = False) -> dict:
-    """Format a single job's info for status output."""
-    job_info = {
+    """Format a single session's info for status output."""
+    session_info = {
         "agent_session_id": j.agent_session_id,
         "session_id": j.session_id,
         "status": j.status,
@@ -379,25 +379,26 @@ def _format_agent_session_info(j, include_children: bool = False) -> dict:
         "message_preview": (j.message_text or "")[:100],
     }
     if j.created_at:
-        job_info["created_at"] = datetime.fromtimestamp(j.created_at, tz=UTC).isoformat()
+        session_info["created_at"] = datetime.fromtimestamp(j.created_at, tz=UTC).isoformat()
     if j.started_at:
-        job_info["started_at"] = datetime.fromtimestamp(j.started_at, tz=UTC).isoformat()
+        session_info["started_at"] = datetime.fromtimestamp(j.started_at, tz=UTC).isoformat()
     if j.scheduled_after:
-        job_info["scheduled_after"] = datetime.fromtimestamp(j.scheduled_after, tz=UTC).isoformat()
+        scheduled_dt = datetime.fromtimestamp(j.scheduled_after, tz=UTC)
+        session_info["scheduled_after"] = scheduled_dt.isoformat()
     if j.issue_url:
-        job_info["issue_url"] = j.issue_url
+        session_info["issue_url"] = j.issue_url
     if j.parent_agent_session_id:
-        job_info["parent_agent_session_id"] = j.parent_agent_session_id
+        session_info["parent_agent_session_id"] = j.parent_agent_session_id
 
     if include_children and j.status == "waiting_for_children":
         completed, total, failed = j.get_completion_progress()
-        job_info["children_progress"] = {
+        session_info["children_progress"] = {
             "completed": completed,
             "failed": failed,
             "total": total,
         }
         children = j.get_children()
-        job_info["children"] = [
+        session_info["children"] = [
             {
                 "agent_session_id": c.agent_session_id,
                 "session_id": c.session_id,
@@ -407,11 +408,11 @@ def _format_agent_session_info(j, include_children: bool = False) -> dict:
             for c in children
         ]
 
-    return job_info
+    return session_info
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    """Show queue status with job tree display."""
+    """Show queue status with session tree display."""
     from models.agent_session import AgentSession
 
     project_key = args.project or _get_env_context()["project_key"]
@@ -441,8 +442,8 @@ def cmd_status(args: argparse.Namespace) -> int:
             "waiting_for_children_count": len(waiting),
             "killed_count": len(killed),
             "recent_completed_count": len(completed),
-            "pending_jobs": [_format_agent_session_info(j) for j in root_pending],
-            "running_jobs": [_format_agent_session_info(j) for j in running],
+            "pending_sessions": [_format_agent_session_info(j) for j in root_pending],
+            "running_sessions": [_format_agent_session_info(j) for j in running],
         }
 
         # Show waiting-for-children sessions with their child trees
@@ -538,7 +539,7 @@ def cmd_push(args: argparse.Namespace) -> int:
         return 0
 
     except Exception as e:
-        _output({"status": "error", "message": f"Failed to push job: {e}"})
+        _output({"status": "error", "message": f"Failed to push session: {e}"})
         return 1
 
 
@@ -584,7 +585,7 @@ def cmd_bump(args: argparse.Namespace) -> int:
         return 0
 
     except Exception as e:
-        _output({"status": "error", "message": f"Failed to bump job: {e}"})
+        _output({"status": "error", "message": f"Failed to bump session: {e}"})
         return 1
 
 
@@ -623,7 +624,7 @@ def cmd_pop(args: argparse.Namespace) -> int:
         return 0
 
     except Exception as e:
-        _output({"status": "error", "message": f"Failed to pop job: {e}"})
+        _output({"status": "error", "message": f"Failed to pop session: {e}"})
         return 1
 
 
@@ -705,7 +706,7 @@ def cmd_cancel(args: argparse.Namespace) -> int:
         return 0
 
     except Exception as e:
-        _output({"status": "error", "message": f"Failed to cancel job: {e}"})
+        _output({"status": "error", "message": f"Failed to cancel session: {e}"})
         return 1
 
 
@@ -769,11 +770,11 @@ def _kill_process(pid: int) -> dict:
         return {"pid": pid, "action": "permission_denied"}
 
 
-def _kill_agent_session(job, *, skip_process_kill: bool = False) -> dict:
-    """Kill a single job: terminate its subprocess and set status to killed.
+def _kill_agent_session(target, *, skip_process_kill: bool = False) -> dict:
+    """Kill a single session: terminate its subprocess and set status to killed.
 
     Args:
-        job: AgentSession instance to kill.
+        target: AgentSession instance to kill.
         skip_process_kill: If True, skip process termination (for pending sessions).
 
     Returns a dict with kill result details.
@@ -782,15 +783,15 @@ def _kill_agent_session(job, *, skip_process_kill: bool = False) -> dict:
     from models.agent_session import AgentSession
 
     result = {
-        "agent_session_id": job.agent_session_id,
-        "session_id": job.session_id,
-        "previous_status": job.status,
+        "agent_session_id": target.agent_session_id,
+        "session_id": target.session_id,
+        "previous_status": target.status,
     }
 
     # Kill subprocess if running
     process_result = None
-    if not skip_process_kill and job.status == "running":
-        pid = _find_process_by_session_id(job.session_id)
+    if not skip_process_kill and target.status == "running":
+        pid = _find_process_by_session_id(target.session_id)
         if pid:
             process_result = _kill_process(pid)
             result["process"] = process_result
@@ -798,8 +799,8 @@ def _kill_agent_session(job, *, skip_process_kill: bool = False) -> dict:
             result["process"] = {"pid": None, "action": "no_process_found"}
 
     # Set status to killed using delete-and-recreate (Popoto pattern)
-    fields = _extract_agent_session_fields(job)
-    job.delete()
+    fields = _extract_agent_session_fields(target)
+    target.delete()
     fields["status"] = "killed"
     fields["completed_at"] = time.time()
     new_job = AgentSession.create(**fields)
@@ -807,7 +808,7 @@ def _kill_agent_session(job, *, skip_process_kill: bool = False) -> dict:
     result["status"] = "killed"
 
     logger.info(
-        f"Killed job {result['agent_session_id']} (session={result['session_id']}, "
+        f"Killed session {result['agent_session_id']} (session={result['session_id']}, "
         f"previous_status={result['previous_status']})"
     )
 
@@ -835,20 +836,20 @@ def cmd_kill(args: argparse.Namespace) -> int:
                 return 1
             # Search across all statuses
             for status in ("running", "pending", "completed", "failed", "waiting_for_children"):
-                for job in AgentSession.query.filter(status=status):
-                    if job.agent_session_id == args.agent_session_id:
-                        targets.append(job)
+                for entry in AgentSession.query.filter(status=status):
+                    if entry.agent_session_id == args.agent_session_id:
+                        targets.append(entry)
                         break
                 if targets:
                     break
 
             if not targets:
-                # Retry once after 1s (race condition during job transition)
+                # Retry once after 1s (race condition during session transition)
                 time.sleep(1)
                 for status in ("running", "pending", "completed", "failed", "waiting_for_children"):
-                    for job in AgentSession.query.filter(status=status):
-                        if job.agent_session_id == args.agent_session_id:
-                            targets.append(job)
+                    for entry in AgentSession.query.filter(status=status):
+                        if entry.agent_session_id == args.agent_session_id:
+                            targets.append(entry)
                             break
                     if targets:
                         break
@@ -864,9 +865,9 @@ def cmd_kill(args: argparse.Namespace) -> int:
                 _output({"status": "error", "message": "--session-id cannot be empty."})
                 return 1
             for status in ("running", "pending", "completed", "failed", "waiting_for_children"):
-                for job in AgentSession.query.filter(status=status):
-                    if job.session_id == args.session_id:
-                        targets.append(job)
+                for entry in AgentSession.query.filter(status=status):
+                    if entry.session_id == args.session_id:
+                        targets.append(entry)
                         break
                 if targets:
                     break
@@ -885,9 +886,9 @@ def cmd_kill(args: argparse.Namespace) -> int:
 
         # Kill all targets
         results = []
-        for job in targets:
-            skip_process = job.status != "running"
-            kill_result = _kill_agent_session(job, skip_process_kill=skip_process)
+        for entry in targets:
+            skip_process = entry.status != "running"
+            kill_result = _kill_agent_session(entry, skip_process_kill=skip_process)
             results.append(kill_result)
 
         _output(
@@ -900,7 +901,7 @@ def cmd_kill(args: argparse.Namespace) -> int:
         return 0
 
     except Exception as e:
-        _output({"status": "error", "message": f"Failed to kill job(s): {e}"})
+        _output({"status": "error", "message": f"Failed to kill session(s): {e}"})
         return 1
 
 
@@ -1011,7 +1012,7 @@ def main():
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
     # schedule
-    sched = subparsers.add_parser("schedule", help="Schedule SDLC job for a GitHub issue")
+    sched = subparsers.add_parser("schedule", help="Schedule SDLC session for a GitHub issue")
     sched.add_argument("--issue", type=int, required=True, help="GitHub issue number")
     sched.add_argument("--priority", choices=["urgent", "high", "normal", "low"], default="normal")
     sched.add_argument("--project", help="Project key (default: from env or 'valor')")
@@ -1023,7 +1024,7 @@ def main():
         "Default: chat for issue/PR work, dev for hotfixes.",
     )
     sched.add_argument(
-        "--parent-job",
+        "--parent-session",
         help="Parent session ID — creates this as a child session inheriting parent fields",
     )
 

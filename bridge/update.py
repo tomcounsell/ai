@@ -33,23 +33,23 @@ def _get_machine_name() -> str:
     return platform.node().split(".")[0]
 
 
-def _get_running_jobs_info() -> tuple[int, list[str]]:
+def _get_running_sessions_info() -> tuple[int, list[str]]:
     """Check for running sessions across all projects. Returns (count, descriptions)."""
     try:
         from models.agent_session import AgentSession
 
-        running_jobs = AgentSession.query.filter(status="running")
-        if not running_jobs:
+        running_sessions = AgentSession.query.filter(status="running")
+        if not running_sessions:
             return 0, []
 
         descriptions = []
-        for job in running_jobs:
-            msg_preview = (job.message_text or "")[:50]
-            if len(job.message_text or "") > 50:
+        for entry in running_sessions:
+            msg_preview = (entry.message_text or "")[:50]
+            if len(entry.message_text or "") > 50:
                 msg_preview += "..."
-            descriptions.append(f"  • [{job.project_key}] {msg_preview}")
+            descriptions.append(f"  • [{entry.project_key}] {msg_preview}")
 
-        return len(running_jobs), descriptions
+        return len(running_sessions), descriptions
 
     except Exception as e:
         logger.warning(f"Failed to check running sessions: {e}")
@@ -61,7 +61,7 @@ async def handle_update_command(tg_client, event):
 
     Pulls code and syncs deps but does NOT restart the bridge.
     If code changed, writes a restart flag that the session queue picks up
-    between jobs for a graceful restart when idle.
+    between sessions for a graceful restart when idle.
     """
     machine = _get_machine_name()
     logger.info(f"[update] /update received from chat {event.chat_id}")
@@ -71,7 +71,7 @@ async def handle_update_command(tg_client, event):
         pass
 
     # Check for running sessions before update
-    running_count, running_descriptions = _get_running_jobs_info()
+    running_count, running_descriptions = _get_running_sessions_info()
     sessions_notice = ""
     if running_count > 0:
         sessions_notice = (
@@ -150,14 +150,14 @@ async def handle_force_update_command(tg_client, event):
         pending_count = len(pending) if pending else 0
         running_count = len(running) if running else 0
 
-        for job in pending or []:
+        for entry in pending or []:
             try:
-                job.delete()
+                entry.delete()
             except Exception:
                 pass
-        for job in running or []:
+        for entry in running or []:
             try:
-                job.delete()
+                entry.delete()
             except Exception:
                 pass
 

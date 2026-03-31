@@ -38,7 +38,7 @@ def pending_session(redis_test_db):
 
 @pytest.fixture
 def running_session(redis_test_db):
-    """Create an AgentSession in running state (after job pickup)."""
+    """Create an AgentSession in running state (after session pickup)."""
     return AgentSession.create(
         session_id="tg_valor_-5051_12345",
         project_key="valor",
