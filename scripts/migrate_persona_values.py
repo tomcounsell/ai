@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Migrate AgentSession persona values for issue #599.
 
-Migrates session_mode values from ChatMode to PersonaType:
+Migrates session_mode values from legacy chat mode strings to PersonaType:
   "qa"  -> "teammate"
   "pm"  -> "project-manager"
   "dev" -> "developer"
