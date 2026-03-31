@@ -156,16 +156,16 @@ No agent integration required -- this is an internal library change to the popot
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/multi-tenancy.md` to add a section on hash-based field partitioning with ConfidenceField example
-- [ ] Add inline code examples in ConfidenceField docstring showing partition_by usage
+- [x] Update `docs/multi-tenancy.md` to add a section on hash-based field partitioning with ConfidenceField example
+- [x] Add inline code examples in ConfidenceField docstring showing partition_by usage
 
 ### External Documentation Site
-- [ ] Update MkDocs pages for ConfidenceField API reference with partition_by parameter
-- [ ] Verify docs build passes with `mkdocs build`
+- [x] Update MkDocs pages for ConfidenceField API reference with partition_by parameter
+- [x] Verify docs build passes with `mkdocs build`
 
 ### Inline Documentation
-- [ ] Docstrings on `_get_partitioned_data_hash_key()` explaining key structure
-- [ ] Code comments on partition change detection logic in on_save/on_delete
+- [x] Docstrings on `_get_data_hash_key()` / `_get_old_data_hash_key()` explaining key structure
+- [x] Code comments on partition change detection logic in on_save/on_delete
 
 ## Success Criteria
 
