@@ -121,7 +121,7 @@ class TestEnrichmentFromTelegramMessage:
         """When telegram_message_key is None, enrichment defaults are all empty."""
         session = _make_mock_agent_session(telegram_message_key=None)
 
-        # Simulate the enrichment logic from job_queue.py
+        # Simulate the enrichment logic from agent_session_queue.py
         enrich_has_media = False
         enrich_media_type = None
         enrich_youtube_urls = None
@@ -147,7 +147,7 @@ class TestEnrichmentFromTelegramMessage:
         tm.non_youtube_urls = '["https://docs.python.org"]'
         tm.reply_to_msg_id = 77
 
-        # Simulate enrichment logic from job_queue.py
+        # Simulate enrichment logic from agent_session_queue.py
         enrich_has_media = False
         enrich_media_type = None
         enrich_youtube_urls = None
@@ -212,7 +212,7 @@ class TestBackReferenceSetting:
         tm.agent_session_id = None
         tm.save = MagicMock()
 
-        # Simulate job_queue.py:1461-1471
+        # Simulate agent_session_queue.py back-reference setting
         telegram_message_key = "tm-001"
         agent_session_id = "session-abc"
 

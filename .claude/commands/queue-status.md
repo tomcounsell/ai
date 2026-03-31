@@ -42,7 +42,7 @@ python -m tools.agent_session_scheduler push --message "Fix the bug in bridge.py
 
 ### Bump job to top of queue
 ```bash
-python -m tools.agent_session_scheduler bump --job-id <JOB_ID>
+python -m tools.agent_session_scheduler bump --agent-session-id <ID>
 ```
 Sets priority to `urgent` and resets created_at to now.
 
@@ -54,7 +54,7 @@ python -m tools.agent_session_scheduler pop --project <project_key>
 
 ### Cancel specific job
 ```bash
-python -m tools.agent_session_scheduler cancel --job-id <JOB_ID>
+python -m tools.agent_session_scheduler cancel --agent-session-id <ID>
 ```
 
 ## Priority Levels

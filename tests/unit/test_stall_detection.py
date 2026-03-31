@@ -3,7 +3,7 @@
 Tests check_stalled_sessions (detection) and fix_unhealthy_session (abandon).
 The old stall retry mechanisms (_recover_stalled_pending, _kill_stalled_worker,
 _enqueue_stall_retry) were deleted in the bridge-resilience refactor.
-Recovery is now handled by the unified _agent_session_health_check in agent/job_queue.py.
+Recovery is now handled by the unified _agent_session_health_check in agent/agent_session_queue.py.
 """
 
 import time

@@ -35,9 +35,9 @@ python -m tools.agent_session_scheduler status --project valor
 ### Queue Manipulation
 
 ```bash
-python -m tools.agent_session_scheduler bump --job-id <JOB_ID>    # Move to top (priority=urgent)
-python -m tools.agent_session_scheduler pop --project valor         # Remove next without executing
-python -m tools.agent_session_scheduler cancel --job-id <JOB_ID>   # Cancel specific job
+python -m tools.agent_session_scheduler bump --agent-session-id <ID>    # Move to top (priority=urgent)
+python -m tools.agent_session_scheduler pop --project valor              # Remove next without executing
+python -m tools.agent_session_scheduler cancel --agent-session-id <ID>   # Cancel specific session
 ```
 
 ### Session Listing and Cleanup
@@ -156,7 +156,7 @@ Child jobs inherit from the parent:
 ### Listing Children
 
 ```bash
-python -m tools.agent_session_scheduler children --job-id <PARENT_JOB_ID>
+python -m tools.agent_session_scheduler children --agent-session-id <PARENT_ID>
 ```
 
 Returns structured JSON with progress summary and per-child status.

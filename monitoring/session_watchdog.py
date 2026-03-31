@@ -583,7 +583,7 @@ async def fix_unhealthy_session(session: AgentSession, assessment: dict[str, Any
     """Fix an unhealthy session by abandoning it.
 
     Recovery of jobs with dead workers is handled by the unified health check
-    in agent/job_queue.py (_agent_session_health_check). The session watchdog only
+    in agent/agent_session_queue.py (_agent_session_health_check). The session watchdog only
     handles session-level health (silence, looping, error cascades).
 
     Args:

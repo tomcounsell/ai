@@ -32,7 +32,7 @@ def test_extra_fields_included():
     record = logging.LogRecord(
         name="agent.agent_session_queue",
         level=logging.WARNING,
-        pathname="job_queue.py",
+        pathname="agent_session_queue.py",
         lineno=42,
         msg="Job recovered",
         args=(),

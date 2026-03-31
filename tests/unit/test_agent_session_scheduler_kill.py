@@ -1,4 +1,4 @@
-"""Tests for the kill command in job_scheduler.
+"""Tests for the kill command in agent_session_scheduler.
 
 Validates:
 1. cmd_kill with nonexistent agent_session_id returns structured error

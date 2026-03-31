@@ -1,4 +1,7 @@
-"""Tests for asyncio.to_thread wrapping in job_queue.py and get_active_session_for_chat."""
+"""Tests for asyncio.to_thread wrapping in agent_session_queue.py.
+
+Covers get_active_session_for_chat and related async helpers.
+"""
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch  # noqa: F401

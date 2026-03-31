@@ -49,7 +49,7 @@ class TestTeammateReactionClearing:
         session = MagicMock()
         session.session_mode = "teammate"
 
-        # The reaction logic in job_queue.py checks session_mode and returns None
+        # The reaction logic in agent_session_queue.py checks session_mode and returns None
         # for successful Teammate sessions. We test the conditional directly.
         task_error = False
         if session and getattr(session, "session_mode", None) == "teammate" and not task_error:

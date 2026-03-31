@@ -204,7 +204,7 @@ class TestSessionTranscriptLifecycleLogging:
 
 
 class TestJobQueueLifecycleLogging:
-    """Tests that job_queue functions log lifecycle transitions."""
+    """Tests that agent_session_queue functions log lifecycle transitions."""
 
     @pytest.mark.asyncio
     async def test_push_agent_session_logs_pending_transition(self, redis_test_db):

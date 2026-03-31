@@ -102,42 +102,42 @@ bug_sessions = sessions_by_tag("bug")
 auto_tag_session("session-123")  # called automatically at session completion
 ```
 
-### Job Scheduler (`tools.job_scheduler`)
+### Agent Session Scheduler (`tools.agent_session_scheduler`)
 
-Agent-initiated queue operations. Schedule SDLC jobs, push arbitrary messages,
+Agent-initiated queue operations. Schedule SDLC sessions, push arbitrary messages,
 and manage queue state mid-conversation.
 
 ```bash
 # Schedule SDLC work for a GitHub issue
-python -m tools.job_scheduler schedule --issue 113
-python -m tools.job_scheduler schedule --issue 113 --after "2026-03-12T02:00:00Z"
+python -m tools.agent_session_scheduler schedule --issue 113
+python -m tools.agent_session_scheduler schedule --issue 113 --after "2026-03-12T02:00:00Z"
 
-# Push arbitrary job
-python -m tools.job_scheduler push --message "What is the architecture?"
+# Push arbitrary session
+python -m tools.agent_session_scheduler push --message "What is the architecture?"
 
 # Queue status
-python -m tools.job_scheduler status
+python -m tools.agent_session_scheduler status
 
 # Queue manipulation
-python -m tools.job_scheduler bump --job-id <JOB_ID>
-python -m tools.job_scheduler pop --project valor
-python -m tools.job_scheduler cancel --job-id <JOB_ID>
+python -m tools.agent_session_scheduler bump --agent-session-id <ID>
+python -m tools.agent_session_scheduler pop --project valor
+python -m tools.agent_session_scheduler cancel --agent-session-id <ID>
 
-# Kill a running or pending job (terminates subprocess, sets status="killed")
-python -m tools.job_scheduler kill --job-id <JOB_ID>
-python -m tools.job_scheduler kill --session-id <SESSION_ID>
-python -m tools.job_scheduler kill --all
+# Kill a running or pending session (terminates subprocess, sets status="killed")
+python -m tools.agent_session_scheduler kill --agent-session-id <ID>
+python -m tools.agent_session_scheduler kill --session-id <SESSION_ID>
+python -m tools.agent_session_scheduler kill --all
 
 # List sessions by status
-python -m tools.job_scheduler list --status killed,abandoned
-python -m tools.job_scheduler list --status completed --limit 5
+python -m tools.agent_session_scheduler list --status killed,abandoned
+python -m tools.agent_session_scheduler list --status completed --limit 5
 
 # Clean up stale sessions (deletes killed/abandoned/failed older than N minutes)
-python -m tools.job_scheduler cleanup --age 30 --dry-run   # Preview
-python -m tools.job_scheduler cleanup --age 30              # Delete
+python -m tools.agent_session_scheduler cleanup --age 30 --dry-run   # Preview
+python -m tools.agent_session_scheduler cleanup --age 30              # Delete
 ```
 
-See `docs/features/job-scheduling.md` for full documentation.
+See `docs/features/agent-session-scheduling.md` for full documentation.
 
 ## Image Tools
 
