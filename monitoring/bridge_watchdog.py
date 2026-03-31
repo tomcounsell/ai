@@ -19,6 +19,7 @@ Usage:
 import argparse
 import json
 import logging
+import logging.handlers
 import os
 import subprocess
 import sys
@@ -44,6 +45,17 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+# Add rotating file handler for watchdog log
+LOGS_DIR = PROJECT_DIR / "logs"
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+_watchdog_file_handler = logging.handlers.RotatingFileHandler(
+    LOGS_DIR / "watchdog.log",
+    maxBytes=10 * 1024 * 1024,  # 10MB
+    backupCount=5,
+)
+_watchdog_file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+logger.addHandler(_watchdog_file_handler)
 
 # Files and directories
 LOG_FILE = PROJECT_DIR / "logs" / "bridge.log"

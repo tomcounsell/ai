@@ -6,6 +6,7 @@ for environment-based configuration with validation and type safety.
 """
 
 import logging
+import logging.handlers
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -259,7 +260,11 @@ class Settings(BaseSettings):
             handlers=[
                 logging.StreamHandler(),
                 (
-                    logging.FileHandler(self.logging.file_path)
+                    logging.handlers.RotatingFileHandler(
+                        self.logging.file_path,
+                        maxBytes=self.logging.max_file_size,
+                        backupCount=self.logging.backup_count,
+                    )
                     if self.logging.file_path
                     else logging.NullHandler()
                 ),
