@@ -1148,11 +1148,22 @@ def _recover_interrupted_jobs_startup() -> int:
             chat_id,
             job.message_text or "",
         )
-        job.status = "pending"
-        job.priority = "high"
-        job.started_at = None
-        job.save()
-        logger.info("[startup-recovery] Recovered job %s", job.job_id)
+        try:
+            job.status = "pending"
+            job.priority = "high"
+            job.started_at = None
+            job.save()
+            logger.info("[startup-recovery] Recovered job %s", job.job_id)
+        except Exception as e:
+            logger.warning(
+                "[startup-recovery] Failed to recover job %s, deleting corrupted session: %s",
+                job.session_id,
+                e,
+            )
+            try:
+                job.delete()
+            except Exception:
+                pass
 
     logger.warning("[startup-recovery] Recovered %d interrupted job(s)", count)
     return count
