@@ -437,43 +437,11 @@ def revert_last_commit() -> bool:
         return False
 
 
-def send_telegram_alert(message: str) -> bool:
-    """Send alert via Telegram (to supervisor DM)."""
-    try:
-        # Use the bridge's Telegram session to send a message
-        # This is a simple approach - spawn a quick script
-        script = f'''
-import asyncio
-from telethon import TelegramClient
-from dotenv import load_dotenv
-import os
+def _hostname() -> str:
+    """Return machine hostname for log identification."""
+    import platform
 
-load_dotenv("{PROJECT_DIR}/.env")
-from pathlib import Path as _P
-load_dotenv(_P.home() / "Desktop" / "Valor" / ".env")
-
-async def send():
-    client = TelegramClient(
-        "{DATA_DIR}/valor_bridge",
-        int(os.getenv("TELEGRAM_API_ID")),
-        os.getenv("TELEGRAM_API_HASH"),
-    )
-    await client.start()
-    # Send to supervisor (Tom's user ID from whitelist)
-    await client.send_message(179144806, """{message}""")
-    await client.disconnect()
-
-asyncio.run(send())
-'''
-        result = subprocess.run(
-            [f"{PROJECT_DIR}/.venv/bin/python", "-c", script],
-            capture_output=True,
-            timeout=30,
-        )
-        return result.returncode == 0
-    except Exception as e:
-        logger.error(f"Failed to send Telegram alert: {e}")
-        return False
+    return platform.node()
 
 
 def _kill_detected_zombies() -> int:
@@ -537,10 +505,10 @@ def execute_recovery(level: int, issues: list[str]) -> bool:
             clear_lock_files()
 
             if revert_last_commit():
-                send_telegram_alert(
-                    f"🔄 Auto-revert triggered\n\n"
-                    f"Issues: {', '.join(issues)}\n\n"
-                    f"HEAD reverted to previous commit. Bridge restarting."
+                logger.warning(
+                    "[%s] Auto-revert triggered. Issues: %s. HEAD reverted to previous commit.",
+                    _hostname(),
+                    ", ".join(issues),
                 )
                 time.sleep(2)
                 return restart_bridge()
@@ -548,15 +516,14 @@ def execute_recovery(level: int, issues: list[str]) -> bool:
                 return execute_recovery(5, issues)
 
         elif level == 5:
-            # Alert human
-            diagnostic = (
-                "🚨 Bridge Recovery Failed\n\n"
-                "Issues:\n" + "\n".join(f"• {i}" for i in issues) + "\n\n"
-                "Recovery levels 1-4 exhausted.\n"
-                "Manual intervention required."
+            # Log critical failure with hostname for multi-machine debugging
+            logger.critical(
+                "[%s] Bridge recovery failed — levels 1-4 exhausted."
+                " Issues: %s. Manual intervention required.",
+                _hostname(),
+                ", ".join(issues),
             )
-            send_telegram_alert(diagnostic)
-            log_crash("Recovery exhausted - alerting human")
+            log_crash(f"[{_hostname()}] Recovery exhausted")
             return False
 
     finally:
