@@ -235,7 +235,7 @@ def build_conversation_history(chat_id: str, limit: int = 5) -> str:
     """
     Build recent conversation history for context.
 
-    NOTE: This is NOT called by default. The agent should use the valor-history
+    NOTE: This is NOT called by default. The agent should use the valor-telegram
     CLI tool to fetch relevant history when context cues suggest prior messages
     may be relevant (e.g., "what do you think of these", "as I mentioned",
     references to recent discussions, etc.). For explicit threading, users

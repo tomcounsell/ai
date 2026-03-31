@@ -49,8 +49,6 @@ References where "Valor" is the **persona** that users interact with — the nam
 | `config/projects.example.json` | 9 | `"Dev: Valor"` group name | Telegram group |
 | `config/SOUL.md` | 268-274 | `"Dev: Valor"` in CLI examples | Documentation |
 | `tools/valor_telegram.py` | 6-11 | `"Dev: Valor"` in usage | CLI help text |
-| `tools/telegram_history/cli.py` | 8-12 | `"Dev: Valor"` in usage | CLI help text |
-| `tools/telegram_history/README.md` | 33-47 | `"Dev: Valor"` in examples | Documentation |
 
 **Total Category A: ~35 references across ~15 files**
 **Configurability effort: MEDIUM** — mostly reads from a few constants/config values. A `persona.name` config key + updating ~5 source-of-truth locations would cascade to most of these.
@@ -66,7 +64,7 @@ References where "Valor" is a **brand/product name** for the tooling itself — 
 | File | Line(s) | Reference | Notes |
 |------|---------|-----------|-------|
 | `pyproject.toml` | 2 | `name = "valor-bridge"` | Package name |
-| `pyproject.toml` | 39-45 | `valor-history`, `valor-telegram`, `valor-calendar`, `valor-image-gen`, `valor-image-analyze`, `valor-search`, `valor-fetch` | 7 CLI binary names |
+| `pyproject.toml` | 39-45 | `valor-telegram`, `valor-calendar`, `valor-image-gen`, `valor-image-analyze`, `valor-search`, `valor-fetch` | 6 CLI binary names |
 
 ### B2. Tool Source Files (CLI branding)
 
@@ -74,7 +72,6 @@ References where "Valor" is a **brand/product name** for the tooling itself — 
 |------|-----------|-------|
 | `tools/valor_telegram.py` | Filename, `prog="valor-telegram"`, usage strings | CLI tool |
 | `tools/valor_calendar.py` | Filename, `valor-calendar` in docstring/usage | CLI tool |
-| `tools/telegram_history/cli.py` | `prog="valor-history"`, usage strings | CLI tool |
 | `tools/web/__init__.py` | `valor-search`, `valor-fetch` in usage | CLI tool |
 | `tools/image_gen/__init__.py` | `valor-image-gen`, `"X-Title": "Valor Image Gen"` | CLI + HTTP header |
 | `tools/image_analysis/__init__.py` | `valor-image-analyze`, `"X-Title": "Valor Image Analysis"` | CLI + HTTP header |

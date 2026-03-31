@@ -61,7 +61,7 @@ This will:
   - Job queue (popoto, redis)
   - Summarization (ollama)
   - Dev tools (pytest, ruff, mypy)
-- Register CLI tools (`valor-calendar`, `valor-history`)
+- Register CLI tools (`valor-calendar`, `valor-telegram`)
 
 Verify key imports work:
 

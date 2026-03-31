@@ -41,7 +41,6 @@ dev = [
 ]
 
 [project.scripts]
-valor-history = "tools.telegram_history.cli:main"
 valor-telegram = "tools.valor_telegram:main"
 valor-calendar = "tools.valor_calendar:main"
 valor-image-gen = "tools.image_gen:main"

@@ -82,6 +82,94 @@ def format_timestamp(ts: str | None) -> str:
         return ts[:16] if len(ts) > 16 else ts
 
 
+def _telethon_client():
+    """Create a Telethon client from env vars. Returns (client, api_id, api_hash) or raises."""
+    from dotenv import load_dotenv
+
+    load_dotenv()
+    load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")
+
+    api_id = int(os.environ.get("TELEGRAM_API_ID", "0"))
+    api_hash = os.environ.get("TELEGRAM_API_HASH", "")
+
+    if not api_id or not api_hash:
+        raise RuntimeError("TELEGRAM_API_ID and TELEGRAM_API_HASH must be set in .env")
+
+    from telethon import TelegramClient
+
+    session_path = str(Path(__file__).parent.parent / "data" / "valor_bridge")
+    return TelegramClient(session_path, api_id, api_hash)
+
+
+def _fetch_from_telegram_api(
+    chat_name: str,
+    limit: int = 10,
+    search: str | None = None,
+    since_dt: datetime | None = None,
+) -> list[dict]:
+    """Fetch messages directly from Telegram API via Telethon.
+
+    Used as fallback when Redis has no results.
+    """
+
+    async def _fetch():
+        client = _telethon_client()
+        await client.start()
+        try:
+            # Find the chat by name
+            entity = None
+            async for dialog in client.iter_dialogs():
+                name = dialog.name or ""
+                if chat_name.lower() in name.lower():
+                    entity = dialog.entity
+                    break
+
+            if not entity:
+                # Try as numeric ID
+                if chat_name.lstrip("-").isdigit():
+                    entity = await client.get_entity(int(chat_name))
+
+            if not entity:
+                return []
+
+            # Fetch messages (Telethon returns newest first)
+            fetch_limit = limit * 3 if search else limit
+            raw_messages = await client.get_messages(entity, limit=fetch_limit)
+
+            results = []
+            for m in raw_messages:
+                text = m.text or ""
+                ts = m.date
+
+                # Apply since filter
+                if since_dt and ts and ts.replace(tzinfo=None) < since_dt.replace(tzinfo=None):
+                    continue
+
+                # Apply search filter
+                if search and search.lower() not in text.lower():
+                    continue
+
+                sender = "Valor" if m.out else (getattr(m.sender, "first_name", None) or "Unknown")
+                results.append(
+                    {
+                        "sender": sender,
+                        "content": text,
+                        "timestamp": ts.isoformat() if ts else None,
+                        "message_type": "text",
+                    }
+                )
+
+                if len(results) >= limit:
+                    break
+
+            # Return in chronological order (oldest first)
+            return list(reversed(results))
+        finally:
+            await client.disconnect()
+
+    return asyncio.run(_fetch())
+
+
 def cmd_read(args: argparse.Namespace) -> int:
     """Read messages from a chat."""
     from tools.telegram_history import (
@@ -97,10 +185,6 @@ def cmd_read(args: argparse.Namespace) -> int:
             # Try raw value (might be a numeric chat ID)
             if args.chat.lstrip("-").isdigit():
                 chat_id = args.chat
-            else:
-                print(f"Error: Unknown chat '{args.chat}'", file=sys.stderr)
-                print("Use 'valor-telegram chats' to list known chats.", file=sys.stderr)
-                return 1
 
     # Search mode
     if args.search:
@@ -130,34 +214,52 @@ def cmd_read(args: argparse.Namespace) -> int:
         messages = result.get("results", [])
     else:
         # Recent messages mode
-        if not chat_id:
+        if not chat_id and not args.chat:
             print("Error: --chat is required when not using --search", file=sys.stderr)
             return 1
 
-        result = get_recent_messages(chat_id=chat_id, limit=args.limit)
+        if chat_id:
+            result = get_recent_messages(chat_id=chat_id, limit=args.limit)
 
-        if "error" in result:
-            print(f"Error: {result['error']}", file=sys.stderr)
-            return 1
+            if "error" in result:
+                print(f"Error: {result['error']}", file=sys.stderr)
+                return 1
 
-        messages = result.get("messages", [])
+            messages = result.get("messages", [])
 
-        # Filter by --since if provided
-        if args.since:
-            since_dt = parse_since(args.since)
-            if since_dt:
-                filtered = []
-                for msg in messages:
-                    try:
-                        msg_dt = datetime.fromisoformat(msg.get("timestamp", ""))
-                        if msg_dt >= since_dt:
-                            filtered.append(msg)
-                    except (ValueError, TypeError):
-                        filtered.append(msg)  # include if we can't parse
-                messages = filtered
+            # Filter by --since if provided
+            if args.since:
+                since_dt = parse_since(args.since)
+                if since_dt:
+                    filtered = []
+                    for msg in messages:
+                        try:
+                            msg_dt = datetime.fromisoformat(msg.get("timestamp", ""))
+                            if msg_dt >= since_dt:
+                                filtered.append(msg)
+                        except (ValueError, TypeError):
+                            filtered.append(msg)  # include if we can't parse
+                    messages = filtered
 
-        # Reverse to show chronological order (oldest first)
-        messages = list(reversed(messages))
+            # Reverse to show chronological order (oldest first)
+            messages = list(reversed(messages))
+        else:
+            messages = []
+
+    # Fallback to Telegram API if Redis returned nothing
+    if not messages and args.chat:
+        try:
+            since_dt = parse_since(args.since) if args.since else None
+            messages = _fetch_from_telegram_api(
+                chat_name=args.chat,
+                limit=args.limit,
+                search=args.search,
+                since_dt=since_dt,
+            )
+            if messages:
+                print(f"(fetched from Telegram API — {len(messages)} messages)", file=sys.stderr)
+        except Exception as e:
+            print(f"Telegram API fallback failed: {e}", file=sys.stderr)
 
     # Output
     if args.json:
@@ -182,11 +284,6 @@ def cmd_read(args: argparse.Namespace) -> int:
 
 def cmd_send(args: argparse.Namespace) -> int:
     """Send a message to a chat."""
-    from dotenv import load_dotenv
-
-    load_dotenv()
-    load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")
-
     chat_id = resolve_chat(args.chat)
     if not chat_id:
         if args.chat.lstrip("-").isdigit():
@@ -208,20 +305,12 @@ def cmd_send(args: argparse.Namespace) -> int:
         return 1
 
     async def _send():
-        from telethon import TelegramClient
-
-        session_path = str(Path(__file__).parent.parent / "data" / "valor_bridge")
-        api_id = int(os.environ.get("TELEGRAM_API_ID", "0"))
-        api_hash = os.environ.get("TELEGRAM_API_HASH", "")
-
-        if not api_id or not api_hash:
-            print(
-                "Error: TELEGRAM_API_ID and TELEGRAM_API_HASH must be set in .env",
-                file=sys.stderr,
-            )
+        try:
+            client = _telethon_client()
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
             return 1
 
-        client = TelegramClient(session_path, api_id, api_hash)
         await client.start()
         try:
             entity = await client.get_entity(int(chat_id))

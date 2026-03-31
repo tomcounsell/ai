@@ -58,6 +58,8 @@ resolve_chat(name) → chat_id
     ↓
 Redis (Popoto TelegramMessage/Chat models)
     ↓
+No results? → Telethon fallback (Telegram API)
+    ↓
 Format and display
 
 valor-telegram send
@@ -80,7 +82,7 @@ Chat names are resolved in order:
 
 | Component | Source | Purpose |
 |-----------|--------|---------|
-| Reading | Redis (Popoto `TelegramMessage` model) | Messages stored by bridge |
+| Reading | Redis (Popoto `TelegramMessage` model), Telethon fallback | Messages stored by bridge, with API fallback |
 | Sending | Telethon (direct API) | Real-time message delivery |
 | Chat names | Redis (Popoto `Chat` model) | Group name → chat_id mapping |
 | User names | `projects.json` (`dms.whitelist`) | Name → user_id mapping |
