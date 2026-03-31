@@ -90,13 +90,13 @@ All log files have rotation configured to prevent unbounded growth. Two mechanis
 
 | Log File | Writer | Rotation Mechanism | Max Size | Backups |
 |----------|--------|--------------------|----------|---------|
-| `bridge.log` | Python (RotatingFileHandler) | `logging.handlers.RotatingFileHandler` | 10MB | 5 |
+| `bridge.log` | Python (RotatingFileHandler) | `logging.handlers.RotatingFileHandler` in `bridge/telegram_bridge.py` | 10MB | 5 |
+| `watchdog.log` | Python (RotatingFileHandler) | `logging.handlers.RotatingFileHandler` in `monitoring/bridge_watchdog.py` | 10MB | 5 |
+| `reflections.log` | Python (RotatingFileHandler) | `logging.handlers.RotatingFileHandler` in `scripts/reflections.py` | 10MB | 5 |
 | `bridge.error.log` | launchd (StandardErrorPath) | Shell `rotate_log` in `valor-service.sh` | 10MB | 3 |
-| `watchdog.log` | launchd (StandardOutPath) | Shell `rotate_log` in `valor-service.sh` | 10MB | 3 |
-| `reflections.log` | launchd (StandardOutPath) | Shell `rotate_log` in `valor-service.sh` | 10MB | 3 |
 | `reflections_error.log` | launchd (StandardErrorPath) | Shell `rotate_log` in `valor-service.sh` | 10MB | 3 |
 
-**Python-rotated files** use `RotatingFileHandler` which rotates automatically during writes. No service restart needed.
+**Python-rotated files** use `RotatingFileHandler` which rotates automatically during writes. No service restart needed. Services using `config/settings.py:configure_logging()` also get rotation automatically via `RotatingFileHandler` with configurable `max_file_size` and `backup_count`.
 
 **Shell-rotated files** are rotated by the `rotate_log` function in `scripts/valor-service.sh` on every service start/restart. A `newsyslog` config (`config/newsyslog.valor.conf`) provides a safety net for long-running services -- macOS runs newsyslog hourly via launchd. Note: since launchd holds file descriptors open, newsyslog rotation may not be effective until the next service restart. The shell `rotate_log` function is the primary mechanism.
 
@@ -451,6 +451,10 @@ The scheduler picks it up on the next tick. No code changes or service restarts 
 | `python scripts/reflections.py --ignore "pattern" --reason "why"` | Suppress with reason |
 | `tail -f logs/bridge.log` | Stream bridge logs (includes reflection scheduler output) |
 | `python -c "from models.reflections import ReflectionIgnore; [print(f'{e.pattern} (expires {e.expires_at})') for e in ReflectionIgnore.get_active()]"` | View active ignore entries |
+
+### Session Log Cleanup
+
+After the daily maintenance pipeline completes, `main()` calls `bridge.session_logs.cleanup_old_snapshots()` to prune session log directories older than 7 days from `logs/sessions/`. The count of removed directories is logged. Failures are caught and logged as non-fatal -- they never block the rest of the pipeline.
 
 ### Output Locations
 
