@@ -125,7 +125,7 @@ def main():
 def _complete_agent_session(session_id: str, hook_input: dict) -> None:
     """Mark the AgentSession as completed or failed based on stop_reason.
 
-    Reads the agent_session_agent_session_id from the sidecar file, updates the
+    Reads the agent_session_id from the sidecar file, updates the
     AgentSession status, completed_at timestamp, and log_path.
 
     Fails silently -- session completion errors never block stop.
@@ -136,7 +136,7 @@ def _complete_agent_session(session_id: str, hook_input: dict) -> None:
         from hook_utils.memory_bridge import load_agent_session_sidecar
 
         sidecar = load_agent_session_sidecar(session_id)
-        agent_session_id = sidecar.get("agent_session_agent_session_id")
+        agent_session_id = sidecar.get("agent_session_id")
         if not agent_session_id:
             return
 

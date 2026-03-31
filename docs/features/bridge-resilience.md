@@ -39,11 +39,11 @@ The Anthropic circuit breaker in `agent/sdk_client.py` protects against sustaine
 
 The six competing recovery mechanisms from the old system were replaced with one:
 
-**`_job_health_check()`** in `agent/agent_session_queue.py` scans both `running` and `pending` jobs:
+**`_agent_session_health_check()`** in `agent/agent_session_queue.py` scans both `running` and `pending` sessions:
 
 - **Running sessions**: If the worker for `session.chat_id` is dead/missing and the session has been running longer than the minimum threshold, recover it (delete-and-recreate as pending)
 - **Pending sessions**: If no live worker exists for `session.chat_id` and the session has been pending longer than the minimum threshold, start a worker
-- **Key invariant**: Jobs with a live worker on the same `chat_id` are never touched
+- **Key invariant**: Sessions with a live worker on the same `chat_id` are never touched
 
 ### Startup Recovery
 
@@ -55,9 +55,9 @@ The six competing recovery mechanisms from the old system were replaced with one
 |--------------|----------|-------------|
 | `_recover_stalled_pending()` | session_watchdog.py | Used `project_key` instead of `chat_id` |
 | `_kill_stalled_worker()` | session_watchdog.py | Looked up workers by wrong key |
-| `_enqueue_stall_retry()` | session_watchdog.py | Delete-and-recreate lost jobs |
+| `_enqueue_stall_retry()` | session_watchdog.py | Delete-and-recreate lost sessions |
 | `_recover_orphaned_sessions()` | agent_session_queue.py | Complex Redis-level scanning |
-| `_reset_running_jobs()` | agent_session_queue.py | Replaced by startup recovery |
+| `_reset_running_sessions()` | agent_session_queue.py | Replaced by startup recovery |
 | `_notify_stall_failure()` | session_watchdog.py | Retry mechanism removed |
 
 ## Startup Retry
@@ -66,19 +66,19 @@ The bridge's Telegram connection retry (`bridge/telegram_bridge.py`) now covers 
 
 ## Structured Logging
 
-`bridge/log_format.py` provides `StructuredJsonFormatter` that outputs one JSON object per line with fields: `timestamp`, `level`, `logger`, `function`, `message`, plus optional `job_id`, `session_id`, `correlation_id`, `chat_id`.
+`bridge/log_format.py` provides `StructuredJsonFormatter` that outputs one JSON object per line with fields: `timestamp`, `level`, `logger`, `function`, `message`, plus optional `agent_session_id`, `session_id`, `correlation_id`, `chat_id`.
 
 ## SDK Heartbeat
 
 `BackgroundTask._watchdog` in `agent/messenger.py` emits periodic heartbeat logs every 60 seconds during SDK subprocess execution, replacing the single check at 180 seconds.
 
-## Job Status CLI
+## Session Status CLI
 
 ```bash
-python -m agent.job_queue --status
+python -m agent.agent_session_queue --status
 ```
 
-Shows all jobs grouped by chat_id with worker status, session IDs, correlation IDs, and dependency health summary.
+Shows all sessions grouped by chat_id with worker status, session IDs, correlation IDs, and dependency health summary.
 
 ## Reflections Pre-flight
 

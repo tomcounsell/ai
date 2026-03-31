@@ -526,7 +526,7 @@ def post_merge_extract(pr_number: str | int | None = None) -> None:
 def load_agent_session_sidecar(session_id: str) -> dict:
     """Load the agent session sidecar data for a session.
 
-    Returns a dict that may contain 'agent_session_agent_session_id' and
+    Returns a dict that may contain 'agent_session_id' and
     'merge_detected' among other keys. Returns empty dict if
     the file is missing or corrupt.
     """
@@ -545,7 +545,7 @@ def save_agent_session_sidecar(session_id: str, data: dict) -> None:
     """Persist agent session sidecar data atomically.
 
     Uses tmp + rename pattern to avoid partial writes.
-    Stores agent_session_agent_session_id and other cross-hook state.
+    Stores agent_session_id and other cross-hook state.
     """
     sidecar_dir = _get_sidecar_dir(session_id)
     sidecar_dir.mkdir(parents=True, exist_ok=True)

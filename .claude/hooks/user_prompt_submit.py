@@ -45,7 +45,7 @@ def main():
             )
 
             sidecar = load_agent_session_sidecar(session_id)
-            agent_session_id = sidecar.get("agent_session_agent_session_id")
+            agent_session_id = sidecar.get("agent_session_id")
             if agent_session_id:
                 # Subsequent prompt in same session -- re-activate
                 import time
@@ -83,7 +83,7 @@ def main():
                     message_text=prompt[:500] if prompt else "",
                 )
 
-                sidecar["agent_session_agent_session_id"] = agent_session.agent_session_id
+                sidecar["agent_session_id"] = agent_session.agent_session_id
                 save_agent_session_sidecar(session_id, sidecar)
     except Exception:
         pass  # Silent failure -- never block prompt submission
