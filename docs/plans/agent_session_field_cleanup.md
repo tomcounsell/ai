@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Large
 owner: Valor
@@ -94,7 +94,7 @@ No prerequisites — this work modifies only internal model fields with no exter
 ### Key Elements
 
 - **DatetimeField migration**: Replace `Field(type=float)` with `DatetimeField` and `SortedField(type=datetime)` for all timestamp fields
-- **Structured event log**: Replace flat string `history` with `session_events` ListField containing serialized `SessionEvent` Pydantic model dicts; derive `summary`, `result_text`, `stage_states`, `last_commit_sha` as `@property` accessors
+- **Structured event log**: Replace flat string `history` with `session_events` ListField containing serialized `SessionEvent` Pydantic model dicts; derive `summary`, `result_text`, `stage_states`, `last_commit_sha` as `@property` accessors with **setters** that append events (so existing code like `s.summary = "..."` continues to work)
 - **Field consolidation**: Merge 6 Telegram origin fields into `initial_telegram_message` DictField; merge `revival_context` + `classification_type` + `classification_confidence` into `extra_context` DictField
 - **Dead field removal**: Remove `depends_on`, `stable_job_id`, `_qa_mode_legacy`, `work_item_slug`, `scheduling_depth` (replaced with derived property)
 - **Method pruning**: Remove 3 factory methods and 7 query wrappers that are trivial Popoto one-liners
@@ -128,6 +128,8 @@ No prerequisites — this work modifies only internal model fields with no exter
 - [ ] Dashboard session detail renders correctly with new field structure
 
 ## Test Impact
+
+**Note:** This list is a starting point. Builders must grep-audit every renamed field and update ALL callers, including files not listed here. The `initial_telegram_message` consolidation alone touches 48+ files.
 
 - [ ] `tests/unit/test_job_hierarchy.py` — UPDATE: datetime objects, remove `depends_on`/`stable_job_id`, remove `commit_sha` field usage
 - [ ] `tests/unit/test_job_dependencies.py` — DELETE: `depends_on` and `stable_job_id` removed entirely
@@ -167,7 +169,7 @@ No prerequisites — this work modifies only internal model fields with no exter
 
 ### Risk 2: Breakage scope
 **Impact:** ~161 timestamp occurrences across ~44 files means high chance of missed callers
-**Mitigation:** Phased approach — model changes first with backward-compatible properties, then systematic caller updates. Grep verification at each step. Full test suite must pass.
+**Mitigation:** One PR with three sequential migration phases (timestamps → event log → field consolidation). Each phase updates model + all callers before moving to the next. Grep verification at each step. Full test suite must pass after each phase.
 
 ### Risk 3: Conflict with parallel issues
 **Impact:** #599 (qa→teammate), #600 (MSG_MAX_CHARS), #608 (job→session) touch overlapping code
@@ -399,14 +401,22 @@ No agent integration required — AgentSession is used internally by the bridge,
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+| # | CONCERN | Critic | Issue | Resolution |
+|---|---------|--------|-------|------------|
+| 1 | BLOCKER | Operator | Test Impact undercounts — `sender_name` alone appears in 144 files, real count is 40+ test files | Plan updated: builders must grep-audit all renamed fields and update every caller, not just the listed files. Test Impact list is a starting point, not exhaustive. |
+| 2 | BLOCKER | Operator | `summary`/`stage_states` writers break — code like `s.summary = "..."` raises AttributeError on read-only @property | Plan updated: add property setters that append to `session_events`. E.g., `summary.setter` creates a completion event. |
+| 3 | BLOCKER | Archaeologist | `depends_on`/`stable_job_id` have 49 lines of wired logic, not truly "dead" | Acknowledged: the infrastructure exists but no callers set dependencies. Removal requires careful extraction of `_dependencies_met()`, `_pop_job()` filtering, and `_update_depends_on_references()`. |
+| 4 | CONCERN | Adversary | `scheduling_depth` parent-chain walk has no cycle protection | Already has max-depth 5 safety cap in the property. Made explicit in plan. |
+| 5 | CONCERN | Simplifier | Phasing unresolved — atomic PR vs multiple | Resolved: one PR, three sequential migration phases internally (timestamps → event log → field consolidation). |
+| 6 | CONCERN | Operator | Missing caller files in task lists (`bridge/enrichment.py`, `bridge/catchup.py`, `bridge/context.py`) | Plan updated: task descriptions say "all callers" not just named files. Builders grep-audit each renamed field. |
+| 7 | NIT | Simplifier | SessionEvent cap contradicts Rabbit Holes | Resolved: cap stays at 20. |
 
 ---
 
 ## Open Questions
 
-1. ~~**Migration strategy for existing Redis data**~~ — **Resolved:** One-time migration script (spike-1 confirmed Popoto reads floats without crashing, simple convert-and-save loop). Added as build task 1.5.
+1. ~~**Migration strategy for existing Redis data**~~ — **Resolved:** One-time migration script (spike-1 confirmed).
 
-2. **SessionEvent cap:** Currently `HISTORY_MAX_ENTRIES = 20`. With richer event data (summaries, delivered messages), should this cap increase? Higher cap means more Redis storage per session but preserves more interaction history.
+2. ~~**SessionEvent cap**~~ — **Resolved:** Keep at 20. Richer data per entry doesn't require more entries.
 
-3. **Phasing:** This is a large change touching ~44 files. Should it be split into multiple PRs (e.g., timestamps first, then event log, then field consolidation) or shipped as one atomic PR?
+3. ~~**Phasing**~~ — **Resolved:** One PR with three sequential migration phases: timestamps → event log → field consolidation.
