@@ -1,4 +1,4 @@
-# Job Queue: Reliability Fixes
+# Agent Session Queue: Reliability Fixes
 
 **Status**: Complete
 
@@ -18,10 +18,10 @@ new_job = await AgentSession.async_create(**fields)  # adds to new index via on_
 ```
 
 This is applied in three functions (plus dependency-related operations):
-- `_pop_job()` -- pending to running (also filters out dependency-blocked jobs)
+- `_pop_agent_session()` -- pending to running (also filters out dependency-blocked jobs)
 - `_recover_interrupted_jobs()` -- running to pending (sync, startup)
 - `_reset_running_jobs()` -- running to pending (async, shutdown)
-- `retry_job()` -- failed/cancelled to pending (PM queue management)
+- `retry_agent_session()` -- failed/cancelled to pending (PM queue management)
 
 The `_extract_job_fields()` helper reads all non-auto fields (56+) from an AgentSession instance for recreation.
 
@@ -31,25 +31,25 @@ The worker loop uses an Event-based drain strategy to reliably pick up pending j
 
 ### How It Works
 
-1. **asyncio.Event notification**: `enqueue_job()` signals a per-chat `asyncio.Event` after pushing a job. The event is level-triggered (stays set until cleared), so signals during job execution are not lost.
+1. **asyncio.Event notification**: `enqueue_agent_session()` signals a per-chat `asyncio.Event` after pushing a job. The event is level-triggered (stays set until cleared), so signals during job execution are not lost.
 
-2. **Event-based wait**: After completing a job, `_worker_loop()` clears the event and waits for it with a `DRAIN_TIMEOUT` (configurable constant, default 1.5s). If the event fires, the worker pops the next job via `_pop_job()`.
+2. **Event-based wait**: After completing a job, `_worker_loop()` clears the event and waits for it with a `DRAIN_TIMEOUT` (configurable constant, default 1.5s). If the event fires, the worker pops the next job via `_pop_agent_session()`.
 
-3. **Sync Popoto fallback**: If the timeout expires without an event, `_pop_job_with_fallback()` runs a synchronous `AgentSession.query.filter()` call that bypasses `to_thread()` scheduling. This eliminates the thread-pool race that caused the original index visibility bug.
+3. **Sync Popoto fallback**: If the timeout expires without an event, `_pop_agent_session_with_fallback()` runs a synchronous `AgentSession.query.filter()` call that bypasses `to_thread()` scheduling. This eliminates the thread-pool race that caused the original index visibility bug.
 
-4. **Exit-time safety check**: Before exiting with "Queue empty", the worker runs one final `_pop_job_with_fallback()` and logs a WARNING if orphaned pending jobs are found.
+4. **Exit-time safety check**: Before exiting with "Queue empty", the worker runs one final `_pop_agent_session_with_fallback()` and logs a WARNING if orphaned pending jobs are found.
 
 ### Key Functions
 
 | Function | Purpose |
 |----------|---------|
-| `_pop_job_with_fallback(chat_id)` | Tries `_pop_job()` first, then sync Popoto query as fallback |
+| `_pop_agent_session_with_fallback(chat_id)` | Tries `_pop_agent_session()` first, then sync Popoto query as fallback |
 | `DRAIN_TIMEOUT` | Module constant (1.5s) controlling the Event wait timeout |
 | `_active_events` | Dict mapping chat_id to asyncio.Event for worker notification |
 
 ### Why the Original Drain Guard Failed
 
-The original 100ms sleep relied on `_pop_job()` (which uses `async_filter` via `to_thread()`) finding the job on retry. But the root cause is a thread-pool scheduling race: `async_create` writes the hash and index entries via multiple Redis commands in a thread, and `async_filter` reads the index intersection in a separate thread. The 100ms window was too short, and both calls suffered from the same `to_thread()` race. The sync fallback bypasses this entirely.
+The original 100ms sleep relied on `_pop_agent_session()` (which uses `async_filter` via `to_thread()`) finding the job on retry. But the root cause is a thread-pool scheduling race: `async_create` writes the hash and index entries via multiple Redis commands in a thread, and `async_filter` reads the index intersection in a separate thread. The 100ms window was too short, and both calls suffered from the same `to_thread()` race. The sync fallback bypasses this entirely.
 
 ## Startup Orphan Recovery
 
@@ -84,7 +84,7 @@ Branch existence is then verified individually in git (`git branch --list <speci
 
 ## Deferred Execution (`scheduled_after`)
 
-The `AgentSession` model has a `scheduled_after` field (UTC float timestamp). `_pop_job()` skips jobs where `scheduled_after > now()`, enabling deferred execution. Jobs with `scheduled_after` in the past or `None` are eligible immediately.
+The `AgentSession` model has a `scheduled_after` field (UTC float timestamp). `_pop_agent_session()` skips jobs where `scheduled_after > now()`, enabling deferred execution. Jobs with `scheduled_after` in the past or `None` are eligible immediately.
 
 ## Priority Model
 
@@ -94,29 +94,29 @@ Priority ranking constant: `PRIORITY_RANK = {"urgent": 0, "high": 1, "normal": 2
 
 ## Self-Scheduling
 
-The agent can enqueue jobs mid-conversation via `tools/job_scheduler.py`. See [Job Scheduling](job-scheduling.md) for details.
+The agent can enqueue jobs mid-conversation via `tools/agent_session_scheduler.py`. See [Agent Session Scheduling](agent-session-scheduling.md) for details.
 
 ## Sibling Job Dependencies
 
-Jobs can declare dependencies on other jobs via `depends_on` (a list of `stable_job_id` values). See [Job Dependency Tracking](job-dependency-tracking.md) for the full design including branch-session mapping, checkpoint/restore, and PM queue management.
+Jobs can declare dependencies on other jobs via `depends_on` (a list of `stable_agent_session_id` values). See [Agent Session Dependency Tracking](agent-session-dependency-tracking.md) for the full design including branch-session mapping, checkpoint/restore, and PM queue management.
 
 Key behaviors:
-- `_pop_job()` skips jobs whose dependencies have not all reached `completed` status
+- `_pop_agent_session()` skips jobs whose dependencies have not all reached `completed` status
 - `cancelled` and `failed` jobs block their dependents
 - A periodic `_dependency_health_check()` detects stuck chains and logs warnings
-- PM can reorder, cancel, and retry jobs via `reorder_job()`, `cancel_job()`, `retry_job()`
+- PM can reorder, cancel, and retry jobs via `reorder_agent_session()`, `cancel_agent_session()`, `retry_agent_session()`
 
 ## Parent-Child Job Hierarchy
 
-Jobs support parent-child decomposition via the `parent_job_id` field on `AgentSession`.
+Jobs support parent-child decomposition via the `parent_agent_session_id` field on `AgentSession`.
 
 ### Hierarchy Fields
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `parent_job_id` | `KeyField(null=True)` | Links child to parent job. Indexed for efficient queries. |
-| `stable_job_id` | `KeyField(null=True)` | UUID set once at creation, never changes on delete-and-recreate. Used as dependency reference key. |
-| `depends_on` | `ListField(null=True)` | List of `stable_job_id` values this job must wait for. |
+| `parent_agent_session_id` | `KeyField(null=True)` | Links child to parent job. Indexed for efficient queries. |
+| `stable_agent_session_id` | `KeyField(null=True)` | UUID set once at creation, never changes on delete-and-recreate. Used as dependency reference key. |
+| `depends_on` | `ListField(null=True)` | List of `stable_agent_session_id` values this job must wait for. |
 | `commit_sha` | `Field(null=True)` | HEAD commit SHA for checkpoint/restore across session pause/resume. |
 
 ### Status Values
@@ -128,22 +128,22 @@ Jobs support parent-child decomposition via the `parent_job_id` field on `AgentS
 
 ### Completion Propagation
 
-When a child job completes, `_complete_job()` calls `_finalize_parent()` **before** deleting the child from Redis. The completing child's intended terminal status is passed as a parameter (since its Redis status is still "running" at that point). `_finalize_parent()` queries all siblings and uses the override status for the completing child. When all siblings are terminal (`completed` or `failed`), the parent transitions to `completed` (all succeeded) or `failed` (any failed). Only after finalization does `_complete_job()` delete the child.
+When a child job completes, `_complete_agent_session()` calls `_finalize_parent()` **before** deleting the child from Redis. The completing child's intended terminal status is passed as a parameter (since its Redis status is still "running" at that point). `_finalize_parent()` queries all siblings and uses the override status for the completing child. When all siblings are terminal (`completed` or `failed`), the parent transitions to `completed` (all succeeded) or `failed` (any failed). Only after finalization does `_complete_agent_session()` delete the child.
 
-The transition uses the same delete-and-recreate pattern as `_pop_job()` to avoid KeyField index corruption.
+The transition uses the same delete-and-recreate pattern as `_pop_agent_session()` to avoid KeyField index corruption.
 
 ### Health Monitor Extensions
 
 The periodic health check (`_job_hierarchy_health_check()`) detects and self-heals:
 
-- **Orphaned children**: `parent_job_id` points to non-existent session -- cleared
+- **Orphaned children**: `parent_agent_session_id` points to non-existent session -- cleared
 - **Stuck parents**: `waiting_for_children` with all children terminal -- auto-finalized
 
-See [Job Scheduling](job-scheduling.md) for usage details and CLI commands.
+See [Agent Session Scheduling](agent-session-scheduling.md) for usage details and CLI commands.
 
 ## See Also
 
-- `docs/features/scale-job-queue-with-popoto-and-worktrees.md` -- Original job queue architecture
-- `docs/features/job-scheduling.md` -- Agent-initiated scheduling tool
-- `docs/features/job-dependency-tracking.md` -- Sibling dependencies, branch mapping, checkpoint/restore, PM controls
-- `agent/job_queue.py` -- Implementation
+- `docs/features/scale-agent-session-queue-with-popoto-and-worktrees.md` -- Original agent session queue architecture
+- `docs/features/agent-session-scheduling.md` -- Agent-initiated scheduling tool
+- `docs/features/agent-session-dependency-tracking.md` -- Sibling dependencies, branch mapping, checkpoint/restore, PM controls
+- `agent/agent_session_queue.py` -- Implementation

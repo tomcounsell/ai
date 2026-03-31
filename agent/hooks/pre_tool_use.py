@@ -180,7 +180,8 @@ def _maybe_register_dev_session(tool_input: dict[str, Any], claude_uuid: str | N
             message_text=prompt_text,
         )
         logger.info(
-            f"[pre_tool_use] Registered DevSession {dev_session.job_id} parent={parent_session_id}"
+            f"[pre_tool_use] Registered DevSession "
+            f"{dev_session.agent_session_id} parent={parent_session_id}"
         )
     except Exception as e:
         logger.warning(f"[pre_tool_use] Failed to register DevSession: {e}")

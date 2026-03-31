@@ -83,7 +83,7 @@ def build_coaching_message(
     Args:
         classification: ClassificationResult from the summarizer.
         plan_file: Path to the active plan document, if any.
-        job_message_text: Original message text that triggered the job.
+        job_message_text: Original message text that triggered the session.
         sdlc_stage_progress: Dict mapping stage names to statuses from
             AgentSession.get_stage_progress(). When provided with remaining
             stages, triggers Tier 1c SDLC pipeline coaching.

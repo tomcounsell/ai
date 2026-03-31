@@ -82,7 +82,7 @@ def get_session_report(include_completed: bool = False, stalled_only: bool = Fal
         history = s._get_history_list() if hasattr(s, "_get_history_list") else []
         last_entry = history[-1] if history else "no history"
 
-        session_id = s.session_id or s.job_id or "unknown"
+        session_id = s.session_id or s.agent_session_id or "unknown"
         lines.append(
             f"{session_id:40s}  {status:10s}  {format_duration(duration):>6s}  "
             f"project={project:8s}  last={str(last_entry)[:50]}{stall_marker}"

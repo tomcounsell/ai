@@ -1,6 +1,6 @@
 """E2E tests for the nudge loop (deliver-vs-nudge outcome logic).
 
-Tests the send_to_chat behavior within _execute_job by exercising
+Tests the send_to_chat behavior within _execute_agent_session by exercising
 the nudge loop decision points with various (stop_reason, output) combos.
 
 Uses real Redis, mocks only Claude API and Telegram send.
@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from agent.job_queue import MAX_NUDGE_COUNT, SendToChatResult
+from agent.agent_session_queue import MAX_NUDGE_COUNT, SendToChatResult
 from models.agent_session import AgentSession
 
 

@@ -10,7 +10,7 @@ Validates:
 
 from unittest.mock import patch
 
-from tools.job_scheduler import _check_persona_permission
+from tools.agent_session_scheduler import _check_persona_permission
 
 
 class TestPersonaGate:

@@ -1,4 +1,4 @@
-"""Tests for the job status CLI (python -m agent.job_queue --status)."""
+"""Tests for the session status CLI (python -m agent.agent_session_queue --status)."""
 
 import sys
 import unittest
@@ -9,12 +9,12 @@ from unittest.mock import MagicMock, patch
 class TestJobStatusCli(unittest.TestCase):
     """Test _cli_show_status output."""
 
-    @patch("agent.job_queue.AgentSession")
-    @patch("agent.job_queue._active_workers", {})
+    @patch("agent.agent_session_queue.AgentSession")
+    @patch("agent.agent_session_queue._active_workers", {})
     def test_empty_queue(self, mock_session_cls):
-        """Status with no jobs prints 'Queue is empty.'"""
+        """Status with no sessions prints 'Queue is empty.'"""
         mock_session_cls.query.all.return_value = []
-        from agent.job_queue import _cli_show_status
+        from agent.agent_session_queue import _cli_show_status
 
         captured = StringIO()
         sys.stdout = captured
@@ -24,15 +24,15 @@ class TestJobStatusCli(unittest.TestCase):
             sys.stdout = sys.__stdout__
         assert "Queue is empty" in captured.getvalue()
 
-    @patch("agent.job_queue.AgentSession")
-    @patch("agent.job_queue._active_workers", {})
+    @patch("agent.agent_session_queue.AgentSession")
+    @patch("agent.agent_session_queue._active_workers", {})
     def test_shows_jobs(self, mock_session_cls):
         """Status with jobs shows job info."""
         job = MagicMock()
         job.chat_id = "chat-123"
         job.project_key = "valor"
         job.status = "running"
-        job.job_id = "job-001"
+        job.agent_session_id = "job-001"
         job.created_at = 1000000.0
         job.started_at = 1000000.0
         job.message_text = "Hello world"
@@ -40,7 +40,7 @@ class TestJobStatusCli(unittest.TestCase):
         job.correlation_id = "corr-xyz"
         mock_session_cls.query.all.return_value = [job]
 
-        from agent.job_queue import _cli_show_status
+        from agent.agent_session_queue import _cli_show_status
 
         captured = StringIO()
         sys.stdout = captured

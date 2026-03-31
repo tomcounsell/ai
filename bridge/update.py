@@ -2,7 +2,7 @@
 
 Handles both normal (/update) and force (/update --force) updates.
 Normal updates pull code and set a restart flag for graceful restart.
-Force updates flush the queue, kill running jobs, and restart immediately.
+Force updates flush the queue, kill running sessions, and restart immediately.
 """
 
 import logging
@@ -34,7 +34,7 @@ def _get_machine_name() -> str:
 
 
 def _get_running_jobs_info() -> tuple[int, list[str]]:
-    """Check for running jobs across all projects. Returns (count, descriptions)."""
+    """Check for running sessions across all projects. Returns (count, descriptions)."""
     try:
         from models.agent_session import AgentSession
 
@@ -52,7 +52,7 @@ def _get_running_jobs_info() -> tuple[int, list[str]]:
         return len(running_jobs), descriptions
 
     except Exception as e:
-        logger.warning(f"Failed to check running jobs: {e}")
+        logger.warning(f"Failed to check running sessions: {e}")
         return 0, []
 
 
@@ -60,7 +60,7 @@ async def handle_update_command(tg_client, event):
     """Run remote update script and send results as standalone message.
 
     Pulls code and syncs deps but does NOT restart the bridge.
-    If code changed, writes a restart flag that the job queue picks up
+    If code changed, writes a restart flag that the session queue picks up
     between jobs for a graceful restart when idle.
     """
     machine = _get_machine_name()
@@ -127,9 +127,9 @@ async def handle_update_command(tg_client, event):
 
 
 async def handle_force_update_command(tg_client, event):
-    """Force update: flush queue, kill running jobs, update, restart.
+    """Force update: flush queue, kill running sessions, update, restart.
 
-    Unlike normal /update which waits for running jobs to finish,
+    Unlike normal /update which waits for running sessions to finish,
     this immediately kills everything and applies the update.
     """
     machine = _get_machine_name()
@@ -141,7 +141,7 @@ async def handle_force_update_command(tg_client, event):
 
     steps = []
 
-    # 1. Flush pending jobs from queue
+    # 1. Flush pending sessions from queue
     try:
         from models.agent_session import AgentSession
 

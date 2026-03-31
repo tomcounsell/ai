@@ -66,13 +66,13 @@ valor-telegram read --chat "Dev: Valor" --since "1 hour ago"
 | `python scripts/autoexperiment.py --target summarizer --dry-run` | Dry-run autoexperiment on summarizer |
 | `python scripts/autoexperiment.py --list-targets` | List autoexperiment targets |
 | `./scripts/install_autoexperiment.sh` | Install autoexperiment nightly schedule |
-| `python -m tools.job_scheduler status` | Show queue status (pending, running, killed counts) |
-| `python -m tools.job_scheduler list --status killed,abandoned` | List sessions filtered by status |
-| `python -m tools.job_scheduler kill --job-id <ID>` | Kill a running or pending job by ID |
-| `python -m tools.job_scheduler kill --session-id <ID>` | Kill a job by session ID |
-| `python -m tools.job_scheduler kill --all` | Kill all running and pending jobs |
-| `python -m tools.job_scheduler cleanup --age 30 --dry-run` | Preview stale session cleanup |
-| `python -m tools.job_scheduler cleanup --age 30` | Delete stale killed/abandoned/failed sessions |
+| `python -m tools.agent_session_scheduler status` | Show queue status (pending, running, killed counts) |
+| `python -m tools.agent_session_scheduler list --status killed,abandoned` | List sessions filtered by status |
+| `python -m tools.agent_session_scheduler kill --agent-session-id <ID>` | Kill a running or pending session by ID |
+| `python -m tools.agent_session_scheduler kill --session-id <ID>` | Kill a session by session ID |
+| `python -m tools.agent_session_scheduler kill --all` | Kill all running and pending sessions |
+| `python -m tools.agent_session_scheduler cleanup --age 30 --dry-run` | Preview stale session cleanup |
+| `python -m tools.agent_session_scheduler cleanup --age 30` | Delete stale killed/abandoned/failed sessions |
 | `python -m tools.memory_search search "query"` | Search memories by query |
 | `python -m tools.memory_search search "query" --category correction` | Search filtered by category |
 | `python -m tools.memory_search search "query" --tag redis` | Search filtered by tag |
@@ -157,7 +157,7 @@ The standard flow from conversation to shipped feature:
 - If there is no question -- just a status update -- the summarizer auto-sends "continue"
 - Status updates without questions or signs of completion are NOT stopping points
 - The agent keeps working until the phase is complete or it's genuinely blocked
-- **SDLC jobs**: ChatSession steers pipeline progression between stages
+- **SDLC sessions**: ChatSession steers pipeline progression between stages
 - **ChatSession** orchestrates DevSession work; all messages route through ChatSession
 - Auto-continue caps are set to 50 as safety backstops (ChatSession manages actual routing)
 - The auto-continue counter resets when the human sends a new message

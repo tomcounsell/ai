@@ -64,7 +64,7 @@ class TestCatchupRedisDedup:
                 monitored_groups=["dev: valor"],
                 projects_config={},
                 should_respond_fn=AsyncMock(return_value=(True, False)),
-                enqueue_job_fn=enqueue_fn,
+                enqueue_agent_session_fn=enqueue_fn,
                 find_project_fn=find_project,
             )
 
@@ -122,7 +122,7 @@ class TestCatchupRedisDedup:
                 monitored_groups=["dev: valor"],
                 projects_config={},
                 should_respond_fn=mock_should_respond,
-                enqueue_job_fn=enqueue_fn,
+                enqueue_agent_session_fn=enqueue_fn,
                 find_project_fn=find_project,
             )
 
@@ -196,7 +196,7 @@ class TestCatchupCodeStructure:
 
         catchup_code = Path("bridge/catchup.py").read_text()
 
-        enqueue_pos = catchup_code.find("await enqueue_job_fn(")
+        enqueue_pos = catchup_code.find("await enqueue_agent_session_fn(")
         record_pos = catchup_code.find("record_message_processed")
 
         assert record_pos > enqueue_pos, (

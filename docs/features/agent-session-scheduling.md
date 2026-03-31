@@ -4,16 +4,16 @@
 
 ## Overview
 
-The agent can programmatically schedule SDLC runs for GitHub issues, enqueue arbitrary Q&A jobs, and manage queue state -- all mid-conversation via the `tools/job_scheduler.py` CLI tool.
+The agent can programmatically schedule SDLC runs for GitHub issues, enqueue arbitrary Q&A jobs, and manage queue state -- all mid-conversation via the `tools/agent_session_scheduler.py` CLI tool.
 
 ## Usage
 
 ### Schedule SDLC Work for a GitHub Issue
 
 ```bash
-python -m tools.job_scheduler schedule --issue 113
-python -m tools.job_scheduler schedule --issue 113 --priority high
-python -m tools.job_scheduler schedule --issue 113 --after "2026-03-12T02:00:00Z"
+python -m tools.agent_session_scheduler schedule --issue 113
+python -m tools.agent_session_scheduler schedule --issue 113 --priority high
+python -m tools.agent_session_scheduler schedule --issue 113 --after "2026-03-12T02:00:00Z"
 ```
 
 The tool validates the issue exists via `gh issue view`, constructs an SDLC dispatch message, and creates an `AgentSession` directly in Redis via Popoto ORM.
@@ -21,45 +21,45 @@ The tool validates the issue exists via `gh issue view`, constructs an SDLC disp
 ### Push Arbitrary Message Jobs
 
 ```bash
-python -m tools.job_scheduler push --message "What is the architecture?" --project valor
-python -m tools.job_scheduler push --message "Fix the bug" --priority high
+python -m tools.agent_session_scheduler push --message "What is the architecture?" --project valor
+python -m tools.agent_session_scheduler push --message "Fix the bug" --priority high
 ```
 
 ### Queue Inspection
 
 ```bash
-python -m tools.job_scheduler status
-python -m tools.job_scheduler status --project valor
+python -m tools.agent_session_scheduler status
+python -m tools.agent_session_scheduler status --project valor
 ```
 
 ### Queue Manipulation
 
 ```bash
-python -m tools.job_scheduler bump --job-id <JOB_ID>    # Move to top (priority=urgent)
-python -m tools.job_scheduler pop --project valor         # Remove next without executing
-python -m tools.job_scheduler cancel --job-id <JOB_ID>   # Cancel specific job
+python -m tools.agent_session_scheduler bump --job-id <JOB_ID>    # Move to top (priority=urgent)
+python -m tools.agent_session_scheduler pop --project valor         # Remove next without executing
+python -m tools.agent_session_scheduler cancel --job-id <JOB_ID>   # Cancel specific job
 ```
 
 ### Session Listing and Cleanup
 
 ```bash
 # List sessions by status (comma-separated)
-python -m tools.job_scheduler list --status killed,abandoned
-python -m tools.job_scheduler list --status completed --limit 5
+python -m tools.agent_session_scheduler list --status killed,abandoned
+python -m tools.agent_session_scheduler list --status completed --limit 5
 
 # Clean up stale sessions (killed/abandoned/failed older than N minutes)
-python -m tools.job_scheduler cleanup --age 30 --dry-run   # Preview what would be deleted
-python -m tools.job_scheduler cleanup --age 30              # Actually delete
-python -m tools.job_scheduler cleanup --age 60 --project valor  # Scope to one project
+python -m tools.agent_session_scheduler cleanup --age 30 --dry-run   # Preview what would be deleted
+python -m tools.agent_session_scheduler cleanup --age 30              # Actually delete
+python -m tools.agent_session_scheduler cleanup --age 60 --project valor  # Scope to one project
 ```
 
-The `cleanup` command deletes sessions in terminal statuses (`killed`, `abandoned`, `failed`) that are older than the specified age. Uses `delete()` directly — not status mutation — to avoid creating orphaned records (see KeyField index note in [Job Queue](job-queue.md)).
+The `cleanup` command deletes sessions in terminal statuses (`killed`, `abandoned`, `failed`) that are older than the specified age. Uses `delete()` directly — not status mutation — to avoid creating orphaned records (see KeyField index note in [Agent Session Queue](agent-session-queue.md)).
 
 ## Architecture
 
 ### Tool, Not MCP Server
 
-The agent runs inside Claude Code with Bash access. A Python CLI tool (`tools/job_scheduler.py`) is simpler than an MCP server. The agent calls it via `python -m tools.job_scheduler schedule --issue 113`.
+The agent runs inside Claude Code with Bash access. A Python CLI tool (`tools/agent_session_scheduler.py`) is simpler than an MCP server. The agent calls it via `python -m tools.agent_session_scheduler schedule --issue 113`.
 
 ### Redis via Popoto (Direct Write)
 
@@ -82,11 +82,11 @@ The tool reads these to determine where to route self-scheduled job output.
 
 The `AgentSession` model has a `scheduled_after` field (UTC timestamp). When set:
 
-- `_pop_job()` skips jobs where `scheduled_after > now()`
+- `_pop_agent_session()` skips jobs where `scheduled_after > now()`
 - Jobs with `scheduled_after` in the past are treated as immediate
 - Jobs with no `scheduled_after` are always eligible
 
-Usage: `python -m tools.job_scheduler schedule --issue 113 --after "2026-03-12T02:00:00Z"`
+Usage: `python -m tools.agent_session_scheduler schedule --issue 113 --after "2026-03-12T02:00:00Z"`
 
 ## Priority Model
 
@@ -116,13 +116,13 @@ Maximum 30 scheduled jobs per hour per project. Checked before every `schedule` 
 All commands return structured JSON for agent parsing:
 
 ```json
-{"status": "queued", "job_id": "abc123", "queue_position": 2, "scheduling_depth": 1}
+{"status": "queued", "agent_session_id": "abc123", "queue_position": 2, "scheduling_depth": 1}
 {"status": "error", "message": "Rate limit exceeded"}
 ```
 
 ## Parent-Child Job Hierarchy
 
-Jobs can be decomposed into smaller child jobs linked to a parent via `parent_job_id`. This enables:
+Jobs can be decomposed into smaller child jobs linked to a parent via `parent_agent_session_id`. This enables:
 
 - **Partial re-runs**: If child 3/5 fails, only that child needs re-running
 - **Progress visibility**: `/queue-status` shows job trees with per-child status
@@ -133,7 +133,7 @@ Jobs can be decomposed into smaller child jobs linked to a parent via `parent_jo
 An agent mid-job can decompose work by passing `--parent-job`:
 
 ```bash
-python -m tools.job_scheduler schedule --issue 113 --parent-job $JOB_ID
+python -m tools.agent_session_scheduler schedule --issue 113 --parent-job $JOB_ID
 ```
 
 The `JOB_ID` environment variable is injected into the agent subprocess automatically.
@@ -156,14 +156,14 @@ Child jobs inherit from the parent:
 ### Listing Children
 
 ```bash
-python -m tools.job_scheduler children --job-id <PARENT_JOB_ID>
+python -m tools.agent_session_scheduler children --job-id <PARENT_JOB_ID>
 ```
 
 Returns structured JSON with progress summary and per-child status.
 
 ### Health Monitoring
 
-The job health monitor (runs every 5 minutes) includes hierarchy checks:
+The agent session health monitor (runs every 5 minutes) includes hierarchy checks:
 
 - **Orphaned children**: Parent deleted but children still reference it -- clears the link
 - **Stuck parents**: `waiting_for_children` with all children terminal -- auto-finalizes
@@ -181,16 +181,16 @@ session.get_completion_progress() # Returns (completed, total, failed) tuple
 "Handle issues #111, #112, #113" is just the agent calling `schedule` three times:
 
 ```bash
-python -m tools.job_scheduler schedule --issue 111
-python -m tools.job_scheduler schedule --issue 112
-python -m tools.job_scheduler schedule --issue 113
+python -m tools.agent_session_scheduler schedule --issue 111
+python -m tools.agent_session_scheduler schedule --issue 112
+python -m tools.agent_session_scheduler schedule --issue 113
 ```
 
 No special batch API needed.
 
 ## Related
 
-- [Job Queue](job-queue.md) -- Core queue infrastructure
-- [Job Dependency Tracking](job-dependency-tracking.md) -- Sibling dependencies, branch mapping, PM queue controls
+- [Agent Session Queue](agent-session-queue.md) -- Core queue infrastructure
+- [Agent Session Dependency Tracking](agent-session-dependency-tracking.md) -- Sibling dependencies, branch mapping, PM queue controls
 - [Chat Dev Session Architecture](chat-dev-session-architecture.md) -- ChatSession orchestrates SDLC pipeline for scheduled jobs
 - `/queue-status` skill -- Telegram-accessible queue management

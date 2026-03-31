@@ -207,11 +207,11 @@ class TestJobQueueLifecycleLogging:
     """Tests that job_queue functions log lifecycle transitions."""
 
     @pytest.mark.asyncio
-    async def test_push_job_logs_pending_transition(self, redis_test_db):
-        """_push_job() logs lifecycle transition to 'pending'."""
-        from agent.job_queue import _push_job
+    async def test_push_agent_session_logs_pending_transition(self, redis_test_db):
+        """_push_agent_session() logs lifecycle transition to 'pending'."""
+        from agent.agent_session_queue import _push_agent_session
 
-        await _push_job(
+        await _push_agent_session(
             project_key="test",
             session_id="jq-lc-test-1",
             working_dir="/tmp/test",
@@ -229,11 +229,11 @@ class TestJobQueueLifecycleLogging:
         assert any("pending" in entry for entry in lifecycle_entries)
 
     @pytest.mark.asyncio
-    async def test_pop_job_logs_running_transition(self, redis_test_db):
-        """_pop_job() logs lifecycle transition to 'running'."""
-        from agent.job_queue import _pop_job, _push_job
+    async def test_pop_agent_session_logs_running_transition(self, redis_test_db):
+        """_pop_agent_session() logs lifecycle transition to 'running'."""
+        from agent.agent_session_queue import _pop_agent_session, _push_agent_session
 
-        await _push_job(
+        await _push_agent_session(
             project_key="test",
             session_id="jq-lc-test-2",
             working_dir="/tmp/test",
@@ -243,7 +243,7 @@ class TestJobQueueLifecycleLogging:
             telegram_message_id=1,
         )
 
-        job = await _pop_job("100")
+        job = await _pop_agent_session("100")
         assert job is not None
 
         # The running session should have a lifecycle entry
@@ -260,7 +260,7 @@ class TestJobQueueLifecycleLogging:
         assert any("running" in entry for entry in lifecycle_entries)
 
     def test_job_fields_includes_history(self):
-        """_JOB_FIELDS includes history for lifecycle entry preservation."""
-        from agent.job_queue import _JOB_FIELDS
+        """_AGENT_SESSION_FIELDS includes history for lifecycle entry preservation."""
+        from agent.agent_session_queue import _AGENT_SESSION_FIELDS
 
-        assert "history" in _JOB_FIELDS
+        assert "history" in _AGENT_SESSION_FIELDS

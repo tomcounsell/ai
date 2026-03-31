@@ -18,7 +18,6 @@ import json as _json
 import logging
 import time
 
-from config.enums import ClassificationType, SessionType
 from popoto import (
     AutoKeyField,
     Field,
@@ -29,6 +28,8 @@ from popoto import (
     Model,
     SortedField,
 )
+
+from config.enums import ClassificationType, SessionType
 
 logger = logging.getLogger(__name__)
 
@@ -61,21 +62,23 @@ class AgentSession(Model):
         running  - Worker picked up, agent executing
         active   - Session in progress (transcript tracking)
         dormant  - Paused on open question
-        waiting_for_children - Parent job waiting for child jobs to complete
+        waiting_for_children - Parent session waiting for child sessions to complete
         completed - Work finished successfully
         failed   - Work failed
     """
 
     # === Identity ===
-    job_id = AutoKeyField()
+    agent_session_id = AutoKeyField()
     session_id = Field()  # Telegram-derived session identifier (e.g., tg_project_chatid_msgid)
     session_type = KeyField(null=True)  # "chat" or "dev" — discriminator
     project_key = KeyField()
     status = IndexedField(default="pending")  # Non-key field with secondary index for .filter()
 
-    # === Queue fields (from RedisJob) ===
+    # === Queue fields ===
     priority = Field(default="normal")  # urgent | high | normal | low
-    scheduled_after = Field(type=float, null=True)  # UTC timestamp; _pop_job() skips if > now()
+    scheduled_after = Field(
+        type=float, null=True
+    )  # UTC timestamp; _pop_agent_session() skips if > now()
     scheduling_depth = Field(type=int, default=0)  # Self-scheduling chain depth (cap at 3)
     created_at = SortedField(type=float, partition_by="project_key")
     working_dir = Field()
@@ -88,7 +91,9 @@ class AgentSession(Model):
     revival_context = Field(null=True)
     work_item_slug = Field(null=True)
     task_list_id = Field(null=True)
-    classification_type = Field(null=True)  # Actively used by is_sdlc, session_tags, job_scheduler
+    classification_type = Field(
+        null=True
+    )  # Actively used by is_sdlc, session_tags, agent_session_scheduler
     auto_continue_count = Field(type=int, default=0)
     started_at = Field(type=float, null=True)  # Cannot be SortedField because it starts as None
 
@@ -157,19 +162,20 @@ class AgentSession(Model):
     # === DevSession fields (null when session_type="chat") ===
     parent_chat_session_id = KeyField(null=True)  # Logical FK -> ChatSession
     slug = Field(null=True)  # Derives branch, plan path, worktree
-    # === Job hierarchy fields ===
-    # Links child jobs to their parent for job decomposition (issue #359).
-    # When set, this job is a child of the referenced parent job.
+    # === Session hierarchy fields ===
+    # Links child sessions to their parent for session decomposition (issue #359).
+    # When set, this session is a child of the referenced parent session.
     # Parent tracks aggregate progress via get_children() / get_completion_progress().
-    parent_job_id = KeyField(null=True)
+    parent_agent_session_id = KeyField(null=True)
 
-    # === Job dependency fields ===
-    # stable_job_id: UUID set once at creation, never changes on delete-and-recreate.
-    # job_id (AutoKeyField) changes on status transitions; stable_job_id does not.
-    # This is the dependency reference key. Nullable for pre-existing jobs.
-    stable_job_id = KeyField(null=True)
-    # depends_on: list of stable_job_id values this job must wait for.
-    # Only jobs whose dependencies are all in terminal state become eligible.
+    # === Session dependency fields ===
+    # stable_agent_session_id: UUID set once at creation, never changes on delete-and-recreate.
+    # agent_session_id (AutoKeyField) changes on status transitions;
+    # stable_agent_session_id does not.
+    # This is the dependency reference key. Nullable for pre-existing sessions.
+    stable_agent_session_id = KeyField(null=True)
+    # depends_on: list of stable_agent_session_id values this session must wait for.
+    # Only sessions whose dependencies are all in terminal state become eligible.
     depends_on = ListField(null=True)
     # commit_sha: HEAD commit SHA recorded at pause for checkpoint/restore.
     commit_sha = Field(null=True)
@@ -178,13 +184,8 @@ class AgentSession(Model):
 
     @property
     def id(self) -> str | None:
-        """Alias for job_id. Provides a cleaner name for the primary key.
-
-        Cannot rename job_id directly because AutoKeyField generates Redis
-        keys from the field name -- renaming would make existing records
-        inaccessible.
-        """
-        return self.job_id
+        """Alias for agent_session_id. Provides a cleaner name for the primary key."""
+        return self.agent_session_id
 
     @property
     def sender(self) -> str | None:
@@ -265,7 +266,7 @@ class AgentSession(Model):
         ChatSessions are created by the bridge handler when a message arrives.
         They own the Telegram conversation and orchestrate DevSessions.
 
-        Wired into bridge handler via enqueue_job(session_type=...).
+        Wired into bridge handler via enqueue_agent_session(session_type=...).
         """
         session = cls(
             session_id=session_id,
@@ -343,7 +344,7 @@ class AgentSession(Model):
         DevSessions are created exclusively by ChatSessions during orchestration.
         They do the actual coding work and run SDLC pipeline stages.
 
-        Wired into bridge handler via enqueue_job(session_type=...).
+        Wired into bridge handler via enqueue_agent_session(session_type=...).
         """
         stages_json = _json.dumps(stage_states) if isinstance(stage_states, dict) else stage_states
         session = cls(
@@ -373,7 +374,7 @@ class AgentSession(Model):
         except Exception:
             logger.warning(
                 f"Parent chat session {self.parent_chat_session_id} not found "
-                f"for dev session {self.job_id}"
+                f"for dev session {self.agent_session_id}"
             )
             return None
 
@@ -385,9 +386,9 @@ class AgentSession(Model):
         if not self.is_chat:
             return []
         try:
-            return list(AgentSession.query.filter(parent_chat_session_id=self.job_id))
+            return list(AgentSession.query.filter(parent_chat_session_id=self.agent_session_id))
         except Exception as e:
-            logger.warning(f"Failed to query dev sessions for chat {self.job_id}: {e}")
+            logger.warning(f"Failed to query dev sessions for chat {self.agent_session_id}: {e}")
             return []
 
     # === PM self-messaging helpers ===
@@ -514,7 +515,7 @@ class AgentSession(Model):
         # Structured log entry
         logger.info(
             f"LIFECYCLE session={self.session_id} transition={old_status}\u2192{new_status} "
-            f"job_id={self.job_id} project={self.project_key} "
+            f"agent_session_id={self.agent_session_id} project={self.project_key} "
             f"duration_in_prev_state={duration:.1f}s" + (f' context="{context}"' if context else "")
         )
 
@@ -550,7 +551,7 @@ class AgentSession(Model):
 
     @property
     def is_sdlc(self) -> bool:
-        """Whether this session is an SDLC pipeline job.
+        """Whether this session is an SDLC pipeline session.
 
         Two checks:
         1. stage_states has any non-pending/non-ready stage
@@ -648,32 +649,37 @@ class AgentSession(Model):
     # === Job hierarchy helpers ===
 
     def get_parent(self) -> "AgentSession | None":
-        """Return the parent AgentSession if this is a child job.
+        """Return the parent AgentSession if this is a child session.
 
-        Returns None if parent_job_id is not set or parent not found.
+        Returns None if parent_agent_session_id is not set or parent not found.
         """
-        if not self.parent_job_id:
+        if not self.parent_agent_session_id:
             return None
         try:
-            parent = AgentSession.query.get(self.parent_job_id)
+            parent = AgentSession.query.get(self.parent_agent_session_id)
             return parent
         except Exception:
-            logger.warning(f"Parent job {self.parent_job_id} not found for child {self.job_id}")
+            logger.warning(
+                f"Parent agent session {self.parent_agent_session_id} "
+                f"not found for child {self.agent_session_id}"
+            )
             return None
 
     def get_children(self) -> list["AgentSession"]:
-        """Return all child AgentSessions linked to this job via parent_job_id.
+        """Return all child AgentSessions linked via parent_agent_session_id.
 
         Returns an empty list if no children exist.
         """
         try:
-            return list(AgentSession.query.filter(parent_job_id=self.job_id))
+            return list(AgentSession.query.filter(parent_agent_session_id=self.agent_session_id))
         except Exception as e:
-            logger.warning(f"Failed to query children for job {self.job_id}: {e}")
+            logger.warning(
+                f"Failed to query children for agent session {self.agent_session_id}: {e}"
+            )
             return []
 
     def get_completion_progress(self) -> tuple[int, int, int]:
-        """Compute aggregate completion status of child jobs.
+        """Compute aggregate completion status of child sessions.
 
         Returns:
             (completed_count, total_count, failed_count) tuple.

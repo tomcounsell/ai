@@ -1,12 +1,12 @@
-"""Deferred message enrichment for the job worker.
+"""Deferred message enrichment for the session worker.
 
 This module contains enrichment logic that was previously executed inline
-in the Telegram event handler. By deferring these operations to the job
+in the Telegram event handler. By deferring these operations to the session
 worker, the event handler can enqueue messages within milliseconds instead
 of blocking on media processing, YouTube transcription, link summaries,
 and reply chain fetching.
 
-The enrich_message() function is called by the job worker in _execute_job()
+The enrich_message() function is called by the session worker in _execute_agent_session()
 before invoking the agent, so the agent still receives fully enriched text.
 """
 

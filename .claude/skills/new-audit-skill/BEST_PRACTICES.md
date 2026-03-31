@@ -126,7 +126,7 @@ But:
 > - [orphan] DeadLetter: no FK references to/from any other model — data is unreachable
 >
 > #### WARNING
-> - [naming-drift] AgentSession.job_id: convention is `session_id` — inconsistent with 4 other models
+> - [naming-drift] AgentSession.agent_session_id: convention is `session_id` — inconsistent with 4 other models
 > ```
 
 ### Autonomy Calibration

@@ -68,7 +68,7 @@ class PipelineEvent(BaseModel):
 class PipelineProgress(BaseModel):
     """Complete pipeline view for a single AgentSession."""
 
-    job_id: str
+    agent_session_id: str
     session_id: str | None = None
     session_type: str | None = None
     status: str | None = None
@@ -120,7 +120,7 @@ class PipelineProgress(BaseModel):
             if len(self.message_text) > 60:
                 text += "..."
             return text
-        return self.job_id or "unknown"
+        return self.agent_session_id or "unknown"
 
 
 # === Project config helpers ===
@@ -198,7 +198,7 @@ def _infer_stages_from_history(history_list: list | None) -> list["StageState"]:
     was eagerly initialized at session creation (pre-#563). It will be removed
     in a future release once all existing sessions have stage_states populated.
 
-    New sessions get stage_states initialized in _push_job() when
+    New sessions get stage_states initialized in _push_agent_session() when
     classification_type is "sdlc", so this path should only fire for
     legacy sessions.
 
@@ -391,7 +391,7 @@ def _session_to_pipeline(session) -> PipelineProgress:
     project_name, project_metadata = _get_project_metadata(project_key)
 
     return PipelineProgress(
-        job_id=_safe_str(session.job_id) or "",
+        agent_session_id=_safe_str(session.agent_session_id) or "",
         session_id=_safe_str(session.session_id),
         session_type=_resolve_persona_display(session),
         status=_safe_str(session.status),
@@ -450,7 +450,7 @@ def get_all_sessions(limit: int = 50) -> list[PipelineProgress]:
         try:
             pipeline = _session_to_pipeline(session)
         except Exception:
-            logger.debug(f"Skipping corrupt session: {getattr(session, 'job_id', '?')}")
+            logger.debug(f"Skipping corrupt session: {getattr(session, 'agent_session_id', '?')}")
             continue
         if pipeline.status in (
             "running",
@@ -482,11 +482,11 @@ def get_active_pipelines() -> list[PipelineProgress]:
     return [p for p in all_sessions if p.stages and p.status not in ("completed", "failed")]
 
 
-def get_pipeline_detail(job_id: str) -> PipelineProgress | None:
+def get_pipeline_detail(agent_session_id: str) -> PipelineProgress | None:
     """Get detailed pipeline information for a specific session.
 
     Args:
-        job_id: The AgentSession job_id to look up.
+        agent_session_id: The AgentSession agent_session_id to look up.
 
     Returns:
         PipelineProgress with full details, or None if not found.
@@ -494,12 +494,12 @@ def get_pipeline_detail(job_id: str) -> PipelineProgress | None:
     from models.agent_session import AgentSession
 
     try:
-        session = AgentSession.query.get(job_id)
+        session = AgentSession.query.get(agent_session_id)
         if not session:
             return None
         return _session_to_pipeline(session)
     except Exception as e:
-        logger.warning(f"Failed to get pipeline detail for {job_id}: {e}")
+        logger.warning(f"Failed to get pipeline detail for {agent_session_id}: {e}")
         return None
 
 
@@ -530,7 +530,7 @@ def get_recent_completions(limit: int = 25, page: int = 1) -> list[PipelineProgr
         try:
             pipeline = _session_to_pipeline(session)
         except Exception:
-            logger.debug(f"Skipping corrupt session: {getattr(session, 'job_id', '?')}")
+            logger.debug(f"Skipping corrupt session: {getattr(session, 'agent_session_id', '?')}")
             continue
         completed.append(pipeline)
 

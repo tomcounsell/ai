@@ -1,10 +1,10 @@
-# Job Health Monitor
+# Agent Session Health Monitor
 
-Automatically detects and recovers stuck running jobs in the Redis-based job queue.
+Automatically detects and recovers stuck running jobs in the Redis-based agent session queue.
 
 ## Overview
 
-The job health monitor runs as a periodic async task alongside the bridge process. Every 5 minutes, it scans all `running` AND `pending` AgentSessions to check:
+The agent session health monitor runs as a periodic async task alongside the bridge process. Every 5 minutes, it scans all `running` AND `pending` AgentSessions to check:
 
 1. Whether the associated worker coroutine is still alive
 2. Whether the job has exceeded its maximum duration
@@ -20,7 +20,7 @@ When a stuck running job is detected, it is automatically recovered by deleting 
 
 - **Dead worker detection**: Checks `_active_workers[chat_id]` asyncio Task liveness via `.done()`. If the task has finished (crashed, cancelled, or completed), the job is considered orphaned.
 - **Timeout detection**: Compares `started_at` timestamp against the configured max duration for the job type.
-- **Race condition guard**: Jobs must be running for at least 5 minutes (`JOB_HEALTH_MIN_RUNNING`) before they become eligible for recovery. This prevents false positives on jobs that just started processing.
+- **Race condition guard**: Jobs must be running for at least 5 minutes (`AGENT_SESSION_HEALTH_MIN_RUNNING`) before they become eligible for recovery. This prevents false positives on jobs that just started processing.
 
 ### Timeouts
 
@@ -45,19 +45,19 @@ When a stuck job is found:
 The health check loop starts automatically with the bridge process, alongside the existing session watchdog. Both run at 5-minute intervals but monitor different concerns:
 
 - **Session watchdog** (`monitoring/session_watchdog.py`): Monitors `AgentSession` objects at the application level
-- **Job health monitor** (`agent/job_queue.py`): Monitors `AgentSession` status at the queue level
+- **Agent session health monitor** (`agent/agent_session_queue.py`): Monitors `AgentSession` status at the queue level
 
 ## CLI Usage
 
 ```bash
 # Show current queue state
-python -m agent.job_queue --status
+python -m agent.agent_session_queue --status
 
 # Recover all stuck running jobs (orphaned workers)
-python -m agent.job_queue --flush-stuck
+python -m agent.agent_session_queue --flush-stuck
 
 # Recover a specific job by ID
-python -m agent.job_queue --flush-job <JOB_ID>
+python -m agent.agent_session_queue --flush-job <JOB_ID>
 ```
 
 ### Example `--status` output
@@ -73,24 +73,24 @@ Total: 2 jobs (1 pending, 1 running)
 
 ## Configuration
 
-Constants in `agent/job_queue.py`:
+Constants in `agent/agent_session_queue.py`:
 
 | Constant | Default | Description |
 |----------|---------|-------------|
-| `JOB_HEALTH_CHECK_INTERVAL` | 300 (5 min) | How often the health check runs |
-| `JOB_TIMEOUT_DEFAULT` | 2700 (45 min) | Max runtime for standard jobs |
-| `JOB_TIMEOUT_BUILD` | 9000 (2.5 hr) | Max runtime for build jobs |
-| `JOB_HEALTH_MIN_RUNNING` | 300 (5 min) | Min runtime before recovery eligible |
+| `AGENT_SESSION_HEALTH_CHECK_INTERVAL` | 300 (5 min) | How often the health check runs |
+| `AGENT_SESSION_TIMEOUT_DEFAULT` | 2700 (45 min) | Max runtime for standard jobs |
+| `AGENT_SESSION_TIMEOUT_BUILD` | 9000 (2.5 hr) | Max runtime for build jobs |
+| `AGENT_SESSION_HEALTH_MIN_RUNNING` | 300 (5 min) | Min runtime before recovery eligible |
 
 ## Dependency Health Check
 
-A separate `_dependency_health_check()` runs alongside the job health monitor. It scans pending jobs with `depends_on` set and detects stuck dependency chains -- cases where a dependency has `failed` or `cancelled` status, permanently blocking the dependent job. These are logged as warnings for PM intervention.
+A separate `_dependency_health_check()` runs alongside the agent session health monitor. It scans pending jobs with `depends_on` set and detects stuck dependency chains -- cases where a dependency has `failed` or `cancelled` status, permanently blocking the dependent job. These are logged as warnings for PM intervention.
 
 ## Related
 
-- [scale-job-queue-with-popoto-and-worktrees.md](scale-job-queue-with-popoto-and-worktrees.md) -- The underlying Redis job queue
+- [scale-agent-session-queue-with-popoto-and-worktrees.md](scale-agent-session-queue-with-popoto-and-worktrees.md) -- The underlying Redis agent session queue
 - [session-watchdog.md](session-watchdog.md) -- Session-level health monitoring (complementary layer)
 - [bridge-self-healing.md](bridge-self-healing.md) -- Bridge process-level health monitoring
-- [job-dependency-tracking.md](job-dependency-tracking.md) -- Sibling dependencies and PM queue controls
-- `agent/job_queue.py` -- Implementation source
+- [agent-session-dependency-tracking.md](agent-session-dependency-tracking.md) -- Sibling dependencies and PM queue controls
+- `agent/agent_session_queue.py` -- Implementation source
 - Issue #127 -- Original tracking issue

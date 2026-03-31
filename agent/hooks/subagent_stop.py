@@ -86,7 +86,7 @@ def _register_dev_session_completion(
                 dev.status = "completed"
                 dev.save()
                 logger.info(
-                    f"[subagent_stop] DevSession {dev.job_id} completed "
+                    f"[subagent_stop] DevSession {dev.agent_session_id} completed "
                     f"(parent={parent_session_id}, agent_id={agent_id})"
                 )
 

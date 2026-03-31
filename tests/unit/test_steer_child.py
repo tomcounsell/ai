@@ -13,7 +13,7 @@ from scripts.steer_child import main
 def mock_parent():
     """Create a mock parent ChatSession."""
     parent = MagicMock()
-    parent.job_id = "parent-001"
+    parent.agent_session_id = "parent-001"
     parent.session_type = "chat"
     parent.is_chat = True
     parent.is_dev = False
@@ -24,7 +24,7 @@ def mock_parent():
 def mock_child():
     """Create a mock child DevSession."""
     child = MagicMock()
-    child.job_id = "child-001"
+    child.agent_session_id = "child-001"
     child.session_type = "dev"
     child.is_chat = False
     child.is_dev = True
@@ -332,7 +332,7 @@ class TestListChildren:
         """--list only shows running children, not completed ones."""
         completed_child = MagicMock()
         completed_child.status = "completed"
-        completed_child.job_id = "child-002"
+        completed_child.agent_session_id = "child-002"
 
         mock_agent_session_cls.query.get.return_value = mock_parent
         mock_parent.get_dev_sessions.return_value = [mock_child, completed_child]

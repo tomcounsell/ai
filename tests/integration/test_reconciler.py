@@ -95,7 +95,7 @@ class TestReconcilerGapDetection:
                 client=client,
                 monitored_groups=["agent builders chat"],
                 should_respond_fn=should_respond_fn,
-                enqueue_job_fn=mock_enqueue,
+                enqueue_agent_session_fn=mock_enqueue,
                 find_project_fn=MagicMock(return_value=project),
             )
 
@@ -123,7 +123,7 @@ class TestReconcilerGapDetection:
                 client=client,
                 monitored_groups=["agent builders chat"],
                 should_respond_fn=should_respond_fn,
-                enqueue_job_fn=mock_enqueue,
+                enqueue_agent_session_fn=mock_enqueue,
                 find_project_fn=MagicMock(return_value=project),
             )
 
@@ -176,7 +176,7 @@ class TestReconcilerGapDetection:
                 client=client,
                 monitored_groups=["test group"],
                 should_respond_fn=should_respond_fn,
-                enqueue_job_fn=mock_enqueue,
+                enqueue_agent_session_fn=mock_enqueue,
                 find_project_fn=MagicMock(return_value=project),
             )
 

@@ -1789,7 +1789,7 @@ class TestLinkifyReferences:
 
     def _register_config(self, project_key="valor", org="tomcounsell", repo="ai"):
         """Register a project config with GitHub org/repo for testing."""
-        from agent.job_queue import register_project_config
+        from agent.agent_session_queue import register_project_config
 
         register_project_config(
             project_key,
@@ -1842,7 +1842,7 @@ class TestLinkifyReferences:
 
     def test_no_github_config_returns_unchanged(self):
         """project_key exists but no GitHub config registered returns unchanged."""
-        from agent.job_queue import register_project_config
+        from agent.agent_session_queue import register_project_config
 
         register_project_config("no-github", {"name": "No GitHub"})
         session = self._make_session("no-github")

@@ -27,10 +27,10 @@ def test_basic_json_format():
 
 
 def test_extra_fields_included():
-    """Extra fields (job_id, session_id, etc.) are included when present."""
+    """Extra fields (agent_session_id, session_id, etc.) are included when present."""
     formatter = StructuredJsonFormatter()
     record = logging.LogRecord(
-        name="agent.job_queue",
+        name="agent.agent_session_queue",
         level=logging.WARNING,
         pathname="job_queue.py",
         lineno=42,
@@ -38,13 +38,13 @@ def test_extra_fields_included():
         args=(),
         exc_info=None,
     )
-    record.job_id = "abc123"
+    record.agent_session_id = "abc123"
     record.session_id = "sess-456"
     record.correlation_id = "corr-789"
     record.chat_id = "chat-100"
     output = formatter.format(record)
     data = json.loads(output)
-    assert data["job_id"] == "abc123"
+    assert data["agent_session_id"] == "abc123"
     assert data["session_id"] == "sess-456"
     assert data["correlation_id"] == "corr-789"
     assert data["chat_id"] == "chat-100"
@@ -64,7 +64,7 @@ def test_missing_extra_fields_omitted():
     )
     output = formatter.format(record)
     data = json.loads(output)
-    assert "job_id" not in data
+    assert "agent_session_id" not in data
     assert "session_id" not in data
     assert "correlation_id" not in data
 

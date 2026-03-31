@@ -79,18 +79,18 @@ class TestDevSessionParentLinkage:
             session_id=f"child_{ts}",
             project_key="valor",
             working_dir="/tmp/test/.worktrees/my-feature",
-            parent_chat_session_id=chat.job_id,
+            parent_chat_session_id=chat.agent_session_id,
             message_text="/do-build",
             slug="my-feature",
         )
 
         assert dev.session_type == SESSION_TYPE_DEV
-        assert dev.parent_chat_session_id == chat.job_id
+        assert dev.parent_chat_session_id == chat.agent_session_id
 
         # Navigate from child to parent via filter
         parents = list(AgentSession.query.filter(session_id=chat.session_id))
         assert len(parents) == 1
-        assert parents[0].job_id == chat.job_id
+        assert parents[0].agent_session_id == chat.agent_session_id
         assert parents[0].session_type == SESSION_TYPE_CHAT
 
     def test_chat_session_finds_its_dev_sessions(self):
@@ -108,21 +108,21 @@ class TestDevSessionParentLinkage:
             session_id=f"dev1_{ts}",
             project_key="valor",
             working_dir="/tmp/test",
-            parent_chat_session_id=chat.job_id,
+            parent_chat_session_id=chat.agent_session_id,
             message_text="/do-build",
         )
         dev2 = AgentSession.create_dev(
             session_id=f"dev2_{ts}",
             project_key="valor",
             working_dir="/tmp/test",
-            parent_chat_session_id=chat.job_id,
+            parent_chat_session_id=chat.agent_session_id,
             message_text="/do-test",
         )
 
         children = chat.get_dev_sessions()
-        child_ids = {c.job_id for c in children}
-        assert dev1.job_id in child_ids
-        assert dev2.job_id in child_ids
+        child_ids = {c.agent_session_id for c in children}
+        assert dev1.agent_session_id in child_ids
+        assert dev2.agent_session_id in child_ids
 
     def test_orphan_dev_session_returns_none_parent(self):
         ts = int(time.time())
@@ -228,7 +228,7 @@ class TestSessionTypeDiscriminator:
             session_id=f"type_dev_{ts}",
             project_key="valor",
             working_dir="/tmp",
-            parent_chat_session_id=chat.job_id,
+            parent_chat_session_id=chat.agent_session_id,
             message_text="build",
         )
 

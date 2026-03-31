@@ -1,7 +1,7 @@
 """Integration tests for the Event-based worker drain in _worker_loop.
 
-Tests the end-to-end drain behavior: asyncio.Event notification from enqueue_job(),
-Event-based wait in _worker_loop(), and sync Popoto fallback via _pop_job_with_fallback().
+Tests the end-to-end drain behavior: asyncio.Event notification from enqueue_agent_session(),
+Event-based wait in _worker_loop(), and sync Popoto fallback via _pop_agent_session_with_fallback().
 
 All tests use redis_test_db fixture (autouse=True in conftest.py) for isolation.
 """
@@ -12,12 +12,12 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from agent.job_queue import (
+from agent.agent_session_queue import (
     _active_events,
     _active_workers,
-    _pop_job_with_fallback,
+    _pop_agent_session_with_fallback,
     _worker_loop,
-    enqueue_job,
+    enqueue_agent_session,
 )
 from models.agent_session import AgentSession
 
@@ -41,11 +41,11 @@ def _create_test_job(**overrides) -> AgentSession:
 
 
 class TestWorkerDrainEventNotification:
-    """Tests for asyncio.Event signaling between enqueue_job and _worker_loop."""
+    """Tests for asyncio.Event signaling between enqueue_agent_session and _worker_loop."""
 
     @pytest.mark.asyncio
     async def test_event_set_when_job_enqueued(self):
-        """enqueue_job should set the Event for the chat_id after pushing."""
+        """enqueue_agent_session should set the Event for the chat_id after pushing."""
         chat_id = "event_test_chat"
         event = asyncio.Event()
         _active_events[chat_id] = event
@@ -53,12 +53,16 @@ class TestWorkerDrainEventNotification:
         # Event should not be set initially
         assert not event.is_set()
 
-        # Mock _push_job and _ensure_worker to isolate the event.set() call
+        # Mock _push_agent_session and _ensure_worker to isolate the event.set() call
         with (
-            patch("agent.job_queue._push_job", new_callable=AsyncMock, return_value=1),
-            patch("agent.job_queue._ensure_worker"),
+            patch(
+                "agent.agent_session_queue._push_agent_session",
+                new_callable=AsyncMock,
+                return_value=1,
+            ),
+            patch("agent.agent_session_queue._ensure_worker"),
         ):
-            await enqueue_job(
+            await enqueue_agent_session(
                 project_key="test",
                 session_id="s1",
                 working_dir="/tmp/test",
@@ -76,17 +80,21 @@ class TestWorkerDrainEventNotification:
 
     @pytest.mark.asyncio
     async def test_event_set_no_error_when_no_event_exists(self):
-        """enqueue_job should not raise if no event exists for the chat_id."""
+        """enqueue_agent_session should not raise if no event exists for the chat_id."""
         chat_id = "no_event_chat"
         # Ensure no event exists
         _active_events.pop(chat_id, None)
 
         with (
-            patch("agent.job_queue._push_job", new_callable=AsyncMock, return_value=1),
-            patch("agent.job_queue._ensure_worker"),
+            patch(
+                "agent.agent_session_queue._push_agent_session",
+                new_callable=AsyncMock,
+                return_value=1,
+            ),
+            patch("agent.agent_session_queue._ensure_worker"),
         ):
             # Should not raise
-            await enqueue_job(
+            await enqueue_agent_session(
                 project_key="test",
                 session_id="s1",
                 working_dir="/tmp/test",
@@ -108,7 +116,7 @@ class TestWorkerLoopDrain:
 
         # Worker should exit quickly since queue is empty and event never fires
         # Use a short DRAIN_TIMEOUT for test speed
-        with patch("agent.job_queue.DRAIN_TIMEOUT", 0.1):
+        with patch("agent.agent_session_queue.DRAIN_TIMEOUT", 0.1):
             await _worker_loop(chat_id, event)
 
         # Worker should have cleaned up
@@ -134,10 +142,10 @@ class TestWorkerLoopDrain:
                 event.set()  # Signal the worker
 
         with (
-            patch("agent.job_queue._execute_job", side_effect=fake_execute),
-            patch("agent.job_queue._complete_job", new_callable=AsyncMock),
-            patch("agent.job_queue._check_restart_flag", return_value=False),
-            patch("agent.job_queue.DRAIN_TIMEOUT", 0.2),
+            patch("agent.agent_session_queue._execute_agent_session", side_effect=fake_execute),
+            patch("agent.agent_session_queue._complete_agent_session", new_callable=AsyncMock),
+            patch("agent.agent_session_queue._check_restart_flag", return_value=False),
+            patch("agent.agent_session_queue.DRAIN_TIMEOUT", 0.2),
         ):
             await _worker_loop(chat_id, event)
 
@@ -147,7 +155,7 @@ class TestWorkerLoopDrain:
 
     @pytest.mark.asyncio
     async def test_worker_drain_fallback_finds_job(self):
-        """When Event doesn't fire, the sync fallback should find pending jobs."""
+        """When Event doesn't fire, the sync fallback should find pending sessions."""
         chat_id = "fallback_drain_chat"
         event = asyncio.Event()
         jobs_executed = []
@@ -163,10 +171,10 @@ class TestWorkerLoopDrain:
                 _create_test_job(chat_id=chat_id, message_text="job B (fallback)")
 
         with (
-            patch("agent.job_queue._execute_job", side_effect=fake_execute),
-            patch("agent.job_queue._complete_job", new_callable=AsyncMock),
-            patch("agent.job_queue._check_restart_flag", return_value=False),
-            patch("agent.job_queue.DRAIN_TIMEOUT", 0.1),
+            patch("agent.agent_session_queue._execute_agent_session", side_effect=fake_execute),
+            patch("agent.agent_session_queue._complete_agent_session", new_callable=AsyncMock),
+            patch("agent.agent_session_queue._check_restart_flag", return_value=False),
+            patch("agent.agent_session_queue.DRAIN_TIMEOUT", 0.1),
         ):
             await _worker_loop(chat_id, event)
 
@@ -179,7 +187,7 @@ class TestExitTimeDiagnostic:
 
     @pytest.mark.asyncio
     async def test_exit_diagnostic_logs_warning(self, caplog):
-        """When pending jobs exist at exit time, a WARNING should be logged."""
+        """When pending sessions exist at exit time, a WARNING should be logged."""
         chat_id = "exit_diag_chat"
         event = asyncio.Event()
         jobs_executed = []
@@ -189,27 +197,27 @@ class TestExitTimeDiagnostic:
 
         call_count = 0
 
-        # We need _pop_job to return None after the first job (simulating the race),
-        # but _pop_job_with_fallback to find the orphan on the exit-time check
-        original_fallback = _pop_job_with_fallback
+        # We need _pop_agent_session to return None after the first job (simulating the race),
+        # but _pop_agent_session_with_fallback to find the orphan on the exit-time check
+        original_fallback = _pop_agent_session_with_fallback
 
         async def fake_execute(job):
             jobs_executed.append(job.message_text)
 
-        async def mock_pop_job_with_fallback(cid):
+        async def mock_pop_agent_session_with_fallback(cid):
             nonlocal call_count
             call_count += 1
             if call_count <= 1:
                 # First fallback call (drain timeout): return None
                 return None
-            # Second call (exit-time safety): find the orphaned job
+            # Second call (exit-time safety): find the orphaned session
             return await original_fallback(cid)
 
         with (
-            patch("agent.job_queue._execute_job", side_effect=fake_execute),
-            patch("agent.job_queue._complete_job", new_callable=AsyncMock),
-            patch("agent.job_queue._check_restart_flag", return_value=False),
-            patch("agent.job_queue.DRAIN_TIMEOUT", 0.05),
+            patch("agent.agent_session_queue._execute_agent_session", side_effect=fake_execute),
+            patch("agent.agent_session_queue._complete_agent_session", new_callable=AsyncMock),
+            patch("agent.agent_session_queue._check_restart_flag", return_value=False),
+            patch("agent.agent_session_queue.DRAIN_TIMEOUT", 0.05),
         ):
             # Create an orphan job that the drain guard misses but exit-time scan finds
             async def delayed_create():
@@ -227,13 +235,13 @@ class TestExitTimeDiagnostic:
 
 
 class TestPopJobWithFallbackErrorHandling:
-    """Tests for error handling in _pop_job_with_fallback."""
+    """Tests for error handling in _pop_agent_session_with_fallback."""
 
     @pytest.mark.asyncio
     async def test_fallback_handles_sync_query_error_gracefully(self):
-        """If the sync Popoto query fails, _pop_job_with_fallback returns None."""
+        """If the sync Popoto query fails, _pop_agent_session_with_fallback returns None."""
         with patch(
-            "agent.job_queue.AgentSession.query",
+            "agent.agent_session_queue.AgentSession.query",
             new_callable=lambda: type(
                 "MockQuery",
                 (),
@@ -245,11 +253,11 @@ class TestPopJobWithFallbackErrorHandling:
                 },
             ),
         ):
-            result = await _pop_job_with_fallback("error_chat")
+            result = await _pop_agent_session_with_fallback("error_chat")
             assert result is None
 
     @pytest.mark.asyncio
     async def test_fallback_with_empty_chat_id(self):
-        """_pop_job_with_fallback with empty chat_id returns None gracefully."""
-        result = await _pop_job_with_fallback("")
+        """_pop_agent_session_with_fallback with empty chat_id returns None gracefully."""
+        result = await _pop_agent_session_with_fallback("")
         assert result is None

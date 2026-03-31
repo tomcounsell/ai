@@ -7,7 +7,7 @@ Run with: pytest tools/test-scheduler/tests/ -v
 import time
 
 from tools.test_scheduler import (
-    cancel_job,
+    cancel_agent_session,
     get_job_results,
     get_job_status,
     list_jobs,
@@ -47,7 +47,7 @@ class TestScheduleTests:
         result = schedule_tests("pytest tests/ -v")
 
         assert "error" not in result
-        assert "job_id" in result
+        assert "agent_session_id" in result
         assert result["status"] == "scheduled"
 
     def test_schedule_generic(self):
@@ -55,7 +55,7 @@ class TestScheduleTests:
         result = schedule_tests("echo 'test'")
 
         assert "error" not in result
-        assert "job_id" in result
+        assert "agent_session_id" in result
 
     def test_test_count(self):
         """Test count is returned."""
@@ -71,15 +71,15 @@ class TestJobStatus:
     def test_get_status(self):
         """Get job status."""
         schedule_result = schedule_tests("echo 'hello'")
-        job_id = schedule_result["job_id"]
+        agent_session_id = schedule_result["agent_session_id"]
 
         # Wait briefly for job to complete
         time.sleep(1)
 
-        status = get_job_status(job_id)
+        status = get_job_status(agent_session_id)
 
         assert "error" not in status
-        assert status["job_id"] == job_id
+        assert status["agent_session_id"] == agent_session_id
 
     def test_unknown_job(self):
         """Unknown job returns error."""
@@ -93,11 +93,11 @@ class TestJobCompletion:
     def test_job_completes(self):
         """Job completes successfully."""
         result = schedule_tests("echo 'test'")
-        job_id = result["job_id"]
+        agent_session_id = result["agent_session_id"]
 
         # Wait for completion
         for _ in range(10):
-            status = get_job_status(job_id)
+            status = get_job_status(agent_session_id)
             if status.get("status") == "completed":
                 break
             time.sleep(0.5)
@@ -108,12 +108,12 @@ class TestJobCompletion:
     def test_get_results(self):
         """Get detailed results."""
         result = schedule_tests("echo 'test'")
-        job_id = result["job_id"]
+        agent_session_id = result["agent_session_id"]
 
         # Wait for completion
         time.sleep(2)
 
-        results = get_job_results(job_id)
+        results = get_job_results(agent_session_id)
 
         if results.get("status") == "completed" or "results" in results:
             assert "results" in results
@@ -123,8 +123,8 @@ class TestListJobs:
     """Test job listing."""
 
     def test_list_jobs(self):
-        """List all jobs."""
-        # Schedule a job first
+        """List all sessions."""
+        # Schedule a session first
         schedule_tests("echo 'test'")
 
         result = list_jobs()
@@ -145,5 +145,5 @@ class TestCancelJob:
 
     def test_cancel_unknown_job(self):
         """Cancel unknown job returns error."""
-        result = cancel_job("nonexistent")
+        result = cancel_agent_session("nonexistent")
         assert "error" in result

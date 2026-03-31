@@ -1,10 +1,10 @@
-# Job Dependency Tracking
+# Agent Session Dependency Tracking
 
-Extends the async job queue with sibling dependency tracking, deterministic branch-session mapping, checkpoint/restore for session pause/resume, PM queue management controls, and structured session observability.
+Extends the async agent session queue with sibling dependency tracking, deterministic branch-session mapping, checkpoint/restore for session pause/resume, PM queue management controls, and structured session observability.
 
 ## Problem
 
-The job queue previously processed work sequentially within a chat but lacked:
+The agent session queue previously processed work sequentially within a chat but lacked:
 
 1. **Sibling dependency tracking** -- Jobs could only declare parent-child relationships, not sibling dependencies. Ordering was implicit (FIFO) rather than explicit.
 2. **Automatic branch-session mapping** -- DevSession agents had to manually figure out which branch to work on.
@@ -15,11 +15,11 @@ The job queue previously processed work sequentially within a chat but lacked:
 
 ### Job Dependencies (Phase 1)
 
-Each job gets a `stable_job_id` (UUID, set once at creation, never changes on delete-and-recreate) and an optional `depends_on` list of `stable_job_id` values.
+Each job gets a `stable_agent_session_id` (UUID, set once at creation, never changes on delete-and-recreate) and an optional `depends_on` list of `stable_agent_session_id` values.
 
-- `_pop_job()` filters out jobs whose dependencies are not all `completed`
+- `_pop_agent_session()` filters out jobs whose dependencies are not all `completed`
 - Only `completed` is considered "met" -- `failed` and `cancelled` block dependents
-- Missing `stable_job_id` (deleted from Redis) is treated as blocked (conservative)
+- Missing `stable_agent_session_id` (deleted from Redis) is treated as blocked (conservative)
 - A `_dependency_health_check()` detects stuck chains and logs warnings
 
 **Key functions:**
@@ -37,7 +37,7 @@ Each job gets a `stable_job_id` (UUID, set once at creation, never changes on de
 | MERGE | `session/{slug}` | No |
 | Q&A / no slug | `main` | No |
 
-Integrated into `_execute_job()` -- the agent automatically starts on the correct branch.
+Integrated into `_execute_agent_session()` -- the agent automatically starts on the correct branch.
 
 ### State Checkpoint/Restore (Phase 3)
 
@@ -50,9 +50,9 @@ Integrated into `_execute_job()` -- the agent automatically starts on the correc
 
 Four functions for ChatSession orchestration:
 
-- `reorder_job(job_id, new_priority)` -- Change priority of pending jobs
-- `cancel_job(job_id)` -- Set explicit `cancelled` terminal status (blocks dependents)
-- `retry_job(stable_job_id)` -- Re-queue failed/cancelled jobs
+- `reorder_agent_session(agent_session_id, new_priority)` -- Change priority of pending jobs
+- `cancel_agent_session(agent_session_id)` -- Set explicit `cancelled` terminal status (blocks dependents)
+- `retry_agent_session(stable_agent_session_id)` -- Re-queue failed/cancelled jobs
 - `get_queue_status(chat_id)` -- Full queue state with dependency graph
 
 ### Session Observability (Phase 5)
@@ -69,8 +69,8 @@ Four functions for ChatSession orchestration:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `stable_job_id` | `KeyField(null=True)` | UUID set once at creation, dependency reference key |
-| `depends_on` | `ListField(null=True)` | List of stable_job_id values this job waits for |
+| `stable_agent_session_id` | `KeyField(null=True)` | UUID set once at creation, dependency reference key |
+| `depends_on` | `ListField(null=True)` | List of stable_agent_session_id values this job waits for |
 | `commit_sha` | `Field(null=True)` | HEAD commit SHA for checkpoint/restore |
 
 ### Terminal Statuses
@@ -81,8 +81,8 @@ Four functions for ChatSession orchestration:
 
 | File | Changes |
 |------|---------|
-| `models/agent_session.py` | Added `stable_job_id`, `depends_on`, `commit_sha` fields |
-| `agent/job_queue.py` | Dependencies, branch mapping, checkpoint/restore, PM controls |
+| `models/agent_session.py` | Added `stable_agent_session_id`, `depends_on`, `commit_sha` fields |
+| `agent/agent_session_queue.py` | Dependencies, branch mapping, checkpoint/restore, PM controls |
 | `agent/health_check.py` | Activity stream, session context enrichment |
 | `agent/hooks/subagent_stop.py` | Outcome summary extraction |
 | `tests/unit/test_job_dependencies.py` | 43 tests for deps, branch mapping, checkpoint, PM controls |

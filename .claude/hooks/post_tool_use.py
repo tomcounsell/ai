@@ -292,7 +292,7 @@ def _run_memory_recall(hook_input: dict) -> str | None:
 def _update_agent_session(hook_input: dict) -> None:
     """Update AgentSession last_activity and tool_call_count.
 
-    Reads the agent_session_job_id from the sidecar file and updates
+    Reads the agent_session_agent_session_id from the sidecar file and updates
     the corresponding AgentSession record in Redis. Fails silently.
     """
     try:
@@ -303,8 +303,8 @@ def _update_agent_session(hook_input: dict) -> None:
         from hook_utils.memory_bridge import load_agent_session_sidecar
 
         sidecar = load_agent_session_sidecar(session_id)
-        job_id = sidecar.get("agent_session_job_id")
-        if not job_id:
+        agent_session_id = sidecar.get("agent_session_agent_session_id")
+        if not agent_session_id:
             return
 
         from models.agent_session import AgentSession

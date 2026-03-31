@@ -1,6 +1,6 @@
 """Tests for Teammate reduced nudge cap in the nudge loop."""
 
-from agent.job_queue import MAX_NUDGE_COUNT, classify_nudge_action
+from agent.agent_session_queue import MAX_NUDGE_COUNT, classify_nudge_action
 from agent.teammate_handler import TEAMMATE_MAX_NUDGE_COUNT
 
 

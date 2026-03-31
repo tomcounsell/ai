@@ -4,7 +4,7 @@ Tests the send_to_chat nudge behavior: completion detection, rate-limit
 backoff, max nudge safety cap, and empty output handling.
 """
 
-from agent.job_queue import MAX_NUDGE_COUNT, NUDGE_MESSAGE, classify_nudge_action
+from agent.agent_session_queue import MAX_NUDGE_COUNT, NUDGE_MESSAGE, classify_nudge_action
 
 
 class TestNudgeConstants:
@@ -197,10 +197,10 @@ class TestPmSentMessageIds:
     """Tests for pm_sent_message_ids field preserved in job queue (issue #497)."""
 
     def test_pm_sent_message_ids_in_job_fields(self):
-        """pm_sent_message_ids should be in the _JOB_FIELDS list for preservation."""
-        from agent.job_queue import _JOB_FIELDS
+        """pm_sent_message_ids should be in the _AGENT_SESSION_FIELDS list for preservation."""
+        from agent.agent_session_queue import _AGENT_SESSION_FIELDS
 
-        assert "pm_sent_message_ids" in _JOB_FIELDS
+        assert "pm_sent_message_ids" in _AGENT_SESSION_FIELDS
 
     def test_outbox_drain_import(self):
         """bridge.telegram_relay.get_outbox_length should be importable."""

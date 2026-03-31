@@ -75,7 +75,7 @@ SDK_INACTIVITY_TIMEOUT_SECONDS = int(os.environ.get("SDK_INACTIVITY_TIMEOUT_SECO
 class CircuitOpenError(RuntimeError):
     """Raised when the Anthropic circuit breaker is open.
 
-    The worker loop catches this specifically to leave the job as pending
+    The worker loop catches this specifically to leave the session as pending
     (instead of marking it failed) so the health check can retry when
     the circuit closes.
     """
@@ -827,7 +827,7 @@ class ValorAgent:
         chat_id: str | None = None,
         project_key: str | None = None,
         message_id: int | None = None,
-        job_id: str | None = None,
+        agent_session_id: str | None = None,
         gh_repo: str | None = None,
         target_repo: str | None = None,
         session_type: str | None = None,
@@ -844,7 +844,7 @@ class ValorAgent:
             chat_id: Optional chat ID for routing context injection.
             project_key: Optional project key for routing context injection.
             message_id: Optional message ID for routing context injection.
-            job_id: Optional job ID injected as JOB_ID env var for child job spawning.
+            agent_session_id: Optional job ID injected as JOB_ID env var for child session spawning.
             gh_repo: Optional GitHub repo (org/repo) to set as GH_REPO env var.
                 When set, all `gh` CLI commands in the subprocess automatically
                 target this repo without needing explicit --repo flags.
@@ -865,7 +865,7 @@ class ValorAgent:
         self.chat_id = chat_id
         self.project_key = project_key
         self.message_id = message_id
-        self.job_id = job_id
+        self.agent_session_id = agent_session_id
         self.gh_repo = gh_repo or None  # Normalize empty string to None
         self.target_repo = target_repo
         self.session_type = session_type
@@ -902,10 +902,10 @@ class ValorAgent:
         if session_id:
             env["VALOR_SESSION_ID"] = session_id
 
-        # Pass job_id so the agent can reference its own job when spawning children
+        # Pass agent_session_id so the agent can reference its own job when spawning children
         # via `schedule_job --parent-job $JOB_ID` (issue #359)
-        if self.job_id:
-            env["JOB_ID"] = self.job_id
+        if self.agent_session_id:
+            env["JOB_ID"] = self.agent_session_id
 
         # Cross-repo gh resolution: set GH_REPO so all `gh` CLI commands in the
         # subprocess automatically target the correct repo (issue #375). This is
@@ -996,7 +996,7 @@ class ValorAgent:
             )
             raise CircuitOpenError(
                 "Anthropic service unavailable (circuit breaker open). "
-                "Job will remain pending and retry when service recovers."
+                "Session will remain pending and retry when service recovers."
             )
 
         # Bug 2 fix (issue #374): Reset watchdog tool counts at query start
@@ -1346,7 +1346,7 @@ async def get_agent_response_sdk(
     sender_id: int | None = None,
     task_list_id: str | None = None,
     correlation_id: str | None = None,
-    job_id: str | None = None,
+    agent_session_id: str | None = None,
 ) -> str:
     """Get agent response using Claude Agent SDK.
 
@@ -1373,7 +1373,7 @@ async def get_agent_response_sdk(
         sender_id: Telegram user ID (for permission checking)
         task_list_id: Optional task list ID to scope sub-agent Task storage
         correlation_id: Optional end-to-end tracing ID from the bridge
-        job_id: Optional job ID for child job spawning (issue #359)
+        agent_session_id: Optional job ID for child session spawning (issue #359)
 
     Returns:
         The assistant's response text
@@ -1644,7 +1644,7 @@ async def get_agent_response_sdk(
     try:
         # Extract project_key from config for env var injection
         _project_key = project.get("name", "valor").lower().replace(" ", "-") if project else None
-        # Extract message_id from the job context (passed through _execute_job)
+        # Extract message_id from the session context (passed through _execute_agent_session)
         _message_id = None  # message_id not available at this layer
 
         logger.info(f"[{request_id}] Resolved persona: {persona}")
@@ -1697,7 +1697,7 @@ async def get_agent_response_sdk(
             chat_id=chat_id,
             project_key=_project_key,
             message_id=_message_id,
-            job_id=job_id,
+            agent_session_id=agent_session_id,
             gh_repo=_gh_repo,
             target_repo=project_working_dir,
             session_type=_session_type,

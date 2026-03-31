@@ -177,7 +177,7 @@ class TestMaybeRegisterDevSessionStartStage:
 
     def test_calls_start_stage_for_sdlc_prompt(self, monkeypatch, caplog):
         mock_dev = MagicMock()
-        mock_dev.job_id = "job-99"
+        mock_dev.agent_session_id = "job-99"
         mock_as_mod = MagicMock()
         mock_as_mod.AgentSession.create_dev.return_value = mock_dev
 
@@ -198,7 +198,7 @@ class TestMaybeRegisterDevSessionStartStage:
 
     def test_skips_start_stage_when_no_stage_in_prompt(self, monkeypatch, caplog):
         mock_dev = MagicMock()
-        mock_dev.job_id = "job-100"
+        mock_dev.agent_session_id = "job-100"
         mock_as_mod = MagicMock()
         mock_as_mod.AgentSession.create_dev.return_value = mock_dev
 
@@ -221,7 +221,7 @@ class TestMaybeRegisterDevSessionStartStage:
     def test_start_stage_failure_does_not_block_registration(self, monkeypatch, caplog):
         """start_stage failure should not prevent DevSession registration from completing."""
         mock_dev = MagicMock()
-        mock_dev.job_id = "job-101"
+        mock_dev.agent_session_id = "job-101"
         mock_as_mod = MagicMock()
         mock_as_mod.AgentSession.create_dev.return_value = mock_dev
 

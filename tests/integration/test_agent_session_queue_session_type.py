@@ -1,5 +1,5 @@
 """
-Integration tests for session_type parameter flow through the job queue.
+Integration tests for session_type parameter flow through the session queue.
 
 Validates that async_create(session_type=...) and the factory methods
 (create_chat, create_dev) produce equivalent AgentSession instances, and

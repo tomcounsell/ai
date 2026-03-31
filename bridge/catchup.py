@@ -22,7 +22,7 @@ async def scan_for_missed_messages(
     monitored_groups: list[str],
     projects_config: dict,
     should_respond_fn,
-    enqueue_job_fn,
+    enqueue_agent_session_fn,
     find_project_fn,
     lookback_override: timedelta | None = None,
 ) -> int:
@@ -34,7 +34,7 @@ async def scan_for_missed_messages(
         monitored_groups: List of group titles to scan
         projects_config: Projects configuration dict
         should_respond_fn: Async function to check if we should respond
-        enqueue_job_fn: Async function to enqueue a job
+        enqueue_agent_session_fn: Async function to enqueue a session
         find_project_fn: Function to find project config for a chat
         lookback_override: If provided, use this timedelta instead of
             CATCHUP_LOOKBACK_MINUTES. Capped at 24 hours.
@@ -189,7 +189,7 @@ async def scan_for_missed_messages(
                 # Build session ID for this message
                 session_id = f"tg_{project_key}_{chat_id}_{message.id}"
 
-                await enqueue_job_fn(
+                await enqueue_agent_session_fn(
                     project_key=project_key,
                     session_id=session_id,
                     working_dir=working_dir,

@@ -109,13 +109,15 @@ def migrate_field_names(dry_run: bool = True) -> dict:
                         for old_name in FIELD_RENAMES:
                             redis_client.hdel(key, old_name)
                     except Exception as e:
-                        logger.warning(f"Failed to HDEL old fields from {session.job_id}: {e}")
+                        logger.warning(
+                            f"Failed to HDEL old fields from {session.agent_session_id}: {e}"
+                        )
             else:
                 stats["skipped_no_data"] += 1
 
         except Exception as e:
             stats["errors"] += 1
-            logger.error(f"Error migrating session {session.job_id}: {e}")
+            logger.error(f"Error migrating session {session.agent_session_id}: {e}")
 
     return stats
 

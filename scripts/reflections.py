@@ -2005,7 +2005,7 @@ class ReflectionRunner:
                 continue
 
             # Check if episode already exists for this session (idempotent)
-            existing = CyclicEpisode.query.filter(raw_ref=session.job_id)
+            existing = CyclicEpisode.query.filter(raw_ref=session.agent_session_id)
             if existing:
                 sessions_skipped += 1
                 continue
@@ -2014,7 +2014,9 @@ class ReflectionRunner:
             try:
                 fingerprint = classify_session(session)
             except Exception as e:
-                logger.warning(f"Fingerprint classification failed for {session.job_id}: {e}")
+                logger.warning(
+                    f"Fingerprint classification failed for {session.agent_session_id}: {e}"
+                )
                 fingerprint = {
                     "problem_topology": "ambiguous",
                     "affected_layer": "unknown",
@@ -2040,7 +2042,7 @@ class ReflectionRunner:
             ]
             if dedup_matches:
                 logger.info(
-                    f"Semantic dedup: skipping episode for session {session.job_id}, "
+                    f"Semantic dedup: skipping episode for session {session.agent_session_id}, "
                     f"existing episode with same fingerprint+branch: {dedup_matches[0].episode_id}"
                 )
                 sessions_skipped += 1
@@ -2053,7 +2055,7 @@ class ReflectionRunner:
             try:
                 CyclicEpisode.create(
                     vault=vault,
-                    raw_ref=session.job_id,
+                    raw_ref=session.agent_session_id,
                     created_at=_time.time(),
                     problem_topology=fingerprint["problem_topology"],
                     affected_layer=fingerprint["affected_layer"],
@@ -2079,12 +2081,14 @@ class ReflectionRunner:
                 )
                 episodes_created += 1
                 logger.info(
-                    f"Created CyclicEpisode for session {session.job_id}: "
+                    f"Created CyclicEpisode for session {session.agent_session_id}: "
                     f"topology={fingerprint['problem_topology']}, "
                     f"layer={fingerprint['affected_layer']}"
                 )
             except Exception as e:
-                logger.warning(f"Failed to create episode for session {session.job_id}: {e}")
+                logger.warning(
+                    f"Failed to create episode for session {session.agent_session_id}: {e}"
+                )
 
         self.state.step_progress["episode_cycle_close"] = {
             "episodes_created": episodes_created,

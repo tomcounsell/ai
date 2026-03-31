@@ -5,13 +5,13 @@ from unittest.mock import AsyncMock, MagicMock, patch  # noqa: F401
 
 import pytest
 
-from agent.job_queue import get_active_session_for_chat
+from agent.agent_session_queue import get_active_session_for_chat
 
 
 @pytest.fixture
 def mock_agent_session():
     """Patch AgentSession.query.filter for unit testing."""
-    with patch("agent.job_queue.AgentSession") as mock_cls:
+    with patch("agent.agent_session_queue.AgentSession") as mock_cls:
         yield mock_cls
 
 
@@ -60,30 +60,34 @@ class TestGetActiveSessionForChat:
     def test_uses_to_thread(self, mock_agent_session):
         """Verify the sync filter call is wrapped in asyncio.to_thread."""
         mock_agent_session.query.filter.return_value = []
-        with patch("agent.job_queue.asyncio.to_thread", wraps=asyncio.to_thread) as mock_to_thread:
+        with patch(
+            "agent.agent_session_queue.asyncio.to_thread", wraps=asyncio.to_thread
+        ) as mock_to_thread:
             asyncio.run(get_active_session_for_chat("12345"))
             # to_thread should have been called (at least once for this function)
             assert mock_to_thread.called
 
 
 class TestPushJobAsyncWrapping:
-    """Verify _push_job wraps sync Popoto calls in asyncio.to_thread."""
+    """Verify _push_agent_session wraps sync Popoto calls in asyncio.to_thread."""
 
-    def test_push_job_superseding_uses_to_thread(self, mock_agent_session):
-        """The superseding logic in _push_job should use to_thread for sync filter+save."""
-        from agent.job_queue import _push_job
+    def test_push_agent_session_superseding_uses_to_thread(self, mock_agent_session):
+        """Superseding logic in _push_agent_session uses to_thread for sync filter+save."""
+        from agent.agent_session_queue import _push_agent_session
 
         # Set up mocks
         old_session = MagicMock()
         old_session.status = "completed"
-        old_session.job_id = "old-job"
+        old_session.agent_session_id = "old-job"
         mock_agent_session.query.filter.return_value = [old_session]
         mock_agent_session.async_create = AsyncMock(return_value=MagicMock())
         mock_agent_session.query.async_count = AsyncMock(return_value=1)
 
-        with patch("agent.job_queue.asyncio.to_thread", wraps=asyncio.to_thread) as mock_to_thread:
+        with patch(
+            "agent.agent_session_queue.asyncio.to_thread", wraps=asyncio.to_thread
+        ) as mock_to_thread:
             asyncio.run(
-                _push_job(
+                _push_agent_session(
                     project_key="test",
                     session_id="sess-1",
                     working_dir="/tmp",
@@ -102,13 +106,13 @@ class TestEnqueueContinuationAsyncWrapping:
 
     def test_continuation_filter_uses_to_thread(self, mock_agent_session):
         """The session lookup in _enqueue_nudge should use to_thread."""
-        from agent.job_queue import Job, _enqueue_nudge
+        from agent.agent_session_queue import _enqueue_nudge
 
-        # Create a mock job
+        # Create a mock agent session
         mock_rj = MagicMock()
         mock_rj.session_id = "sess-1"
         mock_rj.project_key = "test"
-        job = Job(mock_rj)
+        job = mock_rj
 
         # Return a session from filter
         existing_session = MagicMock()
@@ -116,8 +120,10 @@ class TestEnqueueContinuationAsyncWrapping:
         existing_session.async_save = AsyncMock()
         mock_agent_session.query.filter.return_value = [existing_session]
 
-        with patch("agent.job_queue.asyncio.to_thread", wraps=asyncio.to_thread) as mock_to_thread:
-            with patch("agent.job_queue._ensure_worker"):
+        with patch(
+            "agent.agent_session_queue.asyncio.to_thread", wraps=asyncio.to_thread
+        ) as mock_to_thread:
+            with patch("agent.agent_session_queue._ensure_worker"):
                 asyncio.run(
                     _enqueue_nudge(
                         job=job,

@@ -26,7 +26,7 @@ async def reconciler_loop(
     client,
     monitored_groups: list[str],
     should_respond_fn,
-    enqueue_job_fn,
+    enqueue_agent_session_fn,
     find_project_fn,
 ):
     """Run periodic reconciliation to detect missed messages.
@@ -48,7 +48,7 @@ async def reconciler_loop(
                 client=client,
                 monitored_groups=monitored_groups,
                 should_respond_fn=should_respond_fn,
-                enqueue_job_fn=enqueue_job_fn,
+                enqueue_agent_session_fn=enqueue_agent_session_fn,
                 find_project_fn=find_project_fn,
             )
             if recovered > 0:
@@ -63,7 +63,7 @@ async def reconcile_once(
     client,
     monitored_groups: list[str],
     should_respond_fn,
-    enqueue_job_fn,
+    enqueue_agent_session_fn,
     find_project_fn,
 ) -> int:
     """Run a single reconciliation scan across all monitored groups.
@@ -167,7 +167,7 @@ async def reconcile_once(
                     text[:80],
                 )
 
-                await enqueue_job_fn(
+                await enqueue_agent_session_fn(
                     project_key=project_key,
                     session_id=session_id,
                     working_dir=working_dir,

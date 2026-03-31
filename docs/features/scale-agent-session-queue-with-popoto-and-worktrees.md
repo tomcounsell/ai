@@ -1,10 +1,10 @@
-# Scale Job Queue with Popoto + Git Worktrees
+# Scale Agent Session Queue with Popoto + Git Worktrees
 
 **Status**: ✅ Complete (Phases 1 & 2 implemented)
 
 ## Problem
 
-The current job queue (`agent/job_queue.py`) has two scaling bottlenecks:
+The current agent session queue (`agent/agent_session_queue.py`) has two scaling bottlenecks:
 
 1. **JSON file persistence** -- Every push/pop reads and rewrites the entire file. A crash mid-write corrupts the file and silently loses all queued jobs. No atomicity, no crash recovery.
 
@@ -28,7 +28,7 @@ Both are solvable with minimal code changes by leveraging infrastructure we alre
 from popoto import Model, AutoKeyField, KeyField, SortedField, Field
 
 class Job(Model):
-    job_id = AutoKeyField()
+    agent_session_id = AutoKeyField()
     project_key = KeyField()
     status = KeyField(default="pending")       # pending | running | completed | failed
     priority = SortedField(type=int, sort_by="project_key")
@@ -66,9 +66,9 @@ depth = Job.query.count(project_key="valor", status="pending")
 **What survives crashes**: Everything. Redis persists with RDB/AOF. No corrupt JSON, no lost jobs.
 
 **Code changes required**:
-- `agent/job_queue.py`: Replace `ProjectJobQueue` class (~40 lines) with the popoto `Job` model (~20 lines). The `_worker_loop`, `_execute_job`, and callback registry stay the same. Note: `check_revival()` was subsequently rewritten to query Redis by `chat_id` rather than scanning all git branches — see `docs/features/job-queue.md`.
+- `agent/agent_session_queue.py`: Replace `ProjectJobQueue` class (~40 lines) with the popoto `Job` model (~20 lines). The `_worker_loop`, `_execute_agent_session`, and callback registry stay the same. Note: `check_revival()` was subsequently rewritten to query Redis by `chat_id` rather than scanning all git branches — see `docs/features/agent-session-queue.md`.
 - `requirements.txt`: Add `popoto`
-- Delete: `data/job_queue/` directory (no longer needed)
+- Delete: `data/agent_session_queue/` directory (no longer needed)
 - Delete: `MessageQueue` class from `bridge/telegram_bridge.py` (fully superseded)
 
 ### Part 2: Git worktrees for parallel job execution
@@ -98,9 +98,9 @@ git branch -d session/abc123
 ```
 
 **Code changes required**:
-- `agent/job_queue.py`: Replace `_checkout_session_branch()` (~35 lines) with worktree create (~15 lines). Replace `_finish_branch()` (~95 lines) with worktree merge+remove (~40 lines). Remove serialization constraint from `_worker_loop` (allow concurrent jobs).
-- No changes to `bridge/telegram_bridge.py` (working_dir resolution happens in job_queue)
-- No changes to `agent/sdk_client.py` (receives `cwd` from job_queue, works the same)
+- `agent/agent_session_queue.py`: Replace `_checkout_session_branch()` (~35 lines) with worktree create (~15 lines). Replace `_finish_branch()` (~95 lines) with worktree merge+remove (~40 lines). Remove serialization constraint from `_worker_loop` (allow concurrent jobs).
+- No changes to `bridge/telegram_bridge.py` (working_dir resolution happens in agent_session_queue)
+- No changes to `agent/sdk_client.py` (receives `cwd` from agent_session_queue, works the same)
 
 **Concurrency model change**:
 
@@ -121,7 +121,7 @@ Optional: cap concurrent jobs per project (e.g., max 3) to limit resource usage.
 With Parts 1 and 2, these become unnecessary:
 - `MessageQueue` class in `bridge/telegram_bridge.py` (JSON file queue, fully replaced by popoto)
 - `data/pending_messages.json` (message queue file)
-- `data/job_queue/*.json` (per-project queue files)
+- `data/agent_session_queue/*.json` (per-project queue files)
 - `agent/pr_manager.py` (unused, already identified in PR #10 review)
 
 ## Implementation Order
@@ -141,7 +141,7 @@ With Parts 1 and 2, these become unnecessary:
 5. Test: send multiple messages rapidly, verify parallel processing
 
 **Phase 3 -- Cleanup**:
-1. Remove `MessageQueue`, `pending_messages.json`, `data/job_queue/`
+1. Remove `MessageQueue`, `pending_messages.json`, `data/agent_session_queue/`
 2. Remove `agent/pr_manager.py`
 3. Update CLAUDE.md to document new architecture
 

@@ -229,17 +229,17 @@ class TestGetAgentResponseSdkGhRepo:
 
 
 class TestExecuteJobPassesFullProjectConfig:
-    """Test that _execute_job passes the full project config (including github key)
+    """Test that _execute_agent_session passes the full project config (including github key)
     to get_agent_response_sdk, not a minimal dict.
 
-    Regression test: _execute_job previously constructed a minimal project_config
+    Regression test: _execute_agent_session previously constructed a minimal project_config
     with only _key/working_directory/name, missing the github config needed for
     GH_REPO env var injection.
     """
 
-    def test_execute_job_uses_registered_project_config(self):
+    def test_execute_agent_session_uses_registered_project_config(self):
         """get_project_config should return full config including github key."""
-        from agent.job_queue import get_project_config, register_project_config
+        from agent.agent_session_queue import get_project_config, register_project_config
 
         full_config = {
             "name": "Popoto",
@@ -256,6 +256,6 @@ class TestExecuteJobPassesFullProjectConfig:
 
     def test_unregistered_project_returns_empty(self):
         """Unregistered project key returns empty dict (fallback to minimal config)."""
-        from agent.job_queue import get_project_config
+        from agent.agent_session_queue import get_project_config
 
         assert get_project_config("nonexistent-project-xyz") == {}

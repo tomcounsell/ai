@@ -10,7 +10,7 @@ class TestLinkifyReferences:
 
     def test_linkifies_pr_reference(self):
         """Should convert 'PR #42' to a markdown link."""
-        with patch("agent.job_queue.get_project_config") as mock_config:
+        with patch("agent.agent_session_queue.get_project_config") as mock_config:
             mock_config.return_value = {"github": {"org": "tomcounsell", "repo": "ai"}}
             result = linkify_references("See PR #42 for details", "ai")
 
@@ -18,7 +18,7 @@ class TestLinkifyReferences:
 
     def test_linkifies_issue_reference(self):
         """Should convert 'Issue #100' to a markdown link."""
-        with patch("agent.job_queue.get_project_config") as mock_config:
+        with patch("agent.agent_session_queue.get_project_config") as mock_config:
             mock_config.return_value = {"github": {"org": "tomcounsell", "repo": "ai"}}
             result = linkify_references("Fix for Issue #100", "ai")
 
@@ -27,7 +27,7 @@ class TestLinkifyReferences:
     def test_no_double_linkify(self):
         """Should not re-link already-linked references."""
         already_linked = "[PR #42](https://github.com/tomcounsell/ai/pull/42)"
-        with patch("agent.job_queue.get_project_config") as mock_config:
+        with patch("agent.agent_session_queue.get_project_config") as mock_config:
             mock_config.return_value = {"github": {"org": "tomcounsell", "repo": "ai"}}
             result = linkify_references(already_linked, "ai")
 
@@ -41,7 +41,7 @@ class TestLinkifyReferences:
 
     def test_returns_text_unchanged_without_github_config(self):
         """Should return text as-is when GitHub config missing."""
-        with patch("agent.job_queue.get_project_config") as mock_config:
+        with patch("agent.agent_session_queue.get_project_config") as mock_config:
             mock_config.return_value = {}
             result = linkify_references("See PR #42", "ai")
 

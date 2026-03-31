@@ -499,11 +499,11 @@ class TestAgentSessionSidecar:
         )
         sidecar_dir = tmp_path / "test-session"
         sidecar_dir.mkdir(parents=True)
-        data = {"agent_session_job_id": "job-123", "merge_detected": True}
+        data = {"agent_session_agent_session_id": "job-123", "merge_detected": True}
         (sidecar_dir / "agent_session.json").write_text(json.dumps(data))
 
         result = load_agent_session_sidecar("test-session")
-        assert result["agent_session_job_id"] == "job-123"
+        assert result["agent_session_agent_session_id"] == "job-123"
         assert result["merge_detected"] is True
 
     def test_save_atomic(self, tmp_path, monkeypatch):
@@ -514,7 +514,7 @@ class TestAgentSessionSidecar:
             "hook_utils.memory_bridge._get_sidecar_dir",
             lambda sid: tmp_path / sid,
         )
-        data = {"agent_session_job_id": "job-456"}
+        data = {"agent_session_agent_session_id": "job-456"}
         save_agent_session_sidecar("test-session", data)
 
         # No tmp file left
@@ -524,7 +524,7 @@ class TestAgentSessionSidecar:
 
         # Round-trip
         loaded = load_agent_session_sidecar("test-session")
-        assert loaded["agent_session_job_id"] == "job-456"
+        assert loaded["agent_session_agent_session_id"] == "job-456"
 
     def test_load_non_dict(self, tmp_path, monkeypatch):
         """Returns empty dict when sidecar contains non-dict JSON value."""

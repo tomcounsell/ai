@@ -32,7 +32,7 @@ class TestSteeringRaceCondition:
     3. Nobody consumes the steering message because the agent loop already exited
     4. The "continue" sits in Redis forever, response silently dropped
 
-    The fix: _execute_job calls pop_all_steering_messages() after the agent
+    The fix: _execute_agent_session calls pop_all_steering_messages() after the agent
     completes, logging any leftovers as warnings.
     """
 
