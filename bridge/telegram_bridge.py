@@ -130,6 +130,7 @@ _BRIDGE_PROJECT_DIR = Path(__file__).parent.parent
 _FLOOD_BACKOFF_FILE = _BRIDGE_PROJECT_DIR / "data" / "flood-backoff"
 _LAST_CONNECTED_FILE = _BRIDGE_PROJECT_DIR / "data" / "last_connected"
 _bridge_was_connected = False  # Set True after successful Telegram auth
+_catchup_last_connected = None  # Captured before overwrite for catchup lookback
 
 # Staleness threshold: ignore flood-backoff files older than 24 hours
 _FLOOD_BACKOFF_MAX_AGE_SECONDS = 24 * 3600
@@ -1579,6 +1580,7 @@ async def main():
     _bridge_was_connected = True
     _clear_flood_backoff()
     # Read last_connected BEFORE writing new timestamp so catchup gets the real gap
+    global _catchup_last_connected
     _catchup_last_connected = _read_last_connected()
     _write_last_connected()
 
