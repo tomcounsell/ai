@@ -12,7 +12,7 @@ Before this feature, pipeline routing was defined in three places that disagreed
 
 | Location | Definition |
 |----------|-----------|
-| SDLC `SKILL.md` dispatch table | 9 stages including PATCH |
+| SDLC `SKILL.md` dispatch table | 10 numbered rows covering all stages including PATCH |
 | Observer `_STAGE_TO_SKILL` | 6 stages without PATCH |
 | `build_pipeline.py` stage tracking | 6 stages without PATCH |
 
@@ -25,12 +25,15 @@ The graph is a simple Python dict mapping `(stage, outcome)` tuples to next stag
 ```python
 PIPELINE_EDGES: dict[tuple[str, str], str] = {
     ("ISSUE", "success"): "PLAN",
-    ("PLAN", "success"): "BUILD",
+    ("PLAN", "success"): "CRITIQUE",
+    ("CRITIQUE", "success"): "BUILD",
+    ("CRITIQUE", "fail"): "PLAN",
     ("BUILD", "success"): "TEST",
     ("TEST", "success"): "REVIEW",
     ("TEST", "fail"): "PATCH",
     ("REVIEW", "success"): "DOCS",
     ("REVIEW", "fail"): "PATCH",
+    ("REVIEW", "partial"): "PATCH",
     ("PATCH", "success"): "TEST",
     ("PATCH", "fail"): "TEST",
     ("DOCS", "success"): "MERGE",
@@ -40,19 +43,20 @@ PIPELINE_EDGES: dict[tuple[str, str], str] = {
 ### Happy Path
 
 ```
-ISSUE -> PLAN -> BUILD -> TEST -> REVIEW -> DOCS -> MERGE
+ISSUE -> PLAN -> CRITIQUE -> BUILD -> TEST -> REVIEW -> DOCS -> MERGE
 ```
 
 ### Failure Cycles
 
 ```
-TEST(fail) -> PATCH -> TEST        (test failure fix loop)
+CRITIQUE(fail) -> PLAN -> CRITIQUE  (plan revision loop)
+TEST(fail) -> PATCH -> TEST         (test failure fix loop)
 REVIEW(fail) -> PATCH -> TEST -> REVIEW  (review feedback loop)
 ```
 
-### Max Cycle Limit
+### Max Cycle Limits
 
-A `MAX_PATCH_CYCLES` counter (default: 3) prevents infinite PATCH -> TEST loops. When the limit is reached, `get_next_stage()` returns `None`, escalating to human review.
+A `MAX_PATCH_CYCLES` counter (default: 3) prevents infinite PATCH -> TEST loops. A `MAX_CRITIQUE_CYCLES` counter (default: 2) prevents infinite CRITIQUE -> PLAN loops. When either limit is reached, `get_next_stage()` returns `None`, escalating to human review.
 
 ## Key Exports
 
@@ -62,14 +66,15 @@ A `MAX_PATCH_CYCLES` counter (default: 3) prevents infinite PATCH -> TEST loops.
 | `STAGE_TO_SKILL` | `dict[str, str]` | Stage to `/do-*` command mapping |
 | `DISPLAY_STAGES` | `list[str]` | PM-facing linear stage list (excludes PATCH) |
 | `get_next_stage()` | function | Graph traversal with cycle counter |
-| `MAX_PATCH_CYCLES` | `int` | Max cycles before escalation (default 3) |
+| `MAX_PATCH_CYCLES` | `int` | Max PATCH cycles before escalation (default 3) |
+| `MAX_CRITIQUE_CYCLES` | `int` | Max CRITIQUE cycles before escalation (default 2) |
 
 ## Design Decisions
 
 - **PATCH is routing-only**: It does not appear in `DISPLAY_STAGES` or progress templates. It is a routing concept for the Observer, not a stage the PM sees.
 - **No external dependencies**: Pure Python data structures, no state machine library needed.
 - **Fallback behavior**: Unknown outcomes fall back to the "success" transition. Unknown stages return `None`.
-- **MERGE is terminal**: `get_next_stage("DOCS", "success")` returns `None` because MERGE has no corresponding skill -- it requires human decision.
+- **MERGE is terminal**: MERGE requires human authorization via the `/do-merge` skill. There is no edge beyond MERGE.
 
 ## Mandatory Gate Enforcement
 
