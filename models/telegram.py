@@ -8,6 +8,7 @@ import time
 
 from popoto import AutoKeyField, Field, KeyField, Model, SortedField
 
+
 class TelegramMessage(Model):
     """Source of truth for incoming/outgoing Telegram messages in Redis.
 
