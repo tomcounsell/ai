@@ -93,7 +93,7 @@ colorama==0.4.6
     #   click
     #   griffe
     #   tqdm
-cryptography==46.0.5
+cryptography==46.0.6
     # via
     #   authlib
     #   cuttlefish
