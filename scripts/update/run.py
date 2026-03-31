@@ -58,6 +58,7 @@ class UpdateConfig:
         return cls(
             do_git_pull=True,
             do_dep_sync=True,
+            force_dep_sync=True,
             do_service_restart=True,
             do_verify=True,
             do_calendar=True,
@@ -72,6 +73,7 @@ class UpdateConfig:
         return cls(
             do_git_pull=True,
             do_dep_sync=True,
+            force_dep_sync=True,
             do_service_restart=False,  # Use restart flag for graceful restart
             do_verify=True,
             do_calendar=True,
