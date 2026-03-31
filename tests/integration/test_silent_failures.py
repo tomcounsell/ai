@@ -1,6 +1,6 @@
-"""Tests for silent failure logging in job_queue.py (Gap 1).
+"""Tests for silent failure logging in agent_session_queue.py (Gap 1).
 
-Verifies that critical exception handlers in job_queue.py emit
+Verifies that critical exception handlers in agent_session_queue.py emit
 logger.warning() calls instead of silently swallowing exceptions
 with `except Exception: pass`.
 

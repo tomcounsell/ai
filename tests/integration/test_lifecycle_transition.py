@@ -4,7 +4,7 @@ Covers:
 1. AgentSession.log_lifecycle_transition() emits structured log, appends history
 2. Duration derived from started_at/created_at
 3. session_transcript.py calls log_lifecycle_transition() on start and complete
-4. job_queue.py calls log_lifecycle_transition() at key points
+4. agent_session_queue.py calls log_lifecycle_transition() at key points
 """
 
 import logging
@@ -200,7 +200,7 @@ class TestSessionTranscriptLifecycleLogging:
         assert len(history) >= 1
 
 
-# ── job_queue.py instrumentation ─────────────────────────────────────────────
+# ── agent_session_queue.py instrumentation ─────────────────────────────────────────────
 
 
 class TestJobQueueLifecycleLogging:

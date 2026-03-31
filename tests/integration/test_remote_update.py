@@ -1,5 +1,6 @@
 """Tests for remote update: shell script, bridge intercept, restart flag lifecycle."""
 
+import asyncio
 import os
 import subprocess
 from pathlib import Path
@@ -139,7 +140,7 @@ class TestRemoteUpdateScript:
 
 
 class TestRestartFlag:
-    """Test restart flag lifecycle in job_queue.py."""
+    """Test restart flag lifecycle in agent_session_queue.py."""
 
     def setup_method(self):
         """Ensure clean state for each test."""
@@ -247,7 +248,8 @@ class TestWorkerRestartCheck:
         ):
             from agent.agent_session_queue import _worker_loop
 
-            await _worker_loop("testproject")
+            event = asyncio.Event()
+            await _worker_loop("testproject", event)
 
         mock_check.assert_called_once()
         mock_restart.assert_called_once()
@@ -277,7 +279,8 @@ class TestWorkerRestartCheck:
         ):
             from agent.agent_session_queue import _worker_loop
 
-            await _worker_loop("testproject")
+            event = asyncio.Event()
+            await _worker_loop("testproject", event)
 
         # Should have been called at least once (after job completion)
         assert mock_check.call_count >= 1

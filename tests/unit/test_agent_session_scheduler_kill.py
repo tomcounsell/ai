@@ -7,7 +7,7 @@ Validates:
 4. _find_process_by_session_id returns None for unknown session
 5. _kill_process handles ProcessLookupError (already dead)
 6. _kill_agent_session sets status to "killed" via delete-and-recreate
-7. cmd_status includes killed_count and killed_jobs in output
+7. cmd_status includes killed_count and killed_sessions in output
 8. Recovery functions filter on status="running" (killed jobs excluded by query)
 """
 
@@ -481,7 +481,7 @@ class TestCmdKill:
 
 class TestStatusIncludesKilled:
     def test_status_includes_killed_count(self, capsys):
-        """cmd_status output includes killed_count and killed_jobs."""
+        """cmd_status output includes killed_count and killed_sessions."""
         killed_job = _FakeJob(agent_session_id="k-1", session_id="sk-1", status="killed")
         fake_query = _FakeQuery(
             jobs_by_status={
@@ -505,11 +505,11 @@ class TestStatusIncludesKilled:
         assert ret == 0
         output = json.loads(capsys.readouterr().out)
         assert output["killed_count"] == 1
-        assert len(output["killed_jobs"]) == 1
-        assert output["killed_jobs"][0]["agent_session_id"] == "k-1"
+        assert len(output["killed_sessions"]) == 1
+        assert output["killed_sessions"][0]["agent_session_id"] == "k-1"
 
-    def test_status_no_killed_jobs(self, capsys):
-        """cmd_status with no killed jobs omits killed_jobs key."""
+    def test_status_no_killed_sessions(self, capsys):
+        """cmd_status with no killed jobs omits killed_sessions key."""
         fake_query = _FakeQuery(
             jobs_by_status={
                 "pending": [],
@@ -532,7 +532,7 @@ class TestStatusIncludesKilled:
         assert ret == 0
         output = json.loads(capsys.readouterr().out)
         assert output["killed_count"] == 0
-        assert "killed_jobs" not in output  # Only shown when there are killed jobs
+        assert "killed_sessions" not in output  # Only shown when there are killed jobs
 
 
 # ---------------------------------------------------------------------------

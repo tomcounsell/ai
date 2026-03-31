@@ -11,9 +11,9 @@ Usage:
     python -m tools.agent_session_scheduler status
     python -m tools.agent_session_scheduler push --message "What is the architecture?" \\
         --project valor
-    python -m tools.agent_session_scheduler bump --job-id <agent_session_id>
+    python -m tools.agent_session_scheduler bump --agent-session-id <agent_session_id>
     python -m tools.agent_session_scheduler pop --project valor
-    python -m tools.agent_session_scheduler cancel --job-id <agent_session_id>
+    python -m tools.agent_session_scheduler cancel --agent-session-id <agent_session_id>
     python -m tools.agent_session_scheduler list --status killed,abandoned
     python -m tools.agent_session_scheduler cleanup --age 30 --dry-run
     python -m tools.agent_session_scheduler cleanup --age 30
@@ -831,7 +831,7 @@ def cmd_kill(args: argparse.Namespace) -> int:
 
         elif args.agent_session_id:
             if not args.agent_session_id.strip():
-                _output({"status": "error", "message": "--job-id cannot be empty."})
+                _output({"status": "error", "message": "--agent-session-id cannot be empty."})
                 return 1
             # Search across all statuses
             for status in ("running", "pending", "completed", "failed", "waiting_for_children"):
@@ -878,7 +878,7 @@ def cmd_kill(args: argparse.Namespace) -> int:
             _output(
                 {
                     "status": "error",
-                    "message": "One of --job-id, --session-id, or --all is required.",
+                    "message": "One of --agent-session-id, --session-id, or --all is required.",
                 }
             )
             return 1
@@ -1005,8 +1005,8 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
 
 def main():
     parser = argparse.ArgumentParser(
-        prog="job_scheduler",
-        description="Agent-initiated job queue operations",
+        prog="agent_session_scheduler",
+        description="Agent-initiated session queue operations",
     )
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
@@ -1024,12 +1024,12 @@ def main():
     )
     sched.add_argument(
         "--parent-job",
-        help="Parent job ID — creates this as a child session inheriting parent fields",
+        help="Parent session ID — creates this as a child session inheriting parent fields",
     )
 
     # children
     ch = subparsers.add_parser("children", help="List children of a parent session")
-    ch.add_argument("--job-id", required=True, help="Parent job ID")
+    ch.add_argument("--agent-session-id", required=True, help="Parent session ID")
 
     # status
     st = subparsers.add_parser("status", help="Show queue status")
@@ -1043,7 +1043,7 @@ def main():
 
     # bump
     bump = subparsers.add_parser("bump", help="Bump pending session to top of queue")
-    bump.add_argument("--job-id", required=True, help="Session ID to bump")
+    bump.add_argument("--agent-session-id", required=True, help="Session ID to bump")
 
     # pop
     pop = subparsers.add_parser("pop", help="Remove next pending session without executing")
@@ -1051,12 +1051,12 @@ def main():
 
     # cancel
     cancel = subparsers.add_parser("cancel", help="Cancel a specific pending session")
-    cancel.add_argument("--job-id", required=True, help="Session ID to cancel")
+    cancel.add_argument("--agent-session-id", required=True, help="Session ID to cancel")
 
     # kill
     kill = subparsers.add_parser("kill", help="Kill running or pending sessions")
     kill_group = kill.add_mutually_exclusive_group(required=True)
-    kill_group.add_argument("--job-id", help="Kill a specific job by job ID")
+    kill_group.add_argument("--agent-session-id", help="Kill a specific session by ID")
     kill_group.add_argument("--session-id", help="Kill a session by session ID")
     kill_group.add_argument(
         "--all", action="store_true", help="Kill all running and pending sessions"

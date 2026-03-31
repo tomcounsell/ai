@@ -106,7 +106,7 @@ class TestPopJob:
         _create_pending(created_at=time.time() - 100, message="old")
         _create_pending(created_at=time.time(), message="new")
 
-        job = asyncio.get_event_loop().run_until_complete(_pop_agent_session("test-chat"))
+        job = asyncio.run(_pop_agent_session("test-chat"))
         assert job is not None
         assert "old" in job.message_text
 
@@ -115,7 +115,7 @@ class TestPopJob:
         _create_pending(priority="low", message="low-prio")
         _create_pending(priority="urgent", message="urgent-prio")
 
-        job = asyncio.get_event_loop().run_until_complete(_pop_agent_session("test-chat"))
+        job = asyncio.run(_pop_agent_session("test-chat"))
         assert job is not None
         assert "urgent" in job.message_text
 
@@ -124,7 +124,7 @@ class TestPopJob:
         future = time.time() + 3600  # 1 hour from now
         _create_pending(scheduled_after=future, message="deferred")
 
-        job = asyncio.get_event_loop().run_until_complete(_pop_agent_session("test-chat"))
+        job = asyncio.run(_pop_agent_session("test-chat"))
         assert job is None  # No eligible jobs
 
     def test_scheduled_after_past_eligible(self):
@@ -132,7 +132,7 @@ class TestPopJob:
         past = time.time() - 60  # 1 minute ago
         _create_pending(scheduled_after=past, message="ready")
 
-        job = asyncio.get_event_loop().run_until_complete(_pop_agent_session("test-chat"))
+        job = asyncio.run(_pop_agent_session("test-chat"))
         assert job is not None
         assert "ready" in job.message_text
 
@@ -140,7 +140,7 @@ class TestPopJob:
         """Jobs with no scheduled_after are always eligible."""
         _create_pending(message="immediate")
 
-        job = asyncio.get_event_loop().run_until_complete(_pop_agent_session("test-chat"))
+        job = asyncio.run(_pop_agent_session("test-chat"))
         assert job is not None
         assert "immediate" in job.message_text
 
@@ -150,7 +150,7 @@ class TestPopJob:
         _create_pending(scheduled_after=future, message="deferred", priority="urgent")
         _create_pending(message="immediate", priority="low")
 
-        job = asyncio.get_event_loop().run_until_complete(_pop_agent_session("test-chat"))
+        job = asyncio.run(_pop_agent_session("test-chat"))
         assert job is not None
         assert "immediate" in job.message_text
 
@@ -159,7 +159,7 @@ class TestPopJob:
         _create_pending(priority="unknown", message="unknown-prio")
         _create_pending(priority="low", message="low-prio")
 
-        job = asyncio.get_event_loop().run_until_complete(_pop_agent_session("test-chat"))
+        job = asyncio.run(_pop_agent_session("test-chat"))
         assert job is not None
         assert "unknown" in job.message_text  # normal rank < low rank
 
@@ -310,7 +310,7 @@ class TestJobSchedulerCLI:
                 "-m",
                 "tools.agent_session_scheduler",
                 "cancel",
-                "--job-id",
+                "--agent-session-id",
                 "nonexistent-job-id",
             ],
             capture_output=True,
@@ -330,7 +330,7 @@ class TestJobSchedulerCLI:
                 "-m",
                 "tools.agent_session_scheduler",
                 "bump",
-                "--job-id",
+                "--agent-session-id",
                 "nonexistent-job-id",
             ],
             capture_output=True,
@@ -440,7 +440,7 @@ class TestKillCommandIntegration:
                 "-m",
                 "tools.agent_session_scheduler",
                 "kill",
-                "--job-id",
+                "--agent-session-id",
                 agent_session_id,
             ],
             capture_output=True,
@@ -452,7 +452,7 @@ class TestKillCommandIntegration:
         data = json.loads(result.stdout)
         assert data["status"] == "killed"
         assert data["count"] == 1
-        assert data["jobs"][0]["previous_status"] == "pending"
+        assert data["sessions"][0]["previous_status"] == "pending"
 
     def test_kill_by_session_id(self):
         """Kill a pending session by session_id via CLI (push then kill)."""
@@ -505,7 +505,7 @@ class TestKillCommandIntegration:
                 "-m",
                 "tools.agent_session_scheduler",
                 "kill",
-                "--job-id",
+                "--agent-session-id",
                 "nonexistent-kill-target",
             ],
             capture_output=True,
@@ -630,7 +630,7 @@ class TestKillCommandIntegration:
                 "-m",
                 "tools.agent_session_scheduler",
                 "kill",
-                "--job-id",
+                "--agent-session-id",
                 agent_session_id,
             ],
             capture_output=True,

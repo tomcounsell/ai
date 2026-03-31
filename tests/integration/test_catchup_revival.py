@@ -23,7 +23,7 @@ def _make_entity(chat_id: int, title: str):
 def _make_dialog(chat_id: int, title: str):
     """Create a minimal Telegram dialog-like object."""
     entity = _make_entity(chat_id, title)
-    return SimpleNamespace(entity=entity)
+    return SimpleNamespace(id=chat_id, entity=entity)
 
 
 def _make_message(msg_id: int, text: str, out: bool = False, minutes_ago: int = 5):
