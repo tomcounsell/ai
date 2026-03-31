@@ -53,7 +53,13 @@ class TestQaReactionClearing:
         # The reaction logic in job_queue.py checks session_mode and returns None
         # for successful Q&A sessions. We test the conditional directly.
         task_error = False
-        if session and (getattr(session, "session_mode", None) == "qa" or getattr(session, "qa_mode", False)) and not task_error:
+        if (
+            session
+            and (
+                getattr(session, "session_mode", None) == "qa" or getattr(session, "qa_mode", False)
+            )
+            and not task_error
+        ):
             emoji = None
         else:
             emoji = "completion"
@@ -68,7 +74,13 @@ class TestQaReactionClearing:
         session.qa_mode = False
 
         task_error = False
-        if session and (getattr(session, "session_mode", None) == "qa" or getattr(session, "qa_mode", False)) and not task_error:
+        if (
+            session
+            and (
+                getattr(session, "session_mode", None) == "qa" or getattr(session, "qa_mode", False)
+            )
+            and not task_error
+        ):
             emoji = None
         else:
             emoji = "completion"
@@ -83,7 +95,13 @@ class TestQaReactionClearing:
         session.qa_mode = True
 
         task_error = True
-        if session and (getattr(session, "session_mode", None) == "qa" or getattr(session, "qa_mode", False)) and not task_error:
+        if (
+            session
+            and (
+                getattr(session, "session_mode", None) == "qa" or getattr(session, "qa_mode", False)
+            )
+            and not task_error
+        ):
             emoji = None
         else:
             emoji = "error"

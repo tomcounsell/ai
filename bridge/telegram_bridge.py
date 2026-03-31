@@ -1805,8 +1805,9 @@ async def main():
 
         # Configure popoto embedding provider before starting watcher
         try:
-            import popoto
             from popoto.embeddings.openai import OpenAIProvider
+
+            import popoto
 
             popoto.configure(embedding_provider=OpenAIProvider())
             logger.info("Configured popoto OpenAI embedding provider")
