@@ -30,7 +30,7 @@ from agent.branch_manager import (
 from agent.worktree_manager import WORKTREES_DIR, validate_workspace
 from bridge.response import REACTION_COMPLETE, REACTION_ERROR, REACTION_SUCCESS
 from bridge.session_logs import save_session_snapshot
-from config.enums import ChatMode, ClassificationType, SessionType
+from config.enums import ClassificationType, PersonaType, SessionType
 from models.agent_session import AgentSession
 
 logger = logging.getLogger(__name__)
@@ -400,7 +400,7 @@ def resolve_branch_for_stage(slug: str | None, stage: str | None) -> tuple[str, 
     implicit branch resolution that previously relied on skill context.
 
     Args:
-        slug: The work item slug (e.g., 'auth-feature'). None for Q&A/non-SDLC.
+        slug: The work item slug (e.g., 'auth-feature'). None for non-SDLC.
         stage: The SDLC stage (e.g., 'PLAN', 'BUILD', 'TEST'). None for non-SDLC.
 
     Returns:
@@ -2045,15 +2045,13 @@ async def _execute_job(job: Job) -> None:
                 f"[{job.project_key}] Watchdog flagged session unhealthy: {unhealthy_reason}"
             )
 
-        # Use reduced nudge cap for Q&A sessions
+        # Use reduced nudge cap for Teammate sessions
         _effective_nudge_cap = MAX_NUDGE_COUNT
         if agent_session:
-            if getattr(agent_session, "session_mode", None) == ChatMode.QA or getattr(
-                agent_session, "qa_mode", False
-            ):
-                from agent.qa_handler import QA_MAX_NUDGE_COUNT
+            if getattr(agent_session, "session_mode", None) == PersonaType.TEAMMATE:
+                from agent.teammate_handler import TEAMMATE_MAX_NUDGE_COUNT
 
-                _effective_nudge_cap = QA_MAX_NUDGE_COUNT
+                _effective_nudge_cap = TEAMMATE_MAX_NUDGE_COUNT
 
         action = classify_nudge_action(
             msg=msg,
@@ -2326,13 +2324,10 @@ async def _execute_job(job: Job) -> None:
     # Set reaction based on result and delivery state
     # Skip if a continuation job was enqueued (defer reaction to that job)
     if react_cb and not chat_state.defer_reaction:
-        # Q&A sessions: clear the processing reaction instead of setting completion emoji
+        # Teammate sessions: clear the processing reaction instead of setting completion emoji
         if (
             agent_session
-            and (
-                getattr(agent_session, "session_mode", None) == ChatMode.QA
-                or getattr(agent_session, "qa_mode", False)
-            )
+            and getattr(agent_session, "session_mode", None) == PersonaType.TEAMMATE
             and not task.error
         ):
             emoji = None  # Clear reaction

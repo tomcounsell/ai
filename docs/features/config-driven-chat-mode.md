@@ -2,7 +2,7 @@
 
 ## Overview
 
-Chat mode resolution determines how the system handles messages from each Telegram group: whether to spawn a DevSession (full permissions), a ChatSession (PM orchestration), or treat the group as a passive Q&A listener. Previously, this was inferred solely from chat title prefixes (`Dev:`, `PM:`). Config-driven chat mode adds an explicit `persona` field in `projects.json` group configuration, giving operators direct control over per-group routing without relying on naming conventions.
+Chat mode resolution determines how the system handles messages from each Telegram group: whether to spawn a DevSession (full permissions), a ChatSession (PM orchestration), or treat the group as a passive teammate listener. Previously, this was inferred solely from chat title prefixes (`Dev:`, `PM:`). Config-driven chat mode adds an explicit `persona` field in `projects.json` group configuration, giving operators direct control over per-group routing without relying on naming conventions.
 
 ## Config Schema
 
@@ -27,28 +27,28 @@ The `persona` field lives inside the `telegram.groups` dictionary of each projec
 
 ### Persona Values
 
-| Persona | Resolved Mode | Session Type | Behavior |
-|---------|--------------|--------------|----------|
-| `"developer"` | `"dev"` | DevSession | Full permissions, dev persona, direct execution |
-| `"project-manager"` | `"pm"` | ChatSession | PM persona, SDLC orchestration, spawns DevSessions |
-| `"teammate"` | `"qa"` | ChatSession | Passive listener -- only responds on @mention or reply-to-Valor |
+| Persona | Resolved Persona | Session Type | Behavior |
+|---------|-----------------|--------------|----------|
+| `"developer"` | `PersonaType.DEVELOPER` | DevSession | Full permissions, dev persona, direct execution |
+| `"project-manager"` | `PersonaType.PROJECT_MANAGER` | ChatSession | PM persona, SDLC orchestration, spawns DevSessions |
+| `"teammate"` | `PersonaType.TEAMMATE` | ChatSession | Passive listener -- only responds on @mention or reply-to-Valor |
 
-The mapping is defined in `PERSONA_TO_MODE` in `bridge/routing.py`.
+The mapping is handled by `resolve_persona()` in `bridge/routing.py`, which returns a `PersonaType` directly.
 
 ## Mode Resolution Order
 
-The `resolve_chat_mode()` function in `bridge/routing.py` uses the following priority chain:
+The `resolve_persona()` function in `bridge/routing.py` uses the following priority chain:
 
-1. **DMs** -- always resolve to `"qa"` mode (direct Q&A, no SDLC overhead)
-2. **Config persona** -- if the project has a `telegram.groups` dictionary entry matching the chat title with a valid `persona` field, map it to a mode via `PERSONA_TO_MODE`
-3. **Title prefix fallback** -- if no persona is configured, `"Dev:"` prefix resolves to `"dev"`, `"PM:"` prefix resolves to `"pm"`
-4. **None (unconfigured)** -- no mode determined; caller falls through to existing behavior (intent classifier for ChatSessions, respond_to_all/mention logic for response decisions)
+1. **DMs** -- always resolve to `PersonaType.TEAMMATE` (direct teammate mode, no SDLC overhead)
+2. **Config persona** -- if the project has a `telegram.groups` dictionary entry matching the chat title with a valid `persona` field, return the corresponding `PersonaType`
+3. **Title prefix fallback** -- if no persona is configured, `"Dev:"` prefix resolves to `PersonaType.DEVELOPER`, `"PM:"` prefix resolves to `PersonaType.PROJECT_MANAGER`
+4. **None (unconfigured)** -- no persona determined; caller falls through to existing behavior (intent classifier for ChatSessions, respond_to_all/mention logic for response decisions)
 
 This layered approach ensures full backward compatibility: existing groups that rely on title prefixes continue working without any configuration changes.
 
-## Passive Listener Behavior (Q&A Groups)
+## Passive Listener Behavior (Teammate Groups)
 
-When a group resolves to `"qa"` mode (via `"teammate"` persona), the system behaves as a passive listener:
+When a group resolves to `PersonaType.TEAMMATE` (via `"teammate"` persona config), the system behaves as a passive listener:
 
 - **Messages are stored** in Redis as usual (TelegramMessage records)
 - **No automatic response** -- the system stays completely silent
@@ -62,29 +62,29 @@ This is useful for groups where the agent should observe and learn from conversa
 
 ### Bridge (`bridge/telegram_bridge.py`)
 
-The bridge calls `resolve_chat_mode()` when determining session type for a new job:
+The bridge calls `resolve_persona()` when determining session type for a new job:
 
-- If mode is `"dev"` -> creates a DevSession (session_type="dev")
+- If persona is `PersonaType.DEVELOPER` -> creates a DevSession (session_type="dev")
 - Everything else -> creates a ChatSession (session_type="chat")
 
 ### SDK Client (`agent/sdk_client.py`)
 
-The SDK client calls `resolve_chat_mode()` inside `get_agent_response_sdk()` when routing ChatSession intent:
+The SDK client calls `resolve_persona()` inside `get_agent_response_sdk()` when routing ChatSession intent:
 
-- If mode is `"qa"` -> skips the Haiku intent classifier, sets `qa_mode=True` directly (reducing latency and cost)
-- If mode is `"pm"` or `"dev"` -> skips the classifier, uses the known mode
-- If mode is `None` -> falls through to the existing intent classifier
+- If persona is `PersonaType.TEAMMATE` -> skips the Haiku intent classifier, sets `session_mode=PersonaType.TEAMMATE` directly (reducing latency and cost)
+- If persona is `PersonaType.PROJECT_MANAGER` or `PersonaType.DEVELOPER` -> skips the classifier, uses the known persona
+- If persona is `None` -> falls through to the existing intent classifier
 
 ### Response Decision (`bridge/routing.py::should_respond_async()`)
 
-The async response decision uses `resolve_chat_mode()` to handle Q&A groups:
+The async response decision uses `resolve_persona()` to handle teammate groups:
 
-- If mode is `"qa"` -> only respond on @mention or reply-to-Valor; skip Ollama classification entirely
-- Other modes -> fall through to existing response logic (respond_to_all, respond_to_unaddressed, etc.)
+- If persona is `PersonaType.TEAMMATE` -> only respond on @mention or reply-to-Valor; skip Ollama classification entirely
+- Other personas -> fall through to existing response logic (respond_to_all, respond_to_unaddressed, etc.)
 
 ## Backward Compatibility
 
-- **List-format groups**: If `telegram.groups` is a list (legacy format), `resolve_chat_mode()` skips the persona lookup and falls through to title prefix matching
+- **List-format groups**: If `telegram.groups` is a list (legacy format), `resolve_persona()` skips the persona lookup and falls through to title prefix matching
 - **Dict without persona**: If a group entry is a dict but has no `persona` key, the function falls through to title prefix matching
 - **No groups config**: Projects without a `telegram.groups` section use title prefix matching as before
 
@@ -92,8 +92,8 @@ The async response decision uses `resolve_chat_mode()` to handle Q&A groups:
 
 | File | Role |
 |------|------|
-| `bridge/routing.py` | `resolve_chat_mode()`, `PERSONA_TO_MODE`, passive listener logic in `should_respond_async()` |
-| `bridge/telegram_bridge.py` | Session type derivation from resolved mode |
-| `agent/sdk_client.py` | Classifier bypass for config-determined modes |
-| `tests/unit/test_config_driven_routing.py` | Q&A passive listener, backward compatibility, session type derivation |
-| `tests/unit/test_routing_mode.py` | `resolve_chat_mode()` unit tests for all resolution paths |
+| `bridge/routing.py` | `resolve_persona()`, passive listener logic in `should_respond_async()` |
+| `bridge/telegram_bridge.py` | Session type derivation from resolved persona |
+| `agent/sdk_client.py` | Classifier bypass for config-determined personas |
+| `tests/unit/test_config_driven_routing.py` | Teammate passive listener, backward compatibility, session type derivation |
+| `tests/unit/test_routing_mode.py` | `resolve_persona()` unit tests for all resolution paths |

@@ -7,7 +7,7 @@ Covers the gaps identified in PR #180 review:
 4. Summarizer with session context (summarize_response with session param)
 5. Markdown send (send_markdown fallback behavior)
 6. Backward compat (SessionLog shim, RedisJob alias, sender property)
-7. Full lifecycle simulations (SDLC, Q&A, chit-chat)
+7. Full lifecycle simulations (SDLC, Teammate, chit-chat)
 """
 
 import json
@@ -79,7 +79,7 @@ def sdlc_session(redis_test_db):
 
 @pytest.fixture
 def qa_session(redis_test_db):
-    """Create an AgentSession for a Q&A interaction."""
+    """Create an AgentSession for a Teammate interaction."""
     return AgentSession.create(
         session_id="qa-test-1",
         project_key="test",
@@ -407,7 +407,7 @@ class TestSummarizeWithSession:
             result = await summarize_response(long_text, session=qa_session)
 
         assert result.was_summarized is True
-        # No stage-related content for Q&A
+        # No stage-related content for Teammate
         assert "FILO" in result.text
 
     @pytest.mark.asyncio
@@ -717,7 +717,7 @@ class TestSDLCClassificationTypeLifecycle:
 
 
 class TestQALifecycle:
-    """Simulate a Q&A session."""
+    """Simulate a Teammate session."""
 
     @pytest.mark.asyncio
     async def test_qa_flow(self, redis_test_db):

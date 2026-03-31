@@ -353,7 +353,7 @@ def _detect_active_skill(message_text: str | None) -> dict | None:
     skill's metadata dict if found, None otherwise.
 
     Only matches the four SDLC skills (/do-plan, /do-build, /do-test,
-    /do-docs). Non-SDLC messages (general chat, Q&A, exploration)
+    /do-docs). Non-SDLC messages (general chat, informational queries, exploration)
     return None and the coach falls back to plain "continue".
     """
     if not message_text:

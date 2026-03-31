@@ -4,7 +4,7 @@ Verifies string equality, membership, iteration, and backward compatibility
 with existing string-based comparisons throughout the codebase.
 """
 
-from config.enums import ChatMode, ClassificationType, PersonaType, SessionType
+from config.enums import ClassificationType, PersonaType, SessionType
 
 
 class TestSessionType:
@@ -70,16 +70,6 @@ class TestClassificationType:
         assert len(list(ClassificationType)) == 2
 
 
-class TestChatMode:
-    def test_string_equality(self):
-        assert ChatMode.QA == "qa"
-        assert ChatMode.PM == "pm"
-        assert ChatMode.DEV == "dev"
-
-    def test_all_members(self):
-        assert len(list(ChatMode)) == 3
-
-
 class TestEnvVarCompatibility:
     """Verify enums work correctly when used in env var contexts."""
 
@@ -96,12 +86,12 @@ class TestEnvVarCompatibility:
 
     def test_persona_in_config_lookup(self):
         """PersonaType members match string keys from projects.json config."""
-        persona_to_mode = {
-            PersonaType.TEAMMATE: ChatMode.QA,
-            PersonaType.PROJECT_MANAGER: ChatMode.PM,
-            PersonaType.DEVELOPER: ChatMode.DEV,
+        persona_map = {
+            PersonaType.TEAMMATE: "teammate",
+            PersonaType.PROJECT_MANAGER: "project-manager",
+            PersonaType.DEVELOPER: "developer",
         }
         # Lookup with string (simulating config value)
-        assert persona_to_mode.get("teammate") == ChatMode.QA
-        assert persona_to_mode.get("project-manager") == ChatMode.PM
-        assert persona_to_mode.get("developer") == ChatMode.DEV
+        assert persona_map.get("teammate") == "teammate"
+        assert persona_map.get("project-manager") == "project-manager"
+        assert persona_map.get("developer") == "developer"

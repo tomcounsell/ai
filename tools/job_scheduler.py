@@ -1,7 +1,7 @@
 """
 Job Scheduler - Agent-initiated queue operations.
 
-Allows the agent to programmatically schedule SDLC runs, Q&A jobs,
+Allows the agent to programmatically schedule SDLC runs, Teammate jobs,
 and manage queue state mid-conversation.
 
 Usage:

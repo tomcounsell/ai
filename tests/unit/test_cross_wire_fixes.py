@@ -1,7 +1,7 @@
 """Tests for cross-wire bug fixes (issue #232).
 
 Tests three fixes:
-1. Classifier Q&A awareness — informational answers classified as COMPLETION
+1. Classifier Teammate awareness -- informational answers classified as COMPLETION
 2. Session isolation — fresh sessions don't set continue_conversation=True
 3. Non-SDLC auto-continue guard — planning language auto-continues, answers deliver
 
@@ -16,17 +16,17 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
-# === Fix 1: Classifier Q&A awareness ===
+# === Fix 1: Classifier Teammate awareness ===
 
 
-class TestClassifierQACompletion:
-    """Verify that Q&A/informational answers are classified as COMPLETION."""
+class TestClassifierInformationalCompletion:
+    """Verify that informational answers are classified as COMPLETION."""
 
     def test_qa_answer_heuristic_not_status(self):
         """Informational answers should not be classified as STATUS_UPDATE by heuristics."""
         from bridge.summarizer import OutputType, _classify_with_heuristics
 
-        # Typical Q&A answer about a system feature
+        # Typical informational answer about a system feature (Teammate mode)
         qa_answer = (
             "The summarizer works by first classifying the agent output using an LLM "
             "classifier. It determines whether the output is a status update, completion, "
@@ -38,7 +38,7 @@ class TestClassifierQACompletion:
         # The key assertion: it should NOT be classified as STATUS_UPDATE
         if result.output_type is not None:
             assert result.output_type != OutputType.STATUS_UPDATE, (
-                f"Q&A answer was classified as STATUS_UPDATE by heuristics: {result}"
+                f"informational answer was classified as STATUS_UPDATE by heuristics: {result}"
             )
 
     def test_architecture_explanation_heuristic_not_status(self):
@@ -57,7 +57,7 @@ class TestClassifierQACompletion:
 
     @pytest.mark.asyncio
     async def test_qa_answer_classified_as_completion(self):
-        """Full classifier should classify Q&A answers as COMPLETION."""
+        """Full classifier should classify informational answers as COMPLETION."""
         from bridge.summarizer import OutputType, classify_output
 
         qa_answer = (
@@ -69,7 +69,7 @@ class TestClassifierQACompletion:
         )
         result = await classify_output(qa_answer)
         assert result.output_type == OutputType.COMPLETION, (
-            f"Q&A answer classified as {result.output_type.value} "
+            f"informational answer classified as {result.output_type.value} "
             f"(expected COMPLETION): {result.reason}"
         )
 

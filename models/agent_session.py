@@ -18,6 +18,7 @@ import json as _json
 import logging
 import time
 
+from config.enums import ClassificationType, SessionType
 from popoto import (
     AutoKeyField,
     Field,
@@ -28,8 +29,6 @@ from popoto import (
     Model,
     SortedField,
 )
-
-from config.enums import ChatMode, ClassificationType, SessionType
 
 logger = logging.getLogger(__name__)
 
@@ -133,14 +132,10 @@ class AgentSession(Model):
     # === Watchdog fields ===
     watchdog_unhealthy = Field(null=True)  # Reason string when flagged unhealthy, None when healthy
 
-    # === Session mode (replaces qa_mode) ===
-    # Stores ChatMode enum value ("qa" or None) to indicate Q&A routing.
-    # Replaces the boolean qa_mode field with a string-typed enum field.
+    # === Session mode ===
+    # Stores PersonaType enum value ("teammate", "project-manager", "developer")
+    # to indicate the resolved persona for this session.
     session_mode = Field(null=True)
-
-    # Legacy field kept for backward compatibility with in-flight Redis sessions.
-    # New code should use session_mode instead. Will be removed in a future cleanup.
-    _qa_mode_legacy = Field(type=bool, null=True)
 
     # === Semantic routing fields ===
     context_summary = Field(null=True)  # What this session is about
@@ -207,43 +202,6 @@ class AgentSession(Model):
     def is_dev(self) -> bool:
         """Whether this is a DevSession (Dev persona, full permissions)."""
         return self.session_type == SESSION_TYPE_DEV
-
-    @property
-    def qa_mode(self) -> bool:
-        """Backward-compatible property: True when session is in Q&A mode.
-
-        Reads session_mode first, falls back to the legacy ``_qa_mode_legacy``
-        Popoto field and a direct Redis hget for the original ``qa_mode`` key.
-
-        Note: The Popoto field ``_qa_mode_legacy`` stores under Redis key
-        ``_qa_mode_legacy``, NOT ``qa_mode``.  This means it does NOT read
-        data written by pre-rename sessions (which stored under ``qa_mode``).
-        The direct hget fallback on line ~236 covers that case.  The
-        ``_qa_mode_legacy`` check is defense-in-depth for any sessions that
-        may have written to the renamed field directly.
-        """
-        if self.session_mode == ChatMode.QA:
-            return True
-        # Check the renamed Popoto field first (new sessions written post-migration)
-        if self._qa_mode_legacy:
-            return True
-        # Fallback: read the original "qa_mode" hash field from Redis directly,
-        # since Popoto only knows about "_qa_mode_legacy" and cannot see the old key.
-        try:
-            from popoto.redis_db import POPOTO_REDIS_DB
-
-            raw = POPOTO_REDIS_DB.hget(str(self.db_key), "qa_mode")
-            if raw is not None:
-                # Popoto encodes booleans; True is b'\xc1', False is b'\xc0'
-                return raw == b"\xc1"
-        except Exception:
-            pass
-        return False
-
-    @qa_mode.setter
-    def qa_mode(self, value: bool) -> None:
-        """Backward-compatible setter: writes to session_mode."""
-        self.session_mode = ChatMode.QA if value else None
 
     @property
     def current_stage(self) -> str | None:

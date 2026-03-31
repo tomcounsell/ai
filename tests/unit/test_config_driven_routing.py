@@ -1,8 +1,8 @@
 """Tests for config-driven routing paths.
 
 Covers:
-- should_respond_async() behavior for Q&A-persona groups (passive listener)
-- Session type derivation from resolve_chat_mode()
+- should_respond_async() behavior for Teammate-persona groups (passive listener)
+- Session type derivation from resolve_persona()
 - Classifier bypass logic in sdk_client.py
 """
 
@@ -10,7 +10,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from bridge.routing import resolve_chat_mode, should_respond_async
+from bridge.routing import resolve_persona, should_respond_async
+from config.enums import PersonaType
 
 # =============================================================================
 # Helpers
@@ -44,14 +45,14 @@ def _make_client(replied_msg_is_ours=False):
 
 
 # =============================================================================
-# Q&A-persona group: passive listener behavior
+# Teammate-persona group: passive listener behavior
 # =============================================================================
 
 
-class TestQAGroupPassiveListener:
-    """Q&A-persona groups should only respond on @mention or reply-to-Valor."""
+class TestTeammateGroupPassiveListener:
+    """Teammate-persona groups should only respond on @mention or reply-to-Valor."""
 
-    def _qa_project(self):
+    def _teammate_project(self):
         return {
             "telegram": {
                 "groups": {"Team Chat": {"persona": "teammate"}},
@@ -62,8 +63,8 @@ class TestQAGroupPassiveListener:
 
     @pytest.mark.asyncio
     async def test_unaddressed_message_silent(self):
-        """Unaddressed messages in Q&A groups get no response."""
-        project = self._qa_project()
+        """Unaddressed messages in Teammate groups get no response."""
+        project = self._teammate_project()
         event = _make_event("just sharing some info")
         client = _make_client()
 
@@ -80,8 +81,8 @@ class TestQAGroupPassiveListener:
 
     @pytest.mark.asyncio
     async def test_mention_triggers_response(self):
-        """@valor mention in Q&A group triggers a response."""
-        project = self._qa_project()
+        """@valor mention in Teammate group triggers a response."""
+        project = self._teammate_project()
         event = _make_event("hey valor what do you think?")
         client = _make_client()
 
@@ -97,8 +98,8 @@ class TestQAGroupPassiveListener:
 
     @pytest.mark.asyncio
     async def test_reply_to_valor_triggers_response(self):
-        """Reply to Valor's message in Q&A group triggers a response."""
-        project = self._qa_project()
+        """Reply to Valor's message in Teammate group triggers a response."""
+        project = self._teammate_project()
         event = _make_event("can you elaborate?", reply_to_msg_id=999)
         client = _make_client(replied_msg_is_ours=True)
 
@@ -143,22 +144,22 @@ class TestBackwardCompatibility:
             chat_title="Dev: MyProject",
             project=project,
         )
-        # resolve_chat_mode returns "dev" from title prefix
+        # resolve_persona returns DEVELOPER from title prefix
         # is_team_chat returns False for "Dev:" prefix
         # respond_to_all=True so it responds
         assert should is True
 
     def test_dev_prefix_session_type(self):
-        """Dev: prefix without persona still resolves to dev mode."""
+        """Dev: prefix without persona still resolves to Developer."""
         project = {"telegram": {"groups": {}}}
-        mode = resolve_chat_mode(project, "Dev: MyProject", is_dm=False)
-        assert mode == "dev"
+        persona = resolve_persona(project, "Dev: MyProject", is_dm=False)
+        assert persona == PersonaType.DEVELOPER
 
     def test_pm_prefix_session_type(self):
-        """PM: prefix without persona still resolves to pm mode."""
+        """PM: prefix without persona still resolves to Project Manager."""
         project = {"telegram": {"groups": {}}}
-        mode = resolve_chat_mode(project, "PM: MyProject", is_dm=False)
-        assert mode == "pm"
+        persona = resolve_persona(project, "PM: MyProject", is_dm=False)
+        assert persona == PersonaType.PROJECT_MANAGER
 
 
 # =============================================================================
@@ -167,27 +168,27 @@ class TestBackwardCompatibility:
 
 
 class TestSessionTypeDerivation:
-    """Verify mode-to-session-type mapping logic."""
+    """Verify persona-to-session-type mapping logic."""
 
-    def test_dev_mode_gives_dev_session(self):
-        mode = resolve_chat_mode(None, "Dev: X", is_dm=False)
-        assert mode == "dev"
-        # In telegram_bridge.py: dev mode -> session_type = "dev"
+    def test_dev_persona_gives_dev_session(self):
+        persona = resolve_persona(None, "Dev: X", is_dm=False)
+        assert persona == PersonaType.DEVELOPER
+        # In telegram_bridge.py: Developer persona -> session_type = "dev"
 
-    def test_pm_mode_gives_chat_session(self):
-        mode = resolve_chat_mode(None, "PM: X", is_dm=False)
-        assert mode == "pm"
-        # In telegram_bridge.py: pm mode -> session_type = "chat"
+    def test_pm_persona_gives_chat_session(self):
+        persona = resolve_persona(None, "PM: X", is_dm=False)
+        assert persona == PersonaType.PROJECT_MANAGER
+        # In telegram_bridge.py: PM persona -> session_type = "chat"
 
-    def test_qa_mode_gives_chat_session(self):
-        mode = resolve_chat_mode(None, None, is_dm=True)
-        assert mode == "qa"
-        # In telegram_bridge.py: qa mode -> session_type = "chat"
+    def test_teammate_persona_gives_chat_session(self):
+        persona = resolve_persona(None, None, is_dm=True)
+        assert persona == PersonaType.TEAMMATE
+        # In telegram_bridge.py: Teammate persona -> session_type = "chat"
 
-    def test_none_mode_gives_chat_session(self):
-        mode = resolve_chat_mode(None, "Random Group", is_dm=False)
-        assert mode is None
-        # In telegram_bridge.py: None mode -> session_type = "chat"
+    def test_none_persona_gives_chat_session(self):
+        persona = resolve_persona(None, "Random Group", is_dm=False)
+        assert persona is None
+        # In telegram_bridge.py: None persona -> session_type = "chat"
 
 
 # =============================================================================
@@ -196,21 +197,21 @@ class TestSessionTypeDerivation:
 
 
 class TestClassifierBypass:
-    """Verify that config-determined modes skip the intent classifier."""
+    """Verify that config-determined personas skip the intent classifier."""
 
     def test_dm_should_bypass_classifier(self):
-        """DMs resolve to qa mode, which should bypass classifier."""
-        mode = resolve_chat_mode(None, None, is_dm=True)
-        assert mode == "qa"  # qa mode triggers classifier bypass in sdk_client
+        """DMs resolve to Teammate persona, which should bypass classifier."""
+        persona = resolve_persona(None, None, is_dm=True)
+        assert persona == PersonaType.TEAMMATE
 
-    def test_configured_qa_group_should_bypass(self):
+    def test_configured_teammate_group_should_bypass(self):
         project = {
             "telegram": {
                 "groups": {"Team: Project": {"persona": "teammate"}},
             }
         }
-        mode = resolve_chat_mode(project, "Team: Project", is_dm=False)
-        assert mode == "qa"  # qa mode triggers classifier bypass
+        persona = resolve_persona(project, "Team: Project", is_dm=False)
+        assert persona == PersonaType.TEAMMATE
 
     def test_configured_pm_group_should_bypass(self):
         project = {
@@ -218,8 +219,8 @@ class TestClassifierBypass:
                 "groups": {"PM: Project": {"persona": "project-manager"}},
             }
         }
-        mode = resolve_chat_mode(project, "PM: Project", is_dm=False)
-        assert mode == "pm"  # pm mode triggers classifier bypass
+        persona = resolve_persona(project, "PM: Project", is_dm=False)
+        assert persona == PersonaType.PROJECT_MANAGER
 
     def test_configured_dev_group_should_bypass(self):
         project = {
@@ -227,10 +228,10 @@ class TestClassifierBypass:
                 "groups": {"Dev: Project": {"persona": "developer"}},
             }
         }
-        mode = resolve_chat_mode(project, "Dev: Project", is_dm=False)
-        assert mode == "dev"  # dev mode triggers classifier bypass
+        persona = resolve_persona(project, "Dev: Project", is_dm=False)
+        assert persona == PersonaType.DEVELOPER
 
     def test_unconfigured_group_should_not_bypass(self):
         """Groups with no config should NOT bypass -- classifier runs."""
-        mode = resolve_chat_mode(None, "Random Group", is_dm=False)
-        assert mode is None  # None means classifier should run
+        persona = resolve_persona(None, "Random Group", is_dm=False)
+        assert persona is None  # None means classifier should run

@@ -6,7 +6,7 @@ equal to their string values (e.g., SessionType.CHAT == "chat" is True). This me
 no Redis data migration is needed -- existing string values match enum members.
 
 Usage:
-    from config.enums import SessionType, PersonaType, ClassificationType, ChatMode
+    from config.enums import SessionType, PersonaType, ClassificationType
 
     if session.session_type == SessionType.CHAT:
         ...
@@ -35,14 +35,3 @@ class ClassificationType(StrEnum):
 
     SDLC = "sdlc"
     QUESTION = "question"
-
-
-class ChatMode(StrEnum):
-    """Resolved chat mode from config, title prefix, or DM detection.
-
-    Maps 1:1 with the return values of resolve_chat_mode().
-    """
-
-    QA = "qa"
-    PM = "pm"
-    DEV = "dev"

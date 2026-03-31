@@ -1,4 +1,4 @@
-"""Tests for the intent classifier (Q&A vs work routing).
+"""Tests for the intent classifier (Teammate vs work routing).
 
 Tests the parsing logic, threshold behavior, and golden examples.
 The actual Haiku API call is mocked for unit tests.
@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agent.intent_classifier import (
-    QA_CONFIDENCE_THRESHOLD,
+    TEAMMATE_CONFIDENCE_THRESHOLD,
     IntentResult,
     _parse_classifier_response,
     classify_intent,
@@ -20,33 +20,35 @@ from agent.intent_classifier import (
 
 
 class TestIntentResult:
-    def test_qa_high_confidence(self):
-        r = IntentResult(intent="qa", confidence=0.95, reasoning="asking for info")
-        assert r.is_qa is True
+    def test_teammate_high_confidence(self):
+        r = IntentResult(intent="teammate", confidence=0.95, reasoning="asking for info")
+        assert r.is_teammate is True
         assert r.is_work is False
 
-    def test_qa_low_confidence_defaults_to_work(self):
-        r = IntentResult(intent="qa", confidence=0.85, reasoning="ambiguous")
-        assert r.is_qa is False
+    def test_teammate_low_confidence_defaults_to_work(self):
+        r = IntentResult(intent="teammate", confidence=0.85, reasoning="ambiguous")
+        assert r.is_teammate is False
         assert r.is_work is True
 
     def test_work_intent(self):
         r = IntentResult(intent="work", confidence=0.98, reasoning="action request")
-        assert r.is_qa is False
+        assert r.is_teammate is False
         assert r.is_work is True
 
     def test_threshold_boundary(self):
-        # Exactly at threshold: not Q&A (needs to exceed)
-        r = IntentResult(intent="qa", confidence=QA_CONFIDENCE_THRESHOLD, reasoning="boundary")
-        assert r.is_qa is True
+        # Exactly at threshold: is teammate (needs to meet or exceed)
+        r = IntentResult(
+            intent="teammate", confidence=TEAMMATE_CONFIDENCE_THRESHOLD, reasoning="boundary"
+        )
+        assert r.is_teammate is True
 
         below = IntentResult(
-            intent="qa", confidence=QA_CONFIDENCE_THRESHOLD - 0.01, reasoning="below"
+            intent="teammate", confidence=TEAMMATE_CONFIDENCE_THRESHOLD - 0.01, reasoning="below"
         )
-        assert below.is_qa is False
+        assert below.is_teammate is False
 
     def test_frozen_dataclass(self):
-        r = IntentResult(intent="qa", confidence=0.95, reasoning="test")
+        r = IntentResult(intent="teammate", confidence=0.95, reasoning="test")
         with pytest.raises(AttributeError):
             r.intent = "work"
 
@@ -55,9 +57,9 @@ class TestIntentResult:
 
 
 class TestParseClassifierResponse:
-    def test_valid_qa_response(self):
-        r = _parse_classifier_response("qa 0.97 User is asking about architecture")
-        assert r.intent == "qa"
+    def test_valid_teammate_response(self):
+        r = _parse_classifier_response("teammate 0.97 User is asking about architecture")
+        assert r.intent == "teammate"
         assert r.confidence == 0.97
         assert "architecture" in r.reasoning
 
@@ -67,8 +69,8 @@ class TestParseClassifierResponse:
         assert r.confidence == 0.99
 
     def test_case_insensitive_intent(self):
-        r = _parse_classifier_response("QA 0.95 question about system")
-        assert r.intent == "qa"
+        r = _parse_classifier_response("TEAMMATE 0.95 question about system")
+        assert r.intent == "teammate"
 
     def test_no_reasoning(self):
         r = _parse_classifier_response("work 0.88")
@@ -87,7 +89,7 @@ class TestParseClassifierResponse:
         assert r.confidence == 0.0
 
     def test_bad_confidence(self):
-        r = _parse_classifier_response("qa abc some reasoning")
+        r = _parse_classifier_response("teammate abc some reasoning")
         assert r.intent == "work"
         assert r.confidence == 0.0
 
@@ -97,8 +99,8 @@ class TestParseClassifierResponse:
         assert r.confidence == 0.0
 
     def test_whitespace_handling(self):
-        r = _parse_classifier_response("  qa  0.96  asking about feature  ")
-        assert r.intent == "qa"
+        r = _parse_classifier_response("  teammate  0.96  asking about feature  ")
+        assert r.intent == "teammate"
         assert r.confidence == 0.96
 
 
@@ -115,17 +117,17 @@ def _make_mock_response(text: str):
 
 
 class TestClassifyIntent:
-    def test_qa_classification(self):
+    def test_teammate_classification(self):
         with patch("utils.api_keys.get_anthropic_api_key", return_value="test-key"):
             mock_client = MagicMock()
             mock_client.messages.create.return_value = _make_mock_response(
-                "qa 0.97 User is asking for information"
+                "teammate 0.97 User is asking for information"
             )
             with patch("anthropic.Anthropic", return_value=mock_client):
                 result = asyncio.run(classify_intent("How does the bridge work?"))
-                assert result.intent == "qa"
+                assert result.intent == "teammate"
                 assert result.confidence == 0.97
-                assert result.is_qa is True
+                assert result.is_teammate is True
 
     def test_work_classification(self):
         with patch("utils.api_keys.get_anthropic_api_key", return_value="test-key"):
@@ -156,7 +158,7 @@ class TestClassifyIntent:
         with patch("utils.api_keys.get_anthropic_api_key", return_value="test-key"):
             mock_client = MagicMock()
             mock_client.messages.create.return_value = _make_mock_response(
-                "qa 0.95 follow-up question"
+                "teammate 0.95 follow-up question"
             )
             with patch("anthropic.Anthropic", return_value=mock_client):
                 result = asyncio.run(
@@ -170,7 +172,7 @@ class TestClassifyIntent:
                         },
                     )
                 )
-                assert result.intent == "qa"
+                assert result.intent == "teammate"
                 # Verify context was included in the API call
                 call_args = mock_client.messages.create.call_args
                 user_msg = call_args[1]["messages"][0]["content"]
@@ -181,22 +183,22 @@ class TestClassifyIntent:
 # === Golden Examples (parser-level, no API needed) ===
 
 
-GOLDEN_QA_EXAMPLES = [
-    ("qa 0.98", "What's the status of feature X?"),
-    ("qa 0.97", "How does the bridge work?"),
-    ("qa 0.99", "Where is the observer prompt?"),
-    ("qa 0.92", "What's broken in the bridge?"),
-    ("qa 0.95", "Show me the recent PRs"),
-    ("qa 0.93", "What tests are failing?"),
-    ("qa 0.96", "Who worked on the memory system?"),
-    ("qa 0.97", "When was the last deployment?"),
-    ("qa 0.98", "Explain the nudge loop"),
-    ("qa 0.95", "What's in the .env file?"),
-    ("qa 0.96", "How many open issues do we have?"),
-    ("qa 0.97", "What model does the classifier use?"),
-    ("qa 0.94", "Can you check if the tests pass?"),
-    ("qa 0.93", "What's the current branch?"),
-    ("qa 0.96", "List the MCP servers"),
+GOLDEN_TEAMMATE_EXAMPLES = [
+    ("teammate 0.98", "What's the status of feature X?"),
+    ("teammate 0.97", "How does the bridge work?"),
+    ("teammate 0.99", "Where is the observer prompt?"),
+    ("teammate 0.92", "What's broken in the bridge?"),
+    ("teammate 0.95", "Show me the recent PRs"),
+    ("teammate 0.93", "What tests are failing?"),
+    ("teammate 0.96", "Who worked on the memory system?"),
+    ("teammate 0.97", "When was the last deployment?"),
+    ("teammate 0.98", "Explain the nudge loop"),
+    ("teammate 0.95", "What's in the .env file?"),
+    ("teammate 0.96", "How many open issues do we have?"),
+    ("teammate 0.97", "What model does the classifier use?"),
+    ("teammate 0.94", "Can you check if the tests pass?"),
+    ("teammate 0.93", "What's the current branch?"),
+    ("teammate 0.96", "List the MCP servers"),
 ]
 
 GOLDEN_WORK_EXAMPLES = [
@@ -219,10 +221,10 @@ GOLDEN_WORK_EXAMPLES = [
 
 
 class TestGoldenExamples:
-    @pytest.mark.parametrize("response,description", GOLDEN_QA_EXAMPLES)
-    def test_qa_examples_parse_correctly(self, response, description):
+    @pytest.mark.parametrize("response,description", GOLDEN_TEAMMATE_EXAMPLES)
+    def test_teammate_examples_parse_correctly(self, response, description):
         result = _parse_classifier_response(response)
-        assert result.intent == "qa", f"Expected qa for: {description}"
+        assert result.intent == "teammate", f"Expected teammate for: {description}"
         assert result.confidence >= 0.90, f"Expected high confidence for: {description}"
 
     @pytest.mark.parametrize("response,description", GOLDEN_WORK_EXAMPLES)

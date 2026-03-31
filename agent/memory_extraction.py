@@ -430,9 +430,8 @@ async def detect_outcomes_async(
 
         # Feed into ObservationProtocol
         try:
-            from popoto import ObservationProtocol
-
             from models.memory import Memory
+            from popoto import ObservationProtocol
 
             # Load memory instances by key
             memories = []
