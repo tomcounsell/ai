@@ -376,6 +376,243 @@ class TestBridgeSteeringCheck:
             assert caught_generic is True
 
 
+class TestPendingSessionSteering:
+    """Tests for steering into pending sessions within the merge window (#619)."""
+
+    def _create_session(self, session_id, status, chat_id="test_chat", created_at=None):
+        """Create an AgentSession with the given status."""
+        from models.agent_session import AgentSession
+
+        session = AgentSession(
+            session_id=session_id,
+            project_key="test",
+            status=status,
+            chat_id=chat_id,
+            message_text="test message",
+            created_at=created_at or time.time(),
+        )
+        session.save()
+        return session
+
+    def test_pending_session_within_window_receives_steering(self):
+        """A pending session within 7s should accept steering messages."""
+        from bridge.telegram_bridge import PENDING_MERGE_WINDOW_SECONDS
+
+        session_id = "test_pending_steer_recent"
+        self._create_session(session_id, "pending", created_at=time.time())
+
+        # Simulate the bridge logic: check age and push steering
+        from models.agent_session import AgentSession
+
+        pending_sessions = AgentSession.query.filter(
+            session_id=session_id, status="pending"
+        )
+        assert len(pending_sessions) > 0
+        pending_session = pending_sessions[0]
+        age = time.time() - (pending_session.created_at or 0)
+        assert age <= PENDING_MERGE_WINDOW_SECONDS
+
+        push_steering_message(session_id, "follow-up context", "Tom")
+        msg = pop_steering_message(session_id)
+        assert msg is not None
+        assert msg["text"] == "follow-up context"
+
+    def test_pending_session_outside_window_not_steered(self):
+        """A pending session older than 7s should NOT be steered into."""
+        from bridge.telegram_bridge import PENDING_MERGE_WINDOW_SECONDS
+
+        session_id = "test_pending_steer_old"
+        # Create with timestamp 10s in the past
+        self._create_session(session_id, "pending", created_at=time.time() - 10)
+
+        from models.agent_session import AgentSession
+
+        pending_sessions = AgentSession.query.filter(
+            session_id=session_id, status="pending"
+        )
+        assert len(pending_sessions) > 0
+        pending_session = pending_sessions[0]
+        age = time.time() - (pending_session.created_at or 0)
+        assert age > PENDING_MERGE_WINDOW_SECONDS
+
+    def test_pending_merge_window_constant_is_7(self):
+        """The merge window constant should be 7 seconds."""
+        from bridge.telegram_bridge import PENDING_MERGE_WINDOW_SECONDS
+
+        assert PENDING_MERGE_WINDOW_SECONDS == 7
+
+    def test_multiple_steering_messages_into_pending(self):
+        """Multiple follow-up messages should all queue into a pending session."""
+        session_id = "test_pending_multi_steer"
+        self._create_session(session_id, "pending", created_at=time.time())
+
+        push_steering_message(session_id, "first follow-up", "Tom")
+        push_steering_message(session_id, "second follow-up", "Tom")
+        push_steering_message(session_id, "third follow-up", "Tom")
+
+        messages = pop_all_steering_messages(session_id)
+        assert len(messages) == 3
+        assert messages[0]["text"] == "first follow-up"
+        assert messages[1]["text"] == "second follow-up"
+        assert messages[2]["text"] == "third follow-up"
+
+    def test_intake_classifier_includes_recent_pending(self):
+        """The intake classifier status loop should include recent pending sessions."""
+        from bridge.telegram_bridge import PENDING_MERGE_WINDOW_SECONDS
+        from models.agent_session import AgentSession
+
+        chat_id = "test_intake_pending_chat"
+        session_id = "test_intake_pending_session"
+        self._create_session(
+            session_id, "pending", chat_id=chat_id, created_at=time.time()
+        )
+
+        # Replicate the intake classifier logic from the bridge
+        active_sessions = []
+        for check_status in ("running", "active", "dormant"):
+            sessions = AgentSession.query.filter(
+                chat_id=chat_id, status=check_status
+            )
+            if sessions:
+                active_sessions.extend(sessions)
+
+        # Also include recent pending sessions within the merge window
+        pending_sessions = AgentSession.query.filter(
+            chat_id=chat_id, status="pending"
+        )
+        if pending_sessions:
+            now_ts = time.time()
+            for ps in pending_sessions:
+                age = now_ts - (ps.created_at or 0)
+                if age <= PENDING_MERGE_WINDOW_SECONDS:
+                    active_sessions.append(ps)
+
+        assert len(active_sessions) == 1
+        assert active_sessions[0].session_id == session_id
+        assert active_sessions[0].status == "pending"
+
+    def test_intake_classifier_excludes_old_pending(self):
+        """The intake classifier should NOT include pending sessions older than 7s."""
+        from bridge.telegram_bridge import PENDING_MERGE_WINDOW_SECONDS
+        from models.agent_session import AgentSession
+
+        chat_id = "test_intake_old_pending_chat"
+        session_id = "test_intake_old_pending_session"
+        self._create_session(
+            session_id, "pending", chat_id=chat_id, created_at=time.time() - 10
+        )
+
+        active_sessions = []
+        for check_status in ("running", "active", "dormant"):
+            sessions = AgentSession.query.filter(
+                chat_id=chat_id, status=check_status
+            )
+            if sessions:
+                active_sessions.extend(sessions)
+
+        pending_sessions = AgentSession.query.filter(
+            chat_id=chat_id, status="pending"
+        )
+        if pending_sessions:
+            now_ts = time.time()
+            for ps in pending_sessions:
+                age = now_ts - (ps.created_at or 0)
+                if age <= PENDING_MERGE_WINDOW_SECONDS:
+                    active_sessions.append(ps)
+
+        assert len(active_sessions) == 0
+
+
+class TestDrainOnStart:
+    """Tests for the drain-on-start logic in _pop_job (#619).
+
+    Uses AgentSession.create() (sync) + _pop_job_with_fallback() which has a
+    sync fallback that avoids the async_filter index visibility race in tests.
+    """
+
+    def _create_pending_job(self, session_id, chat_id="test_chat", message_text="hello"):
+        """Create a pending AgentSession (job) using the same pattern as test_job_queue_race."""
+        from models.agent_session import AgentSession
+
+        return AgentSession.create(
+            session_id=session_id,
+            project_key="test",
+            status="pending",
+            priority="normal",
+            chat_id=chat_id,
+            message_text=message_text,
+            created_at=time.time(),
+            working_dir="/tmp/test",
+            sender_name="Test",
+            telegram_message_id=1,
+        )
+
+    @pytest.mark.asyncio
+    async def test_drain_prepends_steering_to_message_text(self):
+        """Steering messages queued during pending should be prepended on start."""
+        from agent.job_queue import _pop_job_with_fallback
+
+        session_id = "test_drain_prepend"
+        chat_id = "test_drain_chat_1"
+        self._create_pending_job(session_id, chat_id=chat_id, message_text="original message")
+
+        # Simulate follow-up messages arriving during pending window
+        push_steering_message(session_id, "follow-up context", "Tom")
+        push_steering_message(session_id, "another detail", "Tom")
+
+        # Pop the job (triggers drain-on-start)
+        job = await _pop_job_with_fallback(chat_id)
+        assert job is not None
+        assert "original message" in job.message_text
+        assert "follow-up context" in job.message_text
+        assert "another detail" in job.message_text
+
+    @pytest.mark.asyncio
+    async def test_drain_no_steering_messages_unchanged(self):
+        """If no steering messages, message_text should be unchanged."""
+        from agent.job_queue import _pop_job_with_fallback
+
+        session_id = "test_drain_empty"
+        chat_id = "test_drain_chat_2"
+        self._create_pending_job(session_id, chat_id=chat_id, message_text="just this")
+
+        job = await _pop_job_with_fallback(chat_id)
+        assert job is not None
+        assert job.message_text == "just this"
+
+    @pytest.mark.asyncio
+    async def test_drain_empty_text_steering_skipped(self):
+        """Steering messages with empty text should be skipped."""
+        from agent.job_queue import _pop_job_with_fallback
+
+        session_id = "test_drain_empty_text"
+        chat_id = "test_drain_chat_3"
+        self._create_pending_job(session_id, chat_id=chat_id, message_text="original")
+
+        push_steering_message(session_id, "  ", "Tom")  # whitespace-only
+
+        job = await _pop_job_with_fallback(chat_id)
+        assert job is not None
+        assert job.message_text == "original"
+
+    @pytest.mark.asyncio
+    async def test_drain_failure_does_not_crash_job(self):
+        """If drain fails, the job should still start successfully."""
+        from agent.job_queue import _pop_job_with_fallback
+
+        session_id = "test_drain_failure"
+        chat_id = "test_drain_chat_4"
+        self._create_pending_job(session_id, chat_id=chat_id, message_text="still works")
+
+        with patch(
+            "agent.steering.pop_all_steering_messages",
+            side_effect=ConnectionError("Redis down"),
+        ):
+            job = await _pop_job_with_fallback(chat_id)
+            assert job is not None
+            assert job.message_text == "still works"
+
+
 class TestWatchdogSteering:
     """Tests for steering integration in the watchdog hook."""
 

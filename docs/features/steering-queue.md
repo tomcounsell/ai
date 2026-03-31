@@ -51,6 +51,12 @@ User replies to Valor's "acknowledged" message → Bridge checks if session is a
 
 User sends new mention (not a reply) → Bridge sees active session for project → Enqueue as normal job → Ack: "Queued — will start after current task finishes"
 
+**Pending session merge (#619):**
+
+User sends two messages in quick succession (< 7s) → First message enqueues as pending job → Second message arrives before worker pops the first → Bridge detects pending session within `PENDING_MERGE_WINDOW_SECONDS` (7s) → Push to `steering:{session_id}` Redis list → Ack: "Adding to current task" → When worker pops the job, drain-on-start logic calls `pop_all_steering_messages()` and prepends follow-up text to `message_text` → Agent sees the combined message on first run
+
+This covers both the reply-to fast path (direct Telegram replies to pending sessions) and the intake classifier path (non-reply follow-ups detected by Haiku). The 7s window prevents stale pending sessions from absorbing unrelated messages.
+
 **Abort:**
 
 User replies "stop" or "cancel" → Bridge pushes abort signal to steering queue → Watchdog picks up → SDK `client.interrupt()` → Session marked as aborted → Ack: "Stopped"

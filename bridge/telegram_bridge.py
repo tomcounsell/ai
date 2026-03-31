@@ -106,6 +106,11 @@ from bridge.routing import (  # noqa: E402
     should_respond_sync,  # noqa: F401
 )
 from config.enums import PersonaType, SessionType  # noqa: E402
+
+# Maximum age (seconds) of a pending session that can absorb follow-up messages.
+# Messages arriving within this window attach to the pending session via the
+# steering queue instead of spawning a competing session. See issue #619.
+PENDING_MERGE_WINDOW_SECONDS = 7
 from tools.link_analysis import (  # noqa: E402
     extract_urls,
     extract_youtube_urls,
@@ -1158,15 +1163,47 @@ async def main():
                     return
                 else:
                     # No running/active session found -- check for pending (race window)
+                    # If within PENDING_MERGE_WINDOW_SECONDS, steer into it (#619)
                     pending_sessions = AgentSession.query.filter(
                         session_id=session_id, status="pending"
                     )
                     if pending_sessions:
-                        logger.info(
-                            f"[{project_name}] Steering check found session {session_id} "
-                            f"in 'pending' status -- message will queue normally and be "
-                            f"consumed when the job starts via PostToolUse hook"
-                        )
+                        pending_session = pending_sessions[0]
+                        age = time.time() - (pending_session.created_at or 0)
+                        if age <= PENDING_MERGE_WINDOW_SECONDS:
+                            # Recent pending session: push to steering queue
+                            from agent.steering import ABORT_KEYWORDS
+
+                            is_abort = clean_text.strip().lower() in ABORT_KEYWORDS
+                            push_steering_message(
+                                session_id,
+                                clean_text,
+                                sender_name,
+                                is_abort=is_abort,
+                            )
+                            ack_text = (
+                                "Stopping current task."
+                                if is_abort
+                                else "Adding to current task"
+                            )
+                            from bridge.markdown import send_markdown
+
+                            await send_markdown(
+                                client, event.chat_id, ack_text, reply_to=message.id
+                            )
+                            logger.info(
+                                f"[{project_name}] Steered message into "
+                                f"pending session {session_id} "
+                                f"(age={age:.1f}s <= {PENDING_MERGE_WINDOW_SECONDS}s)"
+                            )
+                            return
+                        else:
+                            logger.info(
+                                f"[{project_name}] Steering check found session {session_id} "
+                                f"in 'pending' status but too old "
+                                f"(age={age:.1f}s > {PENDING_MERGE_WINDOW_SECONDS}s) "
+                                f"-- message will queue normally"
+                            )
             except (ConnectionError, OSError) as e:
                 # Redis/DB connection errors -- log at ERROR with traceback
                 logger.error(
@@ -1190,7 +1227,7 @@ async def main():
             try:
                 from models.agent_session import AgentSession
 
-                # Find active/running/dormant sessions in this chat
+                # Find active/running/dormant/pending sessions in this chat
                 active_sessions = []
                 for check_status in ("running", "active", "dormant"):
                     sessions = AgentSession.query.filter(
@@ -1198,6 +1235,17 @@ async def main():
                     )
                     if sessions:
                         active_sessions.extend(sessions)
+
+                # Also include recent pending sessions within the merge window (#619)
+                pending_sessions = AgentSession.query.filter(
+                    chat_id=telegram_chat_id, status="pending"
+                )
+                if pending_sessions:
+                    now_ts = time.time()
+                    for ps in pending_sessions:
+                        age = now_ts - (ps.created_at or 0)
+                        if age <= PENDING_MERGE_WINDOW_SECONDS:
+                            active_sessions.append(ps)
 
                 if active_sessions:
                     # Pick the most recent session (by last_activity or created_at)
@@ -1230,7 +1278,7 @@ async def main():
                         # Re-check session status (Race 1 mitigation: session may
                         # have completed during classification)
                         fresh_session = None
-                        for check_status in ("running", "active"):
+                        for check_status in ("running", "active", "pending"):
                             sessions = AgentSession.query.filter(
                                 session_id=target_session.session_id,
                                 status=check_status,

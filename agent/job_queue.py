@@ -697,6 +697,34 @@ async def _pop_job(chat_id: str) -> Job | None:
     except Exception as e:
         logger.warning(f"Failed to log lifecycle transition for job {chosen.job_id}: {e}")
 
+    # Drain any steering messages queued during the pending window (#619).
+    # Follow-up messages arriving while the job was pending get pushed to
+    # the steering queue by the bridge. We drain them here and prepend to
+    # message_text so the agent sees the combined message on first run.
+    try:
+        from agent.steering import pop_all_steering_messages
+
+        steering_msgs = pop_all_steering_messages(chosen.session_id)
+        if steering_msgs:
+            extra_texts = [
+                m["text"] for m in steering_msgs if m.get("text", "").strip()
+            ]
+            if extra_texts:
+                prepend = "\n\n".join(extra_texts)
+                original = chosen.message_text or ""
+                chosen.message_text = f"{original}\n\n{prepend}" if original else prepend
+                await chosen.async_save()
+                logger.info(
+                    f"[chat:{chat_id}] Drained {len(extra_texts)} steering message(s) "
+                    f"into job {chosen.job_id} message_text"
+                )
+    except Exception as e:
+        # Drain failure must not crash job start
+        logger.warning(
+            f"[chat:{chat_id}] Failed to drain steering messages for job "
+            f"{chosen.job_id} (non-fatal): {e}"
+        )
+
     return Job(chosen)
 
 
@@ -752,6 +780,30 @@ async def _pop_job_with_fallback(chat_id: str) -> "Job | None":
             chosen.log_lifecycle_transition("running", "worker picked up job (sync fallback)")
         except Exception as e:
             logger.warning(f"Failed to log lifecycle transition for job {chosen.job_id}: {e}")
+
+        # Drain steering messages (same logic as _pop_job) (#619)
+        try:
+            from agent.steering import pop_all_steering_messages
+
+            steering_msgs = pop_all_steering_messages(chosen.session_id)
+            if steering_msgs:
+                extra_texts = [
+                    m["text"] for m in steering_msgs if m.get("text", "").strip()
+                ]
+                if extra_texts:
+                    prepend = "\n\n".join(extra_texts)
+                    original = chosen.message_text or ""
+                    chosen.message_text = f"{original}\n\n{prepend}" if original else prepend
+                    await chosen.async_save()
+                    logger.info(
+                        f"[chat:{chat_id}] Sync fallback: drained {len(extra_texts)} "
+                        f"steering message(s) into job {chosen.job_id} message_text"
+                    )
+        except Exception as e:
+            logger.warning(
+                f"[chat:{chat_id}] Sync fallback: failed to drain steering messages "
+                f"for job {chosen.job_id} (non-fatal): {e}"
+            )
 
         return Job(chosen)
     except Exception:
