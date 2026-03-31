@@ -18,8 +18,9 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import UTC
 
-from tools.memory_search import forget, inspect, save, search
+from tools.memory_search import forget, inspect, outcome_stats, save, search
 
 
 def cmd_search(args: argparse.Namespace) -> int:
@@ -30,6 +31,7 @@ def cmd_search(args: argparse.Namespace) -> int:
         limit=args.limit,
         category=getattr(args, "category", None),
         tag=getattr(args, "tag", None),
+        min_act_rate=getattr(args, "act_rate", None),
     )
 
     if result.get("error"):
@@ -129,6 +131,28 @@ def cmd_inspect(args: argparse.Namespace) -> int:
             print(f"  Dismissal count: {meta['dismissal_count']}")
         if meta.get("last_outcome"):
             print(f"  Last outcome: {meta['last_outcome']}")
+        outcome_history = meta.get("outcome_history", [])
+        if outcome_history:
+            from datetime import datetime
+
+            from agent.memory_extraction import compute_act_rate
+
+            act_rate = compute_act_rate(outcome_history)
+            rate_str = f"{act_rate:.0%}" if act_rate is not None else "N/A"
+            print(f"  Act rate: {rate_str} ({len(outcome_history)} outcomes)")
+            print("  Outcome history:")
+            print(f"    {'Date':<20} {'Outcome':<12} {'Reasoning'}")
+            print(f"    {'-' * 20} {'-' * 12} {'-' * 40}")
+            for entry in outcome_history:
+                ts = entry.get("ts", 0)
+                dt_str = (
+                    datetime.fromtimestamp(ts, tz=UTC).strftime("%Y-%m-%d %H:%M")
+                    if ts
+                    else "unknown"
+                )
+                outcome_val = entry.get("outcome", "?")
+                reasoning_val = entry.get("reasoning", "")[:60]
+                print(f"    {dt_str:<20} {outcome_val:<12} {reasoning_val}")
     elif args.stats:
         # Aggregate stats
         print(f"Memory stats for project '{result.get('project_key', '')}':")
@@ -140,6 +164,41 @@ def cmd_inspect(args: argparse.Namespace) -> int:
                 print(f"    {src}: {count}")
         avg_conf = result.get("avg_confidence", 0.0)
         print(f"  Avg confidence: {avg_conf:.2f}")
+
+    return 0
+
+
+def cmd_stats(args: argparse.Namespace) -> int:
+    """Show outcome statistics."""
+    result = outcome_stats(project_key=args.project)
+
+    if args.json:
+        print(json.dumps(result, indent=2, default=str))
+        return 0
+
+    if "error" in result:
+        print(f"Error: {result['error']}", file=sys.stderr)
+        return 1
+
+    project = result.get("project_key", "")
+    total = result.get("total_with_history", 0)
+    avg_rate = result.get("avg_act_rate", 0.0)
+
+    print(f"Outcome statistics for project '{project}':")
+    print(f"  Memories with outcome history: {total}")
+    print(f"  Average act rate: {avg_rate:.1%}")
+
+    top_acted = result.get("top_acted", [])
+    if top_acted:
+        print()
+        print("  Top acted-on memories:")
+        for mem in top_acted:
+            content = mem.get("content", "")
+            rate = mem.get("act_rate", 0.0)
+            total_outcomes = mem.get("total_outcomes", 0)
+            mid = mem.get("memory_id", "")
+            print(f"    [{rate:.0%} over {total_outcomes}] {content}")
+            print(f"      id={mid}")
 
     return 0
 
@@ -195,6 +254,12 @@ def main() -> int:
         help="Filter by metadata category",
     )
     search_parser.add_argument("--tag", "-t", help="Filter by metadata tag")
+    search_parser.add_argument(
+        "--act-rate",
+        type=float,
+        default=None,
+        help="Filter to memories with act_rate >= threshold (0.0-1.0)",
+    )
 
     # save command
     save_parser = subparsers.add_parser("save", help="Save a new memory")
@@ -223,6 +288,11 @@ def main() -> int:
     inspect_parser.add_argument("--project", "-p", help="Project key (default: from env)")
     inspect_parser.add_argument("--json", action="store_true", help="Output as JSON")
 
+    # stats command
+    stats_parser = subparsers.add_parser("stats", help="Show outcome statistics")
+    stats_parser.add_argument("--project", "-p", help="Project key (default: from env)")
+    stats_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
     # forget command
     forget_parser = subparsers.add_parser("forget", help="Delete a memory")
     forget_parser.add_argument("--id", required=True, help="Memory ID to delete")
@@ -243,6 +313,7 @@ def main() -> int:
         "search": cmd_search,
         "save": cmd_save,
         "inspect": cmd_inspect,
+        "stats": cmd_stats,
         "forget": cmd_forget,
     }
 

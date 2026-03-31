@@ -66,6 +66,9 @@ DISMISSAL_DECAY_THRESHOLD = 3  # consecutive dismissals before importance decays
 DISMISSAL_IMPORTANCE_DECAY = 0.7  # multiply importance by this on threshold breach
 MIN_IMPORTANCE_FLOOR = 0.2  # never decay below this
 
+# Outcome history -- how many outcome entries to keep per memory
+MAX_OUTCOME_HISTORY = 10
+
 # Category recall weights -- post-fusion re-ranking multipliers for memory recall.
 # After RRF fusion returns scored results, each result's effective score is
 # multiplied by the weight for its category before re-sorting. Higher weight = more
