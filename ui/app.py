@@ -41,7 +41,7 @@ def _filter_format_timestamp(ts: float | None) -> str:
         mins = int(diff.total_seconds() / 60)
         return f"{mins}m ago"
     if diff.total_seconds() < 86400 and dt.date() == now.date():
-        return f"today {dt.strftime('%H:%M')}"
+        return dt.strftime("%H:%M")
     if dt.date() == (now - datetime.timedelta(days=1)).date():
         return f"yesterday {dt.strftime('%H:%M')}"
     if diff.days < 7:
