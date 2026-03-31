@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import logging.handlers
 import os
 import re
 import shutil
@@ -74,6 +75,18 @@ logger = logging.getLogger("reflections")
 PROJECT_ROOT = Path(__file__).parent.parent
 AI_ROOT = PROJECT_ROOT  # Preserved alias; do not reassign in production code
 LOGS_DIR = PROJECT_ROOT / "logs"
+
+# Add rotating file handler for reflections log
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+_reflections_file_handler = logging.handlers.RotatingFileHandler(
+    LOGS_DIR / "reflections.log",
+    maxBytes=10 * 1024 * 1024,  # 10MB
+    backupCount=5,
+)
+_reflections_file_handler.setFormatter(
+    logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+)
+logger.addHandler(_reflections_file_handler)
 REFLECTIONS_DIR = LOGS_DIR / "reflections"
 DATA_DIR = PROJECT_ROOT / "data"
 SESSIONS_DIR = LOGS_DIR / "sessions"
@@ -1958,9 +1971,8 @@ class ReflectionRunner:
         """
         import time as _time
 
-        from models.cyclic_episode import CyclicEpisode
-
         from models.agent_session import AgentSession
+        from models.cyclic_episode import CyclicEpisode
         from scripts.fingerprint_classifier import classify_session
 
         cutoff = _time.time() - 86400  # past 24 hours
@@ -2819,6 +2831,16 @@ async def main() -> None:
         runner.state.dry_run = True
         logger.info("DRY RUN mode — no side effects will be triggered")
     await runner.run()
+
+    # Clean up old session log directories (7+ days old)
+    try:
+        from bridge.session_logs import cleanup_old_snapshots
+
+        removed = cleanup_old_snapshots()
+        if removed:
+            logger.info("Session log cleanup: removed %d old session directories", removed)
+    except Exception:
+        logger.exception("Session log cleanup failed (non-fatal)")
 
 
 if __name__ == "__main__":

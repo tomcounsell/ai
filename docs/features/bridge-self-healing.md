@@ -100,9 +100,11 @@ Log rotation uses a dual-mechanism approach: Python-managed rotation for applica
 
 **Python-managed logs** (auto-rotate on write via `RotatingFileHandler`, 10MB max, 5 backups):
 - `bridge.log` — configured in `bridge/telegram_bridge.py`
+- `watchdog.log` — configured in `monitoring/bridge_watchdog.py`
+- `reflections.log` — configured in `scripts/reflections.py`
 
 **Shell-rotated logs** (`rotate_log()` in `valor-service.sh`, runs at bridge startup, 10MB max, 3 backups):
-- `bridge.error.log`, `watchdog.log`, `reflections.log`, `reflections_error.log`
+- `bridge.error.log`, `reflections_error.log`
 
 **newsyslog safety net** (`config/newsyslog.valor.conf`, installed to `/etc/newsyslog.d/valor.conf`): Covers all 5 launchd-managed logs with hourly checks, 10MB max, 5 bzip2-compressed backups. Uses the `N` flag (no signal) because launchd holds file descriptors open. Acts as a backup if the bridge doesn't restart for extended periods.
 
