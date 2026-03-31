@@ -781,6 +781,30 @@ async def _pop_job_with_fallback(chat_id: str) -> "Job | None":
         except Exception as e:
             logger.warning(f"Failed to log lifecycle transition for job {chosen.job_id}: {e}")
 
+        # Drain steering messages (same logic as _pop_job) (#619)
+        try:
+            from agent.steering import pop_all_steering_messages
+
+            steering_msgs = pop_all_steering_messages(chosen.session_id)
+            if steering_msgs:
+                extra_texts = [
+                    m["text"] for m in steering_msgs if m.get("text", "").strip()
+                ]
+                if extra_texts:
+                    prepend = "\n\n".join(extra_texts)
+                    original = chosen.message_text or ""
+                    chosen.message_text = f"{original}\n\n{prepend}" if original else prepend
+                    await chosen.async_save()
+                    logger.info(
+                        f"[chat:{chat_id}] Sync fallback: drained {len(extra_texts)} "
+                        f"steering message(s) into job {chosen.job_id} message_text"
+                    )
+        except Exception as e:
+            logger.warning(
+                f"[chat:{chat_id}] Sync fallback: failed to drain steering messages "
+                f"for job {chosen.job_id} (non-fatal): {e}"
+            )
+
         return Job(chosen)
     except Exception:
         logger.exception(f"[chat:{chat_id}] Sync fallback query failed, falling through to exit")
