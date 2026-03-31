@@ -364,6 +364,16 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             "Check 'machine' field in ~/Desktop/Valor/projects.json"
         )
 
+    # Step 4.5: Telegram auth check (critical — bridge is useless without it)
+    if config.do_service_restart:
+        log("Checking Telegram session...", v)
+        telegram_check = verify.check_telegram_session(project_dir)
+        if telegram_check.available:
+            log(f"  Telegram: {telegram_check.version or 'OK'}", v)
+        else:
+            log(f"ERROR: Telegram session not authorized: {telegram_check.error}", v, always=True)
+            result.errors.append(f"Telegram auth: {telegram_check.error}")
+
     # Step 5: Service management
     if config.do_service_restart:
         log("Installing/restarting services...", v)
