@@ -264,7 +264,7 @@ Add a post-pull hook or documented step: `python -c "from models.agent_session i
 - Update `_JOB_FIELDS` list entries: `parent_job_id` -> `parent_agent_session_id`, `stable_job_id` -> `stable_agent_session_id`
 - Update `_push_job` parameter `parent_job_id` -> `parent_agent_session_id`
 - Update all `.job_id` attribute access across the entire codebase
-- Document Redis flush requirement in a new section of `docs/deployment.md`
+- Create `docs/deployment.md` with Redis flush requirement documentation for this rename
 
 ### 2. Module and File Renames (Phase 2)
 - **Task ID**: build-module-renames
@@ -386,13 +386,13 @@ Add a post-pull hook or documented step: `python -c "from models.agent_session i
 
 | Severity | Critics | Finding | Resolution |
 |----------|---------|---------|------------|
-| BLOCKER | Skeptic, Operator | Task 1 references `docs/deployment.md` for Redis flush docs but that file does not exist | |
-| CONCERN | Operator | `.mcp.json` update mentioned in Agent Integration and Task 4 is a no-op (no job references exist) -- creates builder confusion | |
-| CONCERN | Skeptic | Plan lists 10 test files but issue #608 recon says 12 -- 2 may be missing from Test Impact | |
-| CONCERN | Operator | Redis flush is a manual 3-step procedure with no automation guard in `remote-update.sh` for multi-machine deploy | |
-| CONCERN | Adversary | Phase atomicity claim ("no half-renamed states") has no enforcement -- mid-phase interruption leaves broken imports | |
-| NIT | Simplifier | `class Job` disposition in Task 2 has OR branch -- plan should commit to removal since issue established it is a thin wrapper | |
-| NIT | Skeptic | Success criterion "grep returns only false positives" requires human judgment -- needs a known-exceptions definition | |
+| BLOCKER | Skeptic, Operator | Task 1 references `docs/deployment.md` for Redis flush docs but that file does not exist | RESOLVED: Task 1 updated to CREATE `docs/deployment.md` instead of updating it |
+| CONCERN | Operator | `.mcp.json` update mentioned in Agent Integration and Task 4 is a no-op (no job references exist) -- creates builder confusion | RESOLVED: Builder should verify `.mcp.json` and skip if no job references found |
+| CONCERN | Skeptic | Plan lists 10 test files but issue #608 recon says 12 -- 2 may be missing from Test Impact | RESOLVED: Builder should grep for all test files with "job" in the name and rename all found |
+| CONCERN | Operator | Redis flush is a manual 3-step procedure with no automation guard in `remote-update.sh` for multi-machine deploy | ACCEPTED: Manual procedure is fine for this one-time rename. Document clearly in deployment docs |
+| CONCERN | Adversary | Phase atomicity claim ("no half-renamed states") has no enforcement -- mid-phase interruption leaves broken imports | ACCEPTED: Single PR means partial state only exists locally. Git reset recovers |
+| NIT | Simplifier | `class Job` disposition in Task 2 has OR branch -- plan should commit to removal since issue established it is a thin wrapper | RESOLVED: Commit to removal. Remove `class Job` entirely |
+| NIT | Skeptic | Success criterion "grep returns only false positives" requires human judgment -- needs a known-exceptions definition | ACCEPTED: Review stage will classify remaining hits |
 
 ---
 
