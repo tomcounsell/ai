@@ -150,6 +150,16 @@ XL:   48px   (6x)    — Between components
 
 ---
 
+## Podcast Customer Persona: "Informed Superior"
+
+Our podcast customers walk into rooms with power but lack the domain knowledge of others present. They are decision-makers — executives, leaders, professionals in positions of authority — who feel insecure because their expertise doesn't match their responsibility. They want to feel **informed and prepared**, so that when they enter those rooms, they carry not just authority but genuine understanding.
+
+The podcast product transforms this insecurity into confidence. Every episode is designed so that a listener walks away feeling like they know more than most people in the room — not through superficial talking points, but through the kind of structured, systems-level understanding that this brand represents. The depth isn't academic vanity; it's ammunition for people who need to sound like they've done the reading, because they actually have.
+
+This persona shapes everything: topic selection (what would a leader need to know but doesn't have time to research?), depth of coverage (enough to hold your own with specialists), and tone (respect the listener's intelligence and time pressure).
+
+---
+
 ## Voice & Tone
 
 Precise but not pedantic. Knowledgeable without being condescending. Technical clarity over marketing language. A subtle dry wit where appropriate.
