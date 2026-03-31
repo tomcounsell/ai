@@ -4,7 +4,9 @@ type: feature
 appetite: Small
 owner: Valor
 created: 2026-02-14
+updated: 2026-03-31
 tracking: https://github.com/yudame/cuttlefish/issues/53
+last_comment_id: IC_kwDOPhRNKc7oUKtx
 ---
 
 # Sponsor Message Audio Generation
@@ -18,6 +20,10 @@ No sponsor message infrastructure exists. `PodcastConfig.sponsor_break` is a boo
 
 **Desired outcome:**
 A `Sponsor` model to manage sponsor relationships and messaging, a TTS-based audio generation service to produce sponsor clips, and integration with the file storage service for persistent sponsor audio. Clips are produced independently of episode production and can be reused, rotated, or regenerated.
+
+## Blocker Status
+
+Previously blocked on the core podcast production MVP (issue #75). That shipped on 2026-02-19. This feature is now unblocked and ready for implementation.
 
 ## Appetite
 
@@ -195,6 +201,32 @@ Calls `generate_sponsor_audio()` service for each matching sponsor. Reports succ
 One new migration: `apps/podcast/migrations/XXXX_add_sponsor.py` for the `Sponsor` model. Standard `makemigrations` output — no data migration needed.
 
 **Note:** Migration will be created but not applied per project guidelines. Tom runs migrations.
+
+## Prior Art
+
+No prior implementations of sponsor audio generation exist in this codebase. The only related infrastructure is:
+- `PodcastConfig.sponsor_break` (boolean flag, already exists)
+- Issue #52 (splice point detection/insertion, planned but not built, depends on this issue)
+- `apps/common/services/storage.py` provides `store_file()` for uploading generated audio
+- `apps/podcast/services/audio.py` demonstrates the pattern of calling OpenAI APIs (Whisper) and storing results
+
+## Step by Step Tasks
+
+1. **Create `apps/podcast/models/sponsor.py`** -- Define the `Sponsor` model with fields: `podcast` (FK), `name`, `slug`, `message_copy`, `voice`, `audio_url`, `audio_override_url`, `is_active`. Add the `effective_audio_url` property.
+
+2. **Update `apps/podcast/models/__init__.py`** -- Import and export `Sponsor` in the models package.
+
+3. **Create migration** -- Run `makemigrations` to generate the migration file. Do not apply it.
+
+4. **Register in `apps/podcast/admin.py`** -- Add `SponsorAdmin` with list_display (name, podcast, is_active, voice), list_filter, search_fields. Add a `SponsorInline` to `PodcastAdmin`. Add a "Regenerate Audio" admin action that calls the service.
+
+5. **Create `apps/podcast/services/sponsor_audio.py`** -- Implement `generate_sponsor_audio(sponsor_id: int) -> str` service function. Uses `openai.OpenAI().audio.speech.create()` with model `tts-1`, uploads via `store_file()`, updates `Sponsor.audio_url`.
+
+6. **Create `apps/podcast/management/commands/generate_sponsor_audio.py`** -- Management command with `--sponsor-id`, `--podcast-slug`, and `--all` flags. Calls the service function for each matching sponsor.
+
+7. **Create `apps/podcast/tests/test_sponsor_audio.py`** -- Tests for: model creation, `effective_audio_url` property, service with mocked OpenAI, override short-circuit, storage key format, management command flags, inactive sponsor skipping.
+
+8. **Run pre-commit hooks** -- Ensure black, ruff, flake8 all pass.
 
 ## Rabbit Holes
 
