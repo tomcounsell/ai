@@ -15,7 +15,7 @@ import time
 
 from pydantic import BaseModel
 
-from config.enums import ChatMode
+from config.enums import PersonaType
 
 logger = logging.getLogger(__name__)
 
@@ -318,23 +318,32 @@ def _parse_history(history_list: list | None) -> list[PipelineEvent]:
 
 
 def _resolve_persona_display(session) -> str | None:
-    """Map session_type + session_mode into a dashboard display persona.
+    """Map session_mode and session_type into a dashboard display persona.
 
-    chat + session_mode="qa"  → "Q&A"
-    chat (otherwise)          → "PM"
-    dev                       → "Dev"
+    session_mode takes priority when set:
+      session_mode="teammate"         → "Teammate"
+      session_mode="project-manager"  → "Project Manager"
+      session_mode="developer"        → "Developer"
+
+    Fallback from session_type:
+      session_type="dev"              → "Developer"
+      session_type="chat"             → "Project Manager"
     """
+    mode = getattr(session, "session_mode", None)
+    if mode == PersonaType.TEAMMATE:
+        return "Teammate"
+    if mode == PersonaType.PROJECT_MANAGER:
+        return "Project Manager"
+    if mode == PersonaType.DEVELOPER:
+        return "Developer"
+
     raw = getattr(session, "session_type", None)
     if raw is None:
         return None
+    if raw == "dev":
+        return "Developer"
     if raw == "chat":
-        if getattr(session, "session_mode", None) == ChatMode.QA or getattr(
-            session, "qa_mode", False
-        ):
-            return "Q&A"
-        return "PM"
-    if raw == ChatMode.DEV:
-        return "Dev"
+        return "Project Manager"
     return _safe_str(raw)
 
 

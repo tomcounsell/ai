@@ -54,8 +54,9 @@
             <tr>
                 <td>{{ row.group_name }}</td>
                 <td style="text-align: right;">
-                    {% if row.persona == 'developer' %}<span class="badge badge-blue">{{ row.persona }}</span>
-                    {% elif row.persona == 'project-manager' %}<span class="badge badge-purple">{{ row.persona }}</span>
+                    {% if row.persona == 'developer' %}<span class="badge badge-blue">Developer</span>
+                    {% elif row.persona == 'project-manager' %}<span class="badge badge-purple">Project Manager</span>
+                    {% elif row.persona == 'teammate' %}<span class="badge badge-green">Teammate</span>
                     {% else %}<span class="badge badge-skipped">{{ row.persona }}</span>
                     {% endif %}
                 </td>
