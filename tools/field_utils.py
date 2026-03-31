@@ -31,7 +31,4 @@ def log_large_field(
         return
     length = len(value)
     if length > threshold:
-        logger.warning(
-            f"Large field value: {field_name}={length} chars "
-            f"(threshold={threshold})"
-        )
+        logger.warning(f"Large field value: {field_name}={length} chars (threshold={threshold})")
