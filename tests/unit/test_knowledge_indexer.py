@@ -152,11 +152,11 @@ class TestIndexerPipeline:
 class TestSummarizeContent:
     """Test the _summarize_content function."""
 
-    @patch("tools.knowledge.indexer.anthropic")
-    def test_summarize_uses_haiku_constant(self, mock_anthropic_module):
+    @patch("anthropic.Anthropic")
+    def test_summarize_uses_haiku_constant(self, mock_anthropic_cls):
         """Verify _summarize_content passes the HAIKU model constant to the API."""
         mock_client = MagicMock()
-        mock_anthropic_module.Anthropic.return_value = mock_client
+        mock_anthropic_cls.return_value = mock_client
         mock_response = MagicMock()
         mock_response.content = [MagicMock(text="A summary of the document.")]
         mock_client.messages.create.return_value = mock_response
@@ -165,23 +165,18 @@ class TestSummarizeContent:
 
         mock_client.messages.create.assert_called_once()
         call_kwargs = mock_client.messages.create.call_args
-        assert call_kwargs.kwargs.get("model") or call_kwargs[1].get("model") == HAIKU
-        # Verify the actual model value
-        if call_kwargs.kwargs:
-            assert call_kwargs.kwargs["model"] == HAIKU
-        else:
-            assert call_kwargs[1]["model"] == HAIKU
+        assert call_kwargs.kwargs["model"] == HAIKU
         assert result == "A summary of the document."
 
-    @patch("tools.knowledge.indexer.anthropic")
-    def test_summarize_fallback_on_api_failure(self, mock_anthropic_module):
+    @patch("anthropic.Anthropic")
+    def test_summarize_fallback_on_api_failure(self, mock_anthropic_cls):
         """Verify _summarize_content falls back to truncation on API failure."""
         mock_client = MagicMock()
-        mock_anthropic_module.Anthropic.return_value = mock_client
+        mock_anthropic_cls.return_value = mock_client
         mock_client.messages.create.side_effect = Exception("API error")
 
         content = "A" * 1000
         result = _summarize_content(content, "/path/to/doc.md")
 
-        # Should fall back to truncated content
-        assert len(result) <= 500 + 10  # Allow small margin for ellipsis
+        # Should fall back to truncated content (500 chars + "...")
+        assert len(result) <= 504
