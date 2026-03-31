@@ -64,7 +64,9 @@ No prerequisites -- this work has no external dependencies.
 
 No existing tests affected -- the existing `test_knowledge_indexer.py` tests helper functions and pipeline rejection paths. None of them reference the model string or mock the Anthropic API call. The fix changes only the model constant passed to `client.messages.create()`.
 
-New test: Add a unit test that verifies `_summarize_content` uses the `HAIKU` constant (by mocking `anthropic.Anthropic` and inspecting the `model` kwarg).
+New tests:
+- Add a unit test that verifies `_summarize_content` uses the `HAIKU` constant (by mocking `anthropic.Anthropic` and inspecting the `model` kwarg)
+- Add a regression test that popoto handles long filenames (>255 chars) without crashing — the `popoto>=1.4.4` pin fixes a bug where long Redis key filenames caused errors. Test should create a Memory (or similar Popoto model) with a very long key and verify it saves/loads without error.
 
 ## Rabbit Holes
 
@@ -105,6 +107,7 @@ No agent integration required -- the knowledge indexer is called by the knowledg
 - [ ] `tools/knowledge/indexer.py` imports `HAIKU` from `config/models.py` and uses it on line 104
 - [ ] `grep -r "claude-haiku-4-20250414" .` returns zero results
 - [ ] Unit test verifies `_summarize_content` passes `HAIKU` to the Anthropic client
+- [ ] Regression test verifies popoto handles long filenames (>255 chars) without error
 - [ ] Tests pass (`/do-test`)
 
 ## Team Orchestration
@@ -135,6 +138,7 @@ No agent integration required -- the knowledge indexer is called by the knowledg
 - Add `from config.models import HAIKU` import to `tools/knowledge/indexer.py`
 - Replace `model="claude-haiku-4-20250414"` with `model=HAIKU` on line 104
 - Add unit test in `tests/unit/test_knowledge_indexer.py` that mocks `anthropic.Anthropic` and verifies the `model` kwarg equals `HAIKU`
+- Add regression test that popoto handles long filenames (>255 chars) — create a model instance with a very long key, save and load it, verify no error
 - Grep codebase to confirm no remaining `claude-haiku-4-20250414` occurrences
 
 ### 2. Validate fix
