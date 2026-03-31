@@ -69,8 +69,7 @@
                 {% if s.stages %}
                 <div class="stage-indicator">
                     {% for stage in s.stages %}
-                    {% if not loop.first %}<span class="stage-arrow">&#9654;</span>{% endif %}
-                    <span class="stage-dot {{ 'completed' if stage.is_done else ('in-progress' if stage.is_active else ('failed' if stage.is_failed else ('ready' if stage.is_ready else ''))) }}">{{ stage.name }}</span>
+                    <span class="stage-dot {{ 'completed' if stage.is_done else ('in-progress' if stage.is_active else ('failed' if stage.is_failed else ('ready' if stage.is_ready else ''))) }}" title="{{ stage.name }}">{{ stage.name[0] }}</span>
                     {% endfor %}
                 </div>
                 {% else %}
