@@ -58,13 +58,13 @@ class TestObserverTelemetry:
         reloaded = ObserverTelemetry.get_or_create(self.TEST_DATE)
         assert reloaded.last_decision_context == "test context string"
 
-    def test_record_decision_truncates_context(self):
-        """record_decision truncates context to 500 chars."""
+    def test_record_decision_stores_full_context(self):
+        """record_decision stores full context without truncation."""
         record = ObserverTelemetry.get_or_create(self.TEST_DATE)
         long_context = "x" * 600
         record.record_decision(long_context)
         reloaded = ObserverTelemetry.get_or_create(self.TEST_DATE)
-        assert len(reloaded.last_decision_context) == 500
+        assert len(reloaded.last_decision_context) == 600
 
     def test_record_interjection_increments(self):
         """record_interjection increments the interjections counter."""
