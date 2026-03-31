@@ -454,7 +454,9 @@ def cmd_status(args: argparse.Namespace) -> int:
 
         # Show child sessions separately if any are pending
         if child_pending:
-            result["child_pending_jobs"] = [_format_agent_session_info(j) for j in child_pending]
+            result["child_pending_sessions"] = [
+                _format_agent_session_info(j) for j in child_pending
+            ]
 
         # Show killed sessions
         if killed:
@@ -572,13 +574,13 @@ def cmd_bump(args: argparse.Namespace) -> int:
         target.delete()
         fields["priority"] = "urgent"
         fields["created_at"] = time.time()
-        new_job = AgentSession.create(**fields)
+        new_session = AgentSession.create(**fields)
 
         _output(
             {
                 "status": "bumped",
-                "agent_session_id": new_job.agent_session_id,
-                "session_id": new_job.session_id,
+                "agent_session_id": new_session.agent_session_id,
+                "session_id": new_session.session_id,
                 "new_priority": "urgent",
             }
         )
@@ -803,8 +805,8 @@ def _kill_agent_session(target, *, skip_process_kill: bool = False) -> dict:
     target.delete()
     fields["status"] = "killed"
     fields["completed_at"] = time.time()
-    new_job = AgentSession.create(**fields)
-    result["new_agent_session_id"] = new_job.agent_session_id
+    new_session = AgentSession.create(**fields)
+    result["new_agent_session_id"] = new_session.agent_session_id
     result["status"] = "killed"
 
     logger.info(

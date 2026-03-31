@@ -566,8 +566,8 @@ async def _pop_agent_session(chat_id: str) -> AgentSession | None:
     can process sessions in parallel. Within a chat, sessions run sequentially.
 
     Order: urgent > high > normal > low, then within same priority FIFO (oldest first).
-    Jobs with scheduled_after in the future are skipped (deferred execution).
-    Jobs with unmet depends_on are skipped (dependency blocking).
+    Sessions with scheduled_after in the future are skipped (deferred execution).
+    Sessions with unmet depends_on are skipped (dependency blocking).
 
     Dependency semantics:
     - Only 'completed' is considered "met". 'failed' and 'cancelled' block dependents.

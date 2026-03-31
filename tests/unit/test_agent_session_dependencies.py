@@ -1,4 +1,4 @@
-"""Tests for session dependency tracking, branch mapping, checkpoint/restore, and PM controls."""
+"""Tests for session dependency tracking, branch mapping, checkpoint/restore, PM controls."""
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -17,7 +17,7 @@ class TestDependenciesMet:
     """Tests for _dependencies_met helper."""
 
     def test_no_dependencies_returns_true(self, mock_agent_session):
-        """Job with no depends_on should be considered met."""
+        """Session with no depends_on should be considered met."""
         from agent.agent_session_queue import _dependencies_met
 
         session = MagicMock()
@@ -25,7 +25,7 @@ class TestDependenciesMet:
         assert _dependencies_met(session) is True
 
     def test_empty_dependencies_returns_true(self, mock_agent_session):
-        """Job with empty depends_on list should be considered met."""
+        """Session with empty depends_on list should be considered met."""
         from agent.agent_session_queue import _dependencies_met
 
         session = MagicMock()
@@ -33,7 +33,7 @@ class TestDependenciesMet:
         assert _dependencies_met(session) is True
 
     def test_completed_dependency_returns_true(self, mock_agent_session):
-        """Job with all completed dependencies should be met."""
+        """Session with all completed dependencies should be met."""
         from agent.agent_session_queue import _dependencies_met
 
         dep = MagicMock()
@@ -46,7 +46,7 @@ class TestDependenciesMet:
         assert _dependencies_met(session) is True
 
     def test_failed_dependency_returns_false(self, mock_agent_session):
-        """Job with failed dependency should NOT be met."""
+        """Session with failed dependency should NOT be met."""
         from agent.agent_session_queue import _dependencies_met
 
         dep = MagicMock()
@@ -59,7 +59,7 @@ class TestDependenciesMet:
         assert _dependencies_met(session) is False
 
     def test_cancelled_dependency_returns_false(self, mock_agent_session):
-        """Job with cancelled dependency should NOT be met."""
+        """Session with cancelled dependency should NOT be met."""
         from agent.agent_session_queue import _dependencies_met
 
         dep = MagicMock()
@@ -72,7 +72,7 @@ class TestDependenciesMet:
         assert _dependencies_met(session) is False
 
     def test_running_dependency_returns_false(self, mock_agent_session):
-        """Job with still-running dependency should NOT be met."""
+        """Session with still-running dependency should NOT be met."""
         from agent.agent_session_queue import _dependencies_met
 
         dep = MagicMock()
@@ -85,7 +85,7 @@ class TestDependenciesMet:
         assert _dependencies_met(session) is False
 
     def test_missing_dependency_returns_false(self, mock_agent_session):
-        """Job with missing dependency should NOT be met (conservative)."""
+        """Session with missing dependency should NOT be met (conservative)."""
         from agent.agent_session_queue import _dependencies_met
 
         mock_agent_session.query.filter.return_value = []
@@ -96,7 +96,7 @@ class TestDependenciesMet:
         assert _dependencies_met(session) is False
 
     def test_multiple_deps_all_completed(self, mock_agent_session):
-        """Job with multiple completed dependencies should be met."""
+        """Session with multiple completed dependencies should be met."""
         from agent.agent_session_queue import _dependencies_met
 
         dep1 = MagicMock()
@@ -113,7 +113,7 @@ class TestDependenciesMet:
         assert _dependencies_met(session) is True
 
     def test_multiple_deps_one_failed(self, mock_agent_session):
-        """Job with one failed dependency should NOT be met."""
+        """Session with one failed dependency should NOT be met."""
         from agent.agent_session_queue import _dependencies_met
 
         dep1 = MagicMock()
@@ -142,7 +142,7 @@ class TestDependencyStatus:
     """Tests for dependency_status helper."""
 
     def test_no_dependencies(self, mock_agent_session):
-        """Job with no depends_on should return empty dict."""
+        """Session with no depends_on should return empty dict."""
         from agent.agent_session_queue import dependency_status
 
         session = MagicMock()
@@ -333,7 +333,7 @@ class TestRestoreBranchState:
         assert restore_branch_state(session) is True
 
 
-class TestReorderJob:
+class TestReorderSession:
     """Tests for reorder_agent_session PM control."""
 
     def test_reorder_changes_priority(self, mock_agent_session):
@@ -367,10 +367,10 @@ class TestReorderJob:
         assert result is False
 
 
-class TestCancelJob:
+class TestCancelSession:
     """Tests for cancel_agent_session PM control."""
 
-    def test_cancel_pending_job(self, mock_agent_session):
+    def test_cancel_pending_session(self, mock_agent_session):
         from agent.agent_session_queue import cancel_agent_session
 
         session = MagicMock()
@@ -396,10 +396,10 @@ class TestCancelJob:
         assert result is False
 
 
-class TestRetryJob:
+class TestRetrySession:
     """Tests for retry_agent_session PM control."""
 
-    def test_retry_failed_job(self, mock_agent_session):
+    def test_retry_failed_session(self, mock_agent_session):
         from agent.agent_session_queue import retry_agent_session
 
         session = MagicMock()
@@ -407,15 +407,15 @@ class TestRetryJob:
         session.agent_session_id = "old-id"
         mock_agent_session.query.filter.return_value = [session]
 
-        new_job = MagicMock()
-        new_job.agent_session_id = "new-id"
-        new_job.stable_agent_session_id = "new-stable"
-        mock_agent_session.create.return_value = new_job
+        new_session = MagicMock()
+        new_session.agent_session_id = "new-id"
+        new_session.stable_agent_session_id = "new-stable"
+        mock_agent_session.create.return_value = new_session
 
         result = retry_agent_session("old-stable-id")
         assert result is not None
 
-    def test_retry_cancelled_job(self, mock_agent_session):
+    def test_retry_cancelled_session(self, mock_agent_session):
         from agent.agent_session_queue import retry_agent_session
 
         session = MagicMock()
@@ -423,8 +423,8 @@ class TestRetryJob:
         session.agent_session_id = "old-id"
         mock_agent_session.query.filter.return_value = [session]
 
-        new_job = MagicMock()
-        mock_agent_session.create.return_value = new_job
+        new_session = MagicMock()
+        mock_agent_session.create.return_value = new_session
 
         result = retry_agent_session("old-stable-id")
         assert result is not None
@@ -465,11 +465,11 @@ class TestRetryJob:
         dependent.stable_agent_session_id = "dep-stable"
 
         # The new session created by retry
-        new_job = MagicMock()
-        new_job.agent_session_id = "new-id"
-        new_job.stable_agent_session_id = "new-stable-id"
+        new_session = MagicMock()
+        new_session.agent_session_id = "new-id"
+        new_session.stable_agent_session_id = "new-stable-id"
 
-        mock_agent_session.create.return_value = new_job
+        mock_agent_session.create.return_value = new_session
 
         # First call: filter(stable_agent_session_id=old_stable) -> [session]
         # Second call: filter(chat_id="chat-1", status="pending") -> [dependent]
@@ -503,32 +503,32 @@ class TestGetQueueStatus:
         assert result["failed"] == []
         assert result["cancelled"] == []
 
-    def test_categorizes_jobs(self, mock_agent_session):
+    def test_categorizes_sessions(self, mock_agent_session):
         from agent.agent_session_queue import get_queue_status
 
-        pending_job = MagicMock()
-        pending_job.status = "pending"
-        pending_job.agent_session_id = "j1"
-        pending_job.stable_agent_session_id = "s1"
-        pending_job.session_id = "sess-1"
-        pending_job.message_text = "test msg"
-        pending_job.priority = "normal"
-        pending_job.depends_on = None
-        pending_job.created_at = 1000.0
-        pending_job.started_at = None
+        pending_session = MagicMock()
+        pending_session.status = "pending"
+        pending_session.agent_session_id = "j1"
+        pending_session.stable_agent_session_id = "s1"
+        pending_session.session_id = "sess-1"
+        pending_session.message_text = "test msg"
+        pending_session.priority = "normal"
+        pending_session.depends_on = None
+        pending_session.created_at = 1000.0
+        pending_session.started_at = None
 
-        running_job = MagicMock()
-        running_job.status = "running"
-        running_job.agent_session_id = "j2"
-        running_job.stable_agent_session_id = "s2"
-        running_job.session_id = "sess-2"
-        running_job.message_text = "running msg"
-        running_job.priority = "high"
-        running_job.depends_on = ["s1"]
-        running_job.created_at = 2000.0
-        running_job.started_at = 2001.0
+        running_session = MagicMock()
+        running_session.status = "running"
+        running_session.agent_session_id = "j2"
+        running_session.stable_agent_session_id = "s2"
+        running_session.session_id = "sess-2"
+        running_session.message_text = "running msg"
+        running_session.priority = "high"
+        running_session.depends_on = ["s1"]
+        running_session.created_at = 2000.0
+        running_session.started_at = 2001.0
 
-        mock_agent_session.query.filter.return_value = [pending_job, running_job]
+        mock_agent_session.query.filter.return_value = [pending_session, running_session]
         result = get_queue_status("chat-1")
         assert len(result["pending"]) == 1
         assert len(result["running"]) == 1
@@ -547,22 +547,22 @@ class TestTerminalStatuses:
         assert "failed" in _TERMINAL_STATUSES
 
 
-class TestPopJobDependencyFiltering:
+class TestPopSessionDependencyFiltering:
     """Tests for _pop_agent_session dependency filtering integration."""
 
-    def test_pop_skips_blocked_jobs(self, mock_agent_session):
+    def test_pop_skips_blocked_session(self, mock_agent_session):
         """Sessions with unmet dependencies should be skipped by _pop_agent_session."""
         from agent.agent_session_queue import _pop_agent_session
 
         # Create a session with an unmet dependency
-        blocked_job = MagicMock()
-        blocked_job.scheduled_after = None
-        blocked_job.depends_on = ["unmet-dep"]
-        blocked_job.agent_session_id = "blocked"
-        blocked_job.priority = "normal"
-        blocked_job.created_at = 1000.0
+        blocked_session = MagicMock()
+        blocked_session.scheduled_after = None
+        blocked_session.depends_on = ["unmet-dep"]
+        blocked_session.agent_session_id = "blocked"
+        blocked_session.priority = "normal"
+        blocked_session.created_at = 1000.0
 
-        mock_agent_session.query.async_filter = AsyncMock(return_value=[blocked_job])
+        mock_agent_session.query.async_filter = AsyncMock(return_value=[blocked_session])
 
         # Dependency lookup returns nothing (missing dep)
         mock_agent_session.query.filter.return_value = []
@@ -571,23 +571,23 @@ class TestPopJobDependencyFiltering:
         # Should return None since the only session is blocked
         assert result is None
 
-    def test_pop_picks_unblocked_job(self, mock_agent_session):
-        """Jobs without dependencies should be picked normally."""
+    def test_pop_picks_unblocked_session(self, mock_agent_session):
+        """Sessions without dependencies should be picked normally."""
         from agent.agent_session_queue import _pop_agent_session
 
-        unblocked_job = MagicMock()
-        unblocked_job.scheduled_after = None
-        unblocked_job.depends_on = None
-        unblocked_job.agent_session_id = "unblocked"
-        unblocked_job.priority = "normal"
-        unblocked_job.created_at = 1000.0
-        unblocked_job.session_id = "sess-1"
+        unblocked_session = MagicMock()
+        unblocked_session.scheduled_after = None
+        unblocked_session.depends_on = None
+        unblocked_session.agent_session_id = "unblocked"
+        unblocked_session.priority = "normal"
+        unblocked_session.created_at = 1000.0
+        unblocked_session.session_id = "sess-1"
         # _pop_agent_session now uses direct mutation + async_save (status is IndexedField)
-        unblocked_job.async_save = AsyncMock()
+        unblocked_session.async_save = AsyncMock()
 
-        mock_agent_session.query.async_filter = AsyncMock(return_value=[unblocked_job])
+        mock_agent_session.query.async_filter = AsyncMock(return_value=[unblocked_session])
 
         result = asyncio.run(_pop_agent_session("chat-1"))
         assert result is not None
-        assert unblocked_job.status == "running"
-        unblocked_job.async_save.assert_called_once()
+        assert unblocked_session.status == "running"
+        unblocked_session.async_save.assert_called_once()

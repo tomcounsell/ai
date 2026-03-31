@@ -2,7 +2,7 @@
 
 Replaces the scattered scheduling mechanisms (launchd plists, asyncio loops,
 startup hooks) with a single lightweight scheduler that reads from
-config/reflections.yaml and enqueues due reflections as jobs.
+config/reflections.yaml and enqueues due reflections as sessions.
 
 Architecture:
 - Registry: config/reflections.yaml declares all reflections
@@ -436,7 +436,7 @@ class ReflectionScheduler:
                         lambda t, name=entry.name: self._running_tasks.pop(name, None)
                     )
                 else:
-                    # Agent-type reflections are enqueued to job queue
+                    # Agent-type reflections are enqueued to session queue
                     await run_reflection(entry, state)
 
                 enqueued += 1

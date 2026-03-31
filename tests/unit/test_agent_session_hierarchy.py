@@ -6,7 +6,7 @@ Tests cover:
 - _finalize_parent() completion propagation logic
 - _transition_parent() status transitions
 - _agent_session_hierarchy_health_check() orphan and stuck parent detection
-- job_scheduler --parent-session flag and children subcommand
+- agent_session_scheduler --parent-session flag and children subcommand
 """
 
 import time
@@ -365,7 +365,7 @@ class TestFinalizeParent:
 
 
 # ===================================================================
-# Job scheduler --parent-session flag
+# Session scheduler --parent-session flag
 # ===================================================================
 
 
@@ -381,7 +381,7 @@ class TestSchedulerParentSession:
         # Capture help output
         old_argv = sys.argv
         try:
-            sys.argv = ["job_scheduler", "schedule", "--help"]
+            sys.argv = ["agent_session_scheduler", "schedule", "--help"]
             with pytest.raises(SystemExit) as exc_info:
                 main()
             assert exc_info.value.code == 0
@@ -396,7 +396,7 @@ class TestSchedulerParentSession:
 
         old_argv = sys.argv
         try:
-            sys.argv = ["job_scheduler", "children", "--help"]
+            sys.argv = ["agent_session_scheduler", "children", "--help"]
             with pytest.raises(SystemExit) as exc_info:
                 main()
             assert exc_info.value.code == 0
@@ -409,10 +409,10 @@ class TestSchedulerParentSession:
 # ===================================================================
 
 
-class TestJobFieldsIncludesParentJobId:
+class TestSessionFieldsIncludesParentSessionId:
     """Verify parent_agent_session_id is in the extract list."""
 
-    def test_parent_agent_session_id_in_job_fields(self):
+    def test_parent_agent_session_id_in_session_fields(self):
         from agent.agent_session_queue import _AGENT_SESSION_FIELDS
 
         assert "parent_agent_session_id" in _AGENT_SESSION_FIELDS
