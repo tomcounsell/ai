@@ -222,21 +222,13 @@ class TestRecall:
         mock_memory_cls = MagicMock()
         mock_memory_cls._meta.fields.get.return_value = mock_bloom
 
-        mock_result = MagicMock()
-        mock_result.records = []  # No strong results
-
-        mock_assembler_instance = MagicMock()
-        mock_assembler_instance.assemble.return_value = mock_result
-
-        mock_assembler_cls = MagicMock(return_value=mock_assembler_instance)
-
         with (
             patch(
                 "agent.memory_hook.extract_topic_keywords",
                 return_value=keywords,
             ),
             patch("models.memory.Memory", mock_memory_cls),
-            patch("popoto.ContextAssembler", mock_assembler_cls),
+            patch("agent.memory_retrieval.retrieve_memories", return_value=[]),
             patch("hook_utils.memory_bridge._get_project_key", return_value="test"),
         ):
             for i in range(WINDOW_SIZE - 1):
@@ -267,25 +259,17 @@ class TestRecallCategoryReranking:
         mock_memory_cls = MagicMock()
         mock_memory_cls._meta.fields.get.return_value = mock_bloom
 
-        # Create mock records with content
+        # Create mock records with content and score (as set by retrieve_memories)
         mock_record = MagicMock()
         mock_record.memory_id = "rec-1"
         mock_record.content = "test memory content for recall"
         mock_record.metadata = {"category": "correction"}
         mock_record.score = 0.8
 
-        mock_result = MagicMock()
-        mock_result.records = [mock_record]
-
-        mock_assembler_instance = MagicMock()
-        mock_assembler_instance.assemble.return_value = mock_result
-
-        mock_assembler_cls = MagicMock(return_value=mock_assembler_instance)
-
         with (
             patch("agent.memory_hook.extract_topic_keywords", return_value=keywords),
             patch("models.memory.Memory", mock_memory_cls),
-            patch("popoto.ContextAssembler", mock_assembler_cls),
+            patch("agent.memory_retrieval.retrieve_memories", return_value=[mock_record]),
             patch("hook_utils.memory_bridge._get_project_key", return_value="test"),
             patch(
                 "agent.memory_hook._apply_category_weights",

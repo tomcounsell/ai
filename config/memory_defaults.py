@@ -16,7 +16,7 @@ Tuning guide:
         records (< 0.15) are silently dropped.
 
     WF_PRIORITY_THRESHOLD: Above this, memories are tagged as priority.
-        Priority memories get preferential treatment in ContextAssembler.
+        Priority memories get preferential treatment in retrieval ranking.
 
     INITIAL_CONFIDENCE: Starting confidence for new memories.
         0.5 is neutral — neither trusted nor distrusted.
@@ -41,8 +41,15 @@ MEMORY_DISMISSED_WEAKEN = 0.85
 # Default project key used when VALOR_PROJECT_KEY env var is not set
 DEFAULT_PROJECT_KEY = "dm"
 
-# ContextAssembler tuning
-MEMORY_SURFACING_THRESHOLD = 0.4  # slightly lower than default 0.5 to surface more
+# Reciprocal Rank Fusion (RRF) tuning
+# RRF_K controls blending uniformity: higher values give more weight to lower-ranked
+# items across lists. k=60 is the standard default from the original RRF paper
+# (Cormack et al., 2009). Lower k (e.g., 20) favors top-ranked items more aggressively.
+RRF_K = 60
+
+# BM25 tuning parameters (passed through to popoto defaults)
+BM25_K1 = 1.2  # Term frequency saturation. Higher = more weight to repeated terms.
+BM25_B = 0.75  # Length normalization. 0 = no normalization, 1 = full normalization.
 
 # Injection limits
 MAX_THOUGHTS_PER_INJECTION = 3
@@ -59,8 +66,8 @@ DISMISSAL_DECAY_THRESHOLD = 3  # consecutive dismissals before importance decays
 DISMISSAL_IMPORTANCE_DECAY = 0.7  # multiply importance by this on threshold breach
 MIN_IMPORTANCE_FLOOR = 0.2  # never decay below this
 
-# Category recall weights -- post-query re-ranking multipliers for memory recall.
-# After ContextAssembler returns scored results, each result's effective score is
+# Category recall weights -- post-fusion re-ranking multipliers for memory recall.
+# After RRF fusion returns scored results, each result's effective score is
 # multiplied by the weight for its category before re-sorting. Higher weight = more
 # likely to surface. Set all to 1.0 to disable re-ranking (no-op).
 CATEGORY_RECALL_WEIGHTS: dict[str, float] = {
@@ -84,4 +91,3 @@ def apply_defaults() -> None:
     Defaults.ACTED_CONFIDENCE_SIGNAL = MEMORY_ACTED_SIGNAL
     Defaults.CONTRADICTED_CONFIDENCE_SIGNAL = MEMORY_CONTRADICTED_SIGNAL
     Defaults.DISMISSED_CYCLE_WEAKEN_FACTOR = MEMORY_DISMISSED_WEAKEN
-    Defaults.DEFAULT_SURFACING_THRESHOLD = MEMORY_SURFACING_THRESHOLD

@@ -206,18 +206,10 @@ class TestDejaVuSignals:
         mock_memory_cls = MagicMock()
         mock_memory_cls._meta.fields.get.return_value = mock_bloom
 
-        mock_result = MagicMock()
-        mock_result.records = []  # No strong results
-
-        mock_assembler_instance = MagicMock()
-        mock_assembler_instance.assemble.return_value = mock_result
-
-        mock_assembler_cls = MagicMock(return_value=mock_assembler_instance)
-
         with (
             patch("agent.memory_hook.extract_topic_keywords", return_value=keywords),
             patch("models.memory.Memory", mock_memory_cls),
-            patch("popoto.ContextAssembler", mock_assembler_cls),
+            patch("agent.memory_retrieval.retrieve_memories", return_value=[]),
         ):
             for i in range(INJECTION_WINDOW_SIZE - 1):
                 check_and_inject(session, "Read", {"file_path": f"f{i}.py"})
@@ -250,18 +242,10 @@ class TestDejaVuSignals:
         mock_memory_cls = MagicMock()
         mock_memory_cls._meta.fields.get.return_value = mock_bloom
 
-        mock_result = MagicMock()
-        mock_result.records = []
-
-        mock_assembler_instance = MagicMock()
-        mock_assembler_instance.assemble.return_value = mock_result
-
-        mock_assembler_cls = MagicMock(return_value=mock_assembler_instance)
-
         with (
             patch("agent.memory_hook.extract_topic_keywords", return_value=keywords),
             patch("models.memory.Memory", mock_memory_cls),
-            patch("popoto.ContextAssembler", mock_assembler_cls),
+            patch("agent.memory_retrieval.retrieve_memories", return_value=[]),
         ):
             for i in range(INJECTION_WINDOW_SIZE - 1):
                 check_and_inject(session, "Read", {"file_path": f"f{i}.py"})
