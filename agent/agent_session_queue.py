@@ -175,14 +175,14 @@ _AGENT_SESSION_FIELDS = [
 ]
 
 
-def _extract_agent_session_fields(redis_job: AgentSession) -> dict:
+def _extract_agent_session_fields(redis_session: AgentSession) -> dict:
     """Extract all non-auto fields from an AgentSession instance.
 
     Returns a dict suitable for AgentSession.create(**fields) or
     AgentSession.async_create(**fields). Excludes agent_session_id since that is
     an AutoKeyField and will be auto-generated on create.
     """
-    return {field: getattr(redis_job, field) for field in _AGENT_SESSION_FIELDS}
+    return {field: getattr(redis_session, field) for field in _AGENT_SESSION_FIELDS}
 
 
 async def _push_agent_session(
@@ -350,16 +350,16 @@ def resolve_branch_for_stage(slug: str | None, stage: str | None) -> tuple[str, 
     return ("main", False)
 
 
-def checkpoint_branch_state(job: AgentSession) -> None:
+def checkpoint_branch_state(session: AgentSession) -> None:
     """Record current branch + HEAD commit SHA on the AgentSession.
 
     Called when a session pauses (steering, dependency block) to preserve
     the exact git state for later restoration.
 
     Args:
-        job: The AgentSession to checkpoint.
+        session: The AgentSession to checkpoint.
     """
-    working_dir = job.working_dir
+    working_dir = session.working_dir
     if not working_dir:
         return
 
@@ -380,24 +380,24 @@ def checkpoint_branch_state(job: AgentSession) -> None:
         if branch.returncode == 0 and commit.returncode == 0:
             branch_name = branch.stdout.strip()
             commit_sha = commit.stdout.strip()
-            job.branch_name = branch_name
-            job.commit_sha = commit_sha
-            job.save()
+            session.branch_name = branch_name
+            session.commit_sha = commit_sha
+            session.save()
             logger.info(
                 f"[checkpoint] Saved branch={branch_name} commit={commit_sha[:8]} "
-                f"for session {job.session_id}"
+                f"for session {session.session_id}"
             )
         else:
             logger.warning(
                 f"[checkpoint] Failed to read git state for session "
-                f"{job.session_id}: branch={branch.stderr.strip()}, "
+                f"{session.session_id}: branch={branch.stderr.strip()}, "
                 f"commit={commit.stderr.strip()}"
             )
     except Exception as e:
-        logger.warning(f"[checkpoint] Error checkpointing state for {job.session_id}: {e}")
+        logger.warning(f"[checkpoint] Error checkpointing state for {session.session_id}: {e}")
 
 
-def restore_branch_state(job: AgentSession) -> bool:
+def restore_branch_state(session: AgentSession) -> bool:
     """Verify and restore branch + commit state from a checkpoint.
 
     Called when a session resumes to ensure it starts on the correct branch
@@ -405,18 +405,18 @@ def restore_branch_state(job: AgentSession) -> bool:
     current HEAD, proceeds on HEAD (newer commits are fine).
 
     Args:
-        job: The AgentSession with checkpoint data.
+        session: The AgentSession with checkpoint data.
 
     Returns:
         True if state was successfully verified/restored, False otherwise.
     """
-    working_dir = job.working_dir
-    recorded_branch = job.branch_name
-    recorded_sha = job.commit_sha
+    working_dir = session.working_dir
+    recorded_branch = session.branch_name
+    recorded_sha = session.commit_sha
 
     if not working_dir or not recorded_branch or not recorded_sha:
         logger.debug(
-            f"[restore] No checkpoint data for session {job.session_id} — "
+            f"[restore] No checkpoint data for session {session.session_id} — "
             f"proceeding on current state"
         )
         return True
@@ -477,7 +477,7 @@ def restore_branch_state(job: AgentSession) -> bool:
             return True
 
     except Exception as e:
-        logger.warning(f"[restore] Error restoring state for {job.session_id}: {e}")
+        logger.warning(f"[restore] Error restoring state for {session.session_id}: {e}")
         return False
 
 
@@ -485,7 +485,7 @@ def restore_branch_state(job: AgentSession) -> bool:
 _TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 
 
-def _dependencies_met(job: AgentSession) -> bool:
+def _dependencies_met(session: AgentSession) -> bool:
     """Check if all dependencies for a session are met (completed).
 
     A dependency is met only when its stable_agent_session_id resolves to a session
@@ -494,13 +494,13 @@ def _dependencies_met(job: AgentSession) -> bool:
     Redis) are treated as blocked (conservative — notify PM).
 
     Args:
-        job: The AgentSession to check dependencies for.
+        session: The AgentSession to check dependencies for.
 
     Returns:
         True if the session has no dependencies or all are completed.
         False if any dependency is not completed.
     """
-    deps = job.depends_on
+    deps = session.depends_on
     if not deps:
         return True
 
@@ -514,7 +514,7 @@ def _dependencies_met(job: AgentSession) -> bool:
             if not dep_sessions_list:
                 # Missing dependency — treat as blocked (conservative)
                 logger.warning(
-                    f"[dependency] Session {job.agent_session_id} depends on missing "
+                    f"[dependency] Session {session.agent_session_id} depends on missing "
                     f"stable_agent_session_id={dep_stable_id} — blocked"
                 )
                 return False
@@ -524,20 +524,20 @@ def _dependencies_met(job: AgentSession) -> bool:
         except Exception as e:
             logger.warning(
                 f"[dependency] Error checking dependency {dep_stable_id} "
-                f"for session {job.agent_session_id}: {e} — treating as blocked"
+                f"for session {session.agent_session_id}: {e} — treating as blocked"
             )
             return False
 
     return True
 
 
-def dependency_status(job: AgentSession) -> dict[str, str]:
+def dependency_status(session: AgentSession) -> dict[str, str]:
     """Return the status of each dependency for a session.
 
     Returns a dict mapping stable_agent_session_id -> status string.
     Missing dependencies are reported as 'missing'.
     """
-    deps = job.depends_on
+    deps = session.depends_on
     if not deps:
         return {}
 
@@ -660,9 +660,9 @@ async def _pop_agent_session_with_fallback(chat_id: str) -> AgentSession | None:
     that is the root cause of the pending session drain bug.
     """
     # Try the normal async path first
-    job = await _pop_agent_session(chat_id)
-    if job is not None:
-        return job
+    session = await _pop_agent_session(chat_id)
+    if session is not None:
+        return session
 
     # Sync fallback: bypass to_thread() to avoid the index visibility race.
     # This runs a synchronous Popoto query directly, which blocks the event loop
@@ -765,20 +765,20 @@ def reorder_agent_session(agent_session_id: str, new_priority: str) -> bool:
         return False
 
     try:
-        job = AgentSession.query.get(agent_session_id)
+        session = AgentSession.query.get(agent_session_id)
     except Exception:
         logger.warning(f"[pm-controls] Session {agent_session_id} not found for reorder")
         return False
 
-    if job is None or job.status != "pending":
+    if session is None or session.status != "pending":
         logger.warning(
             f"[pm-controls] Session {agent_session_id} not pending "
-            f"(status={getattr(job, 'status', None)}) — cannot reorder"
+            f"(status={getattr(session, 'status', None)}) — cannot reorder"
         )
         return False
 
-    job.priority = new_priority
-    job.save()
+    session.priority = new_priority
+    session.save()
     logger.info(f"[pm-controls] Reordered session {agent_session_id} (priority={new_priority})")
     return True
 
@@ -796,24 +796,24 @@ def cancel_agent_session(agent_session_id: str) -> bool:
         True if the session was cancelled, False if not found or not pending.
     """
     try:
-        job = AgentSession.query.get(agent_session_id)
+        session = AgentSession.query.get(agent_session_id)
     except Exception:
         logger.warning(f"[pm-controls] Session {agent_session_id} not found for cancel")
         return False
 
-    if job is None or job.status != "pending":
+    if session is None or session.status != "pending":
         logger.warning(
             f"[pm-controls] Session {agent_session_id} not pending "
-            f"(status={getattr(job, 'status', None)}) — cannot cancel"
+            f"(status={getattr(session, 'status', None)}) — cannot cancel"
         )
         return False
 
-    job.status = "cancelled"
-    job.completed_at = time.time()
-    job.save()
+    session.status = "cancelled"
+    session.completed_at = time.time()
+    session.save()
     logger.info(
-        f"[pm-controls] Cancelled job {agent_session_id} "
-        f"(stable_agent_session_id={job.stable_agent_session_id})"
+        f"[pm-controls] Cancelled session {agent_session_id} "
+        f"(stable_agent_session_id={session.stable_agent_session_id})"
     )
     return True
 
@@ -845,15 +845,15 @@ def retry_agent_session(stable_agent_session_id: str) -> AgentSession | None:
         )
         return None
 
-    job = sessions_list[0]
-    if job.status not in ("failed", "cancelled"):
+    session = sessions_list[0]
+    if session.status not in ("failed", "cancelled"):
         logger.warning(
-            f"[pm-controls] Session {job.agent_session_id} status is {job.status!r} — "
+            f"[pm-controls] Session {session.agent_session_id} status is {session.status!r} — "
             f"can only retry failed/cancelled sessions"
         )
         return None
 
-    fields = _extract_agent_session_fields(job)
+    fields = _extract_agent_session_fields(session)
     fields["status"] = "pending"
     fields["priority"] = "high"
     fields["started_at"] = None
@@ -861,18 +861,21 @@ def retry_agent_session(stable_agent_session_id: str) -> AgentSession | None:
     fields["created_at"] = time.time()
     # Generate new stable_agent_session_id for the retry
     fields["stable_agent_session_id"] = uuid.uuid4().hex
-    new_job = AgentSession.create(**fields)
+    new_session = AgentSession.create(**fields)
     logger.info(
-        f"[pm-controls] Retried job {job.agent_session_id} -> {new_job.agent_session_id} "
-        f"(old_stable={stable_agent_session_id}, new_stable={new_job.stable_agent_session_id})"
+        f"[pm-controls] Retried session {session.agent_session_id} "
+        f"-> {new_session.agent_session_id} "
+        f"(old_stable={stable_agent_session_id}, "
+        f"new_stable={new_session.stable_agent_session_id})"
     )
 
     # Update depends_on references in pending sessions that pointed to
     # the old stable_agent_session_id.
-    # Without this, dependents would be stuck waiting for the original (now failed/cancelled) job.
-    new_stable_id = new_job.stable_agent_session_id
+    # Without this, dependents would be stuck waiting for the original
+    # (now failed/cancelled) session.
+    new_stable_id = new_session.stable_agent_session_id
     if new_stable_id != stable_agent_session_id:
-        chat_id = job.chat_id
+        chat_id = session.chat_id
         try:
             pending_sessions = list(AgentSession.query.filter(chat_id=chat_id, status="pending"))
             for pending in pending_sessions:
@@ -895,7 +898,7 @@ def retry_agent_session(stable_agent_session_id: str) -> AgentSession | None:
         except Exception as e:
             logger.warning(f"[pm-controls] Failed to update depends_on references after retry: {e}")
 
-    return new_job
+    return new_session
 
 
 def get_queue_status(chat_id: str) -> dict:
@@ -925,21 +928,21 @@ def get_queue_status(chat_id: str) -> dict:
         logger.warning(f"[pm-controls] Failed to query sessions for chat {chat_id}: {e}")
         return result
 
-    for job in all_sessions:
-        status = job.status or "unknown"
+    for entry in all_sessions:
+        status = entry.status or "unknown"
         if status not in result:
             continue
 
         summary = {
-            "agent_session_id": job.agent_session_id,
-            "stable_agent_session_id": job.stable_agent_session_id,
-            "session_id": job.session_id,
-            "message_preview": (job.message_text or "")[:100],
-            "priority": job.priority,
-            "depends_on": job.depends_on or [],
-            "deps_met": _dependencies_met(job) if status == "pending" else None,
-            "created_at": job.created_at,
-            "started_at": job.started_at,
+            "agent_session_id": entry.agent_session_id,
+            "stable_agent_session_id": entry.stable_agent_session_id,
+            "session_id": entry.session_id,
+            "message_preview": (entry.message_text or "")[:100],
+            "priority": entry.priority,
+            "depends_on": entry.depends_on or [],
+            "deps_met": _dependencies_met(entry) if status == "pending" else None,
+            "created_at": entry.created_at,
+            "started_at": entry.started_at,
         }
         result[status].append(summary)
 
@@ -962,7 +965,7 @@ async def get_active_session_for_chat(chat_id: str) -> AgentSession | None:
     return sessions[0]
 
 
-async def _complete_agent_session(job: AgentSession, *, failed: bool = False) -> None:
+async def _complete_agent_session(session: AgentSession, *, failed: bool = False) -> None:
     """Mark a running session as completed and delete it from Redis.
 
     If this session is a child (has parent_agent_session_id), finalize the parent BEFORE
@@ -971,16 +974,16 @@ async def _complete_agent_session(job: AgentSession, *, failed: bool = False) ->
     even though the child's Redis status hasn't been updated yet.
 
     Args:
-        job: The job to complete.
+        session: The AgentSession to complete.
         failed: If True, this session failed (used for parent finalization).
     """
     # Checkpoint branch state before completion for audit trail
     try:
-        checkpoint_branch_state(job)
+        checkpoint_branch_state(session)
     except Exception as e:
         logger.debug(f"[checkpoint] Non-fatal checkpoint error at completion: {e}")
 
-    parent_agent_session_id = getattr(job, "parent_agent_session_id", None)
+    parent_agent_session_id = getattr(session, "parent_agent_session_id", None)
 
     # Finalize parent BEFORE deleting child, passing the completing child's
     # intended status so _finalize_parent can treat it as terminal
@@ -988,11 +991,11 @@ async def _complete_agent_session(job: AgentSession, *, failed: bool = False) ->
         child_status = "failed" if failed else "completed"
         await _finalize_parent(
             parent_agent_session_id,
-            completing_child_id=job.agent_session_id,
+            completing_child_id=session.agent_session_id,
             completing_child_status=child_status,
         )
 
-    await job.async_delete()
+    await session.async_delete()
 
 
 async def _finalize_parent(
@@ -1126,30 +1129,30 @@ def _recover_interrupted_agent_sessions_startup() -> int:
         return 0
 
     count = len(running_sessions)
-    for job in running_sessions:
-        chat_id = job.chat_id or job.project_key
+    for entry in running_sessions:
+        chat_id = entry.chat_id or entry.project_key
         logger.warning(
             "[startup-recovery] Recovering interrupted session %s "
             "(session=%s, chat=%s, msg=%.80r...)",
-            job.agent_session_id,
-            job.session_id,
+            entry.agent_session_id,
+            entry.session_id,
             chat_id,
-            job.message_text or "",
+            entry.message_text or "",
         )
         try:
-            job.status = "pending"
-            job.priority = "high"
-            job.started_at = None
-            job.save()
-            logger.info("[startup-recovery] Recovered session %s", job.agent_session_id)
+            entry.status = "pending"
+            entry.priority = "high"
+            entry.started_at = None
+            entry.save()
+            logger.info("[startup-recovery] Recovered session %s", entry.agent_session_id)
         except Exception as e:
             logger.warning(
                 "[startup-recovery] Failed to recover session %s, deleting corrupted session: %s",
-                job.session_id,
+                entry.session_id,
                 e,
             )
             try:
-                job.delete()
+                entry.delete()
             except Exception:
                 pass
 
@@ -1160,13 +1163,13 @@ def _recover_interrupted_agent_sessions_startup() -> int:
 # === Agent Session Health Monitor ===
 
 
-def _get_agent_session_timeout(job) -> int:
+def _get_agent_session_timeout(session) -> int:
     """Return the timeout in seconds for a session based on its message_text.
 
     Build sessions (containing '/do-build') get a longer timeout since they
     involve full SDLC cycles. All other sessions get the standard timeout.
     """
-    message_text = getattr(job, "message_text", "") or ""
+    message_text = getattr(session, "message_text", "") or ""
     if "/do-build" in message_text:
         return AGENT_SESSION_TIMEOUT_BUILD
     return AGENT_SESSION_TIMEOUT_DEFAULT
@@ -1183,7 +1186,7 @@ async def _agent_session_health_check() -> None:
     3. Legacy sessions without started_at and no worker: recover.
 
     For PENDING sessions:
-    4. If no live worker for job.chat_id AND pending > AGENT_SESSION_HEALTH_MIN_RUNNING:
+    4. If no live worker for session.chat_id AND pending > AGENT_SESSION_HEALTH_MIN_RUNNING:
        start a worker. This replaces the old _recover_stalled_pending mechanism.
 
     Recovery resets status to 'pending' via direct mutation and save.
@@ -1197,13 +1200,13 @@ async def _agent_session_health_check() -> None:
 
     # === Check RUNNING sessions_list ===
     running_sessions = list(AgentSession.query.filter(status="running"))
-    for job in running_sessions:
+    for entry in running_sessions:
         checked += 1
-        worker_key = job.chat_id or job.project_key
+        worker_key = entry.chat_id or entry.project_key
         worker = _active_workers.get(worker_key)
         worker_alive = worker is not None and not worker.done()
 
-        started_at = getattr(job, "started_at", None)
+        started_at = getattr(entry, "started_at", None)
         running_seconds = (now - started_at) if started_at else None
 
         should_recover = False
@@ -1212,7 +1215,7 @@ async def _agent_session_health_check() -> None:
         if not worker_alive:
             if started_at is None:
                 should_recover = True
-                reason = "worker dead/missing, no started_at (legacy job)"
+                reason = "worker dead/missing, no started_at (legacy session)"
             elif running_seconds is not None and running_seconds > AGENT_SESSION_HEALTH_MIN_RUNNING:
                 should_recover = True
                 reason = (
@@ -1223,12 +1226,12 @@ async def _agent_session_health_check() -> None:
                 logger.debug(
                     "[session-health] Skipping session %s - worker dead but "
                     "running only %ss (under %ss guard)",
-                    job.agent_session_id,
+                    entry.agent_session_id,
                     int(running_seconds) if running_seconds else "?",
                     AGENT_SESSION_HEALTH_MIN_RUNNING,
                 )
         elif started_at is not None:
-            timeout = _get_agent_session_timeout(job)
+            timeout = _get_agent_session_timeout(entry)
             if running_seconds is not None and running_seconds > timeout:
                 should_recover = True
                 reason = f"exceeded timeout ({int(running_seconds)}s > {timeout}s)"
@@ -1237,31 +1240,31 @@ async def _agent_session_health_check() -> None:
             is_local = worker_key.startswith("local")
             logger.warning(
                 "[session-health] Recovering stuck session %s (chat=%s, session=%s, local=%s): %s",
-                job.agent_session_id,
+                entry.agent_session_id,
                 worker_key,
-                job.session_id,
+                entry.session_id,
                 is_local,
                 reason,
             )
             if is_local:
                 # Local CLI sessions have no bridge worker to resume them --
                 # mark abandoned instead of resetting to pending
-                job.status = "abandoned"
-                job.completed_at = now
-                job.save()
+                entry.status = "abandoned"
+                entry.completed_at = now
+                entry.save()
                 logger.info(
                     "[session-health] Marked local session %s as abandoned (chat=%s)",
-                    job.agent_session_id,
+                    entry.agent_session_id,
                     worker_key,
                 )
             else:
-                job.status = "pending"
-                job.priority = "high"
-                job.started_at = None
-                job.save()
+                entry.status = "pending"
+                entry.priority = "high"
+                entry.started_at = None
+                entry.save()
                 logger.info(
                     "[session-health] Recovered session %s (chat=%s)",
-                    job.agent_session_id,
+                    entry.agent_session_id,
                     worker_key,
                 )
                 _ensure_worker(worker_key)
@@ -1269,9 +1272,9 @@ async def _agent_session_health_check() -> None:
 
     # === Check PENDING sessions_list ===
     pending_sessions = list(AgentSession.query.filter(status="pending"))
-    for job in pending_sessions:
+    for entry in pending_sessions:
         checked += 1
-        worker_key = job.chat_id or job.project_key
+        worker_key = entry.chat_id or entry.project_key
         worker = _active_workers.get(worker_key)
         worker_alive = worker is not None and not worker.done()
 
@@ -1280,7 +1283,7 @@ async def _agent_session_health_check() -> None:
             continue
 
         # No live worker — check age threshold before starting one
-        created_at = getattr(job, "created_at", None)
+        created_at = getattr(entry, "created_at", None)
         if created_at is None:
             continue
         pending_seconds = now - created_at
@@ -1290,18 +1293,18 @@ async def _agent_session_health_check() -> None:
                 logger.info(
                     "[session-health] Marking orphaned local pending session %s "
                     "as abandoned (chat=%s, pending %.0fs)",
-                    job.agent_session_id,
+                    entry.agent_session_id,
                     worker_key,
                     pending_seconds,
                 )
-                job.status = "abandoned"
-                job.completed_at = now
-                job.save()
+                entry.status = "abandoned"
+                entry.completed_at = now
+                entry.save()
             else:
                 logger.info(
                     "[session-health] Starting worker for orphaned pending "
                     "session %s (chat=%s, pending %.0fs)",
-                    job.agent_session_id,
+                    entry.agent_session_id,
                     worker_key,
                     pending_seconds,
                 )
@@ -1318,7 +1321,7 @@ async def _agent_session_health_check() -> None:
 
 
 async def _agent_session_hierarchy_health_check() -> None:
-    """Check for orphaned children and stuck parents in job hierarchy.
+    """Check for orphaned children and stuck parents in session hierarchy.
 
     1. Orphaned children: child's parent_agent_session_id points to a non-existent session.
        Action: clear the parent_agent_session_id field (child completes normally).
@@ -1402,8 +1405,8 @@ async def _dependency_health_check() -> None:
     try:
         pending_sessions = list(AgentSession.query.filter(status="pending"))
         stuck_count = 0
-        for job in pending_sessions:
-            deps = job.depends_on
+        for entry in pending_sessions:
+            deps = entry.depends_on
             if not deps:
                 continue
             for dep_stable_id in deps:
@@ -1417,7 +1420,7 @@ async def _dependency_health_check() -> None:
                         "[dependency-health] Session %s blocked on missing "
                         "dependency stable_agent_session_id=%s"
                         " — PM action needed",
-                        job.agent_session_id,
+                        entry.agent_session_id,
                         dep_stable_id,
                     )
                     stuck_count += 1
@@ -1426,7 +1429,7 @@ async def _dependency_health_check() -> None:
                         "[dependency-health] Session %s blocked on %s "
                         "dependency stable_agent_session_id=%s"
                         " (agent_session_id=%s) — PM action needed",
-                        job.agent_session_id,
+                        entry.agent_session_id,
                         dep_sessions_list[0].status,
                         dep_stable_id,
                         dep_sessions_list[0].agent_session_id,
@@ -1635,7 +1638,9 @@ async def enqueue_agent_session(
         event.set()
 
     log_prefix = f"[{correlation_id}]" if correlation_id else f"[{project_key}]"
-    logger.info(f"{log_prefix} Enqueued job (priority={priority}, depth={depth}, chat={chat_id})")
+    logger.info(
+        f"{log_prefix} Enqueued session (priority={priority}, depth={depth}, chat={chat_id})"
+    )
     return depth
 
 
@@ -1656,54 +1661,54 @@ def _ensure_worker(chat_id: str) -> None:
     _active_events[chat_id] = event
     task = asyncio.create_task(_worker_loop(chat_id, event))
     _active_workers[chat_id] = task
-    logger.info(f"[chat:{chat_id}] Started job queue worker")
+    logger.info(f"[chat:{chat_id}] Started session queue worker")
 
 
 async def _worker_loop(chat_id: str, event: asyncio.Event) -> None:
     """
     Process sessions sequentially for one chat.
     Runs until queue is empty, then exits (restarted on next enqueue).
-    After each job, checks for a restart flag written by remote-update.sh.
+    After each session, checks for a restart flag written by remote-update.sh.
 
     Workers are per-chat_id so different chat groups can run in parallel.
     Within a chat, sessions run sequentially to prevent git conflicts.
 
     Uses an Event-based drain strategy to reliably pick up pending sessions:
     1. After completing a session, clear the event and wait for it (with DRAIN_TIMEOUT).
-    2. If the event fires (new work enqueued), pop the next job via _pop_agent_session().
+    2. If the event fires (new work enqueued), pop the next session via _pop_agent_session().
     3. If the timeout expires, use _pop_agent_session_with_fallback() which includes a
        synchronous Popoto query that bypasses the to_thread() index visibility race.
     4. Before exiting, run a final _pop_agent_session_with_fallback() as a safety net.
 
-    CancelledError is caught explicitly to ensure proper job completion
+    CancelledError is caught explicitly to ensure proper session completion
     and worker cleanup instead of silent death.
     """
     try:
         while True:
-            job = await _pop_agent_session(chat_id)
-            if job is None:
+            session = await _pop_agent_session(chat_id)
+            if session is None:
                 # Event-based drain: wait for enqueue_agent_session() to signal new work,
                 # or fall back to sync query after timeout.
                 event.clear()
                 try:
                     await asyncio.wait_for(event.wait(), timeout=DRAIN_TIMEOUT)
                     # Event fired — new work was enqueued
-                    job = await _pop_agent_session(chat_id)
+                    session = await _pop_agent_session(chat_id)
                 except TimeoutError:
                     # Timeout — use sync fallback to bypass index visibility race
-                    job = await _pop_agent_session_with_fallback(chat_id)
+                    session = await _pop_agent_session_with_fallback(chat_id)
 
-                if job is not None:
+                if session is not None:
                     logger.info(
-                        f"[chat:{chat_id}] Drain guard caught job that would have been lost"
+                        f"[chat:{chat_id}] Drain guard caught session that would have been lost"
                     )
                 else:
                     # Exit-time safety check: one final sync scan before giving up
-                    job = await _pop_agent_session_with_fallback(chat_id)
-                    if job is not None:
+                    session = await _pop_agent_session_with_fallback(chat_id)
+                    if session is not None:
                         logger.warning(
                             f"[chat:{chat_id}] Found pending session at exit time: "
-                            f"{job.agent_session_id} — processing instead of exiting"
+                            f"{session.agent_session_id} — processing instead of exiting"
                         )
                     else:
                         logger.info(f"[chat:{chat_id}] Queue empty, worker exiting")
@@ -1711,21 +1716,21 @@ async def _worker_loop(chat_id: str, event: asyncio.Event) -> None:
                             _trigger_restart()
                         break
 
-            job_failed = False
-            job_completed = False
+            session_failed = False
+            session_completed = False
             try:
-                await _execute_agent_session(job)
+                await _execute_agent_session(session)
             except asyncio.CancelledError:
                 logger.warning(
-                    "[chat:%s] Worker cancelled during job %s — completing job",
+                    "[chat:%s] Worker cancelled during session %s — completing session",
                     chat_id,
-                    job.agent_session_id,
+                    session.agent_session_id,
                 )
-                await _complete_agent_session(job, failed=True)
-                job_completed = True
+                await _complete_agent_session(session, failed=True)
+                session_completed = True
                 raise  # Re-raise to exit worker loop
             except Exception as e:
-                # Check if this is a circuit breaker rejection — leave job pending
+                # Check if this is a circuit breaker rejection — leave session pending
                 from agent.sdk_client import CircuitOpenError
 
                 if isinstance(e, CircuitOpenError):
@@ -1733,22 +1738,22 @@ async def _worker_loop(chat_id: str, event: asyncio.Event) -> None:
                         "[chat:%s] Session %s deferred (circuit open) — "
                         "will retry when service recovers",
                         chat_id,
-                        job.agent_session_id,
+                        session.agent_session_id,
                     )
                     # Don't complete the session — leave it for health check to retry
-                    job_completed = True
+                    session_completed = True
                     break  # Exit worker loop; health check will restart
                 else:
-                    logger.error(f"[chat:{chat_id}] Session {job.agent_session_id} failed: {e}")
-                    job_failed = True
+                    logger.error(f"[chat:{chat_id}] Session {session.agent_session_id} failed: {e}")
+                    session_failed = True
             finally:
-                if not job_completed:
-                    await _complete_agent_session(job, failed=job_failed)
+                if not session_completed:
+                    await _complete_agent_session(session, failed=session_failed)
 
             # Clear the event after processing so the next drain wait starts fresh
             event.clear()
 
-            # Check restart flag after each completed job
+            # Check restart flag after each completed session
             if _check_restart_flag():
                 _trigger_restart()
                 break
@@ -1834,7 +1839,7 @@ def _diagnose_missing_session(session_id: str) -> dict:
 
 
 async def _enqueue_nudge(
-    job: AgentSession,
+    session: AgentSession,
     branch_name: str,
     task_list_id: str,
     auto_continue_count: int,
@@ -1850,7 +1855,7 @@ async def _enqueue_nudge(
     Preserves all session metadata via delete-and-recreate pattern.
 
     Args:
-        job: The current AgentSession being executed.
+        session: The current AgentSession being executed.
         branch_name: Git branch name for the session.
         task_list_id: Task list ID for sub-agent isolation.
         auto_continue_count: Current nudge count (already incremented).
@@ -1859,7 +1864,7 @@ async def _enqueue_nudge(
     """
 
     logger.info(
-        f"[{job.project_key}] Nudge message "
+        f"[{session.project_key}] Nudge message "
         f"({len(coaching_message)} chars): {coaching_message[:120]!r}"
     )
 
@@ -1872,14 +1877,14 @@ async def _enqueue_nudge(
     # around Popoto's KeyField index corruption bug (on_save() adds to
     # new index set but never removes from old one).
     sessions = await asyncio.to_thread(
-        lambda: list(AgentSession.query.filter(session_id=job.session_id))
+        lambda: list(AgentSession.query.filter(session_id=session.session_id))
     )
     if not sessions:
         # Diagnose why the session is missing before falling back.
         # Check Redis directly for key existence and TTL to aid debugging.
-        _diag = _diagnose_missing_session(job.session_id)
+        _diag = _diagnose_missing_session(session.session_id)
         logger.error(
-            f"[{job.project_key}] No session found for {job.session_id} "
+            f"[{session.project_key}] No session found for {session.session_id} "
             f"— falling back to recreate from AgentSession metadata. "
             f"Diagnostics: {_diag}"
         )
@@ -1887,7 +1892,7 @@ async def _enqueue_nudge(
         # underlying AgentSession that was loaded when the session was popped.
         # This prevents loss of context_summary, expectations, issue_url,
         # pr_url, history, correlation_id, and other session-phase fields.
-        fields = _extract_agent_session_fields(job)
+        fields = _extract_agent_session_fields(session)
         # Override fields that change for continuation
         fields["status"] = "pending"
         fields["message_text"] = coaching_message
@@ -1896,10 +1901,12 @@ async def _enqueue_nudge(
         fields["priority"] = "high"
         fields["task_list_id"] = task_list_id
         await AgentSession.async_create(**fields)
-        _ensure_worker(job.chat_id)
+        _ensure_worker(session.chat_id)
         logger.info(
-            f"[{job.project_key}] Recreated session {job.session_id} from AgentSession metadata "
-            f"(fallback path, auto_continue_count={auto_continue_count})"
+            f"[{session.project_key}] Recreated session "
+            f"{session.session_id} from AgentSession metadata "
+            f"(fallback path, auto_continue_count="
+            f"{auto_continue_count})"
         )
         return
 
@@ -1913,16 +1920,16 @@ async def _enqueue_nudge(
     session.task_list_id = task_list_id
     await session.async_save()
 
-    _ensure_worker(job.chat_id)
+    _ensure_worker(session.chat_id)
     logger.info(
-        f"[{job.project_key}] Reused session {job.session_id} for continuation "
+        f"[{session.project_key}] Reused session {session.session_id} for continuation "
         f"(auto_continue_count={auto_continue_count})"
     )
 
 
-async def _execute_agent_session(job: AgentSession) -> None:
+async def _execute_agent_session(session: AgentSession) -> None:
     """
-    Execute a single job:
+    Execute a single agent session:
     1. Log calendar heartbeat (start)
     2. Run agent work via BackgroundTask + BossMessenger (in project working dir)
     3. Periodic calendar heartbeats during long-running work
@@ -1930,24 +1937,24 @@ async def _execute_agent_session(job: AgentSession) -> None:
     """
     from agent import BackgroundTask, BossMessenger, get_agent_response_sdk
 
-    working_dir = Path(job.working_dir)
+    working_dir = Path(session.working_dir)
     allowed_root = Path.home() / "src"
     is_wt = WORKTREES_DIR in str(working_dir)
     working_dir = validate_workspace(working_dir, allowed_root, is_worktree=is_wt)
 
-    # Restore branch state from checkpoint if this is a resumed job
+    # Restore branch state from checkpoint if this is a resumed session
     try:
-        restore_branch_state(job)
+        restore_branch_state(session)
     except Exception as e:
-        logger.debug(f"[restore] Non-fatal restore error at job start: {e}")
+        logger.debug(f"[restore] Non-fatal restore error at session start: {e}")
 
     # Resolve branch: use slug + stage mapping if available, else session-based
-    slug = job.work_item_slug
+    slug = session.work_item_slug
     stage = None
     if slug:
         # Try to read current stage from the AgentSession
         try:
-            sessions = list(AgentSession.query.filter(session_id=job.session_id))
+            sessions = list(AgentSession.query.filter(session_id=session.session_id))
             if sessions:
                 stage = sessions[0].current_stage
         except Exception:
@@ -1971,41 +1978,41 @@ async def _execute_agent_session(job: AgentSession) -> None:
                     f"slug={slug}: {e} — using original working dir"
                 )
     else:
-        branch_name = _session_branch_name(job.session_id)
+        branch_name = _session_branch_name(session.session_id)
 
     # Compute task list ID for sub-agent task isolation
     # Tier 2: planned work uses the slug directly
     # Tier 1: ad-hoc sessions use thread-{chat_id}-{root_msg_id}
-    if job.work_item_slug:
-        task_list_id = job.work_item_slug
-    elif job.task_list_id:
-        task_list_id = job.task_list_id
+    if session.work_item_slug:
+        task_list_id = session.work_item_slug
+    elif session.task_list_id:
+        task_list_id = session.task_list_id
     else:
         # Derive from session_id which encodes chat_id and root message
-        parts = job.session_id.split("_")
-        root_id = parts[-1] if "_" in job.session_id else job.telegram_message_id
-        task_list_id = f"thread-{job.chat_id}-{root_id}"
+        parts = session.session_id.split("_")
+        root_id = parts[-1] if "_" in session.session_id else session.telegram_message_id
+        task_list_id = f"thread-{session.chat_id}-{root_id}"
 
-    # Read correlation_id from job for end-to-end tracing
-    cid = job.correlation_id
-    log_prefix = f"[{cid}]" if cid else f"[{job.project_key}]"
+    # Read correlation_id from session for end-to-end tracing
+    cid = session.correlation_id
+    log_prefix = f"[{cid}]" if cid else f"[{session.project_key}]"
 
     logger.info(
-        f"{log_prefix} Executing job {job.agent_session_id} "
-        f"(session={job.session_id}, branch={branch_name}, cwd={working_dir})"
+        f"{log_prefix} Executing session {session.agent_session_id} "
+        f"(session={session.session_id}, branch={branch_name}, cwd={working_dir})"
     )
 
-    # Save session snapshot at job start
+    # Save session snapshot at session start
     save_session_snapshot(
-        session_id=job.session_id,
+        session_id=session.session_id,
         event="resume",
-        project_key=job.project_key,
+        project_key=session.project_key,
         branch_name=branch_name,
-        task_summary=f"Session {job.agent_session_id} starting",
+        task_summary=f"Session {session.agent_session_id} starting",
         extra_context={
-            "agent_session_id": job.agent_session_id,
-            "sender": job.sender_name,
-            "message_preview": job.message_text[:200] if job.message_text else "",
+            "agent_session_id": session.agent_session_id,
+            "sender": session.sender_name,
+            "message_preview": session.message_text[:200] if session.message_text else "",
             "correlation_id": cid,
         },
         working_dir=str(working_dir),
@@ -2014,9 +2021,11 @@ async def _execute_agent_session(job: AgentSession) -> None:
     # Update the AgentSession (already created at enqueue time) with session-phase fields
     agent_session = None
     try:
-        sessions = list(AgentSession.query.filter(project_key=job.project_key, status="running"))
+        sessions = list(
+            AgentSession.query.filter(project_key=session.project_key, status="running")
+        )
         for s in sessions:
-            if s.session_id == job.session_id:
+            if s.session_id == session.session_id:
                 agent_session = s
                 break
         if agent_session:
@@ -2025,7 +2034,7 @@ async def _execute_agent_session(job: AgentSession) -> None:
             # Persist task_list_id so hooks can resolve this session
             agent_session.task_list_id = task_list_id
             agent_session.save()
-            agent_session.append_history("user", (job.message_text or "")[:200])
+            agent_session.append_history("user", (session.message_text or "")[:200])
     except Exception as e:
         logger.debug(f"AgentSession update failed (non-fatal): {e}")
 
@@ -2033,17 +2042,17 @@ async def _execute_agent_session(job: AgentSession) -> None:
     _session_type = getattr(agent_session, "session_type", None) if agent_session else None
 
     # Calendar heartbeat at session start
-    asyncio.create_task(_calendar_heartbeat(job.project_key, project=job.project_key))
+    asyncio.create_task(_calendar_heartbeat(session.project_key, project=session.project_key))
 
     # Create messenger with bridge callbacks
-    send_cb = _send_callbacks.get(job.project_key)
-    react_cb = _reaction_callbacks.get(job.project_key)
+    send_cb = _send_callbacks.get(session.project_key)
+    react_cb = _reaction_callbacks.get(session.project_key)
 
     # Explicit state object replaces fragile nonlocal closures (_defer_reaction,
     # _completion_sent, auto_continue_count). State is passed as a mutable object
     # rather than mutated through shared closure references.
     chat_state = SendToChatResult(
-        auto_continue_count=job.auto_continue_count or 0,
+        auto_continue_count=session.auto_continue_count or 0,
     )
 
     async def send_to_chat(msg: str) -> None:
@@ -2067,13 +2076,13 @@ async def _execute_agent_session(job: AgentSession) -> None:
         from agent.health_check import is_session_unhealthy
         from agent.sdk_client import get_stop_reason
 
-        stop_reason = get_stop_reason(job.session_id) if job.session_id else None
+        stop_reason = get_stop_reason(session.session_id) if session.session_id else None
         session_status = agent_session.status if agent_session else None
-        unhealthy_reason = is_session_unhealthy(job.session_id) if job.session_id else None
+        unhealthy_reason = is_session_unhealthy(session.session_id) if session.session_id else None
 
         if unhealthy_reason:
             logger.warning(
-                f"[{job.project_key}] Watchdog flagged session unhealthy: {unhealthy_reason}"
+                f"[{session.project_key}] Watchdog flagged session unhealthy: {unhealthy_reason}"
             )
 
         # Use reduced nudge cap for Teammate sessions
@@ -2096,15 +2105,15 @@ async def _execute_agent_session(job: AgentSession) -> None:
 
         if action == "deliver_already_completed":
             logger.info(
-                f"[{job.project_key}] Session already completed — "
+                f"[{session.project_key}] Session already completed — "
                 f"delivering without nudge ({len(msg)} chars)"
             )
-            await send_cb(job.chat_id, msg, job.telegram_message_id, agent_session)
+            await send_cb(session.chat_id, msg, session.telegram_message_id, agent_session)
             chat_state.completion_sent = True
 
         elif action == "drop":
             logger.info(
-                f"[{job.project_key}] Dropping suppressed output "
+                f"[{session.project_key}] Dropping suppressed output "
                 f"(completion sent or nudged) "
                 f"({len(msg)} chars): {msg[:100]!r}"
             )
@@ -2112,12 +2121,12 @@ async def _execute_agent_session(job: AgentSession) -> None:
         elif action == "nudge_rate_limited":
             chat_state.auto_continue_count += 1
             logger.warning(
-                f"[{job.project_key}] Rate limited — backoff then nudge "
+                f"[{session.project_key}] Rate limited — backoff then nudge "
                 f"(nudge {chat_state.auto_continue_count}/{MAX_NUDGE_COUNT})"
             )
             await asyncio.sleep(5)
             await _enqueue_nudge(
-                job,
+                session,
                 branch_name,
                 task_list_id,
                 chat_state.auto_continue_count,
@@ -2130,11 +2139,11 @@ async def _execute_agent_session(job: AgentSession) -> None:
         elif action == "nudge_empty":
             chat_state.auto_continue_count += 1
             logger.info(
-                f"[{job.project_key}] Empty output — nudging "
+                f"[{session.project_key}] Empty output — nudging "
                 f"(nudge {chat_state.auto_continue_count}/{MAX_NUDGE_COUNT})"
             )
             await _enqueue_nudge(
-                job,
+                session,
                 branch_name,
                 task_list_id,
                 chat_state.auto_continue_count,
@@ -2146,13 +2155,13 @@ async def _execute_agent_session(job: AgentSession) -> None:
 
         elif action == "deliver_fallback":
             logger.warning(
-                f"[{job.project_key}] Empty output and nudge cap reached — delivering fallback"
+                f"[{session.project_key}] Empty output and nudge cap reached — delivering fallback"
             )
             await send_cb(
-                job.chat_id,
+                session.chat_id,
                 "The task completed but produced no output. "
                 "Please re-trigger if you expected results.",
-                job.telegram_message_id,
+                session.telegram_message_id,
                 agent_session,
             )
             chat_state.completion_sent = True
@@ -2162,52 +2171,54 @@ async def _execute_agent_session(job: AgentSession) -> None:
             # wait briefly for them to be sent before the summarizer fires.
             # This prevents the race where PM queues a message but the session
             # completes before the relay processes it (issue #497).
-            if job.session_id:
+            if session.session_id:
                 try:
                     from bridge.telegram_relay import get_outbox_length
 
                     for _drain_i in range(20):  # 20 x 100ms = 2s max
-                        if get_outbox_length(job.session_id) == 0:
+                        if get_outbox_length(session.session_id) == 0:
                             break
                         await asyncio.sleep(0.1)
                     # Re-read session for fresh pm_sent_message_ids
                     try:
-                        fresh_sessions = list(AgentSession.query.filter(session_id=job.session_id))
+                        fresh_sessions = list(
+                            AgentSession.query.filter(session_id=session.session_id)
+                        )
                         if fresh_sessions:
                             fresh_sessions.sort(key=lambda s: s.created_at or 0, reverse=True)
                             agent_session = fresh_sessions[0]
                     except Exception:
                         pass
                 except Exception as drain_err:
-                    logger.debug(f"[{job.project_key}] Outbox drain check failed: {drain_err}")
+                    logger.debug(f"[{session.project_key}] Outbox drain check failed: {drain_err}")
 
-            await send_cb(job.chat_id, msg, job.telegram_message_id, agent_session)
+            await send_cb(session.chat_id, msg, session.telegram_message_id, agent_session)
             chat_state.completion_sent = True
             logger.info(
-                f"[{job.project_key}] Delivered to Telegram "
+                f"[{session.project_key}] Delivered to Telegram "
                 f"(stop_reason={stop_reason}, {len(msg)} chars)"
             )
 
     messenger = BossMessenger(
         _send_callback=send_to_chat,
-        chat_id=job.chat_id,
-        session_id=job.session_id,
+        chat_id=session.chat_id,
+        session_id=session.session_id,
     )
 
     # Deferred enrichment: process media, YouTube, links, reply chain.
     # Reads enrichment params exclusively from TelegramMessage via telegram_message_key.
-    enriched_text = job.message_text
+    enriched_text = session.message_text
     enrich_has_media = False
     enrich_media_type = None
     enrich_youtube_urls = None
     enrich_non_youtube_urls = None
     enrich_reply_to_msg_id = None
 
-    if job.telegram_message_key:
+    if session.telegram_message_key:
         try:
             from models.telegram import TelegramMessage
 
-            trigger_msgs = list(TelegramMessage.query.filter(msg_id=job.telegram_message_key))
+            trigger_msgs = list(TelegramMessage.query.filter(msg_id=session.telegram_message_key))
             if trigger_msgs:
                 tm = trigger_msgs[0]
                 enrich_has_media = bool(tm.has_media)
@@ -2216,16 +2227,16 @@ async def _execute_agent_session(job: AgentSession) -> None:
                 enrich_non_youtube_urls = tm.non_youtube_urls
                 enrich_reply_to_msg_id = tm.reply_to_msg_id
                 logger.debug(
-                    f"[{job.project_key}] Resolved enrichment from "
-                    f"TelegramMessage {job.telegram_message_key}"
+                    f"[{session.project_key}] Resolved enrichment from "
+                    f"TelegramMessage {session.telegram_message_key}"
                 )
             else:
                 logger.debug(
-                    f"[{job.project_key}] telegram_message_key {job.telegram_message_key} "
+                    f"[{session.project_key}] telegram_message_key {session.telegram_message_key} "
                     f"not found, skipping enrichment"
                 )
         except Exception as e:
-            logger.debug(f"[{job.project_key}] TelegramMessage lookup failed: {e}")
+            logger.debug(f"[{session.project_key}] TelegramMessage lookup failed: {e}")
 
     if enrich_has_media or enrich_youtube_urls or enrich_non_youtube_urls or enrich_reply_to_msg_id:
         try:
@@ -2234,28 +2245,28 @@ async def _execute_agent_session(job: AgentSession) -> None:
             tg_client = get_telegram_client()
             enriched_text = await enrich_message(
                 telegram_client=tg_client,
-                message_text=job.message_text,
+                message_text=session.message_text,
                 has_media=enrich_has_media,
                 media_type=enrich_media_type,
-                raw_media_message_id=job.telegram_message_id,
+                raw_media_message_id=session.telegram_message_id,
                 youtube_urls=enrich_youtube_urls,
                 non_youtube_urls=enrich_non_youtube_urls,
                 reply_to_msg_id=enrich_reply_to_msg_id,
-                chat_id=job.chat_id,
-                sender_name=job.sender_name,
-                message_id=job.telegram_message_id,
+                chat_id=session.chat_id,
+                sender_name=session.sender_name,
+                message_id=session.telegram_message_id,
             )
         except Exception as e:
-            logger.warning(f"[{job.project_key}] Enrichment failed, using raw text: {e}")
+            logger.warning(f"[{session.project_key}] Enrichment failed, using raw text: {e}")
 
     # Set back-reference: TelegramMessage.agent_session_id -> this session's agent_session_id
-    if job.telegram_message_key:
+    if session.telegram_message_key:
         try:
             from models.telegram import TelegramMessage
 
-            trigger_msgs = list(TelegramMessage.query.filter(msg_id=job.telegram_message_key))
+            trigger_msgs = list(TelegramMessage.query.filter(msg_id=session.telegram_message_key))
             if trigger_msgs and not trigger_msgs[0].agent_session_id:
-                trigger_msgs[0].agent_session_id = job.agent_session_id
+                trigger_msgs[0].agent_session_id = session.agent_session_id
                 trigger_msgs[0].save()
         except Exception:
             pass  # Non-critical: best-effort cross-reference
@@ -2264,26 +2275,26 @@ async def _execute_agent_session(job: AgentSession) -> None:
     # Use the full registered project config (from projects.json) so that
     # downstream code (e.g., GH_REPO injection for cross-repo SDLC) has
     # access to all fields including "github", "mode", etc.
-    project_config = get_project_config(job.project_key)
+    project_config = get_project_config(session.project_key)
     if not project_config:
         project_config = {
-            "_key": job.project_key,
+            "_key": session.project_key,
             "working_directory": str(working_dir),
-            "name": job.project_key,
+            "name": session.project_key,
         }
 
     async def do_work() -> str:
         return await get_agent_response_sdk(
             enriched_text,
-            job.session_id,
-            job.sender_name,
-            job.chat_title,
+            session.session_id,
+            session.sender_name,
+            session.chat_title,
             project_config,
-            job.chat_id,
-            job.sender_id,
+            session.chat_id,
+            session.sender_id,
             task_list_id,
             cid,
-            job.agent_session_id,
+            session.agent_session_id,
         )
 
     task = BackgroundTask(messenger=messenger)
@@ -2294,7 +2305,9 @@ async def _execute_agent_session(job: AgentSession) -> None:
     while task.is_running:
         await asyncio.sleep(2)
         if time.time() - last_heartbeat >= CALENDAR_HEARTBEAT_INTERVAL:
-            asyncio.create_task(_calendar_heartbeat(job.project_key, project=job.project_key))
+            asyncio.create_task(
+                _calendar_heartbeat(session.project_key, project=session.project_key)
+            )
             last_heartbeat = time.time()
 
     # Update session status in Redis via AgentSession
@@ -2309,29 +2322,29 @@ async def _execute_agent_session(job: AgentSession) -> None:
                 else ("completed" if not task.error else "failed")
             )
             if not chat_state.defer_reaction:
-                complete_transcript(job.session_id, status=final_status)
+                complete_transcript(session.session_id, status=final_status)
             else:
                 agent_session.last_activity = time.time()
                 agent_session.save()
         except Exception as e:
             logger.warning(
-                f"AgentSession update failed for session {job.agent_session_id} "
-                f"session {job.session_id} (operation: finalize status to "
+                f"AgentSession update failed for session {session.agent_session_id} "
+                f"session {session.session_id} (operation: finalize status to "
                 f"{'completed' if not task.error else 'failed'}): {e}"
             )
 
     # Save session snapshot for error cases
     if task.error:
         save_session_snapshot(
-            session_id=job.session_id,
+            session_id=session.session_id,
             event="error",
-            project_key=job.project_key,
+            project_key=session.project_key,
             branch_name=branch_name,
-            task_summary=f"Session {job.agent_session_id} failed: {task.error}",
+            task_summary=f"Session {session.agent_session_id} failed: {task.error}",
             extra_context={
-                "agent_session_id": job.agent_session_id,
+                "agent_session_id": session.agent_session_id,
                 "error": str(task.error),
-                "sender": job.sender_name,
+                "sender": session.sender_name,
                 "correlation_id": cid,
             },
             working_dir=str(working_dir),
@@ -2341,19 +2354,19 @@ async def _execute_agent_session(job: AgentSession) -> None:
     try:
         from agent.steering import pop_all_steering_messages
 
-        leftover = pop_all_steering_messages(job.session_id)
+        leftover = pop_all_steering_messages(session.session_id)
         if leftover:
             # Use 500-char limit (not 120) to preserve enough intent for forensics
             texts = [f"  [{m.get('sender', '?')}]: {m.get('text', '')[:500]}" for m in leftover]
             logger.warning(
-                f"[{job.project_key}] {len(leftover)} unconsumed steering "
-                f"message(s) dropped for session {job.session_id}:\n" + "\n".join(texts)
+                f"[{session.project_key}] {len(leftover)} unconsumed steering "
+                f"message(s) dropped for session {session.session_id}:\n" + "\n".join(texts)
             )
     except Exception as e:
         logger.debug(f"Steering queue cleanup failed (non-fatal): {e}")
 
     # Set reaction based on result and delivery state
-    # Skip if a continuation job was enqueued (defer reaction to that job)
+    # Skip if a continuation session was enqueued (defer reaction to that session)
     if react_cb and not chat_state.defer_reaction:
         # Teammate sessions: clear the processing reaction instead of setting completion emoji
         if (
@@ -2369,12 +2382,12 @@ async def _execute_agent_session(job: AgentSession) -> None:
         else:
             emoji = REACTION_SUCCESS
         try:
-            await react_cb(job.chat_id, job.telegram_message_id, emoji)
+            await react_cb(session.chat_id, session.telegram_message_id, emoji)
         except Exception as e:
             logger.warning(f"Failed to set reaction: {e}")
 
     # Auto-mark session as done after successful completion
-    # Skip when auto-continue deferred — continuation job will handle cleanup
+    # Skip when auto-continue deferred — continuation session will handle cleanup
     if not task.error and not chat_state.defer_reaction:
         try:
             from agent.branch_manager import mark_work_done
@@ -2388,29 +2401,30 @@ async def _execute_agent_session(job: AgentSession) -> None:
                 timeout=10,
             )
             logger.info(
-                f"[{job.project_key}] Auto-marked session done and cleaned up branch {branch_name}"
+                f"[{session.project_key}] Auto-marked session done "
+                f"and cleaned up branch {branch_name}"
             )
         except Exception as e:
-            logger.warning(f"[{job.project_key}] Failed to auto-mark session done: {e}")
+            logger.warning(f"[{session.project_key}] Failed to auto-mark session done: {e}")
 
         # Save session snapshot on successful completion
         save_session_snapshot(
-            session_id=job.session_id,
+            session_id=session.session_id,
             event="complete",
-            project_key=job.project_key,
+            project_key=session.project_key,
             branch_name=branch_name,
-            task_summary=f"Session {job.agent_session_id} completed successfully",
+            task_summary=f"Session {session.agent_session_id} completed successfully",
             extra_context={
-                "agent_session_id": job.agent_session_id,
-                "sender": job.sender_name,
+                "agent_session_id": session.agent_session_id,
+                "sender": session.sender_name,
                 "correlation_id": cid,
             },
             working_dir=str(working_dir),
         )
     elif chat_state.defer_reaction:
         logger.info(
-            f"[{job.project_key}] Skipping session cleanup — "
-            f"continuation job enqueued (auto-continue {chat_state.auto_continue_count})"
+            f"[{session.project_key}] Skipping session cleanup — "
+            f"continuation session enqueued (auto-continue {chat_state.auto_continue_count})"
         )
 
 
@@ -2472,9 +2486,9 @@ def check_revival(project_key: str, working_dir: str, chat_id: str) -> dict | No
     try:
         for status in ("pending", "running"):
             sessions_list = AgentSession.query.filter(project_key=project_key, status=status)
-            for job in sessions_list:
-                if str(job.chat_id) == chat_id_str:
-                    branch = _session_branch_name(job.session_id)
+            for session in sessions_list:
+                if str(session.chat_id) == chat_id_str:
+                    branch = _session_branch_name(session.session_id)
                     if branch not in branches:
                         branches.append(branch)
     except Exception as e:
@@ -2529,7 +2543,7 @@ async def queue_revival_agent_session(
     additional_context: str | None = None,
 ) -> int:
     """
-    Queue a revival job (low priority) when user reacts/replies to revival notification.
+    Queue a revival session (low priority) when user reacts/replies to revival notification.
     Returns queue depth.
     """
     revival_text = f"Continue the unfinished work on branch `{revival_info['branch']}`."
@@ -2653,11 +2667,11 @@ def _cli_show_status() -> None:
 
     # Group by chat_id (worker key)
     by_chat: dict[str, list] = {}
-    for job in all_sessions:
-        key = job.chat_id or job.project_key
+    for entry in all_sessions:
+        key = entry.chat_id or entry.project_key
         if key not in by_chat:
             by_chat[key] = []
-        by_chat[key].append(job)
+        by_chat[key].append(entry)
 
     now = time.time()
     for chat_key, sessions_group in sorted(by_chat.items()):
@@ -2667,26 +2681,29 @@ def _cli_show_status() -> None:
         worker_status = "alive" if (worker and not worker.done()) else "DEAD/missing"
         print(f"  Worker: {worker_status}")
 
-        for job in sorted(sessions_group, key=lambda j: j.created_at or 0):
+        for session in sorted(sessions_group, key=lambda j: j.created_at or 0):
             duration = ""
-            started = getattr(job, "started_at", None)
-            if job.status == "running" and isinstance(started, int | float):
+            started = getattr(session, "started_at", None)
+            if session.status == "running" and isinstance(started, int | float):
                 duration = f" (running {format_duration(now - started)})"
-            elif job.created_at:
-                duration = f" (queued {format_duration(now - job.created_at)})"
+            elif session.created_at:
+                duration = f" (queued {format_duration(now - session.created_at)})"
 
-            session_id = (getattr(job, "session_id", "") or "")[:12]
-            corr_id = (getattr(job, "correlation_id", "") or "")[:8]
-            msg_preview = (job.message_text or "")[:50]
+            session_id = (getattr(session, "session_id", "") or "")[:12]
+            corr_id = (getattr(session, "correlation_id", "") or "")[:8]
+            msg_preview = (session.message_text or "")[:50]
             extras = []
             if session_id:
                 extras.append(f"sid={session_id}")
             if corr_id:
                 extras.append(f"cid={corr_id}")
             extra_str = f" ({', '.join(extras)})" if extras else ""
-            print(
-                f"  [{job.status:>9}] {job.agent_session_id}{duration}{extra_str} - {msg_preview}"
+            status_line = (
+                f"  [{session.status:>9}] "
+                f"{session.agent_session_id}{duration}"
+                f"{extra_str} - {msg_preview}"
             )
+            print(status_line)
 
     # Health summary
     try:
@@ -2703,8 +2720,8 @@ def _cli_show_status() -> None:
 
     # Summary
     status_counts: dict[str, int] = {}
-    for job in all_sessions:
-        status_counts[job.status] = status_counts.get(job.status, 0) + 1
+    for entry in all_sessions:
+        status_counts[session.status] = status_counts.get(session.status, 0) + 1
     summary = ", ".join(f"{v} {k}" for k, v in sorted(status_counts.items()))
     print(f"Total: {len(all_sessions)} sessions ({summary})")
 
@@ -2717,20 +2734,20 @@ def _cli_flush_stuck() -> None:
         return
 
     recovered = 0
-    for job in running:
-        worker_key = job.chat_id or job.project_key
+    for session in running:
+        worker_key = session.chat_id or session.project_key
         worker = _active_workers.get(worker_key)
         is_alive = worker and not worker.done()
 
         if not is_alive:
             print(
-                f"Recovering orphaned session {job.agent_session_id} "
-                f"(project={job.project_key}, chat={worker_key})"
+                f"Recovering orphaned session {session.agent_session_id} "
+                f"(project={session.project_key}, chat={worker_key})"
             )
-            _cli_recover_single_agent_session(job)
+            _cli_recover_single_agent_session(session)
             recovered += 1
         else:
-            print(f"Skipping {job.agent_session_id} - worker still alive")
+            print(f"Skipping {session.agent_session_id} - worker still alive")
 
     print(f"\nRecovered {recovered}/{len(running)} running sessions.")
 
@@ -2740,39 +2757,41 @@ def _cli_flush_agent_session(agent_session_id: str) -> None:
     import sys
 
     try:
-        job = AgentSession.query.get(agent_session_id)
+        session = AgentSession.query.get(agent_session_id)
     except Exception:
-        job = None
+        session = None
 
-    if not job:
+    if not session:
         print(f"Session {agent_session_id} not found.")
         sys.exit(1)
 
-    if job.status != "running":
-        print(f"Session {agent_session_id} is '{job.status}', not 'running'. Nothing to recover.")
+    if session.status != "running":
+        print(
+            f"Session {agent_session_id} is '{session.status}', not 'running'. Nothing to recover."
+        )
         return
 
-    print(f"Recovering job {agent_session_id} (project={job.project_key})")
-    _cli_recover_single_agent_session(job)
+    print(f"Recovering session {agent_session_id} (project={session.project_key})")
+    _cli_recover_single_agent_session(session)
     print("Done.")
 
 
-def _cli_recover_single_agent_session(job: AgentSession) -> None:
-    """Recover a stuck job by resetting it to pending."""
-    job.status = "pending"
-    job.priority = "high"
-    job.started_at = None
-    job.save()
-    print(f"  Re-enqueued as pending (id: {job.agent_session_id})")
+def _cli_recover_single_agent_session(session: AgentSession) -> None:
+    """Recover a stuck session by resetting it to pending."""
+    session.status = "pending"
+    session.priority = "high"
+    session.started_at = None
+    session.save()
+    print(f"  Re-enqueued as pending (id: {session.agent_session_id})")
 
 
 def _cli_main() -> None:
-    """CLI entry point for job queue management.
+    """CLI entry point for agent session queue management.
 
     Usage:
-        python -m agent.agent_session_queue --status          # Show queue state
-        python -m agent.agent_session_queue --flush-stuck      # Recover all stuck running sessions
-        python -m agent.agent_session_queue --flush-job ID     # Recover specific job
+        python -m agent.agent_session_queue --status              # Show queue state
+        python -m agent.agent_session_queue --flush-stuck       # Recover stuck sessions
+        python -m agent.agent_session_queue --flush-session ID     # Recover specific session
     """
     import argparse
 
@@ -2782,7 +2801,12 @@ def _cli_main() -> None:
     group.add_argument(
         "--flush-stuck", action="store_true", help="Recover all stuck running sessions"
     )
-    group.add_argument("--flush-job", metavar="JOB_ID", help="Recover a specific session by ID")
+    group.add_argument(
+        "--flush-session",
+        dest="flush_session",
+        metavar="SESSION_ID",
+        help="Recover a specific session by ID",
+    )
 
     args = parser.parse_args()
 
