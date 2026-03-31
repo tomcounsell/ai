@@ -3,6 +3,41 @@
 from unittest.mock import MagicMock, patch
 
 
+class TestFilterByProject:
+    """Test the _filter_by_project() helper."""
+
+    def test_filters_to_matching_keys(self):
+        from agent.memory_retrieval import _filter_by_project
+
+        results = [
+            ("Memory:agent1:projA:key1", 10.0),
+            ("Memory:agent1:projB:key2", 8.0),
+            ("Memory:agent1:projA:key3", 5.0),
+        ]
+        filtered = _filter_by_project(results, "projA")
+        assert len(filtered) == 2
+        assert all("projA" in k for k, _ in filtered)
+
+    def test_empty_project_key_returns_all(self):
+        from agent.memory_retrieval import _filter_by_project
+
+        results = [("Memory:a:projA:k1", 1.0), ("Memory:a:projB:k2", 2.0)]
+        filtered = _filter_by_project(results, "")
+        assert len(filtered) == 2
+
+    def test_no_matches_returns_empty(self):
+        from agent.memory_retrieval import _filter_by_project
+
+        results = [("Memory:a:projA:k1", 1.0), ("Memory:a:projB:k2", 2.0)]
+        filtered = _filter_by_project(results, "projC")
+        assert filtered == []
+
+    def test_empty_input_returns_empty(self):
+        from agent.memory_retrieval import _filter_by_project
+
+        assert _filter_by_project([], "projA") == []
+
+
 class TestRrfFuse:
     """Test the rrf_fuse() function."""
 
@@ -157,12 +192,22 @@ class TestGetRelevanceRanked:
 class TestGetConfidenceRanked:
     """Test get_confidence_ranked() with mocked Redis."""
 
+    def _mock_confidence_field(self):
+        """Helper: patch ConfidenceField.get_special_use_field_db_key to return a mock key."""
+        mock_base_key = MagicMock()
+        mock_base_key.redis_key = "$ConfidencF:Memory:confidence"
+        return patch(
+            "popoto.ConfidenceField.get_special_use_field_db_key",
+            return_value=mock_base_key,
+        )
+
     def test_returns_empty_on_error(self):
         from agent.memory_retrieval import get_confidence_ranked
 
         with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
             mock_redis.hgetall.side_effect = Exception("connection failed")
-            result = get_confidence_ranked()
+            with self._mock_confidence_field():
+                result = get_confidence_ranked("proj")
             assert result == []
 
     def test_returns_empty_when_no_data(self):
@@ -170,7 +215,8 @@ class TestGetConfidenceRanked:
 
         with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
             mock_redis.hgetall.return_value = {}
-            result = get_confidence_ranked()
+            with self._mock_confidence_field():
+                result = get_confidence_ranked("proj")
             assert result == []
 
     def test_returns_sorted_by_confidence(self):
@@ -179,23 +225,44 @@ class TestGetConfidenceRanked:
         from agent.memory_retrieval import get_confidence_ranked
 
         mock_data = {
-            b"Memory:key1": msgpack.packb({"confidence": 0.9, "evidence_count": 5}),
-            b"Memory:key2": msgpack.packb({"confidence": 0.3, "evidence_count": 2}),
-            b"Memory:key3": msgpack.packb({"confidence": 0.7, "evidence_count": 3}),
+            b"Memory:agent1:proj:key1": msgpack.packb({"confidence": 0.9, "evidence_count": 5}),
+            b"Memory:agent1:proj:key2": msgpack.packb({"confidence": 0.3, "evidence_count": 2}),
+            b"Memory:agent1:proj:key3": msgpack.packb({"confidence": 0.7, "evidence_count": 3}),
         }
 
         with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
             mock_redis.hgetall.return_value = mock_data
-            result = get_confidence_ranked()
+            with self._mock_confidence_field():
+                result = get_confidence_ranked("proj")
 
         assert len(result) == 3
         # Should be sorted by confidence descending
-        assert result[0][0] == "Memory:key1"
+        assert result[0][0] == "Memory:agent1:proj:key1"
         assert result[0][1] == 0.9
-        assert result[1][0] == "Memory:key3"
+        assert result[1][0] == "Memory:agent1:proj:key3"
         assert result[1][1] == 0.7
-        assert result[2][0] == "Memory:key2"
+        assert result[2][0] == "Memory:agent1:proj:key2"
         assert result[2][1] == 0.3
+
+    def test_filters_by_project_key(self):
+        """Only entries whose Redis key contains the project_key are returned."""
+        import msgpack
+
+        from agent.memory_retrieval import get_confidence_ranked
+
+        mock_data = {
+            b"Memory:agent1:projA:key1": msgpack.packb({"confidence": 0.9}),
+            b"Memory:agent1:projB:key2": msgpack.packb({"confidence": 0.8}),
+            b"Memory:agent1:projA:key3": msgpack.packb({"confidence": 0.7}),
+        }
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
+            mock_redis.hgetall.return_value = mock_data
+            with self._mock_confidence_field():
+                result = get_confidence_ranked("projA")
+
+        assert len(result) == 2
+        assert all("projA" in k for k, _s in result)
 
     def test_limit_caps_results(self):
         import msgpack
@@ -203,13 +270,14 @@ class TestGetConfidenceRanked:
         from agent.memory_retrieval import get_confidence_ranked
 
         mock_data = {
-            f"Memory:key{i}".encode(): msgpack.packb({"confidence": float(i) / 10})
+            f"Memory:agent1:proj:key{i}".encode(): msgpack.packb({"confidence": float(i) / 10})
             for i in range(20)
         }
 
         with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
             mock_redis.hgetall.return_value = mock_data
-            result = get_confidence_ranked(limit=5)
+            with self._mock_confidence_field():
+                result = get_confidence_ranked("proj", limit=5)
 
         assert len(result) == 5
 
@@ -219,17 +287,18 @@ class TestGetConfidenceRanked:
         from agent.memory_retrieval import get_confidence_ranked
 
         mock_data = {
-            b"Memory:good": msgpack.packb({"confidence": 0.8}),
-            b"Memory:bad": b"not-valid-msgpack-\xff\xff",
+            b"Memory:agent1:proj:good": msgpack.packb({"confidence": 0.8}),
+            b"Memory:agent1:proj:bad": b"not-valid-msgpack-\xff\xff",
         }
 
         with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
             mock_redis.hgetall.return_value = mock_data
-            result = get_confidence_ranked()
+            with self._mock_confidence_field():
+                result = get_confidence_ranked("proj")
 
         # Only the valid entry should be returned
         assert len(result) == 1
-        assert result[0][0] == "Memory:good"
+        assert result[0][0] == "Memory:agent1:proj:good"
 
 
 class TestRetrieveMemories:
@@ -244,7 +313,7 @@ class TestRetrieveMemories:
                 patch("agent.memory_retrieval.get_relevance_ranked", return_value=[]),
                 patch("agent.memory_retrieval.get_confidence_ranked", return_value=[]),
             ):
-                result = retrieve_memories("test query", "project")
+                result = retrieve_memories("test query", "proj")
                 assert result == []
 
     def test_fuses_three_signals(self):
@@ -334,7 +403,7 @@ class TestRetrieveMemories:
             patch("agent.memory_retrieval.get_confidence_ranked", return_value=[]),
         ):
             mock_bm25.search.return_value = []
-            result = retrieve_memories("", "project")
+            result = retrieve_memories("", "proj")
 
         assert result == []
 
@@ -355,7 +424,7 @@ class TestRetrieveMemories:
             mock_bm25.search.return_value = [(key, 5.0)]
             mock_memory_cls.query.get.return_value = mock_record
 
-            result = retrieve_memories("test", "project", rrf_k=20)
+            result = retrieve_memories("test", "proj", rrf_k=20)
 
         assert len(result) == 1
         # With k=20, rank 1 gives 1/(20+1), appearing in 2 lists
@@ -375,6 +444,83 @@ class TestRetrieveMemories:
             mock_bm25.search.return_value = [("Memory:missing:proj", 5.0)]
             mock_memory_cls.query.get.return_value = None  # Not found
 
-            result = retrieve_memories("test query", "project")
+            result = retrieve_memories("test query", "proj")
 
         assert result == []
+
+    def test_bm25_results_filtered_by_project(self):
+        """BM25 returns global results; only those matching project_key should survive."""
+        from agent.memory_retrieval import retrieve_memories
+
+        mock_record = MagicMock()
+        mock_record.memory_id = "owned"
+
+        # BM25 returns results from two projects -- only projA should survive
+        bm25_results = [
+            ("Memory:agent1:projA:key1", 8.0),
+            ("Memory:agent1:projB:key2", 6.0),
+            ("Memory:agent1:projA:key3", 4.0),
+        ]
+
+        with (
+            patch("popoto.BM25Field") as mock_bm25,
+            patch("agent.memory_retrieval.get_relevance_ranked", return_value=[]),
+            patch("agent.memory_retrieval.get_confidence_ranked", return_value=[]),
+            patch("models.memory.Memory") as mock_memory_cls,
+        ):
+            mock_bm25.search.return_value = bm25_results
+            mock_memory_cls.query.get.return_value = mock_record
+
+            result = retrieve_memories("test query", "projA", limit=10)
+
+        # projB key should be excluded -- only 2 results from projA
+        assert len(result) == 2
+        # Verify hydration was only called for projA keys
+        hydrated_keys = [call.args[0] for call in mock_memory_cls.query.get.call_args_list]
+        assert all("projA" in k for k in hydrated_keys)
+        assert not any("projB" in k for k in hydrated_keys)
+
+    def test_cross_project_isolation_all_signals(self):
+        """BM25 cross-project keys are filtered out before RRF fusion.
+
+        BM25 returns global results (both projA and projB). The _filter_by_project
+        call in retrieve_memories removes projB keys before they enter rrf_fuse.
+        Relevance and confidence helpers are mocked at function level (already filtered).
+        """
+        from agent.memory_retrieval import retrieve_memories
+
+        owned_record = MagicMock()
+        owned_record.memory_id = "owned"
+
+        # BM25 returns global results including foreign project
+        bm25_results = [
+            ("Memory:a:projA:k1", 9.0),
+            ("Memory:a:projB:k2", 7.0),  # foreign -- should be filtered out
+        ]
+        # Relevance is natively partitioned by project_key
+        relevance_results = [
+            ("Memory:a:projA:k1", 1000.0),
+        ]
+        # Confidence helper is mocked post-filter (already filtered to projA)
+        confidence_results = [
+            ("Memory:a:projA:k1", 0.9),
+        ]
+
+        with (
+            patch("popoto.BM25Field") as mock_bm25,
+            patch("agent.memory_retrieval.get_relevance_ranked", return_value=relevance_results),
+            patch("agent.memory_retrieval.get_confidence_ranked", return_value=confidence_results),
+            patch("models.memory.Memory") as mock_memory_cls,
+        ):
+            mock_bm25.search.return_value = bm25_results
+            mock_memory_cls.query.get.return_value = owned_record
+
+            result = retrieve_memories("test query", "projA", limit=10)
+
+        # Only projA key should survive -- projB filtered before fusion
+        assert len(result) == 1
+        assert result[0].memory_id == "owned"
+        # Verify hydration only called with projA key
+        hydrated_keys = [call.args[0] for call in mock_memory_cls.query.get.call_args_list]
+        assert len(hydrated_keys) == 1
+        assert "projA" in hydrated_keys[0]
