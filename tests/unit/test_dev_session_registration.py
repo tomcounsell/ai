@@ -154,7 +154,7 @@ class TestCreateLocalFactory:
                 working_dir="/tmp",
             )
 
-            assert session.chat_id is None
+            assert session.chat_id.startswith("local")
             assert session.telegram_message_id is None
             assert session.sender_name is None
             assert session.parent_chat_session_id is None
