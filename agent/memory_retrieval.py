@@ -19,6 +19,27 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def _filter_by_project(
+    results: list[tuple[str, float]],
+    project_key: str,
+) -> list[tuple[str, float]]:
+    """Filter (redis_key, score) tuples to only those belonging to project_key.
+
+    Memory's project_key is a KeyField, so it is embedded in each Redis key.
+    We check that the project_key segment appears in the key string.
+
+    Args:
+        results: List of (redis_key, score) tuples.
+        project_key: Project partition key to filter by.
+
+    Returns:
+        Filtered list containing only entries whose key includes project_key.
+    """
+    if not project_key:
+        return results
+    return [(k, s) for k, s in results if project_key in k]
+
+
 def rrf_fuse(
     *ranked_lists: list[tuple[str, float]],
     k: int = 60,
@@ -72,9 +93,10 @@ def get_relevance_ranked(
         List of (redis_key, score) tuples. Empty list on any error.
     """
     try:
-        from models.memory import Memory
         from popoto import DecayingSortedField
         from popoto.redis_db import POPOTO_REDIS_DB
+
+        from models.memory import Memory
 
         sorted_set_key = DecayingSortedField.get_sortedset_db_key(Memory, "relevance", project_key)
         results = POPOTO_REDIS_DB.zrevrange(sorted_set_key.redis_key, 0, limit - 1, withscores=True)
@@ -86,14 +108,18 @@ def get_relevance_ranked(
 
 
 def get_confidence_ranked(
+    project_key: str,
     limit: int = 50,
 ) -> list[tuple[str, float]]:
     """Get confidence-ranked memory keys from the ConfidenceField hash.
 
-    Reads all entries from the ConfidenceField companion hash and sorts
-    by confidence score descending. Returns (redis_key, confidence) tuples.
+    Reads all entries from the ConfidenceField companion hash, filters
+    to the given project_key, and sorts by confidence score descending.
+    Returns (redis_key, confidence) tuples.
 
     Args:
+        project_key: Project partition key. Only entries whose Redis key
+            contains this value are returned.
         limit: Maximum entries to return.
 
     Returns:
@@ -101,11 +127,14 @@ def get_confidence_ranked(
     """
     try:
         import msgpack
-
+        from popoto import ConfidenceField
         from popoto.redis_db import POPOTO_REDIS_DB
 
-        # ConfidenceField stores data in a hash at $ConfidencF:Memory:confidence:data
-        hash_key = "$ConfidencF:Memory:confidence:data"
+        from models.memory import Memory
+
+        # Derive hash key from popoto API instead of hardcoding
+        base_key = ConfidenceField.get_special_use_field_db_key(Memory, "confidence")
+        hash_key = base_key.redis_key + ":data"
         raw_data = POPOTO_REDIS_DB.hgetall(hash_key)
 
         if not raw_data:
@@ -120,6 +149,9 @@ def get_confidence_ranked(
                 entries.append((str_key, confidence))
             except Exception:
                 continue
+
+        # Filter to project scope (project_key is embedded in Redis keys)
+        entries = _filter_by_project(entries, project_key)
 
         # Sort by confidence descending
         entries.sort(key=lambda x: x[1], reverse=True)
@@ -152,25 +184,27 @@ def retrieve_memories(
         RRF score descending. Empty list on any error.
     """
     try:
+        from popoto import BM25Field
+
         from config.memory_defaults import RRF_K
         from models.memory import Memory
-        from popoto import BM25Field
 
         if rrf_k is None:
             rrf_k = RRF_K
 
-        # Signal 1: BM25 keyword match
+        # Signal 1: BM25 keyword match (global index, post-filtered to project)
         try:
             bm25_results = BM25Field.search(Memory, "bm25", query_text, limit=50)
+            bm25_results = _filter_by_project(bm25_results, project_key)
         except Exception as e:
             logger.warning(f"[memory_retrieval] BM25 search failed: {e}")
             bm25_results = []
 
-        # Signal 2: Temporal relevance (decay-sorted)
+        # Signal 2: Temporal relevance (decay-sorted, natively partitioned)
         relevance_results = get_relevance_ranked(project_key, limit=50)
 
-        # Signal 3: Confidence
-        confidence_results = get_confidence_ranked(limit=50)
+        # Signal 3: Confidence (global hash, post-filtered to project)
+        confidence_results = get_confidence_ranked(project_key, limit=50)
 
         # Fuse the three signals
         fused = rrf_fuse(

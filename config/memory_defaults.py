@@ -47,6 +47,10 @@ DEFAULT_PROJECT_KEY = "dm"
 # (Cormack et al., 2009). Lower k (e.g., 20) favors top-ranked items more aggressively.
 RRF_K = 60
 
+# BM25 tuning parameters (passed through to popoto defaults)
+BM25_K1 = 1.2  # Term frequency saturation. Higher = more weight to repeated terms.
+BM25_B = 0.75  # Length normalization. 0 = no normalization, 1 = full normalization.
+
 # Injection limits
 MAX_THOUGHTS_PER_INJECTION = 3
 INJECTION_WINDOW_SIZE = 3  # tool calls per window
