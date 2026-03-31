@@ -75,3 +75,39 @@
   {% endfor %}
 </div>
 {% endblock %}
+
+{% block webmcp %}
+<script type="application/json" id="podcasts-data">
+[{% for podcast in podcasts %}{"slug":"{{ podcast.slug }}","title":"{{ podcast.title|escapejs }}","description":"{{ podcast.description|escapejs }}","episode_count":{{ podcast.episode_count|default:"0" }},"latest_episode_at":"{{ podcast.latest_episode_at|date:'c'|default:'' }}","author_name":"{{ podcast.author_name|escapejs }}","is_public":{% if podcast.is_public %}true{% else %}false{% endif %}}{% if not forloop.last %},{% endif %}{% endfor %}]
+</script>
+<script>
+(function() {
+    if (!navigator.modelContext) return;
+    var mc = navigator.modelContext;
+    var podcasts = JSON.parse(document.getElementById('podcasts-data').textContent);
+
+    mc.registerResource('site://podcasts', {
+        name: 'All Podcasts',
+        description: 'List of all podcasts on this site with title, description, slug, episode count, and author'
+    }, function() {
+        return { contents: [{ text: JSON.stringify(podcasts, null, 2), mimeType: 'application/json' }] };
+    });
+
+    mc.registerTool('search_podcasts', {
+        name: 'Search Podcasts',
+        description: 'Search across all podcast titles and descriptions. Returns matching podcasts.',
+        inputSchema: {
+            type: 'object',
+            properties: { query: { type: 'string', description: 'Search term' } },
+            required: ['query']
+        }
+    }, function(args) {
+        var q = (args.query || '').toLowerCase();
+        var results = podcasts.filter(function(p) {
+            return p.title.toLowerCase().includes(q) || (p.description && p.description.toLowerCase().includes(q));
+        });
+        return { content: [{ type: 'text', text: JSON.stringify(results, null, 2) }] };
+    });
+})();
+</script>
+{% endblock %}
