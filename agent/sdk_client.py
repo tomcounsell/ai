@@ -39,7 +39,7 @@ from claude_agent_sdk import (
 from agent.agent_definitions import get_agent_definitions
 from agent.hooks import build_hooks_config
 from agent.worktree_manager import WORKTREES_DIR, validate_workspace
-from config.enums import ChatMode, ClassificationType, PersonaType, SessionType
+from config.enums import ClassificationType, PersonaType, SessionType
 from utils.github_patterns import ISSUE_NUMBER_RE as _ISSUE_NUMBER_RE
 from utils.github_patterns import PR_NUMBER_RE as _PR_NUMBER_RE
 
@@ -1318,8 +1318,8 @@ def _resolve_persona(
         return telegram_config.get("dm_persona", PersonaType.TEAMMATE)
 
     # PM mode projects always use project-manager persona
-    project_mode = project.get("mode", ChatMode.DEV)
-    if project_mode == ChatMode.PM:
+    project_mode = project.get("mode", "dev")
+    if project_mode == "pm":
         return PersonaType.PROJECT_MANAGER
 
     # Group chats: look up persona from the groups dict
@@ -1351,16 +1351,16 @@ async def get_agent_response_sdk(
     """Get agent response using Claude Agent SDK.
 
     Orchestrates a complete agent session from message receipt to response.
-    Uses config-driven chat mode resolution (resolve_chat_mode from
+    Uses config-driven persona resolution (resolve_persona from
     bridge.routing) to determine session behavior for ChatSessions:
 
-    - "qa" mode: bypasses the Haiku intent classifier, sets qa_mode=True
-      directly on the session, reducing latency and API cost for DMs and
-      groups with "teammate" persona.
-    - "pm"/"dev" mode: bypasses the classifier, uses the config-determined
-      mode without reclassification.
+    - Teammate persona: bypasses the Haiku intent classifier, sets
+      session_mode=PersonaType.TEAMMATE directly on the session, reducing
+      latency and API cost for DMs and groups with "teammate" persona.
+    - Project Manager/Developer persona: bypasses the classifier, uses
+      the config-determined persona without reclassification.
     - None (unconfigured): falls through to the existing Haiku intent
-      classifier for Q&A vs work routing.
+      classifier for Teammate vs work routing.
 
     Args:
         message: The message to process
@@ -1394,13 +1394,13 @@ async def get_agent_response_sdk(
         project_working_dir = AI_REPO_ROOT
 
     # Check project mode: "pm" channels bypass SDLC classification entirely
-    project_mode = project.get("mode", ChatMode.DEV) if project else ChatMode.DEV
+    project_mode = project.get("mode", "dev") if project else "dev"
     # Treat any unrecognized mode as "dev" (safe default)
-    if project_mode not in (ChatMode.DEV, ChatMode.PM):
+    if project_mode not in ("dev", "pm"):
         logger.warning(f"[{request_id}] Unknown project mode '{project_mode}', treating as 'dev'")
-        project_mode = ChatMode.DEV
+        project_mode = "dev"
 
-    if project_mode == ChatMode.PM:
+    if project_mode == "pm":
         # PM mode: skip classification, always use "question", work in project dir
         classification = ClassificationType.QUESTION
         working_dir = project_working_dir
@@ -1487,7 +1487,7 @@ async def get_agent_response_sdk(
 
     # Cross-repo SDLC: inject target repo context
     if (
-        project_mode != ChatMode.PM
+        project_mode != "pm"
         and classification == ClassificationType.SDLC
         and project_working_dir != AI_REPO_ROOT
     ):
@@ -1500,52 +1500,52 @@ async def get_agent_response_sdk(
         if github_org and github_repo:
             enriched_message += f"\nGITHUB: {github_org}/{github_repo}"
 
-    # ChatSession routing: classify intent and choose Q&A or PM dispatch path.
-    # Q&A mode answers informational queries directly without spawning DevSession.
-    _qa_mode = False
+    # ChatSession routing: classify intent and choose Teammate or PM dispatch path.
+    # Teammate mode answers informational queries directly without spawning DevSession.
+    _teammate_mode = False
     if _session_type == SessionType.CHAT:
-        # Config-driven mode bypass: skip classifier when mode is already known
-        from bridge.routing import resolve_chat_mode as _resolve_mode
+        # Config-driven persona bypass: skip classifier when persona is already known
+        from bridge.routing import resolve_persona as _resolve_persona_mode
 
-        _config_mode = _resolve_mode(project, chat_title, is_dm=(chat_title is None))
+        _config_persona = _resolve_persona_mode(project, chat_title, is_dm=(chat_title is None))
 
-        if _config_mode == ChatMode.QA:
-            # DMs and Q&A-persona groups: skip classifier, go straight to Q&A
-            _qa_mode = True
+        if _config_persona == PersonaType.TEAMMATE:
+            # DMs and Teammate-persona groups: skip classifier, go straight to Teammate
+            _teammate_mode = True
             logger.info(
-                f"[{request_id}] Config-driven Q&A mode "
-                f"(mode={_config_mode!r}, is_dm={chat_title is None})"
+                f"[{request_id}] Config-driven Teammate mode "
+                f"(persona={_config_persona!r}, is_dm={chat_title is None})"
             )
             # Record synthetic classification metric for observability
             try:
-                from agent.qa_metrics import record_classification
+                from agent.teammate_metrics import record_classification
 
-                record_classification("qa", 1.0)
+                record_classification("teammate", 1.0)
                 logger.debug(
-                    f"[{request_id}] Recorded synthetic qa classification (config-determined)"
+                    f"[{request_id}] Recorded synthetic teammate classification (config-determined)"
                 )
             except Exception:
                 pass  # Best-effort metrics
-            # Update session qa_mode flag
+            # Update session mode flag
             if session_id:
                 try:
-                    from models.agent_session import AgentSession as _QASession
+                    from models.agent_session import AgentSession as _TMSession
 
-                    for _s in _QASession.query.filter(session_id=session_id):
+                    for _s in _TMSession.query.filter(session_id=session_id):
                         if _s.status in ("running", "active", "pending"):
-                            _s.session_mode = ChatMode.QA
+                            _s.session_mode = PersonaType.TEAMMATE
                             _s.save()
                             break
                 except Exception:
                     pass  # Best-effort
-        elif _config_mode in (ChatMode.PM, ChatMode.DEV):
-            # PM/Dev persona groups: skip classifier, use PM dispatch (not Q&A)
-            logger.info(f"[{request_id}] Config-driven {_config_mode} mode, skipping classifier")
+        elif _config_persona in (PersonaType.PROJECT_MANAGER, PersonaType.DEVELOPER):
+            # PM/Dev persona groups: skip classifier, use PM dispatch (not Teammate)
+            logger.info(f"[{request_id}] Config-driven {_config_persona} mode, skipping classifier")
         else:
             # Unconfigured: fall through to intent classifier
             try:
                 from agent.intent_classifier import classify_intent
-                from agent.qa_metrics import record_classification
+                from agent.teammate_metrics import record_classification
 
                 _intent_result = await classify_intent(message)
                 record_classification(_intent_result.intent, _intent_result.confidence)
@@ -1554,17 +1554,17 @@ async def get_agent_response_sdk(
                     f"(conf={_intent_result.confidence:.2f}): {_intent_result.reasoning}"
                 )
 
-                if _intent_result.is_qa:
-                    _qa_mode = True
-                    logger.info(f"[{request_id}] Routing to Q&A mode (direct response)")
-                    # Update session classification_type so nudge loop uses reduced cap
+                if _intent_result.is_teammate:
+                    _teammate_mode = True
+                    logger.info(f"[{request_id}] Routing to Teammate mode (direct response)")
+                    # Update session mode so nudge loop uses reduced cap
                     if session_id:
                         try:
-                            from models.agent_session import AgentSession as _QASession
+                            from models.agent_session import AgentSession as _TMSession
 
-                            for _s in _QASession.query.filter(session_id=session_id):
+                            for _s in _TMSession.query.filter(session_id=session_id):
                                 if _s.status in ("running", "active", "pending"):
-                                    _s.session_mode = ChatMode.QA
+                                    _s.session_mode = PersonaType.TEAMMATE
                                     _s.save()
                                     break
                         except Exception:
@@ -1574,11 +1574,11 @@ async def get_agent_response_sdk(
                     f"[{request_id}] Intent classification failed, defaulting to PM dispatch: {e}"
                 )
 
-        if _qa_mode:
-            # Q&A mode: inject Q&A instructions instead of PM dispatch
-            from agent.qa_handler import build_qa_instructions
+        if _teammate_mode:
+            # Teammate mode: inject Teammate instructions instead of PM dispatch
+            from agent.teammate_handler import build_teammate_instructions
 
-            enriched_message += build_qa_instructions()
+            enriched_message += build_teammate_instructions()
         else:
             # PM dispatch: orchestrate SDLC work stage-by-stage
             enriched_message += (
@@ -1623,7 +1623,7 @@ async def get_agent_response_sdk(
     enriched_message += f"\nMESSAGE: {message}"
 
     # Log prompt summary before sending to agent
-    has_worker_rules = project_mode != ChatMode.PM
+    has_worker_rules = project_mode != "pm"
     logger.info(
         f"[{request_id}] Sending to agent: {len(enriched_message)} chars, "
         f"classification={classification}, "
@@ -1659,7 +1659,7 @@ async def get_agent_response_sdk(
             # Can write to docs/ and use gh CLI. Code writes blocked by pre_tool_use hook.
             custom_system_prompt = load_pm_system_prompt(working_dir)
             logger.info(f"[{request_id}] ChatSession mode: PM persona, bypassPermissions")
-        elif project_mode == ChatMode.PM:
+        elif project_mode == "pm":
             # PM mode: use PM system prompt (no WORKER_RULES, loads work-vault CLAUDE.md)
             custom_system_prompt = load_pm_system_prompt(working_dir)
         elif persona == PersonaType.TEAMMATE:
@@ -1675,7 +1675,7 @@ async def get_agent_response_sdk(
         # set GH_REPO so all gh commands automatically target the correct repo.
         _gh_repo = None
         is_cross_repo_sdlc = (
-            project_mode != ChatMode.PM
+            project_mode != "pm"
             and classification == ClassificationType.SDLC
             and project_working_dir != AI_REPO_ROOT
         )
@@ -1707,12 +1707,12 @@ async def get_agent_response_sdk(
         elapsed = time.time() - start_time
         logger.info(f"[{request_id}] SDK responded in {elapsed:.1f}s ({len(response)} chars)")
 
-        # Record response time metric for Q&A observability
+        # Record response time metric for Teammate observability
         if _session_type == SessionType.CHAT:
             try:
-                from agent.qa_metrics import record_response_time
+                from agent.teammate_metrics import record_response_time
 
-                record_response_time("qa" if _qa_mode else "work", elapsed)
+                record_response_time("teammate" if _teammate_mode else "work", elapsed)
             except Exception:
                 pass  # Best-effort metrics
 
