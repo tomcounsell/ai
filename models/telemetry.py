@@ -28,7 +28,7 @@ class ObserverTelemetry(Model):
     interjections = IntField(default=0)
     skips = IntField(default=0)
     events = ListField(default=list)
-    last_decision_context = Field(null=True, max_length=500)
+    last_decision_context = Field(null=True)
 
     class Meta:
         ttl = 604800  # 7 days
@@ -54,7 +54,7 @@ class ObserverTelemetry(Model):
         """Record an observer decision."""
         self.decisions = (self.decisions or 0) + 1
         if context:
-            self.last_decision_context = context[:500]
+            self.last_decision_context = context
         self.save()
 
     def record_interjection(self, description: str) -> None:

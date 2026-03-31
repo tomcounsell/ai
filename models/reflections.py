@@ -102,7 +102,7 @@ class ReflectionIgnore(Model):
 
     ignore_id = AutoKeyField()
     pattern = KeyField()  # pattern string to match against
-    reason = Field(null=True, max_length=500)
+    reason = Field(null=True)
     created_at = SortedField(type=float)
     expires_at = SortedField(type=float)  # Unix timestamp when this expires
 

@@ -25,12 +25,12 @@ class Link(Model):
     sender = KeyField(null=True)
     status = KeyField(default="unread")  # unread, read, archived
     timestamp = SortedField(type=float)
-    final_url = Field(null=True, max_length=2000)
-    title = Field(null=True, max_length=1000)
-    description = Field(null=True, max_length=2000)
+    final_url = Field(null=True)
+    title = Field(null=True)
+    description = Field(null=True)
     tags = ListField(null=True)
-    notes = Field(null=True, max_length=5000)
-    ai_summary = Field(null=True, max_length=50_000)
+    notes = Field(null=True)
+    ai_summary = Field(null=True)
 
     @classmethod
     def cleanup_expired(cls, max_age_days: int = 90) -> int:
