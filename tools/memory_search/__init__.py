@@ -33,6 +33,7 @@ def search(
     limit: int = 10,
     category: str | None = None,
     tag: str | None = None,
+    min_act_rate: float | None = None,
 ) -> dict[str, Any]:
     """Search memories by query string using BM25 + RRF fusion.
 
@@ -42,6 +43,7 @@ def search(
         limit: Maximum number of results to return.
         category: Filter by metadata category (correction, decision, pattern, surprise).
         tag: Filter by metadata tag.
+        min_act_rate: Filter to memories with act_rate >= this threshold (0.0-1.0).
 
     Returns:
         Dict with "results" list and "error" key (None if no error).
@@ -103,6 +105,16 @@ def search(
                 for r in filtered_records
                 if tag in (getattr(r, "metadata", None) or {}).get("tags", [])
             ]
+        if min_act_rate is not None:
+            from agent.memory_extraction import compute_act_rate
+
+            def _passes_act_rate(r: object) -> bool:
+                meta = getattr(r, "metadata", None) or {}
+                history = meta.get("outcome_history", [])
+                rate = compute_act_rate(history)
+                return rate is not None and rate >= min_act_rate
+
+            filtered_records = [r for r in filtered_records if _passes_act_rate(r)]
 
         results = []
         for record in filtered_records[:limit]:
@@ -250,6 +262,66 @@ def inspect(
 
     except Exception as e:
         logger.warning(f"[memory_search] inspect failed (non-fatal): {e}")
+        return {"error": str(e)}
+
+
+def outcome_stats(
+    project_key: str | None = None,
+) -> dict[str, Any]:
+    """Get aggregate outcome statistics for memories with outcome history.
+
+    Args:
+        project_key: Project partition key. Resolved from env if not provided.
+
+    Returns:
+        Dict with total_with_history, avg_act_rate, and top_acted list.
+    """
+    try:
+        from agent.memory_extraction import compute_act_rate
+        from models.memory import Memory
+
+        project_key = _resolve_project_key(project_key)
+
+        try:
+            all_records = list(Memory.query.filter(project_key=project_key))
+        except Exception:
+            all_records = []
+
+        memories_with_history = []
+        for record in all_records:
+            meta = getattr(record, "metadata", None) or {}
+            history = meta.get("outcome_history", [])
+            if history:
+                rate = compute_act_rate(history)
+                memories_with_history.append(
+                    {
+                        "memory_id": getattr(record, "memory_id", ""),
+                        "content": getattr(record, "content", "")[:100],
+                        "act_rate": rate if rate is not None else 0.0,
+                        "total_outcomes": len(history),
+                    }
+                )
+
+        if not memories_with_history:
+            return {
+                "project_key": project_key,
+                "total_with_history": 0,
+                "avg_act_rate": 0.0,
+                "top_acted": [],
+            }
+
+        avg_rate = sum(m["act_rate"] for m in memories_with_history) / len(memories_with_history)
+        top_acted = sorted(memories_with_history, key=lambda m: m["act_rate"], reverse=True)[:5]
+
+        return {
+            "project_key": project_key,
+            "total_with_history": len(memories_with_history),
+            "avg_act_rate": round(avg_rate, 3),
+            "top_acted": top_acted,
+        }
+
+    except Exception as e:
+        logger.warning(f"[memory_search] outcome_stats failed (non-fatal): {e}")
         return {"error": str(e)}
 
 
