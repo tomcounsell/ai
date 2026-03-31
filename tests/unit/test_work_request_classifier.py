@@ -2,7 +2,7 @@
 
 Tests the classify_work_request() function that determines whether a message
 should be routed through SDLC (orchestrator in ai/) or directly to the
-target project (Q&A).
+target project (Teammate mode).
 """
 
 import pytest
