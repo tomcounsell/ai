@@ -105,7 +105,7 @@ from bridge.routing import (  # noqa: E402
     should_respond_async,
     should_respond_sync,  # noqa: F401
 )
-from config.enums import ChatMode, SessionType  # noqa: E402
+from config.enums import PersonaType, SessionType  # noqa: E402
 from tools.link_analysis import (  # noqa: E402
     extract_urls,
     extract_youtube_urls,
@@ -833,9 +833,8 @@ async def main():
         # Save to subconscious memory (non-fatal, never crashes bridge)
         try:
             if text and text.strip() and not getattr(sender, "bot", False):
-                from popoto import InteractionWeight
-
                 from models.memory import Memory
+                from popoto import InteractionWeight
 
                 Memory.safe_save(
                     agent_id=sender_name or "unknown",
@@ -1407,18 +1406,18 @@ async def main():
 
         # Determine session_type from config-driven mode, with title-prefix fallback.
         # "dev" mode → DevSession (full permissions, dev persona)
-        # Everything else → ChatSession (PM persona, orchestrates DevSessions + Q&A)
-        from bridge.routing import resolve_chat_mode
+        # Everything else → ChatSession (PM persona, orchestrates DevSessions + Teammate)
+        from bridge.routing import resolve_persona
 
         _classification = classification_result.get("type")
-        _chat_mode = resolve_chat_mode(project, chat_title, is_dm=is_dm)
-        if _chat_mode == ChatMode.DEV:
+        _persona = resolve_persona(project, chat_title, is_dm=is_dm)
+        if _persona == PersonaType.DEVELOPER:
             _session_type = SessionType.DEV  # DevSession — Dev persona, full permissions
             logger.info(
                 f"[{project_name}] Dev mode (config-driven): {chat_title!r} → session_type=dev"
             )
         else:
-            _session_type = SessionType.CHAT  # ChatSession — PM persona, handles both SDLC and Q&A
+            _session_type = SessionType.CHAT  # ChatSession — PM persona, handles SDLC and Teammate
 
         # Enqueue: session_type drives ChatSession vs DevSession creation.
         depth = await enqueue_job(

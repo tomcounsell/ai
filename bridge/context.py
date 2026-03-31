@@ -126,13 +126,14 @@ def build_context_prefix(project: dict | None, is_dm: bool, sender_id: int | Non
     """Build project context to inject into agent prompt."""
     context_parts = []
 
-    # All DM users get uniform qa_only access - no per-user permission levels
+    # All DM users get uniform read-only Teammate access - no per-user permission levels
     if is_dm:
         context_parts.append(
-            "RESTRICTION: This user has Q&A-only access. "
+            "RESTRICTION: This user has read-only Teammate access. "
             "Do NOT make any code changes, file edits, git commits, or run destructive commands. "
             "Answer questions, explain code, and provide guidance only. "
-            "If they ask you to make changes, politely explain you can only help with Q&A for them."
+            "If they ask you to make changes, politely explain you can only help with "
+            "informational queries for them."
         )
 
     if not project:

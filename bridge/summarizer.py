@@ -31,7 +31,7 @@ import anthropic
 import httpx
 
 from bridge.message_quality import PROCESS_NARRATION_PATTERNS as _PROCESS_NARRATION_PATTERNS
-from config.enums import ChatMode
+from config.enums import PersonaType
 from config.models import MODEL_FAST, OPENROUTER_HAIKU
 from utils.api_keys import get_anthropic_api_key
 
@@ -331,7 +331,7 @@ COMPLETION — The work is done AND evidence is provided, OR the user's question
 "PR created: https://... — CI green", "ruff check: 0 errors, black: reformatted 3 files"
   Key signals: specific numbers, command output pasted, exit codes mentioned
 
-  Path B — Conversational/Q&A completion (no evidence needed):
+  Path B — Conversational/Teammate completion (no evidence needed):
   When the user asked a question and the agent answered it with factual, substantive content.
   DOES NOT require test output, numbers, or URLs — the answer itself IS the deliverable.
   Examples: "The summarizer works by...", "Here's how the routing system handles...", \
@@ -383,7 +383,7 @@ Output: {"type": "status", "confidence": 0.93, \
 testing, and review. Use /sdlc to create an issue and start the pipeline instead of \
 writing code directly."}
 
-Few-shot examples of Q&A completions (Path B — no evidence needed):
+Few-shot examples of Teammate completions (Path B — no evidence needed):
 
 Input: "The summarizer works by classifying agent output into types (question, status, \
 completion, blocker, error) using an LLM call. Status updates are auto-continued while \
@@ -393,7 +393,7 @@ Output: {"type": "completion", "confidence": 0.92, \
 "reason": "Factual answer to user question about system architecture", \
 "coaching_message": null, "has_workarounds": false}
 
-Input: "There are two root causes: the classifier misclassifies Q&A answers as status \
+Input: "There are two root causes: the classifier misclassifies informational answers as status \
 updates because they lack evidence like test output, and the shared Claude Code session \
 causes context to leak between concurrent conversations."
 Output: {"type": "completion", "confidence": 0.93, \
@@ -958,11 +958,9 @@ def _build_summary_prompt(
             if history:
                 recent = history[-5:]  # Last 5 entries
                 context_parts.append("Recent history: " + " | ".join(str(e) for e in recent))
-        # Signal Q&A mode so the LLM uses prose format
-        if getattr(session, "session_mode", None) == ChatMode.QA or getattr(
-            session, "qa_mode", False
-        ):
-            context_parts.append("qa_mode=True (use conversational prose, no bullets or emoji)")
+        # Signal Teammate mode so the LLM uses prose format
+        if getattr(session, "session_mode", None) == PersonaType.TEAMMATE:
+            context_parts.append("persona=teammate (use conversational prose, no bullets or emoji)")
         if context_parts:
             context_section = "\n\nSession context:\n" + "\n".join(context_parts) + "\n"
 
@@ -999,7 +997,7 @@ Examples of non-null: "Should we use approach A or B?", "Approve the PR for merg
 "Is the confidence threshold of 0.80 acceptable?".
 
 Input: ANY output from an autonomous developer — work summaries, conversational replies, \
-design discussions, Q&A answers, status updates, or technical analysis. May include \
+design discussions, informational answers, status updates, or technical analysis. May include \
 terminal output, commit messages, file diffs, opinions, or free-form notes.
 
 CRITICAL: Never reject, editorialize, or add meta-commentary about the input. \
@@ -1048,7 +1046,7 @@ FORMAT RULES for the **response** field (adaptive based on content type):
 
 5. STATUS UPDATES / WORK WITH CONTEXT: 2-4 bullet points starting with "• "
 
-6. Q&A SESSIONS (when session context indicates qa_mode=True):
+6. TEAMMATE SESSIONS (when session context indicates persona=teammate):
    Respond in conversational prose — no bullets, no status emoji prefix, no structured template.
    Write as a knowledgeable teammate answering a question. Cite sources naturally in prose.
 
@@ -1349,11 +1347,9 @@ def _compose_structured_summary(summary_text: str, session=None, is_completion: 
         except Exception as e:
             logger.debug(f"Could not refresh session for summary: {e}")
 
-    # Q&A bypass: return prose directly without emoji prefix, bullet parsing,
+    # Teammate bypass: return prose directly without emoji prefix, bullet parsing,
     # or structured template. The LLM summary is already in conversational form.
-    if session and (
-        getattr(session, "session_mode", None) == ChatMode.QA or getattr(session, "qa_mode", False)
-    ):
+    if session and (getattr(session, "session_mode", None) == PersonaType.TEAMMATE):
         return summary_text.strip()
 
     # Parse questions from LLM output
