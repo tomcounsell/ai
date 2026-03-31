@@ -61,8 +61,6 @@ class TestRegisterDevSessionCompletion:
 
     def test_marks_dev_session_completed(self, monkeypatch):
         """Should mark pending dev sessions as completed."""
-        monkeypatch.setenv("VALOR_SESSION_ID", "parent-session-1")
-
         mock_dev = MagicMock()
         mock_dev.status = "running"
         mock_dev.job_id = "job-42"
@@ -70,21 +68,19 @@ class TestRegisterDevSessionCompletion:
         mock_query = MagicMock()
         mock_query.filter.return_value = [mock_dev]
 
-        with patch("agent.hooks.subagent_stop.AgentSession", create=True) as mock_as:
-            # Patch the import inside the function
-            with patch.dict(
-                "sys.modules", {"models.agent_session": MagicMock(AgentSession=mock_as)}
-            ):
-                mock_as.query = mock_query
-                _register_dev_session_completion("agent-1")
+        with (
+            patch("agent.hooks.session_registry.resolve", return_value="parent-session-1"),
+            patch("agent.hooks.subagent_stop.AgentSession", create=True) as mock_as,
+            patch.dict("sys.modules", {"models.agent_session": MagicMock(AgentSession=mock_as)}),
+        ):
+            mock_as.query = mock_query
+            _register_dev_session_completion("agent-1", claude_uuid="test-uuid")
 
         assert mock_dev.status == "completed"
         mock_dev.save.assert_called_once()
 
     def test_skips_already_completed_sessions(self, monkeypatch):
         """Should not overwrite sessions that are already completed or failed."""
-        monkeypatch.setenv("VALOR_SESSION_ID", "parent-session-2")
-
         mock_dev_completed = MagicMock()
         mock_dev_completed.status = "completed"
 
@@ -94,12 +90,13 @@ class TestRegisterDevSessionCompletion:
         mock_query = MagicMock()
         mock_query.filter.return_value = [mock_dev_completed, mock_dev_failed]
 
-        with patch("agent.hooks.subagent_stop.AgentSession", create=True) as mock_as:
-            with patch.dict(
-                "sys.modules", {"models.agent_session": MagicMock(AgentSession=mock_as)}
-            ):
-                mock_as.query = mock_query
-                _register_dev_session_completion("agent-1")
+        with (
+            patch("agent.hooks.session_registry.resolve", return_value="parent-session-2"),
+            patch("agent.hooks.subagent_stop.AgentSession", create=True) as mock_as,
+            patch.dict("sys.modules", {"models.agent_session": MagicMock(AgentSession=mock_as)}),
+        ):
+            mock_as.query = mock_query
+            _register_dev_session_completion("agent-1", claude_uuid="test-uuid")
 
         # Neither should have save called since both are terminal
         mock_dev_completed.save.assert_not_called()
@@ -107,23 +104,25 @@ class TestRegisterDevSessionCompletion:
 
     def test_handles_import_error(self, monkeypatch, caplog):
         """Should log warning if AgentSession import fails."""
-        monkeypatch.setenv("VALOR_SESSION_ID", "parent-session-3")
-
-        with patch.dict("sys.modules", {"models.agent_session": None}):
-            with caplog.at_level(logging.WARNING):
-                _register_dev_session_completion("agent-1")
+        with (
+            patch("agent.hooks.session_registry.resolve", return_value="parent-session-3"),
+            patch.dict("sys.modules", {"models.agent_session": None}),
+            caplog.at_level(logging.WARNING),
+        ):
+            _register_dev_session_completion("agent-1", claude_uuid="test-uuid")
         assert "Failed to register DevSession completion" in caplog.text
 
     def test_handles_query_error(self, monkeypatch, caplog):
         """Should log warning if Redis query raises."""
-        monkeypatch.setenv("VALOR_SESSION_ID", "parent-session-4")
-
         mock_module = MagicMock()
         mock_module.AgentSession.query.filter.side_effect = RuntimeError("Redis down")
 
-        with patch.dict("sys.modules", {"models.agent_session": mock_module}):
-            with caplog.at_level(logging.WARNING):
-                _register_dev_session_completion("agent-1")
+        with (
+            patch("agent.hooks.session_registry.resolve", return_value="parent-session-4"),
+            patch.dict("sys.modules", {"models.agent_session": mock_module}),
+            caplog.at_level(logging.WARNING),
+        ):
+            _register_dev_session_completion("agent-1", claude_uuid="test-uuid")
         assert "Failed to register DevSession completion" in caplog.text
 
 
@@ -313,9 +312,8 @@ class TestSubagentStopHookDevSession:
     @pytest.mark.asyncio
     async def test_injects_stage_states_for_dev_session(self, monkeypatch):
         """Should inject pipeline state into reason field for dev-sessions."""
-        monkeypatch.setenv("VALOR_SESSION_ID", "pm-session-1")
-
         with (
+            patch("agent.hooks.session_registry.resolve", return_value="pm-session-1"),
             patch("agent.hooks.subagent_stop._register_dev_session_completion") as mock_reg,
             patch(
                 "agent.hooks.subagent_stop._get_stage_states",
@@ -326,16 +324,15 @@ class TestSubagentStopHookDevSession:
             input_data = {"agent_type": "dev-session", "agent_id": "dev-1"}
             result = await subagent_stop_hook(input_data, None, None)
 
-        mock_reg.assert_called_once_with("dev-1", input_data=input_data)
+        mock_reg.assert_called_once_with("dev-1", input_data=input_data, claude_uuid=None)
         assert "reason" in result
         assert "Pipeline state" in result["reason"]
 
     @pytest.mark.asyncio
-    async def test_no_injection_when_session_id_not_set(self, monkeypatch):
-        """Should not inject stages when VALOR_SESSION_ID is not set."""
-        monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
-
+    async def test_no_injection_when_session_id_not_resolved(self, monkeypatch):
+        """Should not inject stages when session registry has no mapping."""
         with (
+            patch("agent.hooks.session_registry.resolve", return_value=None),
             patch("agent.hooks.subagent_stop._register_dev_session_completion"),
             patch("agent.hooks.subagent_stop._post_stage_comment_on_completion"),
         ):
@@ -347,9 +344,8 @@ class TestSubagentStopHookDevSession:
     @pytest.mark.asyncio
     async def test_no_injection_when_no_stage_data(self, monkeypatch):
         """Should return empty dict when no SDLC stage data exists."""
-        monkeypatch.setenv("VALOR_SESSION_ID", "pm-session-2")
-
         with (
+            patch("agent.hooks.session_registry.resolve", return_value="pm-session-2"),
             patch("agent.hooks.subagent_stop._register_dev_session_completion"),
             patch("agent.hooks.subagent_stop._get_stage_states", return_value=None),
             patch("agent.hooks.subagent_stop._post_stage_comment_on_completion"),
@@ -362,9 +358,8 @@ class TestSubagentStopHookDevSession:
     @pytest.mark.asyncio
     async def test_posts_stage_comment_on_completion(self, monkeypatch):
         """Should call _post_stage_comment_on_completion for dev-sessions."""
-        monkeypatch.setenv("VALOR_SESSION_ID", "pm-session-3")
-
         with (
+            patch("agent.hooks.session_registry.resolve", return_value="pm-session-3"),
             patch("agent.hooks.subagent_stop._register_dev_session_completion"),
             patch("agent.hooks.subagent_stop._get_stage_states", return_value=None),
             patch("agent.hooks.subagent_stop._post_stage_comment_on_completion") as mock_post,

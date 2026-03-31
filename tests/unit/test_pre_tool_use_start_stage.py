@@ -176,8 +176,6 @@ class TestMaybeRegisterDevSessionStartStage:
     """Test that _maybe_register_dev_session calls start_stage wiring."""
 
     def test_calls_start_stage_for_sdlc_prompt(self, monkeypatch, caplog):
-        monkeypatch.setenv("VALOR_SESSION_ID", "parent-session-10")
-
         mock_dev = MagicMock()
         mock_dev.job_id = "job-99"
         mock_as_mod = MagicMock()
@@ -189,17 +187,16 @@ class TestMaybeRegisterDevSessionStartStage:
         }
 
         with (
+            patch("agent.hooks.session_registry.resolve", return_value="parent-session-10"),
             patch.dict("sys.modules", {"models.agent_session": mock_as_mod}),
             patch("agent.hooks.pre_tool_use._start_pipeline_stage") as mock_start,
             caplog.at_level(logging.INFO),
         ):
-            _maybe_register_dev_session(tool_input)
+            _maybe_register_dev_session(tool_input, claude_uuid="test-uuid")
 
         mock_start.assert_called_once_with("parent-session-10", "BUILD")
 
     def test_skips_start_stage_when_no_stage_in_prompt(self, monkeypatch, caplog):
-        monkeypatch.setenv("VALOR_SESSION_ID", "parent-session-11")
-
         mock_dev = MagicMock()
         mock_dev.job_id = "job-100"
         mock_as_mod = MagicMock()
@@ -211,19 +208,18 @@ class TestMaybeRegisterDevSessionStartStage:
         }
 
         with (
+            patch("agent.hooks.session_registry.resolve", return_value="parent-session-11"),
             patch.dict("sys.modules", {"models.agent_session": mock_as_mod}),
             patch("agent.hooks.pre_tool_use._start_pipeline_stage") as mock_start,
             caplog.at_level(logging.DEBUG),
         ):
-            _maybe_register_dev_session(tool_input)
+            _maybe_register_dev_session(tool_input, claude_uuid="test-uuid")
 
         mock_start.assert_not_called()
         assert "No SDLC stage found" in caplog.text
 
     def test_start_stage_failure_does_not_block_registration(self, monkeypatch, caplog):
         """start_stage failure should not prevent DevSession registration from completing."""
-        monkeypatch.setenv("VALOR_SESSION_ID", "parent-session-12")
-
         mock_dev = MagicMock()
         mock_dev.job_id = "job-101"
         mock_as_mod = MagicMock()
@@ -235,6 +231,7 @@ class TestMaybeRegisterDevSessionStartStage:
         }
 
         with (
+            patch("agent.hooks.session_registry.resolve", return_value="parent-session-12"),
             patch.dict("sys.modules", {"models.agent_session": mock_as_mod}),
             patch(
                 "agent.hooks.pre_tool_use._start_pipeline_stage",
@@ -249,7 +246,7 @@ class TestMaybeRegisterDevSessionStartStage:
             # Note: since we mock at the function level, the side_effect does raise.
             # The real _start_pipeline_stage never raises.
             try:
-                _maybe_register_dev_session(tool_input)
+                _maybe_register_dev_session(tool_input, claude_uuid="test-uuid")
             except RuntimeError:
                 pass
 
