@@ -1578,6 +1578,8 @@ async def main():
     global _bridge_was_connected
     _bridge_was_connected = True
     _clear_flood_backoff()
+    # Read last_connected BEFORE writing new timestamp so catchup gets the real gap
+    _catchup_last_connected = _read_last_connected()
     _write_last_connected()
 
     # Replay any dead-lettered messages from previous session
@@ -1733,9 +1735,10 @@ async def main():
             from agent.job_queue import enqueue_job as _enqueue_job
             from bridge.catchup import scan_for_missed_messages
 
-            # Compute dynamic lookback from last_connected timestamp
+            # Use the last_connected value captured BEFORE we wrote the new
+            # timestamp at connect time, so we get the real downtime gap
             lookback = None
-            last_connected = _read_last_connected()
+            last_connected = _catchup_last_connected
             if last_connected is not None:
                 lookback = datetime.now(UTC) - last_connected
                 logger.info(
