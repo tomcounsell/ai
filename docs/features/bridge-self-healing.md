@@ -110,15 +110,15 @@ Log rotation uses a dual-mechanism approach: Python-managed rotation for applica
 
 ### 6. Startup Redis Key Cleanup (`bridge/telegram_bridge.py`)
 
-**Problem**: Stale Redis entries with non-standard 60-character `job_id` keys (from historical data or crashes) trigger popoto validation errors on every query scan, generating thousands of error log entries.
+**Problem**: Stale Redis entries with non-standard 60-character `agent_session_id` keys (from historical data or crashes) trigger popoto validation errors on every query scan, generating thousands of error log entries.
 
-**Solution**: On bridge startup, before recovering interrupted/orphaned jobs, the bridge calls `AgentSession.query.keys(clean=True)` to purge Redis set entries that point to missing or invalid objects. This is a one-time cleanup that prevents the validation errors from recurring.
+**Solution**: On bridge startup, before recovering interrupted/orphaned sessions, the bridge calls `AgentSession.query.keys(clean=True)` to purge Redis set entries that point to missing or invalid objects. This is a one-time cleanup that prevents the validation errors from recurring.
 
-### 7. Orphan Recovery Hardening (`agent/job_queue.py`)
+### 7. Orphan Recovery Hardening (`agent/agent_session_queue.py`)
 
-**Problem**: The `_recover_orphaned_jobs()` function calls `.decode()` on Redis byte data without error handling. Corrupted UTF-8 data in orphaned sessions causes `UnicodeDecodeError` crashes that abort the entire recovery loop.
+**Problem**: The `_recover_orphaned_sessions()` function calls `.decode()` on Redis byte data without error handling. Corrupted UTF-8 data in orphaned sessions causes `UnicodeDecodeError` crashes that abort the entire recovery loop.
 
-**Solution**: All `.decode()` calls in `_recover_orphaned_jobs()` now use `errors='replace'`, which substitutes U+FFFD for corrupted bytes instead of crashing. The decode error context and raw key bytes are included in warning logs for forensic analysis.
+**Solution**: All `.decode()` calls in `_recover_orphaned_sessions()` now use `errors='replace'`, which substitutes U+FFFD for corrupted bytes instead of crashing. The decode error context and raw key bytes are included in warning logs for forensic analysis.
 
 ### 8. Perplexity Provider Error Handling (`tools/web/providers/perplexity.py`)
 
@@ -176,7 +176,7 @@ The watchdog is installed alongside the bridge:
 1. Acquires a lock (`data/update.lock`) to prevent concurrent runs
 2. Runs `git fetch` + `git pull` via `scripts/update/run.py --cron`
 3. If new commits arrived: syncs dependencies (if dep files changed), writes `data/restart-requested`
-4. The bridge job queue detects the restart flag and triggers a graceful restart after in-flight jobs complete
+4. The bridge session queue detects the restart flag and triggers a graceful restart after in-flight sessions complete
 
 **Verify polling is active**:
 ```bash

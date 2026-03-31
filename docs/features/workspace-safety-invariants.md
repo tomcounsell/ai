@@ -47,10 +47,10 @@ The function never raises an exception. This is a deliberate design choice: a va
 
 Validation runs at two points in the agent launch path, providing defense in depth:
 
-1. **`_execute_job()`** in `agent/job_queue.py` — validates `job.working_dir` before any agent work begins
+1. **`_execute_agent_session()`** in `agent/agent_session_queue.py` — validates `session.working_dir` before any agent work begins
 2. **`ValorAgent.__init__()`** in `agent/sdk_client.py` — validates `working_dir` before storing it on the agent instance
 
-Both call `validate_workspace()` with the same `allowed_root`. The double-check is intentional: job queue validation catches problems early, while SDK client validation ensures safety even when `ValorAgent` is instantiated directly (e.g., in tests or alternate entry points).
+Both call `validate_workspace()` with the same `allowed_root`. The double-check is intentional: session queue validation catches problems early, while SDK client validation ensures safety even when `ValorAgent` is instantiated directly (e.g., in tests or alternate entry points).
 
 ### Worktree Detection
 

@@ -18,18 +18,18 @@ The `AgentSession.log_lifecycle_transition()` method is called at every status c
 |--------|-----------|---------|
 | `session_transcript.start_transcript()` | →active | Transcript started |
 | `session_transcript.complete_transcript()` | →completed/failed/dormant | Transcript completed |
-| `job_queue._push_job()` | →pending | Job enqueued |
-| `job_queue._pop_job()` | →running | Worker picked up job |
+| `agent_session_queue._push_agent_session()` | →pending | Session enqueued |
+| `agent_session_queue._pop_agent_session()` | →running | Worker picked up session |
 | `session_watchdog.fix_unhealthy_session()` | →abandoned | Watchdog remediation |
 
 Each call:
-1. Emits a structured INFO log: `LIFECYCLE session=X transition=old→new job_id=Y project=Z duration_in_prev_state=Ns context="..."`
+1. Emits a structured INFO log: `LIFECYCLE session=X transition=old→new session_id=Y project=Z duration_in_prev_state=Ns context="..."`
 2. Appends a `[lifecycle]` entry to the session's history list (duration is derived from history timestamps)
 
 ### Log Format
 
 ```
-LIFECYCLE session=tg_valor_-5051653062_6165 transition=pending→running job_id=abc123 project=valor duration_in_prev_state=2.3s context="worker picked up job"
+LIFECYCLE session=tg_valor_-5051653062_6165 transition=pending→running job_id=abc123 project=valor duration_in_prev_state=2.3s context="worker picked up session"
 ```
 
 Filter all lifecycle events: `grep LIFECYCLE logs/bridge.log`
@@ -41,7 +41,7 @@ Added to the existing session watchdog loop. Every 5 minutes, `check_stalled_ses
 | Status | Threshold | Rationale |
 |--------|-----------|-----------|
 | pending | 300s (5 min) | Jobs should be picked up quickly |
-| running | 2700s (45 min) | Matches job health monitor timeout |
+| running | 2700s (45 min) | Matches agent session health monitor timeout |
 | active | 600s (10 min) | No `last_activity` update = likely stalled |
 
 For active sessions, `last_activity` is checked first — if recent activity exists within the threshold, the session is not considered stalled.
@@ -53,7 +53,7 @@ When a stall is detected:
 
 ### Stale Save Guard (#342)
 
-The `_execute_job()` epilogue in `agent/job_queue.py` previously saved a stale in-memory `agent_session` reference when `defer_reaction=True` (auto-continue). Since `_enqueue_continuation()` already deleted and recreated the session, this save resurrected a ghost record in Redis, causing the pending continuation to become invisible to the worker. The fix skips the save entirely and logs a debug message explaining why.
+The `_execute_agent_session()` epilogue in `agent/agent_session_queue.py` previously saved a stale in-memory `agent_session` reference when `defer_reaction=True` (auto-continue). Since `_enqueue_continuation()` already deleted and recreated the session, this save resurrected a ghost record in Redis, causing the pending continuation to become invisible to the worker. The fix skips the save entirely and logs a debug message explaining why.
 
 ### CLI Status Report
 
@@ -91,7 +91,7 @@ Constants in `monitoring/session_watchdog.py`:
 |------|---------|
 | `models/agent_session.py` | `log_lifecycle_transition()` method (duration derived from history entries) |
 | `bridge/session_transcript.py` | Lifecycle calls in start/complete |
-| `agent/job_queue.py` | Lifecycle calls in push/pop |
+| `agent/agent_session_queue.py` | Lifecycle calls in push/pop |
 | `monitoring/session_watchdog.py` | Stall detection (`check_stalled_sessions()`) |
 | `monitoring/session_status.py` | CLI session status report |
 | `tests/test_lifecycle_transition.py` | Integration tests for lifecycle logging |
@@ -117,7 +117,7 @@ Summaries are truncated to 500 characters at capture time. The `AgentSession.sum
 ## Related
 
 - [Session Watchdog](session-watchdog.md) — Existing session health monitoring (silence, loops, errors, duration)
-- [Job Health Monitor](job-health-monitor.md) — Queue-level stuck job recovery
+- [Agent Session Health Monitor](agent-session-health-monitor.md) — Queue-level stuck session recovery
 - [Bridge Self-Healing](bridge-self-healing.md) — Process-level bridge health
 - [AgentSession Model](agent-session-model.md) — Unified session lifecycle model
 - Issue #216 — Tracking issue

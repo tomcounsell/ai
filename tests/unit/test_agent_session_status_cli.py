@@ -6,7 +6,7 @@ from io import StringIO
 from unittest.mock import MagicMock, patch
 
 
-class TestJobStatusCli(unittest.TestCase):
+class TestSessionStatusCli(unittest.TestCase):
     """Test _cli_show_status output."""
 
     @patch("agent.agent_session_queue.AgentSession")
@@ -26,7 +26,7 @@ class TestJobStatusCli(unittest.TestCase):
 
     @patch("agent.agent_session_queue.AgentSession")
     @patch("agent.agent_session_queue._active_workers", {})
-    def test_shows_jobs(self, mock_session_cls):
+    def test_shows_sessions(self, mock_session_cls):
         """Status with sessions shows session info."""
         session = MagicMock()
         session.chat_id = "chat-123"

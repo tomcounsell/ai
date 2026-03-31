@@ -28,7 +28,7 @@ reflections:
     interval: 300       # 5 minutes
     priority: high
     execution_type: function
-    callable: "agent.job_queue._job_health_check"
+    callable: "agent.agent_session_queue._job_health_check"
     enabled: true
 ```
 

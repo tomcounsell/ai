@@ -6,7 +6,7 @@ Three targeted fixes addressing session context loss, URL validation, and unauth
 
 The pipeline had three integrity gaps:
 
-1. **Session metadata lost during continuation**: When `_enqueue_continuation` couldn't find the AgentSession in Redis, it fell back to `enqueue_job()` which only passed a subset of fields, losing `context_summary`, `expectations`, `issue_url`, `pr_url`, and stage history.
+1. **Session metadata lost during continuation**: When `_enqueue_continuation` couldn't find the AgentSession in Redis, it fell back to `enqueue_agent_session()` which only passed a subset of fields, losing `context_summary`, `expectations`, `issue_url`, `pr_url`, and stage history.
 
 2. **Unvalidated URLs from worker output**: The Observer's `update_session` tool accepted URLs verbatim from worker text, allowing wrong-repo URLs to propagate through status messages.
 
@@ -16,9 +16,9 @@ The pipeline had three integrity gaps:
 
 ### A. Session Continuation Hardening
 
-**File**: `agent/job_queue.py`
+**File**: `agent/agent_session_queue.py`
 
-The fallback path in `_enqueue_continuation` now uses `_extract_job_fields(job._rj)` to preserve ALL metadata from the underlying AgentSession, including session-phase fields that `enqueue_job()` doesn't accept as parameters.
+The fallback path in `_enqueue_continuation` now uses `_extract_agent_session_fields(session._rj)` to preserve ALL metadata from the underlying AgentSession, including session-phase fields that `enqueue_agent_session()` doesn't accept as parameters.
 
 A `_diagnose_missing_session()` helper checks Redis directly (key existence, TTL) before the fallback, providing diagnostic info in error logs for debugging session loss.
 
@@ -79,7 +79,7 @@ This creates a feedback loop: the PM dispatches a dev-session to run a stage, th
 
 ## Known Tech Debt
 
-### `r.keys()` in `_diagnose_missing_session` (agent/job_queue.py:1271)
+### `r.keys()` in `_diagnose_missing_session` (agent/agent_session_queue.py:1271)
 
 The diagnostic function uses `r.keys(f"*{session_id}*")` which is O(N) across the entire Redis keyspace. Redis documentation explicitly warns against using `KEYS` in production. This is acceptable today because:
 

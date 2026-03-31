@@ -6,7 +6,7 @@ Unified Redis model tracking agent work from enqueue through completion. Replace
 
 `pending` -> `running` -> `active` -> `dormant` -> `completed` | `failed` | `cancelled`
 
-The `cancelled` status is a terminal state set explicitly by the PM via `cancel_agent_session()`. Like `failed`, cancelled jobs block any sibling jobs that depend on them.
+The `cancelled` status is a terminal state set explicitly by the PM via `cancel_agent_session()`. Like `failed`, cancelled sessions block any sibling sessions that depend on them.
 
 ## Key Fields
 
@@ -44,7 +44,7 @@ String fields like `session_type`, `classification_type`, and `session_mode` use
 
 `_get_stage_states_dict()` parses the `stage_states` JSON field into a dict. It handles `None`, `dict`, and JSON string inputs.
 
-These are used by the [stage-aware auto-continue](bridge-workflow-gaps.md#stage-aware-path-sdlc-jobs) routing in `agent/agent_session_queue.py`.
+These are used by the [stage-aware auto-continue routing in `agent/agent_session_queue.py`.
 
 ## Link Accumulation
 
@@ -121,7 +121,7 @@ Each `session_id` has exactly one `AgentSession` at any time. The `AgentSession`
 
 Only four fields change during continuation: `status` (reset to "pending"), `message_text` (coaching message), `auto_continue_count` (incremented), and `priority` (set to "high").
 
-**Fresh reads in routing:** The `send_to_chat` closure in `_execute_agent_session()` re-reads the `AgentSession` from Redis before making routing decisions. This ensures `is_sdlc` and `stage_states` data are current, not the stale in-memory copy captured at job start.
+**Fresh reads in routing:** The `send_to_chat` closure in `_execute_agent_session()` re-reads the `AgentSession` from Redis before making routing decisions. This ensures `is_sdlc` and `stage_states` data are current, not the stale in-memory copy captured at session start.
 
 ### Field Preservation on Status Change
 

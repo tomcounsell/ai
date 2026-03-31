@@ -39,9 +39,9 @@ Errors are classified and handled with escalating backoff:
 - **Counter reset**: Successful observer runs reset the failure counter
 - **Import guard**: `_build_observer_system_prompt()` wraps `load_principal_context` import in try/except; on ImportError, builds prompt without principal context
 
-### 4. Escalation Handling (agent/job_queue.py)
+### 4. Escalation Handling (agent/agent_session_queue.py)
 
-The job queue processes circuit breaker signals from observer error results:
+The session queue processes circuit breaker signals from observer error results:
 
 - `retry_after`: Sleeps for the backoff duration, then re-runs the observer
 - `should_escalate`: Sends an escalation notice to Telegram with session ID, failure count, and error details, then delivers raw worker output as fallback

@@ -6,9 +6,9 @@ Schedule test runs through background queue with resource management.
 
 This tool provides background test execution:
 - Schedule tests for execution
-- Monitor job status
+- Monitor session status
 - Retrieve results
-- Cancel pending jobs
+- Cancel pending sessions
 
 ## Installation
 
@@ -17,14 +17,14 @@ No external dependencies required.
 ## Quick Start
 
 ```python
-from tools.test_scheduler import schedule_tests, get_job_status
+from tools.test_scheduler import schedule_tests, get_session_status
 
 # Schedule tests
 result = schedule_tests("pytest tests/ -v")
-job_id = result["job_id"]
+session_id = result["agent_session_id"]
 
 # Check status
-status = get_job_status(job_id)
+status = get_session_status(session_id)
 print(f"Status: {status['status']}")
 
 # Get results when complete
@@ -52,12 +52,12 @@ def schedule_tests(
 - `notification_chat_id`: Where to send results
 - `max_workers`: Parallel execution limit
 - `timeout_minutes`: Maximum runtime
-- `priority`: Job priority
+- `priority`: Session priority
 
 **Returns:**
 ```python
 {
-    "job_id": str,
+    "agent_session_id": str,
     "status": "scheduled",
     "tests_to_run": list[str],
     "test_count": int,
@@ -66,18 +66,18 @@ def schedule_tests(
 }
 ```
 
-### get_job_status()
+### get_session_status()
 
 ```python
-def get_job_status(job_id: str) -> dict
+def get_session_status(session_id: str) -> dict
 ```
 
-Get current status of a job.
+Get current status of a session.
 
 **Returns:**
 ```python
 {
-    "job_id": str,
+    "agent_session_id": str,
     "status": str,  # scheduled, running, completed, cancelled
     "created_at": str,
     "results": list[dict],  # if completed
@@ -85,41 +85,41 @@ Get current status of a job.
 }
 ```
 
-### list_jobs()
+### list_sessions()
 
 ```python
-def list_jobs(status_filter: str | None = None, limit: int = 10) -> dict
+def list_sessions(status_filter: str | None = None, limit: int = 10) -> dict
 ```
 
-List scheduled jobs.
+List scheduled sessions.
 
-### cancel_job()
+### cancel_session()
 
 ```python
-def cancel_job(job_id: str) -> dict
+def cancel_session(session_id: str) -> dict
 ```
 
-Cancel a scheduled job.
+Cancel a scheduled session.
 
-### get_job_results()
+### get_session_results()
 
 ```python
-def get_job_results(job_id: str) -> dict
+def get_session_results(session_id: str) -> dict
 ```
 
-Get detailed results for a completed job.
+Get detailed results for a completed session.
 
 ## Workflows
 
 ### Schedule and Wait
 ```python
 result = schedule_tests("pytest tests/")
-job_id = result["job_id"]
+session_id = result["agent_session_id"]
 
 # Poll for completion
 import time
 while True:
-    status = get_job_status(job_id)
+    status = get_session_status(session_id)
     if status["status"] == "completed":
         break
     time.sleep(5)
@@ -136,25 +136,25 @@ result = schedule_tests(
 )
 ```
 
-### List Recent Jobs
+### List Recent Sessions
 ```python
-jobs = list_jobs(limit=5)
-for job in jobs["jobs"]:
-    print(f"{job['job_id']}: {job['status']}")
+sessions = list_sessions(limit=5)
+for session in sessions["sessions"]:
+    print(f"{session['agent_session_id']}: {session['status']}")
 ```
 
-## Job Statuses
+## Session Statuses
 
 | Status | Description |
 |--------|-------------|
-| scheduled | Job created, waiting to run |
+| scheduled | Session created, waiting to run |
 | running | Tests executing |
 | completed | All tests finished |
-| cancelled | Job was cancelled |
+| cancelled | Session was cancelled |
 
 ## Results Storage
 
-Results are saved to `~/.valor/test_results/<job_id>.json`.
+Results are saved to `~/.valor/test_results/<agent_session_id>.json`.
 
 ## Error Handling
 
@@ -164,13 +164,13 @@ result = schedule_tests(spec)
 if "error" in result:
     print(f"Scheduling failed: {result['error']}")
 else:
-    print(f"Job scheduled: {result['job_id']}")
+    print(f"Session scheduled: {result['agent_session_id']}")
 ```
 
 ## Troubleshooting
 
-### Job Stuck in Running
+### Session Stuck in Running
 Check if the test command is hanging. Consider reducing timeout.
 
 ### Results Not Found
-Ensure the job completed. Check job status first.
+Ensure the session completed. Check session status first.

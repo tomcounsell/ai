@@ -116,7 +116,7 @@ Runs for the lifetime of the bridge process. No separate service or process mana
 
 **Relationship to PostToolUse health check**: The PostToolUse health check (`agent/health_check.py`) fires every 20 tool calls and uses a two-pronged kill mechanism when it detects an unhealthy session:
 
-1. **`watchdog_unhealthy` flag**: Sets a reason string on the AgentSession model in Redis. The nudge loop in `agent/job_queue.py` checks this flag via `is_session_unhealthy()` before auto-continuing. When flagged, the nudge loop delivers output to Telegram instead of sending "Keep working", breaking the auto-continue cycle.
+1. **`watchdog_unhealthy` flag**: Sets a reason string on the AgentSession model in Redis. The nudge loop in `agent/agent_session_queue.py` checks this flag via `is_session_unhealthy()` before auto-continuing. When flagged, the nudge loop delivers output to Telegram instead of sending "Keep working", breaking the auto-continue cycle.
 2. **`additionalContext` injection**: Returns a PostToolUse hook result with `additionalContext` telling Claude to stop immediately and summarize what blocked it.
 
 The session watchdog is complementary — it catches sessions that go *silent* (no tool calls happening), which the PostToolUse hook cannot detect.
@@ -130,7 +130,7 @@ The session watchdog is complementary — it catches sessions that go *silent* (
 | `monitoring/session_watchdog.py` | Watchdog implementation (all detection + alerting) |
 | `monitoring/__init__.py` | Module exports |
 | `agent/health_check.py` | PostToolUse health check with watchdog_unhealthy flag and additionalContext injection |
-| `agent/job_queue.py` | Nudge loop checks `is_session_unhealthy()` before auto-continuing |
+| `agent/agent_session_queue.py` | Nudge loop checks `is_session_unhealthy()` before auto-continuing |
 | `models/agent_session.py` | `watchdog_unhealthy` field on AgentSession |
 | `bridge/telegram_bridge.py` | Integration point (launches watchdog task) |
 | `tests/unit/test_session_watchdog.py` | 30 unit tests |

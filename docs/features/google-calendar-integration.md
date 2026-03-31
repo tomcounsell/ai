@@ -47,8 +47,8 @@ Configured in `.claude/settings.json` — committed to the repo, so it works on 
 
 ### Bridge Integration (Telegram sessions)
 
-The bridge job queue (`agent/job_queue.py`) automatically calls `valor-calendar` with the project key:
-- Once at job start (session begins)
+The bridge session queue (`agent/agent_session_queue.py`) automatically calls `valor-calendar` with the project key:
+- Once at session start (session begins)
 - Every 25 minutes during long-running jobs (heartbeat)
 
 Calls are fire-and-forget subprocesses — they never block agent work.
@@ -60,7 +60,7 @@ Calls are fire-and-forget subprocesses — they never block agent work.
 | `tools/valor_calendar.py` | CLI tool, event logic, offline queue |
 | `tools/google_workspace/__init__.py` | Package init |
 | `tools/google_workspace/auth.py` | OAuth module (reusable for future Workspace tools) |
-| `agent/job_queue.py` | Bridge heartbeat integration |
+| `agent/agent_session_queue.py` | Bridge heartbeat integration |
 | `scripts/calendar_hook.sh` | Claude Code hook script (rate-limited) |
 | `.claude/settings.json` | Hook configuration (SessionStart + Stop) |
 

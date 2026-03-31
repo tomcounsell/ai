@@ -6,25 +6,25 @@ Extends the async agent session queue with sibling dependency tracking, determin
 
 The agent session queue previously processed work sequentially within a chat but lacked:
 
-1. **Sibling dependency tracking** -- Jobs could only declare parent-child relationships, not sibling dependencies. Ordering was implicit (FIFO) rather than explicit.
+1. **Sibling dependency tracking** -- Sessions could only declare parent-child relationships, not sibling dependencies. Ordering was implicit (FIFO) rather than explicit.
 2. **Automatic branch-session mapping** -- DevSession agents had to manually figure out which branch to work on.
 3. **Session state preservation** -- When a DevSession paused, branch and commit state were not recorded.
 4. **Session-level visibility** -- Health checks lacked session context, producing false positives.
 
 ## Solution
 
-### Job Dependencies (Phase 1)
+### Session Dependencies (Phase 1)
 
-Each job gets a `stable_agent_session_id` (UUID, set once at creation, never changes on delete-and-recreate) and an optional `depends_on` list of `stable_agent_session_id` values.
+Each session gets a `stable_agent_session_id` (UUID, set once at creation, never changes on delete-and-recreate) and an optional `depends_on` list of `stable_agent_session_id` values.
 
-- `_pop_agent_session()` filters out jobs whose dependencies are not all `completed`
+- `_pop_agent_session()` filters out sessions whose dependencies are not all `completed`
 - Only `completed` is considered "met" -- `failed` and `cancelled` block dependents
 - Missing `stable_agent_session_id` (deleted from Redis) is treated as blocked (conservative)
 - A `_dependency_health_check()` detects stuck chains and logs warnings
 
 **Key functions:**
-- `_dependencies_met(job)` -- Check if all deps are completed
-- `dependency_status(job)` -- Return status of each dependency
+- `_dependencies_met(session)` -- Check if all deps are completed
+- `dependency_status(session)` -- Return status of each dependency
 
 ### Branch-Session Mapping (Phase 2)
 
@@ -41,18 +41,18 @@ Integrated into `_execute_agent_session()` -- the agent automatically starts on 
 
 ### State Checkpoint/Restore (Phase 3)
 
-- `checkpoint_branch_state(job)` -- Records current branch + HEAD commit SHA on the AgentSession
-- `restore_branch_state(job)` -- Verifies and restores state on job resume
-- Called automatically at job completion (audit trail) and job start (restore)
+- `checkpoint_branch_state(session)` -- Records current branch + HEAD commit SHA on the AgentSession
+- `restore_branch_state(session)` -- Verifies and restores state on session resume
+- Called automatically at session completion (audit trail) and session start (restore)
 - Handles force-pushed branches and missing commits gracefully
 
 ### PM Queue Management (Phase 4)
 
 Four functions for ChatSession orchestration:
 
-- `reorder_agent_session(agent_session_id, new_priority)` -- Change priority of pending jobs
+- `reorder_agent_session(agent_session_id, new_priority)` -- Change priority of pending sessions
 - `cancel_agent_session(agent_session_id)` -- Set explicit `cancelled` terminal status (blocks dependents)
-- `retry_agent_session(stable_agent_session_id)` -- Re-queue failed/cancelled jobs
+- `retry_agent_session(stable_agent_session_id)` -- Re-queue failed/cancelled sessions
 - `get_queue_status(chat_id)` -- Full queue state with dependency graph
 
 ### Session Observability (Phase 5)
@@ -70,7 +70,7 @@ Four functions for ChatSession orchestration:
 | Field | Type | Description |
 |-------|------|-------------|
 | `stable_agent_session_id` | `KeyField(null=True)` | UUID set once at creation, dependency reference key |
-| `depends_on` | `ListField(null=True)` | List of stable_agent_session_id values this job waits for |
+| `depends_on` | `ListField(null=True)` | List of stable_agent_session_id values this session waits for |
 | `commit_sha` | `Field(null=True)` | HEAD commit SHA for checkpoint/restore |
 
 ### Terminal Statuses

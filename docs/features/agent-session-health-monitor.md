@@ -1,41 +1,41 @@
 # Agent Session Health Monitor
 
-Automatically detects and recovers stuck running jobs in the Redis-based agent session queue.
+Automatically detects and recovers stuck running sessions in the Redis-based agent session queue.
 
 ## Overview
 
 The agent session health monitor runs as a periodic async task alongside the bridge process. Every 5 minutes, it scans all `running` AND `pending` AgentSessions to check:
 
 1. Whether the associated worker coroutine is still alive
-2. Whether the job has exceeded its maximum duration
-3. Whether pending jobs have a worker that can process them
+2. Whether the session has exceeded its maximum duration
+3. Whether pending sessions have a worker that can process them
 
 This is the **single unified recovery mechanism** — it replaces six competing recovery functions that previously raced against each other. See [Bridge Resilience](bridge-resilience.md) for the full refactoring context.
 
-When a stuck running job is detected, it is automatically recovered by deleting it and re-creating it as `pending`. When an orphaned pending job is found (no live worker), a worker is started for it.
+When a stuck running session is detected, it is automatically recovered by deleting it and re-creating it as `pending`. When an orphaned pending session is found (no live worker), a worker is started for it.
 
 ## How It Works
 
 ### Detection
 
-- **Dead worker detection**: Checks `_active_workers[chat_id]` asyncio Task liveness via `.done()`. If the task has finished (crashed, cancelled, or completed), the job is considered orphaned.
-- **Timeout detection**: Compares `started_at` timestamp against the configured max duration for the job type.
+- **Dead worker detection**: Checks `_active_workers[chat_id]` asyncio Task liveness via `.done()`. If the task has finished (crashed, cancelled, or completed), the session is considered orphaned.
+- **Timeout detection**: Compares `started_at` timestamp against the configured max duration for the session type.
 - **Race condition guard**: Jobs must be running for at least 5 minutes (`AGENT_SESSION_HEALTH_MIN_RUNNING`) before they become eligible for recovery. This prevents false positives on jobs that just started processing.
 
 ### Timeouts
 
 | Job Type | Timeout | Detection |
 |----------|---------|-----------|
-| Standard | 45 minutes | Default for all jobs |
+| Standard | 45 minutes | Default for all sessions |
 | Build | 2.5 hours | Detected by `/do-build` in `message_text` |
 
-Timeouts are measured from `started_at` (when the job begins processing), not `created_at` (when it was enqueued). This correctly accounts for queue wait time.
+Timeouts are measured from `started_at` (when the session begins processing), not `created_at` (when it was enqueued). This correctly accounts for queue wait time.
 
 ### Recovery
 
-When a stuck job is found:
+When a stuck session is found:
 
-1. Log a warning with the job ID, project key, and reason (dead worker or timeout)
+1. Log a warning with the session ID, project key, and reason (dead worker or timeout)
 2. Delete the orphaned AgentSession from Redis
 3. Re-create it as `pending` with all original data preserved
 4. Call `_ensure_worker()` to restart the processing loop for that project
@@ -53,11 +53,11 @@ The health check loop starts automatically with the bridge process, alongside th
 # Show current queue state
 python -m agent.agent_session_queue --status
 
-# Recover all stuck running jobs (orphaned workers)
+# Recover all stuck running sessions (orphaned workers)
 python -m agent.agent_session_queue --flush-stuck
 
-# Recover a specific job by ID
-python -m agent.agent_session_queue --flush-job <JOB_ID>
+# Recover a specific session by ID
+python -m agent.agent_session_queue --flush-session <SESSION_ID>
 ```
 
 ### Example `--status` output
@@ -78,13 +78,13 @@ Constants in `agent/agent_session_queue.py`:
 | Constant | Default | Description |
 |----------|---------|-------------|
 | `AGENT_SESSION_HEALTH_CHECK_INTERVAL` | 300 (5 min) | How often the health check runs |
-| `AGENT_SESSION_TIMEOUT_DEFAULT` | 2700 (45 min) | Max runtime for standard jobs |
-| `AGENT_SESSION_TIMEOUT_BUILD` | 9000 (2.5 hr) | Max runtime for build jobs |
+| `AGENT_SESSION_TIMEOUT_DEFAULT` | 2700 (45 min) | Max runtime for standard sessions |
+| `AGENT_SESSION_TIMEOUT_BUILD` | 9000 (2.5 hr) | Max runtime for build sessions |
 | `AGENT_SESSION_HEALTH_MIN_RUNNING` | 300 (5 min) | Min runtime before recovery eligible |
 
 ## Dependency Health Check
 
-A separate `_dependency_health_check()` runs alongside the agent session health monitor. It scans pending jobs with `depends_on` set and detects stuck dependency chains -- cases where a dependency has `failed` or `cancelled` status, permanently blocking the dependent job. These are logged as warnings for PM intervention.
+A separate `_dependency_health_check()` runs alongside the agent session health monitor. It scans pending sessions with `depends_on` set and detects stuck dependency chains -- cases where a dependency has `failed` or `cancelled` status, permanently blocking the dependent session. These are logged as warnings for PM intervention.
 
 ## Related
 

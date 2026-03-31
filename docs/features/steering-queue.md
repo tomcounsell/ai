@@ -38,7 +38,7 @@ When Valor is executing a long task (10-30+ minutes), the supervisor cannot cour
 
 - **Steering Redis Queue**: Per-session Redis list (`steering:{session_id}`) that accumulates reply-thread messages while a session runs
 - **Watchdog Queue Check**: The existing `watchdog_hook` (fires every tool call) checks the steering queue and injects messages or aborts
-- **Bridge Routing Logic**: `handle_new_message` detects reply-to-running-session and routes to the steering queue instead of creating a new job
+- **Bridge Routing Logic**: `handle_new_message` detects reply-to-running-session and routes to the steering queue instead of creating a new session
 - **Receipt Acknowledgments**: Brief ack messages telling the supervisor what happened with their message
 
 ### Flow
@@ -49,7 +49,7 @@ User replies to Valor's "acknowledged" message → Bridge checks if session is a
 
 **Follow-up (new message while session running):**
 
-User sends new mention (not a reply) → Bridge sees active session for project → Enqueue as normal job → Ack: "Queued — will start after current task finishes"
+User sends new mention (not a reply) → Bridge sees active session for project → Enqueue as normal session → Ack: "Queued — will start after current task finishes"
 
 **Pending session merge (#619):**
 
@@ -92,12 +92,12 @@ if is_reply_to_valor and message.reply_to_msg_id:
     # Check if this session is currently running
     active_sessions = AgentSession.query.filter(session_id=session_id, status="active")
     if active_sessions:
-        # Route to steering queue instead of job queue
+        # Route to steering queue instead of session queue
         push_steering_message(session_id, clean_text, sender_name)
         await client.send_message(event.chat_id, "Adding to current task", reply_to=message.id)
         return
 
-    # Otherwise fall through to normal job queue (session resume)
+    # Otherwise fall through to normal session queue (session resume)
 ```
 
 Abort detection: check if `clean_text.strip().lower()` is in `{"stop", "cancel", "abort", "nevermind"}` and set `is_abort=True` in the steering message.
@@ -174,15 +174,15 @@ if client:
 **Crash/reboot safety**: The `_active_clients` dict is in-process memory only. It is NOT persisted. This is intentional and correct:
 
 - **On crash/reboot**: The dict is empty. The SDK subprocess (`claude` CLI) that was running is also dead. There is nothing to steer into — the session is gone.
-- **Recovery path**: On startup, `_recover_interrupted_jobs()` resets any `status="running"` AgentSessions back to `status="pending"`, and `_ensure_worker()` restarts them. The recovered job creates a **new** `ClaudeSDKClient` instance, which gets registered in `_active_clients` fresh. The `ClaudeAgentOptions.resume` field (set to the session_id) tells the SDK CLI to resume from its own persistent conversation history on disk (`~/.claude/`).
-- **Steering queue on crash**: Any messages in `steering:{session_id}` survive in Redis (no TTL — they persist indefinitely). When the job resumes after crash, the watchdog will find and inject them on the first tool call of the new session. No messages are lost.
+- **Recovery path**: On startup, `_recover_interrupted_sessions()` resets any `status="running"` AgentSessions back to `status="pending"`, and `_ensure_worker()` restarts them. The recovered session creates a **new** `ClaudeSDKClient` instance, which gets registered in `_active_clients` fresh. The `ClaudeAgentOptions.resume` field (set to the session_id) tells the SDK CLI to resume from its own persistent conversation history on disk (`~/.claude/`).
+- **Steering queue on crash**: Any messages in `steering:{session_id}` survive in Redis (no TTL — they persist indefinitely). When the session resumes after crash, the watchdog will find and inject them on the first tool call of the new session. No messages are lost.
 - **No stale references**: The `finally` block in `ValorAgent.query()` guarantees cleanup even on exceptions. The only way to get a stale entry is if the process is killed (SIGKILL). On next startup, `_active_clients` is empty (fresh import), so there's zero risk of referencing a dead client.
 
 **What could go wrong with shared client references:**
 
 1. **Async context mismatch**: The SDK docs warn that `ClaudeSDKClient` cannot be used across different async runtime contexts (anyio task groups). The watchdog hook runs inside the SDK's own event loop (it's a PostToolUse callback), so it shares the same async context as the client. This is safe. However, calling `get_active_client()` from a *different* asyncio task (e.g., the bridge's Telethon event handler) would be unsafe. The bridge must only push to the Redis queue, never call the client directly.
 
-2. **Concurrent access**: Only one job runs per project (enforced by `_worker_loop`). The watchdog fires synchronously between tool calls (the agent is paused). There's no concurrent access to the client — the hook has exclusive access during its execution window.
+2. **Concurrent access**: Only one session runs per project (enforced by `_worker_loop`). The watchdog fires synchronously between tool calls (the agent is paused). There's no concurrent access to the client — the hook has exclusive access during its execution window.
 
 3. **Interrupt during tool execution**: `client.interrupt()` sends a signal to the CLI subprocess. If called while a tool is mid-execution (e.g., a long `git push`), the CLI should handle the interrupt gracefully. Need to verify this doesn't corrupt in-progress operations.
 
@@ -193,7 +193,7 @@ The `_active_clients` registry opens up capabilities beyond steering:
 - **Direct health inspection**: Instead of reading transcript files and asking Haiku to judge health (current approach), we could inspect the client's state directly — checking message counts, elapsed time, or the last tool name. This makes the health check simpler and eliminates the Haiku API call for routine checks.
 - **Parallel session inspection**: A monitoring endpoint or diagnostic tool could list all running sessions with their client state (connected, message count, duration) without parsing log files.
 - **Cost tracking in real-time**: `ResultMessage.total_cost_usd` is available on the client's response stream. The registry makes it possible to query accumulated cost for a running session from outside for observability.
-- **Graceful shutdown improvement**: `_graceful_shutdown()` currently resets jobs to pending via Redis. With the registry, it could call `client.interrupt()` on each active client first, giving the agent a chance to save state before the process exits.
+- **Graceful shutdown improvement**: `_graceful_shutdown()` currently resets sessions to pending via Redis. With the registry, it could call `client.interrupt()` on each active client first, giving the agent a chance to save state before the process exits.
 
 #### 5. Steering Queue Functions (new module: `agent/steering.py`)
 
@@ -218,7 +218,7 @@ All use `POPOTO_REDIS_DB` directly with `RPUSH`, `LPOP`, and `DEL` on key `steer
 
 ### Risk 2: Race condition between watchdog and agent response
 **Impact:** The watchdog fires after a tool call. If the agent finishes between the steering push and the next tool call, the steering message is never consumed.
-**Mitigation:** When a session completes, check its steering queue. If messages remain, either auto-queue them as a new follow-up job or log them. Add `clear_steering_queue(session_id)` to `_execute_job` completion path.
+**Mitigation:** When a session completes, check its steering queue. If messages remain, either auto-queue them as a new follow-up session or log them. Add `clear_steering_queue(session_id)` to `_execute_agent_session` completion path.
 
 ### Risk 3: Watchdog hook doesn't have async access to Redis
 **Impact:** The hook is async but runs in the SDK's event loop. Redis calls via popoto are synchronous.
@@ -298,8 +298,8 @@ Both paths converge on the same `push_steering_message()` function in `agent/ste
 
 - **Message classification AI** — Existing reply-to handling is sufficient for routing. No LLM-based classification of "steering vs new task" needed.
 - **Progress streaming** — No play-by-play updates to Telegram. Only meaningful communication.
-- **Multi-session steering** — Only one session runs per project at a time (enforced by job queue). No need to handle concurrent session steering.
-- **Non-reply steering** — Only reply-thread messages count as steering. A new mention always creates a new job.
+- **Multi-session steering** — Only one session runs per project at a time (enforced by session queue). No need to handle concurrent session steering.
+- **Non-reply steering** — Only reply-thread messages count as steering. A new mention always creates a new session.
 - **Automatic fan-out** — Parent-child steering is always explicit, per-child. No broadcasting to all children.
 
 ## Success Criteria
@@ -321,5 +321,5 @@ Both paths converge on the same `push_steering_message()` function in `agent/ste
 | `agent/health_check.py` | Add steering queue check to `watchdog_hook` |
 | `agent/sdk_client.py` | Store active client reference for interrupt access |
 | `bridge/telegram_bridge.py` | Route reply-to-active-session to steering queue |
-| `agent/job_queue.py` | Clear steering queue on job completion; handle leftover messages |
+| `agent/agent_session_queue.py` | Clear steering queue on session completion; handle leftover messages |
 | `tests/test_steering.py` | **NEW** — Tests for steering queue, routing, and cleanup |

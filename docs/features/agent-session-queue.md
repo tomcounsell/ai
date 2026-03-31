@@ -4,14 +4,14 @@
 
 ## KeyField Index Corruption Fix
 
-Popoto's `KeyField.on_save()` only adds the object key to the new status index set -- it never removes from the old one. This means in-place status mutations like `job.status = "running"; await job.async_save()` leave stale entries in the previous index set, causing ghost jobs and double-processing.
+Popoto's `KeyField.on_save()` only adds the object key to the new status index set -- it never removes from the old one. This means in-place status mutations like `job.status = "running"; await job.async_save()` leave stale entries in the previous index set, causing ghost sessions and double-processing.
 
 ### Delete-and-Recreate Pattern
 
 All status transitions now use delete-and-recreate instead of in-place mutation:
 
 ```python
-fields = _extract_job_fields(job)
+fields = _extract_agent_session_fields(job)
 await job.async_delete()        # removes from old index via on_delete
 fields["status"] = "running"
 new_job = await AgentSession.async_create(**fields)  # adds to new index via on_save
@@ -19,21 +19,21 @@ new_job = await AgentSession.async_create(**fields)  # adds to new index via on_
 
 This is applied in three functions (plus dependency-related operations):
 - `_pop_agent_session()` -- pending to running (also filters out dependency-blocked jobs)
-- `_recover_interrupted_jobs()` -- running to pending (sync, startup)
+- `_recover_interrupted_sessions()` -- running to pending (sync, startup)
 - `_reset_running_jobs()` -- running to pending (async, shutdown)
 - `retry_agent_session()` -- failed/cancelled to pending (PM queue management)
 
-The `_extract_job_fields()` helper reads all non-auto fields (56+) from an AgentSession instance for recreation.
+The `_extract_agent_session_fields()` helper reads all non-auto fields (56+) from an AgentSession instance for recreation.
 
 ## Worker Drain Guard (Event-Based)
 
-The worker loop uses an Event-based drain strategy to reliably pick up pending jobs after completing each job. This replaces the original 100ms sleep-and-retry approach which was insufficient to handle the thread-pool race between Popoto's `async_create` index writes and `async_filter` reads.
+The worker loop uses an Event-based drain strategy to reliably pick up pending sessions after completing each job. This replaces the original 100ms sleep-and-retry approach which was insufficient to handle the thread-pool race between Popoto's `async_create` index writes and `async_filter` reads.
 
 ### How It Works
 
-1. **asyncio.Event notification**: `enqueue_agent_session()` signals a per-chat `asyncio.Event` after pushing a job. The event is level-triggered (stays set until cleared), so signals during job execution are not lost.
+1. **asyncio.Event notification**: `enqueue_agent_session()` signals a per-chat `asyncio.Event` after pushing a session. The event is level-triggered (stays set until cleared), so signals during job execution are not lost.
 
-2. **Event-based wait**: After completing a job, `_worker_loop()` clears the event and waits for it with a `DRAIN_TIMEOUT` (configurable constant, default 1.5s). If the event fires, the worker pops the next job via `_pop_agent_session()`.
+2. **Event-based wait**: After completing a session, `_worker_loop()` clears the event and waits for it with a `DRAIN_TIMEOUT` (configurable constant, default 1.5s). If the event fires, the worker pops the next session via `_pop_agent_session()`.
 
 3. **Sync Popoto fallback**: If the timeout expires without an event, `_pop_agent_session_with_fallback()` runs a synchronous `AgentSession.query.filter()` call that bypasses `to_thread()` scheduling. This eliminates the thread-pool race that caused the original index visibility bug.
 
@@ -49,11 +49,11 @@ The worker loop uses an Event-based drain strategy to reliably pick up pending j
 
 ### Why the Original Drain Guard Failed
 
-The original 100ms sleep relied on `_pop_agent_session()` (which uses `async_filter` via `to_thread()`) finding the job on retry. But the root cause is a thread-pool scheduling race: `async_create` writes the hash and index entries via multiple Redis commands in a thread, and `async_filter` reads the index intersection in a separate thread. The 100ms window was too short, and both calls suffered from the same `to_thread()` race. The sync fallback bypasses this entirely.
+The original 100ms sleep relied on `_pop_agent_session()` (which uses `async_filter` via `to_thread()`) finding the session on retry. But the root cause is a thread-pool scheduling race: `async_create` writes the hash and index entries via multiple Redis commands in a thread, and `async_filter` reads the index intersection in a separate thread. The 100ms window was too short, and both calls suffered from the same `to_thread()` race. The sync fallback bypasses this entirely.
 
 ## Startup Orphan Recovery
 
-`_recover_orphaned_jobs()` scans for AgentSession objects in the Redis class set that are not present in any status KeyField index. These orphans result from past index corruption or creation races. They are re-created with status `pending` and priority `high`. Called at bridge startup alongside `_recover_interrupted_jobs()`.
+`_recover_orphaned_sessions()` scans for AgentSession objects in the Redis class set that are not present in any status KeyField index. These orphans result from past index corruption or creation races. They are re-created with status `pending` and priority `high`. Called at bridge startup alongside `_recover_interrupted_sessions()`.
 
 ## Revival Chat Scoping Fix
 
@@ -66,9 +66,9 @@ Instead of scanning git branches globally, `check_revival()` queries Redis (Popo
 ```python
 for status in ("pending", "running"):
     jobs = AgentSession.query.filter(project_key=project_key, status=status)
-    for job in jobs:
-        if str(job.chat_id) == chat_id_str:
-            branch = _session_branch_name(job.session_id)
+    for session in sessions:
+        if str(session.chat_id) == chat_id_str:
+            branch = _session_branch_name(session.session_id)
             branches.append(branch)
 ```
 
@@ -114,9 +114,9 @@ Jobs support parent-child decomposition via the `parent_agent_session_id` field 
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `parent_agent_session_id` | `KeyField(null=True)` | Links child to parent job. Indexed for efficient queries. |
+| `parent_agent_session_id` | `KeyField(null=True)` | Links child to parent session. Indexed for efficient queries. |
 | `stable_agent_session_id` | `KeyField(null=True)` | UUID set once at creation, never changes on delete-and-recreate. Used as dependency reference key. |
-| `depends_on` | `ListField(null=True)` | List of `stable_agent_session_id` values this job must wait for. |
+| `depends_on` | `ListField(null=True)` | List of `stable_agent_session_id` values this session must wait for. |
 | `commit_sha` | `Field(null=True)` | HEAD commit SHA for checkpoint/restore across session pause/resume. |
 
 ### Status Values
@@ -128,7 +128,7 @@ Jobs support parent-child decomposition via the `parent_agent_session_id` field 
 
 ### Completion Propagation
 
-When a child job completes, `_complete_agent_session()` calls `_finalize_parent()` **before** deleting the child from Redis. The completing child's intended terminal status is passed as a parameter (since its Redis status is still "running" at that point). `_finalize_parent()` queries all siblings and uses the override status for the completing child. When all siblings are terminal (`completed` or `failed`), the parent transitions to `completed` (all succeeded) or `failed` (any failed). Only after finalization does `_complete_agent_session()` delete the child.
+When a child session completes, `_complete_agent_session()` calls `_finalize_parent()` **before** deleting the child from Redis. The completing child's intended terminal status is passed as a parameter (since its Redis status is still "running" at that point). `_finalize_parent()` queries all siblings and uses the override status for the completing child. When all siblings are terminal (`completed` or `failed`), the parent transitions to `completed` (all succeeded) or `failed` (any failed). Only after finalization does `_complete_agent_session()` delete the child.
 
 The transition uses the same delete-and-recreate pattern as `_pop_agent_session()` to avoid KeyField index corruption.
 

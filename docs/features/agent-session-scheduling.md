@@ -1,10 +1,10 @@
-# Job Self-Scheduling: Agent-Initiated Queue Operations
+# Session Self-Scheduling: Agent-Initiated Queue Operations
 
 **Status**: Shipped
 
 ## Overview
 
-The agent can programmatically schedule SDLC runs for GitHub issues, enqueue arbitrary Q&A jobs, and manage queue state -- all mid-conversation via the `tools/agent_session_scheduler.py` CLI tool.
+The agent can programmatically schedule SDLC runs for GitHub issues, enqueue arbitrary Q&A sessions, and manage queue state -- all mid-conversation via the `tools/agent_session_scheduler.py` CLI tool.
 
 ## Usage
 
@@ -76,15 +76,15 @@ The bridge injects routing context into the agent subprocess:
 | `PROJECT_KEY` | Project key for queue scoping |
 | `MESSAGE_ID` | Originating message ID |
 
-The tool reads these to determine where to route self-scheduled job output.
+The tool reads these to determine where to route self-scheduled session output.
 
 ## Deferred Execution (`scheduled_after`)
 
 The `AgentSession` model has a `scheduled_after` field (UTC timestamp). When set:
 
-- `_pop_agent_session()` skips jobs where `scheduled_after > now()`
-- Jobs with `scheduled_after` in the past are treated as immediate
-- Jobs with no `scheduled_after` are always eligible
+- `_pop_agent_session()` skips sessions where `scheduled_after > now()`
+- Sessions with `scheduled_after` in the past are treated as immediate
+- Sessions with no `scheduled_after` are always eligible
 
 Usage: `python -m tools.agent_session_scheduler schedule --issue 113 --after "2026-03-12T02:00:00Z"`
 
@@ -94,22 +94,22 @@ Four-tier priority system replacing the old binary high/low:
 
 | Priority | Rank | Use Case |
 |----------|------|----------|
-| `urgent` | 0 | Production outage, bumped jobs |
-| `high` | 1 | Recovery jobs, interrupted work |
-| `normal` | 2 | Default for all new jobs (Telegram messages, scheduled) |
+| `urgent` | 0 | Production outage, bumped sessions |
+| `high` | 1 | Recovery sessions, interrupted work |
+| `normal` | 2 | Default for all new sessions (Telegram messages, scheduled) |
 | `low` | 3 | Catchup messages, revival, reflections |
 
-Within the same priority tier, jobs are processed **FIFO** (oldest first), replacing the previous FILO ordering.
+Within the same priority tier, sessions are processed **FIFO** (oldest first), replacing the previous FILO ordering.
 
 ## Safety Mechanisms
 
 ### Self-Scheduling Depth Cap
 
-Each `AgentSession` tracks `scheduling_depth`. When the tool schedules a job, it increments the parent session's depth. Max depth is 3 -- preventing infinite scheduling loops.
+Each `AgentSession` tracks `scheduling_depth`. When the tool schedules a session, it increments the parent session's depth. Max depth is 3 -- preventing infinite scheduling loops.
 
 ### Rate Limiting
 
-Maximum 30 scheduled jobs per hour per project. Checked before every `schedule` and `push` operation.
+Maximum 30 scheduled sessions per hour per project. Checked before every `schedule` and `push` operation.
 
 ### Structured JSON Output
 
@@ -120,25 +120,25 @@ All commands return structured JSON for agent parsing:
 {"status": "error", "message": "Rate limit exceeded"}
 ```
 
-## Parent-Child Job Hierarchy
+## Parent-Child Session Hierarchy
 
-Jobs can be decomposed into smaller child jobs linked to a parent via `parent_agent_session_id`. This enables:
+Sessions can be decomposed into smaller child sessions linked to a parent via `parent_agent_session_id`. This enables:
 
 - **Partial re-runs**: If child 3/5 fails, only that child needs re-running
-- **Progress visibility**: `/queue-status` shows job trees with per-child status
+- **Progress visibility**: `/queue-status` shows session trees with per-child status
 - **Automatic completion**: When all children complete, the parent auto-transitions
 
-### Spawning Child Jobs
+### Spawning Child Sessions
 
-An agent mid-job can decompose work by passing `--parent-job`:
+An agent mid-session can decompose work by passing `--parent-session`:
 
 ```bash
-python -m tools.agent_session_scheduler schedule --issue 113 --parent-job $JOB_ID
+python -m tools.agent_session_scheduler schedule --issue 113 --parent-session $AGENT_SESSION_ID
 ```
 
-The `JOB_ID` environment variable is injected into the agent subprocess automatically.
+The `AGENT_SESSION_ID` environment variable is injected into the agent subprocess automatically.
 
-Child jobs inherit from the parent:
+Child sessions inherit from the parent:
 - `correlation_id` (end-to-end tracing)
 - `chat_id` (output routing)
 - `classification_type` (SDLC/Q&A classification)
@@ -147,9 +147,9 @@ Child jobs inherit from the parent:
 
 ### Parent Lifecycle
 
-1. Parent spawns children via `schedule_job --parent-job $JOB_ID`
+1. Parent spawns children via `schedule --parent-session $AGENT_SESSION_ID`
 2. Parent transitions to `waiting_for_children` status
-3. Worker processes children sequentially (same as any other jobs)
+3. Worker processes children sequentially (same as any other sessions)
 4. After each child completes, worker checks if all siblings are terminal
 5. When all children are done: parent auto-transitions to `completed` or `failed`
 
@@ -192,5 +192,5 @@ No special batch API needed.
 
 - [Agent Session Queue](agent-session-queue.md) -- Core queue infrastructure
 - [Agent Session Dependency Tracking](agent-session-dependency-tracking.md) -- Sibling dependencies, branch mapping, PM queue controls
-- [Chat Dev Session Architecture](chat-dev-session-architecture.md) -- ChatSession orchestrates SDLC pipeline for scheduled jobs
+- [Chat Dev Session Architecture](chat-dev-session-architecture.md) -- ChatSession orchestrates SDLC pipeline for scheduled sessions
 - `/queue-status` skill -- Telegram-accessible queue management

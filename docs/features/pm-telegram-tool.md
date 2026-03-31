@@ -54,7 +54,7 @@ ChatSession runs as a Claude Code subprocess and cannot access the bridge's Tele
 
 ### Drain Wait
 
-When a session completes, the delivery path in `agent/job_queue.py` checks whether the outbox queue still has pending entries. If so, it polls with 100ms intervals up to 2 seconds for the relay to drain before checking `pm_sent_message_ids`. This prevents a race between queueing and session completion.
+When a session completes, the delivery path in `agent/agent_session_queue.py` checks whether the outbox queue still has pending entries. If so, it polls with 100ms intervals up to 2 seconds for the relay to drain before checking `pm_sent_message_ids`. This prevents a race between queueing and session completion.
 
 ## Fallback Behavior
 
@@ -76,8 +76,8 @@ The following environment variables are injected by `sdk_client.py` for chat-typ
 
 | Variable | Source | Purpose |
 |----------|--------|---------|
-| `TELEGRAM_CHAT_ID` | Job's `chat_id` field | Target Telegram chat for the tool |
-| `TELEGRAM_REPLY_TO` | Job's `message_id` field | Message ID to reply to in thread |
+| `TELEGRAM_CHAT_ID` | Session's `chat_id` field | Target Telegram chat for the tool |
+| `TELEGRAM_REPLY_TO` | Session's `message_id` field | Message ID to reply to in thread |
 | `VALOR_SESSION_ID` | Already injected | Routes messages to the correct outbox queue |
 
 ## Error Handling

@@ -30,7 +30,7 @@ Gates are checked at four levels:
 
 3. **Observer mandatory delivery gates** -- Before any delivery decision (typed outcome success, deterministic guard bypass, or LLM deliver), `_check_mandatory_gates()` checks REVIEW and DOCS gates via `check_review_gate()` and `check_docs_gate()`. If either gate is unsatisfied, delivery is overridden to steer with a coaching message. This hard enforcement runs at three points in the Observer decision flow. Cycle safety allows delivery after 3 forced steerings for the same gate, and gate results are cached per `run()` invocation.
 
-4. **Completion guard in job_queue.py** -- Before delivering the final message to Telegram, `check_all_gates()` runs. If any gate is unsatisfied, a warning listing the missing gates is appended to the delivery message.
+4. **Completion guard in agent_session_queue.py** -- Before delivering the final message to Telegram, `check_all_gates()` runs. If any gate is unsatisfied, a warning listing the missing gates is appended to the delivery message.
 
 ### GateResult
 
@@ -53,8 +53,8 @@ Gate checks never raise exceptions. All subprocess and IO errors are caught and 
 | File | Role |
 |------|------|
 | `agent/goal_gates.py` | Pure gate check functions -- no side effects, no codebase imports |
-| `agent/job_queue.py` | Nudge loop checks gate status before delivery |
-| `agent/job_queue.py` | Completion guard appends warning for unsatisfied gates |
+| `agent/agent_session_queue.py` | Nudge loop checks gate status before delivery |
+| `agent/agent_session_queue.py` | Completion guard appends warning for unsatisfied gates |
 | `.claude/skills/sdlc/SKILL.md` | Step 2.5 gate check instructions before stage dispatch |
 | `tests/test_goal_gates.py` | 37 unit tests covering all gates, edge cases, and error paths |
 

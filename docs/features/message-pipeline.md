@@ -18,9 +18,9 @@ The event handler extracts only lightweight metadata and enqueues immediately. T
 - `reply_to_msg_id` — for threading context
 - `chat_id`, `sender_id`, `timestamp` — standard fields
 
-No network calls, no file downloads, no API requests. The message is persisted to the job queue and the handler returns.
+No network calls, no file downloads, no API requests. The message is persisted to the session queue and the handler returns.
 
-### Stage 2: Job Worker (Enrichment Path)
+### Stage 2: Session Worker (Enrichment Path)
 
 A background worker picks up enqueued messages and runs four independent enrichment operations:
 
@@ -47,7 +47,7 @@ Two mechanisms prevent message loss during bridge restarts:
 | `bridge/telegram_bridge.py` | Event handler with fast-path metadata extraction |
 | `bridge/enrichment.py` | Enrichment operations (media, YouTube, links, replies) |
 | `bridge/dedup.py` | Per-chat Redis deduplication |
-| `agent/job_queue.py` | Job queue for deferred processing |
+| `agent/agent_session_queue.py` | Session queue for deferred processing |
 
 ## Related
 

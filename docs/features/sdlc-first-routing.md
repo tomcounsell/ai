@@ -38,7 +38,7 @@ Based on classification result:
 | `sdlc` | `ai/` repo root | Full SDLC pipeline access, TARGET_REPO context injected |
 | `question` | Target project dir | Direct project context, no SDLC overhead |
 
-The SDK client reads `classification_type` from the `AgentSession` stored by the bridge. If not set (e.g., async classifier lost the race with job pickup), a synchronous fast-path regex checks the message for PR/issue references before falling back to `"question"`. This prevents messages like "Complete PR 478" from being misrouted.
+The SDK client reads `classification_type` from the `AgentSession` stored by the bridge. If not set (e.g., async classifier lost the race with session pickup), a synchronous fast-path regex checks the message for PR/issue references before falling back to `"question"`. This prevents messages like "Complete PR 478" from being misrouted.
 
 For SDLC-routed requests, a `TARGET_REPO` context block is injected into the system prompt so the agent knows which project to dispatch workers to. The subprocess environment includes `GH_REPO=org/repo` so all `gh` CLI commands automatically target the correct repository. A `GITHUB: org/repo` line in the prompt context serves as a secondary safety net.
 

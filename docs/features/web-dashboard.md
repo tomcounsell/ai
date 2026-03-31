@@ -120,7 +120,7 @@ Sessions are stored in Redis via Popoto and survive bridge restarts. The dashboa
 
 The central data model for dashboard display, containing:
 
-- Session identity: `job_id`, `session_id`, `session_type`, `status`, `slug`
+- Session identity: `agent_session_id`, `session_id`, `session_type`, `status`, `slug`
 - Project context: `project_key`, `project_name`, `project_metadata`
 - Timestamps: `created_at`, `started_at`, `completed_at`, `last_activity`
 - SDLC state: `stages` (list of `StageState`), `current_stage`, `events`

@@ -62,7 +62,7 @@ This is useful for groups where the agent should observe and learn from conversa
 
 ### Bridge (`bridge/telegram_bridge.py`)
 
-The bridge calls `resolve_persona()` when determining session type for a new job:
+The bridge calls `resolve_persona()` when determining session type for a new session:
 
 - If persona is `PersonaType.DEVELOPER` -> creates a DevSession (session_type="dev")
 - Everything else -> creates a ChatSession (session_type="chat")

@@ -100,7 +100,7 @@ redis-cli HGETALL telemetry:daily:2026-03-10
 
 | File | Role |
 |------|------|
-| `agent/job_queue.py` | Calls record_decision for nudge loop routing |
+| `agent/agent_session_queue.py` | Calls record_decision for nudge loop routing |
 | `bridge/pipeline_state.py` | State machine logs stage transitions |
 | `models/agent_session.py` | Structured LINK logging in set_link() |
 | `monitoring/health.py` | Health checks (observer telemetry check removed) |

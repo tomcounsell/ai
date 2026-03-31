@@ -4,7 +4,7 @@ Graceful degradation and recovery pipeline for the Telegram bridge.
 
 ## Overview
 
-The bridge resilience system provides circuit breaker protection for external dependencies, a unified job recovery mechanism, general startup retry, structured logging, and pre-flight validation for reflections.
+The bridge resilience system provides circuit breaker protection for external dependencies, a unified session recovery mechanism, general startup retry, structured logging, and pre-flight validation for reflections.
 
 ## Circuit Breaker Pattern
 
@@ -28,26 +28,26 @@ The Anthropic circuit breaker in `agent/sdk_client.py` protects against sustaine
 
 1. Before each SDK query, the circuit is checked
 2. If OPEN, a `CircuitOpenError` is raised immediately
-3. The worker loop catches `CircuitOpenError` and leaves the job as **pending** (not failed)
+3. The worker loop catches `CircuitOpenError` and leaves the session as **pending** (not failed)
 4. The unified health check starts a worker when the circuit closes
 
 ## Dependency Health
 
-`bridge/health.py` provides `DependencyHealth`, a registry of all circuit breakers. Used by the job status CLI to show health summary.
+`bridge/health.py` provides `DependencyHealth`, a registry of all circuit breakers. Used by the session status CLI to show health summary.
 
 ## Unified Recovery Loop
 
 The six competing recovery mechanisms from the old system were replaced with one:
 
-**`_job_health_check()`** in `agent/job_queue.py` scans both `running` and `pending` jobs:
+**`_job_health_check()`** in `agent/agent_session_queue.py` scans both `running` and `pending` jobs:
 
-- **Running jobs**: If the worker for `job.chat_id` is dead/missing and the job has been running longer than the minimum threshold, recover it (delete-and-recreate as pending)
-- **Pending jobs**: If no live worker exists for `job.chat_id` and the job has been pending longer than the minimum threshold, start a worker
+- **Running sessions**: If the worker for `session.chat_id` is dead/missing and the session has been running longer than the minimum threshold, recover it (delete-and-recreate as pending)
+- **Pending sessions**: If no live worker exists for `session.chat_id` and the session has been pending longer than the minimum threshold, start a worker
 - **Key invariant**: Jobs with a live worker on the same `chat_id` are never touched
 
 ### Startup Recovery
 
-`_recover_interrupted_jobs_startup()` runs once synchronously at bridge startup before the event loop. It resets ALL running jobs to pending unconditionally (at startup, all running jobs are orphaned from the previous process).
+`_recover_interrupted_sessions_startup()` runs once synchronously at bridge startup before the event loop. It resets ALL running sessions to pending unconditionally (at startup, all running sessions are orphaned from the previous process).
 
 ### What Was Removed
 
@@ -56,8 +56,8 @@ The six competing recovery mechanisms from the old system were replaced with one
 | `_recover_stalled_pending()` | session_watchdog.py | Used `project_key` instead of `chat_id` |
 | `_kill_stalled_worker()` | session_watchdog.py | Looked up workers by wrong key |
 | `_enqueue_stall_retry()` | session_watchdog.py | Delete-and-recreate lost jobs |
-| `_recover_orphaned_jobs()` | job_queue.py | Complex Redis-level scanning |
-| `_reset_running_jobs()` | job_queue.py | Replaced by startup recovery |
+| `_recover_orphaned_sessions()` | agent_session_queue.py | Complex Redis-level scanning |
+| `_reset_running_jobs()` | agent_session_queue.py | Replaced by startup recovery |
 | `_notify_stall_failure()` | session_watchdog.py | Retry mechanism removed |
 
 ## Startup Retry
@@ -88,4 +88,4 @@ Shows all jobs grouped by chat_id with worker status, session IDs, correlation I
 
 - [Bridge Self-Healing](bridge-self-healing.md) - Crash recovery and watchdog
 - [Session Watchdog](session-watchdog.md) - Session health monitoring
-- [Job Health Monitor](job-health-monitor.md) - Job liveness checking
+- [Agent Session Health Monitor](agent-session-health-monitor.md) - Session liveness checking
