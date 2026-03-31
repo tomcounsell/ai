@@ -833,8 +833,9 @@ async def main():
         # Save to subconscious memory (non-fatal, never crashes bridge)
         try:
             if text and text.strip() and not getattr(sender, "bot", False):
-                from models.memory import Memory
                 from popoto import InteractionWeight
+
+                from models.memory import Memory
 
                 Memory.safe_save(
                     agent_id=sender_name or "unknown",
@@ -1816,9 +1817,8 @@ async def main():
 
         # Configure popoto embedding provider before starting watcher
         try:
-            from popoto.embeddings.openai import OpenAIProvider
-
             import popoto
+            from popoto.embeddings.openai import OpenAIProvider
 
             popoto.configure(embedding_provider=OpenAIProvider())
             logger.info("Configured popoto OpenAI embedding provider")
