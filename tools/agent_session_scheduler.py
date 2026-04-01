@@ -104,7 +104,8 @@ def _check_rate_limit(project_key: str) -> bool:
         for status in ("pending", "running"):
             sessions = list(AgentSession.query.filter(project_key=project_key, status=status))
             for s in sessions:
-                if s.scheduling_depth and int(s.scheduling_depth) > 0:
+                # Check if session has a parent (agent-scheduled, not human-initiated)
+                if s.parent_job_id:
                     created = _to_ts(s.created_at) or 0
                     if created > cutoff:
                         recent_scheduled += 1
@@ -336,7 +337,6 @@ def cmd_schedule(args: argparse.Namespace) -> int:
             classification_type=inherited_classification_type,
             session_type=session_type,
             scheduled_at=scheduled_at,
-            scheduling_depth=depth + 1,
             issue_url=issue_url,
             correlation_id=inherited_correlation_id,
             parent_job_id=parent_job_id,
@@ -370,7 +370,6 @@ def cmd_schedule(args: argparse.Namespace) -> int:
             "issue_title": issue_title,
             "priority": priority,
             "queue_position": queue_position,
-            "scheduling_depth": depth + 1,
             "scheduled_at": scheduled_iso,
         }
         if parent_job_id:
@@ -403,8 +402,7 @@ def _format_agent_session_info(j, include_children: bool = False) -> dict:
     if j.started_at:
         session_info["started_at"] = _to_iso(j.started_at)
     if j.scheduled_at:
-        scheduled_dt = datetime.fromtimestamp(j.scheduled_at, tz=UTC)
-        session_info["scheduled_at"] = scheduled_dt.isoformat()
+        session_info["scheduled_at"] = _to_iso(j.scheduled_at)
     if j.issue_url:
         session_info["issue_url"] = j.issue_url
     if j.parent_job_id:
@@ -542,7 +540,6 @@ def cmd_push(args: argparse.Namespace) -> int:
             sender_name="System (Push)",
             chat_id=ctx["chat_id"],
             telegram_message_id=int(ctx["message_id"]) if ctx["message_id"] else 0,
-            scheduling_depth=depth + 1,
             correlation_id=f"push-{uuid.uuid4().hex[:12]}",
         )
 
@@ -555,7 +552,6 @@ def cmd_push(args: argparse.Namespace) -> int:
                 "session_id": session_id,
                 "priority": priority,
                 "queue_position": len(pending),
-                "scheduling_depth": depth + 1,
             }
         )
         return 0
