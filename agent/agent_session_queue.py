@@ -154,7 +154,6 @@ _AGENT_SESSION_FIELDS = [
     "parent_job_id",
     # === ChatSession/DevSession fields ===
     "session_type",
-    "result_text",
     "parent_chat_session_id",
     "slug",
     # === PM self-messaging fields ===
@@ -633,6 +632,8 @@ async def _pop_agent_session_with_fallback(chat_id: str) -> AgentSession | None:
         def _ensure_tz(dt):
             if dt is None:
                 return datetime.min.replace(tzinfo=UTC)
+            if isinstance(dt, (int, float)):
+                return datetime.fromtimestamp(dt, tz=UTC)
             if isinstance(dt, datetime) and dt.tzinfo is None:
                 return dt.replace(tzinfo=UTC)
             return dt
@@ -1781,8 +1782,14 @@ async def _enqueue_nudge(
         fields = _extract_agent_session_fields(session)
         # Override fields that change for continuation
         fields["status"] = "pending"
-        fields["message_text"] = coaching_message
-        fields["sender_name"] = "System (auto-continue)"
+        # Update initial_telegram_message directly (message_text/sender_name
+        # are now consolidated into this DictField)
+        itm = fields.get("initial_telegram_message") or {}
+        itm["message_text"] = coaching_message
+        itm["sender_name"] = "System (auto-continue)"
+        fields["initial_telegram_message"] = itm
+        fields.pop("message_text", None)
+        fields.pop("sender_name", None)
         fields["auto_continue_count"] = auto_continue_count
         fields["priority"] = "high"
         fields["task_list_id"] = task_list_id
