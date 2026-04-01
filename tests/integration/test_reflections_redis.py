@@ -24,7 +24,7 @@ class TestReflectionRunModel:
             reflections=[],
             auto_fix_attempts=[],
             step_progress={"clean_legacy": {"findings": 1}},
-            started_at=datetime.now(tz=UTC),
+            started_at=time.time(),
             dry_run=False,
         )
         assert run.date == "2026-02-25"
@@ -60,7 +60,7 @@ class TestReflectionRunModel:
             reflections=[],
             auto_fix_attempts=[],
             step_progress={},
-            started_at=datetime.now(tz=UTC),
+            started_at=time.time(),
             dry_run=False,
         )
 
@@ -106,7 +106,7 @@ class TestReflectionRunModel:
             reflections=[],
             auto_fix_attempts=[],
             step_progress={},
-            started_at=datetime.now(tz=UTC) - (60 * 86400),  # 60 days ago
+            started_at=time.time() - (60 * 86400),  # 60 days ago
             dry_run=False,
         )
         # Create recent run
@@ -119,7 +119,7 @@ class TestReflectionRunModel:
             reflections=[],
             auto_fix_attempts=[],
             step_progress={},
-            started_at=datetime.now(tz=UTC),
+            started_at=time.time(),
             dry_run=False,
         )
 
@@ -150,7 +150,7 @@ class TestReflectionIgnoreModel:
         ReflectionIgnore.create(
             pattern="old bug",
             reason="",
-            created_at=datetime.now(tz=UTC) - (30 * 86400),
+            created_at=time.time() - (30 * 86400),
             expires_at=time.time() - 86400,  # expired yesterday
         )
         # Create active entry
@@ -168,7 +168,7 @@ class TestReflectionIgnoreModel:
         ReflectionIgnore.create(
             pattern="expired",
             reason="",
-            created_at=datetime.now(tz=UTC) - timedelta(seconds=86400),
+            created_at=time.time() - timedelta(seconds=86400),
             expires_at=time.time() - 3600,  # expired 1 hour ago
         )
         ReflectionIgnore.add_ignore("active", days=14)
@@ -206,8 +206,8 @@ class TestAnalyzeSessionsFromRedis:
             session_id="test-session-1",
             project_key="ai",
             status="completed",
-            created_at=datetime.now(tz=UTC),
-            started_at=datetime.now(tz=UTC),
+            created_at=time.time(),
+            started_at=time.time(),
             updated_at=datetime.now(tz=UTC),
             turn_count=5,
             tool_call_count=20,  # High ratio = thrashing
@@ -227,8 +227,8 @@ class TestAnalyzeSessionsFromRedis:
             session_id="failed-session",
             project_key="ai",
             status="failed",
-            created_at=datetime.now(tz=UTC),
-            started_at=datetime.now(tz=UTC),
+            created_at=time.time(),
+            started_at=time.time(),
             updated_at=datetime.now(tz=UTC),
             turn_count=2,
             tool_call_count=3,
@@ -270,7 +270,7 @@ class TestIgnoreLogRedis:
         ReflectionIgnore.create(
             pattern="expired",
             reason="",
-            created_at=datetime.now(tz=UTC) - timedelta(seconds=86400),
+            created_at=time.time() - timedelta(seconds=86400),
             expires_at=time.time() - 3600,
         )
 
@@ -337,7 +337,7 @@ class TestLegacyIntegerMigration:
             reflections=[],
             auto_fix_attempts=[],
             step_progress={},
-            started_at=datetime.now(tz=UTC),
+            started_at=time.time(),
             dry_run=False,
         )
 

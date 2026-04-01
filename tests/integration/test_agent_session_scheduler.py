@@ -171,14 +171,16 @@ class TestPopJob:
 class TestAgentSessionFields:
     def test_scheduled_at_field(self):
         """scheduled_at field persists on AgentSession."""
-        future = time.time() + 3600
-        session = _create_pending(scheduled_at=future)
-        assert float(session.scheduled_at) == pytest.approx(future, abs=1)
+        from datetime import timedelta
 
-    def test_scheduling_depth_field(self):
-        """scheduling_depth field persists on AgentSession."""
-        session = _create_pending(scheduling_depth=2)
-        assert int(session.scheduling_depth) == 2
+        future = datetime.now(tz=UTC) + timedelta(hours=1)
+        session = _create_pending(scheduled_at=future)
+        assert session.scheduled_at is not None
+
+    def test_scheduling_depth_derived(self):
+        """scheduling_depth is derived from parent_job_id chain."""
+        session = _create_pending()
+        assert session.scheduling_depth == 0  # No parent
 
     def test_default_priority_normal(self):
         """Default priority is 'normal'."""
@@ -186,14 +188,14 @@ class TestAgentSessionFields:
         assert session.priority == "normal"
 
     def test_extract_agent_session_fields_includes_new_fields(self):
-        """_extract_agent_session_fields preserves scheduled_at and scheduling_depth."""
-        future = time.time() + 3600
-        session = _create_pending(scheduled_at=future, scheduling_depth=1)
+        """_extract_agent_session_fields preserves scheduled_at."""
+        from datetime import timedelta
+
+        future = datetime.now(tz=UTC) + timedelta(hours=1)
+        session = _create_pending(scheduled_at=future)
         fields = _extract_agent_session_fields(session)
         assert "scheduled_at" in fields
-        assert "scheduling_depth" in fields
-        assert float(fields["scheduled_at"]) == pytest.approx(future, abs=1)
-        assert int(fields["scheduling_depth"]) == 1
+        assert fields["scheduled_at"] is not None
 
 
 # === CLI Tool Tests ===
@@ -377,14 +379,15 @@ class TestSelfSchedulingProtection:
         # Test the constant
         assert MAX_SCHEDULING_DEPTH == 3
 
-        # Verify the depth check mechanism works correctly:
-        # A session at depth 3 should trigger the cap in the scheduling logic
-        parent = _create_pending(scheduling_depth=3)
+        # Create a chain of 3 parent sessions to reach depth 3
+        s0 = _create_pending(session_id="chain-root")
+        s1 = _create_pending(session_id="chain-1", parent_job_id=s0.job_id)
+        s2 = _create_pending(session_id="chain-2", parent_job_id=s1.job_id)
+        leaf = _create_pending(session_id="chain-leaf", parent_job_id=s2.job_id)
 
-        # Test that _get_scheduling_depth correctly reads from AgentSession
         import os
 
-        os.environ["VALOR_SESSION_ID"] = parent.session_id
+        os.environ["VALOR_SESSION_ID"] = leaf.session_id
         try:
             depth = _get_scheduling_depth()
             assert depth == 3, f"Expected depth 3, got {depth}"

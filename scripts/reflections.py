@@ -235,7 +235,11 @@ def analyze_sessions_from_redis(target_date: str) -> dict[str, Any]:
         target_sessions = []
         for session in all_sessions:
             if session.started_at:
-                session_date = datetime.fromtimestamp(session.started_at).strftime("%Y-%m-%d")
+                sa = session.started_at
+                if isinstance(sa, datetime):
+                    session_date = sa.strftime("%Y-%m-%d")
+                else:
+                    session_date = datetime.fromtimestamp(sa).strftime("%Y-%m-%d")
                 if session_date == target_date:
                     target_sessions.append(session)
 
@@ -1534,9 +1538,15 @@ class ReflectionRunner:
             # 3. Transcript error pattern analysis: find common errors in recent sessions
             recent_cutoff = _time.time() - (7 * 86400)
             all_sessions = AgentSession.query.all()
-            recent_sessions = [
-                s for s in all_sessions if s.started_at and s.started_at > recent_cutoff
-            ]
+
+            def _is_recent(s):
+                sa = s.started_at
+                if not sa:
+                    return False
+                ts = sa.timestamp() if isinstance(sa, datetime) else float(sa)
+                return ts > recent_cutoff
+
+            recent_sessions = [s for s in all_sessions if _is_recent(s)]
 
             error_keywords: dict[str, int] = {}
             for session in recent_sessions:
@@ -1991,8 +2001,11 @@ class ReflectionRunner:
 
         for session in all_sessions:
             # Skip sessions not completed in the past 24h
-            completed_at = session.completed_at or 0
-            if completed_at < cutoff:
+            ca = session.completed_at
+            if ca is None:
+                continue
+            completed_ts = ca.timestamp() if isinstance(ca, datetime) else float(ca)
+            if completed_ts < cutoff:
                 continue
 
             # Skip non-SDLC sessions

@@ -29,6 +29,28 @@ import sys
 import time
 import uuid
 from datetime import UTC, datetime
+
+
+def _to_ts(val):
+    """Convert datetime or float to Unix timestamp."""
+    if val is None:
+        return None
+    if isinstance(val, datetime):
+        return val.timestamp()
+    if isinstance(val, (int, float)):
+        return float(val)
+    return None
+
+
+def _to_iso(val):
+    """Convert datetime or float to ISO format string."""
+    if val is None:
+        return None
+    if isinstance(val, datetime):
+        return val.isoformat()
+    if isinstance(val, (int, float)):
+        return datetime.fromtimestamp(val, tz=UTC).isoformat()
+    return None
 from pathlib import Path
 
 from config.enums import SessionType
@@ -82,7 +104,7 @@ def _check_rate_limit(project_key: str) -> bool:
             sessions = list(AgentSession.query.filter(project_key=project_key, status=status))
             for s in sessions:
                 if s.scheduling_depth and int(s.scheduling_depth) > 0:
-                    created = s.created_at or 0
+                    created = _to_ts(s.created_at) or 0
                     if created > cutoff:
                         recent_scheduled += 1
         return recent_scheduled < MAX_SCHEDULED_PER_HOUR
@@ -379,9 +401,9 @@ def _format_agent_session_info(j, include_children: bool = False) -> dict:
         "message_preview": (j.message_text or "")[:100],
     }
     if j.created_at:
-        session_info["created_at"] = datetime.fromtimestamp(j.created_at, tz=UTC).isoformat()
+        session_info["created_at"] = _to_iso(j.created_at)
     if j.started_at:
-        session_info["started_at"] = datetime.fromtimestamp(j.started_at, tz=UTC).isoformat()
+        session_info["started_at"] = _to_iso(j.started_at)
     if j.scheduled_at:
         scheduled_dt = datetime.fromtimestamp(j.scheduled_at, tz=UTC)
         session_info["scheduled_at"] = scheduled_dt.isoformat()
@@ -429,7 +451,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         # Sort pending by priority then FIFO
         from agent.agent_session_queue import PRIORITY_RANK
 
-        pending.sort(key=lambda j: (PRIORITY_RANK.get(j.priority, 2), j.created_at or 0))
+        pending.sort(key=lambda j: (PRIORITY_RANK.get(j.priority, 2), _to_ts(j.created_at) or 0))
 
         # Separate root sessions from child sessions for tree display
         root_pending = [j for j in pending if not j.parent_job_id]
@@ -573,7 +595,7 @@ def cmd_bump(args: argparse.Namespace) -> int:
         fields = _extract_agent_session_fields(target)
         target.delete()
         fields["priority"] = "urgent"
-        fields["created_at"] = time.time()
+        fields["created_at"] = datetime.now(tz=UTC)
         new_session = AgentSession.create(**fields)
 
         _output(
@@ -606,7 +628,7 @@ def cmd_pop(args: argparse.Namespace) -> int:
             return 0
 
         # Sort same as _pop_agent_session: priority then FIFO
-        pending.sort(key=lambda j: (PRIORITY_RANK.get(j.priority, 2), j.created_at or 0))
+        pending.sort(key=lambda j: (PRIORITY_RANK.get(j.priority, 2), _to_ts(j.created_at) or 0))
         chosen = pending[0]
 
         info = {
@@ -663,7 +685,7 @@ def cmd_children(args: argparse.Namespace) -> int:
                 "message_preview": (c.message_text or "")[:100],
             }
             if c.created_at:
-                child_info["created_at"] = datetime.fromtimestamp(c.created_at, tz=UTC).isoformat()
+                child_info["created_at"] = _to_iso(c.created_at)
             if c.issue_url:
                 child_info["issue_url"] = c.issue_url
             result["children"].append(child_info)
@@ -804,7 +826,7 @@ def _kill_agent_session(target, *, skip_process_kill: bool = False) -> dict:
     fields = _extract_agent_session_fields(target)
     target.delete()
     fields["status"] = "killed"
-    fields["completed_at"] = time.time()
+    fields["completed_at"] = datetime.now(tz=UTC)
     new_session = AgentSession.create(**fields)
     result["new_agent_session_id"] = new_session.agent_session_id
     result["status"] = "killed"
@@ -920,7 +942,7 @@ def cmd_list(args: argparse.Namespace) -> int:
             sessions.extend(list(AgentSession.query.filter(project_key=project_key, status=status)))
 
         # Sort by created_at descending (newest first)
-        sessions.sort(key=lambda s: s.created_at or 0, reverse=True)
+        sessions.sort(key=lambda s: _to_ts(s.created_at) or 0, reverse=True)
 
         # Apply limit
         if args.limit:
@@ -934,8 +956,8 @@ def cmd_list(args: argparse.Namespace) -> int:
                 "project_key": s.project_key,
             }
             if s.created_at:
-                age_min = int((time.time() - s.created_at) / 60)
-                item["created_at"] = datetime.fromtimestamp(s.created_at, tz=UTC).isoformat()
+                age_min = int((time.time() - _to_ts(s.created_at)) / 60)
+                item["created_at"] = _to_iso(s.created_at)
                 item["age_minutes"] = age_min
             if s.message_text:
                 item["message_preview"] = (s.message_text or "")[:80]
@@ -966,7 +988,7 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
             else:
                 sessions = list(AgentSession.query.filter(status=status))
             for s in sessions:
-                age_sec = (now - float(s.created_at)) if s.created_at else 0
+                age_sec = (now - _to_ts(s.created_at)) if s.created_at else 0
                 if age_sec > age_threshold:
                     targets.append(s)
 
@@ -977,7 +999,7 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
         if args.dry_run:
             items = []
             for s in targets:
-                age_min = int((now - float(s.created_at or 0)) / 60)
+                age_min = int((now - float(_to_ts(s.created_at) or 0)) / 60)
                 items.append(
                     {
                         "session_id": s.session_id,
