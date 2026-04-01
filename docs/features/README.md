@@ -13,6 +13,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Agent Session Model](agent-session-model.md) | Unified lifecycle model with DatetimeFields, SessionEvent log, consolidated DictFields | Shipped |
 | [Agent Session Queue Reliability](agent-session-queue.md) | KeyField index fixes, Event-based drain guard, delete-and-recreate pattern, orphan recovery | Shipped |
 | [Agent Session Scheduling](agent-session-scheduling.md) | Agent-initiated queue operations: schedule SDLC sessions, deferred execution, 4-tier priority, queue manipulation | Shipped |
+| [Agent-Controlled Message Delivery](agent-message-delivery.md) | Stop-hook review gate giving the agent final say over output: SEND/EDIT/REACT/SILENT/CONTINUE delivery choices, classification context, false-stop detection | Shipped |
 | [Autoexperiment](autoexperiment.md) | Autonomous overnight prompt optimization using ultra-cheap LLMs via OpenRouter | Shipped |
 | [Bridge Message Query](bridge-message-query.md) | CLI tool to fetch Telegram message history via file-based IPC with running bridge | Shipped |
 | [Bridge Module Architecture](bridge-module-architecture.md) | Sub-module organization of the Telegram bridge for maintainability | Shipped |

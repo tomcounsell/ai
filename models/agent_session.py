@@ -134,6 +134,15 @@ class AgentSession(Model):
     # === Steering fields ===
     queued_steering_messages = ListField(null=True)
 
+    # === ChatSession delivery fields ===
+    # Stop-hook review gate: agent's final delivery decision.
+    # Set by the stop hook after the agent reviews its draft output.
+    # "send" = deliver delivery_text; "react" = emoji only; "silent" = nothing.
+    # None = no review gate ran (subagent/programmatic session) -> fall through to summarizer.
+    delivery_action = Field(null=True)
+    delivery_text = Field(null=True)  # Final message text (for send/edit)
+    delivery_emoji = Field(null=True)  # Emoji for react-only path
+
     # === PM self-messaging ===
     pm_sent_message_ids = ListField(null=True)
 

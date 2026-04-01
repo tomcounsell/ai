@@ -462,6 +462,52 @@ async def send_response_with_files(
         except Exception:
             pass  # Fall back to existing session object
 
+    # ── Delivery instruction check ──
+    # If the stop-hook review gate wrote a delivery instruction, execute it
+    # directly instead of running the summarizer. The agent already reviewed
+    # and approved the output.
+    if session and getattr(session, "delivery_action", None):
+        delivery_action = session.delivery_action
+
+        if delivery_action == "send":
+            # Agent approved or edited the message — send delivery_text
+            delivery_text = getattr(session, "delivery_text", None) or text
+            # Still send any extracted files first
+            if files:
+                for f in files:
+                    try:
+                        await client.send_file(_chat_id, f, reply_to=_reply_to)
+                    except Exception as e:
+                        logger.error(f"Failed to send file: {e}")
+            if delivery_text:
+                if len(delivery_text) > 4096:
+                    delivery_text = _truncate_at_sentence_boundary(delivery_text, limit=4096)
+                try:
+                    from bridge.markdown import send_markdown
+
+                    return await send_markdown(client, _chat_id, delivery_text, reply_to=_reply_to)
+                except Exception as e:
+                    logger.error(f"Delivery send failed: {e}")
+            return None
+
+        if delivery_action == "react":
+            # Agent chose emoji-only reaction
+            delivery_emoji = getattr(session, "delivery_emoji", None) or "👍"
+            if _reply_to:
+                await set_reaction(client, _chat_id, _reply_to, delivery_emoji)
+            logger.info(
+                f"Delivery: react-only ({delivery_emoji}) for "
+                f"session {getattr(session, 'session_id', 'unknown')}"
+            )
+            return None
+
+        if delivery_action == "silent":
+            # Agent chose silence — no text, no emoji
+            logger.info(f"Delivery: silent for session {getattr(session, 'session_id', 'unknown')}")
+            return None
+
+        # Unknown delivery_action → fall through to normal summarizer path
+
     # PM self-messaging bypass: if the PM already sent messages via the
     # send_telegram tool during this session (or its parent ChatSession in
     # SDLC flows), skip the summarizer entirely. The PM authored its own

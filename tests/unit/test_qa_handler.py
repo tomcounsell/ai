@@ -60,6 +60,16 @@ class TestBuildTeammateInstructions:
         assert "Grep" in result or "Glob" in result
         assert "evidence" in result.lower() or "cite" in result.lower()
 
+    def test_review_gate_awareness(self):
+        """Teammate prompt should mention the delivery review gate."""
+        result = build_teammate_instructions()
+        assert "DELIVERY REVIEW" in result
+        assert "SEND" in result
+        assert "EDIT" in result
+        assert "REACT" in result
+        assert "SILENT" in result
+        assert "CONTINUE" in result
+
 
 class TestTeammateConstants:
     def test_nudge_cap_less_than_default(self):
