@@ -150,10 +150,19 @@ class AgentSession(Model):
 
     # === Backward-compatible field name mapping ===
 
+    # DatetimeField names that should auto-convert float timestamps
+    _DATETIME_FIELDS = {"scheduled_at", "started_at", "updated_at", "completed_at"}
+
     def __init__(self, **kwargs):
         """Initialize AgentSession with backward-compatible field name support."""
         kwargs = self.__class__._normalize_kwargs(kwargs)
         super().__init__(**kwargs)
+
+    def __setattr__(self, name, value):
+        """Auto-convert float timestamps to datetime for DatetimeField fields."""
+        if name in self._DATETIME_FIELDS and isinstance(value, (int, float)):
+            value = datetime.fromtimestamp(value, tz=UTC)
+        super().__setattr__(name, value)
 
     @classmethod
     def _normalize_kwargs(cls, kwargs: dict) -> dict:
