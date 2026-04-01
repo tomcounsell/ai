@@ -37,7 +37,7 @@ Fires when `time.time() - session.updated_at > SILENCE_THRESHOLD`. Indicates the
 | Severity | warning |
 
 ### Transcript Liveness Check (Smart Stall Detection)
-Before killing an active session for silence, the watchdog checks the transcript file's mtime (`logs/sessions/{session_id}/transcript.txt`). Sub-agents continuously write to this file even when `last_activity` isn't updated. If the transcript was modified within the threshold, the session is left alone — it's doing productive sub-agent work.
+Before killing an active session for silence, the watchdog checks the transcript file's mtime (`logs/sessions/{session_id}/transcript.txt`). Sub-agents continuously write to this file even when `updated_at` isn't updated. If the transcript was modified within the threshold, the session is left alone — it's doing productive sub-agent work.
 
 | Setting | Value |
 |---------|-------|
@@ -121,7 +121,7 @@ Runs for the lifetime of the bridge process. No separate service or process mana
 
 The session watchdog is complementary — it catches sessions that go *silent* (no tool calls happening), which the PostToolUse hook cannot detect.
 
-**Stall detection**: The watchdog also runs `check_stalled_sessions()` each cycle, which flags sessions stuck in transitional states (pending >5min, running >45min, active with no recent activity). For active sessions, stall detection is activity-based: the watchdog checks both the Redis `last_activity` field and in-memory timestamps from `sdk_client.get_session_last_activity()`, using whichever is more recent. Sessions producing tool calls or log output are never interrupted regardless of total runtime. See [Session Watchdog Reliability](session-watchdog-reliability.md) for the activity-based detection system and [Session Lifecycle Diagnostics](session-lifecycle-diagnostics.md) for logging details.
+**Stall detection**: The watchdog also runs `check_stalled_sessions()` each cycle, which flags sessions stuck in transitional states (pending >5min, running >45min, active with no recent activity). For active sessions, stall detection is activity-based: the watchdog checks both the Redis `updated_at` field and in-memory timestamps from `sdk_client.get_session_last_activity()`, using whichever is more recent. Sessions producing tool calls or log output are never interrupted regardless of total runtime. See [Session Watchdog Reliability](session-watchdog-reliability.md) for the activity-based detection system and [Session Lifecycle Diagnostics](session-lifecycle-diagnostics.md) for logging details.
 
 ## Files
 

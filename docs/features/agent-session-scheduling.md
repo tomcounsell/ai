@@ -78,13 +78,13 @@ The bridge injects routing context into the agent subprocess:
 
 The tool reads these to determine where to route self-scheduled session output.
 
-## Deferred Execution (`scheduled_after`)
+## Deferred Execution (`scheduled_at`)
 
-The `AgentSession` model has a `scheduled_after` field (UTC timestamp). When set:
+The `AgentSession` model has a `scheduled_at` field (UTC datetime). When set:
 
-- `_pop_agent_session()` skips sessions where `scheduled_after > now()`
-- Sessions with `scheduled_after` in the past are treated as immediate
-- Sessions with no `scheduled_after` are always eligible
+- `_pop_agent_session()` skips sessions where `scheduled_at > now()`
+- Sessions with `scheduled_at` in the past are treated as immediate
+- Sessions with no `scheduled_at` are always eligible
 
 Usage: `python -m tools.agent_session_scheduler schedule --issue 113 --after "2026-03-12T02:00:00Z"`
 

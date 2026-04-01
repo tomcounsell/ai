@@ -64,7 +64,7 @@ Reactions interact with the auto-continue system. When auto-continue is active, 
 
 The original auto-continue implementation injected a "continue" message into the agent's steering queue. This created a race condition: if the agent had already exited its processing loop, the steering message was silently dropped, and the user received no response at all.
 
-The fix re-enqueues a new session through the normal session queue. This guarantees the message is processed because it follows the same path as any incoming Telegram message, with full session context (session_id, work_item_slug, task_list_id) preserved.
+The fix re-enqueues a new session through the normal session queue. This guarantees the message is processed because it follows the same path as any incoming Telegram message, with full session context (session_id, slug, task_list_id) preserved.
 
 ## Silent Loss Prevention
 

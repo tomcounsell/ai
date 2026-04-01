@@ -42,9 +42,9 @@ Added to the existing session watchdog loop. Every 5 minutes, `check_stalled_ses
 |--------|-----------|-----------|
 | pending | 300s (5 min) | Jobs should be picked up quickly |
 | running | 2700s (45 min) | Matches agent session health monitor timeout |
-| active | 600s (10 min) | No `last_activity` update = likely stalled |
+| active | 600s (10 min) | No `updated_at` update = likely stalled |
 
-For active sessions, `last_activity` is checked first — if recent activity exists within the threshold, the session is not considered stalled.
+For active sessions, `updated_at` is checked first — if recent activity exists within the threshold, the session is not considered stalled.
 
 When a stall is detected:
 - A `LIFECYCLE_STALL` warning is logged with session ID, status, duration, and last history entry

@@ -19,7 +19,7 @@ Skills are static Markdown templates with placeholder variables like `{pr_number
 |----------|-------------|---------|
 | `SDLC_PR_NUMBER` | `AgentSession.pr_url` | `220` |
 | `SDLC_PR_BRANCH` | `AgentSession.branch_name` | `session/my-feature` |
-| `SDLC_SLUG` | `AgentSession.work_item_slug` | `my-feature` |
+| `SDLC_SLUG` | `AgentSession.slug` | `my-feature` |
 | `SDLC_PLAN_PATH` | `AgentSession.plan_url` | `docs/plans/my-feature.md` |
 | `SDLC_ISSUE_NUMBER` | `AgentSession.issue_url` | `415` |
 | `SDLC_REPO` | `ValorAgent.gh_repo` | `tomcounsell/ai` |
@@ -60,7 +60,7 @@ Sub-skills are guidance documents in `.claude/skills/do-pr-review/sub-skills/`. 
 AgentSession (Redis)
   ├─ pr_url ──────────► _extract_sdlc_env_vars() ──► SDLC_PR_NUMBER env var
   ├─ branch_name ─────► _extract_sdlc_env_vars() ──► SDLC_PR_BRANCH env var
-  ├─ work_item_slug ──► _extract_sdlc_env_vars() ──► SDLC_SLUG env var
+  ├─ slug ────────────► _extract_sdlc_env_vars() ──► SDLC_SLUG env var
   ├─ plan_url ────────► _extract_sdlc_env_vars() ──► SDLC_PLAN_PATH env var
   └─ issue_url ───────► _extract_sdlc_env_vars() ──► SDLC_ISSUE_NUMBER env var
 

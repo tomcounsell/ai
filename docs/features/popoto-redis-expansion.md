@@ -94,7 +94,7 @@ class AgentSession(Model):
     chat_id = Field()
     sender = Field()
     started_at = SortedField(type=float, partition_by="project_key")
-    last_activity = SortedField(type=float)
+    updated_at = SortedField(type=float)
     tool_call_count = IntField(default=0)
     branch_name = Field(null=True)
     message_text = Field(max_length=20_000, null=True)  # original request
@@ -102,7 +102,7 @@ class AgentSession(Model):
 
 **Changes**:
 - `_execute_agent_session()` in `agent/agent_session_queue.py` — create AgentSession on session start, update on completion
-- Health check watchdog — update `tool_call_count` and `last_activity` on each check
+- Health check watchdog — update `tool_call_count` and `updated_at` on each check
 - Revival detection — query `AgentSession.query.filter(status="active")` instead of git state checks
 - Bridge shutdown — mark active sessions as dormant
 

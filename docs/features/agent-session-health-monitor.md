@@ -82,10 +82,6 @@ Constants in `agent/agent_session_queue.py`:
 | `AGENT_SESSION_TIMEOUT_BUILD` | 9000 (2.5 hr) | Max runtime for build sessions |
 | `AGENT_SESSION_HEALTH_MIN_RUNNING` | 300 (5 min) | Min runtime before recovery eligible |
 
-## Dependency Health Check
-
-A separate `_dependency_health_check()` runs alongside the agent session health monitor. It scans pending sessions with `depends_on` set and detects stuck dependency chains -- cases where a dependency has `failed` or `cancelled` status, permanently blocking the dependent session. These are logged as warnings for PM intervention.
-
 ## Related
 
 - [scale-agent-session-queue-with-popoto-and-worktrees.md](scale-agent-session-queue-with-popoto-and-worktrees.md) -- The underlying Redis agent session queue

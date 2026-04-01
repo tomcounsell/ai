@@ -22,7 +22,7 @@ Hardened reliability fixes for the session watchdog, SDK stall detection, and ob
 
 Instead of hard wall-clock timeouts, the system now tracks session activity:
 
-- `_last_activity_timestamps` dict tracks the timestamp of last tool call or log output per session
+- `_last_activity_timestamps` dict tracks the `updated_at` timestamp of last tool call or log output per session
 - `record_session_activity(session_id)` updates the timestamp on each text block output and result message during SDK query execution
 - `get_session_last_activity(session_id)` exposes the timestamp for watchdog consumption
 - `clear_session_activity(session_id)` cleans up when a session completes

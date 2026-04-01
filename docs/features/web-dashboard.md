@@ -34,7 +34,7 @@ Browser (HTMX polling for live updates)
 1. Calls `AgentSession.query.all()` to fetch all sessions from Redis via Popoto
 2. Splits sessions into **active** (running/pending/in_progress/active/waiting_for_children) and **inactive** (everything else)
 3. Filters inactive sessions by the retention cutoff (see Configuration below)
-4. Uses a timestamp fallback chain for ordering and filtering: `completed_at -> last_activity -> started_at -> created_at`
+4. Uses a timestamp fallback chain for ordering and filtering: `completed_at -> updated_at -> started_at -> created_at`
 5. Returns active sessions (always shown, no cap) followed by up to `limit` inactive sessions, sorted newest-first
 
 ## SDLC Stage Pills
@@ -110,7 +110,7 @@ DASHBOARD_RETENTION_HOURS=24 python -m ui.app
 
 Sessions are stored in Redis via Popoto and survive bridge restarts. The dashboard reads directly from Redis, so session data persists as long as Redis is running. Key design decisions for data persistence:
 
-- **Timestamp fallback chain**: `get_all_sessions()` uses `completed_at or last_activity or started_at or created_at` so sessions with `last_activity=None` are not silently dropped from the retention filter
+- **Timestamp fallback chain**: `get_all_sessions()` uses `completed_at or updated_at or started_at or created_at` so sessions with `updated_at=None` are not silently dropped from the retention filter
 - **Active sessions always shown**: Sessions with active status bypass the retention cutoff entirely
 - **Inactive session limit**: Up to 50 inactive sessions are returned per query (up from the original 16) to support reviewing past work
 
@@ -122,7 +122,7 @@ The central data model for dashboard display, containing:
 
 - Session identity: `agent_session_id`, `session_id`, `session_type`, `status`, `slug`
 - Project context: `project_key`, `project_name`, `project_metadata`
-- Timestamps: `created_at`, `started_at`, `completed_at`, `last_activity`
+- Timestamps: `created_at`, `started_at`, `completed_at`, `updated_at`
 - SDLC state: `stages` (list of `StageState`), `current_stage`, `events`
 - Links: `issue_url`, `plan_url`, `pr_url`
 - Computed properties: `duration`, `is_active`, `is_complete`, `display_name`

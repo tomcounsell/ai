@@ -57,14 +57,14 @@ This runs unconditionally — the legacy `--chat` flag is accepted but ignored s
 | `chat_id` | KeyField | Telegram chat ID |
 | `sender` | Field | Who triggered the session |
 | `started_at` | SortedField | Unix timestamp, partitioned by project_key |
-| `last_activity` | SortedField | Last activity timestamp |
+| `updated_at` | DatetimeField | Last activity timestamp (auto_now=True) |
 | `completed_at` | Field | Completion timestamp |
 | `turn_count` | IntField | Number of conversation turns |
 | `tool_call_count` | IntField | Number of tool calls |
 | `log_path` | Field | Path to transcript .txt file |
 | `summary` | Field | Brief session outcome summary |
 | `branch_name` | Field | Git branch (for tier 2 work items) |
-| `work_item_slug` | Field | Named work item slug (tier 2) |
+| `slug` | Field | Named work item slug (tier 2) |
 | `tags` | ListField | Categorization tags (e.g., "pr-review") |
 | `classification_type` | Field | bug, feature, or chore |
 | `classification_confidence` | Field | 0.0-1.0 |
@@ -89,7 +89,7 @@ log_path = start_transcript(
     chat_id="12345",
     sender="Tom",
     branch_name="session/fix-tests",
-    work_item_slug="fix-tests",
+    slug="fix-tests",
 )
 
 # Append a conversation turn
