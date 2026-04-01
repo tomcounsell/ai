@@ -66,6 +66,9 @@ def _create_pending(
     scheduled_at=None,
     scheduling_depth=0,
     created_at=None,
+    session_id=None,
+    parent_job_id=None,
+    **kwargs,
 ):
     """Helper to create a pending AgentSession for testing."""
     return AgentSession.create(
@@ -73,7 +76,8 @@ def _create_pending(
         status="pending",
         priority=priority,
         created_at=created_at or time.time(),
-        session_id=f"test-{time.time_ns()}",
+        session_id=session_id or f"test-{time.time_ns()}",
+        parent_job_id=parent_job_id,
         working_dir="/tmp/test",
         message_text=message,
         sender_name="Test",

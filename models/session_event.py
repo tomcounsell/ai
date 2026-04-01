@@ -34,7 +34,7 @@ class SessionEvent(BaseModel):
     Validated by Pydantic at creation time, stored as plain dict.
     """
 
-    event_type: EventType
+    event_type: str  # Accept arbitrary event types for backward compat (EventType enum for standard ones)
     timestamp: float = Field(default_factory=lambda: datetime.now(tz=UTC).timestamp())
     text: str = ""
     data: dict | None = None  # Optional structured payload

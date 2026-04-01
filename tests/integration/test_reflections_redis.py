@@ -168,7 +168,7 @@ class TestReflectionIgnoreModel:
         ReflectionIgnore.create(
             pattern="expired",
             reason="",
-            created_at=time.time() - timedelta(seconds=86400),
+            created_at=time.time() - 86400,
             expires_at=time.time() - 3600,  # expired 1 hour ago
         )
         ReflectionIgnore.add_ignore("active", days=14)
@@ -270,7 +270,7 @@ class TestIgnoreLogRedis:
         ReflectionIgnore.create(
             pattern="expired",
             reason="",
-            created_at=time.time() - timedelta(seconds=86400),
+            created_at=time.time() - 86400,
             expires_at=time.time() - 3600,
         )
 
@@ -412,14 +412,14 @@ class TestRedisDataQuality:
             chat_id="stale-chat",
             chat_name="Dead Channel",
             chat_type="group",
-            updated_at=datetime.now(tz=UTC) - (40 * 86400),
+            updated_at=time.time() - (40 * 86400),
         )
         # Create an active chat
         Chat.create(
             chat_id="active-chat",
             chat_name="Active Channel",
             chat_type="group",
-            updated_at=datetime.now(tz=UTC),
+            updated_at=time.time(),
         )
 
         runner = ReflectionRunner()
