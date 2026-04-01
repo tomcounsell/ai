@@ -2,7 +2,7 @@
 
 import json
 import os
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from django.test import TestCase, override_settings
 from django.urls import reverse
@@ -23,7 +23,7 @@ class AITestChatE2ETestCase(TestCase):
         response = self.client.get(self.test_page_url)
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "AI Chat Test")
-        self.assertContains(response, "Send a message to start chatting")
+        self.assertContains(response, "Start a conversation...")
 
     def test_chat_page_shows_api_key_warning_when_not_configured(self):
         """Test that the page shows a warning when API key is not configured."""
@@ -150,16 +150,13 @@ class AIChagentUnitTestCase(TestCase):
         """Test the sync process_chat_message function."""
         from apps.ai.agent.chat import ChatDependencies, process_chat_message_sync
 
-        with patch("apps.ai.agent.chat.chat_agent.run") as mock_run:
+        with patch(
+            "apps.ai.agent.chat.chat_agent.run", new_callable=AsyncMock
+        ) as mock_run:
             # Mock the agent response
             mock_result = Mock()
-            mock_result.text = "Test response"
-
-            # Make mock_run return a coroutine
-            async def mock_async_run(*args, **kwargs):
-                return mock_result
-
-            mock_run.return_value = mock_async_run()
+            mock_result.output = "Test response"
+            mock_run.return_value = mock_result
 
             # Create test session
             session = AgentChatSession(session_id="test-123", user_id=1, messages=[])

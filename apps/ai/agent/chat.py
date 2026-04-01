@@ -150,26 +150,6 @@ def process_chat_message_sync(
     model=None,
 ) -> str:
     """Synchronous wrapper for process_chat_message."""
-    import asyncio
+    from asgiref.sync import async_to_sync
 
-    # Get or create event loop
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-    # Run the async function
-    if loop.is_running():
-        # If loop is already running (e.g., in Jupyter), create a task
-        import concurrent.futures
-
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            future = executor.submit(
-                asyncio.run, process_chat_message(message, session, deps, model)
-            )
-            return future.result()
-    else:
-        return loop.run_until_complete(
-            process_chat_message(message, session, deps, model)
-        )
+    return async_to_sync(process_chat_message)(message, session, deps, model)
