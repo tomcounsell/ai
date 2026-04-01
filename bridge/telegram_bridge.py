@@ -886,9 +886,9 @@ async def main():
         )
         # React-only path: send emoji reaction, no session
         if should_reply == "react":
-            from bridge.routing import _pick_reaction_emoji
+            from bridge.routing import pick_reaction_emoji
 
-            emoji = _pick_reaction_emoji(text.strip().lower().rstrip("!.,"))
+            emoji = pick_reaction_emoji(text.strip().lower().rstrip("!.,"))
             await set_reaction(client, event.chat_id, message.id, emoji)
             logger.info(f"React-only: {emoji} for '{text[:30]}...' in {chat_title or 'DM'}")
             return

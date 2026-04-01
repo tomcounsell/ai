@@ -495,14 +495,32 @@ async def send_response_with_files(
             return None
 
         if delivery_action == "react":
-            # Agent chose emoji-only reaction
+            # Agent chose emoji-only reaction; fall back to SEND if reaction fails
             delivery_emoji = getattr(session, "delivery_emoji", None) or "👍"
+            reacted = False
             if _reply_to:
-                await set_reaction(client, _chat_id, _reply_to, delivery_emoji)
-            logger.info(
-                f"Delivery: react-only ({delivery_emoji}) for "
+                reacted = await set_reaction(client, _chat_id, _reply_to, delivery_emoji)
+            if reacted:
+                logger.info(
+                    f"Delivery: react-only ({delivery_emoji}) for "
+                    f"session {getattr(session, 'session_id', 'unknown')}"
+                )
+                return None
+            # Reaction failed — fall back to sending the draft text
+            logger.warning(
+                f"Delivery: react failed, falling back to SEND for "
                 f"session {getattr(session, 'session_id', 'unknown')}"
             )
+            fallback_text = getattr(session, "delivery_text", None) or text
+            if fallback_text:
+                if len(fallback_text) > 4096:
+                    fallback_text = _truncate_at_sentence_boundary(fallback_text, limit=4096)
+                try:
+                    from bridge.markdown import send_markdown
+
+                    return await send_markdown(client, _chat_id, fallback_text, reply_to=_reply_to)
+                except Exception as e:
+                    logger.error(f"React fallback send also failed: {e}")
             return None
 
         if delivery_action == "silent":

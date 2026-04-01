@@ -345,7 +345,7 @@ REACT_EMOJI_MAP: dict[str, str] = {
 _HUMOR_TOKENS = {"lol", "lmao", "haha", "heh", "rofl"}
 
 
-def _pick_reaction_emoji(token: str) -> str:
+def pick_reaction_emoji(token: str) -> str:
     """Choose a contextually appropriate reaction emoji for *token*."""
     if token in _HUMOR_TOKENS:
         return REACT_EMOJI_MAP["humor"]

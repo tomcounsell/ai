@@ -1,8 +1,8 @@
 """Tests for 3-way social classifier in bridge/routing.py."""
 
 from bridge.routing import (
-    _pick_reaction_emoji,
     classify_needs_response,
+    pick_reaction_emoji,
 )
 
 
@@ -76,9 +76,9 @@ class TestClassifyNeedsResponse:
 
 class TestPickReactionEmoji:
     def test_humor_tokens_get_laugh(self):
-        assert _pick_reaction_emoji("lol") == "\U0001f601"  # grinning face
-        assert _pick_reaction_emoji("haha") == "\U0001f601"
+        assert pick_reaction_emoji("lol") == "\U0001f601"  # grinning face
+        assert pick_reaction_emoji("haha") == "\U0001f601"
 
     def test_non_humor_tokens_get_fire(self):
-        assert _pick_reaction_emoji("nice") == "\U0001f525"  # fire
-        assert _pick_reaction_emoji("cool") == "\U0001f525"
+        assert pick_reaction_emoji("nice") == "\U0001f525"  # fire
+        assert pick_reaction_emoji("cool") == "\U0001f525"
