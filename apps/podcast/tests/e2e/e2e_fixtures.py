@@ -31,6 +31,8 @@ class E2EData:
     draft_episode: object
     published_episode: object
     mid_pipeline_episode: object
+    paused_episode: object
+    publishable_episode: object
 
 
 def cleanup_e2e_data() -> None:
@@ -183,6 +185,111 @@ def setup_e2e_data() -> E2EData:
         mid_pipeline_episode, "p3-questions", "E2E questions content for testing."
     )
 
+    # -- Paused episode (for audio upload tests, step 9) --
+    paused_episode = Episode.objects.create(
+        podcast=podcast,
+        title="E2E Paused Episode",
+        slug="e2e-paused-episode",
+        episode_number=103,
+        status="in_progress",
+        description="An episode paused at Audio Generation for E2E testing.",
+    )
+    create_workflow_at_step(
+        paused_episode,
+        step_name="Audio Generation",
+        status="paused_for_human",
+        history=[
+            {
+                "step": "Setup",
+                "status": "completed",
+                "started_at": "",
+                "completed_at": "",
+            },
+            {
+                "step": "Perplexity Research",
+                "status": "completed",
+                "started_at": "",
+                "completed_at": "",
+            },
+            {
+                "step": "Question Discovery",
+                "status": "completed",
+                "started_at": "",
+                "completed_at": "",
+            },
+            {
+                "step": "Targeted Research",
+                "status": "completed",
+                "started_at": "",
+                "completed_at": "",
+            },
+            {
+                "step": "Cross-Validation",
+                "status": "completed",
+                "started_at": "",
+                "completed_at": "",
+            },
+            {
+                "step": "Master Briefing",
+                "status": "completed",
+                "started_at": "",
+                "completed_at": "",
+            },
+            {
+                "step": "Synthesis",
+                "status": "completed",
+                "started_at": "",
+                "completed_at": "",
+            },
+            {
+                "step": "Episode Planning",
+                "status": "completed",
+                "started_at": "",
+                "completed_at": "",
+            },
+        ],
+    )
+
+    # -- Publishable episode (for publish flow tests, step 12) --
+    publishable_episode = Episode.objects.create(
+        podcast=podcast,
+        title="E2E Publishable Episode",
+        slug="e2e-publishable-episode",
+        episode_number=104,
+        status="in_progress",
+        description="An episode ready to publish for E2E testing.",
+        audio_url="https://example.com/e2e-publishable.mp3",
+        show_notes="E2E test show notes for publishable episode.",
+        tags="e2e, test, publish",
+        cover_image_url="https://example.com/e2e-cover.jpg",
+    )
+    create_workflow_at_step(
+        publishable_episode,
+        step_name="Publish",
+        status="paused_at_gate",
+        history=[
+            {
+                "step": step_name,
+                "status": "completed",
+                "started_at": "",
+                "completed_at": "",
+            }
+            for step_name in [
+                "Setup",
+                "Perplexity Research",
+                "Question Discovery",
+                "Targeted Research",
+                "Cross-Validation",
+                "Master Briefing",
+                "Synthesis",
+                "Episode Planning",
+                "Audio Generation",
+                "Audio Processing",
+                "Publishing Assets",
+            ]
+        ],
+    )
+
     return E2EData(
         staff_user=staff_user,
         owner_user=owner_user,
@@ -191,4 +298,6 @@ def setup_e2e_data() -> E2EData:
         draft_episode=draft_episode,
         published_episode=published_episode,
         mid_pipeline_episode=mid_pipeline_episode,
+        paused_episode=paused_episode,
+        publishable_episode=publishable_episode,
     )
