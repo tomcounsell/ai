@@ -528,6 +528,8 @@ async def _pop_agent_session(chat_id: str) -> AgentSession | None:
     def _ensure_tz(dt):
         if dt is None:
             return datetime.min.replace(tzinfo=UTC)
+        if isinstance(dt, (int, float)):
+            return datetime.fromtimestamp(dt, tz=UTC)
         if isinstance(dt, datetime) and dt.tzinfo is None:
             return dt.replace(tzinfo=UTC)
         return dt

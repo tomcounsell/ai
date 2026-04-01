@@ -134,9 +134,6 @@ class AgentSession(Model):
     # === Steering fields ===
     queued_steering_messages = ListField(null=True)
 
-    # === ChatSession delivery field ===
-    result_text = Field(null=True)  # What was delivered to Telegram
-
     # === PM self-messaging ===
     pm_sent_message_ids = ListField(null=True)
 
@@ -527,6 +524,23 @@ class AgentSession(Model):
         """Set summary by appending a summary event."""
         if value:
             self.append_event("summary", value)
+
+    @property
+    def result_text(self) -> str | None:
+        """Get the most recent delivery text from session_events."""
+        events = self.session_events
+        if not isinstance(events, list):
+            return None
+        for event in reversed(events):
+            if isinstance(event, dict) and event.get("event_type") == "delivery":
+                return event.get("text")
+        return None
+
+    @result_text.setter
+    def result_text(self, value: str) -> None:
+        """Set result_text by appending a delivery event."""
+        if value:
+            self.append_event("delivery", value)
 
     @property
     def stage_states(self) -> str | None:
