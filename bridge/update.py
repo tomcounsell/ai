@@ -8,6 +8,7 @@ Force updates flush the queue, kill running sessions, and restart immediately.
 import logging
 import platform
 import subprocess
+import uuid
 from pathlib import Path
 
 from bridge.response import set_reaction
@@ -56,6 +57,34 @@ def _get_running_sessions_info() -> tuple[int, list[str]]:
         return 0, []
 
 
+async def _queue_fix_session(event, machine: str, stdout: str, stderr: str, failed: bool) -> None:
+    """Queue an agent session to diagnose and fix update issues."""
+    try:
+        from agent.agent_session_queue import enqueue_agent_session
+
+        problem = "Update failed" if failed else "Update has warnings"
+        message = (
+            f"/update fix: {problem} on {machine}.\n"
+            f"stdout:\n{stdout[:500]}\n"
+            f"stderr:\n{stderr[:500]}\n\n"
+            "Diagnose and fix the issue. Use the /update skill."
+        )
+        session_id = f"update_fix_{uuid.uuid4().hex[:8]}"
+        await enqueue_agent_session(
+            project_key="ai",
+            session_id=session_id,
+            working_dir=str(_PROJECT_DIR),
+            message_text=message,
+            sender_name="system",
+            chat_id=str(event.chat_id),
+            telegram_message_id=event.message.id,
+            priority="low",
+        )
+        logger.info(f"[update] Queued fix session {session_id}")
+    except Exception as e:
+        logger.warning(f"[update] Failed to queue fix session: {e}")
+
+
 async def handle_update_command(tg_client, event):
     """Run remote update script and send results as standalone message.
 
@@ -102,12 +131,19 @@ async def handle_update_command(tg_client, event):
         ]
         status = status_lines[0] if status_lines else "(no output)"
 
-        if result.returncode != 0:
+        failed = result.returncode != 0
+        if failed:
             status = f"update failed: {stderr.split(chr(10))[0]}" if stderr else status
 
         if running_count > 0:
             plural = "s" if running_count != 1 else ""
             status += f" ({running_count} session{plural} running; restart queued)"
+
+        # If update had warnings or failed, queue agent session to fix
+        has_warnings = "warning" in status.lower()
+        if failed or has_warnings:
+            status += " — spawning agent session to fix"
+            await _queue_fix_session(event, machine, stdout, stderr, failed)
 
         await tg_client.send_message(event.chat_id, f"{machine} - {status}")
     except subprocess.TimeoutExpired:
