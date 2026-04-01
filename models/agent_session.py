@@ -268,6 +268,10 @@ class AgentSession(Model):
                       "_qa_mode_legacy"):
             kwargs.pop(dead, None)
 
+        # Ensure created_at has a default (SortedField is not nullable)
+        if "created_at" not in kwargs:
+            kwargs["created_at"] = datetime.now(tz=UTC)
+
         # Convert float timestamps to datetime
         if "created_at" in kwargs and isinstance(kwargs["created_at"], (int, float)):
             kwargs["created_at"] = datetime.fromtimestamp(kwargs["created_at"], tz=UTC)

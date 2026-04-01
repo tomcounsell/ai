@@ -1092,6 +1092,16 @@ async def _agent_session_health_check() -> None:
     recovered = 0
     workers_started = 0
 
+    def _ts(val):
+        """Convert datetime or float to Unix timestamp."""
+        if val is None:
+            return None
+        if isinstance(val, datetime):
+            return val.timestamp()
+        if isinstance(val, (int, float)):
+            return float(val)
+        return None
+
     # === Check RUNNING sessions_list ===
     running_sessions = list(AgentSession.query.filter(status="running"))
     for entry in running_sessions:
@@ -1100,14 +1110,14 @@ async def _agent_session_health_check() -> None:
         worker = _active_workers.get(worker_key)
         worker_alive = worker is not None and not worker.done()
 
-        started_at = getattr(entry, "started_at", None)
-        running_seconds = (now - started_at) if started_at else None
+        started_ts = _ts(getattr(entry, "started_at", None))
+        running_seconds = (now - started_ts) if started_ts else None
 
         should_recover = False
         reason = ""
 
         if not worker_alive:
-            if started_at is None:
+            if started_ts is None:
                 should_recover = True
                 reason = "worker dead/missing, no started_at (legacy session)"
             elif running_seconds is not None and running_seconds > AGENT_SESSION_HEALTH_MIN_RUNNING:
@@ -1177,10 +1187,10 @@ async def _agent_session_health_check() -> None:
             continue
 
         # No live worker — check age threshold before starting one
-        created_at = getattr(entry, "created_at", None)
-        if created_at is None:
+        created_ts = _ts(getattr(entry, "created_at", None))
+        if created_ts is None:
             continue
-        pending_seconds = now - created_at
+        pending_seconds = now - created_ts
         if pending_seconds > AGENT_SESSION_HEALTH_MIN_RUNNING:
             if worker_key.startswith("local"):
                 # Local CLI sessions can't be resumed by bridge workers

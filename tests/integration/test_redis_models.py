@@ -21,7 +21,7 @@ class TestDeadLetter:
             chat_id="111",
             reply_to=42,
             text="failed message",
-            created_at=datetime.now(tz=UTC),
+            created_at=time.time(),
             attempts=0,
         )
         assert dl.letter_id
@@ -39,7 +39,7 @@ class TestDeadLetter:
         dl = DeadLetter.create(
             chat_id="222",
             text="retry me",
-            created_at=datetime.now(tz=UTC),
+            created_at=time.time(),
             attempts=0,
         )
         dl.attempts = 3
@@ -54,7 +54,7 @@ class TestDeadLetter:
         dl = DeadLetter.create(
             chat_id="333",
             text="delete me",
-            created_at=datetime.now(tz=UTC),
+            created_at=time.time(),
             attempts=0,
         )
         dl.delete()
@@ -68,7 +68,7 @@ class TestDeadLetter:
         dl = DeadLetter.create(
             chat_id="444",
             text="no reply",
-            created_at=datetime.now(tz=UTC),
+            created_at=time.time(),
             attempts=0,
         )
         assert dl.reply_to is None
@@ -94,7 +94,7 @@ class TestDeadLetter:
         DeadLetter.create(
             chat_id="555",
             text="replay me",
-            created_at=datetime.now(tz=UTC),
+            created_at=time.time(),
             attempts=0,
         )
 
@@ -123,7 +123,7 @@ class TestDeadLetter:
         DeadLetter.create(
             chat_id="666",
             text="fail me",
-            created_at=datetime.now(tz=UTC),
+            created_at=time.time(),
             attempts=0,
         )
 
@@ -363,7 +363,7 @@ class TestAgentSession:
             status="active",
             chat_id="100",
             sender_name="Tom",
-            created_at=datetime.now(tz=UTC),
+            created_at=time.time(),
             started_at=datetime.now(tz=UTC),
             updated_at=datetime.now(tz=UTC),
             tool_call_count=0,
@@ -383,7 +383,7 @@ class TestAgentSession:
             status="active",
             chat_id="200",
             sender_name="Tom",
-            created_at=datetime.now(tz=UTC),
+            created_at=time.time(),
             started_at=now,
             updated_at=now,
             tool_call_count=0,
@@ -401,7 +401,7 @@ class TestAgentSession:
             status="completed",
             chat_id="200",
             sender_name="Tom",
-            created_at=datetime.now(tz=UTC),
+            created_at=time.time(),
             started_at=now,
             updated_at=datetime.now(tz=UTC),
             tool_call_count=0,
@@ -420,7 +420,7 @@ class TestAgentSession:
             status="active",
             chat_id="300",
             sender_name="Tom",
-            created_at=datetime.now(tz=UTC),
+            created_at=time.time(),
             started_at=datetime.now(tz=UTC),
             updated_at=datetime.now(tz=UTC),
             tool_call_count=0,
@@ -442,7 +442,7 @@ class TestAgentSession:
             status="active",
             chat_id="1",
             sender_name="A",
-            created_at=datetime.now(tz=UTC),
+            created_at=time.time(),
             started_at=now,
             updated_at=now,
             tool_call_count=5,
@@ -453,7 +453,7 @@ class TestAgentSession:
             status="completed",
             chat_id="2",
             sender_name="B",
-            created_at=datetime.now(tz=UTC),
+            created_at=time.time(),
             started_at=now,
             updated_at=now,
             tool_call_count=10,
@@ -464,7 +464,7 @@ class TestAgentSession:
             status="active",
             chat_id="3",
             sender_name="C",
-            created_at=datetime.now(tz=UTC),
+            created_at=time.time(),
             started_at=now,
             updated_at=now,
             tool_call_count=2,
@@ -490,7 +490,7 @@ class TestAgentSession:
             status="active",
             chat_id="1",
             sender_name="A",
-            created_at=datetime.now(tz=UTC),
+            created_at=time.time(),
             started_at=now,
             updated_at=now,
             tool_call_count=0,
@@ -501,7 +501,7 @@ class TestAgentSession:
             status="active",
             chat_id="2",
             sender_name="B",
-            created_at=datetime.now(tz=UTC),
+            created_at=time.time(),
             started_at=now,
             updated_at=now,
             tool_call_count=0,
@@ -520,7 +520,7 @@ class TestAgentSession:
             status="active",
             chat_id="100",
             sender_name="Tom",
-            created_at=datetime.now(tz=UTC),
+            created_at=time.time(),
             started_at=now,
             updated_at=now,
             tool_call_count=3,
@@ -533,7 +533,7 @@ class TestAgentSession:
             status="failed",
             chat_id="100",
             sender_name="Tom",
-            created_at=datetime.now(tz=UTC),
+            created_at=time.time(),
             started_at=now,
             updated_at=now,
             tool_call_count=3,
@@ -553,7 +553,7 @@ class TestAgentSession:
             status="active",
             chat_id="100",
             sender_name="Tom",
-            created_at=datetime.now(tz=UTC),
+            created_at=time.time(),
             started_at=now,
             updated_at=now,
             tool_call_count=0,
@@ -573,7 +573,7 @@ class TestAgentSession:
             status="completed",
             chat_id="100",
             sender_name="Tom",
-            created_at=datetime.now(tz=UTC),
+            created_at=time.time(),
             started_at=now,
             updated_at=now,
             tool_call_count=5,
