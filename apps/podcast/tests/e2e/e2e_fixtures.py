@@ -111,6 +111,8 @@ def setup_e2e_data() -> E2EData:
         privacy=Podcast.Privacy.PUBLIC,
         published_at=timezone.now() - timezone.timedelta(hours=1),
         owner=owner_user,
+        spotify_url="https://open.spotify.com/show/e2e-test",
+        apple_podcasts_url="https://podcasts.apple.com/podcast/e2e-test",
     )
 
     # -- Draft episode (for create/edit tests) --
