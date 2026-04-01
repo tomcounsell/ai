@@ -2,11 +2,15 @@
 
 Handles OAuth2 credential management for Google APIs.
 Credentials and tokens stored in ~/Desktop/Valor/ (env: GOOGLE_CREDENTIALS_DIR).
+Tokens are per-machine to avoid iCloud sync race conditions on refresh.
 """
 
 from __future__ import annotations
 
+import logging
 import os
+import platform
+import subprocess
 from pathlib import Path
 
 from google.auth.transport.requests import Request
@@ -16,12 +20,58 @@ from googleapiclient.discovery import Resource, build
 
 from config.settings import settings
 
+logger = logging.getLogger(__name__)
+
 # Resolve credentials directory: env var override or settings default (~/Desktop/Valor/)
 _env_dir = os.getenv("GOOGLE_CREDENTIALS_DIR")
 CONFIG_DIR = Path(_env_dir) if _env_dir else settings.google_auth.credentials_dir
 
 CREDENTIALS_PATH = CONFIG_DIR / "google_credentials.json"
-TOKEN_PATH = CONFIG_DIR / "google_token.json"
+
+# Shared legacy token path (pre per-machine migration)
+_SHARED_TOKEN_PATH = CONFIG_DIR / "google_token.json"
+
+
+def _get_machine_name() -> str:
+    """Get a filesystem-safe machine name for per-machine token files."""
+    try:
+        result = subprocess.run(
+            ["scutil", "--get", "ComputerName"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            name = result.stdout.strip()
+            # Make filesystem-safe: lowercase, replace spaces with hyphens
+            return name.lower().replace(" ", "-")
+    except Exception:
+        pass
+    return platform.node().split(".")[0].lower()
+
+
+def _get_token_path() -> Path:
+    """Get per-machine token path, migrating from shared token if needed."""
+    machine = _get_machine_name()
+    per_machine_path = CONFIG_DIR / f"google_token.{machine}.json"
+
+    # If per-machine token exists, use it
+    if per_machine_path.exists():
+        return per_machine_path
+
+    # Migrate: copy shared token to per-machine path (don't delete shared)
+    if _SHARED_TOKEN_PATH.exists():
+        try:
+            per_machine_path.write_text(_SHARED_TOKEN_PATH.read_text())
+            logger.info(f"Migrated Google token to per-machine: {per_machine_path.name}")
+        except Exception as e:
+            logger.warning(f"Token migration failed: {e}")
+            return _SHARED_TOKEN_PATH
+
+    return per_machine_path
+
+
+TOKEN_PATH = _get_token_path()
 
 SCOPES = [
     "https://www.googleapis.com/auth/calendar",
