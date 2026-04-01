@@ -7,26 +7,18 @@ database setup and fixtures.
 
 import contextlib
 import os
-import warnings
 
 import django
 import pytest
 from django.conf import settings
 
-# Optional Selenium import (skip if not installed)
+# Optional Playwright import for browser tests
 try:
-    from selenium import webdriver
-    from selenium.webdriver.chrome.options import Options as ChromeOptions
-    from selenium.webdriver.edge.options import Options as EdgeOptions
-    from selenium.webdriver.firefox.options import Options as FirefoxOptions
+    from playwright.sync_api import sync_playwright
 
-    SELENIUM_AVAILABLE = True
+    PLAYWRIGHT_AVAILABLE = True
 except ImportError:
-    SELENIUM_AVAILABLE = False
-    warnings.warn(
-        "Selenium not installed. Browser tests will be skipped.",
-        stacklevel=2,
-    )
+    PLAYWRIGHT_AVAILABLE = False
 
 
 def pytest_configure(config):
@@ -109,58 +101,37 @@ def django_db_setup(django_test_environment, django_db_blocker):
         teardown_databases(db_cfg, verbosity=0)
 
 
-if SELENIUM_AVAILABLE:
+# ---------------------------------------------------------------------------
+# Playwright fixtures (available project-wide for browser tests)
+# ---------------------------------------------------------------------------
 
-    @pytest.fixture
-    def driver(request):
-        """
-        Provide a Selenium WebDriver instance for browser testing.
+if PLAYWRIGHT_AVAILABLE:
 
-        By default, this uses Chrome in headless mode, but you can override with:
-        - TEST_BROWSER environment variable (chrome/firefox/edge)
-        - TEST_HEADLESS environment variable (0/1)
-        - TEST_SLOW_MO environment variable (milliseconds to slow down actions)
-        """
-        # Determine browser type from environment or default to Chrome
-        browser_name = os.environ.get("TEST_BROWSER", "chromium").lower()
+    @pytest.fixture(scope="session")
+    def browser_type():
+        """Return the browser type name from environment (default: chromium)."""
+        return os.environ.get("TEST_BROWSER", "chromium")
 
-        # Determine headless mode from environment
+    @pytest.fixture(scope="session")
+    def playwright_instance():
+        """Start and stop Playwright for the test session."""
+        with sync_playwright() as p:
+            yield p
+
+    @pytest.fixture(scope="session")
+    def browser(playwright_instance, browser_type):
+        """Launch a browser instance for the test session."""
         headless = os.environ.get("TEST_HEADLESS", "1") == "1"
-
-        # Get slow motion value for debugging
         slow_mo = int(os.environ.get("TEST_SLOW_MO", "0"))
 
-        if browser_name == "firefox":
-            options = FirefoxOptions()
-            if headless:
-                options.add_argument("--headless")
-            driver = webdriver.Firefox(options=options)
-        elif browser_name == "edge":
-            options = EdgeOptions()
-            if headless:
-                options.add_argument("--headless")
-            driver = webdriver.Edge(options=options)
-        else:  # Default to Chrome
-            options = ChromeOptions()
-            if headless:
-                options.add_argument("--headless")
-            options.add_argument("--no-sandbox")
-            options.add_argument("--disable-gpu")
-            options.add_argument("--disable-dev-shm-usage")
-            options.add_argument("--window-size=1920,1080")
-            driver = webdriver.Chrome(options=options)
+        launcher = getattr(playwright_instance, browser_type)
+        _browser = launcher.launch(headless=headless, slow_mo=slow_mo)
+        yield _browser
+        _browser.close()
 
-        # Set implicit wait time
-        driver.implicitly_wait(10)
-
-        # If slow motion is enabled, add delays between actions
-        if slow_mo > 0:
-            # This is a placeholder - Selenium doesn't have a direct slow_mo option
-            # For real implementation, you'd need to add delays in your test code
-            pass
-
-        # Yield the driver for the test
-        yield driver
-
-        # Quit the driver after the test is complete
-        driver.quit()
+    @pytest.fixture
+    def page(browser):
+        """Create a fresh browser page for each test."""
+        _page = browser.new_page()
+        yield _page
+        _page.close()

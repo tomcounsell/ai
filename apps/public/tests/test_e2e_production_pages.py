@@ -7,18 +7,28 @@ Run with: python tools/testing/browser_test_runner.py apps/public/tests/test_e2e
 import os
 
 import pytest
-from playwright.sync_api import Page, expect
+
+try:
+    from playwright.sync_api import Page, expect
+
+    PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    PLAYWRIGHT_AVAILABLE = False
+
+    class Page:
+        pass
+
+    def expect(*args, **kwargs):
+        pass
+
+
+pytestmark = pytest.mark.skipif(
+    not PLAYWRIGHT_AVAILABLE,
+    reason="Playwright not installed. Run: uv sync --extra e2e",
+)
 
 # Use environment variable to allow testing different environments
 PRODUCTION_URL = os.environ.get("PRODUCTION_URL", "https://ai.yuda.me")
-
-
-@pytest.fixture
-def page(browser):
-    """Create a new page for each test."""
-    page = browser.new_page()
-    yield page
-    page.close()
 
 
 def test_homepage_loads(page: Page):

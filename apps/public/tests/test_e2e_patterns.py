@@ -201,53 +201,57 @@ class EndToEndTestConfig:
     screenshots_dir: str = SCREENSHOTS_BASE_DIR
 
 
-@pytest_asyncio.fixture
-async def browser_context(request):
-    """Fixture to provide a browser context for tests."""
-    import playwright.async_api
+if HAS_PYTEST_ASYNCIO and BROWSER_USE_AVAILABLE:
 
-    config = EndToEndTestConfig()
+    @pytest_asyncio.fixture
+    async def browser_context(request):
+        """Fixture to provide a browser context for tests."""
+        import playwright.async_api
 
-    # Setup screenshots directory if needed
-    if not os.path.exists(config.screenshots_dir):
-        os.makedirs(config.screenshots_dir)
+        config = EndToEndTestConfig()
 
-    # Create browser instance
-    playwright_instance = await playwright.async_api.async_playwright().start()
-    browser_instance = await getattr(playwright_instance, config.browser_type).launch(
-        headless=config.headless, slow_mo=config.slow_mo
-    )
+        # Setup screenshots directory if needed
+        if not os.path.exists(config.screenshots_dir):
+            os.makedirs(config.screenshots_dir)
 
-    # Create context with viewport settings
-    context = await browser_instance.new_context(
-        viewport={"width": config.viewport_width, "height": config.viewport_height}
-    )
+        # Create browser instance
+        playwright_instance = await playwright.async_api.async_playwright().start()
+        browser_instance = await getattr(
+            playwright_instance, config.browser_type
+        ).launch(headless=config.headless, slow_mo=config.slow_mo)
 
-    # Set default timeout values
-    context.set_default_timeout(config.default_timeout)
-    context.set_default_navigation_timeout(config.navigation_timeout)
+        # Create context with viewport settings
+        context = await browser_instance.new_context(
+            viewport={
+                "width": config.viewport_width,
+                "height": config.viewport_height,
+            }
+        )
 
-    # Return context for use in tests
-    yield context
+        # Set default timeout values
+        context.set_default_timeout(config.default_timeout)
+        context.set_default_navigation_timeout(config.navigation_timeout)
 
-    # Cleanup
-    try:
-        await context.close()
-        await browser_instance.close()
-        await playwright_instance.stop()
-    except Exception as e:
-        print(f"Error during browser context cleanup: {e}")
+        # Return context for use in tests
+        yield context
 
+        # Cleanup
+        try:
+            await context.close()
+            await browser_instance.close()
+            await playwright_instance.stop()
+        except Exception as e:
+            print(f"Error during browser context cleanup: {e}")
 
-@pytest_asyncio.fixture
-async def browser_page(browser_context):
-    """Fixture to provide a browser page for tests."""
-    page = await browser_context.new_page()
-    yield page
-    try:
-        await page.close()
-    except Exception as e:
-        print(f"Error closing browser page: {e}")
+    @pytest_asyncio.fixture
+    async def browser_page(browser_context):
+        """Fixture to provide a browser page for tests."""
+        page = await browser_context.new_page()
+        yield page
+        try:
+            await page.close()
+        except Exception as e:
+            print(f"Error closing browser page: {e}")
 
 
 class E2ETestBase(LiveServerMixin):
@@ -528,7 +532,7 @@ class TestResponsiveLayout(E2ETestBase):
             {"width": 375, "height": 667},  # Mobile
         ]
 
-        for i, viewport in enumerate(viewports):
+        for _i, viewport in enumerate(viewports):
             # Create a new context with this viewport
             context = await custom_browser_context.new_context(viewport=viewport)
 
