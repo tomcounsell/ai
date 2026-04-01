@@ -165,11 +165,11 @@ class TestReviewState:
         assert len(_review_state) == 0
 
     def test_state_tracks_sessions(self):
-        _review_state["test-session-1"] = 1234567890.0
+        _review_state["test-session-1"] = {"timestamp": 1234567890.0, "draft": "test"}
         assert "test-session-1" in _review_state
 
     def test_state_cleanup(self):
-        _review_state["test-session-1"] = 1234567890.0
+        _review_state["test-session-1"] = {"timestamp": 1234567890.0, "draft": "test"}
         _review_state.pop("test-session-1", None)
         assert "test-session-1" not in _review_state
 
@@ -255,7 +255,7 @@ class TestStopHookIntegration:
         monkeypatch.setenv("TELEGRAM_REPLY_TO", "456")
 
         # Pre-seed review state (simulating first stop already happened)
-        _review_state["test-4"] = 1234567890.0
+        _review_state["test-4"] = {"timestamp": 1234567890.0, "draft": "draft text"}
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
             f.write("SEND")
@@ -289,7 +289,7 @@ class TestStopHookIntegration:
         monkeypatch.setenv("TELEGRAM_CHAT_ID", "123")
         monkeypatch.setenv("TELEGRAM_REPLY_TO", "456")
 
-        _review_state["test-5"] = 1234567890.0
+        _review_state["test-5"] = {"timestamp": 1234567890.0, "draft": "draft text"}
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
             f.write("CONTINUE")

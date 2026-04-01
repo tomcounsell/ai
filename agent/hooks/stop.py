@@ -2,9 +2,9 @@
 and implements the delivery review gate for Telegram-triggered sessions.
 
 The review gate gives the agent final say over its output:
-1. First stop → summarize raw output into a draft, present choices to agent
+1. First stop -> summarize raw output into a draft, present choices to agent
 2. Agent picks SEND / EDIT / REACT / SILENT / CONTINUE
-3. Second stop → parse choice, write delivery instruction to AgentSession
+3. Second stop -> parse choice, write delivery instruction to AgentSession
 4. Bridge reads delivery instruction and executes accordingly
 """
 
@@ -20,12 +20,12 @@ from claude_agent_sdk import HookContext, StopHookInput
 
 logger = logging.getLogger(__name__)
 
-# Module-level state tracking which sessions have already seen the review gate.
-# Keyed by session_id → timestamp of first stop.  Cleared implicitly when the
-# process restarts (bridge restart = fresh state).
-_review_state: dict[str, float] = {}
+# Module-level state tracking which sessions have seen the review gate.
+# Keyed by session_id -> {"timestamp": float, "draft": str}.
+# Cleared implicitly when the process restarts.
+_review_state: dict[str, dict[str, Any]] = {}
 
-# Patterns that suggest the agent stopped prematurely (promise without substance)
+# Patterns suggesting the agent stopped prematurely (promise without substance)
 _FALSE_STOP_PATTERNS = re.compile(
     r"(?:^|\n)\s*(?:I (?:started|initiated|began|kicked off|triggered)|"
     r"Let me (?:check|look|investigate|find|search)|"
@@ -79,11 +79,7 @@ def _has_pm_messages(session_id: str) -> bool:
 
 
 def _detect_false_stop(output_tail: str) -> bool:
-    """Detect if the agent's output looks like a promise without substance.
-
-    Returns True if the output contains promise-like patterns and is short
-    (suggesting the agent stopped after announcing intent, not after doing work).
-    """
+    """Detect if the agent's output looks like a promise without substance."""
     if len(output_tail.strip()) > 500:
         return False
     return bool(_FALSE_STOP_PATTERNS.search(output_tail))
@@ -130,11 +126,8 @@ def _parse_delivery_choice(output_tail: str) -> dict[str, str | None]:
     Falls back to SEND (deliver the draft) if unparseable.
     """
     text = output_tail.strip()
-
-    # Try to find the choice in the last portion of output
-    # The agent's response to the review gate is typically the last line(s)
     lines = text.split("\n")
-    # Search from the end for a delivery choice
+
     for line in reversed(lines):
         line = line.strip()
         if not line:
@@ -149,7 +142,6 @@ def _parse_delivery_choice(output_tail: str) -> dict[str, str | None]:
             revised = line[5:].strip()
             if revised:
                 return {"delivery_action": "send", "delivery_text": revised}
-            # EDIT with no text → treat as SEND
             return {"delivery_action": "send"}
 
         if upper.startswith("REACT:"):
@@ -164,7 +156,6 @@ def _parse_delivery_choice(output_tail: str) -> dict[str, str | None]:
         if upper == "CONTINUE":
             return {"delivery_action": "continue"}
 
-    # Unparseable → conservative: deliver the draft
     logger.info("[stop_hook] Could not parse delivery choice, defaulting to SEND")
     return {"delivery_action": "send"}
 
@@ -190,7 +181,6 @@ def _write_delivery_to_session(session_id: str, choice: dict, draft: str) -> Non
             session.delivery_emoji = choice.get("delivery_emoji", "👍")
         elif action == "silent":
             session.delivery_action = "silent"
-        # "continue" is handled by blocking again — no fields written
 
         session.save()
         logger.info(
@@ -251,23 +241,24 @@ async def stop_hook(
     # Check if this is the first or second stop for this session
     if session_id not in _review_state:
         # ── First stop: generate draft, present choices ──
-        _review_state[session_id] = time.time()
+        start_time = time.time()
 
         output_tail = _read_transcript_tail(input_data)
         if not output_tail.strip():
             logger.info(f"[stop_hook] Empty output, skipping review gate ({session_id})")
-            _review_state.pop(session_id, None)
             return {}
 
         is_false_stop = _detect_false_stop(output_tail)
         draft = await _generate_draft(output_tail, session_id)
         review_prompt = _build_review_prompt(draft, is_false_stop)
 
-        elapsed = time.time() - _review_state[session_id]
+        # Cache draft so we reuse it on second stop (no regeneration)
+        _review_state[session_id] = {"timestamp": start_time, "draft": draft}
+
+        elapsed = time.time() - start_time
         logger.info(
             f"[stop_hook] Review gate activated: session={session_id}, "
-            f"draft_len={len(draft)}, false_stop={is_false_stop}, "
-            f"elapsed={elapsed:.1f}s"
+            f"draft_len={len(draft)}, false_stop={is_false_stop}, elapsed={elapsed:.1f}s"
         )
 
         return {
@@ -280,19 +271,20 @@ async def stop_hook(
         choice = _parse_delivery_choice(output_tail)
 
         if choice.get("delivery_action") == "continue":
-            # Agent wants to keep working — block again but don't re-show the gate
             logger.info(f"[stop_hook] Agent chose CONTINUE ({session_id})")
-            _review_state.pop(session_id, None)  # Reset so next stop triggers gate again
+            _review_state.pop(session_id, None)  # Reset so next stop triggers gate
             return {
                 "decision": "block",
                 "reason": "Resuming work. Continue where you left off.",
             }
 
-        # Write delivery instruction and allow completion
-        draft = await _generate_draft(_read_transcript_tail(input_data, max_chars=2000), session_id)
+        # Use cached draft from first stop (no regeneration)
+        cached = _review_state.get(session_id, {})
+        draft = cached.get("draft", "")
         _write_delivery_to_session(session_id, choice, draft)
 
-        elapsed = time.time() - _review_state.get(session_id, time.time())
+        start_time = cached.get("timestamp", time.time())
+        elapsed = time.time() - start_time
         logger.info(
             f"[stop_hook] Review gate complete: session={session_id}, "
             f"choice={choice.get('delivery_action')}, elapsed={elapsed:.1f}s"

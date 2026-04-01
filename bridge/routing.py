@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import re
+import unicodedata
 from pathlib import Path
 
 from config.enums import ClassificationType, PersonaType
@@ -376,8 +377,6 @@ def classify_needs_response(text: str) -> str:
         return token_class
 
     # Emoji-only messages (1-3 emoji, no text) → react
-    import unicodedata
-
     stripped = text.strip()
     if stripped and all(
         unicodedata.category(ch).startswith(("So", "Sk", "Sm"))
@@ -858,5 +857,5 @@ async def should_respond_async(
         return False, False
     if classification == "react":
         logger.info(f"Classified as react-only: {text[:50]}...")
-        return False, False  # Caller checks for react via classify directly
+        return "react", False  # Special string; bridge sends emoji, no session
     return True, False

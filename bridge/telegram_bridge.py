@@ -884,6 +884,15 @@ async def main():
             sender_username,
             sender_id,
         )
+        # React-only path: send emoji reaction, no session
+        if should_reply == "react":
+            from bridge.routing import _pick_reaction_emoji
+
+            emoji = _pick_reaction_emoji(text.strip().lower().rstrip("!.,"))
+            await set_reaction(client, event.chat_id, message.id, emoji)
+            logger.info(f"React-only: {emoji} for '{text[:30]}...' in {chat_title or 'DM'}")
+            return
+
         if not should_reply:
             if is_dm and DM_WHITELIST:
                 logger.debug(f"Ignoring DM from {sender_name} (id={sender_id}) - not in whitelist")
