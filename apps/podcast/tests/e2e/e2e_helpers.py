@@ -57,3 +57,15 @@ def episode_workflow_url(podcast_slug: str, episode_slug: str, step: int = 1) ->
 def episode_detail_url(podcast_slug: str, episode_slug: str) -> str:
     """Return the episode detail page URL."""
     return f"{BASE_URL}/podcast/{podcast_slug}/{episode_slug}/"
+
+
+def episode_workflow_poll_url(
+    podcast_slug: str, episode_slug: str, step: int = 1
+) -> str:
+    """Return the workflow polling status URL for a given step."""
+    return f"{BASE_URL}/podcast/{podcast_slug}/{episode_slug}/edit/{step}/status/"
+
+
+def episode_update_field_url(podcast_slug: str, episode_slug: str) -> str:
+    """Return the inline field update URL."""
+    return f"{BASE_URL}/podcast/{podcast_slug}/{episode_slug}/update-field/"

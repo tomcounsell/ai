@@ -30,6 +30,7 @@ class E2EData:
     podcast: object
     draft_episode: object
     published_episode: object
+    mid_pipeline_episode: object
 
 
 def cleanup_e2e_data() -> None:
@@ -59,13 +60,13 @@ def create_workflow_at_step(
 
 def create_artifact(
     episode: Episode,
-    artifact_type: str,
+    title: str,
     content: str = "E2E test artifact content.",
 ) -> EpisodeArtifact:
-    """Create an EpisodeArtifact with given type and content."""
+    """Create an EpisodeArtifact with given title and content."""
     artifact, _ = EpisodeArtifact.objects.update_or_create(
         episode=episode,
-        artifact_type=artifact_type,
+        title=title,
         defaults={"content": content},
     )
     return artifact
@@ -134,6 +135,54 @@ def setup_e2e_data() -> E2EData:
         sources_text="Source 1: https://example.com, Source 2: https://example.org",
     )
 
+    # -- Mid-pipeline episode (for workflow UI tests) --
+    mid_pipeline_episode = Episode.objects.create(
+        podcast=podcast,
+        title="E2E Mid-Pipeline Episode",
+        slug="e2e-mid-pipeline-episode",
+        episode_number=102,
+        status="in_progress",
+        description="An episode partway through the workflow for UI testing.",
+    )
+    create_workflow_at_step(
+        mid_pipeline_episode,
+        step_name="Cross-Validation",
+        status="running",
+        history=[
+            {
+                "step": "Setup",
+                "status": "completed",
+                "started_at": "",
+                "completed_at": "",
+            },
+            {
+                "step": "Perplexity Research",
+                "status": "completed",
+                "started_at": "",
+                "completed_at": "",
+            },
+            {
+                "step": "Question Discovery",
+                "status": "completed",
+                "started_at": "",
+                "completed_at": "",
+            },
+            {
+                "step": "Targeted Research",
+                "status": "completed",
+                "started_at": "",
+                "completed_at": "",
+            },
+        ],
+    )
+    create_artifact(mid_pipeline_episode, "p1-brief", "E2E brief content for testing.")
+    create_artifact(
+        mid_pipeline_episode, "p2-research", "E2E research content for testing."
+    )
+    create_artifact(
+        mid_pipeline_episode, "p3-questions", "E2E questions content for testing."
+    )
+
     return E2EData(
         staff_user=staff_user,
         owner_user=owner_user,
@@ -141,4 +190,5 @@ def setup_e2e_data() -> E2EData:
         podcast=podcast,
         draft_episode=draft_episode,
         published_episode=published_episode,
+        mid_pipeline_episode=mid_pipeline_episode,
     )
