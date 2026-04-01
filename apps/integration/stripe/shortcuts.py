@@ -51,10 +51,10 @@ def create_checkout_session(
     )
 
     if not success_url:
-        success_url = f"{hostname}{reverse('public:home')}?payment_result=success"
+        success_url = f"{hostname}{reverse('public:dashboard')}?payment_result=success"
 
     if not cancel_url:
-        cancel_url = f"{hostname}{reverse('public:home')}?payment_result=canceled"
+        cancel_url = f"{hostname}{reverse('public:dashboard')}?payment_result=canceled"
 
     # Use user email if provided and no email explicitly specified
     if user and not customer_email:
