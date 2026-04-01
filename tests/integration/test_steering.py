@@ -405,12 +405,17 @@ class TestPendingSessionSteering:
         # Simulate the bridge logic: check age and push steering
         from models.agent_session import AgentSession
 
-        pending_sessions = AgentSession.query.filter(
-            session_id=session_id, status="pending"
-        )
+        pending_sessions = AgentSession.query.filter(session_id=session_id, status="pending")
         assert len(pending_sessions) > 0
         pending_session = pending_sessions[0]
-        age = time.time() - (pending_session.created_at or 0)
+        _created = pending_session.created_at
+        if isinstance(_created, datetime):
+            _created = (
+                _created.timestamp()
+                if _created.tzinfo
+                else _created.replace(tzinfo=UTC).timestamp()
+            )
+        age = time.time() - (_created or 0)
         assert age <= PENDING_MERGE_WINDOW_SECONDS
 
         push_steering_message(session_id, "follow-up context", "Tom")
@@ -424,16 +429,23 @@ class TestPendingSessionSteering:
 
         session_id = "test_pending_steer_old"
         # Create with timestamp 10s in the past
-        self._create_session(session_id, "pending", created_at=datetime.now(tz=UTC) - timedelta(seconds=10))
+        self._create_session(
+            session_id, "pending", created_at=datetime.now(tz=UTC) - timedelta(seconds=10)
+        )
 
         from models.agent_session import AgentSession
 
-        pending_sessions = AgentSession.query.filter(
-            session_id=session_id, status="pending"
-        )
+        pending_sessions = AgentSession.query.filter(session_id=session_id, status="pending")
         assert len(pending_sessions) > 0
         pending_session = pending_sessions[0]
-        age = time.time() - (pending_session.created_at or 0)
+        _created = pending_session.created_at
+        if isinstance(_created, datetime):
+            _created = (
+                _created.timestamp()
+                if _created.tzinfo
+                else _created.replace(tzinfo=UTC).timestamp()
+            )
+        age = time.time() - (_created or 0)
         assert age > PENDING_MERGE_WINDOW_SECONDS
 
     def test_pending_merge_window_constant_is_7(self):
@@ -471,20 +483,19 @@ class TestPendingSessionSteering:
         # Replicate the intake classifier logic from the bridge
         active_sessions = []
         for check_status in ("running", "active", "dormant"):
-            sessions = AgentSession.query.filter(
-                chat_id=chat_id, status=check_status
-            )
+            sessions = AgentSession.query.filter(chat_id=chat_id, status=check_status)
             if sessions:
                 active_sessions.extend(sessions)
 
         # Also include recent pending sessions within the merge window
-        pending_sessions = AgentSession.query.filter(
-            chat_id=chat_id, status="pending"
-        )
+        pending_sessions = AgentSession.query.filter(chat_id=chat_id, status="pending")
         if pending_sessions:
             now_ts = time.time()
             for ps in pending_sessions:
-                age = now_ts - (ps.created_at or 0)
+                _ct = ps.created_at
+                if isinstance(_ct, datetime):
+                    _ct = _ct.timestamp() if _ct.tzinfo else _ct.replace(tzinfo=UTC).timestamp()
+                age = now_ts - (_ct or 0)
                 if age <= PENDING_MERGE_WINDOW_SECONDS:
                     active_sessions.append(ps)
 
@@ -500,24 +511,26 @@ class TestPendingSessionSteering:
         chat_id = "test_intake_old_pending_chat"
         session_id = "test_intake_old_pending_session"
         self._create_session(
-            session_id, "pending", chat_id=chat_id, created_at=datetime.now(tz=UTC) - timedelta(seconds=10)
+            session_id,
+            "pending",
+            chat_id=chat_id,
+            created_at=datetime.now(tz=UTC) - timedelta(seconds=10),
         )
 
         active_sessions = []
         for check_status in ("running", "active", "dormant"):
-            sessions = AgentSession.query.filter(
-                chat_id=chat_id, status=check_status
-            )
+            sessions = AgentSession.query.filter(chat_id=chat_id, status=check_status)
             if sessions:
                 active_sessions.extend(sessions)
 
-        pending_sessions = AgentSession.query.filter(
-            chat_id=chat_id, status="pending"
-        )
+        pending_sessions = AgentSession.query.filter(chat_id=chat_id, status="pending")
         if pending_sessions:
             now_ts = time.time()
             for ps in pending_sessions:
-                age = now_ts - (ps.created_at or 0)
+                _ct = ps.created_at
+                if isinstance(_ct, datetime):
+                    _ct = _ct.timestamp() if _ct.tzinfo else _ct.replace(tzinfo=UTC).timestamp()
+                age = now_ts - (_ct or 0)
                 if age <= PENDING_MERGE_WINDOW_SECONDS:
                     active_sessions.append(ps)
 

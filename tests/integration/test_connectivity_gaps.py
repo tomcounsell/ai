@@ -11,7 +11,6 @@ Tests use real Redis (db=1 via redis_test_db fixture) for integration
 validation. Mock-based tests are used only where SDK imports are needed.
 """
 
-import time
 from datetime import UTC, datetime
 
 import pytest

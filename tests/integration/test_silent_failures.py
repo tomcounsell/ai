@@ -1,4 +1,3 @@
-from datetime import UTC, datetime
 """Tests for silent failure logging in agent_session_queue.py (Gap 1).
 
 Verifies that critical exception handlers in agent_session_queue.py emit
@@ -20,6 +19,7 @@ file path, etc.) — NOT exact message text, per risk mitigation in the plan.
 """
 
 import logging
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -33,7 +33,6 @@ class TestPushJobLogging:
     @pytest.mark.asyncio
     async def test_lifecycle_transition_failure_logs_warning(self, caplog, redis_test_db):
         """When log_lifecycle_transition raises, a warning is emitted."""
-        import time
 
         from models.agent_session import AgentSession
 
@@ -85,7 +84,6 @@ class TestPopJobLogging:
     @pytest.mark.asyncio
     async def test_lifecycle_transition_failure_logs_warning(self, caplog, redis_test_db):
         """When log_lifecycle_transition raises during pop, a warning is emitted."""
-        import time
 
         from models.agent_session import AgentSession
 

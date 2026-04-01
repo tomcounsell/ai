@@ -232,8 +232,14 @@ class TestDrainGuard:
     @pytest.mark.asyncio
     async def test_pop_agent_session_with_fallback_respects_priority(self):
         """Sync fallback should respect priority ordering like _pop_agent_session."""
-        _create_test_session(priority="low", message_text="low prio", created_at=datetime.now(tz=UTC))
-        _create_test_session(priority="high", message_text="high prio", created_at=datetime.now(tz=UTC) + timedelta(seconds=1))
+        _create_test_session(
+            priority="low", message_text="low prio", created_at=datetime.now(tz=UTC)
+        )
+        _create_test_session(
+            priority="high",
+            message_text="high prio",
+            created_at=datetime.now(tz=UTC) + timedelta(seconds=1),
+        )
 
         result = await _pop_agent_session_with_fallback("123")
         assert result is not None

@@ -16,7 +16,6 @@ Status lifecycle:
 
 import json as _json
 import logging
-import time
 from datetime import UTC, datetime
 
 from popoto import (
@@ -174,8 +173,13 @@ class AgentSession(Model):
         """
         # Extract fields that map to initial_telegram_message
         itm_fields = {}
-        for key in ("message_text", "sender_name", "sender_id",
-                     "telegram_message_id", "chat_title"):
+        for key in (
+            "message_text",
+            "sender_name",
+            "sender_id",
+            "telegram_message_id",
+            "chat_title",
+        ):
             if key in kwargs and "initial_telegram_message" not in kwargs:
                 val = kwargs.pop(key)
                 if val is not None:
@@ -264,8 +268,12 @@ class AgentSession(Model):
             kwargs["session_events"] = events
 
         # Remove dead fields silently
-        for dead in ("depends_on", "stable_agent_session_id", "scheduling_depth",
-                      "_qa_mode_legacy"):
+        for dead in (
+            "depends_on",
+            "stable_agent_session_id",
+            "scheduling_depth",
+            "_qa_mode_legacy",
+        ):
             kwargs.pop(dead, None)
 
         # Ensure created_at has a default (SortedField is not nullable)
@@ -993,8 +1001,7 @@ class AgentSession(Model):
             return parent
         except Exception:
             logger.warning(
-                f"Parent agent session {self.parent_job_id} "
-                f"not found for child {self.job_id}"
+                f"Parent agent session {self.parent_job_id} not found for child {self.job_id}"
             )
             return None
 
@@ -1003,9 +1010,7 @@ class AgentSession(Model):
         try:
             return list(AgentSession.query.filter(parent_job_id=self.job_id))
         except Exception as e:
-            logger.warning(
-                f"Failed to query children for agent session {self.job_id}: {e}"
-            )
+            logger.warning(f"Failed to query children for agent session {self.job_id}: {e}")
             return []
 
     def get_completion_progress(self) -> tuple[int, int, int]:

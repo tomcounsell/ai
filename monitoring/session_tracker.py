@@ -181,9 +181,7 @@ class SessionTracker:
             Number of sessions cleaned up.
         """
         cutoff = utc_now() - timedelta(hours=max_age_hours)
-        stale_ids = [
-            sid for sid, session in self._sessions.items() if session.updated_at < cutoff
-        ]
+        stale_ids = [sid for sid, session in self._sessions.items() if session.updated_at < cutoff]
 
         for sid in stale_ids:
             del self._sessions[sid]

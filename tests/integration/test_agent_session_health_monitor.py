@@ -15,7 +15,6 @@ import pytest
 
 from agent.agent_session_queue import (
     _active_workers,
-    _pop_agent_session,
     _pop_agent_session_with_fallback,
 )
 from models.agent_session import AgentSession
@@ -216,7 +215,8 @@ class TestJobHealthCheck:
 
         _create_test_session(
             status="running",
-            started_at=datetime.now(tz=UTC) - timedelta(seconds=60),  # 1 minute ago (under 5min guard)
+            started_at=datetime.now(tz=UTC)
+            - timedelta(seconds=60),  # 1 minute ago (under 5min guard)
             session_id="alive_session",
         )
 
@@ -244,7 +244,8 @@ class TestJobHealthCheck:
 
         _create_test_session(
             status="running",
-            started_at=datetime.now(tz=UTC) - AGENT_SESSION_TIMEOUT_DEFAULT - 100,  # past timeout
+            started_at=datetime.now(tz=UTC)
+            - timedelta(seconds=AGENT_SESSION_TIMEOUT_DEFAULT + 100),  # past timeout
             session_id="timeout_session",
         )
 
@@ -268,7 +269,8 @@ class TestJobHealthCheck:
 
         _create_test_session(
             status="running",
-            started_at=datetime.now(tz=UTC) - timedelta(seconds=60),  # Only 1 minute ago (under 5min guard)
+            started_at=datetime.now(tz=UTC)
+            - timedelta(seconds=60),  # Only 1 minute ago (under 5min guard)
             session_id="recent_session",
         )
 

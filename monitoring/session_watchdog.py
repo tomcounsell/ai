@@ -20,9 +20,13 @@ import json
 import logging
 import os
 import time
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from popoto.exceptions import ModelException
+
+from models.agent_session import AgentSession
 
 
 def _to_timestamp(val) -> float | None:
@@ -35,9 +39,6 @@ def _to_timestamp(val) -> float | None:
         return float(val)
     return None
 
-from popoto.exceptions import ModelException
-
-from models.agent_session import AgentSession
 
 logger = logging.getLogger(__name__)
 
@@ -256,7 +257,9 @@ def check_stalled_sessions() -> list[dict]:
                 session_id = session.session_id or session.agent_session_id or "unknown"
 
                 # Determine reference timestamp based on status
-                ref_time = _to_timestamp(session.started_at) or _to_timestamp(session.created_at) or now
+                ref_time = (
+                    _to_timestamp(session.started_at) or _to_timestamp(session.created_at) or now
+                )
 
                 # For active sessions, use updated_at as reference
                 if status_val == "active":

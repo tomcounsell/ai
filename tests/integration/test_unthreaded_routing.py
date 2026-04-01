@@ -8,7 +8,6 @@ resume the session normally.
 Tests use Redis db=1 via the autouse redis_test_db fixture in conftest.py.
 """
 
-import time
 from datetime import UTC, datetime
 
 import pytest

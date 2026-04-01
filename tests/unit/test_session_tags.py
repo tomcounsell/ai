@@ -8,7 +8,6 @@ Tests cover:
 """
 
 import shutil
-import time
 from datetime import UTC, datetime
 from pathlib import Path
 

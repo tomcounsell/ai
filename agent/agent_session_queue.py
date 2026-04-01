@@ -16,10 +16,9 @@ import os
 import signal
 import subprocess
 import time
-import uuid
-from datetime import UTC, datetime
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -514,6 +513,8 @@ async def _pop_agent_session(chat_id: str) -> AgentSession | None:
         if not sa:
             return True
         if isinstance(sa, datetime):
+            if sa.tzinfo is None:
+                sa = sa.replace(tzinfo=UTC)
             return sa <= now
         if isinstance(sa, int | float):
             return sa <= now.timestamp()
@@ -524,9 +525,16 @@ async def _pop_agent_session(chat_id: str) -> AgentSession | None:
         return None
 
     # Sort: highest priority first (4-tier), then oldest first (FIFO)
+    def _ensure_tz(dt):
+        if dt is None:
+            return datetime.min.replace(tzinfo=UTC)
+        if isinstance(dt, datetime) and dt.tzinfo is None:
+            return dt.replace(tzinfo=UTC)
+        return dt
+
     def sort_key(j):
         prio = PRIORITY_RANK.get(j.priority, 2)  # default to normal
-        return (prio, j.created_at or datetime.min.replace(tzinfo=UTC))
+        return (prio, _ensure_tz(j.created_at))
 
     eligible.sort(key=sort_key)
     chosen = eligible[0]
@@ -545,9 +553,7 @@ async def _pop_agent_session(chat_id: str) -> AgentSession | None:
     try:
         chosen.log_lifecycle_transition("running", "worker picked up session")
     except Exception as e:
-        logger.warning(
-            f"Failed to log lifecycle transition for session {chosen.job_id}: {e}"
-        )
+        logger.warning(f"Failed to log lifecycle transition for session {chosen.job_id}: {e}")
 
     # Drain any steering messages queued during the pending window (#619).
     # Follow-up messages arriving while the session was pending get pushed to
@@ -558,9 +564,7 @@ async def _pop_agent_session(chat_id: str) -> AgentSession | None:
 
         steering_msgs = pop_all_steering_messages(chosen.session_id)
         if steering_msgs:
-            extra_texts = [
-                m["text"] for m in steering_msgs if m.get("text", "").strip()
-            ]
+            extra_texts = [m["text"] for m in steering_msgs if m.get("text", "").strip()]
             if extra_texts:
                 prepend = "\n\n".join(extra_texts)
                 original = chosen.message_text or ""
@@ -612,6 +616,8 @@ async def _pop_agent_session_with_fallback(chat_id: str) -> AgentSession | None:
             if not sa:
                 return True
             if isinstance(sa, datetime):
+                if sa.tzinfo is None:
+                    sa = sa.replace(tzinfo=UTC)
                 return sa <= now
             if isinstance(sa, int | float):
                 return sa <= now.timestamp()
@@ -622,9 +628,16 @@ async def _pop_agent_session_with_fallback(chat_id: str) -> AgentSession | None:
             return None
 
         # Sort: highest priority first, then oldest first (FIFO)
+        def _ensure_tz(dt):
+            if dt is None:
+                return datetime.min.replace(tzinfo=UTC)
+            if isinstance(dt, datetime) and dt.tzinfo is None:
+                return dt.replace(tzinfo=UTC)
+            return dt
+
         def sort_key(j):
             prio = PRIORITY_RANK.get(j.priority, 2)
-            return (prio, j.created_at or datetime.min.replace(tzinfo=UTC))
+            return (prio, _ensure_tz(j.created_at))
 
         eligible.sort(key=sort_key)
         chosen = eligible[0]
@@ -641,9 +654,7 @@ async def _pop_agent_session_with_fallback(chat_id: str) -> AgentSession | None:
         try:
             chosen.log_lifecycle_transition("running", "worker picked up session (sync fallback)")
         except Exception as e:
-            logger.warning(
-                f"Failed to log lifecycle transition for session {chosen.job_id}: {e}"
-            )
+            logger.warning(f"Failed to log lifecycle transition for session {chosen.job_id}: {e}")
 
         # Drain steering messages (same logic as _pop_agent_session) (#619)
         try:
@@ -651,9 +662,7 @@ async def _pop_agent_session_with_fallback(chat_id: str) -> AgentSession | None:
 
             steering_msgs = pop_all_steering_messages(chosen.session_id)
             if steering_msgs:
-                extra_texts = [
-                    m["text"] for m in steering_msgs if m.get("text", "").strip()
-                ]
+                extra_texts = [m["text"] for m in steering_msgs if m.get("text", "").strip()]
                 if extra_texts:
                     prepend = "\n\n".join(extra_texts)
                     original = chosen.message_text or ""
@@ -791,9 +800,7 @@ def retry_agent_session(job_id: str) -> AgentSession | None:
     fields["completed_at"] = None
     fields["created_at"] = datetime.now(tz=UTC)
     new_session = AgentSession.create(**fields)
-    logger.info(
-        f"[pm-controls] Retried session {session.job_id} -> {new_session.job_id}"
-    )
+    logger.info(f"[pm-controls] Retried session {session.job_id} -> {new_session.job_id}")
 
     return new_session
 
@@ -1097,6 +1104,8 @@ async def _agent_session_health_check() -> None:
         if val is None:
             return None
         if isinstance(val, datetime):
+            if val.tzinfo is None:
+                val = val.replace(tzinfo=UTC)
             return val.timestamp()
         if isinstance(val, (int, float)):
             return float(val)
@@ -1106,114 +1115,130 @@ async def _agent_session_health_check() -> None:
     running_sessions = list(AgentSession.query.filter(status="running"))
     for entry in running_sessions:
         checked += 1
-        worker_key = entry.chat_id or entry.project_key
-        worker = _active_workers.get(worker_key)
-        worker_alive = worker is not None and not worker.done()
+        try:
+            worker_key = entry.chat_id or entry.project_key
+            worker = _active_workers.get(worker_key)
+            worker_alive = worker is not None and not worker.done()
 
-        started_ts = _ts(getattr(entry, "started_at", None))
-        running_seconds = (now - started_ts) if started_ts else None
+            started_ts = _ts(getattr(entry, "started_at", None))
+            running_seconds = (now - started_ts) if started_ts else None
 
-        should_recover = False
-        reason = ""
+            should_recover = False
+            reason = ""
 
-        if not worker_alive:
-            if started_ts is None:
-                should_recover = True
-                reason = "worker dead/missing, no started_at (legacy session)"
-            elif running_seconds is not None and running_seconds > AGENT_SESSION_HEALTH_MIN_RUNNING:
-                should_recover = True
-                reason = (
-                    f"worker dead/missing, running for "
-                    f"{int(running_seconds)}s (>{AGENT_SESSION_HEALTH_MIN_RUNNING}s guard)"
-                )
-            else:
-                logger.debug(
-                    "[session-health] Skipping session %s - worker dead but "
-                    "running only %ss (under %ss guard)",
+            if not worker_alive:
+                if started_ts is None:
+                    should_recover = True
+                    reason = "worker dead/missing, no started_at (legacy session)"
+                elif (
+                    running_seconds is not None
+                    and running_seconds > AGENT_SESSION_HEALTH_MIN_RUNNING
+                ):
+                    should_recover = True
+                    reason = (
+                        f"worker dead/missing, running for "
+                        f"{int(running_seconds)}s (>{AGENT_SESSION_HEALTH_MIN_RUNNING}s guard)"
+                    )
+                else:
+                    logger.debug(
+                        "[session-health] Skipping session %s - worker dead but "
+                        "running only %ss (under %ss guard)",
+                        entry.agent_session_id,
+                        int(running_seconds) if running_seconds else "?",
+                        AGENT_SESSION_HEALTH_MIN_RUNNING,
+                    )
+            elif started_ts is not None:
+                timeout = _get_agent_session_timeout(entry)
+                if running_seconds is not None and running_seconds > timeout:
+                    should_recover = True
+                    reason = f"exceeded timeout ({int(running_seconds)}s > {timeout}s)"
+
+            if should_recover:
+                is_local = worker_key.startswith("local")
+                logger.warning(
+                    "[session-health] Recovering stuck session %s "
+                    "(chat=%s, session=%s, local=%s): %s",
                     entry.agent_session_id,
-                    int(running_seconds) if running_seconds else "?",
-                    AGENT_SESSION_HEALTH_MIN_RUNNING,
+                    worker_key,
+                    entry.session_id,
+                    is_local,
+                    reason,
                 )
-        elif started_at is not None:
-            timeout = _get_agent_session_timeout(entry)
-            if running_seconds is not None and running_seconds > timeout:
-                should_recover = True
-                reason = f"exceeded timeout ({int(running_seconds)}s > {timeout}s)"
-
-        if should_recover:
-            is_local = worker_key.startswith("local")
-            logger.warning(
-                "[session-health] Recovering stuck session %s (chat=%s, session=%s, local=%s): %s",
-                entry.agent_session_id,
-                worker_key,
-                entry.session_id,
-                is_local,
-                reason,
+                if is_local:
+                    # Local CLI sessions have no bridge worker to resume them --
+                    # mark abandoned instead of resetting to pending
+                    entry.status = "abandoned"
+                    entry.completed_at = now
+                    entry.save()
+                    logger.info(
+                        "[session-health] Marked local session %s as abandoned (chat=%s)",
+                        entry.agent_session_id,
+                        worker_key,
+                    )
+                else:
+                    entry.status = "pending"
+                    entry.priority = "high"
+                    entry.started_at = None
+                    entry.save()
+                    logger.info(
+                        "[session-health] Recovered session %s (chat=%s)",
+                        entry.agent_session_id,
+                        worker_key,
+                    )
+                    _ensure_worker(worker_key)
+                recovered += 1
+        except Exception:
+            logger.exception(
+                "[session-health] Error processing session %s",
+                getattr(entry, "agent_session_id", "unknown"),
             )
-            if is_local:
-                # Local CLI sessions have no bridge worker to resume them --
-                # mark abandoned instead of resetting to pending
-                entry.status = "abandoned"
-                entry.completed_at = now
-                entry.save()
-                logger.info(
-                    "[session-health] Marked local session %s as abandoned (chat=%s)",
-                    entry.agent_session_id,
-                    worker_key,
-                )
-            else:
-                entry.status = "pending"
-                entry.priority = "high"
-                entry.started_at = None
-                entry.save()
-                logger.info(
-                    "[session-health] Recovered session %s (chat=%s)",
-                    entry.agent_session_id,
-                    worker_key,
-                )
-                _ensure_worker(worker_key)
-            recovered += 1
 
     # === Check PENDING sessions_list ===
     pending_sessions = list(AgentSession.query.filter(status="pending"))
     for entry in pending_sessions:
         checked += 1
-        worker_key = entry.chat_id or entry.project_key
-        worker = _active_workers.get(worker_key)
-        worker_alive = worker is not None and not worker.done()
+        try:
+            worker_key = entry.chat_id or entry.project_key
+            worker = _active_workers.get(worker_key)
+            worker_alive = worker is not None and not worker.done()
 
-        if worker_alive:
-            # Worker exists and is processing — pending is normal queue behavior
-            continue
+            if worker_alive:
+                # Worker exists and is processing — pending is normal queue behavior
+                continue
 
-        # No live worker — check age threshold before starting one
-        created_ts = _ts(getattr(entry, "created_at", None))
-        if created_ts is None:
-            continue
-        pending_seconds = now - created_ts
-        if pending_seconds > AGENT_SESSION_HEALTH_MIN_RUNNING:
-            if worker_key.startswith("local"):
-                # Local CLI sessions can't be resumed by bridge workers
-                logger.info(
-                    "[session-health] Marking orphaned local pending session %s "
-                    "as abandoned (chat=%s, pending %.0fs)",
-                    entry.agent_session_id,
-                    worker_key,
-                    pending_seconds,
-                )
-                entry.status = "abandoned"
-                entry.completed_at = now
-                entry.save()
-            else:
-                logger.info(
-                    "[session-health] Starting worker for orphaned pending "
-                    "session %s (chat=%s, pending %.0fs)",
-                    entry.agent_session_id,
-                    worker_key,
-                    pending_seconds,
-                )
-                _ensure_worker(worker_key)
-            workers_started += 1
+            # No live worker — check age threshold before starting one
+            created_ts = _ts(getattr(entry, "created_at", None))
+            if created_ts is None:
+                continue
+            pending_seconds = now - created_ts
+            if pending_seconds > AGENT_SESSION_HEALTH_MIN_RUNNING:
+                if worker_key.startswith("local"):
+                    # Local CLI sessions can't be resumed by bridge workers
+                    logger.info(
+                        "[session-health] Marking orphaned local pending session %s "
+                        "as abandoned (chat=%s, pending %.0fs)",
+                        entry.agent_session_id,
+                        worker_key,
+                        pending_seconds,
+                    )
+                    entry.status = "abandoned"
+                    entry.completed_at = now
+                    entry.save()
+                else:
+                    logger.info(
+                        "[session-health] Starting worker for orphaned pending "
+                        "session %s (chat=%s, pending %.0fs)",
+                        entry.agent_session_id,
+                        worker_key,
+                        pending_seconds,
+                    )
+                    _ensure_worker(worker_key)
+                workers_started += 1
+        except Exception:
+            logger.exception(
+                "[session-health] Error processing pending session %s",
+                getattr(entry, "agent_session_id", "unknown"),
+            )
 
     if checked > 0:
         logger.info(

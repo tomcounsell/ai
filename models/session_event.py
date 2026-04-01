@@ -34,7 +34,9 @@ class SessionEvent(BaseModel):
     Validated by Pydantic at creation time, stored as plain dict.
     """
 
-    event_type: str  # Accept arbitrary event types for backward compat (EventType enum for standard ones)
+    event_type: (
+        str  # Accept arbitrary event types for backward compat (EventType enum for standard ones)
+    )
     timestamp: float = Field(default_factory=lambda: datetime.now(tz=UTC).timestamp())
     text: str = ""
     data: dict | None = None  # Optional structured payload
@@ -58,7 +60,9 @@ class SessionEvent(BaseModel):
         return cls(event_type=EventType.DELIVERY, text=text)
 
     @classmethod
-    def stage_change(cls, stage: str, status: str, stages_dict: dict | None = None) -> "SessionEvent":
+    def stage_change(
+        cls, stage: str, status: str, stages_dict: dict | None = None
+    ) -> "SessionEvent":
         """Create a stage state change event."""
         return cls(
             event_type=EventType.STAGE,

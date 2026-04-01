@@ -11,7 +11,6 @@ Covers the gaps identified in PR #180 review:
 """
 
 import json
-import time
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 

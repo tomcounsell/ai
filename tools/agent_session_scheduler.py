@@ -29,6 +29,9 @@ import sys
 import time
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
+
+from config.enums import SessionType
 
 
 def _to_ts(val):
@@ -51,9 +54,7 @@ def _to_iso(val):
     if isinstance(val, (int, float)):
         return datetime.fromtimestamp(val, tz=UTC).isoformat()
     return None
-from pathlib import Path
 
-from config.enums import SessionType
 
 logger = logging.getLogger(__name__)
 
@@ -347,13 +348,10 @@ def cmd_schedule(args: argparse.Namespace) -> int:
                 from agent.agent_session_queue import _transition_parent
 
                 _transition_parent(parent_session, "waiting_for_children")
-                logger.info(
-                    f"Parent {parent_job_id} transitioned to waiting_for_children"
-                )
+                logger.info(f"Parent {parent_job_id} transitioned to waiting_for_children")
             except Exception as e:
                 logger.warning(
-                    f"Failed to transition parent {parent_job_id} "
-                    f"to waiting_for_children: {e}"
+                    f"Failed to transition parent {parent_job_id} to waiting_for_children: {e}"
                 )
 
         # Count queue position
