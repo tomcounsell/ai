@@ -202,4 +202,9 @@ def _run_memory_extraction(session_id: str, transcript_path: str | None) -> None
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        from hook_utils.constants import log_hook_error
+
+        log_hook_error("stop", str(e))

@@ -89,8 +89,17 @@ SYS_CAL="$HOME/Library/Python/3.12/bin/valor-calendar"
 CAL="${VENV_CAL}"
 [ ! -x "$CAL" ] && CAL="$SYS_CAL"
 
+HOOK_LOG="${CLAUDE_PROJECT_DIR:-$HOME/src/ai}/logs/hooks.log"
 if [ -n "$PROJECT" ]; then
-    "$CAL" --project "$PROJECT" "$SLUG" 2>/dev/null || true
+    "$CAL" --project "$PROJECT" "$SLUG" 2>/tmp/cal_hook_err || {
+        ERR=$(cat /tmp/cal_hook_err)
+        [ -n "$ERR" ] && echo "$(date -u '+%Y-%m-%d %H:%M:%S') - calendar_hook - ERROR - $ERR" >> "$HOOK_LOG"
+        true
+    }
 else
-    "$CAL" "$SLUG" 2>/dev/null || true
+    "$CAL" "$SLUG" 2>/tmp/cal_hook_err || {
+        ERR=$(cat /tmp/cal_hook_err)
+        [ -n "$ERR" ] && echo "$(date -u '+%Y-%m-%d %H:%M:%S') - calendar_hook - ERROR - $ERR" >> "$HOOK_LOG"
+        true
+    }
 fi

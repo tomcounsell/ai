@@ -71,7 +71,12 @@ if [ "$SAME_SESSION" = true ] && [ -f "$STAMPFILE" ]; then
             date +%s > "$STAMPFILE"
             export PATH="$HOME/src/ai/.venv/bin:$HOME/Library/Python/3.12/bin:$PATH"
             PREV_PROJECT=$(cat "$LOCKDIR/.calendar_hook_project" 2>/dev/null || echo "")
-            valor-calendar --project "$PREV_PROJECT" "$SLUG" 2>/dev/null || true
+            HOOK_LOG="${CLAUDE_PROJECT_DIR:-$HOME/src/ai}/logs/hooks.log"
+            valor-calendar --project "$PREV_PROJECT" "$SLUG" 2>/tmp/cal_prompt_err || {
+                ERR=$(cat /tmp/cal_prompt_err)
+                [ -n "$ERR" ] && echo "$(date -u '+%Y-%m-%d %H:%M:%S') - calendar_prompt_hook - ERROR - $ERR" >> "$HOOK_LOG"
+                true
+            }
             exit 0
         fi
     fi
@@ -152,4 +157,9 @@ date +%s > "$STAMPFILE"
 echo "$SLUG" > "$SLUGFILE"
 echo "$PROJECT" > "$LOCKDIR/.calendar_hook_project"
 export PATH="$HOME/src/ai/.venv/bin:$HOME/Library/Python/3.12/bin:$PATH"
-valor-calendar --project "$PROJECT" "$SLUG" 2>/dev/null || true
+HOOK_LOG="${CLAUDE_PROJECT_DIR:-$HOME/src/ai}/logs/hooks.log"
+valor-calendar --project "$PROJECT" "$SLUG" 2>/tmp/cal_prompt_err || {
+    ERR=$(cat /tmp/cal_prompt_err)
+    [ -n "$ERR" ] && echo "$(date -u '+%Y-%m-%d %H:%M:%S') - calendar_prompt_hook - ERROR - $ERR" >> "$HOOK_LOG"
+    true
+}
