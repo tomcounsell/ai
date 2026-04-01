@@ -150,6 +150,11 @@ class AgentSession(Model):
 
     # === Backward-compatible field name mapping ===
 
+    def __init__(self, **kwargs):
+        """Initialize AgentSession with backward-compatible field name support."""
+        kwargs = self.__class__._normalize_kwargs(kwargs)
+        super().__init__(**kwargs)
+
     @classmethod
     def _normalize_kwargs(cls, kwargs: dict) -> dict:
         """Map deprecated field names to their new consolidated equivalents.
@@ -217,9 +222,41 @@ class AgentSession(Model):
         if "summary" in kwargs:
             kwargs.pop("summary")  # Will be set via property/event
 
+        # Convert stage_states to a session event
+        stage_states_val = kwargs.pop("stage_states", None)
+        if stage_states_val is not None and "session_events" not in kwargs:
+            if isinstance(stage_states_val, str):
+                try:
+                    stages_dict = _json.loads(stage_states_val)
+                except (ValueError, TypeError):
+                    stages_dict = None
+            elif isinstance(stage_states_val, dict):
+                stages_dict = stage_states_val
+            else:
+                stages_dict = None
+            if stages_dict:
+                event = SessionEvent.stage_change("bulk", "init", stages_dict)
+                kwargs["session_events"] = [event.model_dump()]
+
+        # Convert commit_sha to a session event
+        commit_sha_val = kwargs.pop("commit_sha", None)
+        if commit_sha_val is not None:
+            events = kwargs.get("session_events", []) or []
+            event = SessionEvent.checkpoint(commit_sha_val)
+            events.append(event.model_dump())
+            kwargs["session_events"] = events
+
+        # Convert summary to a session event
+        summary_val = kwargs.pop("summary", None)
+        if summary_val is not None:
+            events = kwargs.get("session_events", []) or []
+            event = SessionEvent.summary(summary_val)
+            events.append(event.model_dump())
+            kwargs["session_events"] = events
+
         # Remove dead fields silently
         for dead in ("depends_on", "stable_agent_session_id", "scheduling_depth",
-                      "commit_sha", "stage_states", "_qa_mode_legacy"):
+                      "_qa_mode_legacy"):
             kwargs.pop(dead, None)
 
         # Convert float timestamps to datetime

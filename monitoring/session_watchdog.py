@@ -20,8 +20,20 @@ import json
 import logging
 import os
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+
+def _to_timestamp(val) -> float | None:
+    """Convert a datetime or float to a Unix timestamp."""
+    if val is None:
+        return None
+    if isinstance(val, datetime):
+        return val.timestamp()
+    if isinstance(val, (int, float)):
+        return float(val)
+    return None
 
 from popoto.exceptions import ModelException
 
@@ -244,11 +256,11 @@ def check_stalled_sessions() -> list[dict]:
                 session_id = session.session_id or session.agent_session_id or "unknown"
 
                 # Determine reference timestamp based on status
-                ref_time = session.started_at or session.created_at or now
+                ref_time = _to_timestamp(session.started_at) or _to_timestamp(session.created_at) or now
 
                 # For active sessions, use updated_at as reference
                 if status_val == "active":
-                    updated_at = session.updated_at
+                    updated_at_ts = _to_timestamp(session.updated_at)
 
                     # Also check in-memory activity tracking from sdk_client,
                     # which is updated on every tool call and log output.
@@ -258,18 +270,18 @@ def check_stalled_sessions() -> list[dict]:
 
                         inmem_activity = get_session_updated_at(session_id)
                         if inmem_activity is not None:
-                            if updated_at is None or inmem_activity > updated_at:
-                                updated_at = inmem_activity
+                            if updated_at_ts is None or inmem_activity > updated_at_ts:
+                                updated_at_ts = inmem_activity
                     except ImportError:
                         pass
 
-                    if updated_at is not None:
+                    if updated_at_ts is not None:
                         # If updated_at is recent, session is not stalled
-                        activity_age = now - updated_at
+                        activity_age = now - updated_at_ts
                         if activity_age < threshold:
                             continue
                         # Use updated_at as the reference for duration
-                        ref_time = updated_at
+                        ref_time = updated_at_ts
 
                     # Transcript liveness check (issue #360): even if updated_at
                     # is stale, the session may be alive doing sub-agent work.
@@ -352,12 +364,14 @@ def assess_session_health(session: AgentSession) -> dict[str, Any]:
     now = time.time()
 
     # Check for silence
-    silence_duration = now - session.updated_at
+    updated_ts = _to_timestamp(session.updated_at)
+    silence_duration = (now - updated_ts) if updated_ts else 0
     if silence_duration > SILENCE_THRESHOLD:
         issues.append(f"Silent for {int(silence_duration / 60)} minutes")
 
     # Check for excessive duration
-    session_duration = now - session.started_at
+    started_ts = _to_timestamp(session.started_at)
+    session_duration = (now - started_ts) if started_ts else 0
     if session_duration > DURATION_THRESHOLD:
         issues.append(f"Running for {int(session_duration / 3600)} hours")
 
@@ -603,7 +617,8 @@ async def fix_unhealthy_session(session: AgentSession, assessment: dict[str, Any
     now = time.time()
 
     # Calculate silence duration
-    silence_duration = now - session.updated_at
+    updated_ts = _to_timestamp(session.updated_at)
+    silence_duration = (now - updated_ts) if updated_ts else 0
 
     # Most common case: session is stuck/silent
     if silence_duration > ABANDON_THRESHOLD:
@@ -617,7 +632,8 @@ async def fix_unhealthy_session(session: AgentSession, assessment: dict[str, Any
         return True
 
     # Long-running session
-    session_duration = now - session.started_at
+    started_ts = _to_timestamp(session.started_at)
+    session_duration = (now - started_ts) if started_ts else 0
     if session_duration > DURATION_THRESHOLD:
         reason = f"running for {int(session_duration / 3600)}h"
         _safe_abandon_session(session, f"watchdog: {reason}")
