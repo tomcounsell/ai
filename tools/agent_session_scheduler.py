@@ -112,7 +112,7 @@ def _output(data: dict) -> None:
     print(json.dumps(data, indent=2))
 
 
-def _get_parent_session(parent_agent_session_id: str):
+def _get_parent_session(parent_job_id: str):
     """Look up a parent AgentSession by agent_session_id for field inheritance.
 
     Returns the parent session or None if not found.
@@ -120,7 +120,7 @@ def _get_parent_session(parent_agent_session_id: str):
     try:
         from models.agent_session import AgentSession
 
-        return AgentSession.query.get(parent_agent_session_id)
+        return AgentSession.query.get(parent_job_id)
     except Exception:
         return None
 
@@ -221,14 +221,14 @@ def cmd_schedule(args: argparse.Namespace) -> int:
         )
         return 1
 
-    # Parse scheduled_after
-    scheduled_after = None
+    # Parse scheduled_at
+    scheduled_at = None
     if args.after:
         try:
             dt = datetime.fromisoformat(args.after.replace("Z", "+00:00"))
-            scheduled_after = dt.timestamp()
-            if scheduled_after < time.time():
-                scheduled_after = None  # Past = immediate
+            scheduled_at = dt.timestamp()
+            if scheduled_at < time.time():
+                scheduled_at = None  # Past = immediate
         except ValueError:
             _output(
                 {
@@ -254,18 +254,18 @@ def cmd_schedule(args: argparse.Namespace) -> int:
     session_type = getattr(args, "session_type", None) or SessionType.CHAT
 
     # Parent session inheritance
-    parent_agent_session_id = getattr(args, "parent_session", None)
+    parent_job_id = getattr(args, "parent_session", None)
     parent_session = None
-    if parent_agent_session_id:
-        if not parent_agent_session_id.strip():
+    if parent_job_id:
+        if not parent_job_id.strip():
             _output({"status": "error", "message": "--parent-session cannot be empty."})
             return 1
-        parent_session = _get_parent_session(parent_agent_session_id)
+        parent_session = _get_parent_session(parent_job_id)
         if parent_session is None:
             _output(
                 {
                     "status": "error",
-                    "message": f"Parent session {parent_agent_session_id} not found.",
+                    "message": f"Parent session {parent_job_id} not found.",
                 }
             )
             return 1
@@ -312,11 +312,11 @@ def cmd_schedule(args: argparse.Namespace) -> int:
             telegram_message_id=int(ctx["message_id"]) if ctx["message_id"] else 0,
             classification_type=inherited_classification_type,
             session_type=session_type,
-            scheduled_after=scheduled_after,
+            scheduled_at=scheduled_at,
             scheduling_depth=depth + 1,
             issue_url=issue_url,
             correlation_id=inherited_correlation_id,
-            parent_agent_session_id=parent_agent_session_id,
+            parent_job_id=parent_job_id,
         )
 
         # Transition parent to waiting_for_children if not already
@@ -326,11 +326,11 @@ def cmd_schedule(args: argparse.Namespace) -> int:
 
                 _transition_parent(parent_session, "waiting_for_children")
                 logger.info(
-                    f"Parent {parent_agent_session_id} transitioned to waiting_for_children"
+                    f"Parent {parent_job_id} transitioned to waiting_for_children"
                 )
             except Exception as e:
                 logger.warning(
-                    f"Failed to transition parent {parent_agent_session_id} "
+                    f"Failed to transition parent {parent_job_id} "
                     f"to waiting_for_children: {e}"
                 )
 
@@ -339,8 +339,8 @@ def cmd_schedule(args: argparse.Namespace) -> int:
         queue_position = len(pending)
 
         scheduled_iso = None
-        if scheduled_after:
-            scheduled_iso = datetime.fromtimestamp(scheduled_after, tz=UTC).isoformat()
+        if scheduled_at:
+            scheduled_iso = datetime.fromtimestamp(scheduled_at, tz=UTC).isoformat()
 
         result = {
             "status": "queued",
@@ -351,10 +351,10 @@ def cmd_schedule(args: argparse.Namespace) -> int:
             "priority": priority,
             "queue_position": queue_position,
             "scheduling_depth": depth + 1,
-            "scheduled_after": scheduled_iso,
+            "scheduled_at": scheduled_iso,
         }
-        if parent_agent_session_id:
-            result["parent_agent_session_id"] = parent_agent_session_id
+        if parent_job_id:
+            result["parent_job_id"] = parent_job_id
 
         _output(result)
         return 0
@@ -382,13 +382,13 @@ def _format_agent_session_info(j, include_children: bool = False) -> dict:
         session_info["created_at"] = datetime.fromtimestamp(j.created_at, tz=UTC).isoformat()
     if j.started_at:
         session_info["started_at"] = datetime.fromtimestamp(j.started_at, tz=UTC).isoformat()
-    if j.scheduled_after:
-        scheduled_dt = datetime.fromtimestamp(j.scheduled_after, tz=UTC)
-        session_info["scheduled_after"] = scheduled_dt.isoformat()
+    if j.scheduled_at:
+        scheduled_dt = datetime.fromtimestamp(j.scheduled_at, tz=UTC)
+        session_info["scheduled_at"] = scheduled_dt.isoformat()
     if j.issue_url:
         session_info["issue_url"] = j.issue_url
-    if j.parent_agent_session_id:
-        session_info["parent_agent_session_id"] = j.parent_agent_session_id
+    if j.parent_job_id:
+        session_info["parent_job_id"] = j.parent_job_id
 
     if include_children and j.status == "waiting_for_children":
         completed, total, failed = j.get_completion_progress()
@@ -432,8 +432,8 @@ def cmd_status(args: argparse.Namespace) -> int:
         pending.sort(key=lambda j: (PRIORITY_RANK.get(j.priority, 2), j.created_at or 0))
 
         # Separate root sessions from child sessions for tree display
-        root_pending = [j for j in pending if not j.parent_agent_session_id]
-        child_pending = [j for j in pending if j.parent_agent_session_id]
+        root_pending = [j for j in pending if not j.parent_job_id]
+        child_pending = [j for j in pending if j.parent_job_id]
 
         result = {
             "project": project_key,
@@ -644,7 +644,7 @@ def cmd_children(args: argparse.Namespace) -> int:
         completed, total, failed = parent.get_completion_progress()
 
         result = {
-            "parent_agent_session_id": args.agent_session_id,
+            "parent_job_id": args.agent_session_id,
             "parent_status": parent.status,
             "progress": {
                 "completed": completed,

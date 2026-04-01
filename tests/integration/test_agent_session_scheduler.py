@@ -1,4 +1,4 @@
-"""Tests for session scheduling: scheduled_after, 4-tier priority, FIFO, and CLI tool."""
+"""Tests for session scheduling: scheduled_at, 4-tier priority, FIFO, and CLI tool."""
 
 import asyncio
 import json
@@ -62,7 +62,7 @@ def _create_pending(
     project_key="test-scheduler",
     priority="normal",
     message="test",
-    scheduled_after=None,
+    scheduled_at=None,
     scheduling_depth=0,
     created_at=None,
 ):
@@ -78,7 +78,7 @@ def _create_pending(
         sender_name="Test",
         chat_id="test-chat",
         telegram_message_id=0,
-        scheduled_after=scheduled_after,
+        scheduled_at=scheduled_at,
         scheduling_depth=scheduling_depth,
     )
 
@@ -119,25 +119,25 @@ class TestPopJob:
         assert session is not None
         assert "urgent" in session.message_text
 
-    def test_scheduled_after_future_skipped(self):
-        """Jobs with scheduled_after in the future are skipped."""
+    def test_scheduled_at_future_skipped(self):
+        """Jobs with scheduled_at in the future are skipped."""
         future = time.time() + 3600  # 1 hour from now
-        _create_pending(scheduled_after=future, message="deferred")
+        _create_pending(scheduled_at=future, message="deferred")
 
         session = asyncio.run(_pop_agent_session("test-chat"))
         assert session is None  # No eligible sessions
 
-    def test_scheduled_after_past_eligible(self):
-        """Jobs with scheduled_after in the past are eligible."""
+    def test_scheduled_at_past_eligible(self):
+        """Jobs with scheduled_at in the past are eligible."""
         past = time.time() - 60  # 1 minute ago
-        _create_pending(scheduled_after=past, message="ready")
+        _create_pending(scheduled_at=past, message="ready")
 
         session = asyncio.run(_pop_agent_session("test-chat"))
         assert session is not None
         assert "ready" in session.message_text
 
-    def test_scheduled_after_none_eligible(self):
-        """Jobs with no scheduled_after are always eligible."""
+    def test_scheduled_at_none_eligible(self):
+        """Jobs with no scheduled_at are always eligible."""
         _create_pending(message="immediate")
 
         session = asyncio.run(_pop_agent_session("test-chat"))
@@ -147,7 +147,7 @@ class TestPopJob:
     def test_mixed_deferred_and_immediate(self):
         """Only immediate jobs are popped when deferred jobs exist."""
         future = time.time() + 3600
-        _create_pending(scheduled_after=future, message="deferred", priority="urgent")
+        _create_pending(scheduled_at=future, message="deferred", priority="urgent")
         _create_pending(message="immediate", priority="low")
 
         session = asyncio.run(_pop_agent_session("test-chat"))
@@ -168,11 +168,11 @@ class TestPopJob:
 
 
 class TestAgentSessionFields:
-    def test_scheduled_after_field(self):
-        """scheduled_after field persists on AgentSession."""
+    def test_scheduled_at_field(self):
+        """scheduled_at field persists on AgentSession."""
         future = time.time() + 3600
-        session = _create_pending(scheduled_after=future)
-        assert float(session.scheduled_after) == pytest.approx(future, abs=1)
+        session = _create_pending(scheduled_at=future)
+        assert float(session.scheduled_at) == pytest.approx(future, abs=1)
 
     def test_scheduling_depth_field(self):
         """scheduling_depth field persists on AgentSession."""
@@ -185,13 +185,13 @@ class TestAgentSessionFields:
         assert session.priority == "normal"
 
     def test_extract_agent_session_fields_includes_new_fields(self):
-        """_extract_agent_session_fields preserves scheduled_after and scheduling_depth."""
+        """_extract_agent_session_fields preserves scheduled_at and scheduling_depth."""
         future = time.time() + 3600
-        session = _create_pending(scheduled_after=future, scheduling_depth=1)
+        session = _create_pending(scheduled_at=future, scheduling_depth=1)
         fields = _extract_agent_session_fields(session)
-        assert "scheduled_after" in fields
+        assert "scheduled_at" in fields
         assert "scheduling_depth" in fields
-        assert float(fields["scheduled_after"]) == pytest.approx(future, abs=1)
+        assert float(fields["scheduled_at"]) == pytest.approx(future, abs=1)
         assert int(fields["scheduling_depth"]) == 1
 
 

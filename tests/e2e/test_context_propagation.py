@@ -36,7 +36,7 @@ class TestChatSessionContextFields:
         )
         # Set additional context fields
         session.task_list_id = "thread-ctx_chat_123-42"
-        session.work_item_slug = "my-feature"
+        session.slug = "my-feature"
         session.branch_name = "session/my-feature"
         session.correlation_id = f"corr_{ts}"
         session.save()
@@ -55,7 +55,7 @@ class TestChatSessionContextFields:
         assert reloaded.sender_id == 111222
         assert reloaded.chat_title == "Dev: Valor"
         assert reloaded.task_list_id == "thread-ctx_chat_123-42"
-        assert reloaded.work_item_slug == "my-feature"
+        assert reloaded.slug == "my-feature"
         assert reloaded.branch_name == "session/my-feature"
         assert reloaded.correlation_id == f"corr_{ts}"
 

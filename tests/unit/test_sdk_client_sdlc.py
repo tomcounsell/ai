@@ -491,46 +491,46 @@ class TestIsCodeFileInlined:
 
 
 class TestActivityTracking:
-    """Tests for session activity tracking (last_activity_timestamps)."""
+    """Tests for session activity tracking (updated_at_timestamps)."""
 
     def test_record_and_get_activity(self):
         from agent.sdk_client import (
             clear_session_activity,
-            get_session_last_activity,
+            get_session_updated_at,
             record_session_activity,
         )
 
         sid = "test-activity-001"
         # Initially no activity
-        assert get_session_last_activity(sid) is None
+        assert get_session_updated_at(sid) is None
 
         # Record activity
         record_session_activity(sid)
-        ts = get_session_last_activity(sid)
+        ts = get_session_updated_at(sid)
         assert ts is not None
         assert isinstance(ts, float)
         assert ts > 0
 
         # Clean up
         clear_session_activity(sid)
-        assert get_session_last_activity(sid) is None
+        assert get_session_updated_at(sid) is None
 
     def test_activity_updates_on_each_call(self):
         import time
 
         from agent.sdk_client import (
             clear_session_activity,
-            get_session_last_activity,
+            get_session_updated_at,
             record_session_activity,
         )
 
         sid = "test-activity-002"
         record_session_activity(sid)
-        ts1 = get_session_last_activity(sid)
+        ts1 = get_session_updated_at(sid)
 
         time.sleep(0.01)  # Small delay to ensure different timestamp
         record_session_activity(sid)
-        ts2 = get_session_last_activity(sid)
+        ts2 = get_session_updated_at(sid)
 
         assert ts2 >= ts1  # Second timestamp should be equal or later
 
@@ -539,16 +539,16 @@ class TestActivityTracking:
     def test_clear_removes_activity(self):
         from agent.sdk_client import (
             clear_session_activity,
-            get_session_last_activity,
+            get_session_updated_at,
             record_session_activity,
         )
 
         sid = "test-activity-003"
         record_session_activity(sid)
-        assert get_session_last_activity(sid) is not None
+        assert get_session_updated_at(sid) is not None
 
         clear_session_activity(sid)
-        assert get_session_last_activity(sid) is None
+        assert get_session_updated_at(sid) is None
 
     def test_clear_nonexistent_session_no_error(self):
         from agent.sdk_client import clear_session_activity
@@ -570,13 +570,13 @@ class TestActivityTracking:
         from agent.sdk_client import (
             SDK_INACTIVITY_TIMEOUT_SECONDS,
             clear_session_activity,
-            get_session_last_activity,
+            get_session_updated_at,
             record_session_activity,
         )
 
         sid = "test-inactivity"
         record_session_activity(sid)
-        ts = get_session_last_activity(sid)
+        ts = get_session_updated_at(sid)
 
         # Simulate checking if session is inactive
         elapsed = time.time() - ts

@@ -55,7 +55,7 @@ STALL_THRESHOLDS = {
 
 
 # Transcript liveness: if transcript.txt was modified within this many minutes,
-# the session is considered alive (doing sub-agent work) even if last_activity
+# the session is considered alive (doing sub-agent work) even if updated_at
 # in Redis is stale. See issue #360.
 TRANSCRIPT_STALE_THRESHOLD_MIN = 15
 
@@ -72,7 +72,7 @@ def _check_transcript_liveness(
 
     Uses os.path.getmtime() on logs/sessions/{session_id}/transcript.txt
     to determine if the session is actively doing work (e.g., sub-agent calls)
-    even when the Redis last_activity field hasn't been updated.
+    even when the Redis updated_at field hasn't been updated.
 
     Args:
         session_id: The session ID to check.
@@ -211,13 +211,13 @@ def check_stalled_sessions() -> list[dict]:
     how long they've been in that state. Uses started_at (falling back
     to created_at) as the reference timestamp.
 
-    For active sessions, also checks last_activity -- if last_activity is recent
+    For active sessions, also checks updated_at -- if updated_at is recent
     (within the active threshold), the session is not considered stalled.
 
     Thresholds:
         - pending > 300s (5 min) = stalled
         - running > 2700s (45 min) = stalled
-        - active with no recent last_activity > 600s (10 min) = stalled
+        - active with no recent updated_at > 600s (10 min) = stalled
 
     Returns:
         List of dicts for stalled sessions, each containing:
@@ -246,32 +246,32 @@ def check_stalled_sessions() -> list[dict]:
                 # Determine reference timestamp based on status
                 ref_time = session.started_at or session.created_at or now
 
-                # For active sessions, use last_activity as reference
+                # For active sessions, use updated_at as reference
                 if status_val == "active":
-                    last_activity = session.last_activity
+                    updated_at = session.updated_at
 
                     # Also check in-memory activity tracking from sdk_client,
                     # which is updated on every tool call and log output.
                     # Use whichever timestamp is more recent.
                     try:
-                        from agent.sdk_client import get_session_last_activity
+                        from agent.sdk_client import get_session_updated_at
 
-                        inmem_activity = get_session_last_activity(session_id)
+                        inmem_activity = get_session_updated_at(session_id)
                         if inmem_activity is not None:
-                            if last_activity is None or inmem_activity > last_activity:
-                                last_activity = inmem_activity
+                            if updated_at is None or inmem_activity > updated_at:
+                                updated_at = inmem_activity
                     except ImportError:
                         pass
 
-                    if last_activity is not None:
-                        # If last_activity is recent, session is not stalled
-                        activity_age = now - last_activity
+                    if updated_at is not None:
+                        # If updated_at is recent, session is not stalled
+                        activity_age = now - updated_at
                         if activity_age < threshold:
                             continue
-                        # Use last_activity as the reference for duration
-                        ref_time = last_activity
+                        # Use updated_at as the reference for duration
+                        ref_time = updated_at
 
-                    # Transcript liveness check (issue #360): even if last_activity
+                    # Transcript liveness check (issue #360): even if updated_at
                     # is stale, the session may be alive doing sub-agent work.
                     # Check transcript.txt mtime before declaring stalled.
                     transcript_stale, transcript_age_min = _check_transcript_liveness(session_id)
@@ -352,7 +352,7 @@ def assess_session_health(session: AgentSession) -> dict[str, Any]:
     now = time.time()
 
     # Check for silence
-    silence_duration = now - session.last_activity
+    silence_duration = now - session.updated_at
     if silence_duration > SILENCE_THRESHOLD:
         issues.append(f"Silent for {int(silence_duration / 60)} minutes")
 
@@ -603,7 +603,7 @@ async def fix_unhealthy_session(session: AgentSession, assessment: dict[str, Any
     now = time.time()
 
     # Calculate silence duration
-    silence_duration = now - session.last_activity
+    silence_duration = now - session.updated_at
 
     # Most common case: session is stuck/silent
     if silence_duration > ABANDON_THRESHOLD:

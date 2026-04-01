@@ -290,7 +290,7 @@ def _run_memory_recall(hook_input: dict) -> str | None:
 
 
 def _update_agent_session(hook_input: dict) -> None:
-    """Update AgentSession last_activity and tool_call_count.
+    """Update AgentSession updated_at and tool_call_count.
 
     Reads the agent_session_id from the sidecar file and updates
     the corresponding AgentSession record in Redis. Fails silently.
@@ -315,7 +315,7 @@ def _update_agent_session(hook_input: dict) -> None:
             return
         agent_session = matches[0]
 
-        agent_session.last_activity = time.time()
+        agent_session.updated_at = time.time()
         agent_session.tool_call_count = (agent_session.tool_call_count or 0) + 1
         agent_session.save()
     except Exception:

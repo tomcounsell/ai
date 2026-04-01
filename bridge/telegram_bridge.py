@@ -1247,10 +1247,10 @@ async def main():
                             active_sessions.append(ps)
 
                 if active_sessions:
-                    # Pick the most recent session (by last_activity or created_at)
+                    # Pick the most recent session (by updated_at or created_at)
                     target_session = max(
                         active_sessions,
-                        key=lambda s: s.last_activity or s.created_at or 0,
+                        key=lambda s: s.updated_at or s.created_at or 0,
                     )
 
                     # Classify message intent with Haiku

@@ -47,7 +47,7 @@ class TestExtractJobFields:
             sender_id=42,
             chat_title="Test Chat",
             revival_context="some context",
-            work_item_slug="my-feature",
+            slug="my-feature",
             task_list_id="thread-123-456",
             classification_type="bug",
             auto_continue_count=2,
@@ -72,7 +72,7 @@ class TestExtractJobFields:
         assert fields["telegram_message_id"] == 1
         assert fields["chat_title"] == "Test Chat"
         assert fields["revival_context"] == "some context"
-        assert fields["work_item_slug"] == "my-feature"
+        assert fields["slug"] == "my-feature"
         assert fields["task_list_id"] == "thread-123-456"
         assert fields["classification_type"] == "bug"
         assert fields["auto_continue_count"] == 2

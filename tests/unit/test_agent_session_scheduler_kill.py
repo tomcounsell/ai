@@ -60,9 +60,9 @@ class _FakeSession:
         self.message_text = extra.get("message_text", "/sdlc test")
         self.created_at = extra.get("created_at", 1700000000)
         self.started_at = extra.get("started_at", None)
-        self.scheduled_after = extra.get("scheduled_after", None)
+        self.scheduled_at = extra.get("scheduled_at", None)
         self.issue_url = extra.get("issue_url", None)
-        self.parent_agent_session_id = extra.get("parent_agent_session_id", None)
+        self.parent_job_id = extra.get("parent_job_id", None)
         self.completed_at = extra.get("completed_at", None)
         self._deleted = False
 

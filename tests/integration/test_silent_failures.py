@@ -142,7 +142,7 @@ class TestEnqueueContinuationSessionLookupLogging:
         mock_session_entry.sender_name = "Test"
         mock_session_entry.chat_id = "chat_3"
         mock_session_entry.telegram_message_id = 3
-        mock_session_entry.work_item_slug = None
+        mock_session_entry.slug = None
         mock_session_entry.task_list_id = None
         mock_session_entry.classification_type = None
 

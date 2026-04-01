@@ -207,7 +207,7 @@ class TestAnalyzeSessionsFromRedis:
             status="completed",
             created_at=time.time(),
             started_at=time.time(),
-            last_activity=time.time(),
+            updated_at=time.time(),
             turn_count=5,
             tool_call_count=20,  # High ratio = thrashing
         )
@@ -228,7 +228,7 @@ class TestAnalyzeSessionsFromRedis:
             status="failed",
             created_at=time.time(),
             started_at=time.time(),
-            last_activity=time.time(),
+            updated_at=time.time(),
             turn_count=2,
             tool_call_count=3,
             summary="Crashed during build step",

@@ -181,7 +181,7 @@ class TestEnqueueContinuationFallback:
             "history",
             "correlation_id",
             "classification_type",
-            "work_item_slug",
+            "slug",
         ]
         for field in critical_fields:
             assert field in _AGENT_SESSION_FIELDS, (

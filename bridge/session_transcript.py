@@ -47,7 +47,7 @@ def start_transcript(
     chat_id: str | None = None,
     sender: str | None = None,
     branch_name: str | None = None,
-    work_item_slug: str | None = None,
+    slug: str | None = None,
     classification_type: str | None = None,
     correlation_id: str | None = None,
 ) -> str | None:
@@ -59,7 +59,7 @@ def start_transcript(
         chat_id: Telegram chat ID (optional).
         sender: Who triggered the session (optional).
         branch_name: Git branch associated with the session (optional).
-        work_item_slug: Named work item slug (tier 2, optional).
+        slug: Named work item slug (tier 2, optional).
         classification_type: Auto-classified type (bug/feature/chore, optional).
         correlation_id: End-to-end tracing ID (optional).
 
@@ -79,13 +79,13 @@ def start_transcript(
         if existing:
             s = existing[0]
             s.log_path = log_path
-            s.last_activity = now
+            s.updated_at = now
             if sender:
                 s.sender_name = sender
             if branch_name:
                 s.branch_name = branch_name
-            if work_item_slug:
-                s.work_item_slug = work_item_slug
+            if slug:
+                s.slug = slug
             if classification_type:
                 s.classification_type = classification_type
             if chat_id is not None:
@@ -118,12 +118,12 @@ def start_transcript(
                 sender_name=sender,
                 created_at=now,
                 started_at=now,
-                last_activity=now,
+                updated_at=now,
                 turn_count=0,
                 tool_call_count=0,
                 log_path=log_path,
                 branch_name=branch_name,
-                work_item_slug=work_item_slug,
+                slug=slug,
                 classification_type=classification_type,
                 correlation_id=correlation_id,
             )
@@ -202,7 +202,7 @@ def append_turn(
         if sessions:
             s = sessions[0]
             s.turn_count = (s.turn_count or 0) + 1
-            s.last_activity = time.time()
+            s.updated_at = time.time()
             s.save()
     except Exception as e:
         logger.debug(f"Failed to update SessionLog turn_count for {session_id}: {e}")
@@ -243,7 +243,7 @@ def append_tool_result(
         if sessions:
             s = sessions[0]
             s.tool_call_count = (s.tool_call_count or 0) + 1
-            s.last_activity = time.time()
+            s.updated_at = time.time()
             s.save()
     except Exception as e:
         logger.debug(f"Failed to update SessionLog tool_call_count for {session_id}: {e}")
@@ -300,7 +300,7 @@ def complete_transcript(
             # status is an IndexedField — direct mutation is safe
             s.status = status
             s.completed_at = time.time()
-            s.last_activity = time.time()
+            s.updated_at = time.time()
             if summary:
                 s.summary = summary
             s.save()

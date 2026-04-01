@@ -3,7 +3,7 @@
 
 Renames hash fields in existing Redis records:
   job_id -> agent_session_id
-  parent_job_id -> parent_agent_session_id
+  parent_job_id -> parent_job_id
   stable_job_id -> stable_agent_session_id
 
 Works at the raw Redis level because Popoto can't load records whose
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 FIELD_RENAMES = {
     "job_id": "agent_session_id",
-    "parent_job_id": "parent_agent_session_id",
+    "parent_job_id": "parent_job_id",
     "stable_job_id": "stable_agent_session_id",
 }
 

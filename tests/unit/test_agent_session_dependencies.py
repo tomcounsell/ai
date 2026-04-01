@@ -556,7 +556,7 @@ class TestPopSessionDependencyFiltering:
 
         # Create a session with an unmet dependency
         blocked_session = MagicMock()
-        blocked_session.scheduled_after = None
+        blocked_session.scheduled_at = None
         blocked_session.depends_on = ["unmet-dep"]
         blocked_session.agent_session_id = "blocked"
         blocked_session.priority = "normal"
@@ -576,7 +576,7 @@ class TestPopSessionDependencyFiltering:
         from agent.agent_session_queue import _pop_agent_session
 
         unblocked_session = MagicMock()
-        unblocked_session.scheduled_after = None
+        unblocked_session.scheduled_at = None
         unblocked_session.depends_on = None
         unblocked_session.agent_session_id = "unblocked"
         unblocked_session.priority = "normal"

@@ -44,7 +44,7 @@ def _make_fake_session(
     status="active",
     created_at=None,
     started_at=None,
-    last_activity=None,
+    updated_at=None,
     project_key="test",
     history=None,
 ):
@@ -56,7 +56,7 @@ def _make_fake_session(
     mock.status = status
     mock.created_at = created_at or now - 300
     mock.started_at = started_at or now - 200
-    mock.last_activity = last_activity or now - 10
+    mock.updated_at = updated_at or now - 10
     mock.project_key = project_key
     mock._get_history_list.return_value = history or []
     return mock
@@ -124,7 +124,7 @@ class TestGetSessionReport:
         healthy = _make_fake_session(
             session_id="healthy-001",
             status="active",
-            last_activity=now - 10,
+            updated_at=now - 10,
             started_at=now - 60,
         )
         mock_query = MagicMock()
@@ -141,7 +141,7 @@ class TestGetSessionReport:
         healthy = _make_fake_session(
             session_id="healthy-001",
             status="active",
-            last_activity=now - 10,
+            updated_at=now - 10,
         )
         mock_query = MagicMock()
         mock_query.all.return_value = [healthy]
