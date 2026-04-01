@@ -182,6 +182,10 @@ CLI_LEAK_PATTERN = re.compile(
 def _sanitize_cli_leaks(text: str) -> str:
     """Strip CLI command syntax that leaks from prompt contamination.
 
+    Defense-in-depth: the root cause (CLI examples in persona prompt) was
+    also fixed, but this sanitizer catches any residual leaks from cached
+    prompts or other tool descriptions.
+
     Targets specific ``valor-telegram send`` and ``--chat`` patterns that
     appear when the agent echoes tool-description examples into response
     text.  Only command-like lines are removed — legitimate technical
