@@ -476,6 +476,10 @@ def restore_branch_state(session: AgentSession) -> bool:
         return False
 
 
+# Terminal statuses for session hierarchy and lifecycle checks
+_TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
+
+
 def dependency_status(session: AgentSession) -> dict[str, str]:
     """Return the status of each dependency for a session.
 

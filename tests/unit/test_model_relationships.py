@@ -492,7 +492,7 @@ class TestAgentSessionIdAlias:
         # Verify the property implementation logic
         class FakeSession:
             def __init__(self, jid):
-                self.agent_session_id = jid
+                self.job_id = jid
 
             id = AgentSession.id
 
@@ -511,16 +511,33 @@ class TestAgentSessionFieldPresence:
     @pytest.mark.parametrize(
         "field_name",
         [
-            "classification_type",
-            "telegram_message_id",
+            "initial_telegram_message",
+            "extra_context",
         ],
     )
     def test_retained_fields_present(self, field_name):
-        """AgentSession should retain classification and message fields."""
+        """AgentSession should have consolidated DictFields."""
         from models.agent_session import AgentSession
 
         assert field_name in AgentSession._meta.field_names, (
             f"AgentSession.{field_name} should exist"
+        )
+
+    @pytest.mark.parametrize(
+        "property_name",
+        [
+            "classification_type",
+            "telegram_message_id",
+            "sender_name",
+            "message_text",
+        ],
+    )
+    def test_property_accessors_exist(self, property_name):
+        """AgentSession should have property accessors for consolidated fields."""
+        from models.agent_session import AgentSession
+
+        assert hasattr(AgentSession, property_name), (
+            f"AgentSession.{property_name} property should exist"
         )
 
     @pytest.mark.parametrize(

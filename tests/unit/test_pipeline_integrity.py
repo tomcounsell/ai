@@ -178,9 +178,8 @@ class TestEnqueueContinuationFallback:
             "expectations",
             "issue_url",
             "pr_url",
-            "history",
+            "session_events",
             "correlation_id",
-            "classification_type",
             "slug",
         ]
         for field in critical_fields:

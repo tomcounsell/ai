@@ -290,6 +290,11 @@ class AgentSession(Model):
         """Backward-compatible alias for job_id."""
         return self.job_id
 
+    @agent_session_id.setter
+    def agent_session_id(self, value: str) -> None:
+        """Backward-compatible setter for job_id."""
+        self.job_id = value
+
     # === Compatibility property aliases ===
 
     @property
