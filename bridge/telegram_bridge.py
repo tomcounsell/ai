@@ -1183,9 +1183,7 @@ async def main():
                                 is_abort=is_abort,
                             )
                             ack_text = (
-                                "Stopping current task."
-                                if is_abort
-                                else "Adding to current task"
+                                "Stopping current task." if is_abort else "Adding to current task"
                             )
                             from bridge.markdown import send_markdown
 
@@ -1866,9 +1864,8 @@ async def main():
 
         # Configure popoto embedding provider before starting watcher
         try:
-            from popoto.embeddings.openai import OpenAIProvider
-
             import popoto
+            from popoto.embeddings.openai import OpenAIProvider
 
             popoto.configure(embedding_provider=OpenAIProvider())
             logger.info("Configured popoto OpenAI embedding provider")

@@ -11,9 +11,6 @@ import hashlib
 import logging
 import os
 
-from popoto.fields.content_field import ContentField
-from popoto.fields.embedding_field import EmbeddingField
-
 from popoto import (
     AutoKeyField,
     FloatField,
@@ -21,6 +18,8 @@ from popoto import (
     Model,
     StringField,
 )
+from popoto.fields.content_field import ContentField
+from popoto.fields.embedding_field import EmbeddingField
 
 logger = logging.getLogger(__name__)
 
