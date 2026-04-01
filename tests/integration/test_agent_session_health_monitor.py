@@ -67,6 +67,8 @@ class TestStartedAtField:
         started = running_jobs[0].started_at
         if isinstance(started, (int, float)):
             started = datetime.fromtimestamp(started, tz=UTC)
+        elif isinstance(started, datetime) and started.tzinfo is None:
+            started = started.replace(tzinfo=UTC)
         assert before <= started <= after
 
     def test_started_at_in_extract_fields(self):
