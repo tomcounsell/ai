@@ -231,10 +231,6 @@ class AgentSession(Model):
         elif "history" in kwargs:
             kwargs.pop("history")
 
-        # Map old summary to a session event
-        if "summary" in kwargs:
-            kwargs.pop("summary")  # Will be set via property/event
-
         # Convert stage_states to a session event
         stage_states_val = kwargs.pop("stage_states", None)
         if stage_states_val is not None and "session_events" not in kwargs:
