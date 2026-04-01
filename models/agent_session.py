@@ -323,6 +323,15 @@ class AgentSession(Model):
             return itm.get("sender_name")
         return None
 
+    @sender_name.setter
+    def sender_name(self, value: str | None) -> None:
+        """Set sender_name in initial_telegram_message."""
+        itm = self.initial_telegram_message
+        if not isinstance(itm, dict):
+            itm = {}
+        itm["sender_name"] = value
+        self.initial_telegram_message = itm
+
     @property
     def sender_id(self) -> int | None:
         """Extract sender_id from initial_telegram_message."""
@@ -331,6 +340,18 @@ class AgentSession(Model):
             val = itm.get("sender_id")
             return int(val) if val is not None else None
         return None
+
+    @sender_id.setter
+    def sender_id(self, value: int | None) -> None:
+        """Set sender_id in initial_telegram_message."""
+        itm = self.initial_telegram_message
+        if not isinstance(itm, dict):
+            itm = {}
+        if value is not None:
+            itm["sender_id"] = value
+        elif "sender_id" in itm:
+            del itm["sender_id"]
+        self.initial_telegram_message = itm
 
     @property
     def message_text(self) -> str | None:
@@ -358,6 +379,18 @@ class AgentSession(Model):
             return int(val) if val is not None else None
         return None
 
+    @telegram_message_id.setter
+    def telegram_message_id(self, value: int | None) -> None:
+        """Set telegram_message_id in initial_telegram_message."""
+        itm = self.initial_telegram_message
+        if not isinstance(itm, dict):
+            itm = {}
+        if value is not None:
+            itm["telegram_message_id"] = value
+        elif "telegram_message_id" in itm:
+            del itm["telegram_message_id"]
+        self.initial_telegram_message = itm
+
     @property
     def chat_title(self) -> str | None:
         """Extract chat_title from initial_telegram_message."""
@@ -365,6 +398,18 @@ class AgentSession(Model):
         if isinstance(itm, dict):
             return itm.get("chat_title")
         return None
+
+    @chat_title.setter
+    def chat_title(self, value: str | None) -> None:
+        """Set chat_title in initial_telegram_message."""
+        itm = self.initial_telegram_message
+        if not isinstance(itm, dict):
+            itm = {}
+        if value is not None:
+            itm["chat_title"] = value
+        elif "chat_title" in itm:
+            del itm["chat_title"]
+        self.initial_telegram_message = itm
 
     @property
     def sender(self) -> str | None:
@@ -378,6 +423,18 @@ class AgentSession(Model):
         if isinstance(ec, dict):
             return ec.get("revival_context")
         return None
+
+    @revival_context.setter
+    def revival_context(self, value: str | None) -> None:
+        """Set revival_context in extra_context."""
+        ec = self.extra_context
+        if not isinstance(ec, dict):
+            ec = {}
+        if value is not None:
+            ec["revival_context"] = value
+        elif "revival_context" in ec:
+            del ec["revival_context"]
+        self.extra_context = ec
 
     @property
     def classification_type(self) -> str | None:
