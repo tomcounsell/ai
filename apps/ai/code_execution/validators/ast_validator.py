@@ -230,6 +230,10 @@ class ASTValidator:
             elif isinstance(node, ast.Attribute):
                 violations.extend(self._check_attribute(node))
 
+            # Check bare name access (for __builtins__, etc.)
+            elif isinstance(node, ast.Name):
+                violations.extend(self._check_name(node))
+
         return violations
 
     def validate_or_raise(self, code: str) -> None:
@@ -331,6 +335,31 @@ class ASTValidator:
                     col_offset=node.col_offset,
                     severity="high",
                     node_type="Call",
+                )
+            )
+
+        return violations
+
+    def _check_name(self, node: ast.Name) -> list[ASTViolation]:
+        """Check bare name references for dangerous dunder names."""
+        violations = []
+
+        dangerous_names = {
+            "__builtins__",
+            "__import__",
+            "__loader__",
+            "__spec__",
+        }
+
+        if node.id in dangerous_names:
+            violations.append(
+                ASTViolation(
+                    violation_type="dangerous_name",
+                    message=f"Access to '{node.id}' is not allowed",
+                    line_number=node.lineno,
+                    col_offset=node.col_offset,
+                    severity="high",
+                    node_type="Name",
                 )
             )
 
