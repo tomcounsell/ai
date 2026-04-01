@@ -133,18 +133,18 @@ class TestSessionResumeContext:
         sessions = list(AgentSession.query.filter(session_id=session_id))
         assert sessions[0].chat_id == "555666"
 
-    def test_session_last_activity_updates(self):
+    def test_session_updated_at_updates(self):
         session_id = f"test_activity_{int(time.time())}"
         start_transcript(session_id=session_id, project_key="valor")
 
         sessions = list(AgentSession.query.filter(session_id=session_id))
-        first_activity = sessions[0].last_activity
+        first_activity = sessions[0].updated_at
 
         time.sleep(0.05)
         append_turn(session_id, "user", "another message")
 
         sessions = list(AgentSession.query.filter(session_id=session_id))
-        assert sessions[0].last_activity >= first_activity
+        assert sessions[0].updated_at >= first_activity
 
     def test_multiple_sessions_same_chat(self):
         chat_id = "777888"

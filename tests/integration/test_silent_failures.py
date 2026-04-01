@@ -19,6 +19,7 @@ file path, etc.) — NOT exact message text, per risk mitigation in the plan.
 """
 
 import logging
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -32,7 +33,6 @@ class TestPushJobLogging:
     @pytest.mark.asyncio
     async def test_lifecycle_transition_failure_logs_warning(self, caplog, redis_test_db):
         """When log_lifecycle_transition raises, a warning is emitted."""
-        import time
 
         from models.agent_session import AgentSession
 
@@ -43,7 +43,7 @@ class TestPushJobLogging:
             status="pending",
             chat_id="chat_1",
             sender_name="Test",
-            created_at=time.time(),
+            created_at=datetime.now(tz=UTC),
             message_text="test message",
             working_dir="/tmp/test",
             telegram_message_id=1,
@@ -84,7 +84,6 @@ class TestPopJobLogging:
     @pytest.mark.asyncio
     async def test_lifecycle_transition_failure_logs_warning(self, caplog, redis_test_db):
         """When log_lifecycle_transition raises during pop, a warning is emitted."""
-        import time
 
         from models.agent_session import AgentSession
 
@@ -95,7 +94,7 @@ class TestPopJobLogging:
             status="pending",
             chat_id="chat_2",
             sender_name="Test",
-            created_at=time.time(),
+            created_at=datetime.now(tz=UTC),
             message_text="test message",
             working_dir="/tmp/test",
             telegram_message_id=2,
@@ -142,7 +141,7 @@ class TestEnqueueContinuationSessionLookupLogging:
         mock_session_entry.sender_name = "Test"
         mock_session_entry.chat_id = "chat_3"
         mock_session_entry.telegram_message_id = 3
-        mock_session_entry.work_item_slug = None
+        mock_session_entry.slug = None
         mock_session_entry.task_list_id = None
         mock_session_entry.classification_type = None
 

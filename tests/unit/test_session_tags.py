@@ -8,7 +8,7 @@ Tests cover:
 """
 
 import shutil
-import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -34,7 +34,7 @@ def _create_session(
     classification_type: str | None = None,
     branch_name: str | None = None,
     sender: str | None = None,
-    work_item_slug: str | None = None,
+    slug: str | None = None,
     turn_count: int = 5,
     tags: list | None = None,
 ) -> AgentSession:
@@ -43,15 +43,15 @@ def _create_session(
         session_id=session_id,
         project_key=project_key,
         status="active",
-        created_at=time.time(),
-        started_at=time.time(),
-        last_activity=time.time(),
+        created_at=datetime.now(tz=UTC),
+        started_at=datetime.now(tz=UTC),
+        updated_at=datetime.now(tz=UTC),
         turn_count=turn_count,
         tool_call_count=0,
         classification_type=classification_type,
         branch_name=branch_name,
         sender_name=sender,
-        work_item_slug=work_item_slug,
+        slug=slug,
         tags=tags,
     )
 
@@ -289,13 +289,13 @@ class TestAutoTagReflections:
 
 
 # ===================================================================
-# auto_tag_session — work_item_slug and turn_count
+# auto_tag_session — slug and turn_count
 # ===================================================================
 
 
 class TestAutoTagMisc:
     def test_planned_work_tag(self):
-        _create_session(session_id="pw-1", work_item_slug="fix-login-bug")
+        _create_session(session_id="pw-1", slug="fix-login-bug")
         auto_tag_session("pw-1")
         assert "planned-work" in get_tags("pw-1")
 
@@ -346,7 +346,7 @@ class TestAutoTagGraceful:
             session_id="combo-1",
             classification_type="feature",
             branch_name="session/new-feature",
-            work_item_slug="new-feature",
+            slug="new-feature",
             turn_count=25,
         )
         session_dir = SESSION_LOGS_DIR / "combo-1"

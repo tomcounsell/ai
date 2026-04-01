@@ -138,9 +138,29 @@ Popoto field types have different implications for how records behave on mutatio
 | `project_key` | KeyField | No | Set once at creation |
 | `chat_id` | KeyField | No | Set once at creation |
 | `parent_chat_session_id` | KeyField | No | Set once at creation (DevSession only) |
-| `parent_agent_session_id` | KeyField | No | Set once at creation (child jobs only) |
-| `stable_agent_session_id` | KeyField | No | Set once at creation, never changes |
+| `parent_job_id` | KeyField | No | Set once at creation (child jobs only) |
 | `status` | IndexedField | Yes | Mutate and save directly; no delete-and-recreate |
+
+### AgentSession Datetime Fields
+
+All timestamp fields use Popoto `DatetimeField` or `SortedField(type=datetime)`:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `created_at` | SortedField(type=datetime) | Partitioned by project_key |
+| `started_at` | DatetimeField(null=True) | Set when worker picks up session |
+| `updated_at` | DatetimeField(auto_now=True) | Renamed from `last_activity` |
+| `completed_at` | DatetimeField(null=True) | Set on terminal status |
+| `scheduled_at` | DatetimeField(null=True) | Renamed from `scheduled_after` |
+
+Float timestamps are auto-converted to datetime via `__setattr__`. Note: Popoto `DatetimeField` returns naive datetimes from Redis (no timezone info). Code that compares with `time.time()` must assume UTC for naive datetimes.
+
+### AgentSession Consolidated DictFields
+
+| Field | Contains | Replaces |
+|-------|----------|----------|
+| `initial_telegram_message` | `sender_name`, `sender_id`, `message_text`, `telegram_message_id`, `chat_title` | Six separate fields |
+| `extra_context` | `revival_context`, `classification_type`, `classification_confidence` | Three separate fields |
 
 The `status` field was changed from KeyField to IndexedField (popoto >= 1.4.3) to eliminate the delete-and-recreate overhead on every lifecycle transition (pending -> running -> active -> completed). This removed the primary source of duplicate session records in the dashboard.
 

@@ -64,7 +64,7 @@ _session_stop_reasons: dict[str, str] = {}
 # Used by the watchdog heartbeat for activity-based stall detection instead
 # of hard wall-clock timeouts. Updated on each tool call callback and log output.
 # In-memory only — reset on crash/reboot (new sessions start fresh).
-_last_activity_timestamps: dict[str, float] = {}
+_updated_at_timestamps: dict[str, float] = {}
 
 # Configurable inactivity threshold (seconds). Sessions idle longer than this
 # are considered stalled. Active sessions producing tool calls/logs are never
@@ -127,22 +127,22 @@ def record_session_activity(session_id: str) -> None:
     The watchdog uses this to detect stalls based on inactivity rather than
     wall-clock duration.
     """
-    _last_activity_timestamps[session_id] = time.time()
+    _updated_at_timestamps[session_id] = time.time()
 
 
-def get_session_last_activity(session_id: str) -> float | None:
+def get_session_updated_at(session_id: str) -> float | None:
     """Get the timestamp of the last activity for a session.
 
     Returns:
         Unix timestamp of last tool call or log output, or None if
         no activity has been recorded for this session.
     """
-    return _last_activity_timestamps.get(session_id)
+    return _updated_at_timestamps.get(session_id)
 
 
 def clear_session_activity(session_id: str) -> None:
     """Remove activity tracking for a completed/abandoned session."""
-    _last_activity_timestamps.pop(session_id, None)
+    _updated_at_timestamps.pop(session_id, None)
 
 
 def _get_prior_session_uuid(session_id: str) -> str | None:
@@ -270,8 +270,8 @@ def _extract_sdlc_env_vars(session_id: str, gh_repo: str | None = None) -> dict[
         if isinstance(branch, str) and branch:
             env["SDLC_PR_BRANCH"] = branch
 
-        # Work item slug (new DevSessions use session.slug, legacy uses work_item_slug)
-        slug = getattr(session, "slug", None) or getattr(session, "work_item_slug", None)
+        # Work item slug (new DevSessions use session.slug, legacy uses slug)
+        slug = getattr(session, "slug", None) or getattr(session, "slug", None)
         if isinstance(slug, str) and slug:
             env["SDLC_SLUG"] = slug
 

@@ -4,6 +4,7 @@ All tests use redis_test_db fixture (db=1) for isolation from production data.
 """
 
 import time
+from datetime import UTC, datetime
 
 import pytest
 
@@ -363,8 +364,8 @@ class TestAgentSession:
             chat_id="100",
             sender_name="Tom",
             created_at=time.time(),
-            started_at=time.time(),
-            last_activity=time.time(),
+            started_at=datetime.now(tz=UTC),
+            updated_at=datetime.now(tz=UTC),
             tool_call_count=0,
             branch_name="session/tg-valor-100",
         )
@@ -384,7 +385,7 @@ class TestAgentSession:
             sender_name="Tom",
             created_at=time.time(),
             started_at=now,
-            last_activity=now,
+            updated_at=now,
             tool_call_count=0,
         )
         assert s.status == "active"
@@ -402,7 +403,7 @@ class TestAgentSession:
             sender_name="Tom",
             created_at=time.time(),
             started_at=now,
-            last_activity=time.time(),
+            updated_at=datetime.now(tz=UTC),
             tool_call_count=0,
         )
 
@@ -420,12 +421,12 @@ class TestAgentSession:
             chat_id="300",
             sender_name="Tom",
             created_at=time.time(),
-            started_at=time.time(),
-            last_activity=time.time(),
+            started_at=datetime.now(tz=UTC),
+            updated_at=datetime.now(tz=UTC),
             tool_call_count=0,
         )
         s.tool_call_count = 20
-        s.last_activity = time.time()
+        s.updated_at = time.time()
         s.save()
 
         found = AgentSession.query.filter(session_id="tg_valor_300")
@@ -443,7 +444,7 @@ class TestAgentSession:
             sender_name="A",
             created_at=time.time(),
             started_at=now,
-            last_activity=now,
+            updated_at=now,
             tool_call_count=5,
         )
         AgentSession.create(
@@ -454,7 +455,7 @@ class TestAgentSession:
             sender_name="B",
             created_at=time.time(),
             started_at=now,
-            last_activity=now,
+            updated_at=now,
             tool_call_count=10,
         )
         AgentSession.create(
@@ -465,7 +466,7 @@ class TestAgentSession:
             sender_name="C",
             created_at=time.time(),
             started_at=now,
-            last_activity=now,
+            updated_at=now,
             tool_call_count=2,
         )
 
@@ -491,7 +492,7 @@ class TestAgentSession:
             sender_name="A",
             created_at=time.time(),
             started_at=now,
-            last_activity=now,
+            updated_at=now,
             tool_call_count=0,
         )
         AgentSession.create(
@@ -502,7 +503,7 @@ class TestAgentSession:
             sender_name="B",
             created_at=time.time(),
             started_at=now,
-            last_activity=now,
+            updated_at=now,
             tool_call_count=0,
         )
 
@@ -521,7 +522,7 @@ class TestAgentSession:
             sender_name="Tom",
             created_at=time.time(),
             started_at=now,
-            last_activity=now,
+            updated_at=now,
             tool_call_count=3,
         )
         # Delete + recreate to change status KeyField (see test_update_status_to_completed)
@@ -534,7 +535,7 @@ class TestAgentSession:
             sender_name="Tom",
             created_at=time.time(),
             started_at=now,
-            last_activity=now,
+            updated_at=now,
             tool_call_count=3,
         )
 
@@ -554,7 +555,7 @@ class TestAgentSession:
             sender_name="Tom",
             created_at=time.time(),
             started_at=now,
-            last_activity=now,
+            updated_at=now,
             tool_call_count=0,
         )
         assert s.session_id == "async_1"
@@ -574,7 +575,7 @@ class TestAgentSession:
             sender_name="Tom",
             created_at=time.time(),
             started_at=now,
-            last_activity=now,
+            updated_at=now,
             tool_call_count=5,
         )
 

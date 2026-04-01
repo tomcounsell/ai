@@ -58,7 +58,7 @@ def main():
                     if matches:
                         agent_session = matches[0]
                         agent_session.status = "running"
-                        agent_session.last_activity = time.time()
+                        agent_session.updated_at = time.time()
                         agent_session.completed_at = None
                         agent_session.save()
                 except Exception:

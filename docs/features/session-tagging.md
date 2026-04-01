@@ -17,7 +17,7 @@ Tags are stored in the `AgentSession.tags` ListField (Redis via Popoto). Auto-ta
 | Transcript contains `gh pr create` | `pr-created` |
 | Transcript contains `pytest` or `Skill(do-test` | `tested` |
 | Sender or session_id contains "reflections" | `reflections` |
-| `work_item_slug` is set | `planned-work` |
+| `slug` is set | `planned-work` |
 | `turn_count >= 20` | `long-session` |
 
 Auto-tagging reads only the last 50 lines of the transcript for pattern matching. It never removes existing tags — only adds new ones. Failures are caught and logged without breaking session completion.

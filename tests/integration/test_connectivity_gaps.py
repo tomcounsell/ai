@@ -11,7 +11,7 @@ Tests use real Redis (db=1 via redis_test_db fixture) for integration
 validation. Mock-based tests are used only where SDK imports are needed.
 """
 
-import time
+from datetime import UTC, datetime
 
 import pytest
 
@@ -30,7 +30,7 @@ def pending_session(redis_test_db):
         chat_id="-5051",
         sender_name="Tom",
         sender_id=12345,
-        created_at=time.time(),
+        created_at=datetime.now(tz=UTC),
         message_text="SDLC 209",
         priority="high",
     )
@@ -46,13 +46,13 @@ def running_session(redis_test_db):
         chat_id="-5051",
         sender_name="Tom",
         sender_id=12345,
-        created_at=time.time(),
-        started_at=time.time(),
+        created_at=datetime.now(tz=UTC),
+        started_at=datetime.now(tz=UTC),
         message_text="SDLC 209",
         priority="high",
         task_list_id="thread--5051-12345",
         branch_name="session/test-fix",
-        work_item_slug="test-slug",
+        slug="test-slug",
         classification_type="bug",
         classification_confidence=0.95,
         history=["[user] SDLC 209", "[stage] ISSUE completed"],
@@ -77,7 +77,7 @@ class TestTaskListIdPersistence:
             session_id="tg_valor_-5051_99999",
             project_key="valor",
             status="running",
-            created_at=time.time(),
+            created_at=datetime.now(tz=UTC),
         )
         assert s.task_list_id is None
 
@@ -90,14 +90,14 @@ class TestTaskListIdPersistence:
         assert len(found) == 1
         assert found[0].task_list_id == "thread--5051-99999"
 
-    def test_task_list_id_with_work_item_slug(self, redis_test_db):
-        """Tier 2 sessions use work_item_slug as task_list_id."""
+    def test_task_list_id_with_slug(self, redis_test_db):
+        """Tier 2 sessions use slug as task_list_id."""
         s = AgentSession.create(
             session_id="tg_valor_-5051_88888",
             project_key="valor",
             status="running",
-            created_at=time.time(),
-            work_item_slug="bridge-sdk-fix",
+            created_at=datetime.now(tz=UTC),
+            slug="bridge-sdk-fix",
         )
 
         # Simulate _execute_agent_session computing task_list_id from slug
@@ -127,7 +127,7 @@ class TestCompleteTranscriptFieldPreservation:
         original_plan_url = running_session.plan_url
         original_pr_url = running_session.pr_url
         original_classification_type = running_session.classification_type
-        original_work_item_slug = running_session.work_item_slug
+        original_slug = running_session.slug
         original_message_text = running_session.message_text
 
         # Perform status transition
@@ -150,10 +150,10 @@ class TestCompleteTranscriptFieldPreservation:
         assert s.plan_url == original_plan_url
         assert s.pr_url == original_pr_url
         assert s.classification_type == original_classification_type
-        assert s.work_item_slug == original_work_item_slug
+        assert s.slug == original_slug
         assert s.message_text == original_message_text
         assert s.completed_at is not None
-        assert s.last_activity is not None
+        assert s.updated_at is not None
 
     def test_preserves_history_through_status_change(self, running_session):
         """History list survives the delete-and-recreate pattern."""
@@ -323,9 +323,9 @@ class TestFullChainIntegration:
             status="completed",
             chat_id="-5051",
             sender_name="Tom",
-            created_at=time.time(),
-            started_at=time.time(),
-            last_activity=time.time(),
+            created_at=datetime.now(tz=UTC),
+            started_at=datetime.now(tz=UTC),
+            updated_at=datetime.now(tz=UTC),
             message_text="SDLC 209",
             task_list_id="thread--5051-chain",
         )

@@ -81,7 +81,7 @@ class PipelineProgress(BaseModel):
     created_at: float | None = None
     started_at: float | None = None
     completed_at: float | None = None
-    last_activity: float | None = None
+    updated_at: float | None = None
 
     # SDLC state
     stages: list[StageState] = []
@@ -384,7 +384,7 @@ def _session_to_pipeline(session) -> PipelineProgress:
             current = s.name
             break
 
-    slug = _safe_str(session.slug) or _safe_str(session.work_item_slug) or ""
+    slug = _safe_str(session.slug) or _safe_str(session.slug) or ""
 
     # Resolve project name and metadata
     project_key = _safe_str(session.project_key)
@@ -404,7 +404,7 @@ def _session_to_pipeline(session) -> PipelineProgress:
         created_at=_safe_float(session.created_at),
         started_at=_safe_float(session.started_at),
         completed_at=_safe_float(session.completed_at),
-        last_activity=_safe_float(session.last_activity),
+        updated_at=_safe_float(session.updated_at),
         stages=stages,
         current_stage=current,
         events=events,
@@ -444,7 +444,7 @@ def get_all_sessions(limit: int = 50) -> list[PipelineProgress]:
 
     def _best_timestamp(p: PipelineProgress) -> float:
         """Pick the best available timestamp for ordering/filtering."""
-        return p.completed_at or p.last_activity or p.started_at or p.created_at or 0
+        return p.completed_at or p.updated_at or p.started_at or p.created_at or 0
 
     for session in all_sessions:
         try:
@@ -464,7 +464,7 @@ def get_all_sessions(limit: int = 50) -> list[PipelineProgress]:
             if _best_timestamp(pipeline) >= cutoff:
                 inactive.append(pipeline)
 
-    active.sort(key=lambda p: p.last_activity or p.created_at or 0, reverse=True)
+    active.sort(key=lambda p: p.updated_at or p.created_at or 0, reverse=True)
     inactive.sort(key=_best_timestamp, reverse=True)
 
     return active + inactive[:limit]

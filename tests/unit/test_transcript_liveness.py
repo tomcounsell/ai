@@ -130,7 +130,7 @@ class TestCheckStalledSessionsWithTranscript:
 
     def test_active_session_with_fresh_transcript_not_stalled(self, tmp_path):
         """An active session whose transcript is fresh should NOT be marked stalled,
-        even if last_activity is old."""
+        even if updated_at is old."""
         from types import SimpleNamespace
 
         from monitoring.session_watchdog import (
@@ -139,14 +139,14 @@ class TestCheckStalledSessionsWithTranscript:
         )
 
         now = time.time()
-        # last_activity is old (would normally trigger stall)
+        # updated_at is old (would normally trigger stall)
         session = SimpleNamespace(
             session_id="transcript-fresh",
             agent_session_id="session-001",
             status="active",
             started_at=now - 3600,
             created_at=now - 3600,
-            last_activity=now - (STALL_THRESHOLD_ACTIVE + 120),
+            updated_at=now - (STALL_THRESHOLD_ACTIVE + 120),
             project_key="test",
         )
         session._get_history_list = lambda: []
@@ -195,7 +195,7 @@ class TestCheckStalledSessionsWithTranscript:
             status="active",
             started_at=now - 3600,
             created_at=now - 3600,
-            last_activity=now - (STALL_THRESHOLD_ACTIVE + 120),
+            updated_at=now - (STALL_THRESHOLD_ACTIVE + 120),
             project_key="test",
         )
         session._get_history_list = lambda: []
@@ -235,7 +235,7 @@ class TestCheckStalledSessionsWithTranscript:
             status="pending",
             started_at=None,
             created_at=now - (STALL_THRESHOLD_PENDING + 60),
-            last_activity=now,
+            updated_at=now,
             project_key="test",
         )
         session._get_history_list = lambda: []

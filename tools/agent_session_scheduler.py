@@ -33,6 +33,29 @@ from pathlib import Path
 
 from config.enums import SessionType
 
+
+def _to_ts(val):
+    """Convert datetime or float to Unix timestamp."""
+    if val is None:
+        return None
+    if isinstance(val, datetime):
+        return val.timestamp()
+    if isinstance(val, (int, float)):
+        return float(val)
+    return None
+
+
+def _to_iso(val):
+    """Convert datetime or float to ISO format string."""
+    if val is None:
+        return None
+    if isinstance(val, datetime):
+        return val.isoformat()
+    if isinstance(val, (int, float)):
+        return datetime.fromtimestamp(val, tz=UTC).isoformat()
+    return None
+
+
 logger = logging.getLogger(__name__)
 
 # Rate limit: max scheduled sessions per hour per project
@@ -81,8 +104,9 @@ def _check_rate_limit(project_key: str) -> bool:
         for status in ("pending", "running"):
             sessions = list(AgentSession.query.filter(project_key=project_key, status=status))
             for s in sessions:
-                if s.scheduling_depth and int(s.scheduling_depth) > 0:
-                    created = s.created_at or 0
+                # Check if session has a parent (agent-scheduled, not human-initiated)
+                if s.parent_job_id:
+                    created = _to_ts(s.created_at) or 0
                     if created > cutoff:
                         recent_scheduled += 1
         return recent_scheduled < MAX_SCHEDULED_PER_HOUR
@@ -112,7 +136,7 @@ def _output(data: dict) -> None:
     print(json.dumps(data, indent=2))
 
 
-def _get_parent_session(parent_agent_session_id: str):
+def _get_parent_session(parent_job_id: str):
     """Look up a parent AgentSession by agent_session_id for field inheritance.
 
     Returns the parent session or None if not found.
@@ -120,7 +144,7 @@ def _get_parent_session(parent_agent_session_id: str):
     try:
         from models.agent_session import AgentSession
 
-        return AgentSession.query.get(parent_agent_session_id)
+        return AgentSession.query.get(parent_job_id)
     except Exception:
         return None
 
@@ -221,14 +245,14 @@ def cmd_schedule(args: argparse.Namespace) -> int:
         )
         return 1
 
-    # Parse scheduled_after
-    scheduled_after = None
+    # Parse scheduled_at
+    scheduled_at = None
     if args.after:
         try:
             dt = datetime.fromisoformat(args.after.replace("Z", "+00:00"))
-            scheduled_after = dt.timestamp()
-            if scheduled_after < time.time():
-                scheduled_after = None  # Past = immediate
+            scheduled_at = dt.timestamp()
+            if scheduled_at < time.time():
+                scheduled_at = None  # Past = immediate
         except ValueError:
             _output(
                 {
@@ -254,18 +278,18 @@ def cmd_schedule(args: argparse.Namespace) -> int:
     session_type = getattr(args, "session_type", None) or SessionType.CHAT
 
     # Parent session inheritance
-    parent_agent_session_id = getattr(args, "parent_session", None)
+    parent_job_id = getattr(args, "parent_session", None)
     parent_session = None
-    if parent_agent_session_id:
-        if not parent_agent_session_id.strip():
+    if parent_job_id:
+        if not parent_job_id.strip():
             _output({"status": "error", "message": "--parent-session cannot be empty."})
             return 1
-        parent_session = _get_parent_session(parent_agent_session_id)
+        parent_session = _get_parent_session(parent_job_id)
         if parent_session is None:
             _output(
                 {
                     "status": "error",
-                    "message": f"Parent session {parent_agent_session_id} not found.",
+                    "message": f"Parent session {parent_job_id} not found.",
                 }
             )
             return 1
@@ -312,11 +336,10 @@ def cmd_schedule(args: argparse.Namespace) -> int:
             telegram_message_id=int(ctx["message_id"]) if ctx["message_id"] else 0,
             classification_type=inherited_classification_type,
             session_type=session_type,
-            scheduled_after=scheduled_after,
-            scheduling_depth=depth + 1,
+            scheduled_at=scheduled_at,
             issue_url=issue_url,
             correlation_id=inherited_correlation_id,
-            parent_agent_session_id=parent_agent_session_id,
+            parent_job_id=parent_job_id,
         )
 
         # Transition parent to waiting_for_children if not already
@@ -325,13 +348,10 @@ def cmd_schedule(args: argparse.Namespace) -> int:
                 from agent.agent_session_queue import _transition_parent
 
                 _transition_parent(parent_session, "waiting_for_children")
-                logger.info(
-                    f"Parent {parent_agent_session_id} transitioned to waiting_for_children"
-                )
+                logger.info(f"Parent {parent_job_id} transitioned to waiting_for_children")
             except Exception as e:
                 logger.warning(
-                    f"Failed to transition parent {parent_agent_session_id} "
-                    f"to waiting_for_children: {e}"
+                    f"Failed to transition parent {parent_job_id} to waiting_for_children: {e}"
                 )
 
         # Count queue position
@@ -339,8 +359,8 @@ def cmd_schedule(args: argparse.Namespace) -> int:
         queue_position = len(pending)
 
         scheduled_iso = None
-        if scheduled_after:
-            scheduled_iso = datetime.fromtimestamp(scheduled_after, tz=UTC).isoformat()
+        if scheduled_at:
+            scheduled_iso = datetime.fromtimestamp(scheduled_at, tz=UTC).isoformat()
 
         result = {
             "status": "queued",
@@ -350,11 +370,10 @@ def cmd_schedule(args: argparse.Namespace) -> int:
             "issue_title": issue_title,
             "priority": priority,
             "queue_position": queue_position,
-            "scheduling_depth": depth + 1,
-            "scheduled_after": scheduled_iso,
+            "scheduled_at": scheduled_iso,
         }
-        if parent_agent_session_id:
-            result["parent_agent_session_id"] = parent_agent_session_id
+        if parent_job_id:
+            result["parent_job_id"] = parent_job_id
 
         _output(result)
         return 0
@@ -379,16 +398,15 @@ def _format_agent_session_info(j, include_children: bool = False) -> dict:
         "message_preview": (j.message_text or "")[:100],
     }
     if j.created_at:
-        session_info["created_at"] = datetime.fromtimestamp(j.created_at, tz=UTC).isoformat()
+        session_info["created_at"] = _to_iso(j.created_at)
     if j.started_at:
-        session_info["started_at"] = datetime.fromtimestamp(j.started_at, tz=UTC).isoformat()
-    if j.scheduled_after:
-        scheduled_dt = datetime.fromtimestamp(j.scheduled_after, tz=UTC)
-        session_info["scheduled_after"] = scheduled_dt.isoformat()
+        session_info["started_at"] = _to_iso(j.started_at)
+    if j.scheduled_at:
+        session_info["scheduled_at"] = _to_iso(j.scheduled_at)
     if j.issue_url:
         session_info["issue_url"] = j.issue_url
-    if j.parent_agent_session_id:
-        session_info["parent_agent_session_id"] = j.parent_agent_session_id
+    if j.parent_job_id:
+        session_info["parent_job_id"] = j.parent_job_id
 
     if include_children and j.status == "waiting_for_children":
         completed, total, failed = j.get_completion_progress()
@@ -429,11 +447,11 @@ def cmd_status(args: argparse.Namespace) -> int:
         # Sort pending by priority then FIFO
         from agent.agent_session_queue import PRIORITY_RANK
 
-        pending.sort(key=lambda j: (PRIORITY_RANK.get(j.priority, 2), j.created_at or 0))
+        pending.sort(key=lambda j: (PRIORITY_RANK.get(j.priority, 2), _to_ts(j.created_at) or 0))
 
         # Separate root sessions from child sessions for tree display
-        root_pending = [j for j in pending if not j.parent_agent_session_id]
-        child_pending = [j for j in pending if j.parent_agent_session_id]
+        root_pending = [j for j in pending if not j.parent_job_id]
+        child_pending = [j for j in pending if j.parent_job_id]
 
         result = {
             "project": project_key,
@@ -522,7 +540,6 @@ def cmd_push(args: argparse.Namespace) -> int:
             sender_name="System (Push)",
             chat_id=ctx["chat_id"],
             telegram_message_id=int(ctx["message_id"]) if ctx["message_id"] else 0,
-            scheduling_depth=depth + 1,
             correlation_id=f"push-{uuid.uuid4().hex[:12]}",
         )
 
@@ -535,7 +552,6 @@ def cmd_push(args: argparse.Namespace) -> int:
                 "session_id": session_id,
                 "priority": priority,
                 "queue_position": len(pending),
-                "scheduling_depth": depth + 1,
             }
         )
         return 0
@@ -573,7 +589,7 @@ def cmd_bump(args: argparse.Namespace) -> int:
         fields = _extract_agent_session_fields(target)
         target.delete()
         fields["priority"] = "urgent"
-        fields["created_at"] = time.time()
+        fields["created_at"] = datetime.now(tz=UTC)
         new_session = AgentSession.create(**fields)
 
         _output(
@@ -606,7 +622,7 @@ def cmd_pop(args: argparse.Namespace) -> int:
             return 0
 
         # Sort same as _pop_agent_session: priority then FIFO
-        pending.sort(key=lambda j: (PRIORITY_RANK.get(j.priority, 2), j.created_at or 0))
+        pending.sort(key=lambda j: (PRIORITY_RANK.get(j.priority, 2), _to_ts(j.created_at) or 0))
         chosen = pending[0]
 
         info = {
@@ -644,7 +660,7 @@ def cmd_children(args: argparse.Namespace) -> int:
         completed, total, failed = parent.get_completion_progress()
 
         result = {
-            "parent_agent_session_id": args.agent_session_id,
+            "parent_job_id": args.agent_session_id,
             "parent_status": parent.status,
             "progress": {
                 "completed": completed,
@@ -663,7 +679,7 @@ def cmd_children(args: argparse.Namespace) -> int:
                 "message_preview": (c.message_text or "")[:100],
             }
             if c.created_at:
-                child_info["created_at"] = datetime.fromtimestamp(c.created_at, tz=UTC).isoformat()
+                child_info["created_at"] = _to_iso(c.created_at)
             if c.issue_url:
                 child_info["issue_url"] = c.issue_url
             result["children"].append(child_info)
@@ -804,7 +820,7 @@ def _kill_agent_session(target, *, skip_process_kill: bool = False) -> dict:
     fields = _extract_agent_session_fields(target)
     target.delete()
     fields["status"] = "killed"
-    fields["completed_at"] = time.time()
+    fields["completed_at"] = datetime.now(tz=UTC)
     new_session = AgentSession.create(**fields)
     result["new_agent_session_id"] = new_session.agent_session_id
     result["status"] = "killed"
@@ -920,7 +936,7 @@ def cmd_list(args: argparse.Namespace) -> int:
             sessions.extend(list(AgentSession.query.filter(project_key=project_key, status=status)))
 
         # Sort by created_at descending (newest first)
-        sessions.sort(key=lambda s: s.created_at or 0, reverse=True)
+        sessions.sort(key=lambda s: _to_ts(s.created_at) or 0, reverse=True)
 
         # Apply limit
         if args.limit:
@@ -934,8 +950,8 @@ def cmd_list(args: argparse.Namespace) -> int:
                 "project_key": s.project_key,
             }
             if s.created_at:
-                age_min = int((time.time() - s.created_at) / 60)
-                item["created_at"] = datetime.fromtimestamp(s.created_at, tz=UTC).isoformat()
+                age_min = int((time.time() - _to_ts(s.created_at)) / 60)
+                item["created_at"] = _to_iso(s.created_at)
                 item["age_minutes"] = age_min
             if s.message_text:
                 item["message_preview"] = (s.message_text or "")[:80]
@@ -966,7 +982,7 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
             else:
                 sessions = list(AgentSession.query.filter(status=status))
             for s in sessions:
-                age_sec = (now - float(s.created_at)) if s.created_at else 0
+                age_sec = (now - _to_ts(s.created_at)) if s.created_at else 0
                 if age_sec > age_threshold:
                     targets.append(s)
 
@@ -977,7 +993,7 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
         if args.dry_run:
             items = []
             for s in targets:
-                age_min = int((now - float(s.created_at or 0)) / 60)
+                age_min = int((now - float(_to_ts(s.created_at) or 0)) / 60)
                 items.append(
                     {
                         "session_id": s.session_id,

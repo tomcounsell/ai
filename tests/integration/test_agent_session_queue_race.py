@@ -7,6 +7,7 @@ All tests use redis_test_db fixture (autouse=True in conftest.py) for isolation.
 """
 
 import time
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -47,7 +48,7 @@ class TestExtractJobFields:
             sender_id=42,
             chat_title="Test Chat",
             revival_context="some context",
-            work_item_slug="my-feature",
+            slug="my-feature",
             task_list_id="thread-123-456",
             classification_type="bug",
             auto_continue_count=2,
@@ -72,7 +73,7 @@ class TestExtractJobFields:
         assert fields["telegram_message_id"] == 1
         assert fields["chat_title"] == "Test Chat"
         assert fields["revival_context"] == "some context"
-        assert fields["work_item_slug"] == "my-feature"
+        assert fields["slug"] == "my-feature"
         assert fields["task_list_id"] == "thread-123-456"
         assert fields["classification_type"] == "bug"
         assert fields["auto_continue_count"] == 2
@@ -142,12 +143,12 @@ class TestPopJobDeleteAndRecreate:
         _create_test_session(
             priority="low",
             message_text="low priority",
-            created_at=time.time(),
+            created_at=datetime.now(tz=UTC),
         )
         _create_test_session(
             priority="high",
             message_text="high priority",
-            created_at=time.time() + 1,
+            created_at=datetime.now(tz=UTC) + timedelta(seconds=1),
         )
 
         session = await _pop_agent_session("123")
@@ -231,8 +232,14 @@ class TestDrainGuard:
     @pytest.mark.asyncio
     async def test_pop_agent_session_with_fallback_respects_priority(self):
         """Sync fallback should respect priority ordering like _pop_agent_session."""
-        _create_test_session(priority="low", message_text="low prio", created_at=time.time())
-        _create_test_session(priority="high", message_text="high prio", created_at=time.time() + 1)
+        _create_test_session(
+            priority="low", message_text="low prio", created_at=datetime.now(tz=UTC)
+        )
+        _create_test_session(
+            priority="high",
+            message_text="high prio",
+            created_at=datetime.now(tz=UTC) + timedelta(seconds=1),
+        )
 
         result = await _pop_agent_session_with_fallback("123")
         assert result is not None

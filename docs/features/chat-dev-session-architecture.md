@@ -87,13 +87,12 @@ Single Popoto model (`AgentSession`) with discriminator field. Popoto ORM does n
 
 ### DevSession-specific fields
 - `parent_chat_session_id` (KeyField) -- logical FK to parent ChatSession
-- `stage_states` -- JSON dict of stage -> status
+- `stage_states` -- derived property reading from `session_events`
 - `slug` -- derives branch name, plan path, worktree
-- `artifacts` -- JSON dict of issue_url, plan_url, pr_url, etc.
+- `issue_url`, `plan_url`, `pr_url` -- SDLC link URLs
 
-### Factory Methods
-- `AgentSession.create_chat(...)` -- creates a ChatSession with correct defaults
-- `AgentSession.create_dev(...)` -- creates a DevSession linked to a parent
+### Session Creation
+Sessions are created directly via `AgentSession.create(session_type="chat", ...)` or `AgentSession.create(session_type="dev", ...)`. The `_normalize_kwargs()` method handles backward-compatible field name mapping.
 
 ### Derived Properties
 - `is_chat`, `is_dev` -- type checks
@@ -101,6 +100,8 @@ Single Popoto model (`AgentSession`) with discriminator field. Popoto ORM does n
 - `current_stage` -- first stage with status "in_progress"
 - `derived_branch_name` -- `session/{slug}` if slug exists
 - `plan_path` -- `docs/plans/{slug}.md` if slug exists
+- `summary`, `result_text`, `stage_states`, `last_commit_sha` -- derived from `session_events`
+- `scheduling_depth` -- derived from parent chain walk (max depth 5)
 
 ## Nudge Loop (Bridge Output Routing)
 
@@ -232,6 +233,6 @@ The `dev-session` agent is defined in `agent/agent_definitions.py`:
 ## Migration
 
 - Older AgentSession records in Redis are compatible (session_type defaults to null)
-- No data migration needed -- prior records are harmless
-- Factory methods enforce field contracts for new sessions
+- Float timestamps are auto-converted to datetime via `__setattr__`; run `scripts/migrate_datetime_fields.py` for existing data
+- `_normalize_kwargs()` maps deprecated field names to consolidated equivalents
 - Workers auto-adapt: jobs with chat_id use per-chat routing; older jobs fall back to project_key

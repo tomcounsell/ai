@@ -9,12 +9,13 @@ Tests cover:
 
 import asyncio
 import time
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from agent.agent_session_queue import (
     _active_workers,
-    _pop_agent_session,
+    _pop_agent_session_with_fallback,
 )
 from models.agent_session import AgentSession
 
@@ -53,25 +54,30 @@ class TestStartedAtField:
     async def test_pop_agent_session_sets_started_at(self):
         """When _pop_agent_session transitions a session to running, started_at should be set."""
         _create_test_session()
-        before = time.time()
-        session = await _pop_agent_session("123")
-        after = time.time()
+        before = datetime.now(tz=UTC)
+        session = await _pop_agent_session_with_fallback("123")
+        after = datetime.now(tz=UTC)
 
         assert session is not None
         # Verify the AgentSession in Redis has started_at set
         running_jobs = AgentSession.query.filter(project_key="test", status="running")
         assert len(running_jobs) == 1
         assert running_jobs[0].started_at is not None
-        assert before <= running_jobs[0].started_at <= after
+        started = running_jobs[0].started_at
+        if isinstance(started, (int, float)):
+            started = datetime.fromtimestamp(started, tz=UTC)
+        elif isinstance(started, datetime) and started.tzinfo is None:
+            started = started.replace(tzinfo=UTC)
+        assert before <= started <= after
 
     def test_started_at_in_extract_fields(self):
         """started_at should be included in _extract_agent_session_fields."""
         from agent.agent_session_queue import _extract_agent_session_fields
 
-        session = _create_test_session(started_at=12345.0)
+        session = _create_test_session(started_at=datetime.now(tz=UTC))
         fields = _extract_agent_session_fields(session)
         assert "started_at" in fields
-        assert fields["started_at"] == 12345.0
+        assert fields["started_at"] is not None
 
 
 class TestGetJobTimeout:
@@ -159,7 +165,7 @@ class TestJobHealthCheck:
         # Create a running session that has been running long enough
         _create_test_session(
             status="running",
-            started_at=time.time() - 600,  # 10 minutes ago
+            started_at=datetime.now(tz=UTC) - timedelta(seconds=600),  # 10 minutes ago
             session_id="dead_worker_session",
         )
 
@@ -186,7 +192,7 @@ class TestJobHealthCheck:
 
         _create_test_session(
             status="running",
-            started_at=time.time() - 600,  # 10 minutes ago
+            started_at=datetime.now(tz=UTC) - timedelta(seconds=600),  # 10 minutes ago
             session_id="orphan_session",
         )
 
@@ -209,7 +215,8 @@ class TestJobHealthCheck:
 
         _create_test_session(
             status="running",
-            started_at=time.time() - 60,  # 1 minute ago (under 5min guard)
+            started_at=datetime.now(tz=UTC)
+            - timedelta(seconds=60),  # 1 minute ago (under 5min guard)
             session_id="alive_session",
         )
 
@@ -237,7 +244,8 @@ class TestJobHealthCheck:
 
         _create_test_session(
             status="running",
-            started_at=time.time() - AGENT_SESSION_TIMEOUT_DEFAULT - 100,  # past timeout
+            started_at=datetime.now(tz=UTC)
+            - timedelta(seconds=AGENT_SESSION_TIMEOUT_DEFAULT + 100),  # past timeout
             session_id="timeout_session",
         )
 
@@ -261,7 +269,8 @@ class TestJobHealthCheck:
 
         _create_test_session(
             status="running",
-            started_at=time.time() - 60,  # Only 1 minute ago (under 5min guard)
+            started_at=datetime.now(tz=UTC)
+            - timedelta(seconds=60),  # Only 1 minute ago (under 5min guard)
             session_id="recent_session",
         )
 

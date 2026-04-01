@@ -27,7 +27,7 @@ def _make_test_session(session_id: str, chat_id: str = "test_chat") -> MagicMock
     session.message_text = "test message"
     session.sender_name = "Test"
     session.telegram_message_key = None
-    session.work_item_slug = None
+    session.slug = None
     session.task_list_id = None
     return session
 

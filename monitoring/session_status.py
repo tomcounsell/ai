@@ -59,8 +59,8 @@ def get_session_report(include_completed: bool = False, stalled_only: bool = Fal
 
         # Determine reference time for duration calculation
         if status == "active":
-            # For active sessions, stall is based on last_activity
-            transition_time = s.last_activity or s.started_at or s.created_at or now
+            # For active sessions, stall is based on updated_at
+            transition_time = s.updated_at or s.started_at or s.created_at or now
         else:
             transition_time = s.started_at or s.created_at or now
 

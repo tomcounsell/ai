@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from datetime import UTC, datetime
 
 import pytest
 
@@ -207,7 +208,7 @@ class TestAnalyzeSessionsFromRedis:
             status="completed",
             created_at=time.time(),
             started_at=time.time(),
-            last_activity=time.time(),
+            updated_at=datetime.now(tz=UTC),
             turn_count=5,
             tool_call_count=20,  # High ratio = thrashing
         )
@@ -228,7 +229,7 @@ class TestAnalyzeSessionsFromRedis:
             status="failed",
             created_at=time.time(),
             started_at=time.time(),
-            last_activity=time.time(),
+            updated_at=datetime.now(tz=UTC),
             turn_count=2,
             tool_call_count=3,
             summary="Crashed during build step",

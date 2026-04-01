@@ -31,7 +31,7 @@ def _make_agent_session(
     status="active",
     started_at="DEFAULT",
     created_at="DEFAULT",
-    last_activity="DEFAULT",
+    updated_at="DEFAULT",
     project_key="test",
     chat_id="12345",
     agent_session_id="session-001",
@@ -44,7 +44,7 @@ def _make_agent_session(
         status=status,
         started_at=now - 60 if started_at == "DEFAULT" else started_at,
         created_at=now - 120 if created_at == "DEFAULT" else created_at,
-        last_activity=now if last_activity == "DEFAULT" else last_activity,
+        updated_at=now if updated_at == "DEFAULT" else updated_at,
         project_key=project_key,
         chat_id=chat_id,
     )
@@ -146,7 +146,7 @@ class TestCheckStalledSessions:
         session = _make_agent_session(
             session_id="stalled-active",
             status="active",
-            last_activity=now - (STALL_THRESHOLD_ACTIVE + 60),
+            updated_at=now - (STALL_THRESHOLD_ACTIVE + 60),
             started_at=now - 3600,
         )
         mock_query = _mock_query_for_sessions({"active": [session]})
@@ -158,7 +158,7 @@ class TestCheckStalledSessions:
         now = time.time()
         session = _make_agent_session(
             status="active",
-            last_activity=now - 30,
+            updated_at=now - 30,
             started_at=now - 3600,
         )
         mock_query = _mock_query_for_sessions({"active": [session]})
@@ -187,7 +187,7 @@ class TestFixUnhealthySession:
         session = _make_agent_session(
             session_id="abandon-test",
             status="active",
-            last_activity=now - 2000,
+            updated_at=now - 2000,
             started_at=now - 3000,
         )
         assessment = {
@@ -211,7 +211,7 @@ class TestFixUnhealthySession:
         session = _make_agent_session(
             session_id="critical-test",
             status="active",
-            last_activity=now - 100,
+            updated_at=now - 100,
             started_at=now - 500,
         )
         assessment = {
@@ -242,7 +242,7 @@ class TestFixUnhealthySession:
         session = _make_agent_session(
             session_id="long-test",
             status="active",
-            last_activity=now - 100,  # Recent activity
+            updated_at=now - 100,  # Recent activity
             started_at=now - 8000,  # >2 hours
         )
         assessment = {

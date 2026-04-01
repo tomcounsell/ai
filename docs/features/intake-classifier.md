@@ -60,7 +60,7 @@ Unlike the existing `classify_request_async()` (which runs fire-and-forget), the
 
 ### Session Matching
 
-For non-reply interjections, the classifier finds the most recent active/running/dormant session in the same chat (by `last_activity` or `created_at`). No multi-session disambiguation -- just pick the most recent one.
+For non-reply interjections, the classifier finds the most recent active/running/dormant session in the same chat (by `updated_at` or `created_at`). No multi-session disambiguation -- just pick the most recent one.
 
 As of #619, the classifier also includes **pending** sessions within a 7-second recency window (`PENDING_MERGE_WINDOW_SECONDS`). This allows follow-up messages sent in quick succession to be recognized as interjections into pending sessions, rather than spawning competing sessions. Pending sessions older than 7 seconds are excluded to prevent unrelated messages from attaching to stale jobs.
 

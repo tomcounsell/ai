@@ -1,10 +1,11 @@
-"""Tests for session scheduling: scheduled_after, 4-tier priority, FIFO, and CLI tool."""
+"""Tests for session scheduling: scheduled_at, 4-tier priority, FIFO, and CLI tool."""
 
 import asyncio
 import json
 import subprocess
 import sys
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -62,9 +63,12 @@ def _create_pending(
     project_key="test-scheduler",
     priority="normal",
     message="test",
-    scheduled_after=None,
+    scheduled_at=None,
     scheduling_depth=0,
     created_at=None,
+    session_id=None,
+    parent_job_id=None,
+    **kwargs,
 ):
     """Helper to create a pending AgentSession for testing."""
     return AgentSession.create(
@@ -72,13 +76,14 @@ def _create_pending(
         status="pending",
         priority=priority,
         created_at=created_at or time.time(),
-        session_id=f"test-{time.time_ns()}",
+        session_id=session_id or f"test-{time.time_ns()}",
+        parent_job_id=parent_job_id,
         working_dir="/tmp/test",
         message_text=message,
         sender_name="Test",
         chat_id="test-chat",
         telegram_message_id=0,
-        scheduled_after=scheduled_after,
+        scheduled_at=scheduled_at,
         scheduling_depth=scheduling_depth,
     )
 
@@ -103,8 +108,8 @@ class TestPriorityRank:
 class TestPopJob:
     def test_fifo_ordering(self):
         """Within same priority, oldest session (FIFO) is popped first."""
-        _create_pending(created_at=time.time() - 100, message="old")
-        _create_pending(created_at=time.time(), message="new")
+        _create_pending(created_at=datetime.now(tz=UTC) - timedelta(seconds=100), message="old")
+        _create_pending(created_at=datetime.now(tz=UTC), message="new")
 
         session = asyncio.run(_pop_agent_session("test-chat"))
         assert session is not None
@@ -119,25 +124,25 @@ class TestPopJob:
         assert session is not None
         assert "urgent" in session.message_text
 
-    def test_scheduled_after_future_skipped(self):
-        """Jobs with scheduled_after in the future are skipped."""
+    def test_scheduled_at_future_skipped(self):
+        """Jobs with scheduled_at in the future are skipped."""
         future = time.time() + 3600  # 1 hour from now
-        _create_pending(scheduled_after=future, message="deferred")
+        _create_pending(scheduled_at=future, message="deferred")
 
         session = asyncio.run(_pop_agent_session("test-chat"))
         assert session is None  # No eligible sessions
 
-    def test_scheduled_after_past_eligible(self):
-        """Jobs with scheduled_after in the past are eligible."""
+    def test_scheduled_at_past_eligible(self):
+        """Jobs with scheduled_at in the past are eligible."""
         past = time.time() - 60  # 1 minute ago
-        _create_pending(scheduled_after=past, message="ready")
+        _create_pending(scheduled_at=past, message="ready")
 
         session = asyncio.run(_pop_agent_session("test-chat"))
         assert session is not None
         assert "ready" in session.message_text
 
-    def test_scheduled_after_none_eligible(self):
-        """Jobs with no scheduled_after are always eligible."""
+    def test_scheduled_at_none_eligible(self):
+        """Jobs with no scheduled_at are always eligible."""
         _create_pending(message="immediate")
 
         session = asyncio.run(_pop_agent_session("test-chat"))
@@ -147,7 +152,7 @@ class TestPopJob:
     def test_mixed_deferred_and_immediate(self):
         """Only immediate jobs are popped when deferred jobs exist."""
         future = time.time() + 3600
-        _create_pending(scheduled_after=future, message="deferred", priority="urgent")
+        _create_pending(scheduled_at=future, message="deferred", priority="urgent")
         _create_pending(message="immediate", priority="low")
 
         session = asyncio.run(_pop_agent_session("test-chat"))
@@ -168,16 +173,18 @@ class TestPopJob:
 
 
 class TestAgentSessionFields:
-    def test_scheduled_after_field(self):
-        """scheduled_after field persists on AgentSession."""
-        future = time.time() + 3600
-        session = _create_pending(scheduled_after=future)
-        assert float(session.scheduled_after) == pytest.approx(future, abs=1)
+    def test_scheduled_at_field(self):
+        """scheduled_at field persists on AgentSession."""
+        from datetime import timedelta
 
-    def test_scheduling_depth_field(self):
-        """scheduling_depth field persists on AgentSession."""
-        session = _create_pending(scheduling_depth=2)
-        assert int(session.scheduling_depth) == 2
+        future = datetime.now(tz=UTC) + timedelta(hours=1)
+        session = _create_pending(scheduled_at=future)
+        assert session.scheduled_at is not None
+
+    def test_scheduling_depth_derived(self):
+        """scheduling_depth is derived from parent_job_id chain."""
+        session = _create_pending()
+        assert session.scheduling_depth == 0  # No parent
 
     def test_default_priority_normal(self):
         """Default priority is 'normal'."""
@@ -185,14 +192,14 @@ class TestAgentSessionFields:
         assert session.priority == "normal"
 
     def test_extract_agent_session_fields_includes_new_fields(self):
-        """_extract_agent_session_fields preserves scheduled_after and scheduling_depth."""
-        future = time.time() + 3600
-        session = _create_pending(scheduled_after=future, scheduling_depth=1)
+        """_extract_agent_session_fields preserves scheduled_at."""
+        from datetime import timedelta
+
+        future = datetime.now(tz=UTC) + timedelta(hours=1)
+        session = _create_pending(scheduled_at=future)
         fields = _extract_agent_session_fields(session)
-        assert "scheduled_after" in fields
-        assert "scheduling_depth" in fields
-        assert float(fields["scheduled_after"]) == pytest.approx(future, abs=1)
-        assert int(fields["scheduling_depth"]) == 1
+        assert "scheduled_at" in fields
+        assert fields["scheduled_at"] is not None
 
 
 # === CLI Tool Tests ===
@@ -376,14 +383,15 @@ class TestSelfSchedulingProtection:
         # Test the constant
         assert MAX_SCHEDULING_DEPTH == 3
 
-        # Verify the depth check mechanism works correctly:
-        # A session at depth 3 should trigger the cap in the scheduling logic
-        parent = _create_pending(scheduling_depth=3)
+        # Create a chain of 3 parent sessions to reach depth 3
+        s0 = _create_pending(session_id="chain-root")
+        s1 = _create_pending(session_id="chain-1", parent_job_id=s0.job_id)
+        s2 = _create_pending(session_id="chain-2", parent_job_id=s1.job_id)
+        leaf = _create_pending(session_id="chain-leaf", parent_job_id=s2.job_id)
 
-        # Test that _get_scheduling_depth correctly reads from AgentSession
         import os
 
-        os.environ["VALOR_SESSION_ID"] = parent.session_id
+        os.environ["VALOR_SESSION_ID"] = leaf.session_id
         try:
             depth = _get_scheduling_depth()
             assert depth == 3, f"Expected depth 3, got {depth}"

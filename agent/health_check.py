@@ -445,7 +445,7 @@ async def watchdog_hook(
         if sessions:
             s = sessions[0]
             s.tool_call_count = count
-            s.last_activity = time.time()
+            s.updated_at = time.time()
             s.save()
     except Exception:
         pass  # Non-fatal: don't let tracking break the agent

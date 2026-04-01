@@ -9,7 +9,7 @@ Auto-tag rules are pattern-based (no LLM):
 - branch name starting with session/ -> sdlc tag
 - transcript patterns -> pr-created, tested tags
 - reflections signals -> reflections tag
-- work_item_slug set -> planned-work tag
+- slug set -> planned-work tag
 - turn_count >= 20 -> long-session tag
 
 Public API:
@@ -154,7 +154,7 @@ def auto_tag_session(session_id: str) -> None:
     """Apply auto-tags to a session based on its metadata and transcript.
 
     Reads session metadata (classification_type, branch_name, sender,
-    work_item_slug, turn_count) and the last 50 lines of the transcript
+    slug, turn_count) and the last 50 lines of the transcript
     to determine which tags to apply.
 
     This function is safe to call multiple times — it only adds tags,
@@ -194,8 +194,8 @@ def auto_tag_session(session_id: str) -> None:
     if "reflections" in sender.lower() or "reflections" in session_id.lower():
         new_tags.append("reflections")
 
-    # Rule 5: work_item_slug set -> planned-work
-    if session.work_item_slug:
+    # Rule 5: slug set -> planned-work
+    if session.slug:
         new_tags.append("planned-work")
 
     # Rule 6: turn_count >= 20 -> long-session

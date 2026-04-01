@@ -9,6 +9,7 @@ Requires: Redis running (autouse redis_test_db fixture handles isolation).
 """
 
 import time
+from datetime import UTC, datetime
 
 import pytest
 
@@ -36,7 +37,7 @@ class TestAsyncCreateMatchesFactoryMethods:
             session_type="dev",
             status="pending",
             priority="normal",
-            created_at=time.time(),
+            created_at=datetime.now(tz=UTC),
             sender_name="Test",
             chat_id=str(-time.time_ns() % 999_000),
             telegram_message_id=1,
@@ -70,7 +71,7 @@ class TestAsyncCreateMatchesFactoryMethods:
             session_type="chat",
             status="pending",
             priority="normal",
-            created_at=time.time(),
+            created_at=datetime.now(tz=UTC),
             **shared,
         )
         via_factory = AgentSession.create_chat(**shared)
@@ -94,7 +95,7 @@ class TestSessionTypeRoundTrip:
             project_key="test-rt",
             status="pending",
             priority="normal",
-            created_at=time.time(),
+            created_at=datetime.now(tz=UTC),
             session_id=f"rt-chat-{time.time_ns()}",
             working_dir="/tmp/test",
             message_text="roundtrip chat",
@@ -116,7 +117,7 @@ class TestSessionTypeRoundTrip:
             project_key="test-rt",
             status="pending",
             priority="normal",
-            created_at=time.time(),
+            created_at=datetime.now(tz=UTC),
             session_id=f"rt-dev-{time.time_ns()}",
             working_dir="/tmp/test",
             message_text="roundtrip dev",
@@ -152,7 +153,7 @@ class TestValidSessionTypes:
             project_key="test",
             status="pending",
             priority="normal",
-            created_at=time.time(),
+            created_at=datetime.now(tz=UTC),
             session_id=f"type-check-{time.time_ns()}",
             working_dir="/tmp/test",
             message_text="test",
@@ -170,7 +171,7 @@ class TestValidSessionTypes:
             project_key="test",
             status="pending",
             priority="normal",
-            created_at=time.time(),
+            created_at=datetime.now(tz=UTC),
             session_id=f"type-check-{time.time_ns()}",
             working_dir="/tmp/test",
             message_text="test",

@@ -382,14 +382,14 @@ class TestHistoryFallback:
         mock_session.session_type = "chat"
         mock_session.status = "running"
         mock_session.slug = None
-        mock_session.work_item_slug = None
+        mock_session.slug = None
         mock_session.message_text = "test"
         mock_session.project_key = None
         mock_session.branch_name = None
         mock_session.created_at = time.time()
         mock_session.started_at = time.time()
         mock_session.completed_at = None
-        mock_session.last_activity = None
+        mock_session.updated_at = None
         mock_session.stage_states = None
         mock_session.history = ["[stage] ISSUE done", "[stage] PLAN started"]
         mock_session.issue_url = None
@@ -471,7 +471,7 @@ class TestRetentionFilter:
         assert p.completed_at > (now - 48 * 3600)
 
     def test_timestamp_fallback_chain(self):
-        """When last_activity is None, fallback to other timestamps."""
+        """When updated_at is None, fallback to other timestamps."""
         from ui.data.sdlc import PipelineProgress
 
         now = time.time()
@@ -480,12 +480,12 @@ class TestRetentionFilter:
             agent_session_id="123",
             status="completed",
             created_at=now - 3600,
-            last_activity=None,
+            updated_at=None,
             completed_at=None,
             started_at=None,
         )
-        # Best timestamp fallback: completed_at or last_activity or started_at or created_at
-        best_ts = p.completed_at or p.last_activity or p.started_at or p.created_at or 0
+        # Best timestamp fallback: completed_at or updated_at or started_at or created_at
+        best_ts = p.completed_at or p.updated_at or p.started_at or p.created_at or 0
         assert best_ts == p.created_at
         assert best_ts > 0
 

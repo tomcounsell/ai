@@ -28,8 +28,8 @@ The env var is set in `ValorAgent._create_options()` and passed through `get_age
 
 ### Model Fields
 
-- `AgentSession.work_item_slug` -- Redis model field storing the active slug for a session. Set when `/do-plan {slug}` runs.
-- `Job.work_item_slug` -- Propagated from the session to each session for task list routing.
+- `AgentSession.slug` -- Redis model field storing the active slug for a session. Set when `/do-plan {slug}` runs.
+- `Job.slug` -- Propagated from the session to each session for task list routing.
 - `Job.task_list_id` -- The computed task list ID (either slug or thread-derived).
 
 ### Tier Transition
@@ -97,7 +97,7 @@ Experiments validated the approach before implementation:
 | `agent/hooks/session_registry.py` | Maps Claude Code UUIDs to bridge session IDs for hook-side resolution |
 | `agent/sdk_client.py` | Injects `CLAUDE_CODE_TASK_LIST_ID` into SDK environment; registers/unregisters sessions in the hook registry |
 | `agent/agent_session_queue.py` | Computes task list ID in `_execute_agent_session()` and passes to SDK |
-| `models/agent_session.py` | `AgentSession` model with `work_item_slug` field |
+| `models/agent_session.py` | `AgentSession` model with `slug` field |
 | `docs/features/task-list-isolation.md` | Experiment results for CLAUDE_CODE_TASK_LIST_ID behavior |
 | `docs/features/worktree-sdk-compatibility.md` | Experiment results for SDK + worktree compatibility |
 
@@ -154,7 +154,7 @@ Note: The `VALOR_SESSION_ID` env var injection in `sdk_client.py` is retained fo
 
 ## History Truncation Warning
 
-Session history is capped at `HISTORY_MAX_ENTRIES` (currently 20) entries via `AgentSession.append_history()`. When a session exceeds this cap, the oldest entries are silently dropped to stay within the limit. A `WARNING`-level log message is emitted each time truncation occurs, including the original length and number of entries lost:
+Session history is capped at `HISTORY_MAX_ENTRIES` (currently 20) entries via `AgentSession.append_event()`. When a session exceeds this cap, the oldest entries are silently dropped to stay within the limit. A `WARNING`-level log message is emitted each time truncation occurs, including the original length and number of entries lost:
 
 ```
 WARNING Session abc123 history truncated from 25 to 20, 5 oldest entries lost
@@ -167,7 +167,7 @@ This is particularly relevant for long-running SDLC sessions that may accumulate
 The auto-continue system uses session re-enqueue rather than steering queue injection. When a status update triggers auto-continue, a new session is enqueued through the normal session queue with the same session context:
 
 - `session_id` -- preserves thread identity
-- `work_item_slug` -- preserves slug-scoped task list binding
+- `slug` -- preserves slug-scoped task list binding
 - `task_list_id` -- preserves the CLAUDE_CODE_TASK_LIST_ID value
 
 This ensures auto-continued work remains within the correct isolation scope. The previous approach (steering queue injection) could bypass session scoping if the agent process had already exited.

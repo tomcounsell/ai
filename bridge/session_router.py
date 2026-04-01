@@ -80,9 +80,9 @@ async def find_matching_session(
             )
             return (None, 0.0)
 
-        # Cap at 5 most recent by last_activity
+        # Cap at 5 most recent by updated_at
         candidates.sort(
-            key=lambda s: s.last_activity or s.created_at or 0,
+            key=lambda s: s.updated_at or s.created_at or 0,
             reverse=True,
         )
         candidates = candidates[:5]

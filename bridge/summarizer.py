@@ -941,8 +941,8 @@ def _build_summary_prompt(
             context_parts.append(f"Work type: {session.classification_type}")
         if session.branch_name:
             context_parts.append(f"Branch: {session.branch_name}")
-        if hasattr(session, "work_item_slug") and session.work_item_slug:
-            context_parts.append(f"Work item: {session.work_item_slug}")
+        if hasattr(session, "slug") and session.slug:
+            context_parts.append(f"Work item: {session.slug}")
         # Include tracked links for context
         if hasattr(session, "get_links"):
             links = session.get_links()
