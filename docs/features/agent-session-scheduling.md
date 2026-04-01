@@ -191,6 +191,6 @@ No special batch API needed.
 ## Related
 
 - [Agent Session Queue](agent-session-queue.md) -- Core queue infrastructure
-- [Agent Session Dependency Tracking](agent-session-dependency-tracking.md) -- Sibling dependencies, branch mapping, PM queue controls
+- [Agent Session Model](agent-session-model.md) -- AgentSession model fields and lifecycle
 - [Chat Dev Session Architecture](chat-dev-session-architecture.md) -- ChatSession orchestrates SDLC pipeline for scheduled sessions
 - `/queue-status` skill -- Telegram-accessible queue management

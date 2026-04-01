@@ -96,16 +96,6 @@ Priority ranking constant: `PRIORITY_RANK = {"urgent": 0, "high": 1, "normal": 2
 
 The agent can enqueue jobs mid-conversation via `tools/agent_session_scheduler.py`. See [Agent Session Scheduling](agent-session-scheduling.md) for details.
 
-## Sibling Job Dependencies
-
-Jobs can declare dependencies on other jobs via `depends_on` (a list of `stable_agent_session_id` values). See [Agent Session Dependency Tracking](agent-session-dependency-tracking.md) for the full design including branch-session mapping, checkpoint/restore, and PM queue management.
-
-Key behaviors:
-- `_pop_agent_session()` skips jobs whose dependencies have not all reached `completed` status
-- `cancelled` and `failed` jobs block their dependents
-- A periodic `_dependency_health_check()` detects stuck chains and logs warnings
-- PM can reorder, cancel, and retry jobs via `reorder_agent_session()`, `cancel_agent_session()`, `retry_agent_session()`
-
 ## Parent-Child Job Hierarchy
 
 Jobs support parent-child decomposition via the `parent_agent_session_id` field on `AgentSession`.
@@ -145,5 +135,5 @@ See [Agent Session Scheduling](agent-session-scheduling.md) for usage details an
 
 - `docs/features/scale-agent-session-queue-with-popoto-and-worktrees.md` -- Original agent session queue architecture
 - `docs/features/agent-session-scheduling.md` -- Agent-initiated scheduling tool
-- `docs/features/agent-session-dependency-tracking.md` -- Sibling dependencies, branch mapping, checkpoint/restore, PM controls
+- `docs/features/agent-session-model.md` -- AgentSession model fields and lifecycle
 - `agent/agent_session_queue.py` -- Implementation

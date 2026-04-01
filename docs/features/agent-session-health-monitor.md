@@ -91,6 +91,6 @@ A separate `_dependency_health_check()` runs alongside the agent session health 
 - [scale-agent-session-queue-with-popoto-and-worktrees.md](scale-agent-session-queue-with-popoto-and-worktrees.md) -- The underlying Redis agent session queue
 - [session-watchdog.md](session-watchdog.md) -- Session-level health monitoring (complementary layer)
 - [bridge-self-healing.md](bridge-self-healing.md) -- Bridge process-level health monitoring
-- [agent-session-dependency-tracking.md](agent-session-dependency-tracking.md) -- Sibling dependencies and PM queue controls
+- [agent-session-model.md](agent-session-model.md) -- AgentSession model fields and lifecycle
 - `agent/agent_session_queue.py` -- Implementation source
 - Issue #127 -- Original tracking issue

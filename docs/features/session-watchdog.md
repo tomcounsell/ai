@@ -29,7 +29,7 @@ The watchdog fixes problems automatically — marking stuck sessions as abandone
 ## Detection Heuristics
 
 ### Silence Detection
-Fires when `time.time() - session.last_activity > SILENCE_THRESHOLD`. Indicates the agent may have stalled.
+Fires when `time.time() - session.updated_at > SILENCE_THRESHOLD`. Indicates the agent may have stalled. The `updated_at` field (a `DatetimeField` with `auto_now=True`, renamed from `last_activity`) is compared using `_to_timestamp()` which handles both datetime and float values.
 
 | Setting | Value |
 |---------|-------|
