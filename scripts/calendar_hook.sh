@@ -3,7 +3,7 @@
 # Rate-limited: only calls valor-calendar if 10+ minutes since last call.
 # Reads project slug from directory name of cwd passed via stdin JSON.
 
-set -e
+set +e  # Hooks must never fail noisily
 
 LOCKDIR="$HOME/Desktop/Valor"
 STAMPFILE="$LOCKDIR/.calendar_hook_stamp"
@@ -84,9 +84,13 @@ fi
 mkdir -p "$LOCKDIR"
 date +%s > "$STAMPFILE"
 [ -n "$SESSION_ID" ] && echo "$SESSION_ID" > "$SESSIONFILE"
-export PATH="$HOME/Library/Python/3.12/bin:$PATH"
+VENV_CAL="$CLAUDE_PROJECT_DIR/.venv/bin/valor-calendar"
+SYS_CAL="$HOME/Library/Python/3.12/bin/valor-calendar"
+CAL="${VENV_CAL}"
+[ ! -x "$CAL" ] && CAL="$SYS_CAL"
+
 if [ -n "$PROJECT" ]; then
-    exec valor-calendar --project "$PROJECT" "$SLUG"
+    "$CAL" --project "$PROJECT" "$SLUG" 2>/dev/null || true
 else
-    exec valor-calendar "$SLUG"
+    "$CAL" "$SLUG" 2>/dev/null || true
 fi

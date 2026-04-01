@@ -3,7 +3,7 @@
 # user's first prompt via a quick Haiku call, then creates/extends a calendar event.
 # Rate-limited: only fires once per 10 minutes (first prompt wins).
 
-set -e
+set +e  # Hooks must never fail noisily
 
 LOCKDIR="$HOME/Desktop/Valor"
 STAMPFILE="$LOCKDIR/.calendar_hook_stamp"
@@ -71,7 +71,8 @@ if [ "$SAME_SESSION" = true ] && [ -f "$STAMPFILE" ]; then
             date +%s > "$STAMPFILE"
             export PATH="$HOME/src/ai/.venv/bin:$HOME/Library/Python/3.12/bin:$PATH"
             PREV_PROJECT=$(cat "$LOCKDIR/.calendar_hook_project" 2>/dev/null || echo "")
-            exec valor-calendar --project "$PREV_PROJECT" "$SLUG"
+            valor-calendar --project "$PREV_PROJECT" "$SLUG" 2>/dev/null || true
+            exit 0
         fi
     fi
 fi
@@ -151,4 +152,4 @@ date +%s > "$STAMPFILE"
 echo "$SLUG" > "$SLUGFILE"
 echo "$PROJECT" > "$LOCKDIR/.calendar_hook_project"
 export PATH="$HOME/src/ai/.venv/bin:$HOME/Library/Python/3.12/bin:$PATH"
-exec valor-calendar --project "$PROJECT" "$SLUG"
+valor-calendar --project "$PROJECT" "$SLUG" 2>/dev/null || true
