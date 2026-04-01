@@ -148,6 +148,104 @@ class AgentSession(Model):
     # === Session hierarchy fields ===
     parent_job_id = KeyField(null=True)
 
+    # === Backward-compatible field name mapping ===
+
+    @classmethod
+    def _normalize_kwargs(cls, kwargs: dict) -> dict:
+        """Map deprecated field names to their new consolidated equivalents.
+
+        This allows callers to pass old field names (message_text, sender_name,
+        etc.) and have them automatically mapped into initial_telegram_message,
+        extra_context, etc.
+        """
+        # Extract fields that map to initial_telegram_message
+        itm_fields = {}
+        for key in ("message_text", "sender_name", "sender_id",
+                     "telegram_message_id", "chat_title"):
+            if key in kwargs and "initial_telegram_message" not in kwargs:
+                val = kwargs.pop(key)
+                if val is not None:
+                    itm_fields[key] = val
+        if itm_fields and "initial_telegram_message" not in kwargs:
+            kwargs["initial_telegram_message"] = itm_fields
+
+        # Extract fields that map to extra_context
+        ec_fields = {}
+        for key in ("revival_context", "classification_type", "classification_confidence"):
+            if key in kwargs and "extra_context" not in kwargs:
+                val = kwargs.pop(key)
+                if val is not None:
+                    ec_fields[key] = val
+        if ec_fields and "extra_context" not in kwargs:
+            kwargs["extra_context"] = ec_fields
+
+        # Map deprecated field names
+        if "work_item_slug" in kwargs and "slug" not in kwargs:
+            kwargs["slug"] = kwargs.pop("work_item_slug")
+        elif "work_item_slug" in kwargs:
+            kwargs.pop("work_item_slug")
+
+        if "last_activity" in kwargs and "updated_at" not in kwargs:
+            kwargs["updated_at"] = kwargs.pop("last_activity")
+        elif "last_activity" in kwargs:
+            kwargs.pop("last_activity")
+
+        if "scheduled_after" in kwargs and "scheduled_at" not in kwargs:
+            val = kwargs.pop("scheduled_after")
+            if isinstance(val, (int, float)):
+                kwargs["scheduled_at"] = datetime.fromtimestamp(val, tz=UTC)
+            else:
+                kwargs["scheduled_at"] = val
+        elif "scheduled_after" in kwargs:
+            kwargs.pop("scheduled_after")
+
+        if "parent_agent_session_id" in kwargs and "parent_job_id" not in kwargs:
+            kwargs["parent_job_id"] = kwargs.pop("parent_agent_session_id")
+        elif "parent_agent_session_id" in kwargs:
+            kwargs.pop("parent_agent_session_id")
+
+        if "agent_session_id" in kwargs:
+            kwargs.pop("agent_session_id")  # AutoKeyField, ignore
+
+        # Map old history to session_events
+        if "history" in kwargs and "session_events" not in kwargs:
+            kwargs["session_events"] = kwargs.pop("history")
+        elif "history" in kwargs:
+            kwargs.pop("history")
+
+        # Map old summary to a session event
+        if "summary" in kwargs:
+            kwargs.pop("summary")  # Will be set via property/event
+
+        # Remove dead fields silently
+        for dead in ("depends_on", "stable_agent_session_id", "scheduling_depth",
+                      "commit_sha", "stage_states", "_qa_mode_legacy"):
+            kwargs.pop(dead, None)
+
+        # Convert float timestamps to datetime
+        if "created_at" in kwargs and isinstance(kwargs["created_at"], (int, float)):
+            kwargs["created_at"] = datetime.fromtimestamp(kwargs["created_at"], tz=UTC)
+        if "started_at" in kwargs and isinstance(kwargs["started_at"], (int, float)):
+            kwargs["started_at"] = datetime.fromtimestamp(kwargs["started_at"], tz=UTC)
+        if "completed_at" in kwargs and isinstance(kwargs["completed_at"], (int, float)):
+            kwargs["completed_at"] = datetime.fromtimestamp(kwargs["completed_at"], tz=UTC)
+        if "updated_at" in kwargs and isinstance(kwargs["updated_at"], (int, float)):
+            kwargs["updated_at"] = datetime.fromtimestamp(kwargs["updated_at"], tz=UTC)
+
+        return kwargs
+
+    @classmethod
+    def create(cls, **kwargs) -> "AgentSession":
+        """Create an AgentSession with backward-compatible field name support."""
+        kwargs = cls._normalize_kwargs(kwargs)
+        return super().create(**kwargs)
+
+    @classmethod
+    async def async_create(cls, **kwargs) -> "AgentSession":
+        """Create an AgentSession asynchronously with backward-compatible field name support."""
+        kwargs = cls._normalize_kwargs(kwargs)
+        return await super().async_create(**kwargs)
+
     # === Backward-compatible property: agent_session_id -> job_id ===
 
     @property

@@ -9,6 +9,7 @@ Tests cover:
 
 import asyncio
 import time
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -159,7 +160,7 @@ class TestJobHealthCheck:
         # Create a running session that has been running long enough
         _create_test_session(
             status="running",
-            started_at=time.time() - 600,  # 10 minutes ago
+            started_at=datetime.now(tz=UTC) - timedelta(seconds=600),  # 10 minutes ago
             session_id="dead_worker_session",
         )
 
@@ -186,7 +187,7 @@ class TestJobHealthCheck:
 
         _create_test_session(
             status="running",
-            started_at=time.time() - 600,  # 10 minutes ago
+            started_at=datetime.now(tz=UTC) - timedelta(seconds=600),  # 10 minutes ago
             session_id="orphan_session",
         )
 
@@ -209,7 +210,7 @@ class TestJobHealthCheck:
 
         _create_test_session(
             status="running",
-            started_at=time.time() - 60,  # 1 minute ago (under 5min guard)
+            started_at=datetime.now(tz=UTC) - timedelta(seconds=60),  # 1 minute ago (under 5min guard)
             session_id="alive_session",
         )
 
@@ -237,7 +238,7 @@ class TestJobHealthCheck:
 
         _create_test_session(
             status="running",
-            started_at=time.time() - AGENT_SESSION_TIMEOUT_DEFAULT - 100,  # past timeout
+            started_at=datetime.now(tz=UTC) - AGENT_SESSION_TIMEOUT_DEFAULT - 100,  # past timeout
             session_id="timeout_session",
         )
 
@@ -261,7 +262,7 @@ class TestJobHealthCheck:
 
         _create_test_session(
             status="running",
-            started_at=time.time() - 60,  # Only 1 minute ago (under 5min guard)
+            started_at=datetime.now(tz=UTC) - timedelta(seconds=60),  # Only 1 minute ago (under 5min guard)
             session_id="recent_session",
         )
 

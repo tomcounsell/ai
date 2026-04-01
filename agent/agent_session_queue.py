@@ -190,13 +190,10 @@ async def _push_agent_session(
     classification_type: str | None = None,
     auto_continue_count: int = 0,
     correlation_id: str | None = None,
-    scheduled_at: datetime | None = None,
+    scheduled_at: datetime | float | None = None,
     parent_job_id: str | None = None,
     telegram_message_key: str | None = None,
     session_type: str = SessionType.CHAT,
-    # Deprecated parameter aliases (backward compat)
-    scheduled_at: float | None = None,
-    parent_job_id: str | None = None,
     scheduling_depth: int = 0,  # ignored, now derived
     depends_on: list[str] | None = None,  # ignored, removed
     **_kwargs,
@@ -210,10 +207,8 @@ async def _push_agent_session(
     (reply-to-resume), mark old completed records with the same session_id
     as 'superseded' to prevent ambiguity in later record selection.
     """
-    # Handle deprecated parameter aliases
-    if parent_job_id and not parent_job_id:
-        parent_job_id = parent_job_id
-    if scheduled_at is not None and scheduled_at is None:
+    # Convert float timestamps to datetime (backward compat)
+    if isinstance(scheduled_at, (int, float)):
         scheduled_at = datetime.fromtimestamp(scheduled_at, tz=UTC)
 
     # Build consolidated dicts
@@ -1468,7 +1463,7 @@ async def enqueue_agent_session(
         chat_title=chat_title,
         priority=priority,
         revival_context=revival_context,
-        work_item_slug=slug,
+        slug=slug,
         task_list_id=task_list_id,
         classification_type=classification_type,
         auto_continue_count=auto_continue_count,

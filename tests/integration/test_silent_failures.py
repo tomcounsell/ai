@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 """Tests for silent failure logging in agent_session_queue.py (Gap 1).
 
 Verifies that critical exception handlers in agent_session_queue.py emit
@@ -43,7 +44,7 @@ class TestPushJobLogging:
             status="pending",
             chat_id="chat_1",
             sender_name="Test",
-            created_at=time.time(),
+            created_at=datetime.now(tz=UTC),
             message_text="test message",
             working_dir="/tmp/test",
             telegram_message_id=1,
@@ -95,7 +96,7 @@ class TestPopJobLogging:
             status="pending",
             chat_id="chat_2",
             sender_name="Test",
-            created_at=time.time(),
+            created_at=datetime.now(tz=UTC),
             message_text="test message",
             working_dir="/tmp/test",
             telegram_message_id=2,

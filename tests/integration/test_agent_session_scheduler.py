@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -103,8 +104,8 @@ class TestPriorityRank:
 class TestPopJob:
     def test_fifo_ordering(self):
         """Within same priority, oldest session (FIFO) is popped first."""
-        _create_pending(created_at=time.time() - 100, message="old")
-        _create_pending(created_at=time.time(), message="new")
+        _create_pending(created_at=datetime.now(tz=UTC) - timedelta(seconds=100), message="old")
+        _create_pending(created_at=datetime.now(tz=UTC), message="new")
 
         session = asyncio.run(_pop_agent_session("test-chat"))
         assert session is not None

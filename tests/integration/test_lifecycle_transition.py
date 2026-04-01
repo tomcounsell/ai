@@ -9,6 +9,7 @@ Covers:
 
 import logging
 import time
+from datetime import UTC, datetime
 
 import pytest
 
@@ -27,7 +28,7 @@ class TestLogLifecycleTransition:
             session_id="llt-test-2",
             project_key="test",
             status="pending",
-            created_at=time.time(),
+            created_at=datetime.now(tz=UTC),
         )
         s.log_lifecycle_transition("running", "worker picked up")
 
@@ -44,7 +45,7 @@ class TestLogLifecycleTransition:
             session_id="llt-test-3",
             project_key="test",
             status="active",
-            created_at=time.time(),
+            created_at=datetime.now(tz=UTC),
         )
         s.log_lifecycle_transition("completed", "transcript completed: completed")
 
@@ -58,7 +59,7 @@ class TestLogLifecycleTransition:
             session_id="llt-test-4",
             project_key="testproj",
             status="pending",
-            created_at=time.time(),
+            created_at=datetime.now(tz=UTC),
         )
         with caplog.at_level(logging.INFO, logger="models.agent_session"):
             s.log_lifecycle_transition("running", "test context")
@@ -96,7 +97,7 @@ class TestLogLifecycleTransition:
             session_id="llt-test-6",
             project_key="test",
             status="active",
-            created_at=time.time(),
+            created_at=datetime.now(tz=UTC),
         )
         # Force status to None for edge case testing
         s.status = None
@@ -113,7 +114,7 @@ class TestLogLifecycleTransition:
             session_id="llt-test-7",
             project_key="test",
             status="pending",
-            created_at=time.time(),
+            created_at=datetime.now(tz=UTC),
         )
         with caplog.at_level(logging.INFO, logger="models.agent_session"):
             s.log_lifecycle_transition("running")

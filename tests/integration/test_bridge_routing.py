@@ -13,6 +13,7 @@ Requires: Redis running (autouse redis_test_db fixture handles isolation).
 
 import inspect
 import time
+from datetime import UTC, datetime
 
 import pytest
 
@@ -218,7 +219,7 @@ class TestWorkflowIdAbsent:
             project_key="test",
             status="pending",
             priority="normal",
-            created_at=time.time(),
+            created_at=datetime.now(tz=UTC),
             session_id="wfid-check",
             working_dir="/tmp/test",
             message_text="test",

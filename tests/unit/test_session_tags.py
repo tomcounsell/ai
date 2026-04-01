@@ -9,6 +9,7 @@ Tests cover:
 
 import shutil
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -43,9 +44,9 @@ def _create_session(
         session_id=session_id,
         project_key=project_key,
         status="active",
-        created_at=time.time(),
-        started_at=time.time(),
-        updated_at=time.time(),
+        created_at=datetime.now(tz=UTC),
+        started_at=datetime.now(tz=UTC),
+        updated_at=datetime.now(tz=UTC),
         turn_count=turn_count,
         tool_call_count=0,
         classification_type=classification_type,

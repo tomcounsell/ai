@@ -4,6 +4,7 @@ Tests use Redis db=1 via the autouse redis_test_db fixture in conftest.py.
 """
 
 import time
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -186,7 +187,7 @@ class TestBridgeSteeringCheck:
             project_key="test",
             status=status,
             message_text="test message",
-            created_at=time.time(),
+            created_at=datetime.now(tz=UTC),
         )
         session.save()
         return session
@@ -399,7 +400,7 @@ class TestPendingSessionSteering:
         from bridge.telegram_bridge import PENDING_MERGE_WINDOW_SECONDS
 
         session_id = "test_pending_steer_recent"
-        self._create_session(session_id, "pending", created_at=time.time())
+        self._create_session(session_id, "pending", created_at=datetime.now(tz=UTC))
 
         # Simulate the bridge logic: check age and push steering
         from models.agent_session import AgentSession
@@ -423,7 +424,7 @@ class TestPendingSessionSteering:
 
         session_id = "test_pending_steer_old"
         # Create with timestamp 10s in the past
-        self._create_session(session_id, "pending", created_at=time.time() - 10)
+        self._create_session(session_id, "pending", created_at=datetime.now(tz=UTC) - timedelta(seconds=10))
 
         from models.agent_session import AgentSession
 
@@ -444,7 +445,7 @@ class TestPendingSessionSteering:
     def test_multiple_steering_messages_into_pending(self):
         """Multiple follow-up messages should all queue into a pending session."""
         session_id = "test_pending_multi_steer"
-        self._create_session(session_id, "pending", created_at=time.time())
+        self._create_session(session_id, "pending", created_at=datetime.now(tz=UTC))
 
         push_steering_message(session_id, "first follow-up", "Tom")
         push_steering_message(session_id, "second follow-up", "Tom")
@@ -464,7 +465,7 @@ class TestPendingSessionSteering:
         chat_id = "test_intake_pending_chat"
         session_id = "test_intake_pending_session"
         self._create_session(
-            session_id, "pending", chat_id=chat_id, created_at=time.time()
+            session_id, "pending", chat_id=chat_id, created_at=datetime.now(tz=UTC)
         )
 
         # Replicate the intake classifier logic from the bridge
@@ -499,7 +500,7 @@ class TestPendingSessionSteering:
         chat_id = "test_intake_old_pending_chat"
         session_id = "test_intake_old_pending_session"
         self._create_session(
-            session_id, "pending", chat_id=chat_id, created_at=time.time() - 10
+            session_id, "pending", chat_id=chat_id, created_at=datetime.now(tz=UTC) - timedelta(seconds=10)
         )
 
         active_sessions = []
@@ -541,7 +542,7 @@ class TestDrainOnStart:
             priority="normal",
             chat_id=chat_id,
             message_text=message_text,
-            created_at=time.time(),
+            created_at=datetime.now(tz=UTC),
             working_dir="/tmp/test",
             sender_name="Test",
             telegram_message_id=1,

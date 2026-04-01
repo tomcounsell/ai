@@ -12,6 +12,7 @@ Covers the gaps identified in PR #180 review:
 
 import json
 import time
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -41,9 +42,9 @@ def session(redis_test_db):
         status="active",
         chat_id="100",
         sender_name="Tom",
-        created_at=time.time(),
-        started_at=time.time(),
-        updated_at=time.time(),
+        created_at=datetime.now(tz=UTC),
+        started_at=datetime.now(tz=UTC),
+        updated_at=datetime.now(tz=UTC),
         message_text="SDLC 177",
         turn_count=0,
         tool_call_count=0,
@@ -60,9 +61,9 @@ def sdlc_session(redis_test_db):
         status="completed",
         chat_id="200",
         sender_name="Tom",
-        created_at=time.time(),
-        started_at=time.time(),
-        updated_at=time.time(),
+        created_at=datetime.now(tz=UTC),
+        started_at=datetime.now(tz=UTC),
+        updated_at=datetime.now(tz=UTC),
         message_text="SDLC 177",
         classification_type="feature",
         branch_name="session/summarizer-bullet-format",
@@ -86,9 +87,9 @@ def qa_session(redis_test_db):
         status="completed",
         chat_id="300",
         sender_name="Kevin",
-        created_at=time.time(),
-        started_at=time.time(),
-        updated_at=time.time(),
+        created_at=datetime.now(tz=UTC),
+        started_at=datetime.now(tz=UTC),
+        updated_at=datetime.now(tz=UTC),
         message_text="How does the session queue work?",
         turn_count=3,
         tool_call_count=5,
@@ -104,9 +105,9 @@ def chat_session(redis_test_db):
         status="completed",
         chat_id="400",
         sender_name="Tom",
-        created_at=time.time(),
-        started_at=time.time(),
-        updated_at=time.time(),
+        created_at=datetime.now(tz=UTC),
+        started_at=datetime.now(tz=UTC),
+        updated_at=datetime.now(tz=UTC),
         message_text="Hey, how's it going?",
         turn_count=2,
         tool_call_count=0,
@@ -151,7 +152,7 @@ class TestHistoryTracking:
             session_id="no-history",
             project_key="test",
             status="active",
-            created_at=time.time(),
+            created_at=datetime.now(tz=UTC),
         )
         # history field is None by default
         assert s._get_history_list() == []
@@ -280,7 +281,7 @@ class TestGetStatusEmoji:
             session_id="failed-1",
             project_key="test",
             status="failed",
-            created_at=time.time(),
+            created_at=datetime.now(tz=UTC),
         )
         assert _get_status_emoji(s) == "❌"
 
@@ -544,7 +545,7 @@ class TestBackwardCompatibility:
             session_id="shim-test",
             project_key="test",
             status="active",
-            created_at=time.time(),
+            created_at=datetime.now(tz=UTC),
             sender_name="Test",
         )
         assert s.session_id == "shim-test"
@@ -568,7 +569,7 @@ class TestSDLCLifecycle:
             status="pending",
             chat_id="500",
             sender_name="Tom",
-            created_at=time.time(),
+            created_at=datetime.now(tz=UTC),
             message_text="SDLC 177",
             priority="high",
         )
@@ -585,7 +586,7 @@ class TestSDLCLifecycle:
             "priority": s.priority,
         }
         s.delete()
-        s = AgentSession.create(status="running", started_at=time.time(), **fields)
+        s = AgentSession.create(status="running", started_at=datetime.now(tz=UTC), **fields)
         assert s.status == "running"
 
         # 3. Track SDLC stages via stage_states
@@ -641,9 +642,9 @@ class TestSDLCClassificationTypeLifecycle:
             status="running",
             chat_id="800",
             sender_name="Valor",
-            created_at=time.time(),
-            started_at=time.time(),
-            updated_at=time.time(),
+            created_at=datetime.now(tz=UTC),
+            started_at=datetime.now(tz=UTC),
+            updated_at=datetime.now(tz=UTC),
             message_text="SDLC issue 276",
             classification_type="sdlc",
         )
@@ -685,9 +686,9 @@ class TestSDLCClassificationTypeLifecycle:
             status="running",
             chat_id="800",
             sender_name="System (auto-continue)",
-            created_at=time.time(),
-            started_at=time.time(),
-            updated_at=time.time(),
+            created_at=datetime.now(tz=UTC),
+            started_at=datetime.now(tz=UTC),
+            updated_at=datetime.now(tz=UTC),
             message_text="[System Coach] continue building",
             classification_type="sdlc",
         )
@@ -726,7 +727,7 @@ class TestQALifecycle:
             status="completed",
             chat_id="600",
             sender_name="Kevin",
-            created_at=time.time(),
+            created_at=datetime.now(tz=UTC),
             message_text="How does the session queue work?",
         )
         s.append_history("user", "How does the session queue work?")
@@ -758,7 +759,7 @@ class TestChitChatLifecycle:
             status="completed",
             chat_id="700",
             sender_name="Tom",
-            created_at=time.time(),
+            created_at=datetime.now(tz=UTC),
             message_text="Hey, how's it going?",
         )
 

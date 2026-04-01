@@ -12,6 +12,7 @@ validation. Mock-based tests are used only where SDK imports are needed.
 """
 
 import time
+from datetime import UTC, datetime
 
 import pytest
 
@@ -30,7 +31,7 @@ def pending_session(redis_test_db):
         chat_id="-5051",
         sender_name="Tom",
         sender_id=12345,
-        created_at=time.time(),
+        created_at=datetime.now(tz=UTC),
         message_text="SDLC 209",
         priority="high",
     )
@@ -46,8 +47,8 @@ def running_session(redis_test_db):
         chat_id="-5051",
         sender_name="Tom",
         sender_id=12345,
-        created_at=time.time(),
-        started_at=time.time(),
+        created_at=datetime.now(tz=UTC),
+        started_at=datetime.now(tz=UTC),
         message_text="SDLC 209",
         priority="high",
         task_list_id="thread--5051-12345",
@@ -77,7 +78,7 @@ class TestTaskListIdPersistence:
             session_id="tg_valor_-5051_99999",
             project_key="valor",
             status="running",
-            created_at=time.time(),
+            created_at=datetime.now(tz=UTC),
         )
         assert s.task_list_id is None
 
@@ -96,7 +97,7 @@ class TestTaskListIdPersistence:
             session_id="tg_valor_-5051_88888",
             project_key="valor",
             status="running",
-            created_at=time.time(),
+            created_at=datetime.now(tz=UTC),
             slug="bridge-sdk-fix",
         )
 
@@ -323,9 +324,9 @@ class TestFullChainIntegration:
             status="completed",
             chat_id="-5051",
             sender_name="Tom",
-            created_at=time.time(),
-            started_at=time.time(),
-            updated_at=time.time(),
+            created_at=datetime.now(tz=UTC),
+            started_at=datetime.now(tz=UTC),
+            updated_at=datetime.now(tz=UTC),
             message_text="SDLC 209",
             task_list_id="thread--5051-chain",
         )

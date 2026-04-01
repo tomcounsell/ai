@@ -131,6 +131,77 @@ def redis_test_db(request):
 
 
 # ---------------------------------------------------------------------------
+# Test helper: create AgentSession with backward-compatible field names
+# ---------------------------------------------------------------------------
+
+
+def create_test_session(**kwargs):
+    """Create an AgentSession with backward-compatible field names.
+
+    Accepts the old individual field names (message_text, sender_name, sender_id,
+    telegram_message_id, chat_title, revival_context, classification_type,
+    classification_confidence, work_item_slug) and maps them into the new
+    consolidated DictFields.
+    """
+    from datetime import UTC, datetime
+
+    from models.agent_session import AgentSession
+
+    # Extract property-based fields that map to initial_telegram_message
+    msg_text = kwargs.pop("message_text", None)
+    sender_name = kwargs.pop("sender_name", None)
+    sender_id = kwargs.pop("sender_id", None)
+    telegram_message_id = kwargs.pop("telegram_message_id", None)
+    chat_title = kwargs.pop("chat_title", None)
+
+    # Extract property-based fields that map to extra_context
+    revival_context = kwargs.pop("revival_context", None)
+    classification_type = kwargs.pop("classification_type", None)
+    classification_confidence = kwargs.pop("classification_confidence", None)
+
+    # Extract property-based fields that map to slug
+    work_item_slug = kwargs.pop("work_item_slug", None)
+
+    # Build initial_telegram_message if any telegram fields provided
+    if "initial_telegram_message" not in kwargs:
+        itm = {}
+        if msg_text is not None:
+            itm["message_text"] = msg_text
+        if sender_name is not None:
+            itm["sender_name"] = sender_name
+        if sender_id is not None:
+            itm["sender_id"] = sender_id
+        if telegram_message_id is not None:
+            itm["telegram_message_id"] = telegram_message_id
+        if chat_title is not None:
+            itm["chat_title"] = chat_title
+        if itm:
+            kwargs["initial_telegram_message"] = itm
+
+    # Build extra_context if any context fields provided
+    if "extra_context" not in kwargs:
+        ec = {}
+        if revival_context is not None:
+            ec["revival_context"] = revival_context
+        if classification_type is not None:
+            ec["classification_type"] = classification_type
+        if classification_confidence is not None:
+            ec["classification_confidence"] = classification_confidence
+        if ec:
+            kwargs["extra_context"] = ec
+
+    # Map work_item_slug to slug
+    if work_item_slug is not None and "slug" not in kwargs:
+        kwargs["slug"] = work_item_slug
+
+    # Ensure created_at uses datetime
+    if "created_at" not in kwargs:
+        kwargs["created_at"] = datetime.now(tz=UTC)
+
+    return AgentSession.create(**kwargs)
+
+
+# ---------------------------------------------------------------------------
 # Auto-apply feature markers based on test filename
 # ---------------------------------------------------------------------------
 # Centralised here so it applies to ALL test directories (unit, integration,

@@ -9,6 +9,7 @@ Tests use Redis db=1 via the autouse redis_test_db fixture in conftest.py.
 """
 
 import time
+from datetime import UTC, datetime
 
 import pytest
 
@@ -71,7 +72,7 @@ class TestSemanticRoutingDecisionMatrix:
             status="running",
             message_text="implement feature X",
             working_dir="/tmp",
-            created_at=time.time(),
+            created_at=datetime.now(tz=UTC),
             expectations="waiting for auth decision",
         )
         session.save()
@@ -107,7 +108,7 @@ class TestSemanticRoutingDecisionMatrix:
             status="dormant",
             message_text="waiting for review",
             working_dir="/tmp",
-            created_at=time.time(),
+            created_at=datetime.now(tz=UTC),
             expectations="need PR approval",
         )
         session.save()
@@ -136,7 +137,7 @@ class TestSemanticRoutingDecisionMatrix:
             status="active",
             message_text="build the feature",
             working_dir="/tmp",
-            created_at=time.time(),
+            created_at=datetime.now(tz=UTC),
         )
         session.save()
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import json
 import os
 from unittest.mock import MagicMock, patch
@@ -280,7 +282,7 @@ class TestIgnoreLog:
         ReflectionIgnore.create(
             pattern="expired",
             reason="",
-            created_at=time.time() - (2 * 86400),
+            created_at=datetime.now(tz=UTC) - (2 * 86400),
             expires_at=time.time() - 86400,  # expired yesterday
         )
         # Create active entry
@@ -289,7 +291,7 @@ class TestIgnoreLog:
         ReflectionIgnore.create(
             pattern="today",
             reason="",
-            created_at=time.time() - 86400,
+            created_at=datetime.now(tz=UTC) - timedelta(seconds=86400),
             expires_at=time.time() + 3600,  # expires in 1 hour
         )
 
@@ -310,7 +312,7 @@ class TestIgnoreLog:
         ReflectionIgnore.create(
             pattern="expired",
             reason="",
-            created_at=time.time() - (2 * 86400),
+            created_at=datetime.now(tz=UTC) - (2 * 86400),
             expires_at=time.time() - 86400,
         )
         # Create active entry
