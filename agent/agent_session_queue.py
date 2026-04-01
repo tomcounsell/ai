@@ -118,35 +118,26 @@ _AGENT_SESSION_FIELDS = [
     # status is an IndexedField (not KeyField), so it does not affect the Redis key
     # and does not need delete-and-recreate — just mutate and save.
     "priority",
-    "scheduled_after",
-    "scheduling_depth",
+    "scheduled_at",
     "created_at",
     "session_id",
     "working_dir",
-    "message_text",
-    "sender_name",
-    "sender_id",
+    "initial_telegram_message",
     "chat_id",
-    "telegram_message_id",
-    "chat_title",
-    "revival_context",
-    "work_item_slug",
+    "extra_context",
     "task_list_id",
-    "classification_type",
     "auto_continue_count",
     "started_at",
     "telegram_message_key",
     # Session-phase fields preserved across delete-and-recreate
-    "last_activity",
+    "updated_at",
     "completed_at",
     "turn_count",
     "tool_call_count",
     "log_path",
-    "summary",
     "branch_name",
     "tags",
-    "classification_confidence",
-    "history",
+    "session_events",
     "issue_url",
     "plan_url",
     "pr_url",
@@ -159,12 +150,8 @@ _AGENT_SESSION_FIELDS = [
     "correlation_id",
     # Claude Code identity mapping — must be preserved across delete-and-recreate
     "claude_session_uuid",
-    # Session hierarchy fields — must be preserved across delete-and-recreate
-    "parent_agent_session_id",
-    # Session dependency fields — must be preserved across delete-and-recreate
-    "stable_agent_session_id",
-    "depends_on",
-    "commit_sha",
+    # Job hierarchy fields — must be preserved across delete-and-recreate
+    "parent_job_id",
     # === ChatSession/DevSession fields ===
     "session_type",
     "result_text",
@@ -202,29 +189,49 @@ async def _push_agent_session(
     classification_type: str | None = None,
     auto_continue_count: int = 0,
     correlation_id: str | None = None,
-    scheduled_after: float | None = None,
-    scheduling_depth: int = 0,
-    parent_agent_session_id: str | None = None,
+    scheduled_at: datetime | None = None,
+    parent_job_id: str | None = None,
     telegram_message_key: str | None = None,
     session_type: str = SessionType.CHAT,
-    depends_on: list[str] | None = None,
+    # Deprecated parameter aliases (backward compat)
+    scheduled_after: float | None = None,
+    parent_agent_session_id: str | None = None,
+    scheduling_depth: int = 0,  # ignored, now derived
+    depends_on: list[str] | None = None,  # ignored, removed
+    **_kwargs,
 ) -> int:
     """Create an agent session in Redis and return the pending queue depth for this chat.
 
     Queue is keyed by chat_id so different chat groups for the same project
     can run in parallel. project_key is preserved on the model for config lookup.
 
-    Args:
-        depends_on: List of stable_agent_session_id values this session must wait for.
-            Sessions with unmet dependencies are skipped by _pop_agent_session() until
-            all dependencies reach a terminal state (completed). Dependencies
-            in failed or cancelled state block dependents and trigger PM
-            notification.
-
     Bug 3 fix (issue #374): When creating a new record for a continuation
     (reply-to-resume), mark old completed records with the same session_id
     as 'superseded' to prevent ambiguity in later record selection.
     """
+    # Handle deprecated parameter aliases
+    if parent_agent_session_id and not parent_job_id:
+        parent_job_id = parent_agent_session_id
+    if scheduled_after is not None and scheduled_at is None:
+        scheduled_at = datetime.fromtimestamp(scheduled_after, tz=UTC)
+
+    # Build consolidated dicts
+    initial_telegram_message = {
+        "message_text": message_text,
+        "sender_name": sender_name,
+        "telegram_message_id": telegram_message_id,
+    }
+    if sender_id is not None:
+        initial_telegram_message["sender_id"] = sender_id
+    if chat_title is not None:
+        initial_telegram_message["chat_title"] = chat_title
+
+    extra_context = {}
+    if revival_context:
+        extra_context["revival_context"] = revival_context
+    if classification_type:
+        extra_context["classification_type"] = classification_type
+
     # Mark old completed records as superseded to prevent duplicate-record ambiguity
     try:
 
@@ -238,7 +245,7 @@ async def _push_agent_session(
                 old.status = "superseded"
                 old.save()
                 logger.info(
-                    f"Marked old completed session {old.agent_session_id} as superseded "
+                    f"Marked old completed session {old.job_id} as superseded "
                     f"for session_id={session_id}"
                 )
 
@@ -250,28 +257,20 @@ async def _push_agent_session(
         project_key=project_key,
         status="pending",
         priority=priority,
-        created_at=time.time(),
+        created_at=datetime.now(tz=UTC),
         session_id=session_id,
         session_type=session_type,
         working_dir=working_dir,
-        message_text=message_text,
-        sender_name=sender_name,
-        sender_id=sender_id,
+        initial_telegram_message=initial_telegram_message,
         chat_id=chat_id,
-        telegram_message_id=telegram_message_id,
-        chat_title=chat_title,
-        revival_context=revival_context,
-        work_item_slug=work_item_slug,
+        extra_context=extra_context or None,
+        slug=work_item_slug,
         task_list_id=task_list_id,
-        classification_type=classification_type,
         auto_continue_count=auto_continue_count,
         correlation_id=correlation_id,
-        scheduled_after=scheduled_after,
-        scheduling_depth=scheduling_depth,
-        parent_agent_session_id=parent_agent_session_id,
+        scheduled_at=scheduled_at,
+        parent_job_id=parent_job_id,
         telegram_message_key=telegram_message_key,
-        stable_agent_session_id=uuid.uuid4().hex,
-        depends_on=depends_on,
     )
 
     # Initialize stage_states for SDLC sessions so the dashboard shows
