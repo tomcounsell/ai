@@ -483,7 +483,7 @@ class S3Client:
         """
         parsed_url = urlparse(url)
 
-        if parsed_url.netloc.endswith("s3.amazonaws.com"):
+        if parsed_url.netloc.endswith(".s3.amazonaws.com"):
             # URL format: https://bucket-name.s3.amazonaws.com/key
             bucket_name = parsed_url.netloc.replace(".s3.amazonaws.com", "")
             object_key = parsed_url.path.lstrip("/")
