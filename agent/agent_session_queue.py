@@ -2566,7 +2566,17 @@ def _cli_show_status() -> None:
             by_chat[key] = []
         by_chat[key].append(entry)
 
-    now = time.time()
+    now_ts = time.time()
+
+    def _to_ts_safe(val):
+        if val is None:
+            return 0.0
+        if isinstance(val, datetime):
+            return val.timestamp() if val.tzinfo else val.replace(tzinfo=UTC).timestamp()
+        if isinstance(val, (int, float)):
+            return float(val)
+        return 0.0
+
     for chat_key, sessions_group in sorted(by_chat.items()):
         project_key = sessions_group[0].project_key if sessions_group else chat_key
         print(f"\n=== {project_key} (chat: {chat_key}) ===")
@@ -2574,13 +2584,13 @@ def _cli_show_status() -> None:
         worker_status = "alive" if (worker and not worker.done()) else "DEAD/missing"
         print(f"  Worker: {worker_status}")
 
-        for session in sorted(sessions_group, key=lambda j: j.created_at or 0):
+        for session in sorted(sessions_group, key=lambda j: _to_ts_safe(j.created_at)):
             duration = ""
-            started = getattr(session, "started_at", None)
-            if session.status == "running" and isinstance(started, int | float):
-                duration = f" (running {format_duration(now - started)})"
+            started_ts = _to_ts_safe(getattr(session, "started_at", None))
+            if session.status == "running" and started_ts:
+                duration = f" (running {format_duration(now_ts - started_ts)})"
             elif session.created_at:
-                duration = f" (queued {format_duration(now - session.created_at)})"
+                duration = f" (queued {format_duration(now_ts - _to_ts_safe(session.created_at))})"
 
             session_id = (getattr(session, "session_id", "") or "")[:12]
             corr_id = (getattr(session, "correlation_id", "") or "")[:8]

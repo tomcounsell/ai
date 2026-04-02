@@ -1529,7 +1529,10 @@ class ReflectionRunner:
             if dead_chats:
                 findings.append(f"{len(dead_chats)} chat(s) with no activity in 30+ days")
                 for chat in dead_chats[:5]:
-                    days_inactive = int((_time.time() - chat.updated_at) / 86400)
+                    _ua = chat.updated_at
+                    if isinstance(_ua, datetime):
+                        _ua = _ua.timestamp() if _ua.tzinfo else _ua.replace(tzinfo=UTC).timestamp()
+                    days_inactive = int((_time.time() - (_ua or 0)) / 86400)
                     findings.append(
                         f"  Inactive: {chat.chat_name} "
                         f"({days_inactive} days, type={chat.chat_type})"

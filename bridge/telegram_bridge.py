@@ -26,7 +26,7 @@ import subprocess
 import sys
 import time
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from bridge.utc import utc_iso, utc_now
@@ -1170,7 +1170,14 @@ async def main():
                     )
                     if pending_sessions:
                         pending_session = pending_sessions[0]
-                        age = time.time() - (pending_session.created_at or 0)
+                        _ct = pending_session.created_at
+                        if isinstance(_ct, datetime):
+                            _ct = (
+                                _ct.timestamp()
+                                if _ct.tzinfo
+                                else _ct.replace(tzinfo=UTC).timestamp()
+                            )
+                        age = time.time() - (_ct or 0)
                         if age <= PENDING_MERGE_WINDOW_SECONDS:
                             # Recent pending session: push to steering queue
                             from agent.steering import ABORT_KEYWORDS
