@@ -55,26 +55,6 @@ def _is_index_key(key: bytes) -> bool:
     return any(p in key for p in SKIP_PATTERNS)
 
 
-def _is_already_migrated(parts: list[bytes]) -> bool:
-    """Check if key is already in new format.
-
-    New format has parent_agent_session_id in position 3 (index 3).
-    Old format has parent_chat_session_id in position 3 and parent_job_id in position 4.
-
-    Detection heuristic: In old format, segment 3 is parent_chat_session_id which
-    typically looks like 'tg_...' or a non-UUID value. In new format, segment 3 is
-    parent_agent_session_id which is a UUID (32 hex chars) or empty.
-
-    However, the most reliable check: if the key was constructed with the new field
-    ordering, positions 3 and 4 would already be swapped. We check by looking at
-    hash fields inside the record.
-    """
-    # If we have 7 parts (AgentSession + 6 segments), check segment ordering
-    # But this is unreliable without reading the hash. Return False to let
-    # the hash field check handle it.
-    return False
-
-
 def migrate_keys(dry_run: bool = True, reverse: bool = False) -> dict:
     """Rename AgentSession Redis keys and hash fields.
 
@@ -168,16 +148,16 @@ def migrate_keys(dry_run: bool = True, reverse: bool = False) -> dict:
                     pipe.srem(class_set_key, key_str)
                     pipe.sadd(class_set_key, new_key_str)
 
-                pipe.execute()
-
-                # Rename hash fields (must use new key now)
+                # Rename hash fields atomically with key rename
                 target_key = new_key if new_key != key else key
                 for old_field, new_field in field_renames.items():
-                    old_val = redis_client.hget(target_key, old_field)
+                    old_val = redis_client.hget(key, old_field)
                     if old_val is not None:
-                        redis_client.hset(target_key, new_field, old_val)
-                        redis_client.hdel(target_key, old_field)
+                        pipe.hset(target_key, new_field, old_val)
+                        pipe.hdel(target_key, old_field)
                         logger.info(f"    Hash field: {old_field} -> {new_field}")
+
+                pipe.execute()
             else:
                 # Log hash field changes that would happen
                 for old_field, new_field in field_renames.items():
