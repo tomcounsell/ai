@@ -137,7 +137,7 @@ The memory system also runs in Claude Code CLI sessions via hooks. See [Claude C
 - **UserPromptSubmit hook** ingests qualifying user prompts (same importance=6.0 as Telegram messages) and creates an AgentSession record for dashboard observability
 - **PostToolUse hook** runs memory recall with a file-based sliding window (JSON sidecar files replace in-memory state since hooks are stateless processes) and updates AgentSession activity tracking
 - **Stop hook** runs Haiku extraction and outcome detection on the session transcript, completes the AgentSession lifecycle, and triggers post-merge learning extraction when applicable
-- **Deja vu signals** provide vague recognition or novel territory cues when recall results are ambiguous (shared thresholds with SDK agent path via `config/memory_defaults.py`)
+- **Novel territory signals** provide cues when the agent enters unfamiliar areas (zero bloom hits with many keywords). The vague recognition (deja vu) fallback was removed as it produced only noise -- see [Memory Hook Performance](memory-hook-performance.md)
 - **Post-merge learning** is triggered from the Stop hook when `gh pr merge` is detected during the session, calling `extract_post_merge_learning()` with PR metadata fetched via `gh` CLI
 - Bridge module: `.claude/hooks/hook_utils/memory_bridge.py`
 
@@ -166,7 +166,7 @@ After RRF fusion returns scored results, `_apply_category_weights()` re-ranks th
 
 **Fail-safe:** If metadata is None, not a dict, or missing the category key, the default weight (1.0) is used. If `CATEGORY_RECALL_WEIGHTS` cannot be imported, records are returned in their original order.
 
-Both `check_and_inject()` (SDK/Telegram path) and `recall()` (Claude Code hooks path) apply the same re-ranking. The bridge imports `_apply_category_weights` from `agent.memory_hook`.
+Both `check_and_inject()` (SDK/Telegram path) and `recall()` (Claude Code hooks path) apply the same re-ranking. The bridge imports `_apply_category_weights` from `utils.keyword_extraction` (keyword utilities were extracted to break the import chain -- see [Memory Hook Performance](memory-hook-performance.md)).
 
 ## Structured Metadata
 
