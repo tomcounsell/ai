@@ -150,8 +150,8 @@ _AGENT_SESSION_FIELDS = [
     "correlation_id",
     # Claude Code identity mapping — must be preserved across delete-and-recreate
     "claude_session_uuid",
-    # Job hierarchy fields — must be preserved across delete-and-recreate
-    "parent_job_id",
+    # Session hierarchy fields — must be preserved across delete-and-recreate
+    "parent_agent_session_id",
     # === ChatSession/DevSession fields ===
     "session_type",
     "parent_chat_session_id",
@@ -189,7 +189,7 @@ async def _push_agent_session(
     auto_continue_count: int = 0,
     correlation_id: str | None = None,
     scheduled_at: datetime | float | None = None,
-    parent_job_id: str | None = None,
+    parent_agent_session_id: str | None = None,
     telegram_message_key: str | None = None,
     session_type: str = SessionType.CHAT,
     scheduling_depth: int = 0,  # ignored, now derived
@@ -239,7 +239,7 @@ async def _push_agent_session(
                 old.status = "superseded"
                 old.save()
                 logger.info(
-                    f"Marked old completed session {old.job_id} as superseded "
+                    f"Marked old completed session {old.id} as superseded "
                     f"for session_id={session_id}"
                 )
 
@@ -263,7 +263,7 @@ async def _push_agent_session(
         auto_continue_count=auto_continue_count,
         correlation_id=correlation_id,
         scheduled_at=scheduled_at,
-        parent_job_id=parent_job_id,
+        parent_agent_session_id=parent_agent_session_id,
         telegram_message_key=telegram_message_key,
     )
 
@@ -543,7 +543,7 @@ async def _pop_agent_session(chat_id: str) -> AgentSession | None:
     # Direct field mutation -- status is an IndexedField, not a KeyField,
     # so save() correctly updates the secondary index.
     logger.info(
-        f"[chat:{chat_id}] Transitioning session {chosen.job_id} "
+        f"[chat:{chat_id}] Transitioning session {chosen.id} "
         f"(session {chosen.session_id}) pending->running"
     )
     chosen.status = "running"
@@ -554,7 +554,7 @@ async def _pop_agent_session(chat_id: str) -> AgentSession | None:
     try:
         chosen.log_lifecycle_transition("running", "worker picked up session")
     except Exception as e:
-        logger.warning(f"Failed to log lifecycle transition for session {chosen.job_id}: {e}")
+        logger.warning(f"Failed to log lifecycle transition for session {chosen.id}: {e}")
 
     # Drain any steering messages queued during the pending window (#619).
     # Follow-up messages arriving while the session was pending get pushed to
@@ -573,13 +573,13 @@ async def _pop_agent_session(chat_id: str) -> AgentSession | None:
                 await chosen.async_save()
                 logger.info(
                     f"[chat:{chat_id}] Drained {len(extra_texts)} steering message(s) "
-                    f"into session {chosen.job_id} message_text"
+                    f"into session {chosen.id} message_text"
                 )
     except Exception as e:
         # Drain failure must not crash session start
         logger.warning(
             f"[chat:{chat_id}] Failed to drain steering messages for session "
-            f"{chosen.job_id} (non-fatal): {e}"
+            f"{chosen.id} (non-fatal): {e}"
         )
 
     return chosen
@@ -647,7 +647,7 @@ async def _pop_agent_session_with_fallback(chat_id: str) -> AgentSession | None:
 
         # Direct field mutation -- status is an IndexedField, not a KeyField.
         logger.info(
-            f"[chat:{chat_id}] Sync fallback: transitioning session {chosen.job_id} "
+            f"[chat:{chat_id}] Sync fallback: transitioning session {chosen.id} "
             f"(session {chosen.session_id}) pending->running"
         )
         chosen.status = "running"
@@ -657,7 +657,7 @@ async def _pop_agent_session_with_fallback(chat_id: str) -> AgentSession | None:
         try:
             chosen.log_lifecycle_transition("running", "worker picked up session (sync fallback)")
         except Exception as e:
-            logger.warning(f"Failed to log lifecycle transition for session {chosen.job_id}: {e}")
+            logger.warning(f"Failed to log lifecycle transition for session {chosen.id}: {e}")
 
         # Drain steering messages (same logic as _pop_agent_session) (#619)
         try:
@@ -673,12 +673,12 @@ async def _pop_agent_session_with_fallback(chat_id: str) -> AgentSession | None:
                     await chosen.async_save()
                     logger.info(
                         f"[chat:{chat_id}] Sync fallback: drained {len(extra_texts)} "
-                        f"steering message(s) into session {chosen.job_id} message_text"
+                        f"steering message(s) into session {chosen.id} message_text"
                     )
         except Exception as e:
             logger.warning(
                 f"[chat:{chat_id}] Sync fallback: failed to drain steering messages "
-                f"for session {chosen.job_id} (non-fatal): {e}"
+                f"for session {chosen.id} (non-fatal): {e}"
             )
 
         return chosen
@@ -768,30 +768,30 @@ def cancel_agent_session(agent_session_id: str) -> bool:
     return True
 
 
-def retry_agent_session(job_id: str) -> AgentSession | None:
+def retry_agent_session(agent_session_id: str) -> AgentSession | None:
     """Re-queue a failed or cancelled session with the same parameters.
 
     Creates a new pending session preserving all fields from the original.
 
     Args:
-        job_id: The job_id of the session to retry.
+        agent_session_id: The id of the session to retry.
 
     Returns:
         The new AgentSession if retried, None if not found or not terminal.
     """
     try:
-        session = AgentSession.query.get(job_id)
+        session = AgentSession.query.get(agent_session_id)
     except Exception:
-        logger.warning(f"[pm-controls] job_id {job_id} not found for retry")
+        logger.warning(f"[pm-controls] agent_session_id {agent_session_id} not found for retry")
         return None
 
     if not session:
-        logger.warning(f"[pm-controls] No session found with job_id={job_id}")
+        logger.warning(f"[pm-controls] No session found with id={agent_session_id}")
         return None
 
     if session.status not in ("failed", "cancelled"):
         logger.warning(
-            f"[pm-controls] Session {session.job_id} status is {session.status!r} -- "
+            f"[pm-controls] Session {session.id} status is {session.status!r} -- "
             f"can only retry failed/cancelled sessions"
         )
         return None
@@ -803,7 +803,7 @@ def retry_agent_session(job_id: str) -> AgentSession | None:
     fields["completed_at"] = None
     fields["created_at"] = datetime.now(tz=UTC)
     new_session = AgentSession.create(**fields)
-    logger.info(f"[pm-controls] Retried session {session.job_id} -> {new_session.job_id}")
+    logger.info(f"[pm-controls] Retried session {session.id} -> {new_session.id}")
 
     return new_session
 
@@ -841,7 +841,7 @@ def get_queue_status(chat_id: str) -> dict:
             continue
 
         summary = {
-            "agent_session_id": entry.job_id,
+            "agent_session_id": entry.id,
             "session_id": entry.session_id,
             "message_preview": (entry.message_text or "")[:100],
             "priority": entry.priority,
@@ -872,7 +872,7 @@ async def get_active_session_for_chat(chat_id: str) -> AgentSession | None:
 async def _complete_agent_session(session: AgentSession, *, failed: bool = False) -> None:
     """Mark a running session as completed and delete it from Redis.
 
-    If this session is a child (has parent_job_id), finalize the parent BEFORE
+    If this session is a child (has parent_agent_session_id), finalize the parent BEFORE
     deleting the child. The completing child's intended terminal status is
     passed to _finalize_parent so it can correctly count terminal children
     even though the child's Redis status hasn't been updated yet.
@@ -887,14 +887,14 @@ async def _complete_agent_session(session: AgentSession, *, failed: bool = False
     except Exception as e:
         logger.debug(f"[checkpoint] Non-fatal checkpoint error at completion: {e}")
 
-    parent_job_id = getattr(session, "parent_job_id", None)
+    parent_id = getattr(session, "parent_agent_session_id", None)
 
     # Finalize parent BEFORE deleting child, passing the completing child's
     # intended status so _finalize_parent can treat it as terminal
-    if parent_job_id:
+    if parent_id:
         child_status = "failed" if failed else "completed"
         await _finalize_parent(
-            parent_job_id,
+            parent_id,
             completing_child_id=session.agent_session_id,
             completing_child_status=child_status,
         )
@@ -903,7 +903,7 @@ async def _complete_agent_session(session: AgentSession, *, failed: bool = False
 
 
 async def _finalize_parent(
-    parent_job_id: str,
+    parent_id: str,
     completing_child_id: str | None = None,
     completing_child_status: str | None = None,
 ) -> None:
@@ -914,7 +914,7 @@ async def _finalize_parent(
     already in a terminal state or no longer exists.
 
     Args:
-        parent_job_id: The agent_session_id of the parent AgentSession.
+        parent_id: The id of the parent AgentSession.
         completing_child_id: If provided, the agent_session_id of the child that is
             currently completing. Its Redis status may still be "running",
             so completing_child_status overrides it.
@@ -927,17 +927,17 @@ async def _finalize_parent(
     # operations are synchronous under the hood. If the codebase ever moves to
     # true async Redis, these will need updating.
     try:
-        parent = AgentSession.query.get(parent_job_id)
+        parent = AgentSession.query.get(parent_id)
     except Exception:
         logger.warning(
-            f"[session-hierarchy] Parent session {parent_job_id} lookup raised "
+            f"[session-hierarchy] Parent session {parent_id} lookup raised "
             f"exception during finalization — treating child as orphaned"
         )
         return
 
     if parent is None:
         logger.warning(
-            f"[session-hierarchy] Parent session {parent_job_id} not found during "
+            f"[session-hierarchy] Parent session {parent_id} not found during "
             f"finalization — parent may have been deleted or already finalized"
         )
         return
@@ -945,7 +945,7 @@ async def _finalize_parent(
     # Only finalize if parent is in waiting_for_children status
     if parent.status != "waiting_for_children":
         logger.debug(
-            f"[session-hierarchy] Parent {parent_job_id} status is "
+            f"[session-hierarchy] Parent {parent_id} status is "
             f"{parent.status!r}, skipping finalization"
         )
         return
@@ -956,7 +956,7 @@ async def _finalize_parent(
         # Edge case: parent has no children but is waiting_for_children.
         # Transition to completed as a safety guard.
         logger.warning(
-            f"[session-hierarchy] Parent {parent_job_id} has no children but "
+            f"[session-hierarchy] Parent {parent_id} has no children but "
             f"status is waiting_for_children — auto-completing"
         )
         _transition_parent(parent, "completed")
@@ -977,7 +977,7 @@ async def _finalize_parent(
     if non_terminal:
         # Some children still running/pending — not ready to finalize
         logger.debug(
-            f"[session-hierarchy] Parent {parent_job_id} has "
+            f"[session-hierarchy] Parent {parent_id} has "
             f"{len(non_terminal)} non-terminal children — waiting"
         )
         return
@@ -989,7 +989,7 @@ async def _finalize_parent(
     completed_count = sum(1 for s in child_statuses if s == "completed")
     failed_count = sum(1 for s in child_statuses if s == "failed")
     logger.info(
-        f"[session-hierarchy] Finalizing parent {parent_job_id}: "
+        f"[session-hierarchy] Finalizing parent {parent_id}: "
         f"{completed_count} completed, {failed_count} failed -> {new_status}"
     )
 
@@ -1001,7 +1001,7 @@ def _transition_parent(parent: AgentSession, new_status: str) -> None:
 
     Status is an IndexedField, so direct mutation and save is safe.
     No delete-and-recreate needed, which means agent_session_id stays the same
-    and children's parent_job_id references remain valid.
+    and children's parent_agent_session_id references remain valid.
     """
     parent.status = new_status
     # Only set completed_at for terminal statuses, not for waiting_for_children
@@ -1255,8 +1255,8 @@ async def _agent_session_health_check() -> None:
 async def _agent_session_hierarchy_health_check() -> None:
     """Check for orphaned children and stuck parents in session hierarchy.
 
-    1. Orphaned children: child's parent_job_id points to a non-existent session.
-       Action: clear the parent_job_id field (child completes normally).
+    1. Orphaned children: child's parent_agent_session_id points to a non-existent session.
+       Action: clear the parent_agent_session_id field (child completes normally).
     2. Stuck parents: status is waiting_for_children but all children are terminal.
        Action: finalize the parent (transition to completed/failed).
     """
@@ -1266,22 +1266,22 @@ async def _agent_session_hierarchy_health_check() -> None:
     # Check for orphaned children
     try:
         all_sessions = list(AgentSession.query.all())
-        children_with_parent = [s for s in all_sessions if s.parent_job_id]
+        children_with_parent = [s for s in all_sessions if s.parent_agent_session_id]
         parent_ids = {s.agent_session_id for s in all_sessions}
 
         for child in children_with_parent:
-            if child.parent_job_id not in parent_ids:
+            if child.parent_agent_session_id not in parent_ids:
                 logger.warning(
                     "[session-health] Orphaned child %s: parent %s no longer exists — "
-                    "clearing parent_job_id",
+                    "clearing parent_agent_session_id",
                     child.agent_session_id,
-                    child.parent_job_id,
+                    child.parent_agent_session_id,
                 )
-                # Delete-and-recreate required: parent_job_id is a KeyField,
+                # Delete-and-recreate required: parent_agent_session_id is a KeyField,
                 # so mutating it directly would corrupt the index.
                 fields = _extract_agent_session_fields(child)
                 child.delete()
-                fields["parent_job_id"] = None
+                fields["parent_agent_session_id"] = None
                 AgentSession.create(**fields)
                 orphans_fixed += 1
     except Exception as e:
@@ -1478,7 +1478,7 @@ async def enqueue_agent_session(
     auto_continue_count: int = 0,
     correlation_id: str | None = None,
     scheduled_at: float | None = None,
-    parent_job_id: str | None = None,
+    parent_agent_session_id: str | None = None,
     telegram_message_key: str | None = None,
     session_type: str = SessionType.CHAT,
     scheduling_depth: int = 0,  # ignored, now derived
@@ -1511,7 +1511,7 @@ async def enqueue_agent_session(
         auto_continue_count=auto_continue_count,
         correlation_id=correlation_id,
         scheduled_at=scheduled_at,
-        parent_job_id=parent_job_id,
+        parent_agent_session_id=parent_agent_session_id,
         telegram_message_key=telegram_message_key,
         session_type=session_type,
     )

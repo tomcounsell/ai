@@ -62,7 +62,7 @@ class _FakeSession:
         self.started_at = extra.get("started_at", None)
         self.scheduled_at = extra.get("scheduled_at", None)
         self.issue_url = extra.get("issue_url", None)
-        self.parent_job_id = extra.get("parent_job_id", None)
+        self.parent_agent_session_id = extra.get("parent_agent_session_id", None)
         self.completed_at = extra.get("completed_at", None)
         self._deleted = False
 

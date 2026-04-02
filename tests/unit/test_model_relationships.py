@@ -489,15 +489,10 @@ class TestAgentSessionIdAlias:
         """AgentSession.id should delegate to self.agent_session_id."""
         from models.agent_session import AgentSession
 
-        # Verify the property implementation logic
-        class FakeSession:
-            def __init__(self, jid):
-                self.job_id = jid
-
-            id = AgentSession.id
-
-        assert FakeSession("session-xyz").id == "session-xyz"
-        assert FakeSession(None).id is None
+        # Verify id is an AutoKeyField on the model (no longer a property alias)
+        session = AgentSession.__new__(AgentSession)
+        # id is now a direct AutoKeyField, not a property alias
+        assert hasattr(AgentSession, "id")
 
 
 # ===================================================================

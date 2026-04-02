@@ -105,7 +105,7 @@ def _check_rate_limit(project_key: str) -> bool:
             sessions = list(AgentSession.query.filter(project_key=project_key, status=status))
             for s in sessions:
                 # Check if session has a parent (agent-scheduled, not human-initiated)
-                if s.parent_job_id:
+                if s.parent_agent_session_id:
                     created = _to_ts(s.created_at) or 0
                     if created > cutoff:
                         recent_scheduled += 1
@@ -136,15 +136,15 @@ def _output(data: dict) -> None:
     print(json.dumps(data, indent=2))
 
 
-def _get_parent_session(parent_job_id: str):
-    """Look up a parent AgentSession by agent_session_id for field inheritance.
+def _get_parent_session(parent_id: str):
+    """Look up a parent AgentSession by id for field inheritance.
 
     Returns the parent session or None if not found.
     """
     try:
         from models.agent_session import AgentSession
 
-        return AgentSession.query.get(parent_job_id)
+        return AgentSession.query.get(parent_id)
     except Exception:
         return None
 
@@ -278,18 +278,18 @@ def cmd_schedule(args: argparse.Namespace) -> int:
     session_type = getattr(args, "session_type", None) or SessionType.CHAT
 
     # Parent session inheritance
-    parent_job_id = getattr(args, "parent_session", None)
+    parent_id = getattr(args, "parent_session", None)
     parent_session = None
-    if parent_job_id:
-        if not parent_job_id.strip():
+    if parent_id:
+        if not parent_id.strip():
             _output({"status": "error", "message": "--parent-session cannot be empty."})
             return 1
-        parent_session = _get_parent_session(parent_job_id)
+        parent_session = _get_parent_session(parent_id)
         if parent_session is None:
             _output(
                 {
                     "status": "error",
-                    "message": f"Parent session {parent_job_id} not found.",
+                    "message": f"Parent session {parent_id} not found.",
                 }
             )
             return 1
@@ -339,7 +339,7 @@ def cmd_schedule(args: argparse.Namespace) -> int:
             scheduled_at=scheduled_at,
             issue_url=issue_url,
             correlation_id=inherited_correlation_id,
-            parent_job_id=parent_job_id,
+            parent_agent_session_id=parent_id,
         )
 
         # Transition parent to waiting_for_children if not already
@@ -348,10 +348,10 @@ def cmd_schedule(args: argparse.Namespace) -> int:
                 from agent.agent_session_queue import _transition_parent
 
                 _transition_parent(parent_session, "waiting_for_children")
-                logger.info(f"Parent {parent_job_id} transitioned to waiting_for_children")
+                logger.info(f"Parent {parent_id} transitioned to waiting_for_children")
             except Exception as e:
                 logger.warning(
-                    f"Failed to transition parent {parent_job_id} to waiting_for_children: {e}"
+                    f"Failed to transition parent {parent_id} to waiting_for_children: {e}"
                 )
 
         # Count queue position
@@ -372,8 +372,8 @@ def cmd_schedule(args: argparse.Namespace) -> int:
             "queue_position": queue_position,
             "scheduled_at": scheduled_iso,
         }
-        if parent_job_id:
-            result["parent_job_id"] = parent_job_id
+        if parent_id:
+            result["parent_agent_session_id"] = parent_id
 
         _output(result)
         return 0
@@ -405,8 +405,8 @@ def _format_agent_session_info(j, include_children: bool = False) -> dict:
         session_info["scheduled_at"] = _to_iso(j.scheduled_at)
     if j.issue_url:
         session_info["issue_url"] = j.issue_url
-    if j.parent_job_id:
-        session_info["parent_job_id"] = j.parent_job_id
+    if j.parent_agent_session_id:
+        session_info["parent_agent_session_id"] = j.parent_agent_session_id
 
     if include_children and j.status == "waiting_for_children":
         completed, total, failed = j.get_completion_progress()
@@ -450,8 +450,8 @@ def cmd_status(args: argparse.Namespace) -> int:
         pending.sort(key=lambda j: (PRIORITY_RANK.get(j.priority, 2), _to_ts(j.created_at) or 0))
 
         # Separate root sessions from child sessions for tree display
-        root_pending = [j for j in pending if not j.parent_job_id]
-        child_pending = [j for j in pending if j.parent_job_id]
+        root_pending = [j for j in pending if not j.parent_agent_session_id]
+        child_pending = [j for j in pending if j.parent_agent_session_id]
 
         result = {
             "project": project_key,
@@ -660,7 +660,7 @@ def cmd_children(args: argparse.Namespace) -> int:
         completed, total, failed = parent.get_completion_progress()
 
         result = {
-            "parent_job_id": args.agent_session_id,
+            "parent_agent_session_id": args.agent_session_id,
             "parent_status": parent.status,
             "progress": {
                 "completed": completed,
