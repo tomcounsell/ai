@@ -327,7 +327,88 @@ No agent integration required — this is a model-internal rename and field addi
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Critiqued**: 2026-04-02
+**Critics**: Skeptic, Operator, Archaeologist, Adversary, Simplifier, User
+**Findings**: 8 total (2 blockers, 4 concerns, 2 nits)
+
+### Blockers
+
+#### 1. Missing callers of renamed methods in Task 3
+- **Severity**: BLOCKER
+- **Critics**: Skeptic, Operator
+- **Location**: Task 3 (build-caller-update)
+- **Finding**: Task 3 lists specific files to update (`pre_tool_use.py`, `subagent_stop.py`, `steer_child.py`, `agent_session_queue.py`) but omits `bridge/response.py` and `agent/hooks/stop.py`, both of which call `get_parent_chat_session()`. If Task 2 renames this to `get_parent_session()`, these callers will break at runtime.
+- **Suggestion**: Add `bridge/response.py` and `agent/hooks/stop.py` to the explicit caller update list in Task 3. The plan says "Grep entire project to catch any missed references" but the explicit list should be correct to avoid relying on a catch-all.
+
+#### 2. Test Impact section missing test files that reference affected methods
+- **Severity**: BLOCKER
+- **Critics**: Skeptic, Adversary
+- **Location**: Test Impact section
+- **Finding**: Three test files are missing from the Test Impact section: `tests/unit/test_delivery_execution.py` (uses `get_parent_chat_session`), `tests/unit/test_pre_tool_use_start_stage.py` (uses `create_dev`), and `tests/unit/test_model_relationships.py` is listed but with an incorrect rationale ("`_AGENT_SESSION_FIELDS` assertion" does not exist in that file -- it actually has field presence checks that may need updating for the new `role` field).
+- **Suggestion**: Add `test_delivery_execution.py` and `test_pre_tool_use_start_stage.py` to Test Impact with disposition UPDATE. Correct the `test_model_relationships.py` entry rationale to reference field presence assertions for the new `role` field.
+
+### Concerns
+
+#### 3. Plan says "~23 files" but actual count is 12
+- **Severity**: CONCERN
+- **Critics**: Skeptic
+- **Location**: Solution > Key Elements
+- **Finding**: The plan states "Mechanical rename across ~23 files" but grep shows only 12 files contain `parent_chat_session_id`. Overstating scope can lead to a false sense of thoroughness or hide the fact that the rename is smaller than expected.
+- **Suggestion**: Correct the count to ~12 files (or regenerate from grep). The smaller scope is good news for the migration.
+
+#### 4. No backward-compat wrapper for `get_parent_chat_session()` and `get_dev_sessions()`
+- **Severity**: CONCERN
+- **Critics**: Operator, Archaeologist
+- **Location**: Task 2 (build-model-update)
+- **Finding**: Task 2 renames `get_parent_chat_session()` to `get_parent_session()` and `get_dev_sessions()` to `get_child_sessions()`. The plan specifies a backward-compat wrapper for `create_dev()` but none for these two methods. If any code outside the repo (scripts, notebooks, manual debugging) calls the old names, it will break silently.
+- **Suggestion**: Add thin backward-compat wrappers (like `create_dev` gets) or confirm via grep that no external callers exist. The `_normalize_kwargs` approach does not help here since these are instance methods, not constructor kwargs.
+
+#### 5. Migration script should also backfill `role` for records missing `parent_chat_session_id`
+- **Severity**: CONCERN
+- **Critics**: Adversary
+- **Location**: Data Flow / Technical Approach
+- **Finding**: The migration script description focuses on renaming `parent_chat_session_id` and backfilling `role`, but the backfill logic is described as running only on records that have `parent_chat_session_id`. Records that are ChatSessions (no `parent_chat_session_id`) still need `role` backfilled to `"pm"` based on `session_type`. The script needs to handle all records, not just those with the parent field.
+- **Suggestion**: Clarify the migration script processes ALL `AgentSession:*` records: rename the parent field where present, and backfill `role` from `session_type` on every record regardless.
+
+#### 6. Deployment sequence assumes single-operator execution
+- **Severity**: CONCERN
+- **Critics**: Operator
+- **Location**: Update System / Race Conditions
+- **Finding**: The deployment sequence (stop bridge, run migration, deploy code, start bridge) is documented but not automated. If someone pulls the code without running the migration, the model will reference `parent_session_id` but Redis still has `parent_chat_session_id`. There is no guard or version check.
+- **Suggestion**: Add a startup check (e.g., in `AgentSession.__init_subclass__` or a health check) that warns if old field names are detected in Redis. Alternatively, document this risk prominently in the PR description.
+
+### Nits
+
+#### 7. `create_child()` role validation scope unclear
+- **Severity**: NIT
+- **Critics**: Simplifier
+- **Location**: Failure Path Test Strategy
+- **Finding**: The plan says `create_child()` validates `role` parameter is a "known value or None" but does not define the known values. If the only known values are "pm" and "dev", and new roles are explicitly out of scope, the validation is trivially simple but should be documented.
+- **Suggestion**: Add a `KNOWN_ROLES` constant (e.g., `{"pm", "dev"}`) referenced by the validation, or accept any string and document that validation is deferred.
+
+#### 8. Task 6 documentation references may not need updates
+- **Severity**: NIT
+- **Critics**: User
+- **Location**: Task 6 (document-feature)
+- **Finding**: Task 6 lists `docs/features/session-isolation.md` as a documentation target, and the Documentation section says to update it "if it references `parent_chat_session_id`". This conditional should be resolved before build to avoid wasted effort.
+- **Suggestion**: Grep `session-isolation.md` now and either confirm it needs updates or remove it from the task list.
+
+### Structural Check Results
+
+| Check | Status | Detail |
+|-------|--------|--------|
+| Required sections | PASS | Documentation, Update System, Agent Integration, Test Impact all present and non-empty |
+| Task numbering | PASS | Tasks 1-7, sequential, no gaps |
+| Dependencies valid | PASS | All Depends On references point to valid task IDs |
+| File paths exist | PASS | All referenced source files exist (12/12 Python files, 4/4 doc files) |
+| Prerequisites met | PASS | No prerequisites listed (uses existing infrastructure) |
+| Cross-references | PASS | All success criteria map to tasks; no No-Gos appear in Solution; Rabbit Holes are excluded from tasks |
+
+### Verdict
+
+**NEEDS REVISION** -- 2 blockers must be resolved before build:
+1. Add missing callers (`bridge/response.py`, `agent/hooks/stop.py`) to Task 3
+2. Add missing test files (`test_delivery_execution.py`, `test_pre_tool_use_start_stage.py`) to Test Impact and correct `test_model_relationships.py` rationale
 
 ---
 
