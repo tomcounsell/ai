@@ -21,6 +21,8 @@ The `AgentSession.log_lifecycle_transition()` method is called at every status c
 | `agent_session_queue._push_agent_session()` | →pending | Session enqueued |
 | `agent_session_queue._pop_agent_session()` | →running | Worker picked up session |
 | `session_watchdog.fix_unhealthy_session()` | →abandoned | Watchdog remediation |
+| `_worker_loop()` CancelledError handler | →failed | Worker cancelled |
+| `_worker_loop()` finally block | →failed/completed | Worker finally block |
 
 Each call:
 1. Emits a structured INFO log: `LIFECYCLE session=X transition=old→new session_id=Y project=Z duration_in_prev_state=Ns context="..."`
@@ -114,10 +116,71 @@ When sessions fail, the `summary` field on `AgentSession` is now populated with 
 
 Summaries are truncated to 500 characters at capture time. The `AgentSession.summary` field supports up to 50,000 characters, but concise one-line summaries are preferred since full tracebacks are available in `bridge.log`.
 
+## Crash-Path Diagnostic Snapshot (#626)
+
+When a session terminates (whether by failure, cancellation, or normal completion), the worker `finally` block now saves a diagnostic snapshot **before** `_complete_agent_session()` deletes the Redis record. This closes a gap where sessions that died silently left no trace because state was destroyed before diagnostics could run.
+
+### What Gets Captured
+
+The `save_session_snapshot()` call records:
+
+| Field | Source | Purpose |
+|-------|--------|---------|
+| `event` | `"crash"` or `"complete"` | Distinguishes failure from clean exit |
+| `session_id` | `session.session_id` | Links to bridge session context |
+| `agent_session_id` | `session.agent_session_id` | Links to queue-level record |
+| `project_key` | `session.project_key` | Scopes to project |
+| `tool_count` | `get_activity()` | Number of tools invoked during session |
+| `trigger` | `"finally_block"` | Identifies snapshot origin |
+
+### Tool Count Fallback
+
+The `get_activity()` function in `agent/hooks/session_registry.py` retrieves tool counts for heartbeat and snapshot reporting. It uses a reverse lookup from `_uuid_to_bridge_id` to find the session's activity record. When this reverse lookup fails (e.g., the pending-to-UUID promotion never happened because the session crashed early), the function now falls back to `health_check._tool_counts`, which is the authoritative counter incremented on every tool call.
+
+```
+# Normal path: reverse UUID lookup finds activity in _sessions dict
+get_activity("bridge_session_123") -> {"tool_count": 42, "last_tools": ["Read", "Bash"]}
+
+# Fallback path: UUID lookup fails, reads from health_check counter
+get_activity("bridge_session_123") -> {"tool_count": 42, "last_tools": []}
+```
+
+The fallback logs a WARNING so the underlying registration gap can be investigated:
+```
+[session_registry] get_activity reverse lookup failed for bridge_session_123, falling back to health_check count=42
+```
+
+### Task Await (Exception Propagation)
+
+The `_execute_agent_session()` function previously used a `while task.is_running` / `sleep(2)` polling loop to wait for the background task. Exceptions that escaped `BackgroundTask._run_work` were silently swallowed because the polling loop only checked `is_running`, not the task's exception state.
+
+The fix replaces the polling loop with `await task._task`, which directly awaits the asyncio future. Any exception that escapes `_run_work` propagates immediately to the caller, where it is caught and stored in `task._error` for downstream handling.
+
+### Troubleshooting
+
+**Heartbeat shows stale tool count (0 tools when session clearly ran tools)**
+
+This occurs when the session registry's reverse UUID lookup fails. The `get_activity()` fallback to `health_check._tool_counts` was added to address this. If you see the WARNING log `get_activity reverse lookup failed`, the fallback is working. The root cause is that `_uuid_to_bridge_id` was never populated -- typically because the session crashed before the pending-to-UUID promotion in `_pop_agent_session()` completed.
+
+**Session dies with no trace in logs or snapshots**
+
+Before #626, if a session crashed after the `_complete_agent_session()` call deleted the Redis record but before any snapshot was saved, the session vanished. The crash snapshot in the `finally` block now runs before deletion, ensuring at least one diagnostic record exists for every terminated session.
+
+### Files
+
+| File | Change |
+|------|--------|
+| `agent/agent_session_queue.py` | Crash snapshot in finally, task await, lifecycle logging |
+| `agent/hooks/session_registry.py` | Tool count fallback to `health_check._tool_counts` |
+| `tests/unit/test_crash_snapshot.py` | Tests for snapshot saving on all termination paths |
+| `tests/unit/test_session_registry_fallback.py` | Tests for tool count fallback behavior |
+
 ## Related
 
 - [Session Watchdog](session-watchdog.md) — Existing session health monitoring (silence, loops, errors, duration)
 - [Agent Session Health Monitor](agent-session-health-monitor.md) — Queue-level stuck session recovery
 - [Bridge Self-Healing](bridge-self-healing.md) — Process-level bridge health
 - [AgentSession Model](agent-session-model.md) — Unified session lifecycle model
-- Issue #216 — Tracking issue
+- [Agent Session Queue Reliability](agent-session-queue.md) — Queue-level reliability fixes
+- Issue #216 — Original tracking issue
+- Issue #626 — Silent session death fixes
