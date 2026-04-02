@@ -154,7 +154,8 @@ _AGENT_SESSION_FIELDS = [
     "parent_agent_session_id",
     # === ChatSession/DevSession fields ===
     "session_type",
-    "parent_chat_session_id",
+    "parent_session_id",
+    "role",
     "slug",
     # === PM self-messaging fields ===
     "pm_sent_message_ids",

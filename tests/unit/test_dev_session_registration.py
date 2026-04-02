@@ -62,7 +62,7 @@ class TestPreToolUseDevSessionDetection:
 
         input_data = self._make_agent_input()
 
-        with patch("models.agent_session.AgentSession.create_dev") as mock_create:
+        with patch("models.agent_session.AgentSession.create_child") as mock_create:
             mock_create.return_value = MagicMock(agent_session_id="dev-session-1")
 
             result = asyncio.run(pre_tool_use_hook(input_data, "tool-use-123", mock_hook_context))
@@ -70,7 +70,7 @@ class TestPreToolUseDevSessionDetection:
             # Should have called create_dev with parent linkage
             mock_create.assert_called_once()
             call_kwargs = mock_create.call_args[1]
-            assert call_kwargs["parent_chat_session_id"] == "parent-chat-session-abc"
+            assert call_kwargs["parent_session_id"] == "parent-chat-session-abc"
 
             # Should not block the tool call
             assert result.get("decision") != "block"
@@ -83,7 +83,7 @@ class TestPreToolUseDevSessionDetection:
 
         input_data = self._make_agent_input(subagent_type="code-reviewer", prompt="Review the PR")
 
-        with patch("models.agent_session.AgentSession.create_dev") as mock_create:
+        with patch("models.agent_session.AgentSession.create_child") as mock_create:
             result = asyncio.run(pre_tool_use_hook(input_data, "tool-use-456", mock_hook_context))
 
             mock_create.assert_not_called()
@@ -103,7 +103,7 @@ class TestPreToolUseDevSessionDetection:
             "tool_use_id": "tool-use-789",
         }
 
-        with patch("models.agent_session.AgentSession.create_dev") as mock_create:
+        with patch("models.agent_session.AgentSession.create_child") as mock_create:
             asyncio.run(pre_tool_use_hook(input_data, "tool-use-789", mock_hook_context))
 
             mock_create.assert_not_called()
@@ -117,7 +117,7 @@ class TestPreToolUseDevSessionDetection:
 
         input_data = self._make_agent_input()
 
-        with patch("models.agent_session.AgentSession.create_dev") as mock_create:
+        with patch("models.agent_session.AgentSession.create_child") as mock_create:
             asyncio.run(pre_tool_use_hook(input_data, "tool-use-000", mock_hook_context))
 
             mock_create.assert_not_called()
@@ -157,7 +157,7 @@ class TestCreateLocalFactory:
             assert session.chat_id.startswith("local")
             assert session.telegram_message_id is None
             assert session.sender_name is None
-            assert session.parent_chat_session_id is None
+            assert session.parent_session_id is None
 
     def test_accepts_kwargs(self):
         """create_local() passes extra kwargs to the model."""

@@ -179,7 +179,7 @@ class TestMaybeRegisterDevSessionStartStage:
         mock_dev = MagicMock()
         mock_dev.agent_session_id = "session-99"
         mock_as_mod = MagicMock()
-        mock_as_mod.AgentSession.create_dev.return_value = mock_dev
+        mock_as_mod.AgentSession.create_child.return_value = mock_dev
 
         tool_input = {
             "type": "dev-session",
@@ -200,7 +200,7 @@ class TestMaybeRegisterDevSessionStartStage:
         mock_dev = MagicMock()
         mock_dev.agent_session_id = "session-100"
         mock_as_mod = MagicMock()
-        mock_as_mod.AgentSession.create_dev.return_value = mock_dev
+        mock_as_mod.AgentSession.create_child.return_value = mock_dev
 
         tool_input = {
             "type": "dev-session",
@@ -223,7 +223,7 @@ class TestMaybeRegisterDevSessionStartStage:
         mock_dev = MagicMock()
         mock_dev.agent_session_id = "session-101"
         mock_as_mod = MagicMock()
-        mock_as_mod.AgentSession.create_dev.return_value = mock_dev
+        mock_as_mod.AgentSession.create_child.return_value = mock_dev
 
         tool_input = {
             "type": "dev-session",
@@ -251,7 +251,7 @@ class TestMaybeRegisterDevSessionStartStage:
                 pass
 
         # Registration should have happened before start_stage was called
-        mock_as_mod.AgentSession.create_dev.assert_called_once()
+        mock_as_mod.AgentSession.create_child.assert_called_once()
 
     def test_skips_entirely_for_non_dev_session(self, monkeypatch):
         monkeypatch.setenv("VALOR_SESSION_ID", "parent-session-13")

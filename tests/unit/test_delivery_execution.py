@@ -17,7 +17,7 @@ def _make_session(**kwargs):
         "delivery_emoji": None,
         "is_sdlc": False,
         "has_pm_messages": lambda: False,
-        "get_parent_chat_session": lambda: None,
+        "get_parent_session": lambda: None,
     }
     defaults.update(kwargs)
     return SimpleNamespace(**defaults)
