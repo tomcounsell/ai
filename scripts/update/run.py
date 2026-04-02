@@ -28,6 +28,7 @@ from scripts.update import (  # noqa: E402
     git,
     hardlinks,
     hooks,
+    migrations,
     service,
     verify,
 )
@@ -114,6 +115,7 @@ class UpdateResult:
     hardlink_result: hardlinks.HardlinkSyncResult | None = None
     env_sync_result: env_sync.EnvSyncResult | None = None
     hook_audit: hooks.HookAuditResult | None = None
+    migration_result: migrations.MigrationResult | None = None
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -323,6 +325,21 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                 except Exception as e:
                     log(f"WARN: Failed to commit bump: {e}", v)
                     result.warnings.append("Dep bump succeeded but commit/push failed")
+
+    # Step 3.6: Run pending data migrations (after git pull, before service restart)
+    log("Checking pending migrations...", v)
+    result.migration_result = migrations.run_pending_migrations(project_dir)
+    mig = result.migration_result
+    if mig.ran:
+        for name in mig.ran:
+            desc = migrations.MIGRATIONS.get(name, (None, name))[1]
+            log(f"  Migrated: {desc}", v, always=True)
+    if mig.failed:
+        for err in mig.errors:
+            log(f"  FAIL: {err}", v, always=True)
+            result.errors.append(f"Migration failed: {err}")
+    if not mig.ran and not mig.failed:
+        log("No pending migrations", v)
 
     # Step 4: Ollama model (full mode only)
     if config.do_ollama:
