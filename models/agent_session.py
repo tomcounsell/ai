@@ -214,17 +214,17 @@ class AgentSession(Model):
         elif "scheduled_after" in kwargs:
             kwargs.pop("scheduled_after")
 
-        # Map old field names to new ones
-        if "parent_job_id" in kwargs and "parent_agent_session_id" not in kwargs:
-            kwargs["parent_agent_session_id"] = kwargs.pop("parent_job_id")
-        elif "parent_job_id" in kwargs:
-            kwargs.pop("parent_job_id")
+        # Map old field names to new ones  # legacy
+        if "parent_job_id" in kwargs and "parent_agent_session_id" not in kwargs:  # legacy
+            kwargs["parent_agent_session_id"] = kwargs.pop("parent_job_id")  # legacy
+        elif "parent_job_id" in kwargs:  # legacy
+            kwargs.pop("parent_job_id")  # legacy
 
         if "agent_session_id" in kwargs:
             kwargs.pop("agent_session_id")  # AutoKeyField, ignore
 
-        if "job_id" in kwargs:
-            kwargs.pop("job_id")  # AutoKeyField, ignore
+        if "job_id" in kwargs:  # legacy
+            kwargs.pop("job_id")  # legacy
 
         # Map old history to session_events
         if "history" in kwargs and "session_events" not in kwargs:

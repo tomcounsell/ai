@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
-"""Migrate AgentSession Redis key structure for job_id -> id and parent_job_id -> parent_agent_session_id rename.
+"""Migrate AgentSession Redis key structure for KeyField rename.
+
+Renames job_id -> id and parent_job_id -> parent_agent_session_id.
 
 This script handles the structural key migration (not just hash field renames):
 1. SCANs all AgentSession:* keys (excluding index keys)
 2. Parses each key into 6 colon-separated segments
 3. Swaps segments 3 and 4 (parent_agent_session_id takes position 3,
    parent_chat_session_id moves to position 4)
-4. Renames hash fields inside each record (job_id -> id, parent_job_id -> parent_agent_session_id)
+4. Renames hash fields (job_id -> id, parent_job_id -> parent_agent_session_id)
 5. Uses pipeline.rename() for atomic key rename
 6. Updates $Class:AgentSession set membership
 7. Calls AgentSession.rebuild_indexes() after all renames
 
-Key structure change:
-  OLD: AgentSession:{chat_id}:{job_id}:{parent_chat_session_id}:{parent_job_id}:{project_key}:{session_type}
-  NEW: AgentSession:{chat_id}:{id}:{parent_agent_session_id}:{parent_chat_session_id}:{project_key}:{session_type}
+Key structure change (old -> new):
+  AgentSession:{chat_id}:{job_id}:{pcs_id}:{pj_id}:{pk}:{st}
+  AgentSession:{chat_id}:{id}:{pas_id}:{pcs_id}:{pk}:{st}
 
 Segments 3 and 4 swap because Popoto orders KeyFields alphabetically:
   - parent_agent_session_id (new name) sorts before parent_chat_session_id
@@ -123,10 +125,12 @@ def migrate_keys(dry_run: bool = True, reverse: bool = False) -> dict:
         key_str = key.decode() if isinstance(key, bytes) else key
         try:
             parts = key.split(b":")
-            # Expected: [b'AgentSession', chat_id, job_id/id, parent_chat_session_id/parent_agent_session_id, parent_job_id/parent_chat_session_id, project_key, session_type]
+            # Expected 7 parts: [AgentSession, chat_id, id, seg3, seg4, project_key, session_type]
             if len(parts) != 7:
-                logger.warning(f"  Skipping key with unexpected segment count ({len(parts)}): {key_str}")
-                stats["errors"] += 1
+                logger.info(
+                    f"  Skipping key with unexpected segment count ({len(parts)}): {key_str}"
+                )
+                stats["skipped_wrong_segments"] = stats.get("skipped_wrong_segments", 0) + 1
                 continue
 
             # Check hash fields to determine if already migrated
