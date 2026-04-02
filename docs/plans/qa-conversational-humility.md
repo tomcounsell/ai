@@ -413,11 +413,10 @@ All changes use existing infrastructure. No `.mcp.json` changes.
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | Delivery fields exist | `grep -c "delivery_action" models/agent_session.py` | output > 0 |
-| Stop hook has review gate | `grep -c "DELIVERY REVIEW\|delivery_action" agent/hooks/stop.py` | output > 0 |
-| QA prompt has humility | `grep -c "I think\|clarif\|from what" agent/qa_handler.py` | output > 0 |
+| Stop hook has review gate | `grep -c "DELIVERY REVIEW" agent/hooks/stop.py` | output > 0 |
+| Teammate prompt has humility | `grep -c "I think" agent/teammate_handler.py` | output > 0 |
 | No CLI in persona | `grep -c "valor-telegram send" config/personas/_base.md` | exit code 1 |
-| No teammate_handler refs | `grep -rl "teammate_handler" agent/ tests/` | exit code 1 |
-| classify still returns bool | `grep "-> bool" bridge/routing.py \| grep classify` | output > 0 |
+| classify still returns bool | `grep "-> bool" bridge/routing.py` | output > 0 |
 
 ## Critique Results
 

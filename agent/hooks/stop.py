@@ -128,7 +128,8 @@ def _parse_delivery_choice(output_tail: str) -> dict[str, str | None]:
     text = output_tail.strip()
     lines = text.split("\n")
 
-    for line in reversed(lines):
+    # Find the delivery keyword scanning from the end
+    for i, line in enumerate(reversed(lines)):
         line = line.strip()
         if not line:
             continue
@@ -139,7 +140,12 @@ def _parse_delivery_choice(output_tail: str) -> dict[str, str | None]:
             return {"delivery_action": "send"}
 
         if upper.startswith("EDIT:"):
+            # Capture text after EDIT: on same line, plus any subsequent lines
             revised = line[5:].strip()
+            remaining_idx = len(lines) - 1 - i
+            subsequent = "\n".join(l for l in lines[remaining_idx + 1 :] if l.strip())
+            if subsequent:
+                revised = f"{revised}\n{subsequent}".strip() if revised else subsequent
             if revised:
                 return {"delivery_action": "send", "delivery_text": revised}
             return {"delivery_action": "send"}
