@@ -472,27 +472,21 @@ class TestMigrationScript:
 class TestAgentSessionIdAlias:
     """Test the AgentSession.id property that aliases agent_session_id."""
 
-    def test_id_property_exists(self):
-        """AgentSession should have an 'id' property."""
+    def test_id_field_exists(self):
+        """AgentSession should have an 'id' AutoKeyField."""
+        from popoto import AutoKeyField
+
         from models.agent_session import AgentSession
 
         assert hasattr(AgentSession, "id")
-        assert isinstance(AgentSession.id, property)
+        assert isinstance(AgentSession.id, AutoKeyField)
 
-    def test_id_property_has_getter(self):
-        """The id property should have a getter function."""
+    def test_agent_session_id_property_exists(self):
+        """AgentSession should have an 'agent_session_id' backward-compat property."""
         from models.agent_session import AgentSession
 
-        assert AgentSession.id.fget is not None
-
-    def test_id_returns_agent_session_id_value(self):
-        """AgentSession.id should delegate to self.agent_session_id."""
-        from models.agent_session import AgentSession
-
-        # Verify id is an AutoKeyField on the model (no longer a property alias)
-        session = AgentSession.__new__(AgentSession)
-        # id is now a direct AutoKeyField, not a property alias
-        assert hasattr(AgentSession, "id")
+        assert isinstance(AgentSession.agent_session_id, property)
+        assert AgentSession.agent_session_id.fget is not None
 
 
 # ===================================================================
