@@ -226,7 +226,8 @@ def _get_session_context(session_id: str) -> str:
         stats = _compute_activity_stats(session_id)
         tool_dist = stats["tool_distribution"]
         if tool_dist:
-            dist_parts = [f"{count} {name}" for name, count in sorted(tool_dist.items(), key=lambda x: -x[1])]
+            sorted_tools = sorted(tool_dist.items(), key=lambda x: -x[1])
+            dist_parts = [f"{count} {name}" for name, count in sorted_tools]
             context += f"Tool distribution: {', '.join(dist_parts)}\n"
         total = stats["total_tool_count"]
         commits = stats["commit_count"]

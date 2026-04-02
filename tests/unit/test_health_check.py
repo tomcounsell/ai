@@ -308,11 +308,14 @@ class TestGetSessionContext:
 
         with patch.dict("sys.modules", {"models.agent_session": mock_module}):
             with patch("agent.health_check._extract_gh_commands", return_value=[]):
-                with patch("agent.health_check._compute_activity_stats", return_value={
-                    "tool_distribution": {"Read": 5, "Edit": 3},
-                    "commit_count": 1,
-                    "total_tool_count": 8,
-                }):
+                with patch(
+                    "agent.health_check._compute_activity_stats",
+                    return_value={
+                        "tool_distribution": {"Read": 5, "Edit": 3},
+                        "commit_count": 1,
+                        "total_tool_count": 8,
+                    },
+                ):
                     result = _get_session_context("dev-session")
                     assert "dev" in result
                     assert "Build the auth module" in result
@@ -333,11 +336,14 @@ class TestGetSessionContext:
 
         with patch.dict("sys.modules", {"models.agent_session": mock_module}):
             with patch("agent.health_check._extract_gh_commands", return_value=[]):
-                with patch("agent.health_check._compute_activity_stats", return_value={
-                    "tool_distribution": {},
-                    "commit_count": 0,
-                    "total_tool_count": 0,
-                }):
+                with patch(
+                    "agent.health_check._compute_activity_stats",
+                    return_value={
+                        "tool_distribution": {},
+                        "commit_count": 0,
+                        "total_tool_count": 0,
+                    },
+                ):
                     result = _get_session_context("none-session")
                     assert isinstance(result, str)
                     # Stats block still present even with None fields
