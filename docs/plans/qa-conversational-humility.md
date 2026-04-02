@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Building
 type: feature
 appetite: Medium
 owner: Valor
@@ -177,27 +177,27 @@ No prerequisites — builds on existing Stop hook, summarizer, and `set_reaction
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] If summarizer fails during stop hook, the hook should still present a "raw output" fallback draft (not crash)
-- [ ] If stop hook crashes entirely, session completes normally and existing summarizer path fires (fail-open)
-- [ ] `classify_needs_response()` already defaults to `True` on Ollama failure — no change needed
+- [x] If summarizer fails during stop hook, the hook should still present a "raw output" fallback draft (not crash)
+- [x] If stop hook crashes entirely, session completes normally and existing summarizer path fires (fail-open)
+- [x] `classify_needs_response()` already defaults to `True` on Ollama failure — no change needed
 
 ### Empty/Invalid Input Handling
-- [ ] Agent raw output is empty → stop hook skips review gate, session ends with no delivery
-- [ ] Agent response to review gate is unparseable → treat as SEND (conservative: deliver the draft)
-- [ ] REACT with invalid emoji → fall back to SEND (don't lose the message)
+- [x] Agent raw output is empty → stop hook skips review gate, session ends with no delivery
+- [x] Agent response to review gate is unparseable → treat as SEND (conservative: deliver the draft)
+- [x] REACT with invalid emoji → fall back to SEND (don't lose the message)
 
 ### Error State Rendering
-- [ ] If delivery_action is set but bridge can't execute (Telegram API error) → dead-letter queue (existing path)
-- [ ] If agent keeps choosing CONTINUE → existing nudge cap (50) is the safety backstop; no additional cap on review gate
+- [x] If delivery_action is set but bridge can't execute (Telegram API error) → dead-letter queue (existing path)
+- [x] If agent keeps choosing CONTINUE → existing nudge cap (50) is the safety backstop; no additional cap on review gate
 
 ## Test Impact
 
-- [ ] `tests/unit/test_qa_handler.py` — UPDATE: imports reference `teammate_handler`, update to `qa_handler`. Assertions update for new prompt content.
-- [ ] `tests/unit/test_qa_nudge_cap.py` — UPDATE: references `teammate_handler` imports, update to `qa_handler`.
-- [ ] `tests/unit/test_config_driven_routing.py` — NO CHANGE: `classify_needs_response` interface unchanged.
-- [ ] `tests/e2e/test_message_pipeline.py` — NO CHANGE: classifier interface unchanged.
-- [ ] `tests/unit/test_summarizer.py` — NO CHANGE: summarizer still works the same, just called from stop hook instead of bridge.
-- [ ] `tests/unit/test_stop_hook.py` — UPDATE: existing tests for SDLC branch enforcement must still pass; add new tests for review gate (draft generation, choice parsing, delivery field writes, activation rule).
+- [x] `tests/unit/test_qa_handler.py` — UPDATE: imports reference `teammate_handler`, update to `qa_handler`. Assertions update for new prompt content.
+- [x] `tests/unit/test_qa_nudge_cap.py` — UPDATE: references `teammate_handler` imports, update to `qa_handler`.
+- [x] `tests/unit/test_config_driven_routing.py` — NO CHANGE: `classify_needs_response` interface unchanged.
+- [x] `tests/e2e/test_message_pipeline.py` — NO CHANGE: classifier interface unchanged.
+- [x] `tests/unit/test_summarizer.py` — NO CHANGE: summarizer still works the same, just called from stop hook instead of bridge.
+- [x] `tests/unit/test_stop_hook.py` — UPDATE: existing tests for SDLC branch enforcement must still pass; add new tests for review gate (draft generation, choice parsing, delivery field writes, activation rule).
 
 ## Rabbit Holes
 
@@ -257,27 +257,27 @@ All changes use existing infrastructure. No `.mcp.json` changes.
 
 ## Documentation
 
-- [ ] Create `docs/features/agent-message-delivery.md` describing the stop-hook review gate, delivery choices, and how PM/Teammate personas use it
-- [ ] Update `docs/features/README.md` index table
-- [ ] Rename `docs/features/chatsession-teammate-mode.md` → `chatsession-qa-mode.md` and document new Teammate persona
-- [ ] Update `docs/features/chat-dev-session-architecture.md` to mention delivery instruction fields on AgentSession
+- [x] Create `docs/features/agent-message-delivery.md` describing the stop-hook review gate, delivery choices, and how PM/Teammate personas use it
+- [x] Update `docs/features/README.md` index table
+- [x] Rename `docs/features/chatsession-teammate-mode.md` → `chatsession-qa-mode.md` and document new Teammate persona
+- [x] Update `docs/features/chat-dev-session-architecture.md` to mention delivery instruction fields on AgentSession
 
 ## Success Criteria
 
-- [ ] Stop hook presents draft + choices to agent before delivery
-- [ ] Agent can SEND, EDIT, REACT, SILENT, or CONTINUE from the review gate
-- [ ] Summarizer output is used as draft, not as final message (agent has last word)
-- [ ] All personas (PM, Teammate, Dev) get the review gate when Telegram-triggered; subagent/programmatic sessions skip it
-- [ ] Teammate prompt enforces clarification-first, multi-perspective, conversational tone
-- [ ] Classification result passed as context to agent (advisory, not hard gate)
-- [ ] `valor-telegram send` CLI example removed from persona prompt
-- [ ] React-only path works: agent chooses REACT → bridge sets emoji, no text sent
-- [ ] False-stop detection: CONTINUE suggested when output looks like a promise, not a deliverable
-- [ ] Review gate skipped when agent already sent messages mid-session (`has_pm_messages()`)
-- [ ] SILENT means truly silent — no emoji, no text
-- [ ] Existing tests updated and passing
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] Stop hook presents draft + choices to agent before delivery
+- [x] Agent can SEND, EDIT, REACT, SILENT, or CONTINUE from the review gate
+- [x] Summarizer output is used as draft, not as final message (agent has last word)
+- [x] All personas (PM, Teammate, Dev) get the review gate when Telegram-triggered; subagent/programmatic sessions skip it
+- [x] Teammate prompt enforces clarification-first, multi-perspective, conversational tone
+- [x] Classification result passed as context to agent (advisory, not hard gate)
+- [x] `valor-telegram send` CLI example removed from persona prompt
+- [x] React-only path works: agent chooses REACT → bridge sets emoji, no text sent
+- [x] False-stop detection: CONTINUE suggested when output looks like a promise, not a deliverable
+- [x] Review gate skipped when agent already sent messages mid-session (`has_pm_messages()`)
+- [x] SILENT means truly silent — no emoji, no text
+- [x] Existing tests updated and passing
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
@@ -413,11 +413,10 @@ All changes use existing infrastructure. No `.mcp.json` changes.
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | Delivery fields exist | `grep -c "delivery_action" models/agent_session.py` | output > 0 |
-| Stop hook has review gate | `grep -c "DELIVERY REVIEW\|delivery_action" agent/hooks/stop.py` | output > 0 |
-| QA prompt has humility | `grep -c "I think\|clarif\|from what" agent/qa_handler.py` | output > 0 |
-| No CLI in persona | `grep -c "valor-telegram send" config/personas/_base.md` | exit code 1 |
-| No teammate_handler refs | `grep -rl "teammate_handler" agent/ tests/` | exit code 1 |
-| classify still returns bool | `grep "-> bool" bridge/routing.py \| grep classify` | output > 0 |
+| Stop hook has review gate | `grep -c "DELIVERY REVIEW" agent/hooks/stop.py` | output > 0 |
+| Teammate prompt has humility | `grep -c "I think" agent/teammate_handler.py` | output > 0 |
+| CLI example removed | `grep -c "valor-telegram send --chat" config/personas/_base.md` | exit code 1 |
+| classify still returns bool | `grep "-> bool" bridge/routing.py` | output > 0 |
 
 ## Critique Results
 
