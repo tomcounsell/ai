@@ -334,7 +334,68 @@ No agent integration required -- this is a model-internal rename. The agent inte
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Plan**: `docs/plans/agent_session_keyfield_rename.md`
+**Issue**: #631
+**Critics**: Skeptic, Operator, Archaeologist, Adversary, Simplifier, User
+**Findings**: 5 total (2 blockers, 2 concerns, 1 nit)
+
+### Blockers
+
+#### 1. Test Impact section is incomplete -- missing ~15 test files
+- **Severity**: BLOCKER
+- **Critics**: Skeptic, Operator
+- **Location**: ## Test Impact
+- **Finding**: The Test Impact section lists 11 test files, but `agent_session_id` (the property alias being removed) appears in 30+ Python files. Files missing from the Test Impact list include: `tests/unit/test_pre_tool_use_start_stage.py` (uses `create_dev`), `tests/unit/test_subagent_stop_hook.py`, `tests/unit/test_session_status.py`, `tests/unit/test_steer_child.py` (uses `.agent_session_id`), `tests/unit/test_structured_logging.py`, `tests/unit/test_agent_session_queue_async.py`, `tests/unit/test_stop_hook.py`, `tests/unit/test_stall_detection.py`, `tests/unit/test_transcript_liveness.py`, `tests/unit/test_ui_sdlc_data.py`, `tests/unit/test_memory_bridge.py`, `tests/integration/test_agent_session_queue_race.py`, `tests/e2e/test_queue_isolation.py`, `tests/integration/test_remote_update.py`, `tests/unit/test_agent_session_status_cli.py`. Any test that accesses `.agent_session_id` will break when the property alias is removed.
+- **Suggestion**: Run `grep -rn 'agent_session_id\|create_dev\|parent_chat_session_id\|parent_job_id\|\.job_id' --include='*.py' tests/` and add all matching test files to the Test Impact section with dispositions.
+
+#### 2. Caller update list undercounts non-test production files
+- **Severity**: BLOCKER
+- **Critics**: Skeptic, Archaeologist
+- **Location**: ### 3. Update callers
+- **Finding**: Task 3 lists 5 production files to update, but `.agent_session_id` is referenced in at least 12 additional production files not listed: `agent/sdk_client.py`, `bridge/telegram_bridge.py`, `bridge/log_format.py`, `monitoring/session_status.py`, `monitoring/session_watchdog.py`, `ui/data/sdlc.py`, `models/telegram.py`, `scripts/reflections.py`, `.claude/hooks/user_prompt_submit.py`, `.claude/hooks/post_tool_use.py`, `.claude/hooks/stop.py`, `.claude/hooks/hook_utils/memory_bridge.py`. Removing the `agent_session_id` property without updating these callers will cause AttributeError crashes across the bridge, monitoring, and UI.
+- **Suggestion**: The grep verification in Task 3 should catch these, but the explicit file list in the plan must be expanded so the builder does not skip them. Alternatively, consider keeping `agent_session_id` as a thin property alias for `.id` (a one-liner) to avoid the blast radius of a 43-file rename -- the plan's "remove all aliases" goal may not be worth the risk for this particular alias.
+
+### Concerns
+
+#### 3. `_normalize_kwargs` shim for `parent_agent_session_id` is load-bearing for the scheduler
+- **Severity**: CONCERN
+- **Critics**: Adversary, Archaeologist
+- **Location**: ### 2. Update model fields and remove aliases (line 291)
+- **Finding**: The plan says to "Remove `_normalize_kwargs` shims for `parent_agent_session_id`" but `_normalize_kwargs` currently maps `parent_agent_session_id` -> `parent_job_id` (line 217-219 of `models/agent_session.py`). After the rename, the shim should be deleted. However, `tools/agent_session_scheduler.py` line 342 passes `parent_job_id=parent_job_id` to `AgentSession.create()`. If the model field is renamed but the scheduler still passes the old kwarg name, and the shim is already removed, session creation will silently drop the parent linkage. The task ordering (model update before caller update) creates a window where tests could pass individually but the system is broken.
+- **Suggestion**: Task 2 and Task 3 should be merged into a single atomic commit, or the model update should keep the reverse shim (`parent_job_id` -> `parent_agent_session_id`) until callers are updated.
+
+#### 4. No rollback validation in the plan
+- **Severity**: CONCERN
+- **Critics**: Operator
+- **Location**: ## Solution / Technical Approach
+- **Finding**: The plan mentions `--reverse` flag support for the migration script but has no verification command for the reverse path. The Verification table has no entry for testing `--reverse`. If the migration needs to be rolled back in production, the operator has no assurance the reverse path works.
+- **Suggestion**: Add a verification entry: `python scripts/migrate_agent_session_keyfield_rename.py --reverse --dry-run` with expected exit code 0. Include a brief test scenario in the Failure Path section.
+
+### Nits
+
+#### 5. `popoto/models/migrations.py` path does not exist
+- **Severity**: NIT
+- **Critics**: Archaeologist
+- **Location**: ### spike-2
+- **Finding**: Spike 2 references `popoto/models/migrations.py` as a code-read source, but this path does not exist in the repo (it is inside the installed `popoto` package, not a local file). This is not wrong per se, but could confuse a builder looking for the file.
+- **Suggestion**: Clarify the path as referencing the installed `popoto` package (e.g., `site-packages/popoto/...` or link to the Popoto documentation).
+
+### Structural Check Results
+
+| Check | Status | Detail |
+|-------|--------|--------|
+| Required sections | PASS | Documentation, Update System, Agent Integration, Test Impact all present and non-empty |
+| Task numbering | PASS | Tasks 1-4 sequential, no gaps |
+| Dependencies valid | PASS | All `Depends On` references resolve to valid task IDs |
+| File paths exist | WARN | 1 of 17 referenced paths does not exist: `popoto/models/migrations.py` (expected -- installed package). `scripts/migrate_agent_session_keyfield_rename.py` correctly does not exist yet (to be created). |
+| Prerequisites met | PASS | No prerequisites declared |
+| Cross-references | PASS | All success criteria map to tasks. No no-gos appear as planned work. |
+
+### Verdict
+
+**NEEDS REVISION** -- 2 blockers must be resolved before build.
+
+The plan is structurally sound and the migration approach is well-researched (spikes are thorough, key position analysis is correct). However, the blast radius of removing the `agent_session_id` property alias is significantly underestimated. The Test Impact section and caller update list must be expanded to cover all 43+ files that reference `.agent_session_id`, or the plan should be revised to keep `agent_session_id` as a thin alias for `.id` to minimize risk. The task ordering concern (model update before caller update creating a broken intermediate state) should also be addressed.
 
 ---
 
