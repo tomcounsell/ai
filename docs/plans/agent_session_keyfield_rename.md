@@ -111,8 +111,10 @@ No prerequisites -- this work uses existing Redis infrastructure and Popoto ORM 
   5. Updates `$Class:AgentSession` set membership
   6. Renames hash fields inside each record (`job_id` -> `id`, `parent_job_id` -> `parent_agent_session_id`)
   7. Calls `AgentSession.rebuild_indexes()` after all renames
-- The migration is idempotent: re-running on already-migrated data is a no-op (keys already match new pattern)
+- The migration is idempotent: re-running on already-migrated data is a no-op (keys already match new pattern). Detection: if the key already contains `parent_agent_session_id` in position 3 (instead of `parent_chat_session_id`), skip it.
 - Dry-run mode logs what would change without modifying Redis
+- Supports `--reverse` flag to undo the migration (swap segments back, rename hash fields to old names) for rollback scenarios
+- Tracks progress: logs each key as it's processed, so partial failures can be diagnosed and resumed
 
 ## Failure Path Test Strategy
 
@@ -254,8 +256,11 @@ No agent integration required -- this is a model-internal rename. The agent inte
 - **Agent Type**: builder
 - **Parallel**: false
 - Update `agent/agent_session_queue.py`: replace `job_id` with `id`, `parent_job_id` with `parent_agent_session_id`
-- Update `tools/agent_session_scheduler.py`: same replacements
+- Update `tools/agent_session_scheduler.py`: same replacements (including function parameters like `retry_agent_session(job_id: str)` → `retry_agent_session(agent_session_id: str)`)
+- Update `_AGENT_SESSION_FIELDS` list if it references old names
+- Update all local variable names that refer to the AgentSession identifier (e.g., `job_id = ...` → `agent_session_id = ...`)
 - Update all 4 test files with new field names
+- Grep entire project (`grep -rn 'job_id\|parent_job_id' --include='*.py'`) to catch any references outside the 8 known files
 
 ### 4. Validate all changes
 - **Task ID**: validate-all
@@ -275,7 +280,7 @@ No agent integration required -- this is a model-internal rename. The agent inte
 | Tests pass | `pytest tests/ -x -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| No stale job_id refs | `grep -rn 'job_id' models/ agent/ tools/ tests/ --include='*.py' \| grep -v migrate_agent_session \| grep -v '# legacy'` | exit code 1 |
+| No stale job_id refs | `grep -rn 'job_id' --include='*.py' . \| grep -v migrate_agent_session \| grep -v '# legacy'` | exit code 1 |
 | Migration dry-run | `python scripts/migrate_agent_session_keyfield_rename.py --dry-run` | exit code 0 |
 
 ## Critique Results
@@ -286,4 +291,6 @@ No agent integration required -- this is a model-internal rename. The agent inte
 
 ## Open Questions
 
-1. Should the field be named `id` or `agent_session_id`? The issue suggests `id` but `agent_session_id` is more explicit. Using `id` is shorter and conventional (matches `session.id` patterns), but could shadow Python's built-in `id()`. Popoto models access fields as attributes, not via `__dict__`, so shadowing is unlikely to cause issues. Recommend `id` for brevity.
+None — all questions resolved.
+
+- **Resolved:** Field named `id` (not `agent_session_id`) per owner decision on 2026-04-02.
