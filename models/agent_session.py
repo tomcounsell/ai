@@ -64,13 +64,13 @@ class AgentSession(Model):
         running  - Worker picked up, agent executing
         active   - Session in progress (transcript tracking)
         dormant  - Paused on open question
-        waiting_for_children - Parent job waiting for child jobs to complete
+        waiting_for_children - Parent session waiting for child sessions to complete
         completed - Work finished successfully
         failed   - Work failed
     """
 
     # === Identity ===
-    job_id = AutoKeyField()
+    id = AutoKeyField()
     session_id = Field()  # Telegram-derived session identifier (e.g., tg_project_chatid_msgid)
     session_type = KeyField(null=True)  # "chat" or "dev" — discriminator
     project_key = KeyField()
@@ -142,7 +142,7 @@ class AgentSession(Model):
     slug = Field(null=True)  # Derives branch, plan path, worktree
 
     # === Session hierarchy fields ===
-    parent_job_id = KeyField(null=True)
+    parent_agent_session_id = KeyField(null=True)
 
     # === Backward-compatible field name mapping ===
 
@@ -214,13 +214,17 @@ class AgentSession(Model):
         elif "scheduled_after" in kwargs:
             kwargs.pop("scheduled_after")
 
-        if "parent_agent_session_id" in kwargs and "parent_job_id" not in kwargs:
-            kwargs["parent_job_id"] = kwargs.pop("parent_agent_session_id")
-        elif "parent_agent_session_id" in kwargs:
-            kwargs.pop("parent_agent_session_id")
+        # Map old field names to new ones
+        if "parent_job_id" in kwargs and "parent_agent_session_id" not in kwargs:
+            kwargs["parent_agent_session_id"] = kwargs.pop("parent_job_id")
+        elif "parent_job_id" in kwargs:
+            kwargs.pop("parent_job_id")
 
         if "agent_session_id" in kwargs:
             kwargs.pop("agent_session_id")  # AutoKeyField, ignore
+
+        if "job_id" in kwargs:
+            kwargs.pop("job_id")  # AutoKeyField, ignore
 
         # Map old history to session_events
         if "history" in kwargs and "session_events" not in kwargs:
@@ -297,24 +301,19 @@ class AgentSession(Model):
         kwargs = cls._normalize_kwargs(kwargs)
         return await super().async_create(**kwargs)
 
-    # === Backward-compatible property: agent_session_id -> job_id ===
+    # === Backward-compatible property: agent_session_id -> id ===
 
     @property
     def agent_session_id(self) -> str | None:
-        """Backward-compatible alias for job_id."""
-        return self.job_id
+        """Backward-compatible alias for id."""
+        return self.id
 
     @agent_session_id.setter
     def agent_session_id(self, value: str) -> None:
-        """Backward-compatible setter for job_id."""
-        self.job_id = value
+        """Backward-compatible setter for id."""
+        self.id = value
 
     # === Compatibility property aliases ===
-
-    @property
-    def id(self) -> str | None:
-        """Alias for job_id."""
-        return self.job_id
 
     @property
     def sender_name(self) -> str | None:
@@ -485,7 +484,7 @@ class AgentSession(Model):
 
     @property
     def scheduling_depth(self) -> int:
-        """Derive scheduling depth by walking parent_job_id chain.
+        """Derive scheduling depth by walking parent_agent_session_id chain.
 
         Returns the depth of the parent chain, capped at 5 for safety.
         """
@@ -493,7 +492,7 @@ class AgentSession(Model):
         current = self
         max_depth = 5
         while depth < max_depth:
-            pid = current.parent_job_id
+            pid = current.parent_agent_session_id
             if not pid:
                 break
             try:
@@ -764,7 +763,7 @@ class AgentSession(Model):
         except Exception:
             logger.warning(
                 f"Parent chat session {self.parent_chat_session_id} not found "
-                f"for dev session {self.job_id}"
+                f"for dev session {self.id}"
             )
             return None
 
@@ -773,9 +772,9 @@ class AgentSession(Model):
         if not self.is_chat:
             return []
         try:
-            return list(AgentSession.query.filter(parent_chat_session_id=self.job_id))
+            return list(AgentSession.query.filter(parent_chat_session_id=self.id))
         except Exception as e:
-            logger.warning(f"Failed to query dev sessions for chat {self.job_id}: {e}")
+            logger.warning(f"Failed to query dev sessions for chat {self.id}: {e}")
             return []
 
     # === PM self-messaging helpers ===
@@ -913,7 +912,7 @@ class AgentSession(Model):
 
         logger.info(
             f"LIFECYCLE session={self.session_id} transition={old_status}\u2192{new_status} "
-            f"job_id={self.job_id} project={self.project_key} "
+            f"id={self.id} project={self.project_key} "
             f"duration_in_prev_state={duration:.1f}s" + (f' context="{context}"' if context else "")
         )
 
@@ -1004,23 +1003,23 @@ class AgentSession(Model):
 
     def get_parent(self) -> "AgentSession | None":
         """Return the parent AgentSession if this is a child session."""
-        if not self.parent_job_id:
+        if not self.parent_agent_session_id:
             return None
         try:
-            parent = AgentSession.query.get(self.parent_job_id)
+            parent = AgentSession.query.get(self.parent_agent_session_id)
             return parent
         except Exception:
             logger.warning(
-                f"Parent agent session {self.parent_job_id} not found for child {self.job_id}"
+                f"Parent agent session {self.parent_agent_session_id} not found for child {self.id}"
             )
             return None
 
     def get_children(self) -> list["AgentSession"]:
-        """Return all child AgentSessions linked via parent_job_id."""
+        """Return all child AgentSessions linked via parent_agent_session_id."""
         try:
-            return list(AgentSession.query.filter(parent_job_id=self.job_id))
+            return list(AgentSession.query.filter(parent_agent_session_id=self.id))
         except Exception as e:
-            logger.warning(f"Failed to query children for agent session {self.job_id}: {e}")
+            logger.warning(f"Failed to query children for agent session {self.id}: {e}")
             return []
 
     def get_completion_progress(self) -> tuple[int, int, int]:
