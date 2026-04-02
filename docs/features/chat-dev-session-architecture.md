@@ -75,7 +75,7 @@ resolve_chat_mode(project, chat_title, is_dm)
 Single Popoto model (`AgentSession`) with discriminator field. Popoto ORM does not support model inheritance, so both types share one model with nullable type-specific fields.
 
 ### Shared fields (all sessions)
-- `job_id` (AutoKeyField) -- primary key
+- `id` (AutoKeyField) -- primary key (aliased as `agent_session_id`)
 - `session_id` -- Telegram-derived identifier
 - `session_type` (KeyField) -- "chat" or "dev"
 - `status` (KeyField) -- pending/running/active/dormant/completed/failed

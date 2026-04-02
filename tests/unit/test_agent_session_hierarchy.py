@@ -1,7 +1,7 @@
 """Unit tests for session hierarchy: parent-child session decomposition (issue #359).
 
 Tests cover:
-- AgentSession.parent_job_id field
+- AgentSession.parent_agent_session_id field
 - get_parent(), get_children(), get_completion_progress() helpers
 - _finalize_parent() completion propagation logic
 - _transition_parent() status transitions
@@ -28,7 +28,7 @@ class TestAgentSessionHierarchyHelpers:
         session.agent_session_id = kwargs.get("agent_session_id", "test-session-1")
         session.session_id = kwargs.get("session_id", "test-session-1")
         session.status = kwargs.get("status", "pending")
-        session.parent_job_id = kwargs.get("parent_job_id", None)
+        session.parent_agent_session_id = kwargs.get("parent_agent_session_id", None)
         session.message_text = kwargs.get("message_text", "test message")
         session.priority = kwargs.get("priority", "normal")
         session.created_at = kwargs.get("created_at", time.time())
@@ -39,14 +39,14 @@ class TestAgentSessionHierarchyHelpers:
 
     @patch("models.agent_session.AgentSession.query")
     def test_get_parent_returns_parent(self, mock_query):
-        """get_parent() returns the parent session when parent_job_id is set."""
+        """get_parent() returns the parent session when parent_agent_session_id is set."""
         from models.agent_session import AgentSession
 
         parent = self._make_session(agent_session_id="parent-1")
         mock_query.get.return_value = parent
 
         child = AgentSession()
-        child.parent_job_id = "parent-1"
+        child.parent_agent_session_id = "parent-1"
         child.agent_session_id = "child-1"
 
         result = child.get_parent()
@@ -55,11 +55,11 @@ class TestAgentSessionHierarchyHelpers:
 
     @patch("models.agent_session.AgentSession.query")
     def test_get_parent_returns_none_when_no_parent(self, mock_query):
-        """get_parent() returns None when parent_job_id is not set."""
+        """get_parent() returns None when parent_agent_session_id is not set."""
         from models.agent_session import AgentSession
 
         child = AgentSession()
-        child.parent_job_id = None
+        child.parent_agent_session_id = None
         child.agent_session_id = "child-1"
 
         result = child.get_parent()
@@ -72,8 +72,8 @@ class TestAgentSessionHierarchyHelpers:
         from models.agent_session import AgentSession
 
         children = [
-            self._make_session(agent_session_id="child-1", parent_job_id="parent-1"),
-            self._make_session(agent_session_id="child-2", parent_job_id="parent-1"),
+            self._make_session(agent_session_id="child-1", parent_agent_session_id="parent-1"),
+            self._make_session(agent_session_id="child-2", parent_agent_session_id="parent-1"),
         ]
         mock_query.filter.return_value = children
 
@@ -82,7 +82,7 @@ class TestAgentSessionHierarchyHelpers:
 
         result = parent.get_children()
         assert len(result) == 2
-        mock_query.filter.assert_called_once_with(parent_job_id="parent-1")
+        mock_query.filter.assert_called_once_with(parent_agent_session_id="parent-1")
 
     @patch("models.agent_session.AgentSession.query")
     def test_get_children_returns_empty_when_none(self, mock_query):
@@ -405,17 +405,17 @@ class TestSchedulerParentSession:
 
 
 # ===================================================================
-# _AGENT_SESSION_FIELDS includes parent_job_id
+# _AGENT_SESSION_FIELDS includes parent_agent_session_id
 # ===================================================================
 
 
 class TestSessionFieldsIncludesParentSessionId:
-    """Verify parent_job_id is in the extract list."""
+    """Verify parent_agent_session_id is in the extract list."""
 
-    def test_parent_job_id_in_session_fields(self):
+    def test_parent_agent_session_id_in_session_fields(self):
         from agent.agent_session_queue import _AGENT_SESSION_FIELDS
 
-        assert "parent_job_id" in _AGENT_SESSION_FIELDS
+        assert "parent_agent_session_id" in _AGENT_SESSION_FIELDS
 
 
 # ===================================================================

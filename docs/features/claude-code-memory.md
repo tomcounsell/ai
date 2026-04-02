@@ -96,11 +96,11 @@ The Stop hook has a 10-second timeout. Haiku extraction typically completes in 2
 
 ## AgentSession Lifecycle Tracking
 
-Local Claude Code sessions create AgentSession records in Redis, providing dashboard observability on par with Telegram-originated sessions. The lifecycle is managed across three hooks using a sidecar file to share the AgentSession `job_id`:
+Local Claude Code sessions create AgentSession records in Redis, providing dashboard observability on par with Telegram-originated sessions. The lifecycle is managed across three hooks using a sidecar file to share the AgentSession `agent_session_id`:
 
-1. **UserPromptSubmit hook**: On the first prompt of a session, creates an AgentSession via `AgentSession.create(session_type="dev", ...)` with `status="running"` and `session_id=f"local-{claude_session_id}"`. The `job_id` is persisted to `data/sessions/{session_id}/agent_session.json`.
-2. **PostToolUse hook**: On every tool call, reads `job_id` from the sidecar and updates `updated_at` timestamp and increments `tool_call_count` on the AgentSession record.
-3. **Stop hook**: Reads `job_id` from the sidecar, sets `completed_at`, and marks status as `completed` (or `failed` if `stop_reason` is "error" or "crash").
+1. **UserPromptSubmit hook**: On the first prompt of a session, creates an AgentSession via `AgentSession.create(session_type="dev", ...)` with `status="running"` and `session_id=f"local-{claude_session_id}"`. The `agent_session_id` is persisted to `data/sessions/{session_id}/agent_session.json`.
+2. **PostToolUse hook**: On every tool call, reads `agent_session_id` from the sidecar and updates `updated_at` timestamp and increments `tool_call_count` on the AgentSession record.
+3. **Stop hook**: Reads `agent_session_id` from the sidecar, sets `completed_at`, and marks status as `completed` (or `failed` if `stop_reason` is "error" or "crash").
 
 The dashboard at `localhost:8500` picks up local sessions automatically via `AgentSession.query` -- no dashboard code changes were needed. Local sessions appear alongside Telegram sessions with correct status, timestamps, and project key.
 
@@ -113,7 +113,7 @@ Hooks are stateless processes -- each invocation starts fresh. State is persiste
 | File | Location | Contents |
 |------|----------|----------|
 | Memory buffer | `data/sessions/{session_id}/memory_buffer.json` | Tool call count, rolling buffer (last 9 calls), injected thought IDs |
-| Agent session | `data/sessions/{session_id}/agent_session.json` | `agent_session_job_id` for cross-hook lifecycle tracking, `merge_detected` flag for post-merge learning |
+| Agent session | `data/sessions/{session_id}/agent_session.json` | `agent_session_id` for cross-hook lifecycle tracking, `merge_detected` flag for post-merge learning |
 
 The memory buffer sidecar structure:
 ```json
@@ -133,7 +133,7 @@ The memory buffer sidecar structure:
 The agent session sidecar structure:
 ```json
 {
-  "agent_session_job_id": "abc123",
+  "agent_session_id": "abc123",
   "merge_detected": true,
   "merged_pr_number": "560"
 }

@@ -6,8 +6,8 @@ Popoto models stored in Redis form the persistent state layer of the system. Thi
 
 ```
 TelegramMessage ──────── AgentSession
-  msg_id                   job_id
-  agent_session_id ──────> job_id
+  msg_id                   id
+  agent_session_id ──────> id
   msg_id <─────────────── telegram_message_key
   project_key              project_key
   chat_id                  chat_id
@@ -52,7 +52,7 @@ When a Telegram message triggers an agent session:
 1. **Bridge stores TelegramMessage** with media, URL, and classification metadata
 2. **Bridge enqueues AgentSession** with `telegram_message_key` pointing to the TelegramMessage's `msg_id`
 3. **Session worker resolves TelegramMessage** via `telegram_message_key` to get enrichment parameters
-4. **Session worker sets back-reference**: `TelegramMessage.agent_session_id = AgentSession.job_id`
+4. **Session worker sets back-reference**: `TelegramMessage.agent_session_id = AgentSession.id`
 
 This bidirectional link enables:
 - Looking up which session processed a given message
@@ -115,7 +115,7 @@ The script:
 
 | Field | Purpose | Notes |
 |-------|---------|-------|
-| `job_id` | AgentSession primary key (AutoKeyField) | `session.id` property alias available |
+| `id` | AgentSession primary key (AutoKeyField) | `session.agent_session_id` backward-compat alias available |
 | `session_id` | Telegram-derived session identifier | Format: `tg_{project}_{chat_id}_{msg_id}` |
 | `telegram_message_id` | Telegram message ID (integer) | Renamed from `message_id` for clarity |
 | `telegram_message_key` | Popoto key to TelegramMessage | Renamed from `trigger_message_id` for clarity |
@@ -133,12 +133,12 @@ Popoto field types have different implications for how records behave on mutatio
 
 | Field | Type | Mutable? | Notes |
 |-------|------|----------|-------|
-| `job_id` | AutoKeyField | Never | Primary key, auto-generated |
+| `id` | AutoKeyField | Never | Primary key, auto-generated |
 | `session_type` | KeyField | No | Set once at creation ("chat" or "dev") |
 | `project_key` | KeyField | No | Set once at creation |
 | `chat_id` | KeyField | No | Set once at creation |
 | `parent_chat_session_id` | KeyField | No | Set once at creation (DevSession only) |
-| `parent_job_id` | KeyField | No | Set once at creation (child jobs only) |
+| `parent_agent_session_id` | KeyField | No | Set once at creation (child sessions only) |
 | `status` | IndexedField | Yes | Mutate and save directly; no delete-and-recreate |
 
 ### AgentSession Datetime Fields

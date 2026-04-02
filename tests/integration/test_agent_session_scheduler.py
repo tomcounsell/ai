@@ -67,7 +67,7 @@ def _create_pending(
     scheduling_depth=0,
     created_at=None,
     session_id=None,
-    parent_job_id=None,
+    parent_agent_session_id=None,
     **kwargs,
 ):
     """Helper to create a pending AgentSession for testing."""
@@ -77,7 +77,7 @@ def _create_pending(
         priority=priority,
         created_at=created_at or time.time(),
         session_id=session_id or f"test-{time.time_ns()}",
-        parent_job_id=parent_job_id,
+        parent_agent_session_id=parent_agent_session_id,
         working_dir="/tmp/test",
         message_text=message,
         sender_name="Test",
@@ -182,7 +182,7 @@ class TestAgentSessionFields:
         assert session.scheduled_at is not None
 
     def test_scheduling_depth_derived(self):
-        """scheduling_depth is derived from parent_job_id chain."""
+        """scheduling_depth is derived from parent_agent_session_id chain."""
         session = _create_pending()
         assert session.scheduling_depth == 0  # No parent
 
@@ -385,9 +385,9 @@ class TestSelfSchedulingProtection:
 
         # Create a chain of 3 parent sessions to reach depth 3
         s0 = _create_pending(session_id="chain-root")
-        s1 = _create_pending(session_id="chain-1", parent_job_id=s0.job_id)
-        s2 = _create_pending(session_id="chain-2", parent_job_id=s1.job_id)
-        leaf = _create_pending(session_id="chain-leaf", parent_job_id=s2.job_id)
+        s1 = _create_pending(session_id="chain-1", parent_agent_session_id=s0.id)
+        s2 = _create_pending(session_id="chain-2", parent_agent_session_id=s1.id)
+        leaf = _create_pending(session_id="chain-leaf", parent_agent_session_id=s2.id)
 
         import os
 
