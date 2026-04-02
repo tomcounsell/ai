@@ -1,0 +1,339 @@
+---
+status: Planning
+type: chore
+appetite: Medium
+owner: Valor
+created: 2026-04-02
+tracking: https://github.com/tomcounsell/ai/issues/634
+last_comment_id:
+---
+
+# Generalize AgentSession parent-child model and add role field
+
+## Problem
+
+The AgentSession model has three naming/design issues left over from #631 that prevent the system from supporting arbitrary session roles beyond "chat" and "dev":
+
+**Current behavior:**
+1. `parent_chat_session_id` KeyField implies the parent is always a "ChatSession", but there is no ChatSession class — it's all AgentSession with different `session_type` values.
+2. No `role` field exists — session specialization is encoded only in `session_type` (a KeyField limited to "chat"/"dev"). Adding new roles would require KeyField changes and Redis key migrations.
+3. `create_dev()` factory method hard-codes dev-session creation. Every new role would need its own factory method.
+
+**Desired outcome:**
+- `parent_chat_session_id` renamed to `parent_session_id` (accurate, role-neutral name)
+- New `role` DataField for flexible role assignment without key-level impact
+- `create_child(role=...)` factory replacing the rigid `create_dev()`
+- Docstrings updated where they reference "DevSession"/"ChatSession" as if they were distinct classes
+
+## Prior Art
+
+- **#608 / PR #616**: Renamed all "job" terminology to "agent_session". Left KeyFields unchanged.
+- **#609 / PR #628**: AgentSession field cleanup. Added property aliases, kept `job_id` as AutoKeyField.
+- **#631 / PR #633**: Renamed `job_id` → `id` and `parent_job_id` → `parent_agent_session_id`. Established the SCAN + RENAME + `rebuild_indexes()` migration pattern. Deliberately scoped out the remaining items that this plan addresses.
+
+## Spike Results
+
+### spike-1: Key position analysis after rename
+- **Assumption**: "Renaming `parent_chat_session_id` to `parent_session_id` changes key segment positions, requiring segment swapping like PR #633"
+- **Method**: code-read
+- **Finding**: **No segment swap needed.** Current alphabetical order: `chat_id`(1), `id`(2), `parent_agent_session_id`(3), `parent_chat_session_id`(4), `project_key`(5), `session_type`(6). After rename: `parent_session_id` still sorts to position 4 (after `parent_agent_session_id`, before `project_key`). The Redis key structure is unchanged — only the hash field name inside each record changes.
+- **Confidence**: high
+- **Impact on plan**: Migration is simpler than #631. No key restructuring needed — just hash field rename (`HSET` new name, `HDEL` old name) plus `rebuild_indexes()`. No `RENAME` of Redis keys themselves.
+
+### spike-2: session_type vs role design space
+- **Assumption**: "role should replace session_type"
+- **Method**: code-read
+- **Finding**: **No — role supplements session_type.** `session_type` is a KeyField used in 7 critical permission/routing checks across `sdk_client.py`, `pre_tool_use.py`, and `steer_child.py`. It determines the permission model (read-only vs full). `role` is a specialization within a session type — e.g., a dev-type session could have role "builder", "documentarian", "reviewer". Making `role` a DataField (not KeyField) means no key migration impact and roles can be added freely.
+- **Confidence**: high
+- **Impact on plan**: `role` is a `Field(null=True)` — simple addition. `session_type` stays unchanged. Backfill: `session_type="dev"` → `role="dev"`, `session_type="chat"` → `role="pm"`.
+
+### spike-3: DevSession/ChatSession terminology audit
+- **Assumption**: "Hundreds of DevSession/ChatSession references need updating"
+- **Method**: code-read
+- **Finding**: 733 total references across 70 files. However, these are **intentional architectural terminology** — "ChatSession" and "DevSession" are the official names for the two session roles. They correctly describe the architecture. The issue requested updating docstrings that treat them as distinct classes, but the actual usage is already correct (they reference roles, not classes).
+- **Confidence**: high
+- **Impact on plan**: Scope down docstring updates to only the model file's class/module docstrings and the factory method docstrings that literally say "Creates a DevSession" — update those to "Creates a child AgentSession with role=dev". Do NOT bulk-rename 733 references.
+
+## Data Flow
+
+1. **Migration script**: SCAN `AgentSession:*` → for each record: `HGET parent_chat_session_id` → `HSET parent_session_id` → `HDEL parent_chat_session_id` → after all: `rebuild_indexes()`
+2. **Model update**: Rename field declaration, add `role = Field(null=True)`, update `create_child()` factory
+3. **Caller update**: All files referencing `parent_chat_session_id` switch to `parent_session_id`
+4. **Runtime flow**: `pre_tool_use.py` hook calls `AgentSession.create_child(role="dev", ...)` instead of `AgentSession.create_dev(...)`
+
+## Architectural Impact
+
+- **New dependencies**: None
+- **Interface changes**: `parent_chat_session_id` → `parent_session_id` across all callers; `create_dev()` → `create_child(role=...)` with backward-compat wrapper
+- **Coupling**: Decreases — removes ChatSession-specific naming from a generic parent-child relationship
+- **Data ownership**: No change
+- **Reversibility**: Medium — another migration script could reverse the hash field rename
+
+## Appetite
+
+**Size:** Medium
+
+**Team:** Solo dev
+
+**Interactions:**
+- PM check-ins: 0 (continuation of established pattern from #631)
+- Review rounds: 1 (validate migration safety)
+
+## Prerequisites
+
+No prerequisites — this work uses existing Redis infrastructure and Popoto ORM capabilities.
+
+## Solution
+
+### Key Elements
+
+- **Migration script**: Hash field rename (`parent_chat_session_id` → `parent_session_id`) + backfill `role` from `session_type`
+- **Model field rename**: Change KeyField name, add `role` DataField
+- **Factory generalization**: `create_dev()` → `create_child(role=...)` with `create_dev()` kept as thin wrapper for backward compat during transition
+- **Caller updates**: Mechanical rename across ~23 files
+- **Targeted docstring updates**: Only model and factory docstrings, not bulk rename
+
+### Flow
+
+**Run migration** (dry-run first) → **Update model fields** → **Update callers** → **Run tests** → **Update targeted docstrings**
+
+### Technical Approach
+
+- Write `scripts/migrate_parent_session_field.py` that:
+  1. SCANs all `AgentSession:*` keys (excluding index keys)
+  2. For each record: renames hash field `parent_chat_session_id` → `parent_session_id`
+  3. Backfills `role` field from `session_type` (`"chat"` → `"pm"`, `"dev"` → `"dev"`)
+  4. Calls `AgentSession.rebuild_indexes()` after all changes
+  5. Supports `--dry-run` flag
+  6. Idempotent: skips records that already have `parent_session_id`
+- **No Redis key RENAME needed** — key structure is unchanged (spike-1 confirmed)
+- Add `role = Field(null=True)` to AgentSession model
+- Replace `create_dev()` with `create_child(role=...)`, keep `create_dev()` as a thin wrapper that calls `create_child(role="dev", ...)`
+- Add backward-compat mapping in `_normalize_kwargs`: `parent_chat_session_id` → `parent_session_id`
+
+## Failure Path Test Strategy
+
+### Exception Handling Coverage
+- [x] Migration script must handle missing `parent_chat_session_id` field gracefully (skip record)
+- [x] Migration must handle partial failures by logging and continuing
+
+### Empty/Invalid Input Handling
+- [x] Migration handles empty Redis (zero records) gracefully
+- [x] `create_child()` validates `role` parameter is a known value or None
+- [x] `role=None` is valid for unspecialized sessions
+
+### Error State Rendering
+- [x] Migration reports summary: total records, migrated, skipped, errors
+
+## Test Impact
+
+- [ ] `tests/unit/test_agent_session_hierarchy.py` — UPDATE: replace all `parent_chat_session_id` with `parent_session_id`
+- [ ] `tests/unit/test_agent_session_scheduler_kill.py` — UPDATE: replace `parent_chat_session_id` references
+- [ ] `tests/unit/test_model_relationships.py` — UPDATE: update `_AGENT_SESSION_FIELDS` assertion for `parent_chat_session_id`
+- [ ] `tests/unit/test_dev_session_registration.py` — UPDATE: replace `parent_chat_session_id` with `parent_session_id`, update `create_dev` calls to `create_child`
+- [ ] `tests/unit/test_steer_child.py` — UPDATE: replace `parent_chat_session_id` references
+- [ ] `tests/unit/test_summarizer.py` — UPDATE: replace `parent_chat_session_id` in docstrings
+- [ ] `tests/unit/test_chat_session_factory.py` — UPDATE: update factory method references
+- [ ] `tests/integration/test_agent_session_queue_session_type.py` — UPDATE: replace `parent_chat_session_id`
+- [ ] `tests/e2e/test_session_spawning.py` — UPDATE: replace `parent_chat_session_id` (10 occurrences)
+- [ ] `tests/e2e/test_context_propagation.py` — UPDATE: replace `parent_chat_session_id` (10 occurrences)
+
+## Rabbit Holes
+
+- **Bulk-renaming 733 DevSession/ChatSession references**: These are intentional architectural terms. Only update model/factory docstrings, not every comment and doc.
+- **Replacing `session_type` with `role`**: They serve different purposes (permission model vs specialization). Keep both.
+- **Making `role` a KeyField**: This would change Redis key structure. Use DataField (`Field`) instead.
+- **Building a generic Popoto migration framework**: Write a standalone script.
+- **Adding new roles beyond "pm" and "dev" now**: The `role` field enables future roles, but defining them is follow-up work.
+
+## Risks
+
+### Risk 1: Hash field rename breaks Popoto queries
+**Impact:** Queries filtering on `parent_chat_session_id` return empty after migration but before code update.
+**Mitigation:** Deploy sequence: stop bridge → run migration → deploy code → restart bridge. Migration and code update happen atomically from the bridge's perspective.
+
+### Risk 2: Backward-compat shim in `_normalize_kwargs` masks bugs
+**Impact:** Old callers silently work via shim instead of being updated.
+**Mitigation:** Add a deprecation warning log when the shim triggers. Grep to verify zero callers use the old name after the update.
+
+## Race Conditions
+
+### Race 1: Bridge creates session during migration
+**Location:** Migration script + bridge session creation
+**Trigger:** Bridge creates a new AgentSession while migration is running
+**Data prerequisite:** All existing records must be migrated before new model code is deployed
+**State prerequisite:** Bridge must be stopped during migration
+**Mitigation:** Deployment sequence: stop bridge → run migration → deploy code → start bridge. Eliminates the race.
+
+## No-Gos (Out of Scope)
+
+- Renaming `session_type` or changing its values (stays as KeyField discriminator)
+- Defining new role values beyond "pm" and "dev" (follow-up work)
+- Updating all 733 DevSession/ChatSession references (only model docstrings)
+- Modifying `create_chat()` or `create_local()` factory methods
+- Adding role-based permission checks (future work)
+- Multi-machine migration coordination (single Redis instance)
+
+## Update System
+
+The migration script must run on the production machine before the code update deploys. Update sequence:
+1. Stop bridge (`./scripts/valor-service.sh stop`)
+2. Pull new code (`git pull`)
+3. Run migration (`python scripts/migrate_parent_session_field.py`)
+4. Restart bridge (`./scripts/valor-service.sh restart`)
+
+No changes to the update skill or `scripts/remote-update.sh` needed — the migration is a one-time manual operation.
+
+## Agent Integration
+
+No agent integration required — this is a model-internal rename and field addition. The agent interacts with AgentSession through the queue and scheduler, which will be updated as part of the caller changes. No MCP server or bridge changes needed beyond updating `parent_chat_session_id` references.
+
+## Documentation
+
+### Feature Documentation
+- [ ] Update `docs/features/agent-session-model.md` — replace `parent_chat_session_id` references, add `role` field documentation
+- [ ] Update `docs/features/chat-dev-session-architecture.md` — update field names in data model section
+- [ ] Update `docs/features/redis-models.md` — update field documentation table
+- [ ] Update `docs/features/session-isolation.md` — if it references `parent_chat_session_id`
+
+### Inline Documentation
+- [ ] Update module and class docstrings in `models/agent_session.py`
+- [ ] Update factory method docstrings to reference `create_child(role=...)`
+- [ ] Update comments in `agent/agent_session_queue.py` field preservation list
+
+## Success Criteria
+
+- [ ] `parent_chat_session_id` field renamed to `parent_session_id` (KeyField) in model
+- [ ] New `role` DataField added to AgentSession with backfill from `session_type`
+- [ ] `create_child(role=...)` factory method exists and works
+- [ ] `create_dev()` exists as thin wrapper calling `create_child(role="dev", ...)`
+- [ ] Zero references to `parent_chat_session_id` in Python files (excluding migration script and `_normalize_kwargs` backward-compat mapping)
+- [ ] Migration script runs successfully in dry-run mode
+- [ ] All tests pass (`/do-test`)
+- [ ] Documentation updated (`/do-docs`)
+
+## Team Orchestration
+
+### Team Members
+
+- **Builder (migration)**
+  - Name: migration-builder
+  - Role: Write migration script, update model, update callers
+  - Agent Type: builder
+  - Resume: true
+
+- **Validator (migration)**
+  - Name: migration-validator
+  - Role: Verify migration correctness and test coverage
+  - Agent Type: validator
+  - Resume: true
+
+### Step by Step Tasks
+
+### 1. Write migration script
+- **Task ID**: build-migration-script
+- **Depends On**: none
+- **Validates**: `scripts/migrate_parent_session_field.py` runs without error in dry-run mode
+- **Informed By**: spike-1 (no key restructuring needed — hash field rename only)
+- **Assigned To**: migration-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- Create `scripts/migrate_parent_session_field.py` with hash field rename + role backfill
+- Support `--dry-run` flag
+- Idempotent: skip records already migrated
+- Report summary statistics
+
+### 2. Update model fields and add role
+- **Task ID**: build-model-update
+- **Depends On**: build-migration-script
+- **Validates**: `tests/unit/test_model_relationships.py`, `tests/unit/test_agent_session_hierarchy.py`
+- **Informed By**: spike-2 (role is DataField supplementing session_type)
+- **Assigned To**: migration-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- Rename `parent_chat_session_id` to `parent_session_id` (KeyField) in `models/agent_session.py`
+- Add `role = Field(null=True)` to AgentSession
+- Replace `create_dev()` with `create_child(role=...)`, keep `create_dev()` as thin wrapper
+- Add backward-compat mapping in `_normalize_kwargs`
+- Update `get_parent_chat_session()` → `get_parent_session()` and `get_dev_sessions()` → `get_child_sessions()`
+
+### 3. Update callers
+- **Task ID**: build-caller-update
+- **Depends On**: build-model-update
+- **Validates**: `tests/unit/test_dev_session_registration.py`, `tests/unit/test_steer_child.py`
+- **Assigned To**: migration-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- Update `agent/hooks/pre_tool_use.py`: `create_dev()` → `create_child(role="dev", ...)`
+- Update `agent/hooks/subagent_stop.py`: `parent_chat_session_id` → `parent_session_id`
+- Update `scripts/steer_child.py`: same replacements
+- Update `agent/agent_session_queue.py`: field preservation list
+- Update all 10 test files with new field names
+- Grep entire project to catch any missed references
+
+### 4. Update targeted docstrings
+- **Task ID**: build-docstring-update
+- **Depends On**: build-caller-update
+- **Informed By**: spike-3 (only model/factory docstrings, not bulk rename)
+- **Assigned To**: migration-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- Update module docstring in `models/agent_session.py`
+- Update class docstring in AgentSession
+- Update factory method docstrings (`create_child`, `create_chat`)
+- Update `get_parent_session()` and `get_child_sessions()` docstrings
+
+### 5. Validate all changes
+- **Task ID**: validate-all
+- **Depends On**: build-docstring-update
+- **Assigned To**: migration-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Run `pytest tests/unit/ -x -q`
+- Run `python -m ruff check .` and `python -m ruff format --check .`
+- Verify zero `parent_chat_session_id` references in Python files (excluding migration script and `_normalize_kwargs`)
+- Verify migration script dry-run completes without error
+
+### 6. Documentation
+- **Task ID**: document-feature
+- **Depends On**: validate-all
+- **Assigned To**: migration-builder
+- **Agent Type**: documentarian
+- **Parallel**: false
+- Update `docs/features/agent-session-model.md`
+- Update `docs/features/chat-dev-session-architecture.md`
+- Update `docs/features/redis-models.md`
+
+### 7. Final Validation
+- **Task ID**: validate-final
+- **Depends On**: document-feature
+- **Assigned To**: migration-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Run full test suite
+- Verify all success criteria
+- Generate final report
+
+## Verification
+
+| Check | Command | Expected |
+|-------|---------|----------|
+| Tests pass | `pytest tests/ -x -q` | exit code 0 |
+| Lint clean | `python -m ruff check .` | exit code 0 |
+| Format clean | `python -m ruff format --check .` | exit code 0 |
+| No stale parent_chat_session_id refs | `grep -rn 'parent_chat_session_id' --include='*.py' . \| grep -v migrate_parent_session \| grep -v '_normalize_kwargs'` | exit code 1 |
+| Migration dry-run | `python scripts/migrate_parent_session_field.py --dry-run` | exit code 0 |
+| Role field exists | `python -c "from models.agent_session import AgentSession; assert hasattr(AgentSession, 'role')"` | exit code 0 |
+
+## Critique Results
+
+<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+
+---
+
+## Open Questions
+
+None — all questions resolved via spikes. Key decisions:
+- **Resolved:** `parent_session_id` (not `parent_id`) to maintain consistency with `parent_agent_session_id`
+- **Resolved:** `role` as DataField (not KeyField) per spike-2 finding
+- **Resolved:** Docstring updates scoped to model/factory only per spike-3 finding
