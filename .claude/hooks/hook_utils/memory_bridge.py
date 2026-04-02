@@ -47,11 +47,9 @@ MAX_THOUGHTS = 3
 # ---------------------------------------------------------------------------
 try:
     from config.memory_defaults import (
-        DEJA_VU_BLOOM_HIT_THRESHOLD,
         NOVEL_TERRITORY_KEYWORD_THRESHOLD,
     )
 except Exception:
-    DEJA_VU_BLOOM_HIT_THRESHOLD = 3
     NOVEL_TERRITORY_KEYWORD_THRESHOLD = 7
 
 # Trivial prompt patterns to skip during ingestion
@@ -205,7 +203,7 @@ def recall(
             return None
 
         # Extract keywords from buffer (lazy import to avoid overhead on non-query calls)
-        from agent.memory_hook import extract_topic_keywords
+        from utils.keyword_extraction import extract_topic_keywords
 
         all_keywords: list[str] = []
         for entry in buffer[-BUFFER_SIZE:]:
@@ -251,7 +249,7 @@ def recall(
         # Multi-query decomposition -- cluster keywords and retrieve via BM25+RRF
         import time
 
-        from agent.memory_hook import _cluster_keywords
+        from utils.keyword_extraction import _cluster_keywords
         from agent.memory_retrieval import retrieve_memories
 
         project_key = _get_project_key()
@@ -281,20 +279,15 @@ def recall(
                 f"(budget: 15ms, clusters: {len(clusters)})"
             )
 
-        # Deja vu: bloom hits but no strong results
+        # No strong results -- return None (deja vu fallback removed:
+        # vague "encountered something related" thoughts waste context tokens)
         if not all_records:
             _save_sidecar(session_id, state)
-            if bloom_hits >= DEJA_VU_BLOOM_HIT_THRESHOLD:
-                topic_hint = ", ".join(unique_keywords[:3])
-                return (
-                    "<thought>I have encountered something related to "
-                    f"{topic_hint} before, but the details are unclear.</thought>"
-                )
             return None
 
         # Re-rank by category weights (corrections/decisions surface higher)
         try:
-            from agent.memory_hook import _apply_category_weights
+            from utils.keyword_extraction import _apply_category_weights
 
             all_records = _apply_category_weights(all_records)
         except Exception:
