@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Medium
 owner: Valor
@@ -90,7 +90,7 @@ No prerequisites — this work uses existing Redis infrastructure and Popoto ORM
 - **Migration script**: Hash field rename (`parent_chat_session_id` → `parent_session_id`) + backfill `role` from `session_type`
 - **Model field rename**: Change KeyField name, add `role` DataField
 - **Factory generalization**: `create_dev()` → `create_child(role=...)` with `create_dev()` kept as thin wrapper for backward compat during transition
-- **Caller updates**: Mechanical rename across ~23 files
+- **Caller updates**: Mechanical rename across ~12 files (6 source + 6 test files with references)
 - **Targeted docstring updates**: Only model and factory docstrings, not bulk rename
 
 ### Flow
@@ -102,7 +102,7 @@ No prerequisites — this work uses existing Redis infrastructure and Popoto ORM
 - Write `scripts/migrate_parent_session_field.py` that:
   1. SCANs all `AgentSession:*` keys (excluding index keys)
   2. For each record: renames hash field `parent_chat_session_id` → `parent_session_id`
-  3. Backfills `role` field from `session_type` (`"chat"` → `"pm"`, `"dev"` → `"dev"`)
+  3. Backfills `role` field from `session_type` on ALL records (`"chat"` → `"pm"`, `"dev"` → `"dev"`), not just those with `parent_chat_session_id`
   4. Calls `AgentSession.rebuild_indexes()` after all changes
   5. Supports `--dry-run` flag
   6. Idempotent: skips records that already have `parent_session_id`
@@ -129,14 +129,16 @@ No prerequisites — this work uses existing Redis infrastructure and Popoto ORM
 
 - [ ] `tests/unit/test_agent_session_hierarchy.py` — UPDATE: replace all `parent_chat_session_id` with `parent_session_id`
 - [ ] `tests/unit/test_agent_session_scheduler_kill.py` — UPDATE: replace `parent_chat_session_id` references
-- [ ] `tests/unit/test_model_relationships.py` — UPDATE: update `_AGENT_SESSION_FIELDS` assertion for `parent_chat_session_id`
+- [ ] `tests/unit/test_model_relationships.py` — UPDATE: replace `parent_chat_session_id` references in field presence assertions
 - [ ] `tests/unit/test_dev_session_registration.py` — UPDATE: replace `parent_chat_session_id` with `parent_session_id`, update `create_dev` calls to `create_child`
 - [ ] `tests/unit/test_steer_child.py` — UPDATE: replace `parent_chat_session_id` references
 - [ ] `tests/unit/test_summarizer.py` — UPDATE: replace `parent_chat_session_id` in docstrings
 - [ ] `tests/unit/test_chat_session_factory.py` — UPDATE: update factory method references
 - [ ] `tests/integration/test_agent_session_queue_session_type.py` — UPDATE: replace `parent_chat_session_id`
 - [ ] `tests/e2e/test_session_spawning.py` — UPDATE: replace `parent_chat_session_id` (10 occurrences)
-- [ ] `tests/e2e/test_context_propagation.py` — UPDATE: replace `parent_chat_session_id` (10 occurrences)
+- [ ] `tests/e2e/test_context_propagation.py` — UPDATE: replace `parent_chat_session_id` and `get_parent_chat_session` (10+ occurrences)
+- [ ] `tests/unit/test_delivery_execution.py` — UPDATE: replace `get_parent_chat_session` mock (line 20)
+- [ ] `tests/unit/test_pre_tool_use_start_stage.py` — UPDATE: replace `create_dev` references with `create_child` (4 occurrences)
 
 ## Rabbit Holes
 
@@ -266,9 +268,11 @@ No agent integration required — this is a model-internal rename and field addi
 - **Parallel**: false
 - Update `agent/hooks/pre_tool_use.py`: `create_dev()` → `create_child(role="dev", ...)`
 - Update `agent/hooks/subagent_stop.py`: `parent_chat_session_id` → `parent_session_id`
+- Update `agent/hooks/stop.py`: `get_parent_chat_session()` → `get_parent_session()`
+- Update `bridge/response.py`: `get_parent_chat_session()` → `get_parent_session()` (4 references)
 - Update `scripts/steer_child.py`: same replacements
 - Update `agent/agent_session_queue.py`: field preservation list
-- Update all 10 test files with new field names
+- Update all test files with new field names (see Test Impact section)
 - Grep entire project to catch any missed references
 
 ### 4. Update targeted docstrings
