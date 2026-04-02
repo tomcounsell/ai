@@ -179,6 +179,23 @@ def get_activity(bridge_session_id: str | None) -> dict:
                     "tool_count": activity["tool_count"],
                     "last_tools": list(activity["last_tools"]),
                 }
+
+    # Fallback: read from health_check._tool_counts (authoritative counter)
+    try:
+        from agent.health_check import _tool_counts
+
+        count = _tool_counts.get(bridge_session_id, 0)
+        if count > 0:
+            logger.warning(
+                "[session_registry] get_activity reverse lookup failed for %s, "
+                "falling back to health_check count=%d",
+                bridge_session_id,
+                count,
+            )
+            return {"tool_count": count, "last_tools": []}
+    except Exception:
+        pass
+
     return {}
 
 

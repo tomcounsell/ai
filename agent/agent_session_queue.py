@@ -206,7 +206,7 @@ async def _push_agent_session(
     as 'superseded' to prevent ambiguity in later record selection.
     """
     # Convert float timestamps to datetime (backward compat)
-    if isinstance(scheduled_at, (int, float)):
+    if isinstance(scheduled_at, int | float):
         scheduled_at = datetime.fromtimestamp(scheduled_at, tz=UTC)
 
     # Build consolidated dicts
@@ -527,7 +527,7 @@ async def _pop_agent_session(chat_id: str) -> AgentSession | None:
     def _ensure_tz(dt):
         if dt is None:
             return datetime.min.replace(tzinfo=UTC)
-        if isinstance(dt, (int, float)):
+        if isinstance(dt, int | float):
             return datetime.fromtimestamp(dt, tz=UTC)
         if isinstance(dt, datetime) and dt.tzinfo is None:
             return dt.replace(tzinfo=UTC)
@@ -632,7 +632,7 @@ async def _pop_agent_session_with_fallback(chat_id: str) -> AgentSession | None:
         def _ensure_tz(dt):
             if dt is None:
                 return datetime.min.replace(tzinfo=UTC)
-            if isinstance(dt, (int, float)):
+            if isinstance(dt, int | float):
                 return datetime.fromtimestamp(dt, tz=UTC)
             if isinstance(dt, datetime) and dt.tzinfo is None:
                 return dt.replace(tzinfo=UTC)
@@ -1110,7 +1110,7 @@ async def _agent_session_health_check() -> None:
             if val.tzinfo is None:
                 val = val.replace(tzinfo=UTC)
             return val.timestamp()
-        if isinstance(val, (int, float)):
+        if isinstance(val, int | float):
             return float(val)
         return None
 
@@ -1613,6 +1613,10 @@ async def _worker_loop(chat_id: str, event: asyncio.Event) -> None:
                     chat_id,
                     session.agent_session_id,
                 )
+                try:
+                    session.log_lifecycle_transition("failed", "worker cancelled")
+                except Exception:
+                    pass
                 await _complete_agent_session(session, failed=True)
                 session_completed = True
                 raise  # Re-raise to exit worker loop
@@ -1635,6 +1639,44 @@ async def _worker_loop(chat_id: str, event: asyncio.Event) -> None:
                     session_failed = True
             finally:
                 if not session_completed:
+                    # Fix 4: Log lifecycle transition before completing
+                    try:
+                        target = "failed" if session_failed else "completed"
+                        session.log_lifecycle_transition(target, "worker finally block")
+                    except Exception:
+                        pass
+                    # Fix 3: Always save diagnostic snapshot before deleting Redis record
+                    try:
+                        _event = "crash" if session_failed else "complete"
+                        from agent.hooks.session_registry import get_activity
+
+                        activity = get_activity(session.session_id)
+                        save_session_snapshot(
+                            session_id=session.session_id,
+                            event=_event,
+                            project_key=session.project_key,
+                            branch_name=_session_branch_name(session.session_id),
+                            task_summary=(
+                                f"Session {session.agent_session_id} "
+                                f"{'failed' if session_failed else 'terminated'}"
+                            ),
+                            extra_context={
+                                "agent_session_id": session.agent_session_id,
+                                "tool_count": activity.get("tool_count", 0),
+                                "trigger": "finally_block",
+                            },
+                            working_dir=str(
+                                Path(session.working_dir)
+                                if hasattr(session, "working_dir")
+                                else Path(__file__).parent.parent
+                            ),
+                        )
+                    except Exception as snap_err:
+                        logger.warning(
+                            "Failed to save crash snapshot for %s: %s",
+                            session.agent_session_id,
+                            snap_err,
+                        )
                     await _complete_agent_session(session, failed=session_failed)
 
             # Clear the event after processing so the next drain wait starts fresh
@@ -2194,14 +2236,29 @@ async def _execute_agent_session(session: AgentSession) -> None:
     await task.run(do_work(), send_result=True)
 
     # Wait for the background task to complete, with periodic calendar heartbeats
-    last_heartbeat = time.time()
-    while task.is_running:
-        await asyncio.sleep(2)
-        if time.time() - last_heartbeat >= CALENDAR_HEARTBEAT_INTERVAL:
-            asyncio.create_task(
-                _calendar_heartbeat(session.project_key, project=session.project_key)
+    async def _heartbeat_loop():
+        while not task._task.done():
+            await asyncio.sleep(CALENDAR_HEARTBEAT_INTERVAL)
+            if not task._task.done():
+                asyncio.create_task(
+                    _calendar_heartbeat(session.project_key, project=session.project_key)
+                )
+
+    heartbeat = asyncio.create_task(_heartbeat_loop())
+    try:
+        # Await the actual task future -- propagates exceptions immediately
+        await task._task
+    except Exception as e:
+        # Exception escaped BackgroundTask._run_work's handler
+        if not task.error:
+            task._error = e
+            logger.error(
+                "[%s] Task crashed outside _run_work: %s",
+                session.session_id,
+                e,
             )
-            last_heartbeat = time.time()
+    finally:
+        heartbeat.cancel()
 
     # Update session status in Redis via AgentSession
     # When auto-continue deferred, session is still active (not completed)
@@ -2573,7 +2630,7 @@ def _cli_show_status() -> None:
             return 0.0
         if isinstance(val, datetime):
             return val.timestamp() if val.tzinfo else val.replace(tzinfo=UTC).timestamp()
-        if isinstance(val, (int, float)):
+        if isinstance(val, int | float):
             return float(val)
         return 0.0
 
