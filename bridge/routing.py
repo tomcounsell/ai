@@ -4,7 +4,6 @@ import asyncio
 import json
 import logging
 import re
-import unicodedata
 from pathlib import Path
 
 from config.enums import ClassificationType, PersonaType
@@ -280,110 +279,74 @@ def is_message_for_others(text: str, project: dict | None) -> bool:
 # =============================================================================
 
 
-# 3-way social classification tokens.
-# "ignore" tokens produce no response at all; "react" tokens get an emoji
-# reaction without spawning a session.  Merged into a single dict so there
-# is no duplication between the two sets (critique concern #6).
-_SOCIAL_TOKENS: dict[str, str] = {
-    # --- ignore (acknowledgments / affirmations) ---
-    "thanks": "ignore",
-    "thank you": "ignore",
-    "thx": "ignore",
-    "ty": "ignore",
-    "ok": "ignore",
-    "okay": "ignore",
-    "k": "ignore",
-    "kk": "ignore",
-    "got it": "ignore",
-    "gotcha": "ignore",
-    "understood": "ignore",
-    "yes": "ignore",
-    "yep": "ignore",
-    "yeah": "ignore",
-    "yup": "ignore",
-    "no": "ignore",
-    "nope": "ignore",
-    "👍": "ignore",
-    "👌": "ignore",
-    "✅": "ignore",
-    "🙏": "ignore",
-    "❤️": "ignore",
-    "🔥": "ignore",
-    "brb": "ignore",
-    "afk": "ignore",
-    "bbl": "ignore",
-    # --- react (social / banter — deserve a reaction emoji) ---
-    "nice": "react",
-    "great": "react",
-    "awesome": "react",
-    "perfect": "react",
-    "cool": "react",
-    "lol": "react",
-    "lmao": "react",
-    "haha": "react",
-    "heh": "react",
-    "legit": "react",
-    "dope": "react",
-    "sick": "react",
-    "fire": "react",
-    "based": "react",
-    "wow": "react",
-    "whoa": "react",
-    "damn": "react",
-    "omg": "react",
-    "rofl": "react",
+# Acknowledgment and social tokens that don't need a response.
+_ACKNOWLEDGMENT_TOKENS: set[str] = {
+    "thanks",
+    "thank you",
+    "thx",
+    "ty",
+    "ok",
+    "okay",
+    "k",
+    "kk",
+    "got it",
+    "gotcha",
+    "understood",
+    "yes",
+    "yep",
+    "yeah",
+    "yup",
+    "no",
+    "nope",
+    "👍",
+    "👌",
+    "✅",
+    "🙏",
+    "❤️",
+    "🔥",
+    "brb",
+    "afk",
+    "bbl",
+    # Social banter — no session needed
+    "nice",
+    "great",
+    "awesome",
+    "perfect",
+    "cool",
+    "lol",
+    "lmao",
+    "haha",
+    "heh",
+    "legit",
+    "dope",
+    "sick",
+    "fire",
+    "based",
+    "wow",
+    "whoa",
+    "damn",
+    "omg",
+    "rofl",
 }
 
-# Emoji to react with, keyed by the flavour of the social token.
-REACT_EMOJI_MAP: dict[str, str] = {
-    "humor": "😁",
-    "acknowledgment": "👍",
-    "positive": "🔥",
-}
 
-# Tokens whose reaction flavour is "humor"; everything else is "positive".
-_HUMOR_TOKENS = {"lol", "lmao", "haha", "heh", "rofl"}
+def classify_needs_response(text: str) -> bool:
+    """Classify whether a message needs a full response.
 
-
-def pick_reaction_emoji(token: str) -> str:
-    """Choose a contextually appropriate reaction emoji for *token*."""
-    if token in _HUMOR_TOKENS:
-        return REACT_EMOJI_MAP["humor"]
-    return REACT_EMOJI_MAP["positive"]
-
-
-def classify_needs_response(text: str) -> str:
-    """Classify whether a message needs a full response, a reaction, or nothing.
-
-    Returns one of three string values:
-
-    * ``"respond"`` -- the message is a work request, question, or instruction
-      that warrants a full agent session.
-    * ``"react"`` -- the message is social banter or a compliment; send an
-      emoji reaction without spawning a session.
-    * ``"ignore"`` -- the message is a simple acknowledgment; do nothing.
+    Returns ``True`` if the message warrants an agent session, ``False`` if
+    it is a simple acknowledgment, social banter, or emoji that can be ignored.
 
     The function is intentionally conservative: if Ollama classification
-    fails, it defaults to ``"respond"`` so no genuine question is dropped.
+    fails, it defaults to ``True`` so no genuine question is dropped.
     """
     # Fast path: very short messages are usually acknowledgments
     if len(text.strip()) < 3:
-        return "ignore"
+        return False
 
-    # Fast path: check the unified social-token dict
+    # Fast path: check the acknowledgment token set
     text_lower = text.strip().lower().rstrip("!.,")
-    token_class = _SOCIAL_TOKENS.get(text_lower)
-    if token_class is not None:
-        return token_class
-
-    # Emoji-only messages (1-3 emoji, no text) → react
-    stripped = text.strip()
-    if stripped and all(
-        unicodedata.category(ch).startswith(("So", "Sk", "Sm"))
-        or ch in "\ufe0f\u200d"  # variation selectors / ZWJ
-        for ch in stripped
-    ):
-        return "react"
+    if text_lower in _ACKNOWLEDGMENT_TOKENS:
+        return False
 
     # Use Ollama for more nuanced classification
     try:
@@ -409,21 +372,17 @@ Classification:"""
             options={"temperature": 0},
         )
         result = response["message"]["content"].strip().lower()
-        # Ollama only distinguishes work vs ignore (2-way).
-        # The react path is handled entirely by the fast-path token
-        # matching above (critique concern #4: don't rely on Ollama
-        # for the 3rd category).
-        return "respond" if "work" in result else "ignore"
+        return "work" in result
     except Exception as e:
         logger.debug(f"Ollama classification failed, defaulting to respond: {e}")
         # Default to responding if Ollama fails (conservative)
-        return "respond"
+        return True
 
 
-async def classify_needs_response_async(text: str) -> str:
-    """Async wrapper for 3-way Ollama classification.
+async def classify_needs_response_async(text: str) -> bool:
+    """Async wrapper for Ollama classification.
 
-    Returns ``"respond"``, ``"react"``, or ``"ignore"``.
+    Returns ``True`` if the message needs a response, ``False`` otherwise.
     """
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, classify_needs_response, text)
@@ -851,13 +810,10 @@ async def should_respond_async(
         logger.debug("Case 4: Message @directed to others - ignoring")
         return False, False
 
-    # Case 1: Unaddressed message → use Ollama to classify (3-way)
+    # Case 1: Unaddressed message → use Ollama to classify
     logger.debug("Case 1: Unaddressed message - classifying with Ollama")
-    classification = await classify_needs_response_async(text)
-    if classification == "ignore":
-        logger.info(f"Ollama classified as ignore: {text[:50]}...")
+    should_respond = await classify_needs_response_async(text)
+    if not should_respond:
+        logger.info(f"Classified as ignore: {text[:50]}...")
         return False, False
-    if classification == "react":
-        logger.info(f"Classified as react-only: {text[:50]}...")
-        return "react", False  # Special string; bridge sends emoji, no session
     return True, False

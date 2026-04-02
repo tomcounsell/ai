@@ -17,50 +17,35 @@ Controls that make QA responses in teammate group chats conversational rather th
 - End with a follow-up question when uncertain about the ask
 - Reference internal systems only when directly asked
 
-### Layer 2: Summarizer QA Tone Rules (`bridge/summarizer.py`)
+### Layer 2: Agent-Controlled Message Delivery (`agent/hooks/stop.py`)
 
-Defense-in-depth: the summarizer system prompt has QA-specific tone enforcement that catches authoritative framing even if the agent prompt misses it. When `qa_mode=True`:
+The stop-hook review gate gives the agent final say over message delivery. When a session completes, the hook evaluates the output and chooses a delivery action (SEND, EDIT, REACT, SILENT, CONTINUE). React-only responses (e.g., emoji reactions to social banter) are handled through this gate rather than the classifier.
 
-- Compress to 2-4 sentences
-- Remove authoritative framing
-- Remove unsolicited internal references
-- Preserve clarification questions
+### Layer 3: Config Cleanup
 
-### Layer 3: CLI Syntax Sanitization
+**Config cleanup** (`config/personas/_base.md`, `config/SOUL.md`): Removed `valor-telegram send` examples from inline code blocks. Added "TOOL USAGE ONLY" warnings making clear the syntax is for programmatic use only. This addresses the root cause of CLI syntax leaking into responses.
 
-**Config cleanup** (`config/personas/_base.md`, `config/SOUL.md`): Removed `valor-telegram send` examples from inline code blocks. Added "TOOL USAGE ONLY" warnings making clear the syntax is for programmatic use only.
+### Social Token Classification (`bridge/routing.py`)
 
-**Response sanitizer** (`bridge/response.py`): `_sanitize_cli_leaks()` strips lines matching `valor-telegram send` or `valor-telegram --chat` patterns from response text before delivery. Runs after `filter_tool_logs()` in `send_response_with_files()`.
-
-### Layer 4: 3-Way Social Classifier (`bridge/routing.py`)
-
-`classify_needs_response()` returns one of three string values:
+`classify_needs_response()` returns a boolean (`True`/`False`):
 
 | Return value | Meaning | Action |
 |-------------|---------|--------|
-| `"respond"` | Work request, question, instruction | Spawn full agent session |
-| `"react"` | Social banter, compliment, humor | Send emoji reaction, skip session |
-| `"ignore"` | Simple acknowledgment | Do nothing |
+| `True` | Work request, question, instruction | Spawn full agent session |
+| `False` | Acknowledgment, social banter, emoji | Do nothing |
 
 Classification uses a two-stage approach:
 
-1. **Fast-path token matching**: A unified `_SOCIAL_TOKENS` dict maps known tokens to their classification. No duplication between ignore and react sets.
-2. **Ollama fallback**: For messages not caught by fast-path, Ollama classifies as work/ignore (2-way). The react category is handled entirely by token matching, not Ollama.
-
-Emoji selection for reactions is rule-based via `_pick_reaction_emoji()`: humor tokens get a laugh emoji, everything else gets a fire emoji.
-
-## Backward Compatibility
-
-The return type of `classify_needs_response()` changed from `bool` to `str`. All callers in `bridge/routing.py` were updated. The Ollama fallback defaults to `"respond"` on failure (conservative -- no question goes unanswered).
+1. **Fast-path token matching**: An `_ACKNOWLEDGMENT_TOKENS` set catches known acknowledgments and social banter tokens, returning `False`.
+2. **Ollama fallback**: For messages not caught by fast-path, Ollama classifies as work/ignore (2-way). Returns `True` on failure (conservative -- no question goes unanswered).
 
 ## Test Coverage
 
 - `tests/unit/test_qa_handler.py` -- Humility markers, curious colleague framing, brevity guidance
-- `tests/unit/test_cli_sanitizer.py` -- CLI leak stripping, empty/None handling, legitimate prose preservation
-- `tests/unit/test_social_classifier.py` -- 3-way return types, ignore/react/respond paths, emoji selection
-- `tests/e2e/test_message_pipeline.py` -- Updated for string return type
+- `tests/e2e/test_message_pipeline.py` -- Bool return type for classify_needs_response
 
 ## Related
 
-- [Config-Driven Chat Mode](config-driven-chat-mode.md) -- QA mode routing (predecessor)
+- [Config-Driven Chat Mode](config-driven-chat-mode.md) -- Teammate mode routing (predecessor)
+- [Agent-Controlled Message Delivery](agent-message-delivery.md) -- Stop-hook review gate
 - Issue [#589](https://github.com/tomcounsell/ai/issues/589) -- Tracking issue

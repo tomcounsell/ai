@@ -1048,14 +1048,7 @@ FORMAT RULES for the **response** field (adaptive based on content type):
 
 6. TEAMMATE SESSIONS (when session context indicates persona=teammate):
    Respond in conversational prose — no bullets, no status emoji prefix, no structured template.
-   Write as a curious colleague, not an authority. Apply these tone rules:
-   - Compress to 2-4 sentences. One short paragraph max for complex topics.
-   - Remove authoritative framing ("relies on three key patterns", "the answer is").
-     Use hedged language: "I think", "from what I've seen", "it looks like".
-   - Remove unsolicited references to internal systems or architecture the human did not ask about.
-   - Ensure the response sounds like a conversation, not a lecture.
-   - Preserve any clarification questions the agent asked — those are valuable.
-   Cite sources naturally in prose.
+   Write as a knowledgeable teammate answering a question. Cite sources naturally in prose.
 
 GENERAL RULES:
 - NEVER include the agent's plan, approach, or strategy. The PM wants RESULTS, not plans.

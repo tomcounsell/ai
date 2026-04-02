@@ -61,7 +61,6 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Operational Logging](operational-logging.md) | Consistent INFO-level prefix-tagged logging at every decision point for end-to-end message tracing | Shipped |
 | [Personas](personas.md) | Configurable persona system: base + overlay files replacing monolithic SOUL.md for developer, PM, and teammate roles | Shipped |
 | [Pipeline Graph](pipeline-graph.md) | Canonical directed graph for SDLC stage routing with cycle support for test-failure and review-feedback loops | Shipped |
-| [QA Conversational Humility](qa-conversational-humility.md) | Humility-first QA responses: brevity, clarification-first, CLI sanitization, 3-way social classifier with react-only path | Shipped |
 | [Pipeline State Machine](pipeline-state-machine.md) | Programmatic stage tracking replacing inference-based detection with direct state recording at transition points | Shipped |
 | [Plan Completion Gate](plan-completion-gate.md) | Deterministic validation preventing plan completion and PR merge while checkboxes remain unchecked | Shipped |
 | [Plan Prerequisites Validation](plan-prerequisites.md) | Declare and validate environment requirements before plan execution | Shipped |
@@ -70,6 +69,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [PM Telegram Tool](pm-telegram-tool.md) | ChatSession composes and sends its own Telegram messages via Redis IPC, with summarizer as fallback | Shipped |
 | [PM Voice Refinement](pm-voice-refinement.md) | Naturalized SDLC language, crash message pool, sentence-aware truncation, milestone-selective emoji for PM output | Shipped |
 | [Popoto Redis Expansion](popoto-redis-expansion.md) | Migration from JSONL/JSON file state to Redis for atomicity and queries | Shipped |
+| [QA Conversational Humility](qa-conversational-humility.md) | Humility-first Teammate responses: brevity, clarification-first, stop-hook review gate for delivery control | Shipped |
 | [Race Condition Analysis](race-condition-analysis.md) | Structured concurrency analysis section in plan template with soft validator for async code | Shipped |
 | [Reaction Semantics](reaction-semantics.md) | Emoji reaction protocol for message delivery feedback and silent loss prevention | Shipped |
 | [Redis Model Relationships](redis-models.md) | Cross-references between Popoto models, project_key on all models, enrichment metadata ownership on TelegramMessage, field type semantics (KeyField vs IndexedField) | Shipped |
@@ -107,6 +107,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [SuperWhisper Transcription](superwhisper-transcription.md) | Dual-backend audio transcription with local SuperWhisper primary and OpenAI Whisper API fallback | Shipped |
 | [System Overview](system-overview.md) | High-level architecture and design principles | Archived |
 | [Task List Isolation Experiment](task-list-isolation.md) | Experiment results validating CLAUDE_CODE_TASK_LIST_ID behavior | Archived |
+| [Teammate Conversational Humility](qa-conversational-humility.md) | Humility-first Teammate responses: brevity, clarification-first, stop-hook review gate for delivery control | Shipped |
 | [Telegram History & Links](telegram-history.md) | Searchable message history and link compilation from Telegram | Shipped |
 | [Telegram Messaging](telegram-messaging.md) | Unified interface for reading and sending Telegram messages via `valor-telegram` CLI | Shipped |
 | [Telegram PM Guide](telegram-pm-guide.md) | PM-facing guide for Telegram interaction patterns, session resumption, and pipeline signals | Shipped |

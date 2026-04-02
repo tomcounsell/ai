@@ -171,41 +171,6 @@ INTENT_REACTIONS = {
 }
 
 
-# Pattern matching CLI syntax that leaks from prompt contamination
-CLI_LEAK_PATTERN = re.compile(
-    r"^.*valor-telegram\s+send\b.*$|"
-    r"^.*valor-telegram\s+--chat\b.*$",
-    re.MULTILINE,
-)
-
-
-def _sanitize_cli_leaks(text: str) -> str:
-    """Strip CLI command syntax that leaks from prompt contamination.
-
-    Defense-in-depth: the root cause (CLI examples in persona prompt) was
-    also fixed, but this sanitizer catches any residual leaks from cached
-    prompts or other tool descriptions.
-
-    Targets specific ``valor-telegram send`` and ``--chat`` patterns that
-    appear when the agent echoes tool-description examples into response
-    text.  Only command-like lines are removed — legitimate technical
-    discussion about CLI tools is preserved.
-
-    Args:
-        text: Response text, possibly containing leaked CLI syntax.
-
-    Returns:
-        Cleaned text with CLI leak lines removed. Returns "Done." if
-        stripping leaves an empty string.
-    """
-    if not text:
-        return text or ""
-    cleaned = CLI_LEAK_PATTERN.sub("", text).strip()
-    # Collapse multiple blank lines left behind
-    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
-    return cleaned if cleaned else "Done."
-
-
 def filter_tool_logs(response: str) -> str:
     """
     Remove tool execution traces from response.
@@ -433,10 +398,9 @@ async def send_response_with_files(
         logger.error("send_response_with_files: no chat_id available")
         return None
 
-    # Filter out tool logs and CLI syntax leaks before processing
+    # Filter out tool logs before processing
     original_response = response
     response = filter_tool_logs(response)
-    response = _sanitize_cli_leaks(response)
 
     # If filtering removed everything but original had content, use fallback
     if not response:

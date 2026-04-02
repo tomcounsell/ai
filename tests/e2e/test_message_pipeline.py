@@ -185,23 +185,23 @@ class TestWorkRequestClassification:
 
 @pytest.mark.e2e
 class TestNeedsResponseClassification:
-    """Test fast-path classify_needs_response (3-way: respond/react/ignore)."""
+    """Test fast-path classify_needs_response (bool: True/False)."""
 
     def test_short_messages_ignored(self):
-        assert classify_needs_response("ok") == "ignore"
-        assert classify_needs_response("hi") == "ignore"
+        assert classify_needs_response("ok") is False
+        assert classify_needs_response("hi") is False
 
     def test_common_acknowledgments_ignored(self):
-        assert classify_needs_response("thanks") == "ignore"
-        assert classify_needs_response("gotcha") == "ignore"
+        assert classify_needs_response("thanks") is False
+        assert classify_needs_response("gotcha") is False
 
-    def test_social_banter_gets_react(self):
-        assert classify_needs_response("nice") == "react"
-        assert classify_needs_response("lol") == "react"
-        assert classify_needs_response("haha") == "react"
+    def test_social_banter_ignored(self):
+        assert classify_needs_response("nice") is False
+        assert classify_needs_response("lol") is False
+        assert classify_needs_response("haha") is False
 
     def test_emoji_acknowledgments_ignored(self):
-        assert classify_needs_response("\U0001f44d") == "ignore"
+        assert classify_needs_response("\U0001f44d") is False
 
 
 @pytest.mark.e2e
