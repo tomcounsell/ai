@@ -10,7 +10,7 @@ The `cancelled` status is a terminal state set explicitly by the PM via `cancel_
 
 ## Key Fields
 
-**Identity:** `agent_session_id` (AutoKeyField), `session_id`, `session_type` (KeyField), `project_key` (KeyField), `chat_id` (KeyField), `status` (IndexedField)
+**Identity:** `id` (AutoKeyField), `session_id`, `session_type` (KeyField), `project_key` (KeyField), `chat_id` (KeyField), `status` (IndexedField). `agent_session_id` is a backward-compatible property alias for `id`.
 
 **Queue-phase:** `priority`, `scheduled_at` (DatetimeField), `created_at` (SortedField, datetime), `started_at` (DatetimeField), `updated_at` (DatetimeField, auto_now), `completed_at` (DatetimeField), `auto_continue_count`
 
@@ -22,7 +22,7 @@ The `cancelled` status is a terminal state set explicitly by the PM via `cancel_
 
 **Lifecycle:** `session_events` (ListField of `SessionEvent` dicts), `issue_url`, `plan_url`, `pr_url`
 
-**DevSession:** `parent_chat_session_id` (KeyField), `slug`, `parent_job_id` (KeyField)
+**DevSession:** `parent_chat_session_id` (KeyField), `slug`, `parent_agent_session_id` (KeyField)
 
 All timestamp fields use Popoto `DatetimeField` or `SortedField(type=datetime)` with proper UTC datetime objects. Float timestamps are auto-converted via `__setattr__`.
 
@@ -51,7 +51,7 @@ Several fields that were previously stored as independent model fields are now d
 | `stage_states` | Last `stage` event data | Setter appends a `stage` event |
 | `last_commit_sha` | Last `checkpoint` event text | Setter appends a `checkpoint` event |
 | `classification_type` | `extra_context["classification_type"]` | Setter updates `extra_context` |
-| `scheduling_depth` | Walks `parent_job_id` chain (max 5) | Read-only |
+| `scheduling_depth` | Walks `parent_agent_session_id` chain (max 5) | Read-only |
 
 ## SDLC Stage Tracking
 
