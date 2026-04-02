@@ -377,7 +377,7 @@ See [tools/README.md](../tools/README.md) for usage documentation.
 - `timeout_minutes`: Maximum runtime (default: 10)
 
 **Output**:
-- `job_id`: Scheduled job identifier
+- `agent_session_id`: Scheduled session identifier
 - `status`: Scheduling status
 - `tests_to_run`: List of tests that will run
 - `estimated_duration`: Estimated run time

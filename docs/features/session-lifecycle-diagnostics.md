@@ -29,7 +29,7 @@ Each call:
 ### Log Format
 
 ```
-LIFECYCLE session=tg_valor_-5051653062_6165 transition=pending→running job_id=abc123 project=valor duration_in_prev_state=2.3s context="worker picked up session"
+LIFECYCLE session=tg_valor_-5051653062_6165 transition=pending→running id=abc123 project=valor duration_in_prev_state=2.3s context="worker picked up session"
 ```
 
 Filter all lifecycle events: `grep LIFECYCLE logs/bridge.log`
