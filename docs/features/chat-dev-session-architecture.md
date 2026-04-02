@@ -188,7 +188,7 @@ The PM persona uses different output formatting for Q&A sessions versus work ses
 ### Q&A Mode (conversational prose)
 
 When `qa_mode=True`:
-- **Instructions**: `build_qa_instructions()` in `agent/qa_handler.py` emphasizes research-first behavior -- search code, query memory, consult docs, cite findings
+- **Instructions**: `build_teammate_instructions()` in `agent/teammate_handler.py` emphasizes research-first behavior -- search code, query memory, consult docs, cite findings
 - **Summarizer**: The summarizer LLM receives `qa_mode=True` context and produces conversational prose instead of bullets
 - **Structured summary bypass**: `_compose_structured_summary()` in `bridge/summarizer.py` returns the LLM summary directly without emoji prefix, bullet parsing, or structured template
 - **Reaction**: Processing reaction is cleared (set to `None`) after Q&A delivery instead of setting a completion emoji

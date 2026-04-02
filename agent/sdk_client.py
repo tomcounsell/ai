@@ -1504,6 +1504,7 @@ async def get_agent_response_sdk(
     # ChatSession routing: classify intent and choose Teammate or PM dispatch path.
     # Teammate mode answers informational queries directly without spawning DevSession.
     _teammate_mode = False
+    _classification_context = ""  # Advisory routing context for the agent
     if _session_type == SessionType.CHAT:
         # Config-driven persona bypass: skip classifier when persona is already known
         from bridge.routing import resolve_persona as _resolve_persona_mode
@@ -1513,6 +1514,7 @@ async def get_agent_response_sdk(
         if _config_persona == PersonaType.TEAMMATE:
             # DMs and Teammate-persona groups: skip classifier, go straight to Teammate
             _teammate_mode = True
+            _classification_context = "teammate (config-driven, direct message or teammate group)"
             logger.info(
                 f"[{request_id}] Config-driven Teammate mode "
                 f"(persona={_config_persona!r}, is_dm={chat_title is None})"
@@ -1541,6 +1543,7 @@ async def get_agent_response_sdk(
                     pass  # Best-effort
         elif _config_persona in (PersonaType.PROJECT_MANAGER, PersonaType.DEVELOPER):
             # PM/Dev persona groups: skip classifier, use PM dispatch (not Teammate)
+            _classification_context = f"{_config_persona} (config-driven)"
             logger.info(f"[{request_id}] Config-driven {_config_persona} mode, skipping classifier")
         else:
             # Unconfigured: fall through to intent classifier
@@ -1555,6 +1558,10 @@ async def get_agent_response_sdk(
                     f"(conf={_intent_result.confidence:.2f}): {_intent_result.reasoning}"
                 )
 
+                _classification_context = (
+                    f"{_intent_result.intent} "
+                    f"(classifier confidence={_intent_result.confidence:.0%})"
+                )
                 if _intent_result.is_teammate:
                     _teammate_mode = True
                     logger.info(f"[{request_id}] Routing to Teammate mode (direct response)")
@@ -1574,6 +1581,13 @@ async def get_agent_response_sdk(
                 logger.warning(
                     f"[{request_id}] Intent classification failed, defaulting to PM dispatch: {e}"
                 )
+
+        # Inject classification context as advisory information
+        if _classification_context:
+            enriched_message += (
+                f"\n\n[Routing context: classified as {_classification_context}. "
+                f"This is an initial guess — use your judgment.]"
+            )
 
         if _teammate_mode:
             # Teammate mode: inject Teammate instructions instead of PM dispatch

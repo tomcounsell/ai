@@ -279,58 +279,73 @@ def is_message_for_others(text: str, project: dict | None) -> bool:
 # =============================================================================
 
 
-def classify_needs_response(text: str) -> bool:
-    """
-    Use Ollama to quickly classify if a message needs a response.
+# Acknowledgment and social tokens that don't need a response.
+_ACKNOWLEDGMENT_TOKENS: set[str] = {
+    "thanks",
+    "thank you",
+    "thx",
+    "ty",
+    "ok",
+    "okay",
+    "k",
+    "kk",
+    "got it",
+    "gotcha",
+    "understood",
+    "yes",
+    "yep",
+    "yeah",
+    "yup",
+    "no",
+    "nope",
+    "👍",
+    "👌",
+    "✅",
+    "🙏",
+    "❤️",
+    "🔥",
+    "brb",
+    "afk",
+    "bbl",
+    # Social banter — no session needed
+    "nice",
+    "great",
+    "awesome",
+    "perfect",
+    "cool",
+    "lol",
+    "lmao",
+    "haha",
+    "heh",
+    "legit",
+    "dope",
+    "sick",
+    "fire",
+    "based",
+    "wow",
+    "whoa",
+    "damn",
+    "omg",
+    "rofl",
+}
 
-    Returns True if the message appears to be a work request, question, or
-    instruction that needs action. Returns False for acknowledgments like
-    "thanks", "ok", "got it", side conversations, etc.
+
+def classify_needs_response(text: str) -> bool:
+    """Classify whether a message needs a full response.
+
+    Returns ``True`` if the message warrants an agent session, ``False`` if
+    it is a simple acknowledgment, social banter, or emoji that can be ignored.
+
+    The function is intentionally conservative: if Ollama classification
+    fails, it defaults to ``True`` so no genuine question is dropped.
     """
     # Fast path: very short messages are usually acknowledgments
     if len(text.strip()) < 3:
         return False
 
-    # Fast path: common acknowledgments (case-insensitive)
-    acknowledgments = {
-        "thanks",
-        "thank you",
-        "thx",
-        "ty",
-        "ok",
-        "okay",
-        "k",
-        "kk",
-        "got it",
-        "gotcha",
-        "understood",
-        "nice",
-        "great",
-        "awesome",
-        "perfect",
-        "cool",
-        "yes",
-        "yep",
-        "yeah",
-        "yup",
-        "no",
-        "nope",
-        "👍",
-        "👌",
-        "✅",
-        "🙏",
-        "❤️",
-        "🔥",
-        "lol",
-        "lmao",
-        "haha",
-        "heh",
-        "brb",
-        "afk",
-        "bbl",
-    }
+    # Fast path: check the acknowledgment token set
     text_lower = text.strip().lower().rstrip("!.,")
-    if text_lower in acknowledgments:
+    if text_lower in _ACKNOWLEDGMENT_TOKENS:
         return False
 
     # Use Ollama for more nuanced classification
@@ -342,14 +357,16 @@ def classify_needs_response(text: str) -> bool:
             messages=[
                 {
                     "role": "user",
-                    "content": f"""Classify this message. Reply with ONLY "work" or "ignore".
+                    "content": (
+                        f"""Classify this message. Reply with ONLY "work" or "ignore".
 
 - "work" = question, request, instruction, bug report, or anything needing action
 - "ignore" = acknowledgment, thanks, greeting, side chat, or social message
 
 Message: {text[:200]}
 
-Classification:""",
+Classification:"""
+                    ),
                 }
             ],
             options={"temperature": 0},
@@ -358,12 +375,15 @@ Classification:""",
         return "work" in result
     except Exception as e:
         logger.debug(f"Ollama classification failed, defaulting to respond: {e}")
-        # Default to responding if Ollama fails
+        # Default to responding if Ollama fails (conservative)
         return True
 
 
 async def classify_needs_response_async(text: str) -> bool:
-    """Async wrapper for Ollama classification."""
+    """Async wrapper for Ollama classification.
+
+    Returns ``True`` if the message needs a response, ``False`` otherwise.
+    """
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, classify_needs_response, text)
 
@@ -790,7 +810,8 @@ async def should_respond_async(
 
     # Case 1: Unaddressed message → use Ollama to classify
     logger.debug("Case 1: Unaddressed message - classifying with Ollama")
-    needs_response = await classify_needs_response_async(text)
-    if not needs_response:
-        logger.info(f"Ollama classified as ignore: {text[:50]}...")
-    return needs_response, False
+    should_respond = await classify_needs_response_async(text)
+    if not should_respond:
+        logger.info(f"Classified as ignore: {text[:50]}...")
+        return False, False
+    return True, False
