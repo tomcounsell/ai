@@ -35,7 +35,8 @@ Callers use `session.agent_session_id` or `session.id` which are property aliase
 - New `role` hash field added (not a KeyField — no key structure impact)
 - `create_dev()` generalized to `create_child(role="dev", ...)` accepting any role
 - Redis keys migrated in-place without data loss
-- Property aliases and backward-compat shims removed (no longer needed)
+- `_normalize_kwargs` backward-compat shims removed
+- `agent_session_id` kept as thin property alias for `.id` (30+ callers, not worth the blast radius)
 - All "DevSession"/"ChatSession" references in docstrings updated to "AgentSession with role=X"
 - All callers updated to use the new field names directly
 
@@ -92,7 +93,7 @@ Callers use `session.agent_session_id` or `session.id` which are property aliase
   - `AgentSession.parent_chat_session_id` -> `AgentSession.parent_session_id`
   - `AgentSession.create_dev()` -> `AgentSession.create_child(role=...)`
   - New `AgentSession.role` DataField (not a KeyField)
-  - Property aliases removed
+  - `_normalize_kwargs` shims removed; `agent_session_id` kept as thin alias for `.id`
 - **Coupling**: Decreases -- removes indirection layer of property aliases, removes false implication that parent is always a ChatSession
 - **Data ownership**: No change -- AgentSession continues to own its identity
 - **Reversibility**: Medium -- would require another migration script to reverse the key rename, but the pattern is symmetric
@@ -119,7 +120,7 @@ No prerequisites -- this work uses existing Redis infrastructure and Popoto ORM 
 - **Model field renames**: `job_id` → `id` (AutoKeyField), `parent_job_id` → `parent_agent_session_id` (KeyField), `parent_chat_session_id` → `parent_session_id` (KeyField)
 - **New role field**: `role` as a DataField (not KeyField) — stores the spawning role (dev, pm, documentarian, etc.)
 - **Factory generalization**: `create_dev()` → `create_child(role=...)` accepting any role string
-- **Alias cleanup**: Remove property aliases (`agent_session_id`, `id` properties) and `_normalize_kwargs` backward-compat shims
+- **Alias cleanup**: Keep `agent_session_id` as a thin one-line property for `.id` (used in 30+ files, not worth the blast radius). Remove `_normalize_kwargs` backward-compat shims and the `id` property (redundant once `id` is the actual field)
 - **Caller updates**: Mechanical find-and-replace across ~22 files
 
 ### Flow
@@ -157,17 +158,22 @@ No prerequisites -- this work uses existing Redis infrastructure and Popoto ORM 
 
 ## Test Impact
 
-- [ ] `tests/unit/test_agent_session_hierarchy.py` — UPDATE: replace `parent_job_id` with `parent_agent_session_id`, `job_id` with `id`
-- [ ] `tests/unit/test_agent_session_scheduler_kill.py` — UPDATE: replace `parent_job_id` with `parent_agent_session_id`
-- [ ] `tests/unit/test_model_relationships.py` — UPDATE: replace `job_id` with `id`, update `_AGENT_SESSION_FIELDS` for all three renames
+**12 test files require updates** (use renamed fields/methods directly):
+- [ ] `tests/unit/test_agent_session_hierarchy.py` — UPDATE: replace `parent_job_id` → `parent_agent_session_id`, `job_id` → `id`
+- [ ] `tests/unit/test_agent_session_scheduler_kill.py` — UPDATE: replace `parent_job_id` → `parent_agent_session_id`
+- [ ] `tests/unit/test_model_relationships.py` — UPDATE: replace `job_id` → `id`, update `_AGENT_SESSION_FIELDS` for all three renames
 - [ ] `tests/integration/test_agent_session_scheduler.py` — UPDATE: replace `job_id` and `parent_job_id`
-- [ ] `tests/unit/test_dev_session_registration.py` — UPDATE: replace `parent_chat_session_id` with `parent_session_id`, `create_dev` with `create_child`
-- [ ] `tests/unit/test_steer_child.py` — UPDATE: replace `parent_chat_session_id` with `parent_session_id`
-- [ ] `tests/unit/test_summarizer.py` — UPDATE: replace `parent_chat_session_id` with `parent_session_id`
-- [ ] `tests/unit/test_chat_session_factory.py` — UPDATE: replace `create_dev` with `create_child`
-- [ ] `tests/e2e/test_session_spawning.py` — UPDATE: replace `parent_chat_session_id` with `parent_session_id`, `create_dev` with `create_child`
-- [ ] `tests/e2e/test_context_propagation.py` — UPDATE: replace `parent_chat_session_id` with `parent_session_id`
-- [ ] `tests/integration/test_agent_session_queue_session_type.py` — UPDATE: replace `parent_chat_session_id` with `parent_session_id`, `create_dev` with `create_child`
+- [ ] `tests/unit/test_dev_session_registration.py` — UPDATE: replace `parent_chat_session_id` → `parent_session_id`, `create_dev` → `create_child`
+- [ ] `tests/unit/test_pre_tool_use_start_stage.py` — UPDATE: replace `create_dev` → `create_child`
+- [ ] `tests/unit/test_steer_child.py` — UPDATE: replace `parent_chat_session_id` → `parent_session_id`
+- [ ] `tests/unit/test_summarizer.py` — UPDATE: replace `parent_chat_session_id` → `parent_session_id`
+- [ ] `tests/unit/test_chat_session_factory.py` — UPDATE: replace `create_dev` → `create_child`
+- [ ] `tests/e2e/test_session_spawning.py` — UPDATE: replace `parent_chat_session_id` → `parent_session_id`, `create_dev` → `create_child`
+- [ ] `tests/e2e/test_context_propagation.py` — UPDATE: replace `parent_chat_session_id` → `parent_session_id`
+- [ ] `tests/integration/test_agent_session_queue_session_type.py` — UPDATE: replace `parent_chat_session_id` → `parent_session_id`, `create_dev` → `create_child`
+
+**13 additional test files use `.agent_session_id` only** — no changes needed (property alias kept):
+`test_ui_sdlc_data`, `test_transcript_liveness`, `test_stall_detection`, `test_session_status`, `test_subagent_stop_hook`, `test_structured_logging`, `test_stop_hook`, `test_memory_bridge`, `test_agent_session_status_cli`, `test_agent_session_queue_async`, `test_agent_session_queue_race`, `test_remote_update`, `test_queue_isolation`
 
 ## Rabbit Holes
 
@@ -236,7 +242,8 @@ No agent integration required -- this is a model-internal rename. The agent inte
 - [ ] `parent_chat_session_id` field renamed to `parent_session_id` (KeyField) in model
 - [ ] New `role` DataField added to model
 - [ ] `create_dev()` replaced with `create_child(role=...)` factory method
-- [ ] All property aliases (`agent_session_id`, `id` properties) removed
+- [ ] `_normalize_kwargs` backward-compat shims removed
+- [ ] `agent_session_id` kept as thin one-line property for `.id` (30+ callers)
 - [ ] Migration script successfully renames all existing Redis keys and backfills `role` field (dry-run validates)
 - [ ] Zero references to `job_id`, `parent_job_id`, or `parent_chat_session_id` remain in Python files (excluding migration script)
 - [ ] Zero references to `create_dev` remain in Python files (excluding migration script)
@@ -275,50 +282,58 @@ No agent integration required -- this is a model-internal rename. The agent inte
 - Handle idempotency (skip keys already in new format)
 - Handle null KeyField segments
 
-### 2. Update model fields and remove aliases
-- **Task ID**: build-model-update
+### 2. Update model fields, callers, and tests (single atomic commit)
+- **Task ID**: build-model-and-callers
 - **Depends On**: build-migration-script
-- **Validates**: `tests/unit/test_model_relationships.py`, `tests/unit/test_agent_session_hierarchy.py`
+- **Validates**: `pytest tests/unit/ -x -q` passes
 - **Assigned To**: migration-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Rename `job_id` to `id` (AutoKeyField) in `models/agent_session.py`
-- Rename `parent_job_id` to `parent_agent_session_id` (KeyField) in `models/agent_session.py`
-- Rename `parent_chat_session_id` to `parent_session_id` (KeyField) in `models/agent_session.py`
+- **IMPORTANT**: Model field renames and caller updates MUST be a single commit. Removing `_normalize_kwargs` shims before callers are updated creates a broken intermediate state.
+
+**Model changes** (`models/agent_session.py`):
+- Rename `job_id` to `id` (AutoKeyField)
+- Rename `parent_job_id` to `parent_agent_session_id` (KeyField)
+- Rename `parent_chat_session_id` to `parent_session_id` (KeyField)
 - Add `role` as a DataField (string, default `"dev"`)
 - Rename `create_dev()` to `create_child(role="dev", ...)` — accept role as parameter, map role to session_type internally
-- Remove `agent_session_id` property and `id` property aliases
-- Remove `_normalize_kwargs` shims for `parent_agent_session_id`
+- Keep `agent_session_id` as a thin one-line property returning `self.id` (used in 30+ files)
+- Remove `_normalize_kwargs` shims (no longer needed once callers are updated in same commit)
 - Update all "DevSession"/"ChatSession" references in model docstrings to "AgentSession with role=X"
-- Update all internal references within the model file
 
-### 3. Update callers
-- **Task ID**: build-caller-update
-- **Depends On**: build-model-update
-- **Validates**: `tests/unit/test_agent_session_scheduler_kill.py`, `tests/integration/test_agent_session_scheduler.py`
-- **Assigned To**: migration-builder
-- **Agent Type**: builder
-- **Parallel**: false
-- Update `agent/agent_session_queue.py`: replace `job_id` with `id`, `parent_job_id` with `parent_agent_session_id`, `parent_chat_session_id` with `parent_session_id`
-- Update `agent/hooks/pre_tool_use.py`: replace `parent_chat_session_id` with `parent_session_id`, rename `_maybe_register_dev_session` to `_maybe_register_child_session`, replace `create_dev` with `create_child`
-- Update `agent/hooks/subagent_stop.py`: replace `parent_chat_session_id` with `parent_session_id`
-- Update `scripts/steer_child.py`: replace `parent_chat_session_id` with `parent_session_id`
-- Update `tools/agent_session_scheduler.py`: replace `job_id` → `id`, `parent_job_id` → `parent_agent_session_id` (including function parameters)
-- Update `_AGENT_SESSION_FIELDS` list if it references old names
-- Update all local variable names that refer to the AgentSession identifier (e.g., `job_id = ...` → `agent_session_id = ...`)
-- Update all 11 test files with new field names (see Test Impact section)
-- Grep entire project for `job_id`, `parent_job_id`, `parent_chat_session_id`, `create_dev` to catch straggling references
+**Production file callers** (replace `job_id` → `id`, `parent_job_id` → `parent_agent_session_id`, `parent_chat_session_id` → `parent_session_id`, `create_dev` → `create_child`):
+- `agent/agent_session_queue.py` — includes `_AGENT_SESSION_FIELDS`, `_push_agent_session()`, `retry_agent_session()`, `_complete_agent_session()`, `_finalize_parent()`
+- `agent/hooks/pre_tool_use.py` — also rename `_maybe_register_dev_session` → `_maybe_register_child_session`
+- `agent/hooks/subagent_stop.py`
+- `agent/sdk_client.py`
+- `bridge/telegram_bridge.py`
+- `monitoring/session_status.py`
+- `monitoring/session_watchdog.py`
+- `ui/data/sdlc.py`
+- `scripts/steer_child.py`
+- `scripts/reflections.py`
+- `tools/agent_session_scheduler.py`
+- `.claude/hooks/user_prompt_submit.py`
 
-### 4. Validate all changes
+**Test files** (see Test Impact section for full list — all test files referencing old names):
+- Update all test files listed in Test Impact
+- Grep `tests/` for `job_id`, `parent_job_id`, `parent_chat_session_id`, `create_dev`, `.agent_session_id` to catch unlisted files
+
+**Final verification in this task**:
+- `grep -rn 'parent_chat_session_id\|parent_job_id\|create_dev' --include='*.py' . | grep -v migrate_agent_session` returns nothing
+- `grep -rn '\.job_id\b' --include='*.py' . | grep -v migrate_agent_session` returns nothing
+
+### 3. Validate all changes
 - **Task ID**: validate-all
-- **Depends On**: build-caller-update
+- **Depends On**: build-model-and-callers
 - **Assigned To**: migration-validator
 - **Agent Type**: validator
 - **Parallel**: false
 - Run `pytest tests/unit/ -x -q` to verify all unit tests pass
 - Run `python -m ruff check .` and `python -m ruff format --check .`
-- Verify zero remaining `job_id` or `parent_job_id` references in Python files (excluding migration script and git history)
+- Verify zero remaining `job_id`, `parent_job_id`, `parent_chat_session_id`, `create_dev` references in Python files (excluding migration script)
 - Verify migration script dry-run completes without error
+- Verify migration script `--reverse --dry-run` completes without error
 
 ## Verification
 
@@ -331,6 +346,7 @@ No agent integration required -- this is a model-internal rename. The agent inte
 | No stale parent_chat refs | `grep -rn 'parent_chat_session_id' --include='*.py' . \| grep -v migrate_agent_session` | exit code 1 |
 | No stale create_dev refs | `grep -rn 'create_dev' --include='*.py' . \| grep -v migrate_agent_session` | exit code 1 |
 | Migration dry-run | `python scripts/migrate_agent_session_keyfield_rename.py --dry-run` | exit code 0 |
+| Rollback dry-run | `python scripts/migrate_agent_session_keyfield_rename.py --reverse --dry-run` | exit code 0 |
 
 ## Critique Results
 
