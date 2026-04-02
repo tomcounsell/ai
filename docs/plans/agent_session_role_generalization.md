@@ -110,6 +110,7 @@ No prerequisites — this work uses existing Redis infrastructure and Popoto ORM
 - Add `role = Field(null=True)` to AgentSession model
 - Replace `create_dev()` with `create_child(role=...)`, keep `create_dev()` as a thin wrapper that calls `create_child(role="dev", ...)`
 - Add backward-compat mapping in `_normalize_kwargs`: `parent_chat_session_id` → `parent_session_id`
+- Override `pre_save()` to emit a warning if `role` is None at save time (catches missed factory usage without blocking migration)
 
 ## Failure Path Test Strategy
 
@@ -257,6 +258,7 @@ No agent integration required — this is a model-internal rename and field addi
 - Add `role = Field(null=True)` to AgentSession
 - Replace `create_dev()` with `create_child(role=...)`, keep `create_dev()` as thin wrapper
 - Add backward-compat mapping in `_normalize_kwargs`
+- Override `pre_save()` to warn if `role` is None (soft validation — doesn't block save)
 - Update `get_parent_chat_session()` → `get_parent_session()` and `get_dev_sessions()` → `get_child_sessions()`
 
 ### 3. Update callers
