@@ -69,7 +69,6 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [PM Telegram Tool](pm-telegram-tool.md) | ChatSession composes and sends its own Telegram messages via Redis IPC, with summarizer as fallback | Shipped |
 | [PM Voice Refinement](pm-voice-refinement.md) | Naturalized SDLC language, crash message pool, sentence-aware truncation, milestone-selective emoji for PM output | Shipped |
 | [Popoto Redis Expansion](popoto-redis-expansion.md) | Migration from JSONL/JSON file state to Redis for atomicity and queries | Shipped |
-| [QA Conversational Humility](qa-conversational-humility.md) | Humility-first Teammate responses: brevity, clarification-first, stop-hook review gate for delivery control | Shipped |
 | [Race Condition Analysis](race-condition-analysis.md) | Structured concurrency analysis section in plan template with soft validator for async code | Shipped |
 | [Reaction Semantics](reaction-semantics.md) | Emoji reaction protocol for message delivery feedback and silent loss prevention | Shipped |
 | [Redis Model Relationships](redis-models.md) | Cross-references between Popoto models, project_key on all models, enrichment metadata ownership on TelegramMessage, field type semantics (KeyField vs IndexedField) | Shipped |

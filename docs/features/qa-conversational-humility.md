@@ -6,9 +6,9 @@ Controls that make QA responses in teammate group chats conversational rather th
 
 ## Components
 
-### Layer 1: QA Prompt Overhaul (`agent/qa_handler.py`)
+### Layer 1: Teammate Prompt Overhaul (`agent/teammate_handler.py`)
 
-`build_qa_instructions()` uses a "curious colleague" framing instead of "knowledgeable teammate who knows the codebase well". Key rules:
+`build_teammate_instructions()` uses a "curious colleague" framing instead of "knowledgeable teammate who knows the codebase well". Key rules:
 
 - Restate understanding before answering
 - Ask for clarification when ambiguous

@@ -707,12 +707,10 @@ async def should_respond_async(
     sender_name: str | None = None,
     sender_username: str | None = None,
     sender_id: int | None = None,
-) -> tuple[bool | str, bool]:
+) -> tuple[bool, bool]:
     """Async response decision with full context.
 
     Returns (should_respond, is_reply_to_valor) tuple.
-    should_respond is True/False for respond/ignore, or the string "react"
-    for messages that should get an emoji reaction without a session.
 
     Uses config-driven persona resolution (resolve_persona) as the first
     routing gate. When a group resolves to Teammate persona (via "teammate"

@@ -70,8 +70,7 @@ The Teammate persona prompt includes a DELIVERY REVIEW section explaining the ch
 - `tests/unit/test_stop_hook_review.py` — Review gate activation, transcript reading, false stop detection, choice parsing, state management, integration tests
 - `tests/unit/test_delivery_execution.py` — send/react/silent/fallthrough paths
 - `tests/unit/test_qa_handler.py` — Teammate prompt humility markers, review gate awareness
-- `tests/unit/test_cli_sanitizer.py` — CLI leak stripping (defense in depth)
-- `tests/unit/test_social_classifier.py` — 3-way classification tokens and emoji selection
+- `tests/e2e/test_message_pipeline.py` — Bool classifier assertions
 
 ## Related
 
