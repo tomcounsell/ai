@@ -102,6 +102,13 @@ activity log below, determine if the agent is:
 2. Stuck in a repetitive loop (same tools, same patterns, similar errors)
 3. Exploring without converging (unbounded research with no clear deliverable)
 
+Common legitimate patterns (do NOT flag these as unhealthy):
+- Reading the same file with different offset/limit values = chunked reading, not a loop
+- Read then Edit on the same file = productive edit cycle
+- Setup tools (ToolSearch, Skill, Glob) early in a session are one-time operations
+- Sessions with git commits in the activity log are making real progress
+- High tool counts (50+) are normal for build/implementation sessions
+
 {session_context}\
 Recent activity (last {count} tool calls):
 {activity}
@@ -148,11 +155,52 @@ def _write_activity_stream(
         pass  # Never block agent on activity logging
 
 
+def _compute_activity_stats(session_id: str) -> dict[str, Any]:
+    """Compute tool distribution and commit count from the activity stream.
+
+    Reads the full activity JSONL for the session and returns a dict with:
+    - tool_distribution: dict mapping tool name to count
+    - commit_count: number of Bash entries containing 'git commit'
+    - total_tool_count: total tool calls from _tool_counts
+
+    Returns empty/zero values on any error. Never raises.
+    """
+    stats: dict[str, Any] = {
+        "tool_distribution": {},
+        "commit_count": 0,
+        "total_tool_count": _tool_counts.get(session_id, 0),
+    }
+    try:
+        activity_file = Path("logs/sessions") / session_id / "activity.jsonl"
+        if not activity_file.exists():
+            return stats
+
+        tool_dist: dict[str, int] = {}
+        commit_count = 0
+        for line in activity_file.read_text().strip().splitlines():
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            tool = entry.get("tool", "")
+            if tool:
+                tool_dist[tool] = tool_dist.get(tool, 0) + 1
+            if tool == "Bash" and "git commit" in entry.get("args", ""):
+                commit_count += 1
+
+        stats["tool_distribution"] = tool_dist
+        stats["commit_count"] = commit_count
+    except Exception:
+        pass
+    return stats
+
+
 def _get_session_context(session_id: str) -> str:
     """Build session context preamble for the health check judge prompt.
 
     Reads session_type and message_text from AgentSession. Extracts gh CLI
-    commands from recent tool calls for PM session context.
+    commands from recent tool calls for PM session context. Computes tool
+    distribution statistics and commit count from the activity stream.
 
     Returns an empty string if no context is available.
     """
@@ -173,6 +221,16 @@ def _get_session_context(session_id: str) -> str:
         gh_commands = _extract_gh_commands(session_id)
         if gh_commands:
             context += f"Recent GitHub CLI commands: {', '.join(gh_commands[:5])}\n\n"
+
+        # Compute activity statistics for richer judge context
+        stats = _compute_activity_stats(session_id)
+        tool_dist = stats["tool_distribution"]
+        if tool_dist:
+            dist_parts = [f"{count} {name}" for name, count in sorted(tool_dist.items(), key=lambda x: -x[1])]
+            context += f"Tool distribution: {', '.join(dist_parts)}\n"
+        total = stats["total_tool_count"]
+        commits = stats["commit_count"]
+        context += f"Total tool calls: {total}, Commits: {commits}\n\n"
 
         return context
     except Exception:
@@ -245,12 +303,30 @@ def _read_recent_activity(transcript_path: str, max_entries: int = 30) -> str:
 
 
 def _summarize_input(tool_name: str, tool_input: dict[str, Any]) -> str:
-    """Create a brief summary of a tool input for the judge."""
+    """Create a brief summary of a tool input for the judge.
+
+    Includes offset/limit for Read and old_string length for Edit so the
+    judge can distinguish chunked reads from stuck loops.
+    """
     if tool_name == "Bash":
         cmd = tool_input.get("command", "")
         return cmd[:120] + ("..." if len(cmd) > 120 else "")
     if tool_name in ("Read", "Write", "Edit"):
         path = tool_input.get("file_path", tool_input.get("path", ""))
+        extras = []
+        if tool_name == "Read":
+            offset = tool_input.get("offset")
+            limit = tool_input.get("limit")
+            if offset is not None:
+                extras.append(f"offset={offset}")
+            if limit is not None:
+                extras.append(f"limit={limit}")
+        elif tool_name == "Edit":
+            old_string = tool_input.get("old_string")
+            if old_string:
+                extras.append(f"old_string len={len(old_string)}")
+        if extras:
+            return f"{path} [{', '.join(extras)}]"
         return path
     if tool_name == "Grep":
         pattern = tool_input.get("pattern", "")

@@ -11,6 +11,7 @@ import pytest
 from agent.health_check import (
     CHECK_INTERVAL,
     JUDGE_PROMPT,
+    _compute_activity_stats,
     _extract_gh_commands,
     _get_session_context,
     _read_recent_activity,
@@ -97,7 +98,37 @@ class TestSummarizeInput:
         assert result.endswith("...")
 
     def test_read_returns_path(self):
+        """Read without offset/limit returns just the path."""
         assert _summarize_input("Read", {"file_path": "/a/b.py"}) == "/a/b.py"
+
+    def test_read_with_offset_limit(self):
+        """Read with offset/limit includes them in brackets."""
+        result = _summarize_input("Read", {"file_path": "/f.py", "offset": 100, "limit": 50})
+        assert "offset=100" in result
+        assert "limit=50" in result
+        assert "/f.py" in result
+
+    def test_read_with_only_offset(self):
+        """Read with only offset still includes it."""
+        result = _summarize_input("Read", {"file_path": "/f.py", "offset": 200})
+        assert "offset=200" in result
+        assert "limit" not in result
+
+    def test_edit_with_old_string_length(self):
+        """Edit includes old_string length."""
+        result = _summarize_input("Edit", {"file_path": "/f.py", "old_string": "hello world"})
+        assert "old_string len=11" in result
+        assert "/f.py" in result
+
+    def test_edit_without_old_string(self):
+        """Edit without old_string returns just the path."""
+        result = _summarize_input("Edit", {"file_path": "/f.py"})
+        assert result == "/f.py"
+
+    def test_write_returns_path_only(self):
+        """Write returns just the path (no extra context)."""
+        result = _summarize_input("Write", {"file_path": "/f.py"})
+        assert result == "/f.py"
 
     def test_grep_returns_pattern(self):
         assert _summarize_input("Grep", {"pattern": "foo"}) == 'pattern="foo"'
@@ -277,9 +308,18 @@ class TestGetSessionContext:
 
         with patch.dict("sys.modules", {"models.agent_session": mock_module}):
             with patch("agent.health_check._extract_gh_commands", return_value=[]):
-                result = _get_session_context("dev-session")
-                assert "dev" in result
-                assert "Build the auth module" in result
+                with patch("agent.health_check._compute_activity_stats", return_value={
+                    "tool_distribution": {"Read": 5, "Edit": 3},
+                    "commit_count": 1,
+                    "total_tool_count": 8,
+                }):
+                    result = _get_session_context("dev-session")
+                    assert "dev" in result
+                    assert "Build the auth module" in result
+                    assert "Tool distribution:" in result
+                    assert "5 Read" in result
+                    assert "Total tool calls: 8" in result
+                    assert "Commits: 1" in result
 
     def test_handles_none_fields(self):
         mock_session = MagicMock()
@@ -293,8 +333,15 @@ class TestGetSessionContext:
 
         with patch.dict("sys.modules", {"models.agent_session": mock_module}):
             with patch("agent.health_check._extract_gh_commands", return_value=[]):
-                result = _get_session_context("none-session")
-                assert isinstance(result, str)
+                with patch("agent.health_check._compute_activity_stats", return_value={
+                    "tool_distribution": {},
+                    "commit_count": 0,
+                    "total_tool_count": 0,
+                }):
+                    result = _get_session_context("none-session")
+                    assert isinstance(result, str)
+                    # Stats block still present even with None fields
+                    assert "Total tool calls:" in result
 
     def test_no_session_returns_empty(self):
         mock_as_cls = MagicMock()
@@ -307,11 +354,81 @@ class TestGetSessionContext:
             assert result == ""
 
 
+class TestComputeActivityStats:
+    """Tests for _compute_activity_stats."""
+
+    def test_empty_activity_returns_defaults(self):
+        """No activity file returns zero stats."""
+        stats = _compute_activity_stats("nonexistent-session-xyz")
+        assert stats["tool_distribution"] == {}
+        assert stats["commit_count"] == 0
+        assert stats["total_tool_count"] == 0
+
+    def test_computes_tool_distribution(self):
+        """Correctly counts tool calls by name."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            original_cwd = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                session_dir = Path(tmpdir) / "logs" / "sessions" / "stats-session"
+                session_dir.mkdir(parents=True)
+                entries = [
+                    json.dumps({"tool": "Read", "args": "/f1.py", "n": 1}),
+                    json.dumps({"tool": "Read", "args": "/f2.py", "n": 2}),
+                    json.dumps({"tool": "Edit", "args": "/f1.py", "n": 3}),
+                    json.dumps({"tool": "Bash", "args": "git commit -m fix", "n": 4}),
+                    json.dumps({"tool": "Bash", "args": "ls", "n": 5}),
+                ]
+                (session_dir / "activity.jsonl").write_text("\n".join(entries))
+                stats = _compute_activity_stats("stats-session")
+                assert stats["tool_distribution"]["Read"] == 2
+                assert stats["tool_distribution"]["Edit"] == 1
+                assert stats["tool_distribution"]["Bash"] == 2
+                assert stats["commit_count"] == 1
+            finally:
+                os.chdir(original_cwd)
+
+    def test_skips_malformed_jsonl(self):
+        """Malformed JSONL lines are skipped gracefully."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            original_cwd = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                session_dir = Path(tmpdir) / "logs" / "sessions" / "bad-json-session"
+                session_dir.mkdir(parents=True)
+                entries = [
+                    "NOT VALID JSON",
+                    json.dumps({"tool": "Read", "args": "/f.py", "n": 1}),
+                    "{broken",
+                ]
+                (session_dir / "activity.jsonl").write_text("\n".join(entries))
+                stats = _compute_activity_stats("bad-json-session")
+                assert stats["tool_distribution"]["Read"] == 1
+                assert stats["commit_count"] == 0
+            finally:
+                os.chdir(original_cwd)
+
+    def test_includes_total_from_tool_counts(self):
+        """total_tool_count comes from _tool_counts dict."""
+        _tool_counts["counting-session"] = 42
+        try:
+            stats = _compute_activity_stats("counting-session")
+            assert stats["total_tool_count"] == 42
+        finally:
+            _tool_counts.pop("counting-session", None)
+
+
 class TestJudgePromptEnrichment:
     """Tests for enriched JUDGE_PROMPT format."""
 
     def test_prompt_has_session_context_placeholder(self):
         assert "{session_context}" in JUDGE_PROMPT
+
+    def test_prompt_includes_pattern_guidance(self):
+        """JUDGE_PROMPT includes legitimate pattern guidance."""
+        assert "legitimate" in JUDGE_PROMPT.lower() or "pattern" in JUDGE_PROMPT.lower()
+        assert "chunked" in JUDGE_PROMPT.lower() or "offset" in JUDGE_PROMPT.lower()
+        assert "commit" in JUDGE_PROMPT.lower()
 
     def test_prompt_formats_with_context(self):
         formatted = JUDGE_PROMPT.format(
@@ -321,6 +438,7 @@ class TestJudgePromptEnrichment:
         )
         assert "chat session" in formatted
         assert "test" in formatted
+        assert "legitimate" in formatted.lower() or "pattern" in formatted.lower()
 
     def test_prompt_formats_without_context(self):
         formatted = JUDGE_PROMPT.format(
