@@ -86,6 +86,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [SDLC-First Routing](sdlc-first-routing.md) | Automatic work request classification (Ollama/Haiku) and orchestrator routing for SDLC vs conversational requests, with cross-repo `gh` resolution via `GH_REPO` env var | Shipped |
 | [Semantic Doc Impact Finder](semantic-doc-impact-finder.md) | Two-stage semantic search (embedding recall + LLM reranking) for finding docs affected by code changes | Shipped |
 | [Semantic Session Routing](semantic-session-routing.md) | Semantic matching of unthreaded messages to active sessions with declared expectations via structured summarizer output | Shipped |
+| [Session Health Check](session-health-check.md) | PostToolUse watchdog hook monitoring agent sessions for stuck loops using a Haiku judge with enriched tool summaries, activity stats, and pattern guidance | Shipped |
 | [Session Isolation](session-isolation.md) | Two-tier task list scoping and git worktrees for parallel session isolation | Shipped |
 | [Session Lifecycle Diagnostics](session-lifecycle-diagnostics.md) | Structured LIFECYCLE logging at every state transition with stall detection and CLI status report | Shipped |
 | [Session Management](session-management.md) | Reply-chain root resolution ensuring all replies in a thread map to one canonical session_id | Shipped |
