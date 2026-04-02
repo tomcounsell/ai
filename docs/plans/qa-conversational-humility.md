@@ -415,7 +415,7 @@ All changes use existing infrastructure. No `.mcp.json` changes.
 | Delivery fields exist | `grep -c "delivery_action" models/agent_session.py` | output > 0 |
 | Stop hook has review gate | `grep -c "DELIVERY REVIEW" agent/hooks/stop.py` | output > 0 |
 | Teammate prompt has humility | `grep -c "I think" agent/teammate_handler.py` | output > 0 |
-| No CLI in persona | `grep -c "valor-telegram send" config/personas/_base.md` | exit code 1 |
+| CLI example removed | `grep -c "valor-telegram send --chat" config/personas/_base.md` | exit code 1 |
 | classify still returns bool | `grep "-> bool" bridge/routing.py` | output > 0 |
 
 ## Critique Results

@@ -22,8 +22,10 @@ logger = logging.getLogger(__name__)
 
 # Module-level state tracking which sessions have seen the review gate.
 # Keyed by session_id -> {"timestamp": float, "draft": str}.
-# Cleared implicitly when the process restarts.
+# Cleared implicitly when the process restarts. Stale entries evicted
+# on access if older than _REVIEW_STATE_TTL seconds.
 _review_state: dict[str, dict[str, Any]] = {}
+_REVIEW_STATE_TTL = 3600  # 1 hour — sessions should complete well within this
 
 # Patterns suggesting the agent stopped prematurely (promise without substance)
 _FALSE_STOP_PATTERNS = re.compile(
@@ -243,6 +245,12 @@ async def stop_hook(
     if _has_pm_messages(session_id):
         logger.info(f"[stop_hook] Skipping review gate: PM already self-messaged ({session_id})")
         return {}
+
+    # Evict stale entries to prevent unbounded growth in long-running processes
+    now = time.time()
+    stale = [k for k, v in _review_state.items() if now - v.get("timestamp", 0) > _REVIEW_STATE_TTL]
+    for k in stale:
+        _review_state.pop(k, None)
 
     # Check if this is the first or second stop for this session
     if session_id not in _review_state:
