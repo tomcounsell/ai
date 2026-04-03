@@ -164,14 +164,19 @@ def _cleanup_stale_sessions(project_dir: Path, age_minutes: int = 30) -> int:
             created = s.created_at
             if not created:
                 continue
-            if isinstance(created, str):
+            if isinstance(created, datetime):
+                age = now - created.timestamp()
+            elif isinstance(created, str):
                 try:
                     dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
                     age = now - dt.timestamp()
                 except (ValueError, TypeError):
                     continue
             else:
-                age = now - float(created)
+                try:
+                    age = now - float(created)
+                except (TypeError, ValueError):
+                    continue
 
             if age < threshold:
                 continue
