@@ -1,8 +1,11 @@
 """Teammate mode metrics tracking.
 
-Redis-backed counters for intent classification distribution and response
+Popoto-backed counters for intent classification distribution and response
 times. All operations are fire-and-forget -- metrics failures must never
 affect message processing.
+
+Uses the TeammateMetrics Popoto model (single-instance pattern) instead of
+raw Redis commands for proper ORM lifecycle and index management.
 """
 
 from __future__ import annotations
@@ -14,24 +17,16 @@ from agent.intent_classifier import TEAMMATE_CONFIDENCE_THRESHOLD
 
 logger = logging.getLogger(__name__)
 
-# Redis key prefix for teammate metrics
-_PREFIX = "teammate_metrics"
-
-# Module-level lazy singleton for Redis connection
-_redis_client = None
+# Max response time entries to keep per mode
+_MAX_RESPONSE_TIMES = 1000
 
 
-def _get_redis():
-    """Get Redis connection (lazy singleton), returns None on failure."""
-    global _redis_client
-    if _redis_client is not None:
-        return _redis_client
+def _get_metrics():
+    """Get the singleton TeammateMetrics record, returns None on failure."""
     try:
-        import redis
-        from config.redis_config import get_redis_url
+        from models.teammate_metrics import TeammateMetrics
 
-        _redis_client = redis.Redis.from_url(get_redis_url(), decode_responses=True)
-        return _redis_client
+        return TeammateMetrics.get_or_create()
     except Exception:
         return None
 
@@ -44,17 +39,18 @@ def record_classification(intent: str, confidence: float) -> None:
         confidence: Classification confidence (0.0-1.0)
     """
     try:
-        r = _get_redis()
-        if not r:
+        metrics = _get_metrics()
+        if not metrics:
             return
 
         if intent == "teammate" and confidence >= TEAMMATE_CONFIDENCE_THRESHOLD:
-            r.incr(f"{_PREFIX}:teammate_classified_count")
+            metrics.teammate_classified_count = (metrics.teammate_classified_count or 0) + 1
         elif intent == "teammate":
-            r.incr(f"{_PREFIX}:teammate_low_confidence_count")
+            metrics.teammate_low_confidence_count = (metrics.teammate_low_confidence_count or 0) + 1
         else:
-            r.incr(f"{_PREFIX}:work_classified_count")
+            metrics.work_classified_count = (metrics.work_classified_count or 0) + 1
 
+        metrics.save()
         logger.debug(f"[teammate_metrics] Recorded classification: {intent} ({confidence:.2f})")
     except Exception as e:
         logger.debug(f"[teammate_metrics] Failed to record classification: {e}")
@@ -68,16 +64,31 @@ def record_response_time(mode: str, elapsed_seconds: float) -> None:
         elapsed_seconds: Time from message receipt to response delivery.
     """
     try:
-        r = _get_redis()
-        if not r:
+        metrics = _get_metrics()
+        if not metrics:
             return
 
-        key = f"{_PREFIX}:{mode}_response_times"
-        # Store as a sorted set with timestamp as score for time-windowed analysis
-        r.zadd(key, {f"{elapsed_seconds:.2f}:{time.time():.0f}": time.time()})
-        # Keep only last 1000 entries
-        r.zremrangebyrank(key, 0, -1001)
+        # Store as member:score in the sorted field (score=timestamp for time-windowed analysis)
+        member = f"{elapsed_seconds:.2f}:{time.time():.0f}"
+        timestamp = time.time()
 
+        if mode == "teammate":
+            times = dict(metrics.teammate_response_times or {})
+            times[member] = timestamp
+            # Keep only last N entries by removing oldest
+            if len(times) > _MAX_RESPONSE_TIMES:
+                sorted_entries = sorted(times.items(), key=lambda x: x[1])
+                times = dict(sorted_entries[-_MAX_RESPONSE_TIMES:])
+            metrics.teammate_response_times = times
+        else:
+            times = dict(metrics.work_response_times or {})
+            times[member] = timestamp
+            if len(times) > _MAX_RESPONSE_TIMES:
+                sorted_entries = sorted(times.items(), key=lambda x: x[1])
+                times = dict(sorted_entries[-_MAX_RESPONSE_TIMES:])
+            metrics.work_response_times = times
+
+        metrics.save()
         logger.debug(f"[teammate_metrics] Recorded {mode} response time: {elapsed_seconds:.2f}s")
     except Exception as e:
         logger.debug(f"[teammate_metrics] Failed to record response time: {e}")
@@ -90,13 +101,13 @@ def get_stats() -> dict:
         Dict with classification counts and average response times.
     """
     try:
-        r = _get_redis()
-        if not r:
+        metrics = _get_metrics()
+        if not metrics:
             return {}
 
-        teammate_count = int(r.get(f"{_PREFIX}:teammate_classified_count") or 0)
-        work_count = int(r.get(f"{_PREFIX}:work_classified_count") or 0)
-        low_conf_count = int(r.get(f"{_PREFIX}:teammate_low_confidence_count") or 0)
+        teammate_count = metrics.teammate_classified_count or 0
+        work_count = metrics.work_classified_count or 0
+        low_conf_count = metrics.teammate_low_confidence_count or 0
 
         return {
             "teammate_classified": teammate_count,

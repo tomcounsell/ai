@@ -186,6 +186,9 @@ class AgentSession(Model):
     # === Session hierarchy fields ===
     parent_agent_session_id = KeyField(null=True)
 
+    class Meta:
+        ttl = 7776000  # 90 days — matches existing cleanup_expired(max_age_days=90) threshold
+
     # === Backward-compatible field name mapping ===
 
     # DatetimeField names that should auto-convert float timestamps
