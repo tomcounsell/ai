@@ -1,7 +1,6 @@
 """Message cleaning, tool log filtering, file extraction,
 response sending, and reaction management."""
 
-import asyncio
 import logging
 import re
 from pathlib import Path
@@ -154,21 +153,6 @@ REACTION_PROCESSING = "🤔"  # Default thinking emoji
 REACTION_SUCCESS = "👍"  # Simple ack, no text reply needed
 REACTION_COMPLETE = "🏆"  # Work done, text reply attached
 REACTION_ERROR = "😱"  # Something went wrong
-
-# Intent-specific processing emojis (classified by local Ollama)
-# All emojis validated 2026-02-13 via scripts/test_emoji_reactions.py
-INTENT_REACTIONS = {
-    "search": "👀",  # Searching/looking
-    "code_execution": "👨‍💻",  # Running code
-    "image_generation": "🤩",  # Creating an image
-    "image_analysis": "🤓",  # Analyzing an image
-    "file_operation": "✍",  # File operations/writing
-    "git_operation": "👨‍💻",  # Git work
-    "chat": "😎",  # Casual conversation
-    "tool_use": "🫡",  # Executing command
-    "system": "👾",  # System task
-    "unknown": "🤔",  # Default thinking
-}
 
 
 def filter_tool_logs(response: str) -> str:
@@ -654,39 +638,6 @@ async def send_response_with_files(
     if files:
         return True  # type: ignore[return-value]  # files were sent, no text Message object
     return None
-
-
-def get_processing_emoji(message: str) -> str:
-    """
-    Get the appropriate processing emoji based on message intent.
-    Uses local Ollama for fast classification.
-
-    Args:
-        message: The user's message
-
-    Returns:
-        Emoji string for the processing stage
-    """
-    try:
-        # intent/ module classifies message type (search, code, chat, etc.)
-        # to pick a contextual reaction emoji. Falls back to default on failure.
-        from intent import classify_intent
-
-        result = classify_intent(message, use_ollama=True)
-        intent = result.get("intent", "unknown")
-        return INTENT_REACTIONS.get(intent, REACTION_PROCESSING)
-    except Exception as e:
-        logger.debug(f"Intent classification failed: {e}")
-        return REACTION_PROCESSING
-
-
-async def get_processing_emoji_async(message: str) -> str:
-    """
-    Async wrapper for intent classification.
-    Runs in executor to not block the event loop.
-    """
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, get_processing_emoji, message)
 
 
 async def set_reaction(

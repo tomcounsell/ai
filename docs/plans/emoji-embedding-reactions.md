@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Merged
 type: feature
 appetite: Medium
 owner: Valor
@@ -117,24 +117,24 @@ No new dependencies required -- reuses existing OpenRouter embedding infrastruct
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `tools/emoji_embedding.py`: If embedding API fails, fall back to `REACTION_PROCESSING` ("thinking" emoji). Test asserts fallback emoji is returned on API error.
-- [ ] `bridge/telegram_relay.py`: If `set_reaction()` fails for a queued reaction, log warning and skip (do not re-queue reaction failures). Test asserts no crash on reaction failure.
-- [ ] `tools/send_telegram.py`: If `--react` is used without `TELEGRAM_REPLY_TO`, exit with clear error. Test asserts error message.
+- [x] `tools/emoji_embedding.py`: If embedding API fails, fall back to `REACTION_PROCESSING` ("thinking" emoji). Test asserts fallback emoji is returned on API error.
+- [x] `bridge/telegram_relay.py`: If `set_reaction()` fails for a queued reaction, log warning and skip (do not re-queue reaction failures). Test asserts no crash on reaction failure.
+- [x] `tools/send_telegram.py`: If `--react` is used without `TELEGRAM_REPLY_TO`, exit with clear error. Test asserts error message.
 
 ### Empty/Invalid Input Handling
-- [ ] `find_best_emoji("")` returns default thinking emoji
-- [ ] `find_best_emoji(None)` returns default thinking emoji
-- [ ] `--react` with empty string exits with error
+- [x] `find_best_emoji("")` returns default thinking emoji
+- [x] `find_best_emoji(None)` returns default thinking emoji
+- [x] `--react` with empty string exits with error
 
 ### Error State Rendering
-- [ ] If emoji embedding cache file is corrupted/missing, rebuild transparently on next call
-- [ ] If relay receives malformed reaction payload, log and skip (no crash)
+- [x] If emoji embedding cache file is corrupted/missing, rebuild transparently on next call
+- [x] If relay receives malformed reaction payload, log and skip (no crash)
 
 ## Test Impact
 
-- [ ] `tests/unit/test_send_telegram.py` -- UPDATE: Add test cases for `--react` flag validation, reaction payload queuing, and emoji-message mode
-- [ ] `tests/unit/test_intake_classifier.py` -- No changes needed (tests `tools/classifier.py` message intent, not Ollama intent)
-- [ ] `tests/unit/test_intent_classifier.py` -- No changes needed (tests `agent/intent_classifier.py` teammate/work routing, not the `intent/` module)
+- [x] `tests/unit/test_send_telegram.py` -- UPDATE: Add test cases for `--react` flag validation, reaction payload queuing, and emoji-message mode
+- [x] `tests/unit/test_intake_classifier.py` -- No changes needed (tests `tools/classifier.py` message intent, not Ollama intent)
+- [x] `tests/unit/test_intent_classifier.py` -- No changes needed (tests `agent/intent_classifier.py` teammate/work routing, not the `intent/` module)
 
 No existing tests directly test the `intent/__init__.py` module or `get_processing_emoji` -- those are untested code paths being removed.
 
@@ -189,25 +189,25 @@ No update system changes required. The new `tools/emoji_embedding.py` module and
 
 ## Documentation
 
-- [ ] Create `docs/features/emoji-embedding-reactions.md` describing the embedding-based reaction system, emoji label format, cache behavior, and send_telegram --react usage
-- [ ] Add entry to `docs/features/README.md` index table
-- [ ] Update `docs/features/classification.md` to remove references to Ollama intent classification for reactions
-- [ ] Update inline docstrings in `bridge/response.py` (remove intent classification references), `tools/send_telegram.py` (document --react flag)
+- [x] Create `docs/features/emoji-embedding-reactions.md` describing the embedding-based reaction system, emoji label format, cache behavior, and send_telegram --react usage
+- [x] Add entry to `docs/features/README.md` index table
+- [x] Update `docs/features/classification.md` to remove references to Ollama intent classification for reactions
+- [x] Update inline docstrings in `bridge/response.py` (remove intent classification references), `tools/send_telegram.py` (document --react flag)
 
 ## Success Criteria
 
-- [ ] Incoming messages are marked as read immediately after dedup check
-- [ ] Emoji embedding index maps all 73 validated reactions to feeling-word embeddings
-- [ ] `find_best_emoji("excited")` returns a sensible emoji in under 50ms (after cache warm)
-- [ ] `classify_and_update_reaction()` no longer calls Ollama -- uses embedding lookup
-- [ ] `classify_request_async` (work-type) continues to function independently
-- [ ] `send_telegram --react "thinking"` queues a reaction payload and relay delivers it
-- [ ] `INTENT_REACTIONS`, `get_processing_emoji`, `get_processing_emoji_async` removed from `bridge/response.py`
-- [ ] `intent/__init__.py` module removed (no other callers exist)
-- [ ] All existing tests pass
-- [ ] New tests cover embedding selection, fallback behavior, and send_telegram --react flag
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] Incoming messages are marked as read immediately after dedup check
+- [x] Emoji embedding index maps all 73 validated reactions to feeling-word embeddings
+- [x] `find_best_emoji("excited")` returns a sensible emoji in under 50ms (after cache warm)
+- [x] `classify_and_update_reaction()` no longer calls Ollama -- uses embedding lookup
+- [x] `classify_request_async` (work-type) continues to function independently
+- [x] `send_telegram --react "thinking"` queues a reaction payload and relay delivers it
+- [x] `INTENT_REACTIONS`, `get_processing_emoji`, `get_processing_emoji_async` removed from `bridge/response.py`
+- [x] `intent/__init__.py` module removed (no other callers exist)
+- [x] All existing tests pass
+- [x] New tests cover embedding selection, fallback behavior, and send_telegram --react flag
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 

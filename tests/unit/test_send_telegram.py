@@ -473,3 +473,84 @@ class TestSendTelegramCli:
             with pytest.raises(SystemExit) as exc_info:
                 main()
             assert exc_info.value.code == 2  # argparse exits with code 2
+
+
+class TestSendTelegramReaction:
+    """Test --react flag for emoji reactions."""
+
+    def test_react_queues_reaction_payload(self):
+        """Should queue a reaction payload with type='reaction' and resolved emoji."""
+        env = {
+            "TELEGRAM_CHAT_ID": "12345",
+            "TELEGRAM_REPLY_TO": "67890",
+            "VALOR_SESSION_ID": "test-session",
+        }
+
+        mock_redis = MagicMock()
+
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch("tools.send_telegram._get_redis_connection", return_value=mock_redis),
+            patch("tools.emoji_embedding.find_best_emoji", return_value="\U0001f525"),
+        ):
+            from tools.send_telegram import send_reaction
+
+            send_reaction("excited")
+
+        payload = json.loads(mock_redis.rpush.call_args[0][1])
+        assert payload["type"] == "reaction"
+        assert payload["emoji"] == "\U0001f525"
+        assert payload["chat_id"] == "12345"
+        assert payload["reply_to"] == 67890
+        assert payload["session_id"] == "test-session"
+
+    def test_react_requires_reply_to(self):
+        """Should exit with error when TELEGRAM_REPLY_TO is not set."""
+        env = {
+            "TELEGRAM_CHAT_ID": "12345",
+            "VALOR_SESSION_ID": "test-session",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            from tools.send_telegram import send_reaction
+
+            with pytest.raises(SystemExit) as exc_info:
+                send_reaction("happy")
+            assert exc_info.value.code == 1
+
+    def test_react_empty_feeling_exits(self):
+        """Should exit with error when feeling is empty."""
+        env = {
+            "TELEGRAM_CHAT_ID": "12345",
+            "TELEGRAM_REPLY_TO": "67890",
+            "VALOR_SESSION_ID": "test-session",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            from tools.send_telegram import send_reaction
+
+            with pytest.raises(SystemExit) as exc_info:
+                send_reaction("")
+            assert exc_info.value.code == 1
+
+    def test_react_cli_flag(self):
+        """Should parse --react flag from CLI and call send_reaction."""
+        env = {
+            "TELEGRAM_CHAT_ID": "12345",
+            "TELEGRAM_REPLY_TO": "67890",
+            "VALOR_SESSION_ID": "test-session",
+        }
+
+        mock_redis = MagicMock()
+
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch("tools.send_telegram._get_redis_connection", return_value=mock_redis),
+            patch("tools.emoji_embedding.find_best_emoji", return_value="\U0001f44d"),
+            patch("sys.argv", ["send_telegram.py", "--react", "happy"]),
+        ):
+            from tools.send_telegram import main
+
+            main()
+
+        payload = json.loads(mock_redis.rpush.call_args[0][1])
+        assert payload["type"] == "reaction"
+        assert payload["emoji"] == "\U0001f44d"

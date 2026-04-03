@@ -10,6 +10,7 @@ Usage:
     python tools/send_telegram.py "Caption for file" --file /path/to/screenshot.png
     python tools/send_telegram.py --file /path/to/document.pdf
     python tools/send_telegram.py "Album caption" --file a.png --file b.png --file c.png
+    python tools/send_telegram.py --react "excited"
 
 Environment variables (injected by sdk_client.py for chat sessions):
     TELEGRAM_CHAT_ID   - Target Telegram chat ID
@@ -19,6 +20,7 @@ Environment variables (injected by sdk_client.py for chat sessions):
 Redis queue contract:
     Key pattern: telegram:outbox:{session_id}
     Message format: JSON with {chat_id, reply_to, text, file_paths, session_id, timestamp}
+    Reaction format: JSON with {chat_id, reply_to, type: "reaction", emoji, session_id, timestamp}
     TTL: 1 hour (safety net for crashed sessions)
 """
 
@@ -174,6 +176,79 @@ def send_message(text: str, file_paths: list[str] | None = None) -> None:
     print(f"Message queued ({', '.join(parts)})")
 
 
+def send_reaction(feeling: str) -> None:
+    """Queue a reaction (emoji) for delivery by the bridge relay.
+
+    Resolves the feeling word to an emoji via the emoji embedding index,
+    then queues a reaction payload for the relay to send.
+
+    Args:
+        feeling: A word or phrase describing the desired reaction
+                 (e.g., "excited", "great work", "sad").
+
+    Raises:
+        SystemExit: On missing env vars or Redis errors.
+    """
+    # Validate environment
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    reply_to = os.environ.get("TELEGRAM_REPLY_TO")
+    session_id = os.environ.get("VALOR_SESSION_ID")
+
+    if not chat_id:
+        print(
+            "Error: TELEGRAM_CHAT_ID not set. This tool is only available in ChatSession context.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if not session_id:
+        print(
+            "Error: VALOR_SESSION_ID not set. This tool is only available in ChatSession context.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if not reply_to:
+        print(
+            "Error: TELEGRAM_REPLY_TO not set. Reactions require a message to react to.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if not feeling or not feeling.strip():
+        print("Error: --react requires a feeling word (e.g., 'excited').", file=sys.stderr)
+        sys.exit(1)
+
+    # Resolve feeling to emoji
+    from tools.emoji_embedding import find_best_emoji
+
+    emoji = find_best_emoji(feeling.strip())
+
+    # Build reaction payload
+    payload = {
+        "type": "reaction",
+        "chat_id": chat_id,
+        "reply_to": int(reply_to),
+        "emoji": emoji,
+        "session_id": session_id,
+        "timestamp": time.time(),
+    }
+
+    message_payload = json.dumps(payload)
+
+    # Push to Redis outbox queue
+    queue_key = f"telegram:outbox:{session_id}"
+    try:
+        r = _get_redis_connection()
+        r.rpush(queue_key, message_payload)
+        r.expire(queue_key, 3600)
+    except Exception as e:
+        print(f"Error: Failed to queue reaction in Redis: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Reaction queued: {emoji} (feeling: {feeling})")
+
+
 def main():
     """CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -184,7 +259,7 @@ def main():
         "message",
         nargs="*",
         default=[],
-        help="Message text to send (can be omitted if --file is provided)",
+        help="Message text to send (can be omitted if --file or --react is provided)",
     )
     parser.add_argument(
         "--file",
@@ -193,12 +268,24 @@ def main():
         default=None,
         help="Path to a file to attach (repeatable for albums, max 10)",
     )
+    parser.add_argument(
+        "--react",
+        dest="react",
+        default=None,
+        help="React to the message with an emoji matching this feeling word (e.g., 'excited')",
+    )
 
     args = parser.parse_args()
+
+    # Reaction mode
+    if args.react:
+        send_reaction(args.react)
+        return
+
     text = " ".join(args.message)
 
     if not text and not args.file_paths:
-        parser.error("Either message text or --file must be provided.")
+        parser.error("Either message text, --file, or --react must be provided.")
 
     send_message(text, file_paths=args.file_paths)
 
