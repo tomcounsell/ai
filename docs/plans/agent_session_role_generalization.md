@@ -128,14 +128,14 @@ No prerequisites — this work uses existing Redis infrastructure and Popoto ORM
 
 ## Test Impact
 
-- [ ] `tests/unit/test_agent_session_hierarchy.py` — UPDATE: replace all `parent_chat_session_id` with `parent_session_id`
-- [ ] `tests/unit/test_agent_session_scheduler_kill.py` — UPDATE: replace `parent_chat_session_id` references
-- [ ] `tests/unit/test_model_relationships.py` — UPDATE: replace `parent_chat_session_id` references in field presence assertions
-- [ ] `tests/unit/test_dev_session_registration.py` — UPDATE: replace `parent_chat_session_id` with `parent_session_id`, update `create_dev` calls to `create_child`
-- [ ] `tests/unit/test_steer_child.py` — UPDATE: replace `parent_chat_session_id` references
-- [ ] `tests/unit/test_summarizer.py` — UPDATE: replace `parent_chat_session_id` in docstrings
-- [ ] `tests/unit/test_chat_session_factory.py` — UPDATE: update factory method references
-- [ ] `tests/integration/test_agent_session_queue_session_type.py` — UPDATE: replace `parent_chat_session_id`
+- [x] `tests/unit/test_agent_session_hierarchy.py` — UPDATE: replace all `parent_chat_session_id` with `parent_session_id`
+- [x] `tests/unit/test_agent_session_scheduler_kill.py` — UPDATE: replace `parent_chat_session_id` references
+- [x] `tests/unit/test_model_relationships.py` — UPDATE: replace `parent_chat_session_id` references in field presence assertions
+- [x] `tests/unit/test_dev_session_registration.py` — UPDATE: replace `parent_chat_session_id` with `parent_session_id`, update `create_dev` calls to `create_child`
+- [x] `tests/unit/test_steer_child.py` — UPDATE: replace `parent_chat_session_id` references
+- [x] `tests/unit/test_summarizer.py` — UPDATE: replace `parent_chat_session_id` in docstrings
+- [x] `tests/unit/test_chat_session_factory.py` — UPDATE: update factory method references
+- [x] `tests/integration/test_agent_session_queue_session_type.py` — UPDATE: replace `parent_chat_session_id`
 - [ ] `tests/e2e/test_session_spawning.py` — UPDATE: replace `parent_chat_session_id` (10 occurrences)
 - [ ] `tests/e2e/test_context_propagation.py` — UPDATE: replace `parent_chat_session_id` and `get_parent_chat_session` (10+ occurrences)
 - [ ] `tests/unit/test_delivery_execution.py` — UPDATE: replace `get_parent_chat_session` mock (line 20)
