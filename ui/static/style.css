@@ -306,6 +306,25 @@ h3 {
 }
 
 /* Activity badge */
+.activity-bar {
+    display: inline-block;
+    width: 48px;
+    height: 6px;
+    background: var(--bg-tertiary);
+    border-radius: 3px;
+    overflow: hidden;
+    vertical-align: middle;
+}
+
+.activity-bar-fill {
+    display: block;
+    height: 100%;
+    width: 0;
+    background: var(--text-muted);
+    border-radius: 3px;
+    transition: width 0.3s ease;
+}
+
 .activity-badge {
     display: inline-block;
     padding: 1px 6px;
