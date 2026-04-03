@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: Done
 type: bug
 appetite: Small
 owner: Valor
@@ -89,20 +89,20 @@ This approach is better than synchronization because:
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] No new exception handlers introduced. Existing `filter_tool_logs()` has no exception handling (pure string processing).
+- [x] No new exception handlers introduced. Existing `filter_tool_logs()` has no exception handling (pure string processing).
 
 ### Empty/Invalid Input Handling
-- [ ] Test `filter_tool_logs()` with `"REACT:"` (no emoji) — should filter the line
-- [ ] Test `filter_tool_logs()` with `"REACT:  "` (whitespace only) — should filter the line
-- [ ] Test `filter_tool_logs()` with mixed content: `"Hello\nREACT: 😅"` — should filter only the REACT line
+- [x] Test `filter_tool_logs()` with `"REACT:"` (no emoji) — should filter the line
+- [x] Test `filter_tool_logs()` with `"REACT:  "` (whitespace only) — should filter the line
+- [x] Test `filter_tool_logs()` with mixed content: `"Hello\nREACT: 😅"` — should filter only the REACT line
 
 ### Error State Rendering
-- [ ] Not applicable — this fix suppresses internal control signals, no user-visible error states
+- [x] Not applicable — this fix suppresses internal control signals, no user-visible error states
 
 ## Test Impact
 
-- [ ] `tests/unit/test_delivery_execution.py::test_no_delivery_action_falls_through` — UPDATE: may need adjustment if filter_tool_logs now strips delivery choices before they reach send_response_with_files
-- [ ] `tests/unit/test_stop_hook_review.py::test_react_with_emoji` — No change needed, tests stop hook parsing which is unmodified
+- [x] `tests/unit/test_delivery_execution.py::test_no_delivery_action_falls_through` — UPDATE: may need adjustment if filter_tool_logs now strips delivery choices before they reach send_response_with_files
+- [x] `tests/unit/test_stop_hook_review.py::test_react_with_emoji` — No change needed, tests stop hook parsing which is unmodified
 
 No other existing tests affected — the new filter pattern in `filter_tool_logs()` is additive and doesn't change any existing filtering behavior.
 
@@ -144,20 +144,20 @@ No agent integration required — this is a bridge-internal change. The fix modi
 
 ## Documentation
 
-- [ ] Update `docs/features/agent-controlled-delivery.md` (if it exists) to document that delivery-choice prefixes are filtered from raw output as defense-in-depth
-- [ ] Add inline code comments in `filter_tool_logs()` explaining the delivery-choice filter pattern
+- [x] Update `docs/features/agent-controlled-delivery.md` (if it exists) to document that delivery-choice prefixes are filtered from raw output as defense-in-depth
+- [x] Add inline code comments in `filter_tool_logs()` explaining the delivery-choice filter pattern
 
 ## Success Criteria
 
-- [ ] Agent output starting with `REACT:` is never sent as literal text to Telegram
-- [ ] Agent output starting with `SEND`, `EDIT:`, `SILENT`, `CONTINUE` is also filtered
-- [ ] Emoji reactions are correctly applied via the existing delivery system (no regression)
-- [ ] `filter_tool_logs("REACT: 😅")` returns empty string
-- [ ] `filter_tool_logs("Hello\nREACT: 😅")` returns `"Hello"`
-- [ ] Mixed content with delivery choices filters only the control lines
-- [ ] All existing delivery execution and stop hook tests pass
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] Agent output starting with `REACT:` is never sent as literal text to Telegram
+- [x] Agent output starting with `SEND`, `EDIT:`, `SILENT`, `CONTINUE` is also filtered
+- [x] Emoji reactions are correctly applied via the existing delivery system (no regression)
+- [x] `filter_tool_logs("REACT: 😅")` returns empty string
+- [x] `filter_tool_logs("Hello\nREACT: 😅")` returns `"Hello"`
+- [x] Mixed content with delivery choices filters only the control lines
+- [x] All existing delivery execution and stop hook tests pass
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
