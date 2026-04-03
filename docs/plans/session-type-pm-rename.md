@@ -150,20 +150,20 @@ No agent integration required. This is a model/enum rename with a migration scri
 
 ## Test Impact
 
-- [ ] `tests/unit/test_enums.py::TestSessionType` -- REPLACE: Rewrite all assertions for PM/TEAMMATE/DEV enum values, update member count to 3
-- [ ] `tests/unit/test_enums.py::TestEnvVarCompatibility::test_session_type_in_env_var_comparison` -- UPDATE: Change "chat" to "pm"
-- [ ] `tests/unit/test_enums.py::TestEnvVarCompatibility::test_str_enum_in_dict_key` -- UPDATE: Change dict key from "chat" to "pm"
-- [ ] `tests/unit/test_chat_session_factory.py` -- REPLACE: Rename file to `test_pm_session_factory.py`, update all references
-- [ ] `tests/unit/test_pm_session_permissions.py::test_sdk_pm_persona_config` -- UPDATE: Change string match pattern
-- [ ] `tests/unit/test_steer_child.py` -- UPDATE: Change `is_chat` to `is_pm`
-- [ ] `tests/integration/test_agent_session_queue_session_type.py` -- REPLACE: All `is_chat`/`create_chat` references, add TEAMMATE coverage
-- [ ] `tests/integration/test_bridge_routing.py` -- UPDATE: All `is_chat` assertions to `is_pm`
-- [ ] `tests/e2e/test_error_boundaries.py` -- UPDATE: All `create_chat` calls to `create_pm`
-- [ ] `tests/e2e/test_context_propagation.py` -- UPDATE: All `create_chat`/`is_chat` to `create_pm`/`is_pm`
-- [ ] `tests/e2e/test_session_lifecycle.py` -- UPDATE: All `create_chat`/`is_chat` to `create_pm`/`is_pm`
-- [ ] `tests/e2e/test_queue_isolation.py` -- UPDATE: All `create_chat` to `create_pm`
-- [ ] `tests/e2e/test_nudge_loop.py` -- UPDATE: All `create_chat` to `create_pm`
-- [ ] `tests/e2e/test_session_spawning.py` -- UPDATE: All `create_chat` to `create_pm`
+- [x] `tests/unit/test_enums.py::TestSessionType` -- REPLACE: Rewrite all assertions for PM/TEAMMATE/DEV enum values, update member count to 3
+- [x] `tests/unit/test_enums.py::TestEnvVarCompatibility::test_session_type_in_env_var_comparison` -- UPDATE: Change "chat" to "pm"
+- [x] `tests/unit/test_enums.py::TestEnvVarCompatibility::test_str_enum_in_dict_key` -- UPDATE: Change dict key from "chat" to "pm"
+- [x] `tests/unit/test_chat_session_factory.py` -- REPLACE: Rename file to `test_pm_session_factory.py`, update all references
+- [x] `tests/unit/test_pm_session_permissions.py::test_sdk_pm_persona_config` -- UPDATE: Change string match pattern
+- [x] `tests/unit/test_steer_child.py` -- UPDATE: Change `is_chat` to `is_pm`
+- [x] `tests/integration/test_agent_session_queue_session_type.py` -- REPLACE: All `is_chat`/`create_chat` references, add TEAMMATE coverage
+- [x] `tests/integration/test_bridge_routing.py` -- UPDATE: All `is_chat` assertions to `is_pm`
+- [x] `tests/e2e/test_error_boundaries.py` -- UPDATE: All `create_chat` calls to `create_pm`
+- [x] `tests/e2e/test_context_propagation.py` -- UPDATE: All `create_chat`/`is_chat` to `create_pm`/`is_pm`
+- [x] `tests/e2e/test_session_lifecycle.py` -- UPDATE: All `create_chat`/`is_chat` to `create_pm`/`is_pm`
+- [x] `tests/e2e/test_queue_isolation.py` -- UPDATE: All `create_chat` to `create_pm`
+- [x] `tests/e2e/test_nudge_loop.py` -- UPDATE: All `create_chat` to `create_pm`
+- [x] `tests/e2e/test_session_spawning.py` -- UPDATE: All `create_chat` to `create_pm`
 
 ## Rabbit Holes
 
@@ -173,21 +173,21 @@ No agent integration required. This is a model/enum rename with a migration scri
 
 ## Documentation
 
-- [ ] Update `docs/features/standardized-enums.md` -- replace all SessionType.CHAT references, update enum table, update code examples
-- [ ] Update `docs/features/chat-dev-session-architecture.md` -- replace "ChatSession (session_type=SessionType.CHAT)" with PM terminology, add TEAMMATE session description
-- [ ] Update `CLAUDE.md` system architecture section if it references session_type="chat"
+- [x] Update `docs/features/standardized-enums.md` -- replace all SessionType.CHAT references, update enum table, update code examples
+- [x] Update `docs/features/chat-dev-session-architecture.md` -- replace "ChatSession (session_type=SessionType.CHAT)" with PM terminology, add TEAMMATE session description
+- [x] Update `CLAUDE.md` system architecture section if it references session_type="chat"
 
 ## Success Criteria
 
-- [ ] `SessionType` enum has exactly three members: `PM = "pm"`, `TEAMMATE = "teammate"`, `DEV = "dev"`
-- [ ] Zero occurrences of `SessionType.CHAT`, `SESSION_TYPE_CHAT`, or `== "chat"` in non-migration Python files
-- [ ] Redis migration script at `scripts/migrate_session_type_chat_to_pm.py` passes `--dry-run` cleanly
-- [ ] `AgentSession.create_pm()` and `AgentSession.create_teammate()` factory methods exist
-- [ ] `AgentSession.is_pm` and `AgentSession.is_teammate` properties exist
-- [ ] Bridge creates `SessionType.TEAMMATE` sessions directly for teammate-persona routing (no `session_mode` secondary discriminator needed)
-- [ ] `pytest tests/unit/test_enums.py` validates new enum values including TEAMMATE
-- [ ] All existing tests pass: `pytest tests/unit/ tests/integration/ tests/e2e/` green
-- [ ] Documentation updated: `docs/features/standardized-enums.md`, `docs/features/chat-dev-session-architecture.md`
+- [x] `SessionType` enum has exactly three members: `PM = "pm"`, `TEAMMATE = "teammate"`, `DEV = "dev"`
+- [x] Zero occurrences of `SessionType.CHAT`, `SESSION_TYPE_CHAT`, or `== "chat"` in non-migration Python files
+- [x] Redis migration script at `scripts/migrate_session_type_chat_to_pm.py` passes `--dry-run` cleanly
+- [x] `AgentSession.create_pm()` and `AgentSession.create_teammate()` factory methods exist
+- [x] `AgentSession.is_pm` and `AgentSession.is_teammate` properties exist
+- [x] Bridge creates `SessionType.TEAMMATE` sessions directly for teammate-persona routing (no `session_mode` secondary discriminator needed)
+- [x] `pytest tests/unit/test_enums.py` validates new enum values including TEAMMATE
+- [x] All existing tests pass: `pytest tests/unit/ tests/integration/ tests/e2e/` green
+- [x] Documentation updated: `docs/features/standardized-enums.md`, `docs/features/chat-dev-session-architecture.md`
 
 ## Execution Order
 
