@@ -1,6 +1,6 @@
 ---
 name: new-audit-skill
-description: "Use when creating a new audit skill for validating code, configuration, or documentation quality. Also use when the user says 'create an audit', 'new audit skill', 'add an audit', 'make an audit for', or 'I want to check X for problems'. Generates audit skills that follow established patterns from audit-models, audit-next-tool, do-docs-audit, and do-skills-audit. Make sure to use this skill whenever someone wants systematic validation of any codebase artifact."
+description: "Use when creating a new audit skill for validating code, configuration, or documentation quality. Also use when the user says 'create an audit', 'new audit skill', 'add an audit', 'make an audit for', or 'I want to check X for problems'. Generates audit skills that follow established patterns from the 8 existing audit skills in this repo. Make sure to use this skill whenever someone wants systematic validation of any codebase artifact."
 allowed-tools: Read, Write, Edit, Glob, Grep, Bash
 argument-hint: "<subject-to-audit>"
 ---
@@ -9,7 +9,7 @@ argument-hint: "<subject-to-audit>"
 
 ## What this skill does
 
-Creates a new audit skill by guiding you through a structured interview, then producing a complete skill directory with checks, output format, and disposition. The result is a reusable, testable audit that follows the patterns established by the 4 existing audit skills in this repo.
+Creates a new audit skill by guiding you through a structured interview, then producing a complete skill directory with checks, output format, and disposition. The result is a reusable, testable audit that follows the patterns established by the 8 existing audit skills in this repo.
 
 ## When to load sub-files
 
@@ -22,9 +22,13 @@ Creates a new audit skill by guiding you through a structured interview, then pr
 | Skill | Subject | Approach | Disposition | Autonomy |
 |-------|---------|----------|-------------|----------|
 | `audit-models` | Popoto Redis models | Prompt-only, 6 heuristic checks | Report only (human decides) | Low — exploratory |
-| `audit-next-tool` | Python tools in `tools/` | Prompt-only, 4-phase process | Report + implement fixes | Medium |
+| `audit-tools` | Python tools in `tools/` | Prompt-only, 4-phase process | Report + implement fixes | Medium |
+| `do-design-audit` | Web UI quality | Prompt-only, 10-dimension rubric | Report only (findings + top 3 fixes) | Medium — opinionated |
 | `do-docs-audit` | Documentation files | Prompt + parallel agents | Auto-fix, commit, threshold router | High — mechanical |
+| `do-integration-audit` | Feature wiring | Prompt-only, 12 semantic checks | Report only (human decides) | High — exploratory |
+| `do-oop-audit` | Python classes | Prompt-only, 14 anti-pattern checks | Report only (human decides) | Medium — semantic |
 | `do-skills-audit` | Skill SKILL.md files | Script-backed, 12 rules | Auto-fix trivial, report complex | High — deterministic |
+| `do-xref-audit` | Doc cross-references | Prompt + parallel agents | Report gaps, add links | Medium — surgical |
 
 ## Quick start
 
@@ -98,7 +102,7 @@ Two naming tiers based on portability:
 | Pattern | When to use | Examples |
 |---------|-------------|---------|
 | `do-{subject}-audit` | General-purpose, works in any repo | `do-docs-audit`, `do-skills-audit`, `do-deps-audit` |
-| `audit-{subject}` | Repo-specific, tied to this project's domain | `audit-models`, `audit-next-tool`, `audit-prompts` |
+| `audit-{subject}` | Repo-specific, tied to this project's domain | `audit-models`, `audit-tools`, `audit-prompts` |
 
 **Decision rule**: Would this audit make sense in a different repo? If yes → `do-{subject}-audit`. If it audits something unique to this project → `audit-{subject}`.
 

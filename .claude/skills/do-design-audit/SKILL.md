@@ -1,6 +1,6 @@
 ---
-name: do-design-review
-description: "Review an existing web UI against premium design criteria. Screenshots pages and evaluates visual hierarchy, typography, color, spacing, consistency, and more. Use when the user wants to evaluate design quality or says 'review this design', 'check the UI', or provides a URL for design feedback."
+name: do-design-audit
+description: "Audit an existing web UI against premium design criteria. Screenshots pages and evaluates visual hierarchy, typography, color, spacing, consistency, and more. Use when the user wants to evaluate design quality, audit a UI, or says 'review this design', 'check the UI', 'audit this page', 'scan the interface', or provides a URL for design feedback."
 allowed-tools: Bash(agent-browser:*)
 context: fork
 ---
@@ -226,3 +226,14 @@ Produce the following report after evaluating all screenshots:
 Findings must be specific. Identify the exact element, section, or pattern that is failing — not a category. "The hero heading and the body paragraph below it use identical font weights, making the page feel flat" is a finding. "Typography needs work" is not.
 
 Top 3 improvements must be actionable. A developer or designer should be able to act on each recommendation without asking a follow-up question.
+
+---
+
+## After the Audit
+
+This skill produces findings only. The report identifies design weaknesses but does not modify any code. Next steps:
+
+- Share findings with the designer or developer responsible for the UI
+- Use `/frontend-design` to implement the recommended improvements
+- Re-run `/do-design-audit` after changes to verify improvements landed
+- For systematic issues (typography, color palette), address them at the design system level rather than page-by-page
