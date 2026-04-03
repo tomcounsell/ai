@@ -57,6 +57,7 @@ valor-telegram read --chat "Dev: Valor" --since "1 hour ago"
 | `pytest -m sdlc` | Run tests for a specific feature (see `tests/README.md`) |
 | `python -m ruff format . && python -m ruff check .` | Format and lint |
 | `python -m ui.app` | Start web UI server on localhost:8500 |
+| `curl -s localhost:8500/dashboard.json` | Get full system state as JSON (sessions, health, reflections, machine) |
 | `python scripts/reflections.py` | Run reflections maintenance manually |
 | `python scripts/reflections.py --dry-run` | Test reflections without side effects |
 | `python scripts/reflections.py --ignore "pattern"` | Silence a bug pattern for 14 days |
