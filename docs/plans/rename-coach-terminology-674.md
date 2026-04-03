@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: Complete
 type: chore
 appetite: Small
 owner: Valor
@@ -78,11 +78,11 @@ No flow change -- this is purely a rename.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_summarizer.py` -- UPDATE: rename all `coaching_message` references to `nudge_feedback` (~40 occurrences)
-- [ ] `tests/unit/test_message_quality.py` -- UPDATE: rename `NARRATION_COACHING_MESSAGE` to `NARRATION_NUDGE_FEEDBACK` (2 tests)
-- [ ] `tests/unit/test_agent_session_queue_async.py` -- UPDATE: rename `coaching_message=` kwarg to `nudge_feedback=`
-- [ ] `tests/unit/test_cross_wire_fixes.py` -- UPDATE: update comment referencing "coach" chain
-- [ ] `tests/conftest.py` -- UPDATE: rename "coach" key in mapping to "summarizer" (line 288)
+- [x] `tests/unit/test_summarizer.py` -- UPDATE: rename all `coaching_message` references to `nudge_feedback` (~40 occurrences)
+- [x] `tests/unit/test_message_quality.py` -- UPDATE: rename `NARRATION_COACHING_MESSAGE` to `NARRATION_NUDGE_FEEDBACK` (2 tests)
+- [x] `tests/unit/test_agent_session_queue_async.py` -- UPDATE: rename `coaching_message=` kwarg to `nudge_feedback=`
+- [x] `tests/unit/test_cross_wire_fixes.py` -- UPDATE: update comment referencing "coach" chain
+- [x] `tests/conftest.py` -- UPDATE: rename "coach" key in mapping to "summarizer" (line 288)
 
 ## Rabbit Holes
 
@@ -115,29 +115,29 @@ No agent integration required -- this changes internal field names and documenta
 
 ## Documentation
 
-- [ ] Update `docs/features/agent-session-model.md` -- replace coaching references with nudge terminology
-- [ ] Update `docs/features/context-fidelity-modes.md` -- replace coaching references
-- [ ] Update `docs/features/goal-gates.md` -- replace coaching references
-- [ ] Update `docs/features/reaction-semantics.md` -- replace coaching references
-- [ ] Update `docs/features/skill-context-injection.md` -- replace coaching references
-- [ ] Update `docs/guides/claude-prompting-best-practices.md` -- replace coaching references
-- [ ] Update `docs/guides/sdlc-storyline-example.md` -- replace coaching references
-- [ ] Update `tests/README.md` -- replace coaching references
-- [ ] Update `.claude/skills/do-pr-review/sub-skills/README.md` -- replace coaching references
-- [ ] Update `.claude/skills/do-pr-review/sub-skills/checkout.md` -- replace coaching references
-- [ ] Update `.claude/skills/do-pr-review/sub-skills/code-review.md` -- replace coaching references
-- [ ] Update `docs/plans/wire-pipeline-graph-563.md` -- remove dead bridge/coach.py references
-- [ ] Update `docs/plans/unify-persona-vocabulary.md` -- replace coaching references
-- [ ] Update `docs/plans/audit-unreviewed-prs-660-664.md` -- replace coaching references
-- [ ] Update `docs/plans/dennett_thinking_skills.md` -- replace coaching references
-- [ ] Update `monitoring/session_watchdog.py` -- remove dead coaching-loop.md reference
+- [x] Update `docs/features/agent-session-model.md` -- replace coaching references with nudge terminology
+- [x] Update `docs/features/context-fidelity-modes.md` -- replace coaching references
+- [x] Update `docs/features/goal-gates.md` -- replace coaching references
+- [x] Update `docs/features/reaction-semantics.md` -- replace coaching references
+- [x] Update `docs/features/skill-context-injection.md` -- replace coaching references
+- [x] Update `docs/guides/claude-prompting-best-practices.md` -- replace coaching references
+- [x] Update `docs/guides/sdlc-storyline-example.md` -- replace coaching references
+- [x] Update `tests/README.md` -- replace coaching references
+- [x] Update `.claude/skills/do-pr-review/sub-skills/README.md` -- replace coaching references
+- [x] Update `.claude/skills/do-pr-review/sub-skills/checkout.md` -- replace coaching references
+- [x] Update `.claude/skills/do-pr-review/sub-skills/code-review.md` -- replace coaching references
+- [x] Update `docs/plans/wire-pipeline-graph-563.md` -- remove dead bridge/coach.py references
+- [x] Update `docs/plans/unify-persona-vocabulary.md` -- replace coaching references
+- [x] Update `docs/plans/audit-unreviewed-prs-660-664.md` -- replace coaching references
+- [x] Update `docs/plans/dennett_thinking_skills.md` -- replace coaching references
+- [x] Update `monitoring/session_watchdog.py` -- remove dead coaching-loop.md reference
 
 ## Success Criteria
 
-- [ ] `grep -rn "coach" --include="*.py" .` returns zero matches in functional code
-- [ ] `grep -rn "coach" --include="*.md" docs/ .claude/` returns zero matches (except archived plans)
-- [ ] All tests pass (`/do-test`)
-- [ ] No behavioral changes -- purely rename/cleanup
+- [x] `grep -rn "coach" --include="*.py" .` returns zero matches in functional code
+- [x] `grep -rn "coach" --include="*.md" docs/ .claude/` returns zero matches (except archived plans)
+- [x] All tests pass (`/do-test`)
+- [x] No behavioral changes -- purely rename/cleanup
 
 ## Team Orchestration
 
