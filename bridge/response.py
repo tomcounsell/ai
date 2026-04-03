@@ -176,6 +176,14 @@ def filter_tool_logs(response: str) -> str:
         r"^[\U0001F300-\U0001F9FF\u2600-\u26FF\u2700-\u27BF]\s*\w+:", re.UNICODE
     )
 
+    # Delivery-choice prefixes: internal agent control signals that should never
+    # be sent as user-facing text. These are parsed by the stop hook to set
+    # delivery_action on the session, but can leak through the nudge loop's
+    # parallel send path if the stop hook hasn't written to Redis yet.
+    delivery_choice_pattern = re.compile(
+        r"^(REACT:\s*|SEND\s*$|EDIT:\s*|SILENT\s*$|CONTINUE\s*$)", re.IGNORECASE
+    )
+
     for line in lines:
         stripped = line.strip()
 
@@ -184,6 +192,11 @@ def filter_tool_logs(response: str) -> str:
             # Only add blank line if last line wasn't blank
             if filtered and filtered[-1].strip():
                 filtered.append(line)
+            continue
+
+        # Skip delivery-choice control signals (REACT:, SEND, EDIT:, SILENT, CONTINUE)
+        # These are internal protocol between agent and stop hook, never user-facing.
+        if delivery_choice_pattern.match(stripped):
             continue
 
         # Skip lines matching explicit tool log patterns

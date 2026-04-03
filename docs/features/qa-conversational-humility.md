@@ -8,13 +8,13 @@ Controls that make QA responses in teammate group chats conversational rather th
 
 ### Layer 1: Teammate Prompt Overhaul (`agent/teammate_handler.py`)
 
-`build_teammate_instructions()` uses a "curious colleague" framing instead of "knowledgeable teammate who knows the codebase well". Key rules:
+`build_teammate_instructions()` uses a "direct, knowledgeable colleague" framing with honest AI self-identity. Key rules:
 
-- Restate understanding before answering
-- Ask for clarification when ambiguous
-- Use hedged language ("I think", "from what I've seen", "it looks like")
-- Cover 2-3 angles briefly, not one exhaustively
-- End with a follow-up question when uncertain about the ask
+- Keep responses brief: 1-3 sentences usually, matching the energy of the chat
+- Not every message needs a question -- only ask when genuinely needed for clarification
+- Use hedged language ("I think", "from what I've seen") for uncertain claims, but be direct about known facts
+- No patronizing ("great question!") or forced engagement patterns
+- Own AI identity honestly -- no projecting human limitations
 - Reference internal systems only when directly asked
 
 ### Layer 2: Agent-Controlled Message Delivery (`agent/hooks/stop.py`)
@@ -41,7 +41,7 @@ Classification uses a two-stage approach:
 
 ## Test Coverage
 
-- `tests/unit/test_qa_handler.py` -- Humility markers, curious colleague framing, brevity guidance
+- `tests/unit/test_qa_handler.py` -- Hedged language markers, direct colleague framing, brevity guidance
 - `tests/e2e/test_message_pipeline.py` -- Bool return type for classify_needs_response
 
 ## Related

@@ -13,6 +13,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Agent Session Model](agent-session-model.md) | Unified lifecycle model with DatetimeFields, SessionEvent log, consolidated DictFields | Shipped |
 | [Agent Session Queue Reliability](agent-session-queue.md) | KeyField index fixes, Event-based drain guard, delete-and-recreate pattern, orphan recovery | Shipped |
 | [Agent Session Scheduling](agent-session-scheduling.md) | Agent-initiated queue operations: schedule SDLC sessions, deferred execution, 4-tier priority, queue manipulation | Shipped |
+| [Agent-Controlled Delivery Protocol](agent-controlled-delivery.md) | Delivery-choice protocol (SEND/EDIT/REACT/SILENT/CONTINUE) with defense-in-depth filtering to prevent control signal text leaking to users | Shipped |
 | [Agent-Controlled Message Delivery](agent-message-delivery.md) | Stop-hook review gate giving the agent final say over output: SEND/EDIT/REACT/SILENT/CONTINUE delivery choices, classification context, false-stop detection | Shipped |
 | [Autoexperiment](autoexperiment.md) | Autonomous overnight prompt optimization using ultra-cheap LLMs via OpenRouter | Shipped |
 | [Bridge Message Query](bridge-message-query.md) | CLI tool to fetch Telegram message history via file-based IPC with running bridge | Shipped |
@@ -112,7 +113,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [SuperWhisper Transcription](superwhisper-transcription.md) | Dual-backend audio transcription with local SuperWhisper primary and OpenAI Whisper API fallback | Shipped |
 | [System Overview](system-overview.md) | High-level architecture and design principles | Archived |
 | [Task List Isolation Experiment](task-list-isolation.md) | Experiment results validating CLAUDE_CODE_TASK_LIST_ID behavior | Archived |
-| [Teammate Conversational Humility](qa-conversational-humility.md) | Humility-first Teammate responses: brevity, clarification-first, stop-hook review gate for delivery control | Shipped |
+| [Teammate Conversational Humility](qa-conversational-humility.md) | Direct, honest Teammate responses: brevity, hedged language for uncertain claims, stop-hook review gate for delivery control | Shipped |
 | [Telegram History & Links](telegram-history.md) | Searchable message history and link compilation from Telegram | Shipped |
 | [Telegram Messaging](telegram-messaging.md) | Unified interface for reading and sending Telegram messages via `valor-telegram` CLI | Shipped |
 | [Telegram PM Guide](telegram-pm-guide.md) | PM-facing guide for Telegram interaction patterns, session resumption, and pipeline signals | Shipped |

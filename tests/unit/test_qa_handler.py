@@ -39,19 +39,19 @@ class TestBuildTeammateInstructions:
         assert "from what I've seen" in result
         assert "clarif" in result.lower()
 
-    def test_curious_colleague_framing(self):
-        """Teammate should frame as curious colleague, not authoritative expert."""
+    def test_direct_colleague_framing(self):
+        """Teammate should frame as direct colleague, not an interviewer."""
         result = build_teammate_instructions()
-        assert "curious colleague" in result
-        # Old authoritative framing should be gone
+        assert "direct" in result.lower()
+        assert "colleague" in result
+        # Old framing should be gone
         assert "knowledgeable teammate" not in result
         assert "who knows the codebase well" not in result
 
     def test_brevity_guidance(self):
         """Teammate instructions should include brevity guidance."""
         result = build_teammate_instructions()
-        assert "2-4 sentences" in result or "brief" in result.lower()
-        assert "paragraph" in result.lower()
+        assert "1-3 sentences" in result or "brief" in result.lower()
 
     def test_research_first_behavior(self):
         """Teammate instructions should emphasize research before answering."""
