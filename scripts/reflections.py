@@ -3,26 +3,27 @@
 Reflections - Autonomous Daily Maintenance System
 
 A long-running process that performs daily self-directed maintenance tasks.
-15 units: 12 independent items + 3 merged pipelines.
+16 units: 13 independent items + 3 merged pipelines.
 
 Independent units:
 1. legacy_code_scan — Clean Up Stale Code
 2. log_review           — Review Previous Day's Logs
 3. task_management      — Clean Up Task Management
 4. documentation_audit  — Audit Documentation
-5. skills_audit         — Skills Audit
-6. redis_ttl_cleanup    — Redis TTL Cleanup
-7. redis_data_quality   — Redis Data Quality
-8. branch_plan_cleanup  — Branch and Plan Cleanup
-9. feature_docs_audit   — Feature Docs Audit
-10. principal_staleness — Principal Context Staleness
-11. disk_space_check    — Disk Space Check
-12. pr_review_audit     — PR Review Audit
+5. skills_audit        — Skills Audit
+6. hooks_audit         — Hooks Audit
+7. redis_ttl_cleanup   — Redis TTL Cleanup
+8. redis_data_quality  — Redis Data Quality
+9. branch_plan_cleanup — Branch and Plan Cleanup
+10. feature_docs_audit — Feature Docs Audit
+11. principal_staleness — Principal Context Staleness
+12. disk_space_check    — Disk Space Check
+13. pr_review_audit     — PR Review Audit
 
 Merged pipelines (sub-steps run internally, one checkpoint per pipeline):
-13. session_intelligence    — Session Analysis + LLM Reflection + Bug Filing
-14. behavioral_learning     — Episode Cycle-Close + Pattern Crystallization
-15. daily_report_and_notify — Daily Report + GitHub Issues + Telegram (must be last)
+14. session_intelligence    — Session Analysis + LLM Reflection + Bug Filing
+15. behavioral_learning     — Episode Cycle-Close + Pattern Crystallization
+16. daily_report_and_notify — Daily Report + GitHub Issues + Telegram (must be last)
 
 All persistence is Redis-backed via Popoto models (see models/ directory).
 State: ReflectionRun | Ignore patterns: ReflectionIgnore
