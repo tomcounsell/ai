@@ -99,6 +99,7 @@ tests/
 | unit | `test_sdlc_reminder.py` | — | SDLC reminder messaging |
 | integration | `test_steering.py` | 32 | Steering queue push/pop/clear |
 | integration | `test_cross_repo_build.py` | 8 | Cross-repo build flow |
+| integration | `test_artifact_inference.py` | 15 | Artifact-based pipeline stage inference (real gh CLI + filesystem) |
 
 ### `sessions` — Session lifecycle and health
 
