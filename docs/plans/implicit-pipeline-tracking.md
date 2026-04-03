@@ -6,6 +6,7 @@ owner: Valor
 created: 2026-04-03
 tracking: https://github.com/tomcounsell/ai/issues/645
 last_comment_id:
+plan_branch: main
 ---
 
 # Implicit Pipeline Stage Tracking via Observable Artifacts
