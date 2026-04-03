@@ -38,23 +38,10 @@ The orchestrator will:
 
 After running, report the result. If there are warnings or errors, list each one clearly.
 
-### Stale Session & Job Audit
-
-After the orchestrator completes, audit Redis for stale or abandoned sessions/jobs. An `/update` implies a soft reset — anything stuck should be surfaced.
-
-```bash
-# Preview stale sessions (killed/abandoned/failed older than 30 min)
-cd ~/src/ai && python -m tools.agent_session_scheduler cleanup --age 30 --dry-run
-
-# List any non-terminal sessions that might be stuck
-python -m tools.agent_session_scheduler list --status running,pending
-```
-
-Report findings:
-- **Clean**: "No stale sessions or jobs"
-- **Stale found**: Show the dry-run output and ask whether to clean up. If approved: `python -m tools.agent_session_scheduler cleanup --age 30`
-
-**Important**: Never change session status via `s.status = ...; s.save()` — Popoto's KeyField creates a new record and orphans the old one. Use `s.delete()` for cleanup, or use the `cleanup` command which does this correctly.
+The orchestrator automatically cleans up stale sessions as part of Step 5.5:
+- Running/pending sessions older than 30 min with no live process are transitioned to `killed`
+- Terminal sessions (killed/abandoned/failed/completed) are preserved for reflections to analyze
+- Reflections handles its own 90-day expiry of old session records
 
 ### Auto-Bump Critical Dependencies
 
