@@ -79,27 +79,9 @@ This creates a feedback loop: the PM dispatches a dev-session to run a stage, th
 
 ## Known Tech Debt
 
-### `r.keys()` in `_diagnose_missing_session` (agent/agent_session_queue.py:1271)
+### ~~`r.keys()` in `_diagnose_missing_session`~~ (Resolved)
 
-The diagnostic function uses `r.keys(f"*{session_id}*")` which is O(N) across the entire Redis keyspace. Redis documentation explicitly warns against using `KEYS` in production. This is acceptable today because:
-
-- It only runs on the error path (session not found during continuation)
-- Our Redis instance is small (hundreds of keys, not millions)
-- The function is diagnostic — it aids debugging, not critical path
-
-**When to fix:** If Redis grows beyond ~10k keys, or if session-not-found errors become frequent enough that this diagnostic runs regularly. Replace with `SCAN` cursor iteration:
-
-```python
-cursor = 0
-keys = []
-while True:
-    cursor, batch = r.scan(cursor, match=f"*{session_id}*", count=100)
-    keys.extend(batch)
-    if cursor == 0:
-        break
-```
-
-**Tracked in:** PR #419 review comment
+Previously used raw `r.keys(f"*{session_id}*")` which is O(N) across the entire Redis keyspace. Refactored in [Popoto Index Hygiene](popoto-index-hygiene.md) (PR #650) to use Popoto-native queries (`AgentSession.query.filter()`) and targeted `POPOTO_REDIS_DB.exists()` checks instead of raw Redis operations.
 
 ## Testing
 

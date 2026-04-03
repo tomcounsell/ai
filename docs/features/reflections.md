@@ -50,6 +50,7 @@ reflections:
 | `health-check` | 5 min | high | function | Check running jobs for liveness, recover stuck ones |
 | `orphan-recovery` | 30 min | normal | function | Recover stranded AgentSession objects |
 | `stale-branch-cleanup` | daily | low | function | Clean up session branches older than 72 hours |
+| `popoto-index-cleanup` | daily | low | function | Rebuild Popoto model indexes to remove orphaned entries (see [Popoto Index Hygiene](popoto-index-hygiene.md)) |
 | `daily-maintenance` | daily | low | function | Full 16-unit maintenance pipeline |
 
 ### State Model (`models/reflection.py`)
