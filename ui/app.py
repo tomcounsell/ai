@@ -171,6 +171,49 @@ def create_app() -> FastAPI:
             pass
         return {"status": "error", "age_s": None}
 
+    def _session_to_json(s) -> dict:
+        """Serialize a PipelineProgress to JSON dict for the dashboard API."""
+        result = {
+            "agent_session_id": s.agent_session_id,
+            "session_id": s.session_id,
+            "display_name": s.display_name,
+            "session_type": s.session_type,
+            "status": s.status,
+            "project_key": s.project_key,
+            "project_name": s.project_name,
+            "slug": s.slug,
+            "branch_name": s.branch_name,
+            "current_stage": s.current_stage,
+            "stages": [{"name": st.name, "status": st.status} for st in s.stages],
+            "created_at": s.created_at,
+            "started_at": s.started_at,
+            "completed_at": s.completed_at,
+            "updated_at": s.updated_at,
+            "duration": s.duration,
+            "issue_url": s.issue_url,
+            "pr_url": s.pr_url,
+            "message_text": s.message_text,
+            "parent_agent_session_id": s.parent_agent_session_id,
+            "context_summary": s.context_summary,
+            "expectations": s.expectations,
+            "turn_count": s.turn_count,
+            "tool_call_count": s.tool_call_count,
+            "watchdog_unhealthy": s.watchdog_unhealthy,
+            "priority": s.priority,
+            "classification_type": s.classification_type,
+            "is_stale": s.is_stale,
+            "children": [_session_to_json(c) for c in s.children],
+            "events": [
+                {
+                    "role": e.role,
+                    "text": e.text,
+                    "timestamp": e.timestamp,
+                }
+                for e in s.events
+            ],
+        }
+        return result
+
     @app.get("/dashboard.json")
     def dashboard_json():
         """Full dashboard state as JSON for programmatic consumption."""
@@ -192,34 +235,7 @@ def create_app() -> FastAPI:
                     "bridge_last_seen_s": bridge["age_s"],
                 },
                 "sessions": [
-                    {
-                        "agent_session_id": s.agent_session_id,
-                        "session_id": s.session_id,
-                        "display_name": s.display_name,
-                        "session_type": s.session_type,
-                        "status": s.status,
-                        "project_key": s.project_key,
-                        "project_name": s.project_name,
-                        "slug": s.slug,
-                        "branch_name": s.branch_name,
-                        "current_stage": s.current_stage,
-                        "stages": [{"name": st.name, "status": st.status} for st in s.stages],
-                        "created_at": s.created_at,
-                        "started_at": s.started_at,
-                        "completed_at": s.completed_at,
-                        "duration": s.duration,
-                        "issue_url": s.issue_url,
-                        "pr_url": s.pr_url,
-                        "message_text": s.message_text,
-                        "events": [
-                            {
-                                "role": e.role,
-                                "text": e.text,
-                                "timestamp": e.timestamp,
-                            }
-                            for e in s.events
-                        ],
-                    }
+                    _session_to_json(s)
                     for s in sessions
                 ],
                 "reflections": reflections,
