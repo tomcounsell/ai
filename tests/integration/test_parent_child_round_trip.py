@@ -20,7 +20,6 @@ import pytest
 
 from models.agent_session import AgentSession
 
-
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 
@@ -290,9 +289,10 @@ class TestEdgeCases:
         assert _extract_stage_from_prompt("stage: build") == "BUILD"
 
         # Embedded in larger prompt
-        assert _extract_stage_from_prompt(
-            "Your assignment:\nStage: DOCS\nPlease update the docs."
-        ) == "DOCS"
+        assert (
+            _extract_stage_from_prompt("Your assignment:\nStage: DOCS\nPlease update the docs.")
+            == "DOCS"
+        )
 
         # No stage found
         assert _extract_stage_from_prompt("Just do some work") is None
