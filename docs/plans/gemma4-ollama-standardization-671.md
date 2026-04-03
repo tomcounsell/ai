@@ -1,5 +1,5 @@
 ---
-status: In Progress
+status: PR Open
 type: enhancement
 appetite: Small
 owner: Valor
