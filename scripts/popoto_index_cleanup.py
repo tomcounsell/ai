@@ -106,9 +106,7 @@ def run_cleanup() -> dict:
                     f"{rebuilt_count} records reindexed"
                 )
             else:
-                logger.debug(
-                    f"[popoto-cleanup] {model_name}: clean ({rebuilt_count} records)"
-                )
+                logger.debug(f"[popoto-cleanup] {model_name}: clean ({rebuilt_count} records)")
         except Exception as e:
             error_msg = f"{model_name}: {e}"
             errors.append(error_msg)

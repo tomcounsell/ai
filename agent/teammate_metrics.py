@@ -46,9 +46,7 @@ def record_classification(intent: str, confidence: float) -> None:
         if intent == "teammate" and confidence >= TEAMMATE_CONFIDENCE_THRESHOLD:
             metrics.teammate_classified_count = (metrics.teammate_classified_count or 0) + 1
         elif intent == "teammate":
-            metrics.teammate_low_confidence_count = (
-                metrics.teammate_low_confidence_count or 0
-            ) + 1
+            metrics.teammate_low_confidence_count = (metrics.teammate_low_confidence_count or 0) + 1
         else:
             metrics.work_classified_count = (metrics.work_classified_count or 0) + 1
 

@@ -73,7 +73,10 @@ class TestRunCleanup:
         mock_model_b.rebuild_indexes.return_value = 3
 
         with (
-            patch("scripts.popoto_index_cleanup._get_all_models", return_value=[mock_model_a, mock_model_b]),
+            patch(
+                "scripts.popoto_index_cleanup._get_all_models",
+                return_value=[mock_model_a, mock_model_b],
+            ),
             patch("scripts.popoto_index_cleanup._count_orphans", return_value=0),
         ):
             result = run_cleanup()
@@ -93,7 +96,10 @@ class TestRunCleanup:
         mock_model_bad.rebuild_indexes.side_effect = RuntimeError("Redis down")
 
         with (
-            patch("scripts.popoto_index_cleanup._get_all_models", return_value=[mock_model_ok, mock_model_bad]),
+            patch(
+                "scripts.popoto_index_cleanup._get_all_models",
+                return_value=[mock_model_ok, mock_model_bad],
+            ),
             patch("scripts.popoto_index_cleanup._count_orphans", return_value=0),
         ):
             result = run_cleanup()
