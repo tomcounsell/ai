@@ -531,7 +531,7 @@ No agent integration required. No MCP server changes, no `.mcp.json` modificatio
 - **Severity**: CONCERN
 - **Critics**: Skeptic, Operator
 - **Location**: Scope table, Task 12 (validate-all)
-- **Finding**: Two Python files contain "Q&A" string references not listed in the plan's scope: `tools/job_scheduler.py` (line 4, docstring) and `bridge/coach.py` (line 356, comment). The Success Criteria require `grep -r "Q&A" --include="*.py"` to return zero results, so these must be updated or the grep will fail validation.
+- **Finding**: Two Python files contain "Q&A" string references not listed in the plan's scope: `tools/job_scheduler.py` (line 4, docstring) and `bridge/coach.py` [NOTE: `bridge/coach.py` was deleted by PR #661; this critique finding is now stale] (line 356, comment). The Success Criteria require `grep -r "Q&A" --include="*.py"` to return zero results, so these must be updated or the grep will fail validation.
 - **Suggestion**: Add both files to Task 7 or Task 8 scope. The fixes are trivial (docstring/comment text changes) but must be tracked to satisfy the zero-match grep criterion.
 
 #### 2. Summarizer dual-check pattern will break if qa_mode property is deleted

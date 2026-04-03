@@ -51,7 +51,6 @@ reflections:
 | `orphan-recovery` | 30 min | normal | function | Recover stranded AgentSession objects |
 | `stale-branch-cleanup` | daily | low | function | Clean up session branches older than 72 hours |
 | `popoto-index-cleanup` | daily | low | function | Rebuild Popoto model indexes to remove orphaned entries (see [Popoto Index Hygiene](popoto-index-hygiene.md)) |
-| `daily-maintenance` | daily | low | function | Full 16-unit maintenance pipeline |
 
 ### State Model (`models/reflection.py`)
 
@@ -109,7 +108,7 @@ When the watchdog detects that the bridge process is not running (via `pgrep`), 
 
 ## Daily Maintenance Pipeline (16 Units)
 
-The `daily-maintenance` reflection runs the full pipeline from `scripts/reflections.py`. The runner loads state from Redis, executes each unit in order, and checkpoints after every unit. If interrupted, the next run resumes from where it left off. Each unit is independently failable — a crash in one unit does not block the rest.
+The daily maintenance pipeline runs from `scripts/reflections.py`. It is invoked manually or via launchd (not via the reflection scheduler -- the `daily-maintenance` registry entry was removed in PR #664). The runner loads state from Redis, executes each unit in order, and checkpoints after every unit. If interrupted, the next run resumes from where it left off. Each unit is independently failable -- a crash in one unit does not block the rest.
 
 The pipeline has 16 units: 13 independent items and 3 merged pipelines. Completed units are tracked by string key (e.g. `"legacy_code_scan"`), not by integer position. This means units can be reordered or renamed without data migrations — any unknown key in `completed_steps` is simply skipped.
 
