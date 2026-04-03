@@ -104,10 +104,10 @@ For **ChatSession (PM)** sends, use `tools/send_telegram.py` instead. It routes 
 | Tool | Context | File Support |
 |------|---------|--------------|
 | `valor-telegram send` | DevSession / CLI | `--file`, `--image`, `--audio` |
-| `python tools/send_telegram.py` | ChatSession (PM) | `--file` (auto-detects media type) |
+| `python tools/send_telegram.py` | ChatSession (PM) | `--file` (repeatable, max 10 for albums; auto-detects media type) |
 
 ## Related
 
 - [Telegram History](telegram-history.md) — underlying Redis/Popoto storage
-- [PM Telegram Tool](pm-telegram-tool.md) — ChatSession self-messaging with file attachments
+- [PM Telegram Tool](pm-telegram-tool.md) — ChatSession self-messaging with file attachments and multi-file albums
 - `config/SOUL.md` — agent persona references to this tool

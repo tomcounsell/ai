@@ -1627,10 +1627,12 @@ async def get_agent_response_sdk(
                 '  `python tools/send_telegram.py "Your message here"`\n'
                 "To attach a file (screenshot, document, image):\n"
                 '  `python tools/send_telegram.py "Caption text" --file /path/to/file.png`\n'
+                "Multiple files as an album (max 10):\n"
+                '  `python tools/send_telegram.py "Album caption" --file a.png --file b.png --file c.png`\n'
                 "File-only (no caption):\n"
                 "  `python tools/send_telegram.py --file /path/to/file.png`\n"
                 "Use --file to attach screenshots, images, or documents. "
-                "Telethon auto-detects the media type.\n"
+                "Repeat --file for albums. Telethon auto-detects the media type.\n"
                 "Use this tool for:\n"
                 "- Status updates and progress reports\n"
                 "- Questions that need human input\n"

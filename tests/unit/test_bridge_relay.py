@@ -83,7 +83,7 @@ class TestSendQueuedMessage:
 
     @pytest.mark.asyncio
     async def test_sends_file_via_send_file(self):
-        """Should use client.send_file() when file_path is present."""
+        """Should use client.send_file() when file_paths list is present."""
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
             tmp_path = f.name
             f.write(b"fake image")
@@ -98,7 +98,7 @@ class TestSendQueuedMessage:
                 "chat_id": "12345",
                 "reply_to": 67890,
                 "text": "Check this",
-                "file_path": tmp_path,
+                "file_paths": [tmp_path],
                 "session_id": "test-session",
             }
 
@@ -130,7 +130,7 @@ class TestSendQueuedMessage:
             message = {
                 "chat_id": "12345",
                 "text": "",
-                "file_path": tmp_path,
+                "file_paths": [tmp_path],
                 "session_id": "test-session",
             }
 
@@ -148,7 +148,7 @@ class TestSendQueuedMessage:
 
     @pytest.mark.asyncio
     async def test_missing_file_falls_back_to_text(self):
-        """Should fall back to text-only when file_path is present but file missing."""
+        """Should fall back to text-only when all files missing but text present."""
         mock_client = MagicMock()
         mock_sent = MagicMock()
         mock_sent.id = 77
@@ -156,7 +156,7 @@ class TestSendQueuedMessage:
         message = {
             "chat_id": "12345",
             "text": "The file was here",
-            "file_path": "/nonexistent/deleted.png",
+            "file_paths": ["/nonexistent/deleted.png"],
             "session_id": "test-session",
         }
 
@@ -169,18 +169,120 @@ class TestSendQueuedMessage:
 
     @pytest.mark.asyncio
     async def test_missing_file_no_text_returns_none(self):
-        """Should return None when file is missing and no text to fall back to."""
+        """Should return None when all files missing and no text to fall back to."""
         mock_client = MagicMock()
 
         message = {
             "chat_id": "12345",
             "text": "",
-            "file_path": "/nonexistent/deleted.png",
+            "file_paths": ["/nonexistent/deleted.png"],
             "session_id": "test-session",
         }
 
         result = await _send_queued_message(mock_client, message)
         assert result is None
+
+    @pytest.mark.asyncio
+    async def test_backward_compat_file_path_string(self):
+        """Should handle legacy file_path (string) payloads during rolling deployment."""
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            tmp_path = f.name
+            f.write(b"fake image")
+
+        try:
+            mock_client = MagicMock()
+            mock_sent = MagicMock()
+            mock_sent.id = 88
+            mock_client.send_file = AsyncMock(return_value=mock_sent)
+
+            # Legacy payload with file_path (string), not file_paths (list)
+            message = {
+                "chat_id": "12345",
+                "text": "Legacy payload",
+                "file_path": tmp_path,
+                "session_id": "test-session",
+            }
+
+            result = await _send_queued_message(mock_client, message)
+
+            assert result == 88
+            mock_client.send_file.assert_called_once_with(
+                12345,
+                tmp_path,
+                caption="Legacy payload",
+                reply_to=None,
+            )
+        finally:
+            os.unlink(tmp_path)
+
+    @pytest.mark.asyncio
+    async def test_multi_file_album_send(self):
+        """Should send multiple files as album via send_file with list."""
+        tmp_files = []
+        try:
+            for suffix in [".png", ".jpg", ".gif"]:
+                f = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+                f.write(b"fake data")
+                f.close()
+                tmp_files.append(f.name)
+
+            mock_client = MagicMock()
+            # Telethon returns list of Messages for albums
+            mock_msgs = [MagicMock(id=101), MagicMock(id=102), MagicMock(id=103)]
+            mock_client.send_file = AsyncMock(return_value=mock_msgs)
+
+            message = {
+                "chat_id": "12345",
+                "text": "Album caption",
+                "file_paths": tmp_files,
+                "session_id": "test-session",
+            }
+
+            result = await _send_queued_message(mock_client, message)
+
+            assert result == 101  # First message ID
+            mock_client.send_file.assert_called_once_with(
+                12345,
+                tmp_files,
+                caption="Album caption",
+                reply_to=None,
+            )
+        finally:
+            for f in tmp_files:
+                os.unlink(f)
+
+    @pytest.mark.asyncio
+    async def test_partial_missing_files_sends_available(self):
+        """Should send available files when some are missing at relay time."""
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            tmp_path = f.name
+            f.write(b"fake image")
+
+        try:
+            mock_client = MagicMock()
+            mock_sent = MagicMock()
+            mock_sent.id = 99
+            mock_client.send_file = AsyncMock(return_value=mock_sent)
+
+            message = {
+                "chat_id": "12345",
+                "text": "Partial album",
+                "file_paths": [tmp_path, "/nonexistent/missing.png"],
+                "session_id": "test-session",
+            }
+
+            result = await _send_queued_message(mock_client, message)
+
+            assert result == 99
+            # Should only send the available file
+            mock_client.send_file.assert_called_once_with(
+                12345,
+                tmp_path,
+                caption="Partial album",
+                reply_to=None,
+            )
+        finally:
+            os.unlink(tmp_path)
 
 
 class TestRecordSentMessage:

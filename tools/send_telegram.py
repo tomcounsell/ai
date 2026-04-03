@@ -9,6 +9,7 @@ Usage:
     python tools/send_telegram.py "Your message text here"
     python tools/send_telegram.py "Caption for file" --file /path/to/screenshot.png
     python tools/send_telegram.py --file /path/to/document.pdf
+    python tools/send_telegram.py "Album caption" --file a.png --file b.png --file c.png
 
 Environment variables (injected by sdk_client.py for chat sessions):
     TELEGRAM_CHAT_ID   - Target Telegram chat ID
@@ -17,7 +18,7 @@ Environment variables (injected by sdk_client.py for chat sessions):
 
 Redis queue contract:
     Key pattern: telegram:outbox:{session_id}
-    Message format: JSON with {chat_id, reply_to, text, file_path, session_id, timestamp}
+    Message format: JSON with {chat_id, reply_to, text, file_paths, session_id, timestamp}
     TTL: 1 hour (safety net for crashed sessions)
 """
 
@@ -29,6 +30,9 @@ import time
 
 # Telegram message length limit
 TELEGRAM_MAX_LENGTH = 4096
+
+# Telegram album limit (max files per album)
+TELEGRAM_MAX_ALBUM_SIZE = 10
 
 
 def _get_redis_connection():
@@ -56,17 +60,18 @@ def _linkify_text(text: str) -> str:
         return text
 
 
-def send_message(text: str, file_path: str | None = None) -> None:
+def send_message(text: str, file_paths: list[str] | None = None) -> None:
     """Queue a Telegram message for delivery by the bridge relay.
 
     Args:
         text: The message text to send. Will be linkified and truncated
             to Telegram's character limit before queueing. Can be empty
-            if file_path is provided.
-        file_path: Optional path to a file to attach. Must exist on disk.
+            if file_paths is provided.
+        file_paths: Optional list of file paths to attach. Each must exist
+            on disk. Multiple files are sent as a Telegram album (max 10).
 
     Raises:
-        SystemExit: On missing env vars, missing file, or Redis errors.
+        SystemExit: On missing env vars, missing file, >10 files, or Redis errors.
     """
     # Validate environment
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
@@ -87,19 +92,40 @@ def send_message(text: str, file_path: str | None = None) -> None:
         )
         sys.exit(1)
 
-    # Validate file if provided
-    if file_path is not None:
-        if not file_path or not file_path.strip():
-            print("Error: --file path is empty.", file=sys.stderr)
-            sys.exit(1)
-        file_path = os.path.abspath(file_path)
-        if not os.path.isfile(file_path):
-            print(f"Error: File not found: {file_path}", file=sys.stderr)
+    # Validate files if provided
+    if file_paths is not None:
+        if len(file_paths) > TELEGRAM_MAX_ALBUM_SIZE:
+            print(
+                f"Error: Too many files ({len(file_paths)}). "
+                f"Telegram albums support at most {TELEGRAM_MAX_ALBUM_SIZE} files.",
+                file=sys.stderr,
+            )
             sys.exit(1)
 
-    # Validate message (text required unless file is provided)
+        validated_paths = []
+        missing = []
+        for fp in file_paths:
+            if not fp or not fp.strip():
+                print("Error: --file path is empty.", file=sys.stderr)
+                sys.exit(1)
+            abs_path = os.path.abspath(fp)
+            if not os.path.isfile(abs_path):
+                missing.append(abs_path)
+            else:
+                validated_paths.append(abs_path)
+
+        if missing:
+            print(
+                "Error: File(s) not found:\n" + "\n".join(f"  {f}" for f in missing),
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        file_paths = validated_paths
+
+    # Validate message (text required unless files provided)
     if not text or not text.strip():
-        if file_path is None:
+        if not file_paths:
             print("Error: Message text is empty.", file=sys.stderr)
             sys.exit(1)
         # File-only send: text stays empty
@@ -121,8 +147,8 @@ def send_message(text: str, file_path: str | None = None) -> None:
         "session_id": session_id,
         "timestamp": time.time(),
     }
-    if file_path:
-        payload["file_path"] = file_path
+    if file_paths:
+        payload["file_paths"] = file_paths
 
     message_payload = json.dumps(payload)
 
@@ -140,8 +166,11 @@ def send_message(text: str, file_path: str | None = None) -> None:
     parts = []
     if text:
         parts.append(f"{len(text)} chars")
-    if file_path:
-        parts.append(f"file: {os.path.basename(file_path)}")
+    if file_paths:
+        if len(file_paths) == 1:
+            parts.append(f"file: {os.path.basename(file_paths[0])}")
+        else:
+            parts.append(f"{len(file_paths)} files")
     print(f"Message queued ({', '.join(parts)})")
 
 
@@ -149,7 +178,7 @@ def main():
     """CLI entry point."""
     parser = argparse.ArgumentParser(
         description="Send a Telegram message via Redis outbox queue.",
-        usage='python tools/send_telegram.py "message text" [--file PATH]',
+        usage='python tools/send_telegram.py "message text" [--file PATH ...]',
     )
     parser.add_argument(
         "message",
@@ -159,18 +188,19 @@ def main():
     )
     parser.add_argument(
         "--file",
-        dest="file_path",
+        dest="file_paths",
+        action="append",
         default=None,
-        help="Path to a file to attach (image, document, etc.)",
+        help="Path to a file to attach (repeatable for albums, max 10)",
     )
 
     args = parser.parse_args()
     text = " ".join(args.message)
 
-    if not text and not args.file_path:
+    if not text and not args.file_paths:
         parser.error("Either message text or --file must be provided.")
 
-    send_message(text, file_path=args.file_path)
+    send_message(text, file_paths=args.file_paths)
 
 
 if __name__ == "__main__":
