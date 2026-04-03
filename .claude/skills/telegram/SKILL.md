@@ -18,7 +18,23 @@ There are two sending interfaces. Use the correct one for your context:
 | `python tools/send_telegram.py` | ChatSession (PM) | Queues via Redis, relay sends via Telethon, records msg_id for summarizer bypass |
 | `valor-telegram send` | DevSession / CLI | Sends directly via Telethon, no Redis queue, no summarizer bypass |
 
-**ChatSession (PM)** should always use `tools/send_telegram.py`. It supports text and file attachments via `--file`. Using `valor-telegram send` from ChatSession would bypass the Redis queue and break `has_pm_messages()` tracking.
+**ChatSession (PM)** should always use `tools/send_telegram.py`. It supports text, single file attachments, and multi-file albums via `--file` (repeatable, max 10 files). Using `valor-telegram send` from ChatSession would bypass the Redis queue and break `has_pm_messages()` tracking.
+
+### PM Tool Examples
+
+```bash
+# Text only
+python tools/send_telegram.py "Status update message"
+
+# Single file with caption
+python tools/send_telegram.py "Screenshot attached" --file /path/to/screenshot.png
+
+# Multi-file album (grouped as one Telegram album message)
+python tools/send_telegram.py "PR review screenshots" --file before.png --file during.png --file after.png
+
+# File only (no caption)
+python tools/send_telegram.py --file /path/to/document.pdf
+```
 
 **DevSession** uses `valor-telegram send` for direct CLI sends when needed.
 
