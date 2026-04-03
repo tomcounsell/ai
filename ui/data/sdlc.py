@@ -325,8 +325,6 @@ def _get_artifact_enriched_stages(session, slug: str) -> list[StageState]:
     Returns:
         List of StageState objects with artifact-inferred completions merged in.
     """
-    global _artifact_inference_cache
-
     now = time.time()
     time_bucket = int(now / _ARTIFACT_INFERENCE_TTL)
     cache_key = (slug, time_bucket)

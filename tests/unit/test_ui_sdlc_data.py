@@ -378,10 +378,8 @@ class TestArtifactInference:
             stage_states={"ISSUE": "completed", "PLAN": "pending"},
         )
 
-        with patch(
-            "bridge.pipeline_state.PipelineStateMachine"
-        ) as MockPSM:
-            MockPSM.return_value.get_display_progress.return_value = mock_display
+        with patch("bridge.pipeline_state.PipelineStateMachine") as mock_psm:
+            mock_psm.return_value.get_display_progress.return_value = mock_display
             pipeline = _session_to_pipeline(session)
 
         assert len(pipeline.stages) == 8
@@ -389,7 +387,7 @@ class TestArtifactInference:
         # Artifact inference should show PLAN as completed (overriding stored "pending")
         assert by_name["PLAN"].is_done
         assert by_name["BUILD"].is_active
-        MockPSM.return_value.get_display_progress.assert_called_once_with(slug="my-feature")
+        mock_psm.return_value.get_display_progress.assert_called_once_with(slug="my-feature")
 
     def test_session_without_slug_uses_stored_state(self):
         """Sessions without a slug should use _parse_stage_states() only."""
@@ -400,13 +398,11 @@ class TestArtifactInference:
             stage_states={"ISSUE": "completed", "PLAN": "in_progress"},
         )
 
-        with patch(
-            "bridge.pipeline_state.PipelineStateMachine"
-        ) as MockPSM:
+        with patch("bridge.pipeline_state.PipelineStateMachine") as mock_psm:
             pipeline = _session_to_pipeline(session)
 
         # PipelineStateMachine should not be called without a slug
-        MockPSM.assert_not_called()
+        mock_psm.assert_not_called()
         assert len(pipeline.stages) == 8
         by_name = {s.name: s for s in pipeline.stages}
         assert by_name["ISSUE"].is_done
@@ -421,12 +417,10 @@ class TestArtifactInference:
             stage_states={"ISSUE": "completed"},
         )
 
-        with patch(
-            "bridge.pipeline_state.PipelineStateMachine"
-        ) as MockPSM:
-            pipeline = _session_to_pipeline(session)
+        with patch("bridge.pipeline_state.PipelineStateMachine") as mock_psm:
+            _session_to_pipeline(session)
 
-        MockPSM.assert_not_called()
+        mock_psm.assert_not_called()
 
     def test_artifact_inference_failure_falls_back_to_stored_state(self):
         """When PipelineStateMachine raises, fall back to _parse_stage_states()."""
@@ -485,13 +479,11 @@ class TestArtifactInference:
 
         session = self._make_session(slug="cached-slug")
 
-        with patch(
-            "bridge.pipeline_state.PipelineStateMachine"
-        ) as MockPSM:
+        with patch("bridge.pipeline_state.PipelineStateMachine") as mock_psm:
             result = _get_artifact_enriched_stages(session, "cached-slug")
 
         # PipelineStateMachine should NOT be called -- cache hit
-        MockPSM.assert_not_called()
+        mock_psm.assert_not_called()
         by_name = {s.name: s for s in result}
         assert by_name["ISSUE"].is_done
         assert by_name["PLAN"].is_done
@@ -512,19 +504,18 @@ class TestArtifactInference:
 
         session = self._make_session(slug="stale-slug")
 
-        fresh_display = {s: "pending" for s in [
-            "ISSUE", "PLAN", "CRITIQUE", "BUILD", "TEST", "REVIEW", "DOCS", "MERGE"
-        ]}
+        fresh_display = {
+            s: "pending"
+            for s in ["ISSUE", "PLAN", "CRITIQUE", "BUILD", "TEST", "REVIEW", "DOCS", "MERGE"]
+        }
         fresh_display["ISSUE"] = "in_progress"
 
-        with patch(
-            "bridge.pipeline_state.PipelineStateMachine"
-        ) as MockPSM:
-            MockPSM.return_value.get_display_progress.return_value = fresh_display
+        with patch("bridge.pipeline_state.PipelineStateMachine") as mock_psm:
+            mock_psm.return_value.get_display_progress.return_value = fresh_display
             result = _get_artifact_enriched_stages(session, "stale-slug")
 
         # Should have called PipelineStateMachine (cache miss)
-        MockPSM.return_value.get_display_progress.assert_called_once_with(slug="stale-slug")
+        mock_psm.return_value.get_display_progress.assert_called_once_with(slug="stale-slug")
         by_name = {s.name: s for s in result}
         assert by_name["ISSUE"].is_active
 
