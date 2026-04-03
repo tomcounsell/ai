@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -97,6 +98,45 @@ class StageStates(BaseModel):
     def to_dict(self) -> dict[str, str]:
         """Return the validated stages dict."""
         return dict(self.stages)
+
+
+# Regex to match <!-- OUTCOME {...} --> blocks in agent output
+_OUTCOME_RE = re.compile(r"<!-- OUTCOME (\{.*?\}) -->")
+
+
+def _parse_outcome_contract(output_tail: str) -> dict | None:
+    """Parse an OUTCOME contract from agent output tail.
+
+    Scans for ``<!-- OUTCOME {...} -->`` blocks and parses the JSON payload.
+    If multiple blocks exist, uses the last one (most recent).
+
+    Args:
+        output_tail: Last ~500 chars of agent output.
+
+    Returns:
+        Parsed dict with at least a ``status`` key, or None if no valid
+        OUTCOME block is found.
+    """
+    if not output_tail:
+        return None
+
+    matches = _OUTCOME_RE.findall(output_tail)
+    if not matches:
+        return None
+
+    # Use last match (most recent OUTCOME block)
+    raw = matches[-1]
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        logger.debug("_parse_outcome_contract: malformed JSON in OUTCOME block")
+        return None
+
+    if not isinstance(parsed, dict) or "status" not in parsed:
+        logger.debug("_parse_outcome_contract: missing 'status' key in OUTCOME block")
+        return None
+
+    return parsed
 
 
 class PipelineStateMachine:
@@ -558,7 +598,9 @@ class PipelineStateMachine:
     ) -> str:
         """Classify a stage's outcome from SDK stop_reason and output patterns.
 
-        Two-tier approach:
+        Three-tier approach:
+        0. OUTCOME contract: structured ``<!-- OUTCOME {...} -->`` block in output.
+           If found with a valid status, returns immediately.
         1. stop_reason from SDK: anything other than "end_turn" is a process
            failure (rate_limited, timeout, etc.)
         2. For "end_turn": deterministic tail patterns scoped to the known stage.
@@ -569,8 +611,27 @@ class PipelineStateMachine:
             output_tail: Last ~500 chars of worker output.
 
         Returns:
-            "success", "fail", or "ambiguous".
+            "success", "fail", "partial", or "ambiguous".
         """
+        # Tier 0: OUTCOME contract parsing
+        contract = _parse_outcome_contract(output_tail)
+        if contract:
+            status = contract.get("status", "")
+            contract_stage = contract.get("stage", "")
+            if contract_stage and contract_stage != stage:
+                logger.warning(
+                    f"classify_outcome({stage}): OUTCOME contract stage mismatch "
+                    f"(expected {stage}, got {contract_stage}) — falling through to Tier 1/2"
+                )
+            elif status in ("success", "fail", "partial"):
+                logger.info(f"classify_outcome({stage}): OUTCOME contract -> {status}")
+                return status
+            else:
+                logger.debug(
+                    f"classify_outcome({stage}): OUTCOME contract has unknown status "
+                    f"{status!r} — falling through to Tier 1/2"
+                )
+
         # Tier 1: SDK stop_reason
         if stop_reason and stop_reason != "end_turn":
             logger.info(f"classify_outcome({stage}): stop_reason={stop_reason} -> fail")
