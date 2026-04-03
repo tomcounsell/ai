@@ -9,9 +9,22 @@ user-invocable: false
 
 Unified interface for reading and sending Telegram messages.
 
-**CLI**: `valor-telegram`
+## PM Tool vs CLI Tool
+
+There are two sending interfaces. Use the correct one for your context:
+
+| Tool | Context | How It Works |
+|------|---------|--------------|
+| `python tools/send_telegram.py` | ChatSession (PM) | Queues via Redis, relay sends via Telethon, records msg_id for summarizer bypass |
+| `valor-telegram send` | DevSession / CLI | Sends directly via Telethon, no Redis queue, no summarizer bypass |
+
+**ChatSession (PM)** should always use `tools/send_telegram.py`. It supports text and file attachments via `--file`. Using `valor-telegram send` from ChatSession would bypass the Redis queue and break `has_pm_messages()` tracking.
+
+**DevSession** uses `valor-telegram send` for direct CLI sends when needed.
 
 ## Reading Messages
+
+**CLI**: `valor-telegram`
 
 ```bash
 # Recent messages from a chat
@@ -30,7 +43,7 @@ valor-telegram read --chat "Dev: Valor" --since "1 hour ago"
 valor-telegram read --chat "Dev: Valor" --limit 5 --json
 ```
 
-## Sending Messages
+## Sending Messages (CLI -- DevSession only)
 
 ```bash
 # Send text message
@@ -57,8 +70,8 @@ valor-telegram chats
 - **Check what someone said**: `valor-telegram read --chat "Tom" --limit 10`
 - **Find a past discussion**: `valor-telegram read --chat "Dev: Valor" --search "authentication"`
 - **Get recent context**: `valor-telegram read --chat "Dev: Valor" --since "2 hours ago"`
-- **Send a status update**: `valor-telegram send --chat "Dev: Valor" "Deployment complete"`
-- **Share a file**: `valor-telegram send --chat "Tom" "Here's the report" --file ./report.pdf`
+- **Send a status update (DevSession)**: `valor-telegram send --chat "Dev: Valor" "Deployment complete"`
+- **Share a file (DevSession)**: `valor-telegram send --chat "Tom" "Here's the report" --file ./report.pdf`
 
 ## Notes
 

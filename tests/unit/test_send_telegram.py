@@ -6,6 +6,7 @@ via the Redis outbox queue, bypassing the summarizer.
 
 import json
 import os
+import tempfile
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -35,7 +36,7 @@ class TestSendTelegramValidation:
             assert exc_info.value.code == 1
 
     def test_empty_message_exits(self):
-        """Should exit with error when message text is empty."""
+        """Should exit with error when message text is empty and no file."""
         env = {
             "TELEGRAM_CHAT_ID": "12345",
             "TELEGRAM_REPLY_TO": "67890",
@@ -97,6 +98,7 @@ class TestSendTelegramQueueing:
         assert payload["text"] == "Hello, stakeholder!"
         assert payload["session_id"] == "test-session-123"
         assert "timestamp" in payload
+        assert "file_path" not in payload
 
         # Verify TTL was set
         mock_redis.expire.assert_called_once_with("telegram:outbox:test-session-123", 3600)
@@ -167,6 +169,124 @@ class TestSendTelegramQueueing:
         assert payload["reply_to"] is None
 
 
+class TestSendTelegramFileSupport:
+    """Test file attachment support."""
+
+    def test_queues_file_payload(self):
+        """Should include file_path in Redis payload when --file is provided."""
+        env = {
+            "TELEGRAM_CHAT_ID": "12345",
+            "VALOR_SESSION_ID": "test-session",
+        }
+
+        mock_redis = MagicMock()
+
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            tmp_path = f.name
+            f.write(b"fake image data")
+
+        try:
+            with (
+                patch.dict(os.environ, env, clear=True),
+                patch("tools.send_telegram._get_redis_connection", return_value=mock_redis),
+                patch("tools.send_telegram._linkify_text", side_effect=lambda t: t),
+            ):
+                from tools.send_telegram import send_message
+
+                send_message("Check this screenshot", file_path=tmp_path)
+
+            payload = json.loads(mock_redis.rpush.call_args[0][1])
+            assert payload["text"] == "Check this screenshot"
+            assert payload["file_path"] == tmp_path
+            assert payload["session_id"] == "test-session"
+        finally:
+            os.unlink(tmp_path)
+
+    def test_file_only_send(self):
+        """Should allow file-only sends with no caption text."""
+        env = {
+            "TELEGRAM_CHAT_ID": "12345",
+            "VALOR_SESSION_ID": "test-session",
+        }
+
+        mock_redis = MagicMock()
+
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
+            tmp_path = f.name
+            f.write(b"fake pdf data")
+
+        try:
+            with (
+                patch.dict(os.environ, env, clear=True),
+                patch("tools.send_telegram._get_redis_connection", return_value=mock_redis),
+            ):
+                from tools.send_telegram import send_message
+
+                send_message("", file_path=tmp_path)
+
+            payload = json.loads(mock_redis.rpush.call_args[0][1])
+            assert payload["text"] == ""
+            assert payload["file_path"] == tmp_path
+        finally:
+            os.unlink(tmp_path)
+
+    def test_file_not_found_exits(self):
+        """Should exit with error when file does not exist."""
+        env = {
+            "TELEGRAM_CHAT_ID": "12345",
+            "VALOR_SESSION_ID": "test-session",
+        }
+
+        with patch.dict(os.environ, env, clear=True):
+            from tools.send_telegram import send_message
+
+            with pytest.raises(SystemExit) as exc_info:
+                send_message("caption", file_path="/nonexistent/file.png")
+            assert exc_info.value.code == 1
+
+    def test_empty_file_path_exits(self):
+        """Should exit with error when --file path is empty string."""
+        env = {
+            "TELEGRAM_CHAT_ID": "12345",
+            "VALOR_SESSION_ID": "test-session",
+        }
+
+        with patch.dict(os.environ, env, clear=True):
+            from tools.send_telegram import send_message
+
+            with pytest.raises(SystemExit) as exc_info:
+                send_message("caption", file_path="")
+            assert exc_info.value.code == 1
+
+    def test_file_path_normalized_to_absolute(self):
+        """Should normalize file_path to absolute path."""
+        env = {
+            "TELEGRAM_CHAT_ID": "12345",
+            "VALOR_SESSION_ID": "test-session",
+        }
+
+        mock_redis = MagicMock()
+
+        with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as f:
+            tmp_path = f.name
+            f.write(b"test data")
+
+        try:
+            with (
+                patch.dict(os.environ, env, clear=True),
+                patch("tools.send_telegram._get_redis_connection", return_value=mock_redis),
+                patch("tools.send_telegram._linkify_text", side_effect=lambda t: t),
+            ):
+                from tools.send_telegram import send_message
+
+                send_message("text", file_path=tmp_path)
+
+            payload = json.loads(mock_redis.rpush.call_args[0][1])
+            assert os.path.isabs(payload["file_path"])
+        finally:
+            os.unlink(tmp_path)
+
+
 class TestSendTelegramCli:
     """Test CLI entry point."""
 
@@ -199,4 +319,43 @@ class TestSendTelegramCli:
 
             with pytest.raises(SystemExit) as exc_info:
                 main()
-            assert exc_info.value.code == 1
+            assert exc_info.value.code == 2  # argparse exits with code 2
+
+    def test_main_with_file_flag(self):
+        """Should parse --file flag and pass to send_message."""
+        env = {
+            "TELEGRAM_CHAT_ID": "12345",
+            "VALOR_SESSION_ID": "test-session",
+        }
+
+        mock_redis = MagicMock()
+
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            tmp_path = f.name
+            f.write(b"fake image")
+
+        try:
+            with (
+                patch.dict(os.environ, env, clear=True),
+                patch("tools.send_telegram._get_redis_connection", return_value=mock_redis),
+                patch("tools.send_telegram._linkify_text", side_effect=lambda t: t),
+                patch("sys.argv", ["send_telegram.py", "Caption text", "--file", tmp_path]),
+            ):
+                from tools.send_telegram import main
+
+                main()
+
+            payload = json.loads(mock_redis.rpush.call_args[0][1])
+            assert payload["text"] == "Caption text"
+            assert payload["file_path"] == tmp_path
+        finally:
+            os.unlink(tmp_path)
+
+    def test_main_rejects_unknown_flags(self):
+        """Should reject unknown flags like --photo or --project."""
+        with patch("sys.argv", ["send_telegram.py", "--photo", "foo", "test"]):
+            from tools.send_telegram import main
+
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 2  # argparse exits with code 2

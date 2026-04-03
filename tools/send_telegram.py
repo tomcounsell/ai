@@ -7,6 +7,8 @@ Telegram messages, bypassing the summarizer. The bridge relay task
 
 Usage:
     python tools/send_telegram.py "Your message text here"
+    python tools/send_telegram.py "Caption for file" --file /path/to/screenshot.png
+    python tools/send_telegram.py --file /path/to/document.pdf
 
 Environment variables (injected by sdk_client.py for chat sessions):
     TELEGRAM_CHAT_ID   - Target Telegram chat ID
@@ -15,10 +17,11 @@ Environment variables (injected by sdk_client.py for chat sessions):
 
 Redis queue contract:
     Key pattern: telegram:outbox:{session_id}
-    Message format: JSON with {chat_id, reply_to, text, session_id, timestamp}
+    Message format: JSON with {chat_id, reply_to, text, file_path, session_id, timestamp}
     TTL: 1 hour (safety net for crashed sessions)
 """
 
+import argparse
 import json
 import os
 import sys
@@ -53,15 +56,17 @@ def _linkify_text(text: str) -> str:
         return text
 
 
-def send_message(text: str) -> None:
+def send_message(text: str, file_path: str | None = None) -> None:
     """Queue a Telegram message for delivery by the bridge relay.
 
     Args:
         text: The message text to send. Will be linkified and truncated
-            to Telegram's character limit before queueing.
+            to Telegram's character limit before queueing. Can be empty
+            if file_path is provided.
+        file_path: Optional path to a file to attach. Must exist on disk.
 
     Raises:
-        SystemExit: On missing env vars or Redis errors.
+        SystemExit: On missing env vars, missing file, or Redis errors.
     """
     # Validate environment
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
@@ -82,28 +87,44 @@ def send_message(text: str) -> None:
         )
         sys.exit(1)
 
-    # Validate message
+    # Validate file if provided
+    if file_path is not None:
+        if not file_path or not file_path.strip():
+            print("Error: --file path is empty.", file=sys.stderr)
+            sys.exit(1)
+        file_path = os.path.abspath(file_path)
+        if not os.path.isfile(file_path):
+            print(f"Error: File not found: {file_path}", file=sys.stderr)
+            sys.exit(1)
+
+    # Validate message (text required unless file is provided)
     if not text or not text.strip():
-        print("Error: Message text is empty.", file=sys.stderr)
-        sys.exit(1)
+        if file_path is None:
+            print("Error: Message text is empty.", file=sys.stderr)
+            sys.exit(1)
+        # File-only send: text stays empty
+        text = ""
 
-    # Apply linkification
-    text = _linkify_text(text)
+    if text:
+        # Apply linkification
+        text = _linkify_text(text)
 
-    # Enforce Telegram length limit
-    if len(text) > TELEGRAM_MAX_LENGTH:
-        text = text[: TELEGRAM_MAX_LENGTH - 3] + "..."
+        # Enforce Telegram length limit
+        if len(text) > TELEGRAM_MAX_LENGTH:
+            text = text[: TELEGRAM_MAX_LENGTH - 3] + "..."
 
     # Build queue entry
-    message_payload = json.dumps(
-        {
-            "chat_id": chat_id,
-            "reply_to": int(reply_to) if reply_to else None,
-            "text": text,
-            "session_id": session_id,
-            "timestamp": time.time(),
-        }
-    )
+    payload = {
+        "chat_id": chat_id,
+        "reply_to": int(reply_to) if reply_to else None,
+        "text": text,
+        "session_id": session_id,
+        "timestamp": time.time(),
+    }
+    if file_path:
+        payload["file_path"] = file_path
+
+    message_payload = json.dumps(payload)
 
     # Push to Redis outbox queue
     queue_key = f"telegram:outbox:{session_id}"
@@ -116,18 +137,40 @@ def send_message(text: str) -> None:
         print(f"Error: Failed to queue message in Redis: {e}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"Message queued ({len(text)} chars)")
+    parts = []
+    if text:
+        parts.append(f"{len(text)} chars")
+    if file_path:
+        parts.append(f"file: {os.path.basename(file_path)}")
+    print(f"Message queued ({', '.join(parts)})")
 
 
 def main():
     """CLI entry point."""
-    if len(sys.argv) < 2:
-        print("Usage: python tools/send_telegram.py <message_text>", file=sys.stderr)
-        sys.exit(1)
+    parser = argparse.ArgumentParser(
+        description="Send a Telegram message via Redis outbox queue.",
+        usage='python tools/send_telegram.py "message text" [--file PATH]',
+    )
+    parser.add_argument(
+        "message",
+        nargs="*",
+        default=[],
+        help="Message text to send (can be omitted if --file is provided)",
+    )
+    parser.add_argument(
+        "--file",
+        dest="file_path",
+        default=None,
+        help="Path to a file to attach (image, document, etc.)",
+    )
 
-    # Join all arguments as the message (supports multi-word messages)
-    text = " ".join(sys.argv[1:])
-    send_message(text)
+    args = parser.parse_args()
+    text = " ".join(args.message)
+
+    if not text and not args.file_path:
+        parser.error("Either message text or --file must be provided.")
+
+    send_message(text, file_path=args.file_path)
 
 
 if __name__ == "__main__":

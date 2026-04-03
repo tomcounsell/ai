@@ -5,6 +5,8 @@ from Redis outbox queues and sends them via Telethon.
 """
 
 import json
+import os
+import tempfile
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -63,8 +65,8 @@ class TestSendQueuedMessage:
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_returns_none_on_missing_text(self):
-        """Should return None for messages without text."""
+    async def test_returns_none_on_missing_text_and_file(self):
+        """Should return None for messages without text or file_path."""
         result = await _send_queued_message(MagicMock(), {"chat_id": "123"})
         assert result is None
 
@@ -77,6 +79,107 @@ class TestSendQueuedMessage:
         with patch("bridge.markdown.send_markdown", mock_send):
             result = await _send_queued_message(MagicMock(), message)
 
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_sends_file_via_send_file(self):
+        """Should use client.send_file() when file_path is present."""
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            tmp_path = f.name
+            f.write(b"fake image")
+
+        try:
+            mock_client = MagicMock()
+            mock_sent = MagicMock()
+            mock_sent.id = 55
+            mock_client.send_file = AsyncMock(return_value=mock_sent)
+
+            message = {
+                "chat_id": "12345",
+                "reply_to": 67890,
+                "text": "Check this",
+                "file_path": tmp_path,
+                "session_id": "test-session",
+            }
+
+            result = await _send_queued_message(mock_client, message)
+
+            assert result == 55
+            mock_client.send_file.assert_called_once_with(
+                12345,
+                tmp_path,
+                caption="Check this",
+                reply_to=67890,
+            )
+        finally:
+            os.unlink(tmp_path)
+
+    @pytest.mark.asyncio
+    async def test_file_only_send_no_caption(self):
+        """Should send file with caption=None when text is empty."""
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
+            tmp_path = f.name
+            f.write(b"fake pdf")
+
+        try:
+            mock_client = MagicMock()
+            mock_sent = MagicMock()
+            mock_sent.id = 66
+            mock_client.send_file = AsyncMock(return_value=mock_sent)
+
+            message = {
+                "chat_id": "12345",
+                "text": "",
+                "file_path": tmp_path,
+                "session_id": "test-session",
+            }
+
+            result = await _send_queued_message(mock_client, message)
+
+            assert result == 66
+            mock_client.send_file.assert_called_once_with(
+                12345,
+                tmp_path,
+                caption=None,
+                reply_to=None,
+            )
+        finally:
+            os.unlink(tmp_path)
+
+    @pytest.mark.asyncio
+    async def test_missing_file_falls_back_to_text(self):
+        """Should fall back to text-only when file_path is present but file missing."""
+        mock_client = MagicMock()
+        mock_sent = MagicMock()
+        mock_sent.id = 77
+
+        message = {
+            "chat_id": "12345",
+            "text": "The file was here",
+            "file_path": "/nonexistent/deleted.png",
+            "session_id": "test-session",
+        }
+
+        mock_send = AsyncMock(return_value=mock_sent)
+        with patch("bridge.markdown.send_markdown", mock_send):
+            result = await _send_queued_message(mock_client, message)
+
+        assert result == 77
+        mock_send.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_missing_file_no_text_returns_none(self):
+        """Should return None when file is missing and no text to fall back to."""
+        mock_client = MagicMock()
+
+        message = {
+            "chat_id": "12345",
+            "text": "",
+            "file_path": "/nonexistent/deleted.png",
+            "session_id": "test-session",
+        }
+
+        result = await _send_queued_message(mock_client, message)
         assert result is None
 
 
