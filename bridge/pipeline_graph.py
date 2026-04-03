@@ -73,7 +73,7 @@ STAGE_TO_SKILL: dict[str, str] = {
 
 # Display-only linear stage list for progress templates and PM-facing messages.
 # PATCH is intentionally excluded -- it's a routing concept, not a display stage.
-# Used by PipelineStateMachine.get_display_progress() and summarizer rendering.
+# Used by PipelineStateMachine.get_display_progress() and bridge/coach.py.
 DISPLAY_STAGES: list[str] = [
     "ISSUE",
     "PLAN",
