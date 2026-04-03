@@ -65,6 +65,16 @@ class TestSuccessRoundTrip:
     def test_pretooluse_creates_child_and_starts_stage(self, pm_session):
         """PreToolUse hook registers a DevSession and starts BUILD on parent."""
         from agent.hooks.session_registry import register_pending, resolve
+        from bridge.pipeline_state import PipelineStateMachine
+
+        # Walk through prerequisite stages so BUILD can start
+        sm = PipelineStateMachine(pm_session)
+        sm.start_stage("ISSUE")
+        sm.complete_stage("ISSUE")
+        sm.start_stage("PLAN")
+        sm.complete_stage("PLAN")
+        sm.start_stage("CRITIQUE")
+        sm.complete_stage("CRITIQUE")
 
         # Wire the session registry so hooks can resolve the PM session
         register_pending(pm_session.session_id)
@@ -100,6 +110,16 @@ class TestSuccessRoundTrip:
     def test_subagent_stop_completes_child_and_stage(self, pm_session):
         """SubagentStop hook marks DevSession complete and records stage success."""
         from agent.hooks.session_registry import register_pending
+        from bridge.pipeline_state import PipelineStateMachine
+
+        # Walk through prerequisite stages so BUILD can start
+        sm = PipelineStateMachine(pm_session)
+        sm.start_stage("ISSUE")
+        sm.complete_stage("ISSUE")
+        sm.start_stage("PLAN")
+        sm.complete_stage("PLAN")
+        sm.start_stage("CRITIQUE")
+        sm.complete_stage("CRITIQUE")
 
         register_pending(pm_session.session_id)
 
@@ -302,6 +322,16 @@ class TestStageStateInjection:
     async def test_hook_returns_pipeline_state(self, pm_session):
         """subagent_stop_hook returns pipeline state in the reason field."""
         from agent.hooks.session_registry import register_pending
+        from bridge.pipeline_state import PipelineStateMachine
+
+        # Walk through prerequisite stages so BUILD can start
+        sm = PipelineStateMachine(pm_session)
+        sm.start_stage("ISSUE")
+        sm.complete_stage("ISSUE")
+        sm.start_stage("PLAN")
+        sm.complete_stage("PLAN")
+        sm.start_stage("CRITIQUE")
+        sm.complete_stage("CRITIQUE")
 
         register_pending(pm_session.session_id)
 
