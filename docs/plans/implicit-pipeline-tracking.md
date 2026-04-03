@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Small
 owner: Valor
@@ -51,7 +51,7 @@ The pre-merge nudge in `/do-merge` calls `get_display_progress()` and shows stag
 ## Architectural Impact
 
 - **New dependencies**: None. Artifact checks use `pathlib`, `subprocess` (for `gh` CLI), and existing imports.
-- **Interface changes**: `get_display_progress()` gains an optional `slug` parameter for artifact lookups. Existing callers without the parameter get the same behavior.
+- **Interface changes**: `get_display_progress()` gains an optional `slug` parameter for artifact lookups. `AgentSession.get_stage_progress()` gains a matching optional `slug` parameter that it forwards. Existing callers without the parameter get the same behavior.
 - **Coupling**: Slightly increases coupling between `pipeline_state.py` and filesystem/GitHub conventions (plan file path, branch naming). These conventions are already canonical across the codebase.
 - **Data ownership**: No change. Stage state is still owned by `PipelineStateMachine`; artifacts are read-only signals.
 - **Reversibility**: Fully reversible -- remove the artifact inference function and the optional parameter.
@@ -76,6 +76,7 @@ No prerequisites -- this work has no external dependencies. All artifact checks 
 
 - **Artifact inference function**: A new `_infer_stage_from_artifacts(slug)` method on `PipelineStateMachine` that checks observable signals for each stage and returns inferred statuses
 - **Fallback layering in `get_display_progress()`**: When stored state for a stage is "pending" or "ready", check artifact inference as a fallback. Stored "completed"/"in_progress"/"failed" always wins.
+- **AgentSession.get_stage_progress() update**: The wrapper in `models/agent_session.py` must accept an optional `slug` parameter and pass it through to `get_display_progress(slug=slug)`, so summarizer and coach callers also benefit from artifact inference.
 - **Dead code removal**: Delete `record_stage_completion()` which has zero callers
 - **Logging improvement**: Verify `_save()` logs at warning level on failure (already does -- just confirm not swallowed upstream)
 
@@ -90,12 +91,13 @@ No prerequisites -- this work has no external dependencies. All artifact checks 
   - **PLAN**: `docs/plans/{slug}.md` exists
   - **CRITIQUE**: Plan frontmatter has `status: Ready` (critique sets this) or plan has non-empty `## Critique Results` section
   - **BUILD**: `gh pr list --head session/{slug} --state open --json number` returns a result (single `gh` call, cached for the request)
-  - **TEST**: Inferred as completed if REVIEW is completed (tests must pass before review approves)
+  - **TEST**: Inferred from `statusCheckRollup` in the `gh pr view` response -- if any check context contains "test" or "ci" with a `SUCCESS` conclusion, TEST is completed. If no check data is available, TEST is marked "not inferable" and left to hooks only.
   - **REVIEW**: PR has `reviewDecision: APPROVED` (from the same `gh pr view` call used for BUILD)
-  - **DOCS**: PR diff includes changes under `docs/` (from `gh pr diff --name-only`, or check if plan's Documentation tasks are checked)
+  - **DOCS**: PR `files` array (from the same `gh pr view` call) contains at least one entry where `path` starts with `docs/`. Single API call, no second `gh` invocation needed.
   - **MERGE**: PR state is "MERGED" (already terminal -- not needed for pre-merge nudge)
 
-- The single `gh pr view` call provides BUILD, REVIEW, and can inform DOCS status. This is one API call total, not per-stage.
+- A single `gh pr view --json number,reviewDecision,state,statusCheckRollup,files` call provides BUILD, TEST, REVIEW, and DOCS signals. This is one API call total, not per-stage.
+- All `subprocess.run()` calls for `gh` must use `timeout=5` to prevent hangs from blocking the merge flow.
 - Results are computed once per `get_display_progress(slug=...)` call, not cached across calls (stateless).
 
 ## Failure Path Test Strategy
@@ -116,6 +118,7 @@ No prerequisites -- this work has no external dependencies. All artifact checks 
 
 - [ ] `tests/unit/test_pipeline_state_machine.py::TestGetDisplayProgress` -- UPDATE: add new test cases for artifact-based inference with slug parameter
 - [ ] `tests/unit/test_pipeline_state_machine.py` -- UPDATE: remove any tests referencing `record_stage_completion` if present
+- [ ] `tests/integration/test_agent_session_lifecycle.py::TestGetStageProgress` -- UPDATE: add test case verifying `get_stage_progress(slug="x")` passes slug through to `get_display_progress`
 
 No other existing tests affected -- the artifact inference is purely additive to `get_display_progress()` and existing callers without the `slug` parameter get identical behavior.
 
@@ -158,14 +161,20 @@ No agent integration required -- this is a bridge-internal change to `PipelineSt
 ## Documentation
 
 - [ ] Update `docs/features/pipeline-state-machine.md` to describe artifact-based inference fallback
+- [ ] Update `docs/features/pipeline-state-machine.md` to remove the `record_stage_completion()` reference from the API section and Files table (it will be deleted)
 - [ ] Update inline docstrings in `bridge/pipeline_state.py` for `get_display_progress()` and the new `_infer_stage_from_artifacts()` method
 
 ## Success Criteria
 
 - [ ] `get_display_progress(slug="X")` returns "completed" for stages with matching artifacts, even when stored state is "pending"
 - [ ] `get_display_progress()` without slug returns identical behavior to current (backward compatible)
+- [ ] `AgentSession.get_stage_progress(slug="X")` passes slug through to `get_display_progress()`
 - [ ] Pre-merge nudge in `/do-merge` shows correct pipeline status when stored state is empty
+- [ ] All `gh` subprocess calls use `timeout=5`
+- [ ] TEST inference uses `statusCheckRollup` (not circular REVIEW dependency)
+- [ ] DOCS inference uses `files` array from single `gh pr view` call
 - [ ] `record_stage_completion()` is deleted from `bridge/pipeline_state.py`
+- [ ] `record_stage_completion()` reference removed from `docs/features/pipeline-state-machine.md`
 - [ ] Silent save failures in `_save()` confirmed logged at warning level (test exists)
 - [ ] Existing hook-based tracking continues to work (no modifications to hooks)
 - [ ] Tests pass (`/do-test`)
@@ -198,7 +207,11 @@ No agent integration required -- this is a bridge-internal change to `PipelineSt
 - **Parallel**: true
 - Add `_infer_stage_from_artifacts(slug: str) -> dict[str, str]` method that returns inferred statuses for stages based on observable artifacts
 - Modify `get_display_progress()` to accept optional `slug` parameter; when provided and stored state is "pending"/"ready", check artifact inference as fallback
+- Use a single `gh pr view --json number,reviewDecision,state,statusCheckRollup,files` call with `subprocess.run(timeout=5)` for all GitHub-derived signals (BUILD, TEST, REVIEW, DOCS)
+- TEST inference: check `statusCheckRollup` for any check with "test"/"ci" in the name and `SUCCESS` conclusion; if no check data, leave TEST as stored state (not inferable from artifacts alone)
+- DOCS inference: check `files` array for any entry with `path` starting with `docs/`
 - Wrap all artifact checks in try/except so failures return empty dict (never crash)
+- Update `AgentSession.get_stage_progress()` in `models/agent_session.py` to accept optional `slug` parameter and pass it through to `sm.get_display_progress(slug=slug)`
 - Delete `record_stage_completion()` function (zero callers confirmed)
 
 ### 2. Update do-merge to pass slug
@@ -223,6 +236,10 @@ No agent integration required -- this is a bridge-internal change to `PipelineSt
 - Test: artifact inference upgrades "pending" PLAN to "completed" when plan file exists
 - Test: stored "failed" state is NOT overridden by artifact inference
 - Test: `_infer_stage_from_artifacts()` handles missing files, failed subprocess calls gracefully
+- Test: `subprocess.run()` for `gh` is called with `timeout=5`
+- Test: TEST inference uses `statusCheckRollup` data (not circular REVIEW dependency)
+- Test: DOCS inference checks `files` array for `docs/` paths from `gh pr view` response
+- Test: `AgentSession.get_stage_progress(slug="x")` passes slug through to `get_display_progress()`
 - Test: `_save()` logs warning when `session.save()` raises
 - Test: `record_stage_completion` no longer importable (deleted)
 
@@ -258,8 +275,13 @@ No agent integration required -- this is a bridge-internal change to `PipelineSt
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
-| CONCERN | [agent-type] | [The concern raised] | [How/whether it was addressed] |
+| CONCERN | Agent | Concern | Resolution |
+|---------|-------|---------|------------|
+| 1 | Operator | `AgentSession.get_stage_progress()` wrapper does not pass slug -- summarizer/coach get stale state | FIXED: Plan now includes updating the wrapper to accept and forward optional `slug` parameter |
+| 2 | Skeptic | TEST inference "completed if REVIEW completed" is circular process assumption, not artifact-based | FIXED: TEST now inferred from `statusCheckRollup` in `gh pr view` response; if no check data, left as stored state (not inferable) |
+| 3 | Adversary | `gh` CLI subprocess has no timeout -- could hang and block merge flow | FIXED: Plan now requires `subprocess.run(timeout=5)` on all `gh` calls, with test coverage |
+| 4 | Simplifier | DOCS inference underspecified -- unclear whether to use `gh pr diff` or plan checkbox parsing | FIXED: Use `files` array from the same `gh pr view --json` call (single API call). No second `gh` invocation needed. |
+| 5 | Archaeologist | `docs/features/pipeline-state-machine.md` references `record_stage_completion()` which will be deleted | FIXED: Added explicit documentation task to remove the reference from API section and Files table |
 
 ---
 
