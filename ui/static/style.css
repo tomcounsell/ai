@@ -238,6 +238,70 @@ h3 {
     background: var(--green-bg);
 }
 
+.badge-outline {
+    color: var(--text-muted);
+    background: transparent;
+    border: 1px solid var(--border);
+}
+
+.badge-warning {
+    color: var(--orange);
+    background: var(--orange-bg);
+    font-weight: 700;
+}
+
+.badge-priority-urgent {
+    color: var(--red);
+    background: var(--red-bg);
+    font-weight: 700;
+}
+
+.badge-priority-high {
+    color: var(--orange);
+    background: var(--orange-bg);
+}
+
+.badge.stale {
+    opacity: 0.6;
+    border: 1px dashed var(--orange);
+}
+
+/* Parent/child session hierarchy */
+.child-row {
+    background: var(--bg-tertiary);
+}
+
+.child-row td {
+    padding-left: 24px;
+    font-size: 12px;
+}
+
+.child-connector {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border-left: 2px solid var(--border);
+    border-bottom: 2px solid var(--border);
+    margin-right: 6px;
+    vertical-align: middle;
+}
+
+/* Activity badge */
+.activity-badge {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 8px;
+    font-size: 10px;
+    color: var(--text-muted);
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+}
+
+/* Stale session row */
+tr.session-row.stale {
+    opacity: 0.7;
+}
+
 /* Cards and panels */
 .card {
     background: var(--bg-secondary);
