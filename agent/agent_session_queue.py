@@ -192,7 +192,7 @@ async def _push_agent_session(
     scheduled_at: datetime | float | None = None,
     parent_agent_session_id: str | None = None,
     telegram_message_key: str | None = None,
-    session_type: str = SessionType.PM,
+    session_type: str = SessionType.CHAT,
     scheduling_depth: int = 0,  # ignored, now derived
     depends_on: list[str] | None = None,  # ignored, removed
     **_kwargs,
@@ -1481,7 +1481,7 @@ async def enqueue_agent_session(
     scheduled_at: float | None = None,
     parent_agent_session_id: str | None = None,
     telegram_message_key: str | None = None,
-    session_type: str = SessionType.PM,
+    session_type: str = SessionType.CHAT,
     scheduling_depth: int = 0,  # ignored, now derived
 ) -> int:
     """
@@ -1743,26 +1743,40 @@ CALENDAR_HEARTBEAT_INTERVAL = 25 * 60  # 25 minutes (fits within 30-min segments
 
 
 def _diagnose_missing_session(session_id: str) -> dict:
-    """Check Redis directly for session key diagnostics when Popoto query fails.
+    """Check for session diagnostics when Popoto query fails.
 
-    Returns a dict with key_exists, ttl, and any error info to aid debugging
-    why the session was not found by the ORM query.
+    Uses Popoto-native queries and targeted hash existence checks instead
+    of raw r.keys() scanning. Returns a dict with diagnostic info to aid
+    debugging why the session was not found by the ORM query.
     """
     try:
-        import redis as redis_lib
+        from popoto.redis_db import POPOTO_REDIS_DB
 
-        r = redis_lib.Redis()
-        # Popoto stores keys with model-specific prefixes; scan for matches
-        # TODO: Replace r.keys() with r.scan() if Redis grows beyond ~10k keys.
-        #   KEYS is O(N) across the entire keyspace. Acceptable on error path
-        #   with small Redis, but SCAN would be safer at scale. (PR #419 review)
-        keys = r.keys(f"*{session_id}*")
-        result = {"matching_keys": len(keys)}
-        for key in keys[:5]:  # Cap at 5 to avoid log spam
-            key_str = key.decode() if isinstance(key, bytes) else str(key)
-            ttl = r.ttl(key)
-            exists = r.exists(key)
-            result[key_str] = {"exists": bool(exists), "ttl": ttl}
+        result = {}
+
+        # Check if the AgentSession hash key exists directly
+        hash_key = f"AgentSession:{session_id}"
+        hash_exists = POPOTO_REDIS_DB.exists(hash_key)
+        result["hash_exists"] = bool(hash_exists)
+
+        if hash_exists:
+            ttl = POPOTO_REDIS_DB.ttl(hash_key)
+            result["hash_ttl"] = ttl
+
+        # Try Popoto query with session_id filter
+        try:
+            matches = list(AgentSession.query.filter(session_id=session_id))
+            result["popoto_query_matches"] = len(matches)
+        except Exception as qe:
+            result["popoto_query_error"] = str(qe)
+
+        # Check if session exists by ID (AutoKeyField lookup)
+        try:
+            by_id = AgentSession.query.filter(id=session_id)
+            result["id_query_matches"] = len(list(by_id))
+        except Exception:
+            result["id_query_matches"] = 0
+
         return result
     except Exception as e:
         return {"error": str(e)}
@@ -2024,7 +2038,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # Use reduced nudge cap for Teammate sessions
         _effective_nudge_cap = MAX_NUDGE_COUNT
         if agent_session:
-            if getattr(agent_session, "session_type", None) == SessionType.TEAMMATE or getattr(agent_session, "session_mode", None) == PersonaType.TEAMMATE:
+            if getattr(agent_session, "session_mode", None) == PersonaType.TEAMMATE:
                 from agent.teammate_handler import TEAMMATE_MAX_NUDGE_COUNT
 
                 _effective_nudge_cap = TEAMMATE_MAX_NUDGE_COUNT
@@ -2322,7 +2336,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # Teammate sessions: clear the processing reaction instead of setting completion emoji
         if (
             agent_session
-            and (getattr(agent_session, "session_type", None) == SessionType.TEAMMATE or getattr(agent_session, "session_mode", None) == PersonaType.TEAMMATE)
+            and getattr(agent_session, "session_mode", None) == PersonaType.TEAMMATE
             and not task.error
         ):
             emoji = None  # Clear reaction

@@ -40,7 +40,7 @@ def _to_ts(val):
         return None
     if isinstance(val, datetime):
         return val.timestamp()
-    if isinstance(val, (int, float)):
+    if isinstance(val, int | float):
         return float(val)
     return None
 
@@ -51,7 +51,7 @@ def _to_iso(val):
         return None
     if isinstance(val, datetime):
         return val.isoformat()
-    if isinstance(val, (int, float)):
+    if isinstance(val, int | float):
         return datetime.fromtimestamp(val, tz=UTC).isoformat()
     return None
 
@@ -1038,7 +1038,8 @@ def main():
     sched.add_argument(
         "--session-type",
         choices=[SessionType.PM, SessionType.TEAMMATE, SessionType.DEV],
-        help="Session type: pm (PM orchestrates), teammate (conversational), or dev (direct execution). "
+        help="Session type: pm (PM orchestrates), teammate "
+        "(conversational), or dev (direct execution). "
         "Default: pm for issue/PR work, dev for hotfixes.",
     )
     sched.add_argument(

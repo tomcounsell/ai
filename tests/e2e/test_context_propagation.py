@@ -11,8 +11,8 @@ import time
 import pytest
 
 from models.agent_session import (
-    SESSION_TYPE_PM,
     SESSION_TYPE_DEV,
+    SESSION_TYPE_PM,
     AgentSession,
 )
 
