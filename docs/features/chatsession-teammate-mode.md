@@ -4,7 +4,7 @@
 
 ChatSession teammate mode adds a fast path for informational queries. When a user asks a question (e.g., "where is the observer prompt?", "what tests are failing?"), the ChatSession answers directly using read-only tools instead of spawning a full DevSession. This reduces latency and cost for simple lookups while preserving the full SDLC pipeline for actual work requests.
 
-Teammate mode is not a new session type. It is a routing decision within the existing ChatSession, gated by a binary intent classifier. Teammate sessions are indicated by the `session_mode` field set to `PersonaType.TEAMMATE` (from `config/enums.py`). The `ChatMode` enum has been removed -- `PersonaType` is the sole persona identifier.
+Teammate mode is now a first-class session type (`SessionType.TEAMMATE`). It was previously a routing decision within the PM session, gated by a binary intent classifier. Teammate sessions are indicated by the `session_mode` field set to `PersonaType.TEAMMATE` (from `config/enums.py`). The `ChatMode` enum has been removed -- `PersonaType` is the sole persona identifier.
 
 ## Architecture
 
@@ -73,7 +73,7 @@ No special mechanism needed. Each incoming message is classified independently. 
 
 ### `agent/sdk_client.py`
 
-In `_execute_agent_request()`, after determining the session type is "chat":
+In `_execute_agent_request()`, after determining the session type is "pm" or "teammate":
 
 1. Calls `classify_intent(message)` to get the intent result
 2. Calls `record_classification()` to track metrics
@@ -99,7 +99,7 @@ In the nudge loop, checks the session's `session_mode` field:
 ## Key Design Decisions
 
 1. **Conservative threshold (0.90)**: false negatives (teammate classified as work) cause no harm -- just unnecessary DevSession spawn. False positives (work classified as teammate) are more costly, so the threshold is high.
-2. **No new session type**: teammate is a routing decision, not a new `session_type` value. The `session_mode` field on AgentSession stores `PersonaType.TEAMMATE` to track the routing decision separately from `classification_type` (which preserves the bridge's original classification).
+2. **First-class session type**: teammate now has its own `SessionType.TEAMMATE` enum value. The bridge routes teammate-persona messages directly to `session_type="teammate"` instead of routing through PM sessions.
 3. **No bridge changes**: teammate vs work routing happens entirely in the agent layer. The bridge continues routing all messages to ChatSession.
 4. **No caching**: each message is classified independently for simplicity.
 
