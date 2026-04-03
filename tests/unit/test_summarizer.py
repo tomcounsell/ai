@@ -314,24 +314,24 @@ class TestClassificationResult:
         assert result.confidence == 0.95
         assert result.reason == "Direct question detected"
 
-    def test_coaching_message_default_none(self):
-        """coaching_message defaults to None when not provided."""
+    def test_nudge_feedback_default_none(self):
+        """nudge_feedback defaults to None when not provided."""
         result = ClassificationResult(
             output_type=OutputType.STATUS_UPDATE,
             confidence=0.9,
             reason="Test",
         )
-        assert result.coaching_message is None
+        assert result.nudge_feedback is None
 
-    def test_coaching_message_set(self):
-        """coaching_message can be set explicitly."""
+    def test_nudge_feedback_set(self):
+        """nudge_feedback can be set explicitly."""
         result = ClassificationResult(
             output_type=OutputType.STATUS_UPDATE,
             confidence=0.9,
             reason="Test",
-            coaching_message="You said 'should work' but didn't show test output.",
+            nudge_feedback="You said 'should work' but didn't show test output.",
         )
-        assert result.coaching_message == "You said 'should work' but didn't show test output."
+        assert result.nudge_feedback == "You said 'should work' but didn't show test output."
 
     def test_confidence_range(self):
         """Confidence is a float between 0.0 and 1.0."""
@@ -418,30 +418,30 @@ class TestParseClassificationResponse:
         assert result is not None
         assert result.confidence == 0.5
 
-    def test_coaching_message_extracted(self):
-        """coaching_message is extracted from LLM JSON response."""
+    def test_nudge_feedback_extracted(self):
+        """nudge_feedback is extracted from LLM JSON response."""
         raw = (
             '{"type": "status", "confidence": 0.92, '
             '"reason": "hedging language", '
-            '"coaching_message": "You said \'should work\' — run the tests and share output."}'
+            '"nudge_feedback": "You said \'should work\' — run the tests and share output."}'
         )
         result = _parse_classification_response(raw)
         assert result is not None
-        assert result.coaching_message == "You said 'should work' — run the tests and share output."
+        assert result.nudge_feedback == "You said 'should work' — run the tests and share output."
 
-    def test_coaching_message_absent_defaults_none(self):
-        """When coaching_message is missing from JSON, it defaults to None."""
+    def test_nudge_feedback_absent_defaults_none(self):
+        """When nudge_feedback is missing from JSON, it defaults to None."""
         raw = '{"type": "completion", "confidence": 0.95, "reason": "done"}'
         result = _parse_classification_response(raw)
         assert result is not None
-        assert result.coaching_message is None
+        assert result.nudge_feedback is None
 
     def test_hedging_patterns_not_used_for_was_rejected(self):
         """was_rejected_completion is NOT set by hedging pattern matching.
 
         The old code scanned reason text for patterns like 'hedg', 'no evidence'.
         This has been removed — was_rejected_completion should only be set
-        when coaching_message is present (indicating the LLM flagged it).
+        when nudge_feedback is present (indicating the LLM flagged it).
         """
         raw = (
             '{"type": "status", "confidence": 0.90, '
@@ -449,48 +449,48 @@ class TestParseClassificationResponse:
         )
         result = _parse_classification_response(raw)
         assert result is not None
-        # Without coaching_message, was_rejected_completion should be False
+        # Without nudge_feedback, was_rejected_completion should be False
         assert result.was_rejected_completion is False
 
-    def test_was_rejected_set_when_coaching_message_present(self):
-        """was_rejected_completion is True when coaching_message is present on status."""
+    def test_was_rejected_set_when_nudge_feedback_present(self):
+        """was_rejected_completion is True when nudge_feedback is present on status."""
         raw = (
             '{"type": "status", "confidence": 0.90, '
             '"reason": "completion downgraded", '
-            '"coaching_message": "Include test output next time."}'
+            '"nudge_feedback": "Include test output next time."}'
         )
         result = _parse_classification_response(raw)
         assert result is not None
         assert result.was_rejected_completion is True
-        assert result.coaching_message == "Include test output next time."
+        assert result.nudge_feedback == "Include test output next time."
 
-    def test_coaching_message_null_for_non_status_types(self):
-        """coaching_message should be None for completion, question, blocker, error."""
+    def test_nudge_feedback_null_for_non_status_types(self):
+        """nudge_feedback should be None for completion, question, blocker, error."""
         for type_str in ("completion", "question", "blocker", "error"):
             raw = (
                 f'{{"type": "{type_str}", "confidence": 0.95, '
-                f'"reason": "test", "coaching_message": null}}'
+                f'"reason": "test", "nudge_feedback": null}}'
             )
             result = _parse_classification_response(raw)
             assert result is not None
-            assert result.coaching_message is None, (
-                f"coaching_message should be None for {type_str}"
+            assert result.nudge_feedback is None, (
+                f"nudge_feedback should be None for {type_str}"
             )
             assert result.was_rejected_completion is False, (
                 f"was_rejected_completion should be False for {type_str}"
             )
 
-    def test_coaching_message_on_non_status_ignored_for_rejection(self):
-        """Even if LLM mistakenly sets coaching_message on completion, was_rejected stays False."""
+    def test_nudge_feedback_on_non_status_ignored_for_rejection(self):
+        """Even if LLM mistakenly sets nudge_feedback on completion, was_rejected stays False."""
         raw = (
             '{"type": "completion", "confidence": 0.95, '
             '"reason": "done", '
-            '"coaching_message": "Some coaching text"}'
+            '"nudge_feedback": "Some nudge_feedback text"}'
         )
         result = _parse_classification_response(raw)
         assert result is not None
-        # coaching_message IS preserved (it's in the JSON)
-        assert result.coaching_message == "Some coaching text"
+        # nudge_feedback IS preserved (it's in the JSON)
+        assert result.nudge_feedback == "Some nudge_feedback text"
         # But was_rejected_completion is only set for STATUS_UPDATE
         assert result.was_rejected_completion is False
 
@@ -584,27 +584,27 @@ class TestClassifyWithHeuristics:
         result = _classify_with_heuristics("Running tests now...")
         assert result.output_type == OutputType.QUESTION
 
-    def test_heuristics_always_return_coaching_message_none(self):
-        """All heuristic paths return coaching_message=None."""
+    def test_heuristics_always_return_nudge_feedback_none(self):
+        """All heuristic paths return nudge_feedback=None."""
         # Question path
         result = _classify_with_heuristics("Should I proceed?")
-        assert result.coaching_message is None
+        assert result.nudge_feedback is None
 
         # Error path
         result = _classify_with_heuristics("Error: something broke")
-        assert result.coaching_message is None
+        assert result.nudge_feedback is None
 
         # Blocker path
         result = _classify_with_heuristics("Blocked on API access")
-        assert result.coaching_message is None
+        assert result.nudge_feedback is None
 
         # Completion path
         result = _classify_with_heuristics("Done. All committed.")
-        assert result.coaching_message is None
+        assert result.nudge_feedback is None
 
         # Default status path
         result = _classify_with_heuristics("Working on it now")
-        assert result.coaching_message is None
+        assert result.nudge_feedback is None
 
     def test_empty_text(self):
         """Empty text still returns a valid classification (default QUESTION)."""
@@ -646,10 +646,10 @@ class TestEmptyPromiseDetection:
         """'Got it' + commitment without evidence = empty promise."""
         result = _classify_with_heuristics("Got it. Will report final results and blockers only.")
         assert result.output_type == OutputType.STATUS_UPDATE
-        assert result.coaching_message is not None
+        assert result.nudge_feedback is not None
         assert (
-            "empty" in result.coaching_message.lower()
-            or "evidence" in result.coaching_message.lower()
+            "empty" in result.nudge_feedback.lower()
+            or "evidence" in result.nudge_feedback.lower()
         )
 
     def test_understood_without_evidence_is_empty_promise(self):
@@ -658,13 +658,13 @@ class TestEmptyPromiseDetection:
             "Understood. I'll adjust my communication style going forward."
         )
         assert result.output_type == OutputType.STATUS_UPDATE
-        assert result.coaching_message is not None
+        assert result.nudge_feedback is not None
 
     def test_noted_without_evidence_is_empty_promise(self):
         """'Noted' with a vague commitment = empty promise."""
         result = _classify_with_heuristics("Noted. You'll see the difference in my next output.")
         assert result.output_type == OutputType.STATUS_UPDATE
-        assert result.coaching_message is not None
+        assert result.nudge_feedback is not None
 
     def test_acknowledgment_with_commit_is_not_empty(self):
         """Acknowledgment WITH a commit hash = real action, not empty."""
@@ -679,21 +679,21 @@ class TestEmptyPromiseDetection:
         result = _classify_with_heuristics(
             "Understood. Saved memory to feedback_no_plans.md with this rule."
         )
-        assert result.output_type != OutputType.STATUS_UPDATE or result.coaching_message is None
+        assert result.output_type != OutputType.STATUS_UPDATE or result.nudge_feedback is None
 
     def test_normal_status_not_flagged(self):
         """Regular status updates should not trigger empty promise detection."""
         result = _classify_with_heuristics("Running tests now, found 3 issues so far.")
         assert (
-            result.coaching_message is None
-            or "empty" not in (result.coaching_message or "").lower()
+            result.nudge_feedback is None
+            or "empty" not in (result.nudge_feedback or "").lower()
         )
 
     def test_will_do_without_evidence(self):
         """'Will do' without proof = empty promise."""
         result = _classify_with_heuristics("Will do. I'll change my approach from now on.")
         assert result.output_type == OutputType.STATUS_UPDATE
-        assert result.coaching_message is not None
+        assert result.nudge_feedback is not None
 
 
 class TestApplyHeuristicConfidenceGate:
@@ -938,14 +938,14 @@ class TestClassifyOutput:
         assert result.output_type == OutputType.STATUS_UPDATE
 
     @pytest.mark.asyncio
-    async def test_llm_returns_coaching_for_hedging(self):
-        """LLM classifier returns specific coaching when hedging language detected."""
+    async def test_llm_returns_nudge_feedback_for_hedging(self):
+        """LLM classifier returns specific nudge_feedback when hedging language detected."""
         mock_response = AsyncMock()
         mock_response.content = [
             AsyncMock(
                 text='{"type": "status", "confidence": 0.92, '
                 '"reason": "Hedging language without verification", '
-                '"coaching_message": "You used hedging language. Run the tests."}'
+                '"nudge_feedback": "You used hedging language. Run the tests."}'
             )
         ]
         mock_client = AsyncMock()
@@ -958,18 +958,18 @@ class TestClassifyOutput:
             result = await classify_output("I think the bug is fixed now. Should work.")
 
         assert result.output_type == OutputType.STATUS_UPDATE
-        assert result.coaching_message == "You used hedging language. Run the tests."
+        assert result.nudge_feedback == "You used hedging language. Run the tests."
         assert result.was_rejected_completion is True
 
     @pytest.mark.asyncio
-    async def test_llm_returns_coaching_for_missing_evidence(self):
-        """LLM classifier returns specific coaching when evidence is missing."""
+    async def test_llm_returns_nudge_feedback_for_missing_evidence(self):
+        """LLM classifier returns specific nudge_feedback when evidence is missing."""
         mock_response = AsyncMock()
         mock_response.content = [
             AsyncMock(
                 text='{"type": "status", "confidence": 0.90, '
                 '"reason": "Claims tests pass but shows no output", '
-                '"coaching_message": "Paste the pytest output with pass/fail counts."}'
+                '"nudge_feedback": "Paste the pytest output with pass/fail counts."}'
             )
         ]
         mock_client = AsyncMock()
@@ -982,18 +982,18 @@ class TestClassifyOutput:
             result = await classify_output("All tests pass. Task complete.")
 
         assert result.output_type == OutputType.STATUS_UPDATE
-        assert result.coaching_message == "Paste the pytest output with pass/fail counts."
+        assert result.nudge_feedback == "Paste the pytest output with pass/fail counts."
         assert result.was_rejected_completion is True
 
     @pytest.mark.asyncio
-    async def test_llm_no_coaching_for_genuine_completion(self):
-        """LLM returns null coaching_message for genuine completions with evidence."""
+    async def test_llm_no_nudge_feedback_for_genuine_completion(self):
+        """LLM returns null nudge_feedback for genuine completions with evidence."""
         mock_response = AsyncMock()
         mock_response.content = [
             AsyncMock(
                 text='{"type": "completion", "confidence": 0.98, '
                 '"reason": "verified completion with evidence", '
-                '"coaching_message": null}'
+                '"nudge_feedback": null}'
             )
         ]
         mock_client = AsyncMock()
@@ -1008,7 +1008,7 @@ class TestClassifyOutput:
             )
 
         assert result.output_type == OutputType.COMPLETION
-        assert result.coaching_message is None
+        assert result.nudge_feedback is None
         assert result.was_rejected_completion is False
 
     @pytest.mark.asyncio

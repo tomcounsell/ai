@@ -285,7 +285,6 @@ FEATURE_MAP = {
     "model_relationships": "models",
     "redis_models": "models",
     "summarizer": "summarizer",
-    "coach": "summarizer",
     "telemetry": "monitoring",
     "health_check": "monitoring",
     "bridge_watchdog": "monitoring",
