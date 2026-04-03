@@ -136,10 +136,10 @@ No prerequisites — this work uses existing Redis infrastructure and Popoto ORM
 - [x] `tests/unit/test_summarizer.py` — UPDATE: replace `parent_chat_session_id` in docstrings
 - [x] `tests/unit/test_chat_session_factory.py` — UPDATE: update factory method references
 - [x] `tests/integration/test_agent_session_queue_session_type.py` — UPDATE: replace `parent_chat_session_id`
-- [ ] `tests/e2e/test_session_spawning.py` — UPDATE: replace `parent_chat_session_id` (10 occurrences)
-- [ ] `tests/e2e/test_context_propagation.py` — UPDATE: replace `parent_chat_session_id` and `get_parent_chat_session` (10+ occurrences)
-- [ ] `tests/unit/test_delivery_execution.py` — UPDATE: replace `get_parent_chat_session` mock (line 20)
-- [ ] `tests/unit/test_pre_tool_use_start_stage.py` — UPDATE: replace `create_dev` references with `create_child` (4 occurrences)
+- [x] `tests/e2e/test_session_spawning.py` — UPDATE: replace `parent_chat_session_id` (10 occurrences)
+- [x] `tests/e2e/test_context_propagation.py` — UPDATE: replace `parent_chat_session_id` and `get_parent_chat_session` (10+ occurrences)
+- [x] `tests/unit/test_delivery_execution.py` — UPDATE: replace `get_parent_chat_session` mock (line 20)
+- [x] `tests/unit/test_pre_tool_use_start_stage.py` — UPDATE: replace `create_dev` references with `create_child` (4 occurrences)
 
 ## Rabbit Holes
 
@@ -194,26 +194,26 @@ No agent integration required — this is a model-internal rename and field addi
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/agent-session-model.md` — replace `parent_chat_session_id` references, add `role` field documentation
-- [ ] Update `docs/features/chat-dev-session-architecture.md` — update field names in data model section
-- [ ] Update `docs/features/redis-models.md` — update field documentation table
-- [ ] Update `docs/features/session-isolation.md` — if it references `parent_chat_session_id`
+- [x] Update `docs/features/agent-session-model.md` — replace `parent_chat_session_id` references, add `role` field documentation
+- [x] Update `docs/features/chat-dev-session-architecture.md` — update field names in data model section
+- [x] Update `docs/features/redis-models.md` — update field documentation table
+- [x] Update `docs/features/session-isolation.md` — if it references `parent_chat_session_id`
 
 ### Inline Documentation
-- [ ] Update module and class docstrings in `models/agent_session.py`
-- [ ] Update factory method docstrings to reference `create_child(role=...)`
-- [ ] Update comments in `agent/agent_session_queue.py` field preservation list
+- [x] Update module and class docstrings in `models/agent_session.py`
+- [x] Update factory method docstrings to reference `create_child(role=...)`
+- [x] Update comments in `agent/agent_session_queue.py` field preservation list
 
 ## Success Criteria
 
-- [ ] `parent_chat_session_id` field renamed to `parent_session_id` (KeyField) in model
-- [ ] New `role` DataField added to AgentSession with backfill from `session_type`
-- [ ] `create_child(role=...)` factory method exists and works
-- [ ] `create_dev()` exists as thin wrapper calling `create_child(role="dev", ...)`
-- [ ] Zero references to `parent_chat_session_id` in Python files (excluding migration script and `_normalize_kwargs` backward-compat mapping)
-- [ ] Migration script runs successfully in dry-run mode
-- [ ] All tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] `parent_chat_session_id` field renamed to `parent_session_id` (KeyField) in model
+- [x] New `role` DataField added to AgentSession with backfill from `session_type`
+- [x] `create_child(role=...)` factory method exists and works
+- [x] `create_dev()` exists as thin wrapper calling `create_child(role="dev", ...)`
+- [x] Zero references to `parent_chat_session_id` in Python files (excluding migration script and `_normalize_kwargs` backward-compat mapping)
+- [x] Migration script runs successfully in dry-run mode
+- [x] All tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
