@@ -33,6 +33,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Config-Driven Chat Mode](config-driven-chat-mode.md) | Per-group persona field in projects.json controlling session type, classifier bypass, and passive listener behavior | Shipped |
 | [Context Fidelity Modes](context-fidelity-modes.md) | Right-sized context compression (full/compact/minimal/steering) for sub-agent dispatch | Shipped |
 | [Correlation IDs](correlation-ids.md) | End-to-end request tracing with shared correlation_id from Telegram receipt to response delivery | Shipped |
+| [Dashboard](dashboard.md) | Agent sessions table with parent/child hierarchy, staleness detection, session metadata (context_summary, expectations, activity counts), datetime timestamp handling, and enriched JSON API | Shipped |
 | [Deep Plan Analysis](deep-plan-analysis.md) | Prior Art, Data Flow, Failure Analysis, and Architectural Impact investigation sections in /do-plan | Shipped |
 | [Deployment](deployment.md) | Multi-instance deployment configuration with per-machine project routing | Shipped |
 | [Design Audit](do-design-audit.md) | Audit web UI against 10 premium design criteria with severity ratings | Shipped |

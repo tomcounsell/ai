@@ -1,5 +1,6 @@
 """Tests for the SDLC data access layer and Pydantic serializers."""
 
+import datetime
 import json
 import time
 from unittest.mock import MagicMock, patch
@@ -7,6 +8,47 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 pytestmark = [pytest.mark.unit, pytest.mark.webui]
+
+
+def _make_mock_session(**overrides):
+    """Create a mock AgentSession with sensible defaults for all fields.
+
+    Supports all fields needed by _session_to_pipeline(), including the new
+    metadata fields added for parent/child hierarchy and session visibility.
+    """
+    defaults = {
+        "agent_session_id": "mock-session-1",
+        "session_id": "sess-1",
+        "session_type": "dev",
+        "session_mode": None,
+        "status": "running",
+        "slug": None,
+        "message_text": "test message",
+        "project_key": None,
+        "branch_name": None,
+        "created_at": time.time(),
+        "started_at": time.time(),
+        "completed_at": None,
+        "updated_at": time.time(),
+        "stage_states": None,
+        "history": [],
+        "issue_url": None,
+        "plan_url": None,
+        "pr_url": None,
+        "parent_agent_session_id": None,
+        "context_summary": None,
+        "expectations": None,
+        "turn_count": 0,
+        "tool_call_count": 0,
+        "watchdog_unhealthy": None,
+        "priority": "normal",
+        "extra_context": None,
+    }
+    defaults.update(overrides)
+    mock = MagicMock()
+    for key, val in defaults.items():
+        setattr(mock, key, val)
+    return mock
 
 
 class TestStageStateParsing:
@@ -125,6 +167,18 @@ class TestStageStateModel:
 class TestPipelineProgress:
     """Tests for the PipelineProgress Pydantic model."""
 
+    def test_display_name_prefers_context_summary(self):
+        """context_summary takes priority over slug and message_text."""
+        from ui.data.sdlc import PipelineProgress
+
+        p = PipelineProgress(
+            agent_session_id="123",
+            context_summary="Implementing auth flow",
+            slug="auth-flow",
+            message_text="Build the auth",
+        )
+        assert p.display_name == "Implementing auth flow"
+
     def test_display_name_with_slug(self):
         from ui.data.sdlc import PipelineProgress
 
@@ -202,6 +256,250 @@ class TestPipelineProgress:
             project_metadata=metadata,
         )
         assert p.project_metadata["github_repo"] == "tomcounsell/popoto"
+
+    def test_new_metadata_fields(self):
+        """All new session metadata fields should be settable."""
+        from ui.data.sdlc import PipelineProgress
+
+        p = PipelineProgress(
+            agent_session_id="123",
+            context_summary="Building auth flow",
+            expectations="Need API key from human",
+            turn_count=5,
+            tool_call_count=12,
+            watchdog_unhealthy="No response for 15 minutes",
+            priority="high",
+            classification_type="sdlc",
+            is_stale=True,
+            parent_agent_session_id="parent-456",
+        )
+        assert p.context_summary == "Building auth flow"
+        assert p.expectations == "Need API key from human"
+        assert p.turn_count == 5
+        assert p.tool_call_count == 12
+        assert p.watchdog_unhealthy == "No response for 15 minutes"
+        assert p.priority == "high"
+        assert p.classification_type == "sdlc"
+        assert p.is_stale is True
+        assert p.parent_agent_session_id == "parent-456"
+
+    def test_children_field_default_empty(self):
+        """Children field defaults to empty list."""
+        from ui.data.sdlc import PipelineProgress
+
+        p = PipelineProgress(agent_session_id="123")
+        assert p.children == []
+
+    def test_is_stale_default_false(self):
+        """is_stale defaults to False."""
+        from ui.data.sdlc import PipelineProgress
+
+        p = PipelineProgress(agent_session_id="123")
+        assert p.is_stale is False
+
+    def test_none_metadata_fields_render_cleanly(self):
+        """None/missing metadata fields should not raise errors."""
+        from ui.data.sdlc import PipelineProgress
+
+        p = PipelineProgress(
+            agent_session_id="123",
+            context_summary=None,
+            expectations=None,
+            turn_count=None,
+            tool_call_count=None,
+        )
+        assert p.context_summary is None
+        assert p.expectations is None
+        assert p.turn_count is None
+        assert p.tool_call_count is None
+
+
+class TestSessionToPipeline:
+    """Tests for _session_to_pipeline conversion with new fields."""
+
+    def test_populates_new_metadata_fields(self):
+        """_session_to_pipeline should extract new fields from AgentSession."""
+        from ui.data.sdlc import _session_to_pipeline
+
+        mock_session = _make_mock_session(
+            context_summary="Implementing feature X",
+            expectations="Waiting for review",
+            turn_count=10,
+            tool_call_count=25,
+            watchdog_unhealthy="Stuck for 20 min",
+            priority="high",
+            extra_context={"classification_type": "sdlc"},
+        )
+        pipeline = _session_to_pipeline(mock_session)
+        assert pipeline.context_summary == "Implementing feature X"
+        assert pipeline.expectations == "Waiting for review"
+        assert pipeline.turn_count == 10
+        assert pipeline.tool_call_count == 25
+        assert pipeline.watchdog_unhealthy == "Stuck for 20 min"
+        assert pipeline.priority == "high"
+        assert pipeline.classification_type == "sdlc"
+
+    def test_staleness_detection_stale(self):
+        """Running session with old updated_at should be flagged stale."""
+        from ui.data.sdlc import _session_to_pipeline
+
+        mock_session = _make_mock_session(
+            status="running",
+            updated_at=time.time() - 700,  # >10 minutes ago
+        )
+        pipeline = _session_to_pipeline(mock_session)
+        assert pipeline.is_stale is True
+
+    def test_staleness_detection_fresh(self):
+        """Running session with recent updated_at should not be stale."""
+        from ui.data.sdlc import _session_to_pipeline
+
+        mock_session = _make_mock_session(
+            status="running",
+            updated_at=time.time() - 60,  # 1 minute ago
+        )
+        pipeline = _session_to_pipeline(mock_session)
+        assert pipeline.is_stale is False
+
+    def test_staleness_not_applied_to_completed(self):
+        """Completed sessions should never be flagged stale."""
+        from ui.data.sdlc import _session_to_pipeline
+
+        mock_session = _make_mock_session(
+            status="completed",
+            updated_at=time.time() - 7200,  # 2 hours ago
+        )
+        pipeline = _session_to_pipeline(mock_session)
+        assert pipeline.is_stale is False
+
+    def test_datetime_timestamps_converted(self):
+        """datetime.datetime values in timestamp fields should be converted to float."""
+        from ui.data.sdlc import _session_to_pipeline
+
+        now = datetime.datetime.now()
+        mock_session = _make_mock_session(
+            created_at=now,
+            started_at=now,
+            updated_at=now,
+        )
+        pipeline = _session_to_pipeline(mock_session)
+        assert isinstance(pipeline.created_at, float)
+        assert isinstance(pipeline.started_at, float)
+        assert isinstance(pipeline.updated_at, float)
+        assert pipeline.created_at == now.timestamp()
+
+    def test_parent_agent_session_id_populated(self):
+        """parent_agent_session_id should be passed through."""
+        from ui.data.sdlc import _session_to_pipeline
+
+        mock_session = _make_mock_session(
+            parent_agent_session_id="parent-abc",
+        )
+        pipeline = _session_to_pipeline(mock_session)
+        assert pipeline.parent_agent_session_id == "parent-abc"
+
+    def test_missing_new_fields_handled_gracefully(self):
+        """Sessions without new fields (e.g., old records) should not raise."""
+        from ui.data.sdlc import _session_to_pipeline
+
+        mock_session = MagicMock()
+        mock_session.agent_session_id = "old-session"
+        mock_session.session_id = "sess-1"
+        mock_session.session_type = "dev"
+        mock_session.session_mode = None
+        mock_session.status = "completed"
+        mock_session.slug = None
+        mock_session.message_text = "old message"
+        mock_session.project_key = None
+        mock_session.branch_name = None
+        mock_session.created_at = time.time()
+        mock_session.started_at = time.time()
+        mock_session.completed_at = time.time()
+        mock_session.updated_at = time.time()
+        mock_session.stage_states = None
+        mock_session.history = []
+        mock_session.issue_url = None
+        mock_session.plan_url = None
+        mock_session.pr_url = None
+        # These attributes won't exist on very old sessions
+        del mock_session.parent_agent_session_id
+        del mock_session.context_summary
+        del mock_session.expectations
+        del mock_session.turn_count
+        del mock_session.tool_call_count
+        del mock_session.watchdog_unhealthy
+        del mock_session.priority
+        del mock_session.extra_context
+
+        # Should not raise
+        pipeline = _session_to_pipeline(mock_session)
+        assert pipeline.agent_session_id == "old-session"
+        assert pipeline.parent_agent_session_id is None
+        assert pipeline.context_summary is None
+
+
+class TestParentChildGrouping:
+    """Tests for parent/child session grouping in get_all_sessions."""
+
+    def test_children_grouped_under_parent(self):
+        """Child sessions should be nested under their parent."""
+        from ui.data.sdlc import get_all_sessions
+
+        parent = _make_mock_session(
+            agent_session_id="parent-1",
+            status="running",
+            parent_agent_session_id=None,
+        )
+        child = _make_mock_session(
+            agent_session_id="child-1",
+            status="running",
+            parent_agent_session_id="parent-1",
+        )
+
+        with patch("models.agent_session.AgentSession") as mock_as:
+            mock_as.query.all.return_value = [parent, child]
+            with patch("ui.data.sdlc._get_project_metadata", return_value=(None, None)):
+                result = get_all_sessions()
+
+        # Child should be nested, not at top level
+        assert len(result) == 1
+        assert result[0].agent_session_id == "parent-1"
+        assert len(result[0].children) == 1
+        assert result[0].children[0].agent_session_id == "child-1"
+
+    def test_orphaned_child_stays_top_level(self):
+        """Child whose parent is not in the list stays at top level."""
+        from ui.data.sdlc import get_all_sessions
+
+        child = _make_mock_session(
+            agent_session_id="orphan-1",
+            status="running",
+            parent_agent_session_id="missing-parent",
+        )
+
+        with patch("models.agent_session.AgentSession") as mock_as:
+            mock_as.query.all.return_value = [child]
+            with patch("ui.data.sdlc._get_project_metadata", return_value=(None, None)):
+                result = get_all_sessions()
+
+        assert len(result) == 1
+        assert result[0].agent_session_id == "orphan-1"
+
+
+class TestRetentionWithDatetime:
+    """Tests verifying retention filter works with datetime timestamps."""
+
+    def test_datetime_timestamps_enable_retention(self):
+        """Sessions with datetime timestamps should pass the retention filter."""
+        from ui.data.sdlc import _safe_float
+
+        # Before the fix, this would return None and sessions would get
+        # timestamp 0, placing them before the 48h cutoff
+        now_dt = datetime.datetime.now()
+        ts = _safe_float(now_dt)
+        assert ts is not None
+        cutoff = time.time() - 48 * 3600
+        assert ts > cutoff  # Recent datetime should be within retention
 
 
 class TestHistoryParsing:
@@ -331,6 +629,38 @@ class TestSafeFloat:
         from ui.data.sdlc import _safe_float
 
         assert _safe_float("") is None
+
+    def test_datetime_input(self):
+        """datetime.datetime objects should be converted via .timestamp()."""
+        from ui.data.sdlc import _safe_float
+
+        dt = datetime.datetime(2026, 1, 1)
+        result = _safe_float(dt)
+        assert result is not None
+        assert isinstance(result, float)
+        assert result == dt.timestamp()
+
+    def test_datetime_with_timezone(self):
+        """datetime with UTC timezone should convert correctly."""
+        from ui.data.sdlc import _safe_float
+
+        dt = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
+        result = _safe_float(dt)
+        assert result is not None
+        assert isinstance(result, float)
+        assert result == dt.timestamp()
+
+    def test_datetime_preserves_precision(self):
+        """datetime conversion should preserve sub-second precision."""
+        from ui.data.sdlc import _safe_float
+
+        dt = datetime.datetime(2026, 6, 15, 12, 30, 45, 123456)
+        result = _safe_float(dt)
+        assert result is not None
+        # Reconstruct and verify roundtrip
+        reconstructed = datetime.datetime.fromtimestamp(result)
+        assert reconstructed.year == 2026
+        assert reconstructed.month == 6
 
 
 class TestArtifactInference:

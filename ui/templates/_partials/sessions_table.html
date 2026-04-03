@@ -1,3 +1,101 @@
+{# Macro for rendering a single session row (reused for parent and child rows) #}
+{% macro session_row(s, is_child=false) %}
+<tr class="session-row{% if is_child %} child-row{% endif %}{% if s.is_stale %} stale{% endif %}" hx-get="/sdlc/{{ s.job_id }}/_inline/" hx-target="#detail-{{ s.job_id }}" hx-swap="innerHTML" hx-trigger="click" style="cursor: pointer;">
+    <td>
+        {% if is_child %}
+        <span class="child-connector"></span>
+        {% endif %}
+        {% if s.project_name or s.project_key %}
+        <span class="project-cell" {% if s.project_metadata %}data-metadata='{{ s.project_metadata | tojson }}'{% endif %}>
+            <span class="project-name mono">{{ s.project_name or s.project_key }}</span>
+            {% if s.project_metadata %}
+            <div class="project-popover">
+                <div class="popover-content">
+                    {% if s.project_metadata.telegram_chat %}
+                    <div class="popover-row"><span class="popover-label">Chat</span><span class="popover-value">{{ s.project_metadata.telegram_chat }}</span></div>
+                    {% endif %}
+                    {% if s.project_metadata.github_repo %}
+                    <div class="popover-row"><span class="popover-label">Repo</span><span class="popover-value">{{ s.project_metadata.github_repo }}</span></div>
+                    {% endif %}
+                    {% if s.project_metadata.working_dir %}
+                    <div class="popover-row"><span class="popover-label">Dir</span><span class="popover-value">{{ s.project_metadata.working_dir }}</span></div>
+                    {% endif %}
+                    {% if s.project_metadata.tech_stack %}
+                    <div class="popover-row"><span class="popover-label">Stack</span><span class="popover-value">{{ s.project_metadata.tech_stack }}</span></div>
+                    {% endif %}
+                    {% if s.project_metadata.machine %}
+                    <div class="popover-row"><span class="popover-label">Machine</span><span class="popover-value">{{ s.project_metadata.machine }}</span></div>
+                    {% endif %}
+                </div>
+            </div>
+            {% endif %}
+        </span>
+        {% else %}
+        <span class="text-muted">-</span>
+        {% endif %}
+    </td>
+    <td>
+        <div class="card-title">{{ s.display_name }}</div>
+        {% if s.expectations and s.status == 'dormant' %}
+        <div class="text-muted" style="font-size: 11px; font-style: italic;">{{ s.expectations }}</div>
+        {% endif %}
+        {% if s.branch_name %}
+        <div class="text-muted mono" style="font-size: 11px;">{{ s.branch_name }}</div>
+        {% endif %}
+    </td>
+    <td>
+        {% if s.session_type %}
+        <span class="badge badge-{{ 'blue' if s.session_type == 'Developer' else ('green' if s.session_type == 'Teammate' else 'purple') }}">{{ s.session_type }}</span>
+        {% else %}
+        <span class="text-muted">-</span>
+        {% endif %}
+        {% if s.classification_type %}
+        <span class="badge badge-outline" style="font-size: 10px;">{{ s.classification_type }}</span>
+        {% endif %}
+    </td>
+    <td>
+        {% if s.status %}
+        <span class="badge badge-{{ s.status }}{% if s.is_stale %} stale{% endif %}">{{ s.status }}{% if s.is_stale %} (stale){% endif %}</span>
+        {% if s.watchdog_unhealthy %}
+        <span class="badge badge-warning" title="{{ s.watchdog_unhealthy }}">!</span>
+        {% endif %}
+        {% if s.priority and s.priority in ('urgent', 'high') %}
+        <span class="badge badge-priority-{{ s.priority }}">{{ s.priority }}</span>
+        {% endif %}
+        {% else %}
+        <span class="text-muted">-</span>
+        {% endif %}
+    </td>
+    <td>
+        {% if s.stages %}
+        <div class="stage-indicator">
+            {% for stage in s.stages %}
+            <span class="stage-dot {{ 'completed' if stage.is_done else ('in-progress' if stage.is_active else ('failed' if stage.is_failed else ('ready' if stage.is_ready else ''))) }}" title="{{ stage.name }}">{{ stage.name[0] }}</span>
+            {% endfor %}
+        </div>
+        {% else %}
+        <span class="text-muted">-</span>
+        {% endif %}
+    </td>
+    <td class="mono">{{ (s.started_at or s.created_at) | format_timestamp }}</td>
+    <td class="mono">{{ s.duration | format_duration }}</td>
+    <td>
+        <div class="flex gap-2">
+            {% if s.turn_count or s.tool_call_count %}
+            <span class="activity-badge mono" title="turns / tool calls">{{ s.turn_count or 0 }}/{{ s.tool_call_count or 0 }}</span>
+            {% endif %}
+            {% if s.issue_url %}
+            <a href="{{ s.issue_url }}" class="link" target="_blank" onclick="event.stopPropagation()">issue</a>
+            {% endif %}
+            {% if s.pr_url %}
+            <a href="{{ s.pr_url }}" class="link" target="_blank" onclick="event.stopPropagation()">PR</a>
+            {% endif %}
+        </div>
+    </td>
+</tr>
+<tr id="detail-{{ s.job_id }}" class="session-detail-row"></tr>
+{% endmacro %}
+
 {% if sessions %}
 <table class="data-table">
     <thead>
@@ -14,82 +112,10 @@
     </thead>
     <tbody>
         {% for s in sessions %}
-        <tr class="session-row" hx-get="/sdlc/{{ s.job_id }}/_inline/" hx-target="#detail-{{ s.job_id }}" hx-swap="innerHTML" hx-trigger="click" style="cursor: pointer;">
-            <td>
-                {% if s.project_name or s.project_key %}
-                <span class="project-cell" {% if s.project_metadata %}data-metadata='{{ s.project_metadata | tojson }}'{% endif %}>
-                    <span class="project-name mono">{{ s.project_name or s.project_key }}</span>
-                    {% if s.project_metadata %}
-                    <div class="project-popover">
-                        <div class="popover-content">
-                            {% if s.project_metadata.telegram_chat %}
-                            <div class="popover-row"><span class="popover-label">Chat</span><span class="popover-value">{{ s.project_metadata.telegram_chat }}</span></div>
-                            {% endif %}
-                            {% if s.project_metadata.github_repo %}
-                            <div class="popover-row"><span class="popover-label">Repo</span><span class="popover-value">{{ s.project_metadata.github_repo }}</span></div>
-                            {% endif %}
-                            {% if s.project_metadata.working_dir %}
-                            <div class="popover-row"><span class="popover-label">Dir</span><span class="popover-value">{{ s.project_metadata.working_dir }}</span></div>
-                            {% endif %}
-                            {% if s.project_metadata.tech_stack %}
-                            <div class="popover-row"><span class="popover-label">Stack</span><span class="popover-value">{{ s.project_metadata.tech_stack }}</span></div>
-                            {% endif %}
-                            {% if s.project_metadata.machine %}
-                            <div class="popover-row"><span class="popover-label">Machine</span><span class="popover-value">{{ s.project_metadata.machine }}</span></div>
-                            {% endif %}
-                        </div>
-                    </div>
-                    {% endif %}
-                </span>
-                {% else %}
-                <span class="text-muted">-</span>
-                {% endif %}
-            </td>
-            <td>
-                <div class="card-title">{{ s.display_name }}</div>
-                {% if s.branch_name %}
-                <div class="text-muted mono" style="font-size: 11px;">{{ s.branch_name }}</div>
-                {% endif %}
-            </td>
-            <td>
-                {% if s.session_type %}
-                <span class="badge badge-{{ 'blue' if s.session_type == 'Developer' else ('green' if s.session_type == 'Teammate' else 'purple') }}">{{ s.session_type }}</span>
-                {% else %}
-                <span class="text-muted">-</span>
-                {% endif %}
-            </td>
-            <td>
-                {% if s.status %}
-                <span class="badge badge-{{ s.status }}">{{ s.status }}</span>
-                {% else %}
-                <span class="text-muted">-</span>
-                {% endif %}
-            </td>
-            <td>
-                {% if s.stages %}
-                <div class="stage-indicator">
-                    {% for stage in s.stages %}
-                    <span class="stage-dot {{ 'completed' if stage.is_done else ('in-progress' if stage.is_active else ('failed' if stage.is_failed else ('ready' if stage.is_ready else ''))) }}" title="{{ stage.name }}">{{ stage.name[0] }}</span>
-                    {% endfor %}
-                </div>
-                {% else %}
-                <span class="text-muted">-</span>
-                {% endif %}
-            </td>
-            <td class="mono">{{ (s.started_at or s.created_at) | format_timestamp }}</td>
-            <td class="mono">{{ s.duration | format_duration }}</td>
-            <td>
-                <div class="flex gap-2">
-                    {% if s.issue_url %}
-                    <a href="{{ s.issue_url }}" class="link" target="_blank" onclick="event.stopPropagation()">issue</a>
-                    {% endif %}
-                    {% if s.pr_url %}
-                    <a href="{{ s.pr_url }}" class="link" target="_blank" onclick="event.stopPropagation()">PR</a>
-                    {% endif %}
-                </div>
-            </td>
-        </tr>
-        <tr id="detail-{{ s.job_id }}" class="session-detail-row"></tr>
+        {{ session_row(s) }}
+        {% for child in s.children %}
+        {{ session_row(child, is_child=true) }}
+        {% endfor %}
         {% endfor %}
     </tbody>
 </table>
