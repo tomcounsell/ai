@@ -171,6 +171,65 @@ def create_app() -> FastAPI:
             pass
         return {"status": "error", "age_s": None}
 
+    @app.get("/dashboard.json")
+    def dashboard_json():
+        """Full dashboard state as JSON for programmatic consumption."""
+        from fastapi.responses import JSONResponse
+
+        from ui.data.machine import get_machine_name, get_machine_projects
+        from ui.data.reflections import get_all_reflections
+        from ui.data.sdlc import get_all_sessions
+
+        bridge = _get_bridge_health()
+        sessions = get_all_sessions()
+        reflections = get_all_reflections()
+
+        return JSONResponse(
+            {
+                "health": {
+                    "webserver": "ok",
+                    "bridge": bridge["status"],
+                    "bridge_last_seen_s": bridge["age_s"],
+                },
+                "sessions": [
+                    {
+                        "agent_session_id": s.agent_session_id,
+                        "session_id": s.session_id,
+                        "display_name": s.display_name,
+                        "session_type": s.session_type,
+                        "status": s.status,
+                        "project_key": s.project_key,
+                        "project_name": s.project_name,
+                        "slug": s.slug,
+                        "branch_name": s.branch_name,
+                        "current_stage": s.current_stage,
+                        "stages": [{"name": st.name, "status": st.status} for st in s.stages],
+                        "created_at": s.created_at,
+                        "started_at": s.started_at,
+                        "completed_at": s.completed_at,
+                        "duration": s.duration,
+                        "issue_url": s.issue_url,
+                        "pr_url": s.pr_url,
+                        "message_text": s.message_text,
+                        "events": [
+                            {
+                                "role": e.role,
+                                "text": e.text,
+                                "timestamp": e.timestamp,
+                            }
+                            for e in s.events
+                        ],
+                    }
+                    for s in sessions
+                ],
+                "reflections": reflections,
+                "machine": {
+                    "name": get_machine_name(),
+                    "projects": get_machine_projects(),
+                },
+            }
+        )
+
     @app.get("/health")
     def health_status():
         """Health JSON endpoint for programmatic access."""
