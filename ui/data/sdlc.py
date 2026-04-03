@@ -7,6 +7,7 @@ All functions are synchronous (def, not async def) because Popoto uses
 synchronous Redis calls. FastAPI runs sync route handlers in a threadpool.
 """
 
+import datetime
 import json
 import logging
 import os
@@ -66,7 +67,31 @@ class PipelineEvent(BaseModel):
 
 
 class PipelineProgress(BaseModel):
-    """Complete pipeline view for a single AgentSession."""
+    """Complete pipeline view for a single AgentSession.
+
+    Fields:
+        agent_session_id: Unique identifier for this agent session.
+        session_id: Telegram/local session identifier.
+        session_type: Display persona (e.g., "Developer", "Project Manager").
+        status: Lifecycle status (pending, running, completed, etc.).
+        slug: Work item slug for planned work.
+        message_text: Original message that triggered this session.
+        project_key: Project identifier from projects.json.
+        project_name: Human-readable project name.
+        project_metadata: Enriched project info (repo, chat, stack, etc.).
+        branch_name: Git branch for this session's work.
+        created_at/started_at/completed_at/updated_at: Timestamps as floats.
+        parent_agent_session_id: ID of the parent session (for hierarchy).
+        children: Child sessions nested under this parent.
+        context_summary: What this session is about (human-friendly).
+        expectations: What the agent needs from the human (for dormant sessions).
+        turn_count: Number of conversation turns.
+        tool_call_count: Number of tool calls made.
+        watchdog_unhealthy: Reason string when flagged unhealthy, None when healthy.
+        priority: Session priority (urgent, high, normal, low).
+        classification_type: Session classification (sdlc, qa, etc.).
+        is_stale: True if session is running but updated_at is >10 minutes ago.
+    """
 
     agent_session_id: str
     session_id: str | None = None
@@ -82,6 +107,20 @@ class PipelineProgress(BaseModel):
     started_at: float | None = None
     completed_at: float | None = None
     updated_at: float | None = None
+
+    # Parent/child hierarchy
+    parent_agent_session_id: str | None = None
+    children: list["PipelineProgress"] = []
+
+    # Session metadata
+    context_summary: str | None = None
+    expectations: str | None = None
+    turn_count: int | None = None
+    tool_call_count: int | None = None
+    watchdog_unhealthy: str | None = None
+    priority: str | None = None
+    classification_type: str | None = None
+    is_stale: bool = False
 
     # SDLC state
     stages: list[StageState] = []
@@ -112,7 +151,9 @@ class PipelineProgress(BaseModel):
 
     @property
     def display_name(self) -> str:
-        """Human-friendly name: slug if available, else truncated message."""
+        """Human-friendly name: context_summary, then slug, then truncated message."""
+        if self.context_summary:
+            return self.context_summary
         if self.slug:
             return self.slug
         if self.message_text:
@@ -359,7 +400,14 @@ def _safe_str(val, default: str | None = None) -> str | None:
 
 
 def _safe_float(val) -> float | None:
-    """Return val as a float if it's a real number, else None."""
+    """Return val as a float if it's a real number, else None.
+
+    Handles datetime.datetime objects by converting via .timestamp(),
+    which is needed because Popoto stores datetime fields as Python
+    datetime objects, not raw floats.
+    """
+    if isinstance(val, datetime.datetime):
+        return val.timestamp()
     if isinstance(val, int | float):
         return float(val)
     if isinstance(val, str):
@@ -388,17 +436,49 @@ def _session_to_pipeline(session) -> PipelineProgress:
             current = s.name
             break
 
-    slug = _safe_str(session.slug) or _safe_str(session.slug) or ""
+    slug = _safe_str(session.slug) or ""
 
     # Resolve project name and metadata
     project_key = _safe_str(session.project_key)
     project_name, project_metadata = _get_project_metadata(project_key)
 
+    # Populate new metadata fields from AgentSession attributes
+    status = _safe_str(session.status)
+    updated_at = _safe_float(session.updated_at)
+
+    # Compute staleness: running/active sessions with no update in >10 minutes
+    is_stale = False
+    if status in ("running", "active") and updated_at:
+        is_stale = (time.time() - updated_at) > 600  # 10 minutes
+
+    # Extract classification_type (stored in extra_context dict)
+    classification_type = None
+    extra_context = getattr(session, "extra_context", None)
+    if isinstance(extra_context, dict):
+        classification_type = extra_context.get("classification_type")
+    elif hasattr(session, "classification_type"):
+        classification_type = _safe_str(getattr(session, "classification_type", None))
+
+    # Safe int extraction for count fields
+    turn_count = getattr(session, "turn_count", None)
+    if turn_count is not None:
+        try:
+            turn_count = int(turn_count)
+        except (ValueError, TypeError):
+            turn_count = None
+
+    tool_call_count = getattr(session, "tool_call_count", None)
+    if tool_call_count is not None:
+        try:
+            tool_call_count = int(tool_call_count)
+        except (ValueError, TypeError):
+            tool_call_count = None
+
     return PipelineProgress(
         agent_session_id=_safe_str(session.agent_session_id) or "",
         session_id=_safe_str(session.session_id),
         session_type=_resolve_persona_display(session),
-        status=_safe_str(session.status),
+        status=status,
         slug=slug,
         message_text=_safe_str(session.message_text),
         project_key=project_key,
@@ -408,7 +488,16 @@ def _session_to_pipeline(session) -> PipelineProgress:
         created_at=_safe_float(session.created_at),
         started_at=_safe_float(session.started_at),
         completed_at=_safe_float(session.completed_at),
-        updated_at=_safe_float(session.updated_at),
+        updated_at=updated_at,
+        parent_agent_session_id=_safe_str(getattr(session, "parent_agent_session_id", None)),
+        context_summary=_safe_str(getattr(session, "context_summary", None)),
+        expectations=_safe_str(getattr(session, "expectations", None)),
+        turn_count=turn_count,
+        tool_call_count=tool_call_count,
+        watchdog_unhealthy=_safe_str(getattr(session, "watchdog_unhealthy", None)),
+        priority=_safe_str(getattr(session, "priority", None)),
+        classification_type=classification_type,
+        is_stale=is_stale,
         stages=stages,
         current_stage=current,
         events=events,
@@ -471,7 +560,19 @@ def get_all_sessions(limit: int = 50) -> list[PipelineProgress]:
     active.sort(key=lambda p: p.updated_at or p.created_at or 0, reverse=True)
     inactive.sort(key=_best_timestamp, reverse=True)
 
-    return active + inactive[:limit]
+    flat_list = active + inactive[:limit]
+
+    # Group children under parents (no N+1 queries -- uses the flat list)
+    by_id: dict[str, PipelineProgress] = {p.agent_session_id: p for p in flat_list}
+    child_ids: set[str] = set()
+    for p in flat_list:
+        if p.parent_agent_session_id and p.parent_agent_session_id in by_id:
+            parent = by_id[p.parent_agent_session_id]
+            parent.children.append(p)
+            child_ids.add(p.agent_session_id)
+        # Orphaned children (parent not in list) remain as top-level rows
+
+    return [p for p in flat_list if p.agent_session_id not in child_ids]
 
 
 def get_active_pipelines() -> list[PipelineProgress]:
