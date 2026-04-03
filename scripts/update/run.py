@@ -29,6 +29,7 @@ from scripts.update import (  # noqa: E402
     hardlinks,
     hooks,
     migrations,
+    officecli,
     service,
     verify,
 )
@@ -116,6 +117,7 @@ class UpdateResult:
     env_sync_result: env_sync.EnvSyncResult | None = None
     hook_audit: hooks.HookAuditResult | None = None
     migration_result: migrations.MigrationResult | None = None
+    officecli_result: officecli.InstallResult | None = None
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -340,6 +342,19 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             result.errors.append(f"Migration failed: {err}")
     if not mig.ran and not mig.failed:
         log("No pending migrations", v)
+
+    # Step 3.7: OfficeCLI binary install/update
+    log("Checking OfficeCLI...", v)
+    result.officecli_result = officecli.install_or_update()
+    oc = result.officecli_result
+    if oc.success:
+        if oc.action == "skipped":
+            log(f"OfficeCLI {oc.version} (up to date)", v)
+        else:
+            log(f"OfficeCLI {oc.action}: {oc.version}", v, always=True)
+    else:
+        log(f"WARN: OfficeCLI {oc.action}: {oc.error}", v)
+        result.warnings.append(f"OfficeCLI: {oc.error}")
 
     # Step 4: Ollama model (full mode only)
     if config.do_ollama:
