@@ -39,12 +39,21 @@ class TestCountOrphans:
 
         mock_db = MagicMock()
         mock_db.smembers.return_value = {b"TestModel:1", b"TestModel:2", b"TestModel:3"}
-        # Key 2 does not exist
-        mock_db.exists.side_effect = lambda k: k != b"TestModel:2"
+        # Key 2 does not exist (exists returns 0/False)
+        mock_db.exists.side_effect = lambda k: (
+            0 if (k.decode() if isinstance(k, bytes) else k) == "TestModel:2" else 1
+        )
 
-        with patch("popoto.redis_db.POPOTO_REDIS_DB", mock_db):
+        # Patch at the import target within the function
+        import popoto.redis_db
+
+        original = popoto.redis_db.POPOTO_REDIS_DB
+        try:
+            popoto.redis_db.POPOTO_REDIS_DB = mock_db
             result = _count_orphans(mock_model)
             assert result == 1
+        finally:
+            popoto.redis_db.POPOTO_REDIS_DB = original
 
 
 class TestRunCleanup:
