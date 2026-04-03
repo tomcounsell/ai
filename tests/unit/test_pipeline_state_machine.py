@@ -869,6 +869,52 @@ class TestArtifactInference:
 
     @patch("bridge.pipeline_state.subprocess.run")
     @patch("bridge.pipeline_state.Path")
+    def test_docs_plans_only_does_not_infer_docs(self, mock_path_cls, mock_run):
+        """PR with only docs/plans/ files does NOT infer DOCS as completed."""
+        mock_path_instance = MagicMock()
+        mock_path_cls.return_value = mock_path_instance
+        mock_path_instance.exists.return_value = False
+
+        pr_data = {
+            "number": 42,
+            "state": "OPEN",
+            "reviewDecision": "",
+            "statusCheckRollup": [],
+            "files": [{"path": "docs/plans/my-feature.md"}, {"path": "bridge/foo.py"}],
+        }
+        mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(pr_data), stderr="")
+
+        session = _make_session()
+        sm = PipelineStateMachine(session)
+        progress = sm.get_display_progress(slug="test-feature")
+
+        assert progress["DOCS"] != "completed"
+
+    @patch("bridge.pipeline_state.subprocess.run")
+    @patch("bridge.pipeline_state.Path")
+    def test_docs_features_infers_docs_completed(self, mock_path_cls, mock_run):
+        """PR with docs/features/ files DOES infer DOCS as completed."""
+        mock_path_instance = MagicMock()
+        mock_path_cls.return_value = mock_path_instance
+        mock_path_instance.exists.return_value = False
+
+        pr_data = {
+            "number": 42,
+            "state": "OPEN",
+            "reviewDecision": "",
+            "statusCheckRollup": [],
+            "files": [{"path": "docs/features/my-feature.md"}],
+        }
+        mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(pr_data), stderr="")
+
+        session = _make_session()
+        sm = PipelineStateMachine(session)
+        progress = sm.get_display_progress(slug="test-feature")
+
+        assert progress["DOCS"] == "completed"
+
+    @patch("bridge.pipeline_state.subprocess.run")
+    @patch("bridge.pipeline_state.Path")
     def test_gh_timeout_returns_stored_state(self, mock_path_cls, mock_run):
         """Subprocess timeout does not crash, returns stored state."""
         import subprocess as sp

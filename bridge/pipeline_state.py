@@ -463,11 +463,11 @@ class PipelineStateMachine:
                 if review_decision in ("APPROVED", "CHANGES_REQUESTED"):
                     inferred["REVIEW"] = "completed"
 
-                # DOCS: files array contains docs/ paths
+                # DOCS: files array contains docs/ paths (excluding docs/plans/)
                 files = pr_data.get("files") or []
                 for f in files:
                     file_path = f.get("path") or ""
-                    if file_path.startswith("docs/"):
+                    if file_path.startswith("docs/") and not file_path.startswith("docs/plans/"):
                         inferred["DOCS"] = "completed"
                         break
 
