@@ -6,8 +6,11 @@ tools/send_telegram.py and sends them via Telethon.
 
 Redis queue contract:
     Key pattern: telegram:outbox:{session_id}
-    Message format: JSON with {chat_id, reply_to, text, file_path?, session_id, timestamp}
+    Message format: JSON with {chat_id, reply_to, text, file_paths?, session_id, timestamp}
     TTL: 1 hour (set by the tool, safety net for crashed sessions)
+
+    Backward compatibility: legacy payloads with ``file_path`` (string) are
+    normalized to ``file_paths`` (list) at relay time during rolling deployments.
 
 After successful send, records the Telegram message ID on the AgentSession's
 pm_sent_message_ids field. This list is checked by the summarizer bypass
@@ -46,58 +49,82 @@ async def _send_queued_message(
 ) -> int | None:
     """Send a single queued message via Telethon.
 
+    Supports single files, multi-file albums (via ``file_paths`` list),
+    and backward-compatible ``file_path`` (string) payloads.
+
     Args:
         telegram_client: The Telethon TelegramClient instance.
         message: Parsed message dict with chat_id, reply_to, text,
-            optional file_path, and session_id.
+            optional file_paths (list) or file_path (string), and session_id.
 
     Returns:
         The Telegram message ID on success, None on failure.
+        For albums, returns the ID of the first message in the album.
     """
     import os
 
     chat_id = message.get("chat_id")
     reply_to = message.get("reply_to")
     text = message.get("text", "")
-    file_path = message.get("file_path")
+
+    # Normalize file_path (string, legacy) and file_paths (list, current)
+    file_paths = message.get("file_paths")
+    legacy_file_path = message.get("file_path")
+    if file_paths is None and legacy_file_path:
+        file_paths = [legacy_file_path]
 
     if not chat_id:
         logger.warning(f"Relay: skipping malformed message (no chat_id): {message}")
         return None
 
-    # Must have either text or file_path
-    if not text and not file_path:
-        logger.warning(f"Relay: skipping malformed message (no text or file_path): {message}")
+    # Must have either text or files
+    if not text and not file_paths:
+        logger.warning(f"Relay: skipping malformed message (no text or files): {message}")
         return None
 
     try:
         reply_to_id = int(reply_to) if reply_to else None
 
         # File send path
-        if file_path:
-            if os.path.isfile(file_path):
+        if file_paths:
+            # Filter to files that exist at send time
+            available = [fp for fp in file_paths if os.path.isfile(fp)]
+            missing = [fp for fp in file_paths if not os.path.isfile(fp)]
+
+            if missing:
+                for fp in missing:
+                    logger.warning(f"Relay: file not found at send time: {fp}")
+
+            if available:
+                # Single file or album
+                file_arg = available[0] if len(available) == 1 else available
                 sent = await telegram_client.send_file(
                     int(chat_id),
-                    file_path,
+                    file_arg,
                     caption=text or None,
                     reply_to=reply_to_id,
                 )
-                msg_id = getattr(sent, "id", None)
+                # Telethon returns a list for albums, single Message for one file
+                if isinstance(sent, list):
+                    msg_id = getattr(sent[0], "id", None) if sent else None
+                else:
+                    msg_id = getattr(sent, "id", None)
+                file_names = [os.path.basename(fp) for fp in available]
                 logger.info(
-                    f"Relay: sent PM file to chat {chat_id} "
-                    f"(file={os.path.basename(file_path)}, "
+                    f"Relay: sent PM file(s) to chat {chat_id} "
+                    f"(files={file_names}, "
                     f"caption={len(text)} chars, msg_id={msg_id})"
                 )
                 return msg_id
             else:
-                # File missing at send time -- fall back to text-only
+                # All files missing -- fall back to text-only
                 logger.warning(
-                    f"Relay: file not found at send time: {file_path}. "
-                    f"Falling back to text-only send."
+                    "Relay: all files missing at send time. "
+                    "Falling back to text-only send."
                 )
                 if not text:
                     logger.warning(
-                        f"Relay: file missing and no text -- skipping message to chat {chat_id}"
+                        f"Relay: all files missing and no text -- skipping message to chat {chat_id}"
                     )
                     return None
 
