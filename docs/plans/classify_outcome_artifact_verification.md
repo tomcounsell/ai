@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor
@@ -267,8 +267,15 @@ Standard tier 1 agents sufficient for this work.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
-| CONCERN | [agent-type] | [The concern raised] | [How/whether it was addressed] |
+<!-- Populated by /do-plan-critique (war room) on 2026-04-03. Verdict: READY TO BUILD -->
+| Severity | Critic(s) | Finding | Resolution |
+|----------|-----------|---------|------------|
+| CONCERN | Skeptic, Adversary | classify_outcome docstring only lists "success"/"fail"/"ambiguous" — needs "partial" added | Address in Task 1 |
+| CONCERN | Operator, Skeptic | "partial" routes through fail_stage() which shows as "failed" in dashboard — misleading for approved-with-nits | Pre-existing; note as follow-up |
+| CONCERN | Operator | Task 2 validation is "manual review" — no automated check | Use grep verification commands |
+| CONCERN | Simplifier | /do-docs OUTCOME emission mentioned in Solution but not tasked | Remove mention or add task |
+| NIT | Adversary | Regex notation differs between Solution and Task 1 | Align during build |
+| NIT | Archaeologist | Filename references "artifact_verification" which was the prior rejected approach | Not worth renaming |
 
 ---
 
