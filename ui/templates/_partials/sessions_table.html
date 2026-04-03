@@ -55,9 +55,11 @@
         <span class="badge badge-outline" style="font-size: 10px;">{{ s.classification_type }}</span>
         {% endif %}
     </td>
+    <td class="mono">{{ (s.started_at or s.created_at) | format_timestamp }}</td>
     <td>
         {% if s.status %}
         <span class="badge badge-{{ s.status }}{% if s.is_stale %} stale{% endif %}">{{ s.status }}{% if s.is_stale %} (stale){% endif %}</span>
+        <span class="duration-label mono">{{ s.duration | format_duration }}</span>
         {% if s.watchdog_unhealthy %}
         <span class="badge badge-warning" title="{{ s.watchdog_unhealthy }}">!</span>
         {% endif %}
@@ -79,8 +81,6 @@
         <span class="text-muted">-</span>
         {% endif %}
     </td>
-    <td class="mono">{{ (s.started_at or s.created_at) | format_timestamp }}</td>
-    <td class="mono">{{ s.duration | format_duration }}</td>
     <td>
         <div class="flex gap-2">
             {% if s.issue_url %}
@@ -114,10 +114,9 @@ function toggleChildren(el) {
             <th>Project</th>
             <th>Name</th>
             <th>Persona</th>
+            <th>Started</th>
             <th>Status</th>
             <th>SDLC Stages</th>
-            <th>Started</th>
-            <th>Duration</th>
             <th></th>
         </tr>
     </thead>

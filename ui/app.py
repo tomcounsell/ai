@@ -50,14 +50,14 @@ def _filter_format_timestamp(ts: float | None) -> str:
 
 
 def _filter_format_duration(seconds: float | None) -> str:
-    """Jinja2 filter: format seconds to human-readable duration."""
+    """Jinja2 filter: format seconds to compact integer duration."""
     if seconds is None:
         return "-"
     if seconds < 60:
-        return f"{seconds:.1f}s"
+        return "<1m"
     if seconds < 3600:
-        return f"{seconds / 60:.1f}m"
-    return f"{seconds / 3600:.1f}h"
+        return f"{int(seconds / 60)}m"
+    return f"{int(seconds / 3600)}h"
 
 
 def _filter_format_interval(seconds: int | None) -> str:

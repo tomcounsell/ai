@@ -218,6 +218,15 @@ h3 {
     background: var(--green-bg);
 }
 
+.duration-label {
+    display: inline-block;
+    width: 28px;
+    text-align: right;
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-left: 4px;
+}
+
 .badge-ok, .badge-success {
     color: var(--green);
     background: var(--green-bg);
