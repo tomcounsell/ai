@@ -83,8 +83,8 @@
     <td class="mono">{{ s.duration | format_duration }}</td>
     <td>
         <div class="flex gap-2">
-            {% if s.turn_count or s.tool_call_count %}
-            <span class="activity-badge mono" title="turns / tool calls">{{ s.turn_count or 0 }}/{{ s.tool_call_count or 0 }}</span>
+            {% if s.tool_call_count %}
+            <span class="activity-badge mono" title="tool calls">{{ s.tool_call_count }} tools</span>
             {% endif %}
             {% if s.issue_url %}
             <a href="{{ s.issue_url }}" class="link" target="_blank" onclick="event.stopPropagation()">issue</a>
