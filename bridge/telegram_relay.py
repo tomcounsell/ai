@@ -6,7 +6,7 @@ tools/send_telegram.py and sends them via Telethon.
 
 Redis queue contract:
     Key pattern: telegram:outbox:{session_id}
-    Message format: JSON with {chat_id, reply_to, text, session_id, timestamp}
+    Message format: JSON with {chat_id, reply_to, text, file_path?, session_id, timestamp}
     TTL: 1 hour (set by the tool, safety net for crashed sessions)
 
 After successful send, records the Telegram message ID on the AgentSession's
@@ -48,27 +48,67 @@ async def _send_queued_message(
 
     Args:
         telegram_client: The Telethon TelegramClient instance.
-        message: Parsed message dict with chat_id, reply_to, text, session_id.
+        message: Parsed message dict with chat_id, reply_to, text,
+            optional file_path, and session_id.
 
     Returns:
         The Telegram message ID on success, None on failure.
     """
+    import os
+
     chat_id = message.get("chat_id")
     reply_to = message.get("reply_to")
     text = message.get("text", "")
+    file_path = message.get("file_path")
 
-    if not chat_id or not text:
-        logger.warning(f"Relay: skipping malformed message (no chat_id or text): {message}")
+    if not chat_id:
+        logger.warning(f"Relay: skipping malformed message (no chat_id): {message}")
+        return None
+
+    # Must have either text or file_path
+    if not text and not file_path:
+        logger.warning(f"Relay: skipping malformed message (no text or file_path): {message}")
         return None
 
     try:
+        reply_to_id = int(reply_to) if reply_to else None
+
+        # File send path
+        if file_path:
+            if os.path.isfile(file_path):
+                sent = await telegram_client.send_file(
+                    int(chat_id),
+                    file_path,
+                    caption=text or None,
+                    reply_to=reply_to_id,
+                )
+                msg_id = getattr(sent, "id", None)
+                logger.info(
+                    f"Relay: sent PM file to chat {chat_id} "
+                    f"(file={os.path.basename(file_path)}, "
+                    f"caption={len(text)} chars, msg_id={msg_id})"
+                )
+                return msg_id
+            else:
+                # File missing at send time -- fall back to text-only
+                logger.warning(
+                    f"Relay: file not found at send time: {file_path}. "
+                    f"Falling back to text-only send."
+                )
+                if not text:
+                    logger.warning(
+                        f"Relay: file missing and no text -- skipping message to chat {chat_id}"
+                    )
+                    return None
+
+        # Text-only send path
         from bridge.markdown import send_markdown
 
         sent = await send_markdown(
             telegram_client,
             int(chat_id),
             text,
-            reply_to=int(reply_to) if reply_to else None,
+            reply_to=reply_to_id,
         )
         msg_id = getattr(sent, "id", None)
         logger.info(

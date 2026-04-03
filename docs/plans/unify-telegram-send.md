@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Building
 type: bug
 appetite: Medium
 owner: Valor

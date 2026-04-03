@@ -1625,10 +1625,17 @@ async def get_agent_response_sdk(
                 "**Communicating with the stakeholder:**\n"
                 "You can send Telegram messages directly using:\n"
                 '  `python tools/send_telegram.py "Your message here"`\n'
-                "This sends your message immediately to the chat. Use it for:\n"
+                "To attach a file (screenshot, document, image):\n"
+                '  `python tools/send_telegram.py "Caption text" --file /path/to/file.png`\n'
+                "File-only (no caption):\n"
+                "  `python tools/send_telegram.py --file /path/to/file.png`\n"
+                "Use --file to attach screenshots, images, or documents. "
+                "Telethon auto-detects the media type.\n"
+                "Use this tool for:\n"
                 "- Status updates and progress reports\n"
                 "- Questions that need human input\n"
                 "- Final delivery summaries\n"
+                "- Sharing screenshots or files\n"
                 "Write in business terms — never expose SDLC stage names, "
                 "pipeline internals, or implementation details. "
                 "Speak like a project manager updating a stakeholder.\n"
