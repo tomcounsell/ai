@@ -456,8 +456,8 @@ class TestParentChildGrouping:
             parent_agent_session_id="parent-1",
         )
 
-        with patch("models.agent_session.AgentSession") as MockAS:
-            MockAS.query.all.return_value = [parent, child]
+        with patch("models.agent_session.AgentSession") as mock_as:
+            mock_as.query.all.return_value = [parent, child]
             with patch("ui.data.sdlc._get_project_metadata", return_value=(None, None)):
                 result = get_all_sessions()
 
@@ -477,8 +477,8 @@ class TestParentChildGrouping:
             parent_agent_session_id="missing-parent",
         )
 
-        with patch("models.agent_session.AgentSession") as MockAS:
-            MockAS.query.all.return_value = [child]
+        with patch("models.agent_session.AgentSession") as mock_as:
+            mock_as.query.all.return_value = [child]
             with patch("ui.data.sdlc._get_project_metadata", return_value=(None, None)):
                 result = get_all_sessions()
 
@@ -644,7 +644,7 @@ class TestSafeFloat:
         """datetime with UTC timezone should convert correctly."""
         from ui.data.sdlc import _safe_float
 
-        dt = datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc)
+        dt = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
         result = _safe_float(dt)
         assert result is not None
         assert isinstance(result, float)

@@ -234,10 +234,7 @@ def create_app() -> FastAPI:
                     "bridge": bridge["status"],
                     "bridge_last_seen_s": bridge["age_s"],
                 },
-                "sessions": [
-                    _session_to_json(s)
-                    for s in sessions
-                ],
+                "sessions": [_session_to_json(s) for s in sessions],
                 "reflections": reflections,
                 "machine": {
                     "name": get_machine_name(),
