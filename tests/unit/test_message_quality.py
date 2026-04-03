@@ -1,8 +1,8 @@
 """Tests for bridge.message_quality — narration detection and delivery quality filters."""
 
 from bridge.message_quality import (
-    NARRATION_COACHING_MESSAGE,
     NARRATION_FALLBACK_MESSAGE,
+    NARRATION_NUDGE_FEEDBACK,
     PROCESS_NARRATION_PATTERNS,
     is_narration_only,
 )
@@ -143,14 +143,14 @@ class TestConstants:
     def test_fallback_message_not_empty(self):
         assert len(NARRATION_FALLBACK_MESSAGE) > 0
 
-    def test_coaching_message_not_empty(self):
-        assert len(NARRATION_COACHING_MESSAGE) > 0
+    def test_nudge_feedback_not_empty(self):
+        assert len(NARRATION_NUDGE_FEEDBACK) > 0
 
     def test_fallback_message_is_user_facing(self):
         """Fallback should not contain internal jargon."""
         assert "observer" not in NARRATION_FALLBACK_MESSAGE.lower()
         assert "narration" not in NARRATION_FALLBACK_MESSAGE.lower()
 
-    def test_coaching_message_instructs_continuation(self):
-        """Coaching message should instruct the worker to continue."""
-        assert "continue" in NARRATION_COACHING_MESSAGE.lower()
+    def test_nudge_feedback_instructs_continuation(self):
+        """Nudge feedback message should instruct the worker to continue."""
+        assert "continue" in NARRATION_NUDGE_FEEDBACK.lower()

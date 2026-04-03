@@ -102,8 +102,8 @@ NARRATION_FALLBACK_MESSAGE = (
     "Please re-trigger if you'd like me to try again."
 )
 
-# Coaching message sent when narration gate triggers an auto-continue
-NARRATION_COACHING_MESSAGE = (
+# Nudge feedback sent when narration gate triggers an auto-continue
+NARRATION_NUDGE_FEEDBACK = (
     "You announced you would investigate but stopped before producing findings. "
     "Continue the investigation and report actual results."
 )

@@ -4,7 +4,7 @@ Judgment work: analyze the PR diff for correctness, security, and quality.
 
 ## Context Variables
 
-- `$SDLC_PR_NUMBER` — PR number (fallback: extract from git or coaching message)
+- `$SDLC_PR_NUMBER` — PR number (fallback: extract from git or nudge feedback)
 - `$SDLC_SLUG` — work item slug for finding the plan document
 - `$SDLC_PLAN_PATH` — direct path to plan document (fallback: derive from slug)
 - `$SDLC_ISSUE_NUMBER` — tracking issue number

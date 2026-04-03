@@ -47,7 +47,7 @@ Reactions interact with the auto-continue system. When auto-continue is active, 
 ### Flow
 
 1. Agent completes a turn. The nudge loop in `agent/agent_session_queue.py` decides whether to **nudge** (auto-continue) or **deliver** (send to Telegram).
-2. If Observer decides **STEER**: suppress the output, re-enqueue with coaching message, defer reaction.
+2. If Observer decides **STEER**: suppress the output, re-enqueue with nudge feedback, defer reaction.
 3. If Observer decides **DELIVER**: send the response and set the appropriate reaction based on content.
 4. The auto-continue counter resets when the human sends a new message.
 

@@ -352,7 +352,7 @@ PRINCIPAL_PATH = Path(__file__).parent.parent / "config" / "PRINCIPAL.md"
 
 # Worker safety rails injected into every agent session.
 # ChatSession is the sole pipeline controller —
-# it steers the worker one stage at a time via coaching messages.
+# it steers the worker one stage at a time via nudge messages.
 # This constant provides only the safety rails the worker needs; it does NOT
 # contain pipeline orchestration or /sdlc invocation instructions.
 WORKER_RULES = """\
@@ -1750,7 +1750,7 @@ async def get_agent_response_sdk(
         # CRASH GUARD: Mark session as failed so the watchdog doesn't try to
         # interact with a dead session. Without this cleanup, the watchdog would
         # find the session still "active" and potentially trigger further errors.
-        # See docs/features/coaching-loop.md "Error-Classified Output Bypass".
+        # See nudge loop error-classified output bypass.
         try:
             from bridge.session_transcript import complete_transcript
 

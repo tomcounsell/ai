@@ -181,7 +181,7 @@ async def check_all_sessions() -> None:
             # to save/update them, popoto raises ModelException (e.g. unique
             # constraint violations). We catch all ModelException variants and
             # mark the session as failed to prevent the watchdog from looping
-            # on it every cycle. See docs/features/coaching-loop.md "Related Guards".
+            # on it every cycle. See nudge loop related guards.
             try:
                 session.status = "failed"
                 # Capture exception details so the reflections system can produce

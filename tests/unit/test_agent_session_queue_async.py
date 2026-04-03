@@ -134,7 +134,7 @@ class TestEnqueueContinuationAsyncWrapping:
                         task_list_id="tl-1",
                         auto_continue_count=1,
                         output_msg="test output",
-                        coaching_message="continue",
+                        nudge_feedback="continue",
                     )
                 )
                 # to_thread should be called for the filter

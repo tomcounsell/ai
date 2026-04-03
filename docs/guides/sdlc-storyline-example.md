@@ -43,7 +43,7 @@ if (
     next_stage_info = _next_sdlc_skill(self.session)
 ```
 
-The guard routes to ISSUE stage, and the Observer steers with a coaching message:
+The guard routes to ISSUE stage, and the Observer steers with a nudge feedback message:
 
 ```
 Pipeline has remaining stages. Next: ISSUE. Continue with /do-issue.
@@ -121,11 +121,11 @@ The worker also emits a typed outcome:
 
 ```python
 if outcome.status == "success" and self.session.has_remaining_stages():
-    coaching = (
+    feedback = (
         f"{outcome.stage} completed successfully. "
         f"{outcome.notes} Continue with {next_skill}."
     )
-    return {"action": "steer", "coaching_message": coaching, ...}
+    return {"action": "steer", "nudge_feedback": feedback, ...}
 ```
 
 Log line:
@@ -266,7 +266,7 @@ if self.stop_reason == "rate_limited":
     logger.warning(f"{self._log_prefix} Worker stopped: rate_limited — steering with backoff")
     return {
         "action": "steer",
-        "coaching_message": "Rate limited by API. Wait briefly and resume.",
+        "nudge_feedback": "Rate limited by API. Wait briefly and resume.",
         "stop_reason": self.stop_reason,
     }
 ```
@@ -380,7 +380,7 @@ The LLM Observer reads the session, sees the test failures are fixable (not a fu
 
 ```python
 enqueue_continuation(
-    coaching_message="TEST found 2 failures: division by zero in churn_rate "
+    nudge_feedback="TEST found 2 failures: division by zero in churn_rate "
     "and off-by-one in cohort_matrix. These are fixable bugs. Continue with "
     "/do-patch to fix both issues, then /do-test will re-verify. "
     "Success means all 9 tests passing."
@@ -531,7 +531,7 @@ The typed outcome:
 
 ```python
 enqueue_continuation(
-    coaching_message="Review found 2 issues: SQL injection in api.py "
+    nudge_feedback="Review found 2 issues: SQL injection in api.py "
     "(high severity) and missing error handling in engine.py. Continue "
     "with /do-patch to address both. The SQL injection fix is critical — "
     "use parameterized queries. After patching, /do-test will re-verify, "

@@ -14,7 +14,7 @@ Context fidelity modes control how much session state is forwarded to sub-agents
 | **Full** | `ContextFidelity.FULL` | Resume within same skill | Complete session transcript |
 | **Compact** | `ContextFidelity.COMPACT` | Stage handoffs (BUILD -> TEST) | Plan path, completed stages, artifacts |
 | **Minimal** | `ContextFidelity.MINIMAL` | Individual builder sub-agents | Task description + essential refs |
-| **Steering** | `ContextFidelity.STEERING` | Observer coaching messages | Current stage, done stages, recent human messages |
+| **Steering** | `ContextFidelity.STEERING` | Observer nudge feedback messages | Current stage, done stages, recent human messages |
 
 ## Skill Registry
 
