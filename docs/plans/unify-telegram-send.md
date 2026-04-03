@@ -1,5 +1,5 @@
 ---
-status: Building
+status: Done
 type: bug
 appetite: Medium
 owner: Valor

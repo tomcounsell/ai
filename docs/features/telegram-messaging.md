@@ -95,7 +95,19 @@ Chat names are resolved in order:
 | `.claude/skills/telegram/SKILL.md` | Agent skill documentation |
 | `tests/test_valor_telegram.py` | Test suite |
 
+## PM Tool vs CLI Tool
+
+The `valor-telegram send` CLI documented above is the **DevSession / manual** sending interface. It sends directly via Telethon.
+
+For **ChatSession (PM)** sends, use `tools/send_telegram.py` instead. It routes through a Redis queue so the bridge relay can track message IDs for summarizer bypass. See [PM Telegram Tool](pm-telegram-tool.md) for details.
+
+| Tool | Context | File Support |
+|------|---------|--------------|
+| `valor-telegram send` | DevSession / CLI | `--file`, `--image`, `--audio` |
+| `python tools/send_telegram.py` | ChatSession (PM) | `--file` (auto-detects media type) |
+
 ## Related
 
 - [Telegram History](telegram-history.md) — underlying Redis/Popoto storage
+- [PM Telegram Tool](pm-telegram-tool.md) — ChatSession self-messaging with file attachments
 - `config/SOUL.md` — agent persona references to this tool
