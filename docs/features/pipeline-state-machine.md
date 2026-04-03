@@ -149,7 +149,6 @@ Falls back to `"ambiguous"` when no pattern matches, for the Observer LLM to han
 - **Job Queue** (`agent/agent_session_queue.py`): Creates state machine in `send_to_chat()`, applies transitions from Observer decisions
 - **AgentSession** (`models/agent_session.py`): `get_stage_progress()` convenience wrapper around `get_display_progress()`
 - **Merge Gate** (`.claude/commands/do-merge.md`): Reads `get_display_progress()` for pre-merge pipeline validation
-- **Coach** (`bridge/coach.py`): Imports `DISPLAY_STAGES` for stage coaching logic
 
 ## What Was Deleted
 
