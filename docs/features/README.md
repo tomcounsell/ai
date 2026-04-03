@@ -35,7 +35,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Correlation IDs](correlation-ids.md) | End-to-end request tracing with shared correlation_id from Telegram receipt to response delivery | Shipped |
 | [Deep Plan Analysis](deep-plan-analysis.md) | Prior Art, Data Flow, Failure Analysis, and Architectural Impact investigation sections in /do-plan | Shipped |
 | [Deployment](deployment.md) | Multi-instance deployment configuration with per-machine project routing | Shipped |
-| [Design Review](do-design-review.md) | Review web UI against 10 premium design criteria with severity ratings | Shipped |
+| [Design Audit](do-design-audit.md) | Audit web UI against 10 premium design criteria with severity ratings | Shipped |
 | [Do Test](do-test.md) | Intelligent test orchestration with parallel dispatch, changed-file detection, structured reporting, and pytest plugin configuration | Shipped |
 | [Memory Hook Performance](memory-hook-performance.md) | Import chain optimization and deja vu removal for PostToolUse memory recall hook | Shipped |
 | [do-patch Skill](do-patch-skill.md) | Targeted fix skill for test failures and review blockers; called automatically by do-build | Shipped |

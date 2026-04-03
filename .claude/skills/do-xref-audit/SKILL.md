@@ -1,6 +1,6 @@
 ---
-name: do-xref
-description: "Cross-reference the work vault knowledge base with project docs/. Audits coverage gaps and adds bidirectional links. Triggered by 'cross-reference docs', 'xref', 'sync knowledge base', or 'do-xref'."
+name: do-xref-audit
+description: "Cross-reference the work vault knowledge base with project docs/. Audits coverage gaps and adds bidirectional links. Triggered by 'cross-reference docs', 'xref audit', 'sync knowledge base', 'do-xref-audit', 'check vault alignment', or 'validate doc cross-references'."
 allowed-tools: Read, Write, Edit, Glob, Grep, Bash, Agent, Task
 context: fork
 ---
@@ -14,12 +14,12 @@ Audit and maintain bidirectional cross-references between the work vault and the
 - Periodic alignment: ensure business docs and technical docs reference each other
 - After adding a new feature doc or work vault page
 - When someone asks "where is the business context for X?" or "where are the technical docs for Y?"
-- Invoked by `/do-xref` or when user asks to cross-reference, sync knowledge base, or link docs
+- Invoked by `/do-xref-audit` or when user asks to cross-reference, sync knowledge base, or link docs
 
 ## Invocation
 
 ```
-/do-xref [--audit-only] [--vault-path PATH] [--docs-path PATH]
+/do-xref-audit [--audit-only] [--vault-path PATH] [--docs-path PATH]
 ```
 
 - `--audit-only`: Report gaps without making changes
@@ -297,6 +297,6 @@ If either repo has no changes, skip that commit.
 ## Integration
 
 This skill pairs with:
-- `/do-docs` — After code changes cascade docs updates, run `/do-xref` to verify vault alignment
-- `/do-docs-audit` — After auditing docs accuracy, run `/do-xref` to refresh cross-references
+- `/do-docs` — After code changes cascade docs updates, run `/do-xref-audit` to verify vault alignment
+- `/do-docs-audit` — After auditing docs accuracy, run `/do-xref-audit` to refresh cross-references
 - `/do-plan` — When a new plan is created, check if the vault has business context to link

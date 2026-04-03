@@ -1,10 +1,10 @@
-# `/do-design-review` Skill
+# `/do-design-audit` Skill
 
-The `/do-design-review` skill evaluates a live web UI against 10 premium design criteria and produces a structured quality report with severity ratings. It is the review-time companion to `/frontend-design`.
+The `/do-design-audit` skill evaluates a live web UI against 10 premium design criteria and produces a structured quality report with severity ratings. It is the review-time companion to `/frontend-design`.
 
 ## Why It Exists
 
-Shipping a functional UI and shipping a polished UI are different things. Code review catches logic errors; design review catches the subtler failures — inconsistent spacing, poor contrast, unclear interaction affordances, or a layout that technically works but feels cheap. `/do-design-review` systematizes that judgment: it visits each page with a headless browser, captures a screenshot, and evaluates the result across 10 dimensions that define premium web UI quality. The output is actionable, not vague — each dimension gets a rating and a specific explanation of what to fix.
+Shipping a functional UI and shipping a polished UI are different things. Code review catches logic errors; design review catches the subtler failures — inconsistent spacing, poor contrast, unclear interaction affordances, or a layout that technically works but feels cheap. `/do-design-audit` systematizes that judgment: it visits each page with a headless browser, captures a screenshot, and evaluates the result across 10 dimensions that define premium web UI quality. The output is actionable, not vague — each dimension gets a rating and a specific explanation of what to fix.
 
 ## When to Use It
 
@@ -16,15 +16,15 @@ Shipping a functional UI and shipping a polished UI are different things. Code r
 ## Usage
 
 ```
-/do-design-review <url>
-/do-design-review <url> --pages <path1>,<path2>,...
+/do-design-audit <url>
+/do-design-audit <url> --pages <path1>,<path2>,...
 ```
 
 Examples:
 
 ```
-/do-design-review http://localhost:8000
-/do-design-review https://staging.example.com --pages /,/about,/pricing
+/do-design-audit http://localhost:8000
+/do-design-audit https://staging.example.com --pages /,/about,/pricing
 ```
 
 Without `--pages`, the skill discovers pages automatically by following navigation links from the start URL (up to 6 pages). With `--pages`, only the specified paths are screenshotted.
@@ -67,7 +67,7 @@ For each URL reviewed:
 | Skill | Role |
 |-------|------|
 | `/frontend-design` | **Build** — Generates UI from a spec with bold aesthetic direction |
-| `/do-design-review` | **Review** — Audits the finished UI against 10 structured criteria |
+| `/do-design-audit` | **Review** — Audits the finished UI against 10 structured criteria |
 | `/do-pr-review` | **Code Review** — Evaluates the PR diff, tests, and implementation |
 
-Use `/frontend-design` to build. Use `/do-design-review` to verify before shipping.
+Use `/frontend-design` to build. Use `/do-design-audit` to verify before shipping.
