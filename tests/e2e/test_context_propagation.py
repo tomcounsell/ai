@@ -11,8 +11,8 @@ import time
 import pytest
 
 from models.agent_session import (
-    SESSION_TYPE_CHAT,
     SESSION_TYPE_DEV,
+    SESSION_TYPE_PM,
     AgentSession,
 )
 
@@ -23,7 +23,7 @@ class TestChatSessionContextFields:
 
     def test_all_context_fields_roundtrip(self):
         ts = int(time.time())
-        session = AgentSession.create_chat(
+        session = AgentSession.create_pm(
             session_id=f"ctx_{ts}",
             project_key="valor",
             working_dir="/Users/test/src/ai",
@@ -45,7 +45,7 @@ class TestChatSessionContextFields:
         reloaded = list(AgentSession.query.filter(session_id=session.session_id))[0]
 
         assert reloaded.session_id == f"ctx_{ts}"
-        assert reloaded.session_type == SESSION_TYPE_CHAT
+        assert reloaded.session_type == SESSION_TYPE_PM
         assert reloaded.project_key == "valor"
         assert reloaded.working_dir == "/Users/test/src/ai"
         assert reloaded.chat_id == "ctx_chat_123"
@@ -66,7 +66,7 @@ class TestDevSessionParentLinkage:
 
     def test_dev_session_has_parent_reference(self):
         ts = int(time.time())
-        chat = AgentSession.create_chat(
+        chat = AgentSession.create_pm(
             session_id=f"parent_{ts}",
             project_key="valor",
             working_dir="/tmp/test",
@@ -91,11 +91,11 @@ class TestDevSessionParentLinkage:
         parents = list(AgentSession.query.filter(session_id=chat.session_id))
         assert len(parents) == 1
         assert parents[0].agent_session_id == chat.agent_session_id
-        assert parents[0].session_type == SESSION_TYPE_CHAT
+        assert parents[0].session_type == SESSION_TYPE_PM
 
     def test_chat_session_finds_its_dev_sessions(self):
         ts = int(time.time())
-        chat = AgentSession.create_chat(
+        chat = AgentSession.create_pm(
             session_id=f"multi_parent_{ts}",
             project_key="valor",
             working_dir="/tmp/test",
@@ -155,7 +155,7 @@ class TestDerivedPaths:
 
     def test_no_slug_falls_back_to_branch_name(self):
         ts = int(time.time())
-        session = AgentSession.create_chat(
+        session = AgentSession.create_pm(
             session_id=f"nosluq_{ts}",
             project_key="valor",
             working_dir="/tmp/test",
@@ -197,7 +197,7 @@ class TestSDLCStagesPropagation:
 
     def test_chat_session_without_stage_states(self):
         ts = int(time.time())
-        chat = AgentSession.create_chat(
+        chat = AgentSession.create_pm(
             session_id=f"nosdlc_{ts}",
             project_key="valor",
             working_dir="/tmp/test",
@@ -216,7 +216,7 @@ class TestSessionTypeDiscriminator:
     def test_factory_methods_set_correct_types(self):
         ts = int(time.time())
 
-        chat = AgentSession.create_chat(
+        chat = AgentSession.create_pm(
             session_id=f"type_chat_{ts}",
             project_key="valor",
             working_dir="/tmp",
@@ -232,12 +232,12 @@ class TestSessionTypeDiscriminator:
             message_text="build",
         )
 
-        assert chat.is_chat and not chat.is_dev
-        assert dev.is_dev and not dev.is_chat
+        assert chat.is_pm and not chat.is_dev
+        assert dev.is_dev and not dev.is_pm
 
     def test_session_type_queryable(self):
         ts = int(time.time())
-        AgentSession.create_chat(
+        AgentSession.create_pm(
             session_id=f"qt_chat_{ts}",
             project_key="query_test",
             working_dir="/tmp",
@@ -253,7 +253,7 @@ class TestSessionTypeDiscriminator:
             message_text="build",
         )
 
-        chats = list(AgentSession.query.filter(session_type=SESSION_TYPE_CHAT))
+        chats = list(AgentSession.query.filter(session_type=SESSION_TYPE_PM))
         devs = list(AgentSession.query.filter(session_type=SESSION_TYPE_DEV))
 
         chat_ids = {s.session_id for s in chats}

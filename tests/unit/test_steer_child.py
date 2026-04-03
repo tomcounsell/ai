@@ -14,8 +14,8 @@ def mock_parent():
     """Create a mock parent ChatSession."""
     parent = MagicMock()
     parent.agent_session_id = "parent-001"
-    parent.session_type = "chat"
-    parent.is_chat = True
+    parent.session_type = "pm"
+    parent.is_pm = True
     parent.is_dev = False
     return parent
 
@@ -26,7 +26,7 @@ def mock_child():
     child = MagicMock()
     child.agent_session_id = "child-001"
     child.session_type = "dev"
-    child.is_chat = False
+    child.is_pm = False
     child.is_dev = True
     child.parent_session_id = "parent-001"
     child.status = "running"

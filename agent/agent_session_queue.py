@@ -192,7 +192,7 @@ async def _push_agent_session(
     scheduled_at: datetime | float | None = None,
     parent_agent_session_id: str | None = None,
     telegram_message_key: str | None = None,
-    session_type: str = SessionType.CHAT,
+    session_type: str = SessionType.PM,
     scheduling_depth: int = 0,  # ignored, now derived
     depends_on: list[str] | None = None,  # ignored, removed
     **_kwargs,
@@ -1481,7 +1481,7 @@ async def enqueue_agent_session(
     scheduled_at: float | None = None,
     parent_agent_session_id: str | None = None,
     telegram_message_key: str | None = None,
-    session_type: str = SessionType.CHAT,
+    session_type: str = SessionType.PM,
     scheduling_depth: int = 0,  # ignored, now derived
 ) -> int:
     """

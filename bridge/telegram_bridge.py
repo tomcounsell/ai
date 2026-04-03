@@ -1471,7 +1471,12 @@ async def main():
                 f"[{project_name}] Dev mode (config-driven): {chat_title!r} → session_type=dev"
             )
         else:
-            _session_type = SessionType.CHAT  # ChatSession — PM persona, handles SDLC and Teammate
+            if _persona == PersonaType.TEAMMATE:
+                _session_type = (
+                    SessionType.TEAMMATE
+                )  # Teammate session — read-only, no orchestration
+            else:
+                _session_type = SessionType.PM  # PM session — orchestrates work, spawns children
 
         # Enqueue: session_type drives ChatSession vs DevSession creation.
         depth = await enqueue_agent_session(

@@ -40,7 +40,7 @@ def _to_ts(val):
         return None
     if isinstance(val, datetime):
         return val.timestamp()
-    if isinstance(val, (int, float)):
+    if isinstance(val, int | float):
         return float(val)
     return None
 
@@ -51,7 +51,7 @@ def _to_iso(val):
         return None
     if isinstance(val, datetime):
         return val.isoformat()
-    if isinstance(val, (int, float)):
+    if isinstance(val, int | float):
         return datetime.fromtimestamp(val, tz=UTC).isoformat()
     return None
 
@@ -274,8 +274,8 @@ def cmd_schedule(args: argparse.Namespace) -> int:
     session_id = f"scheduled-{args.issue}-{uuid.uuid4().hex[:8]}"
     priority = args.priority or "normal"
 
-    # Session type: explicit flag > default (chat for issue-based work)
-    session_type = getattr(args, "session_type", None) or SessionType.CHAT
+    # Session type: explicit flag > default (pm for issue-based work)
+    session_type = getattr(args, "session_type", None) or SessionType.PM
 
     # Parent session inheritance
     parent_id = getattr(args, "parent_session", None)
@@ -1037,9 +1037,10 @@ def main():
     sched.add_argument("--after", help="Defer execution until this ISO 8601 datetime")
     sched.add_argument(
         "--session-type",
-        choices=[SessionType.CHAT, SessionType.DEV],
-        help="Session type: chat (PM orchestrates) or dev (direct execution). "
-        "Default: chat for issue/PR work, dev for hotfixes.",
+        choices=[SessionType.PM, SessionType.TEAMMATE, SessionType.DEV],
+        help="Session type: pm (PM orchestrates), teammate "
+        "(conversational), or dev (direct execution). "
+        "Default: pm for issue/PR work, dev for hotfixes.",
     )
     sched.add_argument(
         "--parent-session",

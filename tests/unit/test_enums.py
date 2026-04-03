@@ -9,30 +9,36 @@ from config.enums import ClassificationType, PersonaType, SessionType
 
 class TestSessionType:
     def test_string_equality(self):
-        assert SessionType.CHAT == "chat"
+        assert SessionType.PM == "pm"
+        assert SessionType.TEAMMATE == "teammate"
         assert SessionType.DEV == "dev"
 
     def test_str_conversion(self):
-        assert str(SessionType.CHAT) == "chat"
+        assert str(SessionType.PM) == "pm"
+        assert str(SessionType.TEAMMATE) == "teammate"
         assert str(SessionType.DEV) == "dev"
 
     def test_membership(self):
-        assert "chat" in [SessionType.CHAT, SessionType.DEV]
-        assert "dev" in [SessionType.CHAT, SessionType.DEV]
-        assert "invalid" not in [SessionType.CHAT, SessionType.DEV]
+        assert "pm" in [SessionType.PM, SessionType.TEAMMATE, SessionType.DEV]
+        assert "teammate" in [SessionType.PM, SessionType.TEAMMATE, SessionType.DEV]
+        assert "dev" in [SessionType.PM, SessionType.TEAMMATE, SessionType.DEV]
+        assert "invalid" not in [SessionType.PM, SessionType.TEAMMATE, SessionType.DEV]
 
     def test_iteration(self):
         members = list(SessionType)
-        assert len(members) == 2
-        assert SessionType.CHAT in members
+        assert len(members) == 3
+        assert SessionType.PM in members
+        assert SessionType.TEAMMATE in members
         assert SessionType.DEV in members
 
     def test_value_access(self):
-        assert SessionType.CHAT.value == "chat"
+        assert SessionType.PM.value == "pm"
+        assert SessionType.TEAMMATE.value == "teammate"
         assert SessionType.DEV.value == "dev"
 
     def test_construction_from_string(self):
-        assert SessionType("chat") == SessionType.CHAT
+        assert SessionType("pm") == SessionType.PM
+        assert SessionType("teammate") == SessionType.TEAMMATE
         assert SessionType("dev") == SessionType.DEV
 
     def test_invalid_construction_raises(self):
@@ -41,13 +47,16 @@ class TestSessionType:
         with pytest.raises(ValueError):
             SessionType("invalid")
 
-    def test_backward_compat_with_constants(self):
-        """SESSION_TYPE_CHAT/DEV aliases in agent_session.py should match."""
-        from models.agent_session import SESSION_TYPE_CHAT, SESSION_TYPE_DEV
+        with pytest.raises(ValueError):
+            SessionType("chat")  # Old value no longer valid
 
-        assert SESSION_TYPE_CHAT == SessionType.CHAT
+    def test_backward_compat_with_constants(self):
+        """SESSION_TYPE_PM/DEV aliases in agent_session.py should match."""
+        from models.agent_session import SESSION_TYPE_DEV, SESSION_TYPE_PM
+
+        assert SESSION_TYPE_PM == SessionType.PM
         assert SESSION_TYPE_DEV == SessionType.DEV
-        assert SESSION_TYPE_CHAT is SessionType.CHAT
+        assert SESSION_TYPE_PM is SessionType.PM
         assert SESSION_TYPE_DEV is SessionType.DEV
 
 
@@ -75,13 +84,14 @@ class TestEnvVarCompatibility:
 
     def test_session_type_in_env_var_comparison(self):
         """os.environ values are strings; enum must compare equal."""
-        env_value = "chat"  # Simulates os.environ.get("SESSION_TYPE")
-        assert env_value == SessionType.CHAT
+        env_value = "pm"  # Simulates os.environ.get("SESSION_TYPE")
+        assert env_value == SessionType.PM
 
     def test_str_enum_in_dict_key(self):
         """StrEnum members work as dict keys matching string keys."""
-        d = {"chat": "pm_persona", "dev": "dev_persona"}
-        assert d[SessionType.CHAT] == "pm_persona"
+        d = {"pm": "pm_persona", "teammate": "teammate_persona", "dev": "dev_persona"}
+        assert d[SessionType.PM] == "pm_persona"
+        assert d[SessionType.TEAMMATE] == "teammate_persona"
         assert d[SessionType.DEV] == "dev_persona"
 
     def test_persona_in_config_lookup(self):

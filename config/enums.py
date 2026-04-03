@@ -2,13 +2,12 @@
 
 All magic strings for session routing, persona selection, and intent classification
 are defined here as StrEnum members. StrEnum inherits from str, so members compare
-equal to their string values (e.g., SessionType.CHAT == "chat" is True). This means
-no Redis data migration is needed -- existing string values match enum members.
+equal to their string values (e.g., SessionType.PM == "pm" is True).
 
 Usage:
     from config.enums import SessionType, PersonaType, ClassificationType
 
-    if session.session_type == SessionType.CHAT:
+    if session.session_type == SessionType.PM:
         ...
 """
 
@@ -16,9 +15,10 @@ from enum import StrEnum
 
 
 class SessionType(StrEnum):
-    """Discriminator for AgentSession: chat (PM) or dev (developer)."""
+    """Discriminator for AgentSession: pm, teammate, or dev."""
 
-    CHAT = "chat"
+    PM = "pm"
+    TEAMMATE = "teammate"
     DEV = "dev"
 
 

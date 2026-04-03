@@ -4,17 +4,18 @@
 
 All magic strings for session types, persona identifiers, and classification types are centralized as Python `StrEnum` members in `config/enums.py`. This replaces scattered string literals across the codebase with type-safe enum imports.
 
-`StrEnum` inherits from `str`, so enum members compare equal to their string values (`SessionType.CHAT == "chat"` is `True`). No Redis data migration is needed -- existing string values in Redis match enum members transparently.
+`StrEnum` inherits from `str`, so enum members compare equal to their string values (`SessionType.PM == "pm"` is `True`).
 
 ## Enum Types
 
 ### SessionType
 
-Discriminator for AgentSession: chat (PM) or dev (developer).
+Discriminator for AgentSession: pm, teammate, or dev.
 
 | Member | Value | Usage |
 |--------|-------|-------|
-| `SessionType.CHAT` | `"chat"` | ChatSession -- PM persona, orchestration |
+| `SessionType.PM` | `"pm"` | PM session -- PM persona, orchestration, read-only |
+| `SessionType.TEAMMATE` | `"teammate"` | Teammate session -- conversational, informational queries |
 | `SessionType.DEV` | `"dev"` | DevSession -- Dev persona, full permissions |
 
 ### PersonaType
@@ -42,7 +43,7 @@ Intent classification results from the work request classifier.
 from config.enums import SessionType, PersonaType, ClassificationType
 
 # Comparisons
-if session.session_type == SessionType.CHAT:
+if session.session_type == SessionType.PM:
     ...
 
 # Assignments
@@ -51,15 +52,16 @@ _session_type = SessionType.DEV
 # Persona resolution
 persona = resolve_persona(project, chat_title, is_dm)
 if persona == PersonaType.TEAMMATE:
-    session.session_mode = PersonaType.TEAMMATE
+    _session_type = SessionType.TEAMMATE
 ```
 
 ## Backward Compatibility
 
-- `SESSION_TYPE_CHAT` and `SESSION_TYPE_DEV` constants in `models/agent_session.py` are now aliases to `SessionType.CHAT` and `SessionType.DEV`
-- The `session_mode` field on AgentSession stores `PersonaType.TEAMMATE` for teammate sessions. The legacy `qa_mode` boolean and `ChatMode` enum have been removed entirely
-- Environment variables remain string-typed (`SESSION_TYPE` env var still contains `"chat"` or `"dev"`), and `StrEnum` members compare equal to those strings
+- `SESSION_TYPE_PM` and `SESSION_TYPE_DEV` constants in `models/agent_session.py` are aliases to `SessionType.PM` and `SessionType.DEV`
+- The `session_mode` field on AgentSession stores `PersonaType.TEAMMATE` for teammate sessions as a legacy fallback. With `SessionType.TEAMMATE` as a first-class enum value, new code checks `session_type` directly
+- Environment variables remain string-typed (`SESSION_TYPE` env var contains `"pm"`, `"teammate"`, or `"dev"`), and `StrEnum` members compare equal to those strings
 - The `"passthrough"` return value from `classify_work_request()` is not part of `ClassificationType` -- it is a routing-specific value distinct from intent classification
+- A Redis key migration script (`scripts/migrate_session_type_chat_to_pm.py`) handles renaming existing `:chat:` key segments to `:pm:` or `:teammate:`
 
 ## Dashboard Changes
 
@@ -69,15 +71,14 @@ The sessions table column previously labeled "Type" is now "Persona" with displa
 
 | File | Changes |
 |------|---------|
-| `config/enums.py` | Enum definitions (SessionType, PersonaType, ClassificationType) |
-| `models/agent_session.py` | Enum imports, session_mode field |
-| `bridge/telegram_bridge.py` | SessionType for session_type assignment |
+| `config/enums.py` | Enum definitions (SessionType with PM/TEAMMATE/DEV, PersonaType, ClassificationType) |
+| `models/agent_session.py` | Enum imports, factory methods (create_pm, create_teammate), properties (is_pm, is_teammate) |
+| `bridge/telegram_bridge.py` | SessionType routing: PM, TEAMMATE, or DEV based on persona |
 | `bridge/routing.py` | PersonaType, ClassificationType, `resolve_persona()` |
 | `bridge/summarizer.py` | session_mode checks with PersonaType.TEAMMATE |
-| `agent/sdk_client.py` | SessionType, PersonaType for comparisons |
-| `agent/agent_session_queue.py` | SessionType defaults, session_mode reads |
-| `agent/hooks/pre_tool_use.py` | SessionType for env var comparison |
-| `tools/job_scheduler.py` | SessionType for choices and defaults |
-| `ui/data/sdlc.py` | Renamed display function, unified badge colors |
-| `ui/data/machine.py` | PersonaType for sort ordering |
-| `ui/templates/_partials/sessions_table.html` | Column rename, badge updates |
+| `agent/sdk_client.py` | SessionType.PM and SessionType.TEAMMATE for routing |
+| `agent/agent_session_queue.py` | SessionType.PM defaults, TEAMMATE detection |
+| `agent/hooks/pre_tool_use.py` | SessionType.PM for env var comparison |
+| `tools/agent_session_scheduler.py` | SessionType choices include PM, TEAMMATE, DEV |
+| `ui/data/sdlc.py` | Display function handles "pm", "teammate", "dev" |
+| `scripts/migrate_session_type_chat_to_pm.py` | Redis key migration: `:chat:` -> `:pm:` or `:teammate:` |

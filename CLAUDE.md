@@ -233,7 +233,8 @@ Telegram → Python Bridge (Telethon) → ChatSession (read-only, PM persona)
 ```
 
 **Session Types** (see `docs/features/chat-dev-session-architecture.md`):
-- **ChatSession** (`session_type="chat"`) - Orchestrates work, PM persona, read-only
+- **PM Session** (`session_type="pm"`) - Orchestrates work, PM persona, read-only
+- **Teammate Session** (`session_type="teammate"`) - Conversational, Teammate persona
 - **DevSession** (`session_type="dev"`) - Does coding work, Dev persona, full permissions
 - **Nudge loop** - Bridge output routing (deliver or nudge, no SDLC awareness)
 

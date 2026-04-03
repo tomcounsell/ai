@@ -24,7 +24,7 @@ class TestDevSessionCreation:
         parent_session_id = f"chat_parent_{ts}"
 
         # Create a parent ChatSession first
-        parent = AgentSession.create_chat(
+        parent = AgentSession.create_pm(
             session_id=parent_session_id,
             project_key="valor",
             working_dir="/tmp/test",
@@ -79,7 +79,7 @@ class TestDevSessionCompletion:
         parent_sid = f"parent_completion_{ts}"
 
         # Create parent ChatSession
-        AgentSession.create_chat(
+        AgentSession.create_pm(
             session_id=parent_sid,
             project_key="valor",
             working_dir="/tmp/test",
@@ -124,7 +124,7 @@ class TestDevSessionCompletion:
         ts = int(time.time())
         parent_sid = f"parent_guard_{ts}"
 
-        AgentSession.create_chat(
+        AgentSession.create_pm(
             session_id=parent_sid,
             project_key="valor",
             working_dir="/tmp/test",
@@ -169,7 +169,7 @@ class TestDevSessionCompletion:
         ts = int(time.time())
         parent_sid = f"parent_multi_{ts}"
 
-        AgentSession.create_chat(
+        AgentSession.create_pm(
             session_id=parent_sid,
             project_key="valor",
             working_dir="/tmp/test",
