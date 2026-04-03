@@ -2,6 +2,57 @@
 
 You are the merge gate for the SDLC pipeline. Your job is to programmatically verify all prerequisites are met, then execute the merge.
 
+## Pre-Merge Pipeline Check
+
+Before running gate checks, take a moment to review what the pipeline actually completed. Run this and share the output with the user:
+
+```bash
+BRANCH=$(gh pr view $ARGUMENTS --json headRefName -q .headRefName)
+SLUG=$(echo "$BRANCH" | sed 's|^session/||')
+
+python3 -c "
+from bridge.pipeline_graph import DISPLAY_STAGES
+
+# Try programmatic state machine first
+try:
+    from bridge.pipeline_state import PipelineStateMachine
+    from models.agent_session import AgentSession
+    session = AgentSession.get_by_slug('$SLUG')
+    if session:
+        sm = PipelineStateMachine(session)
+        states = sm.get_display_progress()
+    else:
+        states = {}
+except Exception:
+    states = {}
+
+# Show pipeline progress
+icons = {'completed': '✓', 'in_progress': '~', 'failed': '✗'}
+stages_display = []
+skipped = []
+for stage in DISPLAY_STAGES:
+    if stage == 'MERGE':
+        continue
+    status = states.get(stage, 'pending')
+    icon = icons.get(status, '·')
+    stages_display.append(f'{icon} {stage}')
+    if status in ('pending', 'ready'):
+        skipped.append(stage)
+
+print('Pipeline: ' + '  '.join(stages_display))
+if skipped:
+    print()
+    names = ', '.join(skipped)
+    print(f'⚠ These stages appear to have been skipped: {names}')
+    print('Are you sure you want to merge without completing them?')
+else:
+    print()
+    print('All stages completed. Good to merge.')
+"
+```
+
+If stages were skipped, pause and confirm with the user before proceeding. The user may have good reasons — respect their judgment — but make sure they saw what was skipped.
+
 ## Prerequisites Check
 
 Use the pipeline state machine to verify TEST, REVIEW, and DOCS stages are completed:
