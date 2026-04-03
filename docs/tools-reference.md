@@ -139,6 +139,30 @@ python -m tools.agent_session_scheduler cleanup --age 30              # Delete
 
 See `docs/features/agent-session-scheduling.md` for full documentation.
 
+## OfficeCLI
+
+Standalone binary at `~/.local/bin/officecli` for creating, reading, and editing Office documents (.docx, .xlsx, .pptx). No dependencies, no Office installation needed. Installed and updated automatically by the update system (`scripts/update/officecli.py`).
+
+```bash
+# Create files
+officecli create report.docx
+officecli create data.xlsx
+officecli create slides.pptx
+
+# Read and inspect
+officecli view report.docx outline       # Document structure
+officecli view report.docx stats         # Page/word/shape counts
+officecli get report.docx '/body/p[1]' --json
+
+# Edit
+officecli set data.xlsx /Sheet1/A1 --prop value="Name" --prop bold=true
+officecli add slides.pptx /slide[1] --type shape --prop text="Revenue grew 25%"
+```
+
+Strategy: L1 (read) then L2 (DOM edit) then L3 (raw XML). Use `--json` for structured output. Run `officecli <format> set` for help on available properties.
+
+See `.claude/skills/officecli/SKILL.md` for the full agent reference.
+
 ## Image Tools
 
 Installed CLI commands via `pip install -e .`
