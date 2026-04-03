@@ -65,6 +65,7 @@ DevSession completes
   -> _extract_output_tail(input_data)    # last ~500 chars from transcript
   -> sm.classify_outcome(stage, stop_reason, output_tail)
       |
+      +-- Tier 0: Parse <!-- OUTCOME {...} --> contract -> "success" / "fail" / "partial"
       +-- Tier 1: SDK stop_reason != "end_turn" -> "fail"
       +-- Tier 2: Deterministic tail patterns scoped by stage -> "success" / "fail"
       +-- Default: "ambiguous"
@@ -72,6 +73,8 @@ DevSession completes
       "success" or "ambiguous" -> sm.complete_stage()
       "fail" or "partial"      -> sm.fail_stage()
 ```
+
+Tier 0 parses structured OUTCOME contracts that skills emit (e.g., `/do-pr-review` emits `<!-- OUTCOME {"status":"partial",...} -->`). This enables the `("REVIEW", "partial") -> PATCH` routing edge for tech debt and nit findings. See `docs/features/pipeline-state-machine.md` for the full three-tier classification reference.
 
 ### Failure Routing via Pipeline Graph
 
@@ -81,6 +84,7 @@ When `fail_stage()` fires, the pipeline graph (`PIPELINE_EDGES` in `bridge/pipel
 |---------------|---------|------------|
 | TEST | fail | PATCH |
 | REVIEW | fail | PATCH |
+| REVIEW | partial | PATCH |
 | PATCH | success | TEST |
 | PATCH | fail | TEST |
 

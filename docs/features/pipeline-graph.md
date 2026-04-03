@@ -90,9 +90,12 @@ As of PR #601, the pipeline graph is fully wired into the runtime execution path
 
 ### Outcome Classification
 
-When a DevSession completes, the `subagent_stop_hook` calls `classify_outcome(stage, stop_reason, output_tail)` on the PipelineStateMachine. This uses a two-tier approach:
-1. SDK stop_reason: anything other than "end_turn" is a process failure
-2. Deterministic tail patterns scoped by stage (e.g., "changes requested" in REVIEW output -> fail)
+When a DevSession completes, the `subagent_stop_hook` calls `classify_outcome(stage, stop_reason, output_tail)` on the PipelineStateMachine. This uses a three-tier approach:
+1. **Tier 0**: Parse `<!-- OUTCOME {...} -->` contracts from output (structured status from skills)
+2. **Tier 1**: SDK stop_reason — anything other than "end_turn" is a process failure
+3. **Tier 2**: Deterministic tail patterns scoped by stage (fallback when no OUTCOME contract)
+
+Tier 0 enables the `("REVIEW", "partial")` edge: when `/do-pr-review` finds tech debt or nits, it emits `status: "partial"`, routing to PATCH instead of DOCS.
 
 The result routes to `complete_stage()` (success/ambiguous) or `fail_stage()` (fail/partial), which triggers the appropriate graph edge.
 
