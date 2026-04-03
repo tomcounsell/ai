@@ -1,6 +1,6 @@
 # PM Telegram Tool
 
-ChatSession (the PM persona) composes and sends its own Telegram messages directly, bypassing the summarizer. This gives the PM full control over tone and content when communicating with stakeholders. Supports both text messages and file attachments (screenshots, documents, images).
+ChatSession (the PM persona) composes and sends its own Telegram messages directly, bypassing the summarizer. This gives the PM full control over tone and content when communicating with stakeholders. Supports text messages, single file attachments, and multi-file albums (up to 10 files grouped as a Telegram album).
 
 ## Architecture
 
@@ -17,6 +17,7 @@ ChatSession (Claude Code subprocess)
     |
     | python tools/send_telegram.py "message text"
     | python tools/send_telegram.py "caption" --file /path/to/file.png
+    | python tools/send_telegram.py "album" --file a.png --file b.png --file c.png
     v
 Redis list: telegram:outbox:{session_id}
     |
@@ -29,8 +30,8 @@ Telethon send_markdown() or send_file() -> Telegram
 
 | Component | File | Purpose |
 |-----------|------|---------|
-| Send tool | `tools/send_telegram.py` | CLI script called by ChatSession via Bash. Validates input, applies linkification, enforces 4096-char limit, pushes to Redis queue. Supports `--file` for attachments. |
-| Bridge relay | `bridge/telegram_relay.py` | Async task in the bridge event loop. Polls `telegram:outbox:*` keys, sends via Telethon (`send_markdown` for text, `send_file` for attachments), records message IDs on AgentSession. |
+| Send tool | `tools/send_telegram.py` | CLI script called by ChatSession via Bash. Validates input, applies linkification, enforces 4096-char limit, pushes to Redis queue. Supports `--file` for single attachments and multi-file albums (repeatable, max 10 files). |
+| Bridge relay | `bridge/telegram_relay.py` | Async task in the bridge event loop. Polls `telegram:outbox:*` keys, sends via Telethon (`send_markdown` for text, `send_file` for single files or albums), records message IDs on AgentSession. Normalizes legacy `file_path` payloads to `file_paths` for backward compatibility. |
 | Formatting | `bridge/formatting.py` | Shared `linkify_references()` utility extracted from the summarizer. Converts `PR #N` and `Issue #N` to markdown links. |
 | Summarizer bypass | `bridge/response.py` | Before calling the summarizer, checks `session.has_pm_messages()`. If the PM already sent messages, skips summarizer and returns True. |
 | AgentSession field | `models/agent_session.py` | `pm_sent_message_ids` ListField tracks Telegram message IDs sent by the PM during a session. Helper methods: `record_pm_message()`, `has_pm_messages()`. |
@@ -38,26 +39,29 @@ Telethon send_markdown() or send_file() -> Telegram
 
 ## File Attachments
 
-The PM tool supports sending file attachments (screenshots, documents, images) alongside or instead of text messages.
+The PM tool supports sending file attachments (screenshots, documents, images) alongside or instead of text messages. Multiple `--file` flags send files as a Telegram album (max 10 files).
 
 ### Usage
 
 ```bash
-# Text with file attachment
+# Text with single file attachment
 python tools/send_telegram.py "Caption text" --file /path/to/screenshot.png
 
 # File only (no caption)
 python tools/send_telegram.py --file /path/to/document.pdf
+
+# Multi-file album (grouped as one Telegram album message)
+python tools/send_telegram.py "PR review screenshots" --file before.png --file during.png --file after.png
 ```
 
-Telethon's `send_file()` auto-detects the media type, so a single `--file` flag handles images, documents, audio, and video.
+Telethon's `send_file()` auto-detects the media type. When multiple files are provided, Telethon sends them as a native album (grouped media).
 
 ### Flow
 
-1. ChatSession calls `python tools/send_telegram.py "caption" --file /path/to/file`
-2. `send_telegram.py` validates the file exists, resolves the absolute path, and includes `file_path` in the Redis queue payload
-3. `telegram_relay.py` detects `file_path` in the payload and uses `client.send_file()` instead of `send_markdown()`
-4. If the file is missing at relay time (deleted between queue and send), the relay logs a warning and falls back to text-only delivery
+1. ChatSession calls `python tools/send_telegram.py "caption" --file /path/to/file [--file /path/to/file2 ...]`
+2. `send_telegram.py` validates all files exist, resolves absolute paths, enforces the 10-file album limit, and includes `file_paths` (list) in the Redis queue payload
+3. `telegram_relay.py` detects `file_paths` in the payload and uses `client.send_file()` with the file list for album sends or a single file for single attachments
+4. If any files are missing at relay time, the relay filters them out and sends the available files. If no files remain, it falls back to text-only delivery
 
 ### Error Handling for Files
 
@@ -65,7 +69,8 @@ Telethon's `send_file()` auto-detects the media type, so a single `--file` flag 
 |---------|----------|
 | `--file` with nonexistent path | Tool exits with code 1 and error message |
 | `--file` with empty string | Tool exits with code 1 and error message |
-| File deleted between queue and relay | Relay falls back to text-only send, logs warning |
+| More than 10 `--file` flags | Tool exits with code 1, citing the album limit |
+| File deleted between queue and relay | Relay filters missing files, sends available ones; falls back to text-only if none remain |
 | `send_file()` failure | Message re-pushed to queue tail for retry |
 
 ## IPC Mechanism: Redis Queue
@@ -79,7 +84,7 @@ ChatSession runs as a Claude Code subprocess and cannot access the bridge's Tele
   - `chat_id` (string) -- target Telegram chat ID
   - `reply_to` (int or null) -- message ID to reply to
   - `text` (string) -- message content, already linkified and length-checked
-  - `file_path` (string, optional) -- absolute path to a file attachment
+  - `file_paths` (list of strings, optional) -- absolute paths to file attachments (max 10 for album sends). Legacy `file_path` (string) payloads are normalized by the relay for backward compatibility.
   - `session_id` (string) -- session ID for routing
   - `timestamp` (float) -- Unix timestamp when queued
 - **TTL**: 1 hour, set by the tool as a safety net for crashed sessions
@@ -122,7 +127,8 @@ The following environment variables are injected by `sdk_client.py` for chat-typ
 | Missing `TELEGRAM_CHAT_ID` | Tool exits with error explaining it is only available in ChatSession context |
 | Empty message text (no file) | Tool rejects with clear error |
 | `--file` with nonexistent path | Tool exits with code 1 and descriptive error |
-| File missing at relay time | Relay falls back to text-only, logs warning |
+| More than 10 `--file` flags | Tool exits with code 1, citing the album limit |
+| File(s) missing at relay time | Relay filters missing files, sends available ones; falls back to text-only if none remain |
 | Telethon send failure in relay | Message re-pushed to queue tail for retry; logged as error |
 | AgentSession save failure | Non-fatal warning; message is still delivered to Telegram |
 | Malformed queue entry | Skipped and logged; relay continues processing |
@@ -131,6 +137,7 @@ The following environment variables are injected by `sdk_client.py` for chat-typ
 
 - Issue: [#497](https://github.com/tomcounsell/ai/issues/497) (initial text-only PM tool)
 - Issue: [#641](https://github.com/tomcounsell/ai/issues/641) (file attachment support)
+- Issue: [#644](https://github.com/tomcounsell/ai/issues/644) (multi-file album support)
 - Plan: `docs/plans/pm-telegram-tool.md`
 - Prior art on summarizer architecture: PR #275 (semantic session routing), PR #456 (summarizer evidence hardening)
 - [Summarizer Format](summarizer-format.md) -- the existing summarizer that this feature partially bypasses
