@@ -2,7 +2,6 @@
 name: new-audit-skill
 description: "Use when creating a new audit skill for validating code, configuration, or documentation quality. Also use when the user says 'create an audit', 'new audit skill', 'add an audit', 'make an audit for', or 'I want to check X for problems'. Generates audit skills that follow established patterns from audit-models, audit-next-tool, do-docs-audit, and do-skills-audit. Make sure to use this skill whenever someone wants systematic validation of any codebase artifact."
 allowed-tools: Read, Write, Edit, Glob, Grep, Bash
-disable-model-invocation: true
 argument-hint: "<subject-to-audit>"
 ---
 
