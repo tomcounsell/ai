@@ -342,8 +342,12 @@ def _resolve_persona_display(session) -> str | None:
         return None
     if raw == "dev":
         return "Developer"
-    if raw == "chat":
+    if raw == "pm":
         return "Project Manager"
+    if raw == "teammate":
+        return "Teammate"
+    if raw == "chat":
+        return "Project Manager"  # Legacy fallback for pre-migration sessions
     return _safe_str(raw)
 
 

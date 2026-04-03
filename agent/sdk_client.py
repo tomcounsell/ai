@@ -922,12 +922,12 @@ class ValorAgent:
         # own messages via tools/send_telegram.py (issue #497).
         # chat_id comes from the project config; reply_to is resolved from
         # the AgentSession's telegram_message_id in _extract_sdlc_env_vars below.
-        if self.session_type == SessionType.CHAT and self.chat_id:
+        if self.session_type in (SessionType.PM, SessionType.TEAMMATE) and self.chat_id:
             env["TELEGRAM_CHAT_ID"] = str(self.chat_id)
 
         # PM sessions: inject Sentry auth token so sentry-cli works without
         # manual export. Token is stored in ~/Desktop/Valor/.env (iCloud-synced).
-        if self.session_type == SessionType.CHAT:
+        if self.session_type in (SessionType.PM, SessionType.TEAMMATE):
             sentry_env = Path.home() / "Desktop" / "Valor" / ".env"
             if sentry_env.exists():
                 for line in sentry_env.read_text().splitlines():
@@ -1501,11 +1501,11 @@ async def get_agent_response_sdk(
         if github_org and github_repo:
             enriched_message += f"\nGITHUB: {github_org}/{github_repo}"
 
-    # ChatSession routing: classify intent and choose Teammate or PM dispatch path.
+    # PM/Teammate routing: classify intent and choose Teammate or PM dispatch path.
     # Teammate mode answers informational queries directly without spawning DevSession.
     _teammate_mode = False
     _classification_context = ""  # Advisory routing context for the agent
-    if _session_type == SessionType.CHAT:
+    if _session_type in (SessionType.PM, SessionType.TEAMMATE):
         # Config-driven persona bypass: skip classifier when persona is already known
         from bridge.routing import resolve_persona as _resolve_persona_mode
 
@@ -1655,9 +1655,11 @@ async def get_agent_response_sdk(
     )
     wr_label = "yes" if has_worker_rules else "no (pm mode)"
     is_dm = chat_title is None
-    # ChatSession always uses PM persona; otherwise resolve from config
-    if _session_type == SessionType.CHAT:
+    # PM session always uses PM persona; Teammate uses Teammate; otherwise resolve from config
+    if _session_type == SessionType.PM:
         persona = PersonaType.PROJECT_MANAGER
+    elif _session_type == SessionType.TEAMMATE:
+        persona = PersonaType.TEAMMATE
     else:
         persona = _resolve_persona(project, chat_title, is_dm=is_dm)
     logger.info(
@@ -1674,15 +1676,15 @@ async def get_agent_response_sdk(
         logger.info(f"[{request_id}] Resolved persona: {persona}")
 
         # Build system prompt based on persona and project mode.
-        # ChatSession (session_type="chat") uses PM persona with read-only permissions.
+        # PM session (session_type="pm") uses PM persona with read-only permissions.
         custom_system_prompt = None
         _permission_mode = "bypassPermissions"  # Default: full permissions
 
-        if _session_type == SessionType.CHAT:
-            # ChatSession: PM persona, full permissions but hook-restricted.
+        if _session_type == SessionType.PM:
+            # PM session: PM persona, full permissions but hook-restricted.
             # Can write to docs/ and use gh CLI. Code writes blocked by pre_tool_use hook.
             custom_system_prompt = load_pm_system_prompt(working_dir)
-            logger.info(f"[{request_id}] ChatSession mode: PM persona, bypassPermissions")
+            logger.info(f"[{request_id}] PM session mode: PM persona, bypassPermissions")
         elif project_mode == "pm":
             # PM mode: use PM system prompt (no WORKER_RULES, loads work-vault CLAUDE.md)
             custom_system_prompt = load_pm_system_prompt(working_dir)
@@ -1732,7 +1734,7 @@ async def get_agent_response_sdk(
         logger.info(f"[{request_id}] SDK responded in {elapsed:.1f}s ({len(response)} chars)")
 
         # Record response time metric for Teammate observability
-        if _session_type == SessionType.CHAT:
+        if _session_type in (SessionType.PM, SessionType.TEAMMATE):
             try:
                 from agent.teammate_metrics import record_response_time
 

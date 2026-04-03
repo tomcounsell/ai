@@ -192,7 +192,7 @@ async def _push_agent_session(
     scheduled_at: datetime | float | None = None,
     parent_agent_session_id: str | None = None,
     telegram_message_key: str | None = None,
-    session_type: str = SessionType.CHAT,
+    session_type: str = SessionType.PM,
     scheduling_depth: int = 0,  # ignored, now derived
     depends_on: list[str] | None = None,  # ignored, removed
     **_kwargs,
@@ -1481,7 +1481,7 @@ async def enqueue_agent_session(
     scheduled_at: float | None = None,
     parent_agent_session_id: str | None = None,
     telegram_message_key: str | None = None,
-    session_type: str = SessionType.CHAT,
+    session_type: str = SessionType.PM,
     scheduling_depth: int = 0,  # ignored, now derived
 ) -> int:
     """
@@ -2024,7 +2024,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # Use reduced nudge cap for Teammate sessions
         _effective_nudge_cap = MAX_NUDGE_COUNT
         if agent_session:
-            if getattr(agent_session, "session_mode", None) == PersonaType.TEAMMATE:
+            if getattr(agent_session, "session_type", None) == SessionType.TEAMMATE or getattr(agent_session, "session_mode", None) == PersonaType.TEAMMATE:
                 from agent.teammate_handler import TEAMMATE_MAX_NUDGE_COUNT
 
                 _effective_nudge_cap = TEAMMATE_MAX_NUDGE_COUNT
@@ -2322,7 +2322,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # Teammate sessions: clear the processing reaction instead of setting completion emoji
         if (
             agent_session
-            and getattr(agent_session, "session_mode", None) == PersonaType.TEAMMATE
+            and (getattr(agent_session, "session_type", None) == SessionType.TEAMMATE or getattr(agent_session, "session_mode", None) == PersonaType.TEAMMATE)
             and not task.error
         ):
             emoji = None  # Clear reaction

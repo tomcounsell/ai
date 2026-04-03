@@ -1470,8 +1470,13 @@ async def main():
             logger.info(
                 f"[{project_name}] Dev mode (config-driven): {chat_title!r} → session_type=dev"
             )
+        elif _persona == PersonaType.TEAMMATE:
+            _session_type = SessionType.TEAMMATE  # Teammate — conversational, no SDLC
+            logger.info(
+                f"[{project_name}] Teammate mode (config-driven): {chat_title!r} → session_type=teammate"
+            )
         else:
-            _session_type = SessionType.CHAT  # ChatSession — PM persona, handles SDLC and Teammate
+            _session_type = SessionType.PM  # PM session — PM persona, handles SDLC
 
         # Enqueue: session_type drives ChatSession vs DevSession creation.
         depth = await enqueue_agent_session(
