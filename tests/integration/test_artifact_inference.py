@@ -22,7 +22,6 @@ import pytest
 from bridge.pipeline_graph import DISPLAY_STAGES
 from bridge.pipeline_state import PipelineStateMachine
 
-
 # ---------------------------------------------------------------------------
 # Fixtures -- dynamic artifact discovery
 # ---------------------------------------------------------------------------
@@ -62,10 +61,15 @@ def merged_pr_slug():
     try:
         result = subprocess.run(
             [
-                "gh", "pr", "list",
-                "--state", "merged",
-                "--limit", "20",
-                "--json", "headRefName,number",
+                "gh",
+                "pr",
+                "list",
+                "--state",
+                "merged",
+                "--limit",
+                "20",
+                "--json",
+                "headRefName,number",
             ],
             capture_output=True,
             text=True,
@@ -96,9 +100,12 @@ def merged_pr_data(merged_pr_slug):
     try:
         result = subprocess.run(
             [
-                "gh", "pr", "view",
+                "gh",
+                "pr",
+                "view",
                 f"session/{merged_pr_slug}",
-                "--json", "number,reviewDecision,state,statusCheckRollup,files",
+                "--json",
+                "number,reviewDecision,state,statusCheckRollup,files",
             ],
             capture_output=True,
             text=True,
