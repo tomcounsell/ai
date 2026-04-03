@@ -38,7 +38,7 @@ class TestJudgeConfig:
     def test_default_config(self):
         """Test default configuration values."""
         config = JudgeConfig()
-        assert config.model == "gemma2:3b"
+        assert config.model == "gemma4:e2b"
         assert config.temperature == 0.1
         assert config.strict_mode is True
         assert config.fallback_to_heuristics is True

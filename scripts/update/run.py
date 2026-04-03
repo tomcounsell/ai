@@ -422,7 +422,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     # Step 4: Ollama model (full mode only)
     if config.do_ollama:
         log("Checking Ollama model...", v)
-        ollama_model = os.getenv("OLLAMA_SUMMARIZER_MODEL", "qwen3:4b")
+        ollama_model = os.getenv("OLLAMA_SUMMARIZER_MODEL", "gemma4:e2b")
         ollama_check = verify.check_ollama(ollama_model)
 
         if not ollama_check.available:

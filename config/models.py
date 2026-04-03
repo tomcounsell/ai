@@ -88,8 +88,8 @@ OPENROUTER_KIMI_K2_5 = "moonshotai/kimi-k2.5"
 # Qwen3 32B - Good code understanding, ultra-cheap
 OPENROUTER_QWEN3_32B = "qwen/qwen3-32b"
 
-# Gemma 3 27B - Free tier option
-OPENROUTER_GEMMA3_FREE = "google/gemma-3-27b-it:free"
+# Gemma 4 E2B - Free tier option, multimodal, 128K context
+OPENROUTER_GEMMA4_FREE = "google/gemma-4-e2b:free"
 
 
 # =============================================================================

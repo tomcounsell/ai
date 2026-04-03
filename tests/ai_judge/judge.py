@@ -29,7 +29,7 @@ class JudgmentScore(Enum):
 class JudgeConfig:
     """Configuration for AI judge."""
 
-    model: str = "gemma2:3b"  # Local model for speed
+    model: str = "gemma4:e2b"  # Local model for speed
     temperature: float = 0.1  # Low for consistency
     strict_mode: bool = True  # High quality standards
     custom_criteria: list[str] | None = None
@@ -104,7 +104,7 @@ def _call_openrouter(prompt: str, config: JudgeConfig) -> str | None:
                 "Content-Type": "application/json",
             },
             json={
-                "model": "google/gemma-2-9b-it:free",
+                "model": "google/gemma-4-e2b:free",
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": config.temperature,
             },
