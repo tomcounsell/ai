@@ -116,8 +116,7 @@ def send_message(text: str, file_paths: list[str] | None = None) -> None:
 
         if missing:
             print(
-                "Error: File(s) not found:\n"
-                + "\n".join(f"  {f}" for f in missing),
+                "Error: File(s) not found:\n" + "\n".join(f"  {f}" for f in missing),
                 file=sys.stderr,
             )
             sys.exit(1)

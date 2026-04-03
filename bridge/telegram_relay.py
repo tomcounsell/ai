@@ -119,12 +119,12 @@ async def _send_queued_message(
             else:
                 # All files missing -- fall back to text-only
                 logger.warning(
-                    "Relay: all files missing at send time. "
-                    "Falling back to text-only send."
+                    "Relay: all files missing at send time. Falling back to text-only send."
                 )
                 if not text:
                     logger.warning(
-                        f"Relay: all files missing and no text -- skipping message to chat {chat_id}"
+                        f"Relay: all files missing and no text "
+                        f"-- skipping message to chat {chat_id}"
                     )
                     return None
 
