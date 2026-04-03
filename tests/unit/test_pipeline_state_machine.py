@@ -618,14 +618,18 @@ class TestClassifyOutcomeContract:
         """Valid OUTCOME block with status=partial returns partial."""
         session = _make_session()
         sm = PipelineStateMachine(session)
-        tail = 'Review done. <!-- OUTCOME {"status":"partial","stage":"REVIEW","artifacts":{"findings":3}} -->'
+        tail = (
+            "Review done. "
+            '<!-- OUTCOME {"status":"partial","stage":"REVIEW",'
+            '"artifacts":{"findings":3}} -->'
+        )
         assert sm.classify_outcome("REVIEW", "end_turn", tail) == "partial"
 
     def test_malformed_json_falls_through(self):
         """Malformed JSON in OUTCOME block falls through to Tier 2."""
         session = _make_session()
         sm = PipelineStateMachine(session)
-        tail = '<!-- OUTCOME {not valid json} --> 42 passed, 0 warnings'
+        tail = "<!-- OUTCOME {not valid json} --> 42 passed, 0 warnings"
         assert sm.classify_outcome("TEST", "end_turn", tail) == "success"
 
     def test_missing_status_key_falls_through(self):
@@ -681,19 +685,15 @@ class TestClassifyOutcomeContract:
         sm = PipelineStateMachine(session)
         assert sm.classify_outcome("BUILD", "end_turn", "") == "ambiguous"
 
-    def test_sdk_failure_overrides_outcome(self):
-        """Non-end_turn stop_reason still classified as fail even with OUTCOME success.
+    def test_outcome_contract_takes_priority_over_sdk_failure(self):
+        """Tier 0 (OUTCOME contract) fires before Tier 1 (SDK stop_reason).
 
-        Tier 1 (SDK stop_reason) fires before Tier 0 only when stop_reason != end_turn.
-        Actually, Tier 0 fires first, but let's verify the priority is correct.
+        Even with a non-end_turn stop_reason like "timeout", a valid OUTCOME
+        contract in the output takes priority and returns its status.
         """
         session = _make_session()
         sm = PipelineStateMachine(session)
         tail = '<!-- OUTCOME {"status":"success","stage":"BUILD"} -->'
-        # With a timeout stop_reason, Tier 0 finds the OUTCOME first and returns success
-        # Wait -- let me re-read the implementation. Tier 0 fires first, then Tier 1.
-        # So OUTCOME contract takes priority even over stop_reason failures.
-        # This is the intended design per the plan: "parse OUTCOME first"
         result = sm.classify_outcome("BUILD", "timeout", tail)
         assert result == "success"
 
