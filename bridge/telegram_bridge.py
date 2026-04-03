@@ -1033,15 +1033,21 @@ async def main():
         # 1. 👀 Eyes = Message received/acknowledged
         await set_reaction(client, event.chat_id, message.id, REACTION_RECEIVED)
 
-        # 2. Embedding-based emoji selection (fast, <50ms after cache warm)
-        try:
-            from tools.emoji_embedding import find_best_emoji_for_message
+        # 2. Embedding-based emoji selection (fire-and-forget async task)
+        # find_best_emoji_for_message makes a synchronous HTTP call for embeddings,
+        # so we run it in a thread to avoid blocking the Telethon event loop.
+        async def select_and_set_emoji_reaction():
+            """Select contextual emoji via embedding similarity and set as reaction."""
+            try:
+                from tools.emoji_embedding import find_best_emoji_for_message
 
-            emoji = find_best_emoji_for_message(clean_text)
-            await set_reaction(client, event.chat_id, message.id, emoji)
-            logger.debug(f"Embedding emoji selected: {emoji}")
-        except Exception as e:
-            logger.debug(f"Embedding emoji selection failed (non-fatal): {e}")
+                emoji = await asyncio.to_thread(find_best_emoji_for_message, clean_text)
+                await set_reaction(client, event.chat_id, message.id, emoji)
+                logger.debug(f"Embedding emoji selected: {emoji}")
+            except Exception as e:
+                logger.debug(f"Embedding emoji selection failed (non-fatal): {e}")
+
+        asyncio.create_task(select_and_set_emoji_reaction())
 
         # 3. Work-type classification (separate async task, non-blocking)
         classification_result = {}  # Mutable container for async classification result
