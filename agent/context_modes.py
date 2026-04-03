@@ -123,9 +123,9 @@ def build_minimal_context(request: ContextRequest) -> str:
 
 
 def build_steering_context(request: ContextRequest) -> str:
-    """Build steering context — minimal state for nudge loop coaching.
+    """Build steering context — minimal state for nudge loop feedback.
 
-    Use case: nudge/coaching messages that need to know what stage
+    Use case: nudge/feedback messages that need to know what stage
     the pipeline is in, what is done, and any recent human messages.
     Approximate target: ~300 tokens.
     """

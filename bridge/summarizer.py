@@ -161,7 +161,7 @@ class ClassificationResult:
     confidence: float  # 0.0-1.0
     reason: str  # Brief explanation
     was_rejected_completion: bool = False  # True when COMPLETION → STATUS_UPDATE downgrade
-    coaching_message: str | None = None  # LLM-generated coaching for rejected completions
+    nudge_feedback: str | None = None  # LLM-generated feedback for rejected completions
     has_workarounds: bool = False  # True when agent encountered problems it worked around
 
 
@@ -277,13 +277,13 @@ You classify developer agent output to determine if human input is needed.
 
 Respond with ONLY a JSON object — no markdown, no explanation, no extra text:
 {"type": "question|status|completion|blocker|error", \
-"confidence": 0.95, "reason": "brief explanation", "coaching_message": null, \
+"confidence": 0.95, "reason": "brief explanation", "nudge_feedback": null, \
 "has_workarounds": false}
 
-The coaching_message field is REQUIRED in your response. Set it to a helpful string \
+The nudge_feedback field is REQUIRED in your response. Set it to a helpful string \
 when you classify as "status" and the output LOOKS like a completion attempt but \
-lacks evidence (i.e., you are downgrading a completion to status). The coaching \
-message should explain what was missing and what the agent should include next time. \
+lacks evidence (i.e., you are downgrading a completion to status). The nudge \
+feedback should explain what was missing and what the agent should include next time. \
 Set it to null for all other classifications.
 
 The has_workarounds field detects when the agent encountered problems, errors, or \
@@ -341,7 +341,7 @@ direct answers to "how does X work?" or "what is X?" questions
   IMPORTANT: If the output explains a system, answers a question, or provides information \
 the user asked for — that is COMPLETION, not STATUS_UPDATE. The user asked, the agent answered.
 
-  NOT completion (classify as STATUS_UPDATE instead, and provide a coaching_message):
+  NOT completion (classify as STATUS_UPDATE instead, and provide a nudge_feedback):
   - "Done" or "Complete" without any evidence (for work tasks)
   - "Should work now" (hedging = not verified)
   - "Committed and pushed" without test results
@@ -356,30 +356,30 @@ ERROR — Something failed or broke.
   Examples: "Error: ModuleNotFoundError", "Build failed with exit code 1", "Tests failing: 3 errors"
   Key signals: "error:", "failed:", exception names, non-zero exit codes
 
-Few-shot examples of coaching_message for downgraded completions:
+Few-shot examples of nudge_feedback for downgraded completions:
 
 Input: "I think the bug is fixed now. Should work."
 Output: {"type": "status", "confidence": 0.92, "reason": "Hedging language without verification", \
-"coaching_message": "You used hedging language ('I think', 'should work') which signals \
+"nudge_feedback": "You used hedging language ('I think', 'should work') which signals \
 uncertainty. Run the reproduction steps or tests and share the actual output to confirm the fix."}
 
 Input: "All tests pass. Task complete."
 (but no test output shown)
 Output: {"type": "status", "confidence": 0.90, "reason": "Claims tests pass but shows no output", \
-"coaching_message": "You claimed tests pass but didn't include the test output. Run pytest and \
+"nudge_feedback": "You claimed tests pass but didn't include the test output. Run pytest and \
 paste the results showing pass/fail counts so completion can be verified."}
 
 Input: "Fixed the issue and committed. I believe everything is working correctly."
 Output: {"type": "status", "confidence": 0.91, \
 "reason": "Completion claim with hedging, no evidence", \
-"coaching_message": "You said 'I believe everything is working' — \
+"nudge_feedback": "You said 'I believe everything is working' — \
 that's hedging, not evidence. Show the commit hash, test output, \
 and any verification commands you ran."}
 
 Input: "I'll implement a fix for this by adding a check in the hook..."
 Output: {"type": "status", "confidence": 0.93, \
 "reason": "Agent plans to write code outside SDLC pipeline", \
-"coaching_message": "Implementation work should go through /sdlc to ensure proper branch, \
+"nudge_feedback": "Implementation work should go through /sdlc to ensure proper branch, \
 testing, and review. Use /sdlc to create an issue and start the pipeline instead of \
 writing code directly."}
 
@@ -391,21 +391,21 @@ completions and questions are delivered to Telegram. The structured format uses 
 points with stage progress lines for SDLC work."
 Output: {"type": "completion", "confidence": 0.92, \
 "reason": "Factual answer to user question about system architecture", \
-"coaching_message": null, "has_workarounds": false}
+"nudge_feedback": null, "has_workarounds": false}
 
 Input: "There are two root causes: the classifier misclassifies informational answers as status \
 updates because they lack evidence like test output, and the shared Claude Code session \
 causes context to leak between concurrent conversations."
 Output: {"type": "completion", "confidence": 0.93, \
 "reason": "Direct analysis answering user's question about a bug", \
-"coaching_message": null, "has_workarounds": false}
+"nudge_feedback": null, "has_workarounds": false}
 
 Input: "Let me investigate the logs to find out what happened..."
 Output: {"type": "status", "confidence": 0.90, \
 "reason": "Agent describing planned investigation, not yet answering", \
-"coaching_message": null, "has_workarounds": false}
+"nudge_feedback": null, "has_workarounds": false}
 
-Few-shot examples of EMPTY PROMISES (must be classified as status with coaching):
+Few-shot examples of EMPTY PROMISES (must be classified as status with nudge feedback):
 
 CRITICAL CONTEXT: By the time a response reaches Telegram, the agent's session is OVER. \
 There is no future execution. The agent cannot "will do" anything — it has already finished. \
@@ -418,7 +418,7 @@ Otherwise the only honest responses are: "I did X (proof)" or "I didn't do X (wh
 Input: "Will do. I'll update the config next time."
 Output: {"type": "status", "confidence": 0.95, \
 "reason": "Empty promise — agent says 'will do' but session is ending, there is no next time", \
-"coaching_message": "You said 'will do' but your session is about to end — there is no \
+"nudge_feedback": "You said 'will do' but your session is about to end — there is no \
 future execution to fulfill this promise. Either make the change NOW (edit a file, save a \
 memory, update a config) and show evidence, or be honest that you didn't do it.", \
 "has_workarounds": false}
@@ -426,7 +426,7 @@ memory, update a config) and show evidence, or be honest that you didn't do it."
 Input: "Noted. I'll adjust my approach going forward."
 Output: {"type": "status", "confidence": 0.95, \
 "reason": "Empty promise — 'going forward' implies future action but session is ending", \
-"coaching_message": "You said 'going forward' but this session is ending. There is no \
+"nudge_feedback": "You said 'going forward' but this session is ending. There is no \
 'going forward' unless you made a durable change right now. What did you actually change? \
 Show a commit hash, file path, or memory entry — or admit no change was made.", \
 "has_workarounds": false}
@@ -434,7 +434,7 @@ Show a commit hash, file path, or memory entry — or admit no change was made."
 Input: "Updated bridge/summarizer.py to reject empty promises. Committed abc1234."
 Output: {"type": "completion", "confidence": 0.90, \
 "reason": "Concrete action taken with evidence — file path and commit hash", \
-"coaching_message": null, "has_workarounds": false}"""
+"nudge_feedback": null, "has_workarounds": false}"""
 
 # False question detection explained:
 # Many agent outputs contain question-like text that should NOT pause for human input:
@@ -559,7 +559,7 @@ def _classify_with_heuristics(text: str) -> ClassificationResult:
             output_type=OutputType.STATUS_UPDATE,
             confidence=0.90,
             reason="Empty promise — session is ending, 'will do' has no future execution",
-            coaching_message=(
+            nudge_feedback=(
                 "Your session is about to end. You cannot 'will do' anything — "
                 "there is no future execution. Make the change NOW (edit a file, "
                 "save a memory, update a config) and show evidence, or honestly "
@@ -828,13 +828,13 @@ def _parse_classification_response(raw: str) -> ClassificationResult | None:
     except (TypeError, ValueError):
         confidence = 0.5
 
-    # Extract optional coaching_message from LLM response
-    coaching_message = data.get("coaching_message")
-    if coaching_message is not None:
-        coaching_message = str(coaching_message)
+    # Extract optional nudge_feedback from LLM response
+    nudge_feedback = data.get("nudge_feedback")
+    if nudge_feedback is not None:
+        nudge_feedback = str(nudge_feedback)
         # Treat JSON null / empty string as None
-        if not coaching_message or coaching_message == "null":
-            coaching_message = None
+        if not nudge_feedback or nudge_feedback == "null":
+            nudge_feedback = None
 
     # Extract has_workarounds flag
     has_workarounds = bool(data.get("has_workarounds", False))
@@ -843,13 +843,13 @@ def _parse_classification_response(raw: str) -> ClassificationResult | None:
         output_type=output_type,
         confidence=confidence,
         reason=str(reason),
-        coaching_message=coaching_message,
+        nudge_feedback=nudge_feedback,
         has_workarounds=has_workarounds,
     )
 
-    # Detect rejected completions: LLM provided a coaching_message on a
+    # Detect rejected completions: LLM provided a nudge_feedback on a
     # STATUS_UPDATE, meaning it downgraded a completion attempt
-    if result.output_type == OutputType.STATUS_UPDATE and result.coaching_message:
+    if result.output_type == OutputType.STATUS_UPDATE and result.nudge_feedback:
         result.was_rejected_completion = True
 
     return result

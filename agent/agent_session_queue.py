@@ -1788,7 +1788,7 @@ async def _enqueue_nudge(
     task_list_id: str,
     auto_continue_count: int,
     output_msg: str,
-    coaching_message: str = "continue",
+    nudge_feedback: str = "continue",
 ) -> None:
     """Enqueue a nudge by reusing the existing AgentSession.
 
@@ -1804,12 +1804,12 @@ async def _enqueue_nudge(
         task_list_id: Task list ID for sub-agent isolation.
         auto_continue_count: Current nudge count (already incremented).
         output_msg: The agent output that triggered the nudge.
-        coaching_message: Nudge message sent to the agent.
+        nudge_feedback: Nudge message sent to the agent.
     """
 
     logger.info(
         f"[{session.project_key}] Nudge message "
-        f"({len(coaching_message)} chars): {coaching_message[:120]!r}"
+        f"({len(nudge_feedback)} chars): {nudge_feedback[:120]!r}"
     )
 
     # Reuse existing AgentSession instead of creating a new one.
@@ -1842,7 +1842,7 @@ async def _enqueue_nudge(
         # Update initial_telegram_message directly (message_text/sender_name
         # are now consolidated into this DictField)
         itm = fields.get("initial_telegram_message") or {}
-        itm["message_text"] = coaching_message
+        itm["message_text"] = nudge_feedback
         itm["sender_name"] = "System (auto-continue)"
         fields["initial_telegram_message"] = itm
         fields.pop("message_text", None)
@@ -1864,7 +1864,7 @@ async def _enqueue_nudge(
 
     # Direct mutation -- status is an IndexedField, no delete-and-recreate needed.
     session.status = "pending"
-    session.message_text = coaching_message
+    session.message_text = nudge_feedback
     session.auto_continue_count = auto_continue_count
     session.priority = "high"
     session.task_list_id = task_list_id
@@ -2081,7 +2081,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 task_list_id,
                 chat_state.auto_continue_count,
                 msg,
-                coaching_message=NUDGE_MESSAGE,
+                nudge_feedback=NUDGE_MESSAGE,
             )
             chat_state.completion_sent = True
             chat_state.defer_reaction = True
@@ -2098,7 +2098,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 task_list_id,
                 chat_state.auto_continue_count,
                 msg,
-                coaching_message=NUDGE_MESSAGE,
+                nudge_feedback=NUDGE_MESSAGE,
             )
             chat_state.completion_sent = True
             chat_state.defer_reaction = True
