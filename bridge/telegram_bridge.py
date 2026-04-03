@@ -1744,10 +1744,9 @@ async def main():
         _recover_interrupted_agent_sessions_startup,
     )
 
-    # Rebuild AgentSession indexes using SCAN-based rebuild_indexes() instead of
-    # the blocking KEYS-based keys(clean=True). This cleans up stale index entries
-    # (orphans from crashed/expired sessions) and fixes any index corruption.
-    # Per Popoto maintainer guidance: rebuild_indexes() is production-safe (uses SCAN).
+    # Rebuild AgentSession indexes using SCAN-based rebuild_indexes() (production-safe).
+    # This cleans up stale index entries (orphans from crashed/expired sessions)
+    # and fixes any index corruption without blocking the keyspace.
     try:
         from models.agent_session import AgentSession
 
