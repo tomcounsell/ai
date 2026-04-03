@@ -70,11 +70,8 @@ sm.next_stage("success")      # ("TEST", "/do-test")
 sm.has_remaining_stages()     # True if pipeline not complete
 sm.has_failed_stage()         # True if any stage failed
 sm.get_display_progress()     # {stage: status} for DISPLAY_STAGES
+sm.get_display_progress(slug="my-feature")  # fills pending gaps from artifacts
 sm.classify_outcome(stage, stop_reason, output_tail)  # "success"/"fail"/"ambiguous"
-
-# Convenience: start + complete in one shot (for atomic stage completions)
-from bridge.pipeline_state import record_stage_completion
-record_stage_completion(session, "BUILD")
 ```
 
 ## Stage Statuses
@@ -95,6 +92,20 @@ The state machine validates transitions using `PIPELINE_EDGES` from `bridge/pipe
 - ISSUE can always be started (it's the first stage)
 - PATCH can start when TEST or REVIEW has failed/completed
 - TEST can restart after PATCH completes (cycle support)
+
+## Artifact-Based Inference
+
+When `get_display_progress(slug=...)` is called with a slug, the state machine supplements stored state with observable artifact checks. This fills in "pending"/"ready" gaps when hook-based tracking failed silently.
+
+**Inference sources:**
+- **ISSUE/PLAN**: `docs/plans/{slug}.md` file exists on disk
+- **CRITIQUE**: Plan frontmatter contains `status: Ready`
+- **BUILD**: PR exists for branch `session/{slug}` (from `gh pr view`)
+- **TEST**: `statusCheckRollup` contains a passing check with "test" or "ci" in the name
+- **REVIEW**: `reviewDecision` is APPROVED or CHANGES_REQUESTED
+- **DOCS**: PR files array contains entries under `docs/`
+
+All GitHub checks use a single `gh pr view` call with `timeout=5`. Stored state always takes precedence -- artifact inference only fills in gaps where stored status is "pending" or "ready".
 
 ## Outcome Classification
 
@@ -122,7 +133,7 @@ Falls back to `"ambiguous"` for the Observer LLM to handle.
 
 | File | Purpose |
 |------|---------|
-| `bridge/pipeline_state.py` | PipelineStateMachine class + `record_stage_completion()` helper |
+| `bridge/pipeline_state.py` | PipelineStateMachine class with artifact-based inference |
 | `bridge/pipeline_graph.py` | Transition table (PIPELINE_EDGES, DISPLAY_STAGES) |
 | `models/agent_session.py` | `stage_states` field on AgentSession |
 | `agent/hooks/pre_tool_use.py` | `start_stage()` wiring via `_extract_stage_from_prompt()` and `_start_pipeline_stage()` |

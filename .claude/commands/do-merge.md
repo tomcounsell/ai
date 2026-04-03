@@ -20,7 +20,7 @@ try:
     session = AgentSession.get_by_slug('$SLUG')
     if session:
         sm = PipelineStateMachine(session)
-        states = sm.get_display_progress()
+        states = sm.get_display_progress(slug='$SLUG')
     else:
         states = {}
 except Exception:
@@ -74,7 +74,7 @@ if not session:
     exit()
 
 sm = PipelineStateMachine(session)
-states = sm.get_display_progress()
+states = sm.get_display_progress(slug='$SLUG')
 required = ['TEST', 'REVIEW', 'DOCS']
 all_pass = True
 for stage in required:

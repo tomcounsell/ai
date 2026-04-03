@@ -103,22 +103,22 @@ No prerequisites -- this work has no external dependencies. All artifact checks 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `_infer_stage_from_artifacts()` wraps all checks in try/except -- test that a missing plan file, failed `gh` call, or malformed frontmatter returns empty inference (not crash)
-- [ ] `_save()` already logs at warning level -- add a test confirming the warning is emitted when `session.save()` raises
+- [x] `_infer_stage_from_artifacts()` wraps all checks in try/except -- test that a missing plan file, failed `gh` call, or malformed frontmatter returns empty inference (not crash)
+- [x] `_save()` already logs at warning level -- add a test confirming the warning is emitted when `session.save()` raises
 
 ### Empty/Invalid Input Handling
-- [ ] `get_display_progress(slug=None)` returns stored state only (no artifact inference attempted)
-- [ ] `get_display_progress(slug="nonexistent")` returns stored state only (artifact checks find nothing)
-- [ ] Plan file with empty or malformed frontmatter does not crash inference
+- [x] `get_display_progress(slug=None)` returns stored state only (no artifact inference attempted)
+- [x] `get_display_progress(slug="nonexistent")` returns stored state only (artifact checks find nothing)
+- [x] Plan file with empty or malformed frontmatter does not crash inference
 
 ### Error State Rendering
-- [ ] Pre-merge nudge renders correctly when artifact inference upgrades some stages from "pending" to "completed"
+- [x] Pre-merge nudge renders correctly when artifact inference upgrades some stages from "pending" to "completed"
 
 ## Test Impact
 
-- [ ] `tests/unit/test_pipeline_state_machine.py::TestGetDisplayProgress` -- UPDATE: add new test cases for artifact-based inference with slug parameter
-- [ ] `tests/unit/test_pipeline_state_machine.py` -- UPDATE: remove any tests referencing `record_stage_completion` if present
-- [ ] `tests/integration/test_agent_session_lifecycle.py::TestGetStageProgress` -- UPDATE: add test case verifying `get_stage_progress(slug="x")` passes slug through to `get_display_progress`
+- [x] `tests/unit/test_pipeline_state_machine.py::TestGetDisplayProgress` -- UPDATE: add new test cases for artifact-based inference with slug parameter
+- [x] `tests/unit/test_pipeline_state_machine.py` -- UPDATE: remove any tests referencing `record_stage_completion` if present
+- [x] `tests/integration/test_agent_session_lifecycle.py::TestGetStageProgress` -- UPDATE: add test case verifying `get_stage_progress(slug="x")` passes slug through to `get_display_progress`
 
 No other existing tests affected -- the artifact inference is purely additive to `get_display_progress()` and existing callers without the `slug` parameter get identical behavior.
 
@@ -160,25 +160,25 @@ No agent integration required -- this is a bridge-internal change to `PipelineSt
 
 ## Documentation
 
-- [ ] Update `docs/features/pipeline-state-machine.md` to describe artifact-based inference fallback
-- [ ] Update `docs/features/pipeline-state-machine.md` to remove the `record_stage_completion()` reference from the API section and Files table (it will be deleted)
-- [ ] Update inline docstrings in `bridge/pipeline_state.py` for `get_display_progress()` and the new `_infer_stage_from_artifacts()` method
+- [x] Update `docs/features/pipeline-state-machine.md` to describe artifact-based inference fallback
+- [x] Update `docs/features/pipeline-state-machine.md` to remove the `record_stage_completion()` reference from the API section and Files table (it will be deleted)
+- [x] Update inline docstrings in `bridge/pipeline_state.py` for `get_display_progress()` and the new `_infer_stage_from_artifacts()` method
 
 ## Success Criteria
 
-- [ ] `get_display_progress(slug="X")` returns "completed" for stages with matching artifacts, even when stored state is "pending"
-- [ ] `get_display_progress()` without slug returns identical behavior to current (backward compatible)
-- [ ] `AgentSession.get_stage_progress(slug="X")` passes slug through to `get_display_progress()`
-- [ ] Pre-merge nudge in `/do-merge` shows correct pipeline status when stored state is empty
-- [ ] All `gh` subprocess calls use `timeout=5`
-- [ ] TEST inference uses `statusCheckRollup` (not circular REVIEW dependency)
-- [ ] DOCS inference uses `files` array from single `gh pr view` call
-- [ ] `record_stage_completion()` is deleted from `bridge/pipeline_state.py`
-- [ ] `record_stage_completion()` reference removed from `docs/features/pipeline-state-machine.md`
-- [ ] Silent save failures in `_save()` confirmed logged at warning level (test exists)
-- [ ] Existing hook-based tracking continues to work (no modifications to hooks)
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] `get_display_progress(slug="X")` returns "completed" for stages with matching artifacts, even when stored state is "pending"
+- [x] `get_display_progress()` without slug returns identical behavior to current (backward compatible)
+- [x] `AgentSession.get_stage_progress(slug="X")` passes slug through to `get_display_progress()`
+- [x] Pre-merge nudge in `/do-merge` shows correct pipeline status when stored state is empty
+- [x] All `gh` subprocess calls use `timeout=5`
+- [x] TEST inference uses `statusCheckRollup` (not circular REVIEW dependency)
+- [x] DOCS inference uses `files` array from single `gh pr view` call
+- [x] `record_stage_completion()` is deleted from `bridge/pipeline_state.py`
+- [x] `record_stage_completion()` reference removed from `docs/features/pipeline-state-machine.md`
+- [x] Silent save failures in `_save()` confirmed logged at warning level (test exists)
+- [x] Existing hook-based tracking continues to work (no modifications to hooks)
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
