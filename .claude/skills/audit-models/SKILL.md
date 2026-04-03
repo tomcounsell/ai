@@ -1,6 +1,6 @@
 ---
 name: audit-models
-description: "Audit Popoto Redis models for relationship gaps, missing fields, naming inconsistencies, and architectural weaknesses. Use when reviewing data model health with the architect."
+description: "Audit Popoto Redis models for relationship gaps, missing fields, naming inconsistencies, and architectural weaknesses. Use when reviewing data model health, checking model integrity, validating Redis models, scanning for data model issues, or reviewing the data layer with the architect."
 disable-model-invocation: true
 allowed-tools: Read, Grep, Glob, Bash
 ---

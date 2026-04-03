@@ -1,6 +1,6 @@
 ---
 name: do-skills-audit
-description: "Audit all Claude Code skills for compliance with canonical template standards. Use when checking skill quality, validating frontmatter, or verifying progressive disclosure. Runs deterministic validation rules and best practices sync against latest Anthropic docs by default."
+description: "Audit all Claude Code skills for compliance with canonical template standards. Use when checking skill quality, validating skill structure, linting SKILL.md files, verifying frontmatter, or scanning for skill issues. Runs deterministic validation rules and best practices sync against latest Anthropic docs by default."
 disable-model-invocation: true
 allowed-tools: Read, Grep, Glob, Bash
 argument-hint: "[--fix] [--json] [--skill <name>] [--no-sync]"
@@ -43,3 +43,8 @@ python .claude/skills/do-skills-audit/scripts/audit_skills.py $ARGUMENTS
 **Quality (WARN):** description trigger-oriented, description ≤1024 chars, known fields only, argument-hint presence
 **Classification (WARN):** infrastructure/background/fork skills have correct frontmatter flags
 **Content (WARN):** no duplicate descriptions across skills
+
+
+## After the Audit
+
+With `--fix`: trivial issues (missing name field, trailing whitespace) are auto-corrected in place. Complex findings (classification mismatches, trigger phrasing, duplicate descriptions) are reported for human review. Without `--fix`: all findings are report-only.
