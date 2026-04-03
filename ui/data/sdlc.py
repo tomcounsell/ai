@@ -536,9 +536,11 @@ def get_all_sessions(limit: int = 15) -> list[PipelineProgress]:
         """Pick the best available timestamp for ordering/filtering."""
         return p.completed_at or p.updated_at or p.started_at or p.created_at or 0
 
-    # Convert all sessions to PipelineProgress
+    # Convert all sessions to PipelineProgress, skipping test data
     all_pipelines = []
     for session in all_sessions:
+        if getattr(session, "project_key", None) == "test":
+            continue
         try:
             pipeline = _session_to_pipeline(session)
         except Exception:
