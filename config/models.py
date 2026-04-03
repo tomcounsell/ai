@@ -93,6 +93,22 @@ OPENROUTER_GEMMA4_FREE = "google/gemma-4-e2b:free"
 
 
 # =============================================================================
+# LOCAL OLLAMA MODELS
+# Used for fast, local inference (message classification, intent, AI judge)
+# =============================================================================
+
+OLLAMA_LOCAL_MODEL = "gemma4:e2b"
+
+# Models superseded by OLLAMA_LOCAL_MODEL — cleaned up during /update
+OLLAMA_SUPERSEDED_MODELS = [
+    "gemma2:3b",
+    "gemma3:4b",
+    "qwen3:1.7b",
+    "qwen3:4b",
+]
+
+
+# =============================================================================
 # USE-CASE SPECIFIC ALIASES
 # These map semantic use cases to specific models.
 # Change these to easily switch models for specific tasks.

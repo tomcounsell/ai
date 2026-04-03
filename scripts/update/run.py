@@ -421,8 +421,10 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
 
     # Step 4: Ollama model (full mode only)
     if config.do_ollama:
+        from config.models import OLLAMA_LOCAL_MODEL, OLLAMA_SUPERSEDED_MODELS
+
         log("Checking Ollama model...", v)
-        ollama_model = os.getenv("OLLAMA_SUMMARIZER_MODEL", "gemma4:e2b")
+        ollama_model = os.getenv("OLLAMA_SUMMARIZER_MODEL", OLLAMA_LOCAL_MODEL)
         ollama_check = verify.check_ollama(ollama_model)
 
         if not ollama_check.available:
@@ -434,6 +436,55 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                     result.warnings.append(f"Failed to pull Ollama model {ollama_model}")
             else:
                 log("Ollama not installed, skipping", v)
+
+        # Smoke test: verify the model can generate a response
+        if ollama_check.available or verify.check_ollama(ollama_model).available:
+            log(f"Smoke testing {ollama_model}...", v)
+            try:
+                import subprocess
+
+                smoke_result = subprocess.run(
+                    ["ollama", "run", ollama_model, "hi"],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                if smoke_result.returncode == 0 and smoke_result.stdout.strip():
+                    log(f"Smoke test passed for {ollama_model}", v)
+                else:
+                    result.warnings.append(
+                        f"Smoke test failed for {ollama_model}: "
+                        f"{smoke_result.stderr.strip() or 'empty response'}"
+                    )
+            except subprocess.TimeoutExpired:
+                result.warnings.append(f"Smoke test timed out for {ollama_model}")
+            except Exception as e:
+                result.warnings.append(f"Smoke test error for {ollama_model}: {e}")
+
+        # Cleanup superseded models (best-effort, never fail the update)
+        if ollama_check.available or verify.check_ollama(ollama_model).available:
+            log("Cleaning up superseded Ollama models...", v)
+            for old_model in OLLAMA_SUPERSEDED_MODELS:
+                try:
+                    import subprocess
+
+                    rm_result = subprocess.run(
+                        ["ollama", "rm", old_model],
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                    )
+                    if rm_result.returncode == 0:
+                        log(f"  Removed {old_model}", v, always=True)
+                    else:
+                        # Model may not exist, that is fine
+                        stderr = rm_result.stderr.strip()
+                        if "not found" in stderr.lower():
+                            log(f"  {old_model} not present, skipping", v)
+                        else:
+                            log(f"  WARN: Failed to remove {old_model}: {stderr}", v)
+                except Exception as e:
+                    log(f"  WARN: Failed to remove {old_model}: {e}", v)
 
     # Step 4.5: Machine identity verification
     log("Verifying machine identity...", v)

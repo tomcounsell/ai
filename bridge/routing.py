@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 
 from config.enums import ClassificationType, PersonaType
+from config.models import OLLAMA_LOCAL_MODEL
 from utils.api_keys import get_anthropic_api_key
 
 logger = logging.getLogger(__name__)
@@ -353,7 +354,7 @@ def classify_needs_response(text: str) -> bool:
         import ollama
 
         response = ollama.chat(
-            model="qwen3:1.7b",
+            model=OLLAMA_LOCAL_MODEL,
             messages=[
                 {
                     "role": "user",
@@ -529,7 +530,7 @@ def _classify_work_request_llm(text: str) -> str:
         import ollama
 
         response = ollama.chat(
-            model="qwen3:1.7b",
+            model=OLLAMA_LOCAL_MODEL,
             messages=[{"role": "user", "content": prompt}],
             options={"temperature": 0, "num_predict": 10},
         )
