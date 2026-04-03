@@ -1458,7 +1458,7 @@ class ReflectionRunner:
             try:
                 errors = extract_structured_errors(hooks_log)
                 # Filter to last 24 hours
-                cutoff = (utc_now() - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+                cutoff = (utc_now() - timedelta(days=1)).strftime("%Y-%m-%d")
                 recent = [e for e in errors if e.get("timestamp", "") >= cutoff]
                 error_count = len(recent)
                 if recent:
