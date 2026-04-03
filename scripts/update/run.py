@@ -21,6 +21,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from datetime import UTC  # noqa: E402
+
 from scripts.update import (  # noqa: E402
     cal_integration,
     deps,
@@ -136,6 +138,62 @@ def log(msg: str, verbose: bool = True, always: bool = False) -> None:
         _log_buffer.append(line)
     else:
         print(line)
+
+
+def _cleanup_stale_sessions(project_dir: Path, age_minutes: int = 30) -> int:
+    """Kill running/pending sessions with no live process.
+
+    Terminal sessions (killed/abandoned/failed/completed) are preserved
+    for reflections to analyze — reflections handles its own 90-day expiry.
+
+    Returns the number of sessions transitioned to 'killed'.
+    """
+    import time
+    from datetime import datetime
+
+    from agent.agent_session_queue import _extract_agent_session_fields
+    from models.agent_session import AgentSession
+
+    now = time.time()
+    threshold = age_minutes * 60
+    killed_count = 0
+
+    for status in ("running", "pending"):
+        sessions = list(AgentSession.query.filter(status=status))
+        for s in sessions:
+            created = s.created_at
+            if not created:
+                continue
+            if isinstance(created, str):
+                try:
+                    dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
+                    age = now - dt.timestamp()
+                except (ValueError, TypeError):
+                    continue
+            else:
+                age = now - float(created)
+
+            if age < threshold:
+                continue
+
+            # Check if process is still alive
+            pid = getattr(s, "pid", None)
+            if pid:
+                try:
+                    os.kill(int(pid), 0)
+                    continue  # process alive, skip
+                except (OSError, ValueError):
+                    pass  # process dead
+
+            # Transition via delete-and-recreate (Popoto KeyField pattern)
+            fields = _extract_agent_session_fields(s)
+            s.delete()
+            fields["status"] = "killed"
+            fields["completed_at"] = datetime.now(tz=UTC)
+            AgentSession.create(**fields)
+            killed_count += 1
+
+    return killed_count
 
 
 def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
@@ -467,6 +525,15 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         # Cron mode: set restart flag instead of restarting
         log("Setting restart flag for graceful restart...", v, always=True)
         git.set_restart_requested(project_dir, result.git_result.commit_count)
+
+    # Step 5.5: Clean up stale sessions (kill orphaned running/pending)
+    # Terminal sessions are preserved for reflections to analyze.
+    try:
+        stale_killed = _cleanup_stale_sessions(project_dir)
+        if stale_killed > 0:
+            log(f"Cleaned up {stale_killed} stale session(s)", v)
+    except Exception as e:
+        log(f"WARN: Session cleanup failed: {e}", v)
 
     # Step 6: Environment verification
     if config.do_verify:

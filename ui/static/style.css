@@ -267,6 +267,25 @@ h3 {
 }
 
 /* Parent/child session hierarchy */
+.child-toggle {
+    cursor: pointer;
+    font-size: 10px;
+    color: var(--text-muted);
+    user-select: none;
+}
+
+.child-toggle:hover {
+    color: var(--text-primary);
+}
+
+.child-count {
+    font-size: 9px;
+    background: var(--bg-tertiary);
+    border-radius: 8px;
+    padding: 1px 5px;
+    margin-left: 2px;
+}
+
 .child-row {
     background: var(--bg-tertiary);
 }

@@ -1,9 +1,11 @@
 {# Macro for rendering a single session row (reused for parent and child rows) #}
-{% macro session_row(s, is_child=false) %}
-<tr class="session-row{% if is_child %} child-row{% endif %}{% if s.is_stale %} stale{% endif %}" hx-get="/sdlc/{{ s.job_id }}/_inline/" hx-target="#detail-{{ s.job_id }}" hx-swap="innerHTML" hx-trigger="click" style="cursor: pointer;">
+{% macro session_row(s, is_child=false, has_children=false) %}
+<tr class="session-row{% if is_child %} child-row{% endif %}{% if s.is_stale %} stale{% endif %}"{% if is_child %} data-parent="{{ s.parent_agent_session_id }}" style="display: none; cursor: pointer;"{% else %} style="cursor: pointer;"{% endif %} hx-get="/sdlc/{{ s.job_id }}/_inline/" hx-target="#detail-{{ s.job_id }}" hx-swap="innerHTML" hx-trigger="click">
     <td>
         {% if is_child %}
         <span class="child-connector"></span>
+        {% elif has_children %}
+        <span class="child-toggle collapsed" data-session="{{ s.agent_session_id }}" onclick="event.stopPropagation(); toggleChildren(this)" title="Show {{ s.children|length }} child session(s)">&#9654; <span class="child-count">{{ s.children|length }}</span></span>
         {% endif %}
         {% if s.project_name or s.project_key %}
         <span class="project-cell" {% if s.project_metadata %}data-metadata='{{ s.project_metadata | tojson }}'{% endif %}>
@@ -97,6 +99,18 @@
 {% endmacro %}
 
 {% if sessions %}
+<script>
+function toggleChildren(el) {
+    var sid = el.dataset.session;
+    var rows = document.querySelectorAll('tr[data-parent="' + sid + '"]');
+    var collapsed = el.classList.toggle('collapsed');
+    el.innerHTML = collapsed ? '&#9654; ' : '&#9660; ';
+    el.title = collapsed ? 'Show child sessions' : 'Hide child sessions';
+    for (var i = 0; i < rows.length; i++) {
+        rows[i].style.display = collapsed ? 'none' : '';
+    }
+}
+</script>
 <table class="data-table">
     <thead>
         <tr>
@@ -112,7 +126,7 @@
     </thead>
     <tbody>
         {% for s in sessions %}
-        {{ session_row(s) }}
+        {{ session_row(s, has_children=s.children|length > 0) }}
         {% for child in s.children %}
         {{ session_row(child, is_child=true) }}
         {% endfor %}
