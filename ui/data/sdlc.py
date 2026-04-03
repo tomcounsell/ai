@@ -10,7 +10,6 @@ synchronous Redis calls. FastAPI runs sync route handlers in a threadpool.
 import json
 import logging
 import os
-import re
 import time
 
 from pydantic import BaseModel
@@ -29,6 +28,14 @@ DASHBOARD_RETENTION_HOURS = int(os.environ.get("DASHBOARD_RETENTION_HOURS", "48"
 _project_configs_cache: dict | None = None
 _project_configs_ts: float = 0.0
 _PROJECT_CONFIGS_TTL = 60.0  # seconds
+
+# Module-level cache for artifact inference results.
+# Keyed by (slug, time_bucket) where time_bucket = int(time.time() / 30).
+# This avoids repeated `gh pr view` subprocess calls when rendering the
+# dashboard list view with many sessions that have slugs. Entries older
+# than 60 seconds are evicted on each access.
+_artifact_inference_cache: dict[tuple[str, int], dict[str, str]] = {}
+_ARTIFACT_INFERENCE_TTL = 30  # seconds per bucket
 
 
 # === Pydantic models ===
@@ -188,74 +195,6 @@ def _get_project_metadata(project_key: str | None) -> tuple[str | None, dict | N
     return name, metadata if metadata else None
 
 
-# === Stage inference from history ===
-
-
-def _infer_stages_from_history(history_list: list | None) -> list["StageState"]:
-    """DEPRECATED: Infer SDLC stage states from session history entries.
-
-    This fallback exists for in-flight sessions created before stage_states
-    was eagerly initialized at session creation (pre-#563). It will be removed
-    in a future release once all existing sessions have stage_states populated.
-
-    New sessions get stage_states initialized in _push_agent_session() when
-    classification_type is "sdlc", so this path should only fire for
-    legacy sessions.
-
-    Returns empty list if no stage info found in history.
-    """
-    logger.warning(
-        "DEPRECATED: _infer_stages_from_history() called. "
-        "This session lacks stage_states -- it was created before eager initialization (#563). "
-        "This fallback will be removed in a future release."
-    )
-
-    if not history_list or not isinstance(history_list, list):
-        return []
-
-    # Collect mentioned stage names from history
-    mentioned_stages = set()
-    active_stage = None
-    stage_pattern = re.compile(r"^\[stage\]\s*(\w+)", re.IGNORECASE)
-
-    for entry in history_list:
-        if not isinstance(entry, str):
-            continue
-        match = stage_pattern.match(entry)
-        if match:
-            stage_name = match.group(1).upper()
-            if stage_name in SDLC_STAGES:
-                mentioned_stages.add(stage_name)
-
-    if not mentioned_stages:
-        return []
-
-    # Build stage list: stages mentioned in history are completed,
-    # the last mentioned stage is marked in_progress (heuristic)
-    last_stage_idx = -1
-    for stage_name in mentioned_stages:
-        idx = SDLC_STAGES.index(stage_name)
-        if idx > last_stage_idx:
-            last_stage_idx = idx
-            active_stage = stage_name
-
-    stages = []
-    for name in SDLC_STAGES:
-        if name == active_stage:
-            stages.append(StageState(name=name, status="in_progress"))
-        elif name in mentioned_stages:
-            stages.append(StageState(name=name, status="completed"))
-        else:
-            idx = SDLC_STAGES.index(name)
-            if idx < last_stage_idx and all(SDLC_STAGES[i] in mentioned_stages for i in range(idx)):
-                # Earlier stages implied completed
-                stages.append(StageState(name=name, status="completed"))
-            else:
-                stages.append(StageState(name=name, status="pending"))
-
-    return stages
-
-
 # === Parsing helpers ===
 
 
@@ -370,15 +309,76 @@ def _safe_float(val) -> float | None:
     return None
 
 
+def _get_artifact_enriched_stages(session, slug: str) -> list[StageState]:
+    """Get stage states enriched with artifact inference via PipelineStateMachine.
+
+    Uses a module-level TTL cache (30s buckets) to avoid repeated `gh pr view`
+    subprocess calls when rendering the dashboard list view.
+
+    Falls back to _parse_stage_states() if PipelineStateMachine raises an
+    exception, ensuring the dashboard never crashes due to artifact inference.
+
+    Args:
+        session: AgentSession instance to build the state machine from.
+        slug: Non-empty slug for artifact-based inference.
+
+    Returns:
+        List of StageState objects with artifact-inferred completions merged in.
+    """
+    global _artifact_inference_cache
+
+    now = time.time()
+    time_bucket = int(now / _ARTIFACT_INFERENCE_TTL)
+    cache_key = (slug, time_bucket)
+
+    # Evict stale entries (older than 60s = 2 buckets)
+    stale_cutoff = int(now / _ARTIFACT_INFERENCE_TTL) - 2
+    stale_keys = [k for k in _artifact_inference_cache if k[1] < stale_cutoff]
+    for k in stale_keys:
+        del _artifact_inference_cache[k]
+
+    if cache_key in _artifact_inference_cache:
+        display_progress = _artifact_inference_cache[cache_key]
+    else:
+        try:
+            from bridge.pipeline_state import PipelineStateMachine
+
+            psm = PipelineStateMachine(session)
+            display_progress = psm.get_display_progress(slug=slug)
+            _artifact_inference_cache[cache_key] = display_progress
+        except Exception:
+            logger.debug(
+                "Artifact inference failed for slug=%s, falling back to stored state",
+                slug,
+            )
+            return _parse_stage_states(session.stage_states)
+
+    stages = []
+    for name in SDLC_STAGES:
+        status = display_progress.get(name, "pending")
+        stages.append(StageState(name=name, status=str(status)))
+    return stages
+
+
 def _session_to_pipeline(session) -> PipelineProgress:
-    """Convert an AgentSession instance to a PipelineProgress model."""
-    stages = _parse_stage_states(session.stage_states)
+    """Convert an AgentSession instance to a PipelineProgress model.
 
-    # Fallback: infer stages from history when stage_states is empty
+    When the session has a slug, uses PipelineStateMachine.get_display_progress()
+    to enrich stored stage states with artifact-inferred completions (e.g.,
+    plan file on disk, PR on GitHub). This ensures the dashboard shows the same
+    pipeline state as the merge gate.
+
+    Sessions without a slug use _parse_stage_states() for stored state only.
+    """
+    slug = _safe_str(session.slug) or ""
+
+    # Use artifact-enriched stages when slug is available
+    if slug:
+        stages = _get_artifact_enriched_stages(session, slug)
+    else:
+        stages = _parse_stage_states(session.stage_states)
+
     history_list = session.history if isinstance(session.history, list) else None
-    if not stages and history_list:
-        stages = _infer_stages_from_history(history_list)
-
     events = _parse_history(history_list)
 
     # Determine current stage
@@ -387,8 +387,6 @@ def _session_to_pipeline(session) -> PipelineProgress:
         if s.is_active:
             current = s.name
             break
-
-    slug = _safe_str(session.slug) or _safe_str(session.slug) or ""
 
     # Resolve project name and metadata
     project_key = _safe_str(session.project_key)
