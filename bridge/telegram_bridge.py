@@ -1744,23 +1744,17 @@ async def main():
         _recover_interrupted_agent_sessions_startup,
     )
 
-    # Clean up stale Redis keys with invalid agent_session_id format (e.g. 60-char
-    # keys from old data). This silences the popoto "auto key value is length
-    # N" validation errors that spam the error log on every query.
-    # Temporarily suppress popoto's "{clean} is for debugging" warning.
+    # Rebuild AgentSession indexes using SCAN-based rebuild_indexes() instead of
+    # the blocking KEYS-based keys(clean=True). This cleans up stale index entries
+    # (orphans from crashed/expired sessions) and fixes any index corruption.
+    # Per Popoto maintainer guidance: rebuild_indexes() is production-safe (uses SCAN).
     try:
         from models.agent_session import AgentSession
 
-        _popoto_keys_logger = logging.getLogger("POPOTO.Query")
-        _prev_level = _popoto_keys_logger.level
-        _popoto_keys_logger.setLevel(logging.ERROR)
-        try:
-            AgentSession.query.keys(clean=True)
-        finally:
-            _popoto_keys_logger.setLevel(_prev_level)
-        logger.info("Cleaned stale Redis keys for AgentSession")
-    except Exception as _clean_err:
-        logger.warning(f"Redis key cleanup failed (non-fatal): {_clean_err}")
+        rebuilt = AgentSession.rebuild_indexes()
+        logger.info(f"Rebuilt AgentSession indexes ({rebuilt} records reindexed)")
+    except Exception as _rebuild_err:
+        logger.warning(f"AgentSession index rebuild failed (non-fatal): {_rebuild_err}")
 
     # Unified startup recovery: reset ALL running sessions to pending
     # (at startup, all running sessions are orphaned from previous process)
