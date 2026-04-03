@@ -96,17 +96,15 @@ When a DevSession completes, the `subagent_stop_hook` calls `classify_outcome(st
 
 The result routes to `complete_stage()` (success/ambiguous) or `fail_stage()` (fail/partial), which triggers the appropriate graph edge.
 
-### Coach Graph-Based Routing
-
-The coach (`bridge/coach.py`) uses `PipelineStateMachine.next_stage(outcome)` to determine the next stage from the graph, replacing the previous linear scan of `DISPLAY_STAGES`. It infers the outcome from stage statuses written by the subagent_stop hook.
-
 ### Stage States Initialization
 
-SDLC sessions have `stage_states` initialized eagerly at session creation (ISSUE=ready, all others=pending), eliminating the need for the dashboard inference fallback (`_infer_stages_from_history()`), which is now deprecated.
+SDLC sessions have `stage_states` initialized eagerly at session creation (ISSUE=ready, all others=pending).
+
+### Dashboard Artifact Inference
+
+The dashboard (`ui/data/sdlc.py`) uses `PipelineStateMachine.get_display_progress(slug=slug)` for sessions with a slug, ensuring the dashboard shows the same artifact-enriched pipeline state as the merge gate. When hook-based tracking fails to record a stage transition, artifact inference fills the gap by checking observable artifacts (plan files, PR existence, review status). Results are cached with a 30-second TTL to avoid repeated subprocess calls. The deprecated `_infer_stages_from_history()` fallback has been removed.
 
 ## Integration
-
-The coach (`bridge/coach.py`) imports `DISPLAY_STAGES` and `STAGE_TO_SKILL` from the graph module instead of maintaining its own hardcoded copies.
 
 ChatSession orchestration uses the graph for pipeline progression. Individual `/do-*` skills report their results; the ChatSession determines what happens next.
 
@@ -117,6 +115,5 @@ ChatSession orchestration uses the graph for pipeline progression. Individual `/
 | `bridge/pipeline_graph.py` | Canonical graph definition |
 | `agent/hooks/subagent_stop.py` | Calls `classify_outcome()` and routes to `complete_stage()`/`fail_stage()` |
 | `agent/agent_session_queue.py` | Nudge loop uses graph for routing decisions; initializes `stage_states` for SDLC sessions |
-| `bridge/coach.py` | Uses `PipelineStateMachine.next_stage(outcome)` for graph-based routing |
 | `bridge/pipeline_state.py` | `PipelineStateMachine` -- stage tracking, outcome classification, and transitions using the graph |
 | `tests/unit/test_pipeline_graph.py` | 27 tests covering all routing scenarios |
