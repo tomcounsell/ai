@@ -10,8 +10,8 @@ AgentSession (Popoto/Redis)
     v
 ui/data/sdlc.py
     _session_to_pipeline()         # converts AgentSession -> PipelineProgress
-        _parse_stage_states()      # parses stage_states JSON -> StageState list
-        _infer_stages_from_history()  # fallback for pre-#492 sessions
+        _get_artifact_enriched_stages()  # slug sessions: PipelineStateMachine + artifact inference
+        _parse_stage_states()      # no-slug sessions: parses stage_states JSON -> StageState list
         _get_project_metadata()    # resolves project_key -> name + metadata
     |
     v
@@ -51,9 +51,13 @@ The `AgentSession.stage_states` field (populated by the PipelineStateMachine sin
 
 Internal metadata keys like `_patch_cycle_count` and `_critique_cycle_count` are ignored because the parser only iterates over the known `SDLC_STAGES` list.
 
-### Fallback: History Inference
+### Artifact Inference (Sessions with Slug)
 
-For sessions created before `stage_states` was wired in, `_infer_stages_from_history()` scans the session's `history` list for entries matching `[stage] STAGE_NAME`. It marks mentioned stages as completed and the last-mentioned stage as in-progress. This provides graceful degradation -- older sessions show approximate stage pills rather than empty dashes.
+When a session has a slug, `_session_to_pipeline()` delegates to `_get_artifact_enriched_stages()`, which instantiates `PipelineStateMachine(session)` and calls `get_display_progress(slug=slug)`. This enriches stored stage states with artifact-inferred completions -- for example, if a plan file exists on disk but the stored state shows PLAN as "pending", the dashboard will show PLAN as "completed". This ensures the dashboard shows the same pipeline state as the merge gate.
+
+Results are cached in a module-level dict with a 30-second TTL (keyed by `(slug, time_bucket)`) to avoid repeated `gh pr view` subprocess calls when rendering the list view. Stale cache entries (older than 60 seconds) are evicted on each access.
+
+If `PipelineStateMachine` raises an exception (e.g., `gh` CLI not available), the function falls back silently to `_parse_stage_states()` with stored state only -- the dashboard never crashes due to artifact inference failures.
 
 ### CSS Rendering
 
