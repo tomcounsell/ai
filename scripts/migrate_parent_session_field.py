@@ -94,7 +94,9 @@ def migrate(dry_run: bool = True) -> dict:
             if has_old and not has_new:
                 old_val = redis_client.hget(key, "parent_chat_session_id")
                 if old_val is not None:
-                    logger.info(f"  Rename field: {key_str} parent_chat_session_id → parent_session_id")
+                    logger.info(
+                        f"  Rename field: {key_str} parent_chat_session_id -> parent_session_id"
+                    )
                     if not dry_run:
                         pipe = redis_client.pipeline()
                         pipe.hset(key, "parent_session_id", old_val)
@@ -133,12 +135,16 @@ def migrate(dry_run: bool = True) -> dict:
                     st_clean = st.lstrip("\x00\xa3£").strip() if st else st
                     role = SESSION_TYPE_TO_ROLE.get(st_clean) or SESSION_TYPE_TO_ROLE.get(st)
                     if role:
-                        logger.info(f"  Backfill role: {key_str} session_type={st_clean} → role={role}")
+                        logger.info(
+                            f"  Backfill role: {key_str} session_type={st_clean} → role={role}"
+                        )
                         if not dry_run:
                             redis_client.hset(key, "role", role)
                         stats["role_backfilled"] += 1
                     else:
-                        logger.warning(f"  Unknown session_type={st!r} for {key_str}, skipping role backfill")
+                        logger.warning(
+                            f"  Unknown session_type={st!r} for {key_str}, skipping role backfill"
+                        )
                 else:
                     logger.warning(f"  No session_type for {key_str}, skipping role backfill")
 
@@ -182,9 +188,14 @@ def main():
 
     changes = stats["field_renamed"] + stats["role_backfilled"]
     if not args.dry_run and changes > 0:
-        logger.info(f"Successfully migrated {changes} changes across {stats['total_records']} records.")
+        logger.info(
+            f"Successfully migrated {changes} changes across {stats['total_records']} records."
+        )
     elif args.dry_run and changes > 0:
-        logger.info(f"Would make {changes} changes across {stats['total_records']} records. Run without --dry-run to apply.")
+        logger.info(
+            f"Would make {changes} changes across {stats['total_records']} records."
+            " Run without --dry-run to apply."
+        )
     else:
         logger.info("No records needed migration.")
 
