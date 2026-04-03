@@ -38,7 +38,7 @@ class TestPMWriteRestriction:
 
     def test_pm_blocked_from_writing_source_code(self, mock_context, monkeypatch):
         """PM session cannot write to source code files."""
-        monkeypatch.setenv("SESSION_TYPE", "chat")
+        monkeypatch.setenv("SESSION_TYPE", "pm")
 
         from agent.hooks.pre_tool_use import pre_tool_use_hook
 
@@ -50,7 +50,7 @@ class TestPMWriteRestriction:
 
     def test_pm_blocked_from_editing_source_code(self, mock_context, monkeypatch):
         """PM session cannot edit source code files."""
-        monkeypatch.setenv("SESSION_TYPE", "chat")
+        monkeypatch.setenv("SESSION_TYPE", "pm")
 
         from agent.hooks.pre_tool_use import pre_tool_use_hook
 
@@ -63,7 +63,7 @@ class TestPMWriteRestriction:
 
     def test_pm_allowed_to_write_docs(self, mock_context, monkeypatch):
         """PM session can write to docs/ directory."""
-        monkeypatch.setenv("SESSION_TYPE", "chat")
+        monkeypatch.setenv("SESSION_TYPE", "pm")
 
         from agent.hooks.pre_tool_use import pre_tool_use_hook
 
@@ -74,7 +74,7 @@ class TestPMWriteRestriction:
 
     def test_pm_allowed_to_write_nested_docs(self, mock_context, monkeypatch):
         """PM session can write to nested paths under docs/."""
-        monkeypatch.setenv("SESSION_TYPE", "chat")
+        monkeypatch.setenv("SESSION_TYPE", "pm")
 
         from agent.hooks.pre_tool_use import pre_tool_use_hook
 
@@ -107,7 +107,7 @@ class TestPMWriteRestriction:
 
     def test_pm_sensitive_file_still_blocked(self, mock_context, monkeypatch):
         """PM session writing to .env is blocked by sensitive path check (not PM check)."""
-        monkeypatch.setenv("SESSION_TYPE", "chat")
+        monkeypatch.setenv("SESSION_TYPE", "pm")
 
         from agent.hooks.pre_tool_use import pre_tool_use_hook
 
@@ -142,8 +142,8 @@ class TestPMSessionEnvInjection:
 
         assert "SESSION_TYPE" not in options.env
 
-    def test_sentry_token_injected_for_chat_session(self, tmp_path):
-        """Chat sessions get SENTRY_AUTH_TOKEN from ~/Desktop/Valor/.env."""
+    def test_sentry_token_injected_for_pm_session(self, tmp_path):
+        """PM sessions get SENTRY_AUTH_TOKEN from ~/Desktop/Valor/.env."""
         # Create a fake ~/Desktop/Valor/.env
         valor_dir = tmp_path / "Desktop" / "Valor"
         valor_dir.mkdir(parents=True)
@@ -151,15 +151,15 @@ class TestPMSessionEnvInjection:
 
         from agent.sdk_client import ValorAgent
 
-        agent = ValorAgent(session_type="chat")
+        agent = ValorAgent(session_type="pm")
 
         with patch("agent.sdk_client.Path.home", return_value=tmp_path):
             options = agent._create_options(session_id="test-session")
 
         assert options.env.get("SENTRY_AUTH_TOKEN") == "test-sentry-token-abc"
 
-    def test_sentry_token_not_injected_for_non_chat(self):
-        """Non-chat sessions don't get SENTRY_AUTH_TOKEN."""
+    def test_sentry_token_not_injected_for_non_pm(self):
+        """Non-PM sessions don't get SENTRY_AUTH_TOKEN."""
         from agent.sdk_client import ValorAgent
 
         agent = ValorAgent()
