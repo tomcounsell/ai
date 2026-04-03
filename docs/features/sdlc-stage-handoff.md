@@ -84,11 +84,7 @@ When `fail_stage()` fires, the pipeline graph (`PIPELINE_EDGES` in `bridge/pipel
 | PATCH | success | TEST |
 | PATCH | fail | TEST |
 
-This enables automatic PATCH cycles: a REVIEW that finds issues routes to PATCH, which routes back to TEST, which routes back to REVIEW. The cycle is bounded by `MAX_PATCH_CYCLES` (default 3) -- when reached, `get_next_stage()` returns None and the coach escalates to human review.
-
-### Coach Integration
-
-The coach (`bridge/coach.py`) uses graph-based routing via `PipelineStateMachine.next_stage(outcome)` instead of the previous linear scan of `DISPLAY_STAGES`. It infers the outcome from stage statuses: if any stage has status "failed", it passes `outcome="fail"` to get the graph-determined next stage.
+This enables automatic PATCH cycles: a REVIEW that finds issues routes to PATCH, which routes back to TEST, which routes back to REVIEW. The cycle is bounded by `MAX_PATCH_CYCLES` (default 3) -- when reached, `get_next_stage()` returns None and the pipeline escalates to human review.
 
 ### Safe Defaults
 

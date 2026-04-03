@@ -120,7 +120,6 @@ tests/
 | Level | File | Tests | Description |
 |-------|------|------:|-------------|
 | unit | `test_summarizer.py` | 158 | Response summarization, classification |
-| unit | `test_coach.py` | 54 | Coaching message building |
 
 ### `classifiers` — Message classification
 
