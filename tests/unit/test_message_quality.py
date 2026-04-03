@@ -1,8 +1,8 @@
 """Tests for bridge.message_quality — narration detection and delivery quality filters."""
 
 from bridge.message_quality import (
-    NARRATION_NUDGE_FEEDBACK,
     NARRATION_FALLBACK_MESSAGE,
+    NARRATION_NUDGE_FEEDBACK,
     PROCESS_NARRATION_PATTERNS,
     is_narration_only,
 )
@@ -152,5 +152,5 @@ class TestConstants:
         assert "narration" not in NARRATION_FALLBACK_MESSAGE.lower()
 
     def test_nudge_feedback_instructs_continuation(self):
-        """Coaching message should instruct the worker to continue."""
+        """Nudge feedback message should instruct the worker to continue."""
         assert "continue" in NARRATION_NUDGE_FEEDBACK.lower()

@@ -28,7 +28,7 @@ Gates are checked at four levels:
 
 2. **Observer Agent read_session** -- The `_handle_read_session()` response includes a `gate_status` dict for each stage. If the Observer sees a stage marked "completed" but its gate is unsatisfied, it steers back to that stage.
 
-3. **Observer mandatory delivery gates** -- Before any delivery decision (typed outcome success, deterministic guard bypass, or LLM deliver), `_check_mandatory_gates()` checks REVIEW and DOCS gates via `check_review_gate()` and `check_docs_gate()`. If either gate is unsatisfied, delivery is overridden to steer with a coaching message. This hard enforcement runs at three points in the Observer decision flow. Cycle safety allows delivery after 3 forced steerings for the same gate, and gate results are cached per `run()` invocation.
+3. **Observer mandatory delivery gates** -- Before any delivery decision (typed outcome success, deterministic guard bypass, or LLM deliver), `_check_mandatory_gates()` checks REVIEW and DOCS gates via `check_review_gate()` and `check_docs_gate()`. If either gate is unsatisfied, delivery is overridden to steer with nudge feedback. This hard enforcement runs at three points in the Observer decision flow. Cycle safety allows delivery after 3 forced steerings for the same gate, and gate results are cached per `run()` invocation.
 
 4. **Completion guard in agent_session_queue.py** -- Before delivering the final message to Telegram, `check_all_gates()` runs. If any gate is unsatisfied, a warning listing the missing gates is appended to the delivery message.
 

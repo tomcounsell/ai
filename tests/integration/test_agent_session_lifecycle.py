@@ -688,7 +688,7 @@ class TestSDLCClassificationTypeLifecycle:
             created_at=datetime.now(tz=UTC),
             started_at=datetime.now(tz=UTC),
             updated_at=datetime.now(tz=UTC),
-            message_text="[System Coach] continue building",
+            message_text="[System Nudge] continue building",
             classification_type="sdlc",
         )
 

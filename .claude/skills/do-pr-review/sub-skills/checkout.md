@@ -4,7 +4,7 @@ Mechanical setup: clean git state and checkout the PR branch.
 
 ## Context Variables
 
-- `$SDLC_PR_NUMBER` — PR number to checkout (fallback: extract from coaching message or `gh pr list`)
+- `$SDLC_PR_NUMBER` — PR number to checkout (fallback: extract from nudge feedback or `gh pr list`)
 - `$SDLC_PR_BRANCH` — expected branch name (informational)
 
 ## Steps
