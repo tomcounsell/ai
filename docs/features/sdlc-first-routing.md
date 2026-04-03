@@ -24,7 +24,7 @@ A two-stage routing system: fast-path pattern matching for obvious cases, LLM cl
    - Short acknowledgments (`continue`, `ok`, `yes`) → `passthrough`
 
 2. **LLM classification** (for everything else):
-   - Primary: Ollama (qwen3:1.7b, fast, local, free)
+   - Primary: Ollama (gemma4:e2b, fast, local, free)
    - Fallback: Anthropic Haiku (when Ollama unavailable)
    - Prompt asks for single-word `sdlc` or `question` response
    - Any classification failure defaults to `question` (safe fallback)

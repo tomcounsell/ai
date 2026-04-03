@@ -15,9 +15,11 @@ import re
 
 import requests
 
+from config.models import OLLAMA_LOCAL_MODEL
+
 # Ollama configuration
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3:1.7b")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", OLLAMA_LOCAL_MODEL)
 
 # Intent categories
 INTENTS = {
