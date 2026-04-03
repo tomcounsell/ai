@@ -170,6 +170,71 @@ The PM session orchestrates SDLC work by spawning one DevSession per pipeline st
 
 The stop hook (`.claude/hooks/stop.py`) includes a warning for SDLC-classified sessions that complete without any stage progress. This catches cases where the DevSession bypasses the pipeline. The warning is logged to stderr and is non-fatal.
 
+## Hook-Driven Lifecycle
+
+The parent-child session lifecycle is driven by two SDK hooks: **PreToolUse** and **SubagentStop**. These hooks automatically register child DevSessions in Redis, start pipeline stages, and record stage outcomes when the child completes.
+
+### Spawn-Execute-Return Flow
+
+```
+PM (ChatSession) calls Agent tool with type="dev-session"
+    |
+    v
+PreToolUse hook fires (agent/hooks/pre_tool_use.py)
+    |-- Detects tool_name == "Agent", type == "dev-session"
+    |-- session_registry.resolve(claude_uuid) -> bridge session_id
+    |-- AgentSession.create_child(role="dev", parent_session_id=...)
+    |-- _extract_stage_from_prompt(prompt) -> e.g. "BUILD"
+    |-- PipelineStateMachine(parent).start_stage("BUILD")
+    |       -> marks stage as "in_progress" in parent's stage_states
+    |
+    v
+DevSession executes assigned work
+    |-- Runs the appropriate skill (/do-build, /do-test, etc.)
+    |-- Commits code, runs tests, produces output
+    |
+    v
+SubagentStop hook fires (agent/hooks/subagent_stop.py)
+    |-- Detects agent_type == "dev-session"
+    |-- session_registry.resolve(claude_uuid) -> bridge session_id
+    |-- Marks DevSession status = "completed" in Redis
+    |-- _extract_output_tail(input_data) -> last ~500 chars
+    |-- PipelineStateMachine(parent).classify_outcome(stage, ..., output_tail)
+    |       |
+    |       |-- "success" or "ambiguous" -> complete_stage(stage)
+    |       |-- "fail" or "partial"      -> fail_stage(stage)
+    |
+    v
+Hook returns {"reason": "Pipeline state: {stage_states}"}
+    -> Injected into PM's context so it sees current pipeline state
+```
+
+### Key Components
+
+| Component | File | Role |
+|-----------|------|------|
+| `pre_tool_use_hook()` | `agent/hooks/pre_tool_use.py` | Registers DevSession, starts pipeline stage |
+| `subagent_stop_hook()` | `agent/hooks/subagent_stop.py` | Completes DevSession, classifies outcome, records stage result |
+| `session_registry` | `agent/hooks/session_registry.py` | Maps Claude Code UUIDs to bridge session IDs (see [Session Isolation](session-isolation.md)) |
+| `PipelineStateMachine` | `bridge/pipeline_state.py` | Manages stage_states on the parent AgentSession |
+| `_extract_stage_from_prompt()` | `agent/hooks/pre_tool_use.py` | Parses "Stage: BUILD" patterns from dev-session prompts |
+| `classify_outcome()` | `bridge/pipeline_state.py` | Determines success/fail/ambiguous from output tail |
+
+### Stage Extraction
+
+The PreToolUse hook extracts the SDLC stage name from the dev-session prompt using pattern matching. It recognizes patterns like `Stage: BUILD`, `Stage to execute -- PLAN`, and falls back to scanning for standalone stage names near the "stage" keyword. Recognized stages: ISSUE, PLAN, CRITIQUE, BUILD, TEST, PATCH, REVIEW, DOCS, MERGE.
+
+### Outcome Classification
+
+When a DevSession completes, the SubagentStop hook extracts the last ~500 characters of output (from the agent transcript file or fallback summary) and passes them to `PipelineStateMachine.classify_outcome()`. The outcome determines whether the stage is marked as completed or failed on the parent session:
+
+- **success** or **ambiguous** -> `complete_stage()` (safe default for ambiguous)
+- **fail** or **partial** -> `fail_stage()`
+
+### Error Handling
+
+Both hooks wrap all operations in try/except blocks. Failures are logged as warnings but never raised -- the hooks must not crash the Agent tool or block the PM from continuing. If stage extraction fails (e.g., empty prompt), the hook skips the `start_stage()` call gracefully. If the session registry has no mapping (e.g., running outside the bridge), the hook skips DevSession registration entirely.
+
 ## Parent-Child Steering
 
 The PM session can push steering messages to its running child DevSessions, enabling mid-execution course correction without waiting for the DevSession to complete.

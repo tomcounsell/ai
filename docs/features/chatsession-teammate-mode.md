@@ -57,7 +57,7 @@ Provides teammate-specific instructions that replace the PM dispatch block when 
 
 ### Metrics (`agent/teammate_metrics.py`)
 
-Redis-backed counters for observability. All operations are fire-and-forget -- metrics failures never affect message processing.
+Popoto-backed counters for observability (migrated from raw Redis in PR #650). All operations are fire-and-forget -- metrics failures never affect message processing.
 
 - `teammate_classified_count`: messages routed to teammate mode
 - `work_classified_count`: messages routed to DevSession
@@ -110,6 +110,6 @@ In the nudge loop, checks the session's `session_mode` field:
 | `agent/intent_classifier.py` | Haiku-based binary classifier with few-shot prompt |
 | `agent/teammate_handler.py` | Teammate instruction builder (research-first) and nudge cap constant |
 | `bridge/summarizer.py` | Teammate prose bypass in `_compose_structured_summary()` and prompt context |
-| `agent/teammate_metrics.py` | Redis-backed classification and response time counters |
+| `agent/teammate_metrics.py` | Popoto-backed classification and response time counters (see [Popoto Index Hygiene](popoto-index-hygiene.md)) |
 | `agent/sdk_client.py` | Integration point: classifier call and instruction injection |
 | `agent/agent_session_queue.py` | Integration point: reduced nudge cap for teammate sessions |

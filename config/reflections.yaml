@@ -50,6 +50,14 @@ reflections:
     callable: "agent.agent_session_queue.cleanup_stale_branches_all_projects"
     enabled: false
 
+  - name: popoto-index-cleanup
+    description: "Rebuild Popoto model indexes to clean orphaned entries from crashes/TTL expiry"
+    interval: 86400  # daily
+    priority: low
+    execution_type: function
+    callable: "scripts.popoto_index_cleanup.run_cleanup"
+    enabled: true
+
   - name: daily-maintenance
     description: "Full 15-step daily maintenance pipeline (formerly scripts/reflections.py)"
     interval: 86400  # daily

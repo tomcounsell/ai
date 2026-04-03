@@ -193,8 +193,8 @@ class TestEnqueueContinuationFallback:
 
         result = _diagnose_missing_session("nonexistent-session-id-12345")
         assert isinstance(result, dict)
-        # Should either have matching_keys or error (if Redis not available)
-        assert "matching_keys" in result or "error" in result
+        # Should have hash_exists, popoto_query_matches, or error (if Redis not available)
+        assert "hash_exists" in result or "error" in result
 
 
 class TestMergeStageTracking:

@@ -112,7 +112,7 @@ Log rotation uses a dual-mechanism approach: Python-managed rotation for applica
 
 **Problem**: Stale Redis entries with non-standard 60-character `agent_session_id` keys (from historical data or crashes) trigger popoto validation errors on every query scan, generating thousands of error log entries.
 
-**Solution**: On bridge startup, before recovering interrupted/orphaned sessions, the bridge calls `AgentSession.query.keys(clean=True)` to purge Redis set entries that point to missing or invalid objects. This is a one-time cleanup that prevents the validation errors from recurring.
+**Solution**: On bridge startup, before recovering interrupted/orphaned sessions, the bridge calls `AgentSession.rebuild_indexes()` (SCAN-based, production-safe) to purge Redis set entries that point to missing or invalid objects. This is a one-time cleanup that prevents the validation errors from recurring. See [Popoto Index Hygiene](popoto-index-hygiene.md) for the daily automated cleanup reflection that supplements this startup check.
 
 ### 7. Orphan Recovery Hardening (`agent/agent_session_queue.py`)
 

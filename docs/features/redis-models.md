@@ -41,6 +41,13 @@ BridgeEvent              Memory
                            relevance (DecayingSortedField)
                            confidence (ConfidenceField)
                            bloom (ExistenceFilter)
+
+TeammateMetrics (singleton, key="global")
+  teammate_classified_count (IntField)
+  teammate_low_confidence_count (IntField)
+  work_classified_count (IntField)
+  teammate_response_times (SortedField)
+  work_response_times (SortedField)
 ```
 
 ## Cross-References
