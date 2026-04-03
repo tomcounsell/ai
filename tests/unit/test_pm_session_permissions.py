@@ -124,17 +124,17 @@ class TestPMWriteRestriction:
 class TestPMSessionEnvInjection:
     """ValorAgent should inject correct env vars for PM sessions."""
 
-    def test_chat_session_gets_session_type_env(self):
-        """ChatSession (session_type='chat') injects SESSION_TYPE=chat."""
+    def test_pm_session_gets_session_type_env(self):
+        """PM session (session_type='pm') injects SESSION_TYPE=pm."""
         from agent.sdk_client import ValorAgent
 
-        agent = ValorAgent(session_type="chat")
+        agent = ValorAgent(session_type="pm")
         options = agent._create_options(session_id="test-session")
 
-        assert options.env.get("SESSION_TYPE") == "chat"
+        assert options.env.get("SESSION_TYPE") == "pm"
 
-    def test_non_chat_session_no_session_type_env(self):
-        """Non-chat sessions don't inject SESSION_TYPE."""
+    def test_non_pm_session_no_session_type_env(self):
+        """Non-PM sessions without session_type don't inject SESSION_TYPE."""
         from agent.sdk_client import ValorAgent
 
         agent = ValorAgent()
