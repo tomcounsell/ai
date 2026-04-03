@@ -1,14 +1,26 @@
 """AgentSession model - unified lifecycle tracking for agent work.
 
-Single Popoto model with session_type discriminator ("chat" or "dev").
+Single Popoto model with session_type discriminator ("chat" or "dev") and
+an optional role field for flexible specialization within each session type.
+
 Popoto does not support model inheritance, so ChatSession and DevSession
 are distinguished by the session_type field with factory methods and
 derived properties providing type-specific behavior.
 
-ChatSession (session_type="chat"): Read-only Agent SDK session, PM persona.
-  Owns the Telegram conversation, orchestrates work, spawns DevSessions.
-DevSession (session_type="dev"): Full-permission Agent SDK session, Dev persona.
-  Does the actual coding work, runs SDLC pipeline stages.
+Session types (permission model):
+  ChatSession (session_type="chat"): Read-only Agent SDK session, PM persona.
+    Owns the Telegram conversation, orchestrates work, spawns child sessions.
+  DevSession (session_type="dev"): Full-permission Agent SDK session, Dev persona.
+    Does the actual coding work, runs SDLC pipeline stages.
+
+Roles (specialization within a session type):
+  "pm"  - Project manager role (default for chat sessions)
+  "dev" - Developer role (default for dev sessions)
+  None  - Unspecialized (legacy sessions before role was introduced)
+
+Parent-child relationship:
+  parent_session_id links a child session to its parent (role-neutral).
+  Use create_child(role=...) to spawn child sessions.
 
 Status lifecycle:
   pending -> running -> active -> dormant -> completed | failed | waiting_for_children
@@ -50,14 +62,32 @@ SESSION_TYPE_DEV = SessionType.DEV
 class AgentSession(Model):
     """Unified model for all Agent SDK sessions, discriminated by session_type.
 
-    Single Popoto model with a session_type discriminator ("chat" or "dev").
+    Single Popoto model with a session_type discriminator ("chat" or "dev")
+    and an optional role field for flexible specialization.
 
-    ChatSession (session_type="chat"):
-        Read-only Agent SDK session, PM persona. Owns the Telegram
-        conversation, orchestrates work, spawns DevSessions.
-    DevSession (session_type="dev"):
-        Full-permission Agent SDK session, Dev persona. Does the actual
-        coding work, runs SDLC pipeline stages.
+    Session types (permission model):
+        ChatSession (session_type="chat"):
+            Read-only Agent SDK session, PM persona. Owns the Telegram
+            conversation, orchestrates work, spawns child sessions.
+        DevSession (session_type="dev"):
+            Full-permission Agent SDK session, Dev persona. Does the actual
+            coding work, runs SDLC pipeline stages.
+
+    Roles (specialization):
+        "pm"  - Project manager (default for chat sessions)
+        "dev" - Developer (default for dev sessions)
+        None  - Unspecialized (legacy or generic sessions)
+
+    Parent-child hierarchy:
+        parent_session_id: Links child to parent (role-neutral, replaces
+            the old parent_chat_session_id which implied a ChatSession parent).
+        parent_agent_session_id: Generic agent hierarchy link.
+
+    Factory methods:
+        create_chat(): Create a ChatSession (PM persona, read-only).
+        create_child(role=...): Create a child session with the given role.
+        create_dev(): Backward-compat wrapper for create_child(role="dev").
+        create_local(): Create a local CLI session.
 
     Status values:
         pending  - Queued, waiting for worker
@@ -859,8 +889,7 @@ class AgentSession(Model):
             return AgentSession.query.get(self.parent_session_id)
         except Exception:
             logger.warning(
-                f"Parent session {self.parent_session_id} not found "
-                f"for session {self.id}"
+                f"Parent session {self.parent_session_id} not found for session {self.id}"
             )
             return None
 
