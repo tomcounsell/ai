@@ -47,7 +47,6 @@ class TestRegistryLoading:
             data = yaml.safe_load(f)
         all_names = [r["name"] for r in data["reflections"]]
         assert "health-check" in all_names
-        assert "daily-maintenance" in all_names
 
     def test_load_registry_returns_only_enabled(self):
         """load_registry() filters out disabled entries."""
@@ -490,15 +489,6 @@ class TestRegistryIntegrity:
         health_entries = [e for e in data["reflections"] if e["name"] == "health-check"]
         assert health_entries[0]["interval"] == 300
 
-    def test_daily_maintenance_interval_daily(self):
-        """Daily maintenance should run once per day (86400 seconds)."""
-        registry_path = Path(__file__).parent.parent.parent / "config" / "reflections.yaml"
-        with open(registry_path) as f:
-            data = yaml.safe_load(f)
-        daily_entries = [e for e in data["reflections"] if e["name"] == "daily-maintenance"]
-        assert len(daily_entries) == 1
-        assert daily_entries[0]["interval"] == 86400
-
     def test_no_duplicate_names(self):
         """All reflection names should be unique."""
         registry_path = Path(__file__).parent.parent.parent / "config" / "reflections.yaml"
@@ -513,7 +503,7 @@ class TestRegistryIntegrity:
         with open(registry_path) as f:
             data = yaml.safe_load(f)
         names = {e["name"] for e in data["reflections"]}
-        expected = {"health-check", "orphan-recovery", "stale-branch-cleanup", "daily-maintenance"}
+        expected = {"health-check", "orphan-recovery", "stale-branch-cleanup"}
         assert expected.issubset(names), f"Missing reflections: {expected - names}"
 
 
