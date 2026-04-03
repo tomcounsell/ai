@@ -1,20 +1,22 @@
 """AgentSession model - unified lifecycle tracking for agent work.
 
-Single Popoto model with session_type discriminator ("chat" or "dev") and
-an optional role field for flexible specialization within each session type.
+Single Popoto model with session_type discriminator ("pm", "teammate", or "dev")
+and an optional role field for flexible specialization within each session type.
 
-Popoto does not support model inheritance, so ChatSession and DevSession
+Popoto does not support model inheritance, so PM, Teammate, and Dev sessions
 are distinguished by the session_type field with factory methods and
 derived properties providing type-specific behavior.
 
 Session types (permission model):
-  ChatSession (session_type="chat"): Read-only Agent SDK session, PM persona.
+  PM (session_type="pm"): Read-only Agent SDK session, PM persona.
     Owns the Telegram conversation, orchestrates work, spawns child sessions.
+  Teammate (session_type="teammate"): Conversational agent, Teammate persona.
+    Handles informational queries directly without spawning DevSession.
   DevSession (session_type="dev"): Full-permission Agent SDK session, Dev persona.
     Does the actual coding work, runs SDLC pipeline stages.
 
 Roles (specialization within a session type):
-  "pm"  - Project manager role (default for chat sessions)
+  "pm"  - Project manager role (default for PM sessions)
   "dev" - Developer role (default for dev sessions)
   None  - Unspecialized (legacy sessions before role was introduced)
 
@@ -55,26 +57,29 @@ STEERING_QUEUE_MAX = 10  # Max buffered steering messages per session
 SDLC_STAGES = ["ISSUE", "PLAN", "CRITIQUE", "BUILD", "TEST", "REVIEW", "DOCS", "MERGE"]
 
 # Backward-compatible aliases (import from config.enums for new code)
-SESSION_TYPE_CHAT = SessionType.CHAT
+SESSION_TYPE_PM = SessionType.PM
 SESSION_TYPE_DEV = SessionType.DEV
 
 
 class AgentSession(Model):
     """Unified model for all Agent SDK sessions, discriminated by session_type.
 
-    Single Popoto model with a session_type discriminator ("chat" or "dev")
-    and an optional role field for flexible specialization.
+    Single Popoto model with a session_type discriminator ("pm", "teammate",
+    or "dev") and an optional role field for flexible specialization.
 
     Session types (permission model):
-        ChatSession (session_type="chat"):
+        PM (session_type="pm"):
             Read-only Agent SDK session, PM persona. Owns the Telegram
             conversation, orchestrates work, spawns child sessions.
+        Teammate (session_type="teammate"):
+            Conversational agent, Teammate persona. Handles informational
+            queries directly without spawning DevSession.
         DevSession (session_type="dev"):
             Full-permission Agent SDK session, Dev persona. Does the actual
             coding work, runs SDLC pipeline stages.
 
     Roles (specialization):
-        "pm"  - Project manager (default for chat sessions)
+        "pm"  - Project manager (default for PM sessions)
         "dev" - Developer (default for dev sessions)
         None  - Unspecialized (legacy or generic sessions)
 
@@ -84,7 +89,8 @@ class AgentSession(Model):
         parent_agent_session_id: Generic agent hierarchy link.
 
     Factory methods:
-        create_chat(): Create a ChatSession (PM persona, read-only).
+        create_pm(): Create a PM session (PM persona, read-only).
+        create_teammate(): Create a Teammate session (Teammate persona).
         create_child(role=...): Create a child session with the given role.
         create_dev(): Backward-compat wrapper for create_child(role="dev").
         create_local(): Create a local CLI session.
@@ -676,9 +682,14 @@ class AgentSession(Model):
     # === Session type helpers ===
 
     @property
-    def is_chat(self) -> bool:
-        """Whether this is a ChatSession (PM persona, read-only)."""
-        return self.session_type == SESSION_TYPE_CHAT
+    def is_pm(self) -> bool:
+        """Whether this is a PM session (PM persona, read-only)."""
+        return self.session_type == SESSION_TYPE_PM
+
+    @property
+    def is_teammate(self) -> bool:
+        """Whether this is a Teammate session."""
+        return self.session_type == SessionType.TEAMMATE
 
     @property
     def is_dev(self) -> bool:
@@ -727,7 +738,7 @@ class AgentSession(Model):
     # === Factory methods ===
 
     @classmethod
-    def create_chat(
+    def create_pm(
         cls,
         *,
         session_id: str,
@@ -742,7 +753,7 @@ class AgentSession(Model):
         telegram_message_key: str | None = None,
         **kwargs,
     ) -> "AgentSession":
-        """Create a ChatSession (PM persona, read-only orchestrator)."""
+        """Create a PM session (PM persona, read-only orchestrator)."""
         itm = {
             "message_text": message_text,
             "sender_name": sender_name,
@@ -755,7 +766,48 @@ class AgentSession(Model):
 
         session = cls(
             session_id=session_id,
-            session_type=SESSION_TYPE_CHAT,
+            session_type=SESSION_TYPE_PM,
+            project_key=project_key,
+            working_dir=working_dir,
+            chat_id=chat_id,
+            initial_telegram_message=itm,
+            telegram_message_key=telegram_message_key,
+            created_at=datetime.now(tz=UTC),
+            **kwargs,
+        )
+        session.save()
+        return session
+
+    @classmethod
+    def create_teammate(
+        cls,
+        *,
+        session_id: str,
+        project_key: str,
+        working_dir: str,
+        chat_id: str,
+        telegram_message_id: int,
+        message_text: str,
+        sender_name: str | None = None,
+        sender_id: int | None = None,
+        chat_title: str | None = None,
+        telegram_message_key: str | None = None,
+        **kwargs,
+    ) -> "AgentSession":
+        """Create a Teammate session (Teammate persona, conversational)."""
+        itm = {
+            "message_text": message_text,
+            "sender_name": sender_name,
+            "telegram_message_id": telegram_message_id,
+        }
+        if sender_id is not None:
+            itm["sender_id"] = sender_id
+        if chat_title is not None:
+            itm["chat_title"] = chat_title
+
+        session = cls(
+            session_id=session_id,
+            session_type=SessionType.TEAMMATE,
             project_key=project_key,
             working_dir=working_dir,
             chat_id=chat_id,
