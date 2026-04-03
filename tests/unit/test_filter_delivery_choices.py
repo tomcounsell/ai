@@ -6,8 +6,6 @@ parsed by the stop hook to set delivery_action, but can leak through the nudge
 loop's parallel send path as literal text.
 """
 
-import pytest
-
 from bridge.response import filter_tool_logs
 
 
