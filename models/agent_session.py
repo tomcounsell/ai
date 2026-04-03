@@ -210,7 +210,7 @@ class AgentSession(Model):
 
     def __setattr__(self, name, value):
         """Auto-convert float timestamps to datetime for DatetimeField fields."""
-        if name in self._DATETIME_FIELDS and isinstance(value, (int, float)):
+        if name in self._DATETIME_FIELDS and isinstance(value, int | float):
             value = datetime.fromtimestamp(value, tz=UTC)
         super().__setattr__(name, value)
 
@@ -261,7 +261,7 @@ class AgentSession(Model):
 
         if "scheduled_after" in kwargs and "scheduled_at" not in kwargs:
             val = kwargs.pop("scheduled_after")
-            if isinstance(val, (int, float)):
+            if isinstance(val, int | float):
                 kwargs["scheduled_at"] = datetime.fromtimestamp(val, tz=UTC)
             else:
                 kwargs["scheduled_at"] = val
@@ -342,13 +342,13 @@ class AgentSession(Model):
             kwargs["created_at"] = datetime.now(tz=UTC)
 
         # Convert float timestamps to datetime
-        if "created_at" in kwargs and isinstance(kwargs["created_at"], (int, float)):
+        if "created_at" in kwargs and isinstance(kwargs["created_at"], int | float):
             kwargs["created_at"] = datetime.fromtimestamp(kwargs["created_at"], tz=UTC)
-        if "started_at" in kwargs and isinstance(kwargs["started_at"], (int, float)):
+        if "started_at" in kwargs and isinstance(kwargs["started_at"], int | float):
             kwargs["started_at"] = datetime.fromtimestamp(kwargs["started_at"], tz=UTC)
-        if "completed_at" in kwargs and isinstance(kwargs["completed_at"], (int, float)):
+        if "completed_at" in kwargs and isinstance(kwargs["completed_at"], int | float):
             kwargs["completed_at"] = datetime.fromtimestamp(kwargs["completed_at"], tz=UTC)
-        if "updated_at" in kwargs and isinstance(kwargs["updated_at"], (int, float)):
+        if "updated_at" in kwargs and isinstance(kwargs["updated_at"], int | float):
             kwargs["updated_at"] = datetime.fromtimestamp(kwargs["updated_at"], tz=UTC)
 
         return kwargs
@@ -1070,12 +1070,18 @@ class AgentSession(Model):
             links["pr"] = self.pr_url
         return links
 
-    def get_stage_progress(self) -> dict[str, str]:
-        """Return SDLC stage completion status via PipelineStateMachine."""
+    def get_stage_progress(self, slug: str | None = None) -> dict[str, str]:
+        """Return SDLC stage completion status via PipelineStateMachine.
+
+        Args:
+            slug: Optional work item slug for artifact-based inference.
+                  When provided, fills in pending/ready gaps by checking
+                  observable artifacts (plan file, PR, review status).
+        """
         from bridge.pipeline_state import PipelineStateMachine
 
         sm = PipelineStateMachine(self)
-        return sm.get_display_progress()
+        return sm.get_display_progress(slug=slug)
 
     # === Stage-aware auto-continue helpers ===
 
