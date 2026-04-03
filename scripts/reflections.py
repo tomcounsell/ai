@@ -679,6 +679,7 @@ class ReflectionRunner:
             ("task_management", "Clean Up Task Management", self.step_clean_tasks),
             ("documentation_audit", "Audit Documentation", self.step_audit_docs),
             ("skills_audit", "Skills Audit", self.step_skills_audit),
+            ("hooks_audit", "Hooks Audit", self.step_hooks_audit),
             ("redis_ttl_cleanup", "Redis TTL Cleanup", self.step_redis_cleanup),
             ("redis_data_quality", "Redis Data Quality", self.step_redis_data_quality),
             ("branch_plan_cleanup", "Branch and Plan Cleanup", self.step_branch_plan_cleanup),
@@ -1438,6 +1439,90 @@ class ReflectionRunner:
             logger.error(f"Skills audit failed: {e}")
             self.state.step_progress["skills_audit"] = {"error": str(e)}
 
+    async def step_hooks_audit(self) -> None:
+        """Audit Claude Code hooks for safety and configuration issues.
+
+        Checks:
+        - logs/hooks.log for recent errors
+        - .claude/settings.json for hook configuration consistency
+        - Stop/SubagentStop hooks have || true
+        - Referenced hook scripts exist
+        """
+        findings: list[str] = []
+        error_count = 0
+        settings_issues = 0
+
+        # 1. Scan hooks.log for recent errors
+        hooks_log = PROJECT_ROOT / "logs" / "hooks.log"
+        if hooks_log.exists():
+            try:
+                errors = extract_structured_errors(hooks_log)
+                # Filter to last 24 hours
+                cutoff = (utc_now() - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+                recent = [e for e in errors if e.get("timestamp", "") >= cutoff]
+                error_count = len(recent)
+                if recent:
+                    # Count unique hook names
+                    hook_names = set()
+                    for e in recent:
+                        msg = e.get("message", "")
+                        # Extract hook name from "hook_name - ERROR - message" format
+                        parts = msg.split(" - ")
+                        if parts:
+                            hook_names.add(parts[0].strip())
+                    names = ", ".join(sorted(hook_names)) or "unknown"
+                    findings.append(f"{error_count} hook error(s) in last 24h from: {names}")
+            except Exception as e:
+                logger.warning(f"Failed to scan hooks.log: {e}")
+
+        # 2. Validate settings.json hook configuration
+        settings_path = PROJECT_ROOT / ".claude" / "settings.json"
+        if settings_path.exists():
+            try:
+                settings = json.loads(settings_path.read_text())
+                hooks = settings.get("hooks", {})
+
+                for event_type, matchers in hooks.items():
+                    for matcher_block in matchers:
+                        for hook in matcher_block.get("hooks", []):
+                            cmd = hook.get("command", "")
+                            has_or_true = "|| true" in cmd
+
+                            # Stop/SubagentStop hooks must have || true
+                            if event_type in ("Stop", "SubagentStop") and not has_or_true:
+                                findings.append(
+                                    f"FAIL: {event_type} hook missing || true: {cmd[:60]}"
+                                )
+                                settings_issues += 1
+
+                            # Check referenced scripts exist
+                            # Extract script path from command
+                            for part in cmd.replace("|| true", "").split():
+                                if part.endswith(".py") or part.endswith(".sh"):
+                                    script_path = part.replace(
+                                        '"$CLAUDE_PROJECT_DIR"/', ""
+                                    ).replace("$CLAUDE_PROJECT_DIR/", "")
+                                    full_path = PROJECT_ROOT / script_path
+                                    if not full_path.exists():
+                                        findings.append(
+                                            f"WARN: Hook script not found: {script_path}"
+                                        )
+                                        settings_issues += 1
+                                    break
+            except (json.JSONDecodeError, OSError) as e:
+                logger.warning(f"Failed to parse settings.json: {e}")
+                settings_issues += 1
+
+        self.state.step_progress["hooks_audit"] = {
+            "log_errors_24h": error_count,
+            "settings_issues": settings_issues,
+        }
+
+        if findings:
+            self.state.findings["ai:hooks_audit"] = findings
+
+        logger.info(f"Hooks audit: {error_count} log errors, {settings_issues} settings issues")
+
     async def step_redis_cleanup(self) -> None:
         """Step 12: Run TTL cleanup on all Redis models.
 
@@ -1984,9 +2069,8 @@ class ReflectionRunner:
         """
         import time as _time
 
-        from models.cyclic_episode import CyclicEpisode
-
         from models.agent_session import AgentSession
+        from models.cyclic_episode import CyclicEpisode
         from scripts.fingerprint_classifier import classify_session
 
         cutoff = _time.time() - 86400  # past 24 hours

@@ -1,5 +1,5 @@
 ---
-status: Draft
+status: Done
 type: feature
 appetite: Small
 owner: Valor
