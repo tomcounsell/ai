@@ -379,7 +379,7 @@ class TestHistoryFallback:
         mock_session = MagicMock()
         mock_session.agent_session_id = "test-123"
         mock_session.session_id = "sess-1"
-        mock_session.session_type = "chat"
+        mock_session.session_type = "pm"
         mock_session.status = "running"
         mock_session.slug = None
         mock_session.slug = None

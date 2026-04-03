@@ -852,7 +852,7 @@ class ValorAgent:
             target_repo: Absolute path to the target project's repo root. For
                 cross-repo SDLC builds this differs from working_dir (the
                 orchestrator). Defaults to working_dir when not specified.
-            session_type: Session type ("chat" for PM, None for dev). Injected as
+            session_type: Session type ("pm", "teammate", or "dev"). Injected as
                 SESSION_TYPE env var so hooks can enforce write restrictions.
         """
         default_dir = Path(__file__).parent.parent
@@ -1473,8 +1473,8 @@ async def get_agent_response_sdk(
         "requests from other sessions, other senders, or prior conversation threads."
     )
     # For SDLC-routed requests, inject target repo context (never for PM mode).
-    # ChatSession (session_type="chat") gets full pipeline instructions.
-    # All sessions are ChatSessions — orchestrate via dev-session subagent
+    # PM session (session_type="pm") gets full pipeline instructions.
+    # PM sessions orchestrate via dev-session subagent
     _session_type = None
     if session_id:
         try:

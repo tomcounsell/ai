@@ -29,7 +29,7 @@ class TestSessionCreationFromMessage:
         )
 
         ts = int(time.time())
-        session = AgentSession.create_chat(
+        session = AgentSession.create_pm(
             session_id=f"tg_valor_{event.chat_id}_{event.message.id}_{ts}",
             project_key="valor",
             working_dir="/Users/test/src/ai",
@@ -42,7 +42,7 @@ class TestSessionCreationFromMessage:
         )
 
         assert session.status == "pending"
-        assert session.is_chat
+        assert session.is_pm
         assert session.message_text == "build feature X"
         assert session.sender_name == "Tom"
         assert session.chat_id == str(event.chat_id)
@@ -56,7 +56,7 @@ class TestSessionCreationFromMessage:
         )
 
         ts = int(time.time())
-        session = AgentSession.create_chat(
+        session = AgentSession.create_pm(
             session_id=f"tg_valor_{event.chat_id}_{event.message.id}_{ts}",
             project_key="valor",
             working_dir="/Users/test/src/ai",
@@ -65,7 +65,7 @@ class TestSessionCreationFromMessage:
             message_text=event.message.text,
         )
 
-        assert session.is_chat
+        assert session.is_pm
         assert session.message_text == "what is the weather?"
 
 
@@ -75,7 +75,7 @@ class TestSessionStatusTransitions:
 
     def test_full_lifecycle(self):
         ts = int(time.time())
-        session = AgentSession.create_chat(
+        session = AgentSession.create_pm(
             session_id=f"lifecycle_{ts}",
             project_key="valor",
             working_dir="/tmp/test",
@@ -115,7 +115,7 @@ class TestSessionStatusTransitions:
 
     def test_dormant_on_open_question(self):
         ts = int(time.time())
-        session = AgentSession.create_chat(
+        session = AgentSession.create_pm(
             session_id=f"dormant_{ts}",
             project_key="valor",
             working_dir="/tmp/test",
@@ -134,7 +134,7 @@ class TestSessionStatusTransitions:
 
     def test_failed_session(self):
         ts = int(time.time())
-        session = AgentSession.create_chat(
+        session = AgentSession.create_pm(
             session_id=f"failed_{ts}",
             project_key="valor",
             working_dir="/tmp/test",
@@ -178,7 +178,7 @@ class TestHistoryAccumulation:
 
     def test_history_appends_entries(self):
         ts = int(time.time())
-        session = AgentSession.create_chat(
+        session = AgentSession.create_pm(
             session_id=f"hist_{ts}",
             project_key="valor",
             working_dir="/tmp/test",
@@ -200,7 +200,7 @@ class TestHistoryAccumulation:
 
     def test_link_tracking(self):
         ts = int(time.time())
-        session = AgentSession.create_chat(
+        session = AgentSession.create_pm(
             session_id=f"links_{ts}",
             project_key="valor",
             working_dir="/tmp/test",

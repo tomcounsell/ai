@@ -41,7 +41,7 @@ class TestNudgeLoopOutcomes:
         ts = int(time.time())
         session_id = f"nudge_empty_{ts}"
 
-        session = AgentSession.create_chat(
+        session = AgentSession.create_pm(
             session_id=session_id,
             project_key="valor",
             working_dir="/tmp/test",
@@ -79,7 +79,7 @@ class TestNudgeLoopOutcomes:
         ts = int(time.time())
         session_id = f"nudge_deliver_{ts}"
 
-        session = AgentSession.create_chat(
+        session = AgentSession.create_pm(
             session_id=session_id,
             project_key="valor",
             working_dir="/tmp/test",
@@ -173,7 +173,7 @@ class TestNudgeLoopOutcomes:
         ts = int(time.time())
         session_id = f"nudge_completed_{ts}"
 
-        session = AgentSession.create_chat(
+        session = AgentSession.create_pm(
             session_id=session_id,
             project_key="valor",
             working_dir="/tmp/test",

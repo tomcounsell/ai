@@ -21,7 +21,7 @@ class TestSessionErrorIsolation:
         chat_id = f"iso_chat_{ts}"
 
         # Create two sessions in the same chat
-        session1 = AgentSession.create_chat(
+        session1 = AgentSession.create_pm(
             session_id=f"iso_s1_{ts}",
             project_key="valor",
             working_dir="/tmp/test",
@@ -29,7 +29,7 @@ class TestSessionErrorIsolation:
             telegram_message_id=1,
             message_text="task 1",
         )
-        session2 = AgentSession.create_chat(
+        session2 = AgentSession.create_pm(
             session_id=f"iso_s2_{ts}",
             project_key="valor",
             working_dir="/tmp/test",
@@ -66,7 +66,7 @@ class TestSessionErrorIsolation:
         """A session that encounters an error should be marked 'failed'."""
         ts = int(time.time())
 
-        session = AgentSession.create_chat(
+        session = AgentSession.create_pm(
             session_id=f"err_status_{ts}",
             project_key="valor",
             working_dir="/tmp/test",
@@ -90,7 +90,7 @@ class TestSessionErrorIsolation:
         ts = int(time.time())
 
         # Session in chat A fails
-        s_a = AgentSession.create_chat(
+        s_a = AgentSession.create_pm(
             session_id=f"cross_a_{ts}",
             project_key="valor",
             working_dir="/tmp/test",
@@ -102,7 +102,7 @@ class TestSessionErrorIsolation:
         s_a.save()
 
         # Session in chat B should be unaffected
-        s_b = AgentSession.create_chat(
+        s_b = AgentSession.create_pm(
             session_id=f"cross_b_{ts}",
             project_key="valor",
             working_dir="/tmp/test",

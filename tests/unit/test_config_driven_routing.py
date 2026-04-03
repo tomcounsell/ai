@@ -175,20 +175,20 @@ class TestSessionTypeDerivation:
         assert persona == PersonaType.DEVELOPER
         # In telegram_bridge.py: Developer persona -> session_type = "dev"
 
-    def test_pm_persona_gives_chat_session(self):
+    def test_pm_persona_gives_pm_session(self):
         persona = resolve_persona(None, "PM: X", is_dm=False)
         assert persona == PersonaType.PROJECT_MANAGER
-        # In telegram_bridge.py: PM persona -> session_type = "chat"
+        # In telegram_bridge.py: PM persona -> session_type = "pm"
 
-    def test_teammate_persona_gives_chat_session(self):
+    def test_teammate_persona_gives_teammate_session(self):
         persona = resolve_persona(None, None, is_dm=True)
         assert persona == PersonaType.TEAMMATE
-        # In telegram_bridge.py: Teammate persona -> session_type = "chat"
+        # In telegram_bridge.py: Teammate persona -> session_type = "teammate"
 
-    def test_none_persona_gives_chat_session(self):
+    def test_none_persona_gives_pm_session(self):
         persona = resolve_persona(None, "Random Group", is_dm=False)
         assert persona is None
-        # In telegram_bridge.py: None persona -> session_type = "chat"
+        # In telegram_bridge.py: None persona -> session_type = "pm"
 
 
 # =============================================================================

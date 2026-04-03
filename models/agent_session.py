@@ -108,7 +108,7 @@ class AgentSession(Model):
     # === Identity ===
     id = AutoKeyField()
     session_id = Field()  # Telegram-derived session identifier (e.g., tg_project_chatid_msgid)
-    session_type = KeyField(null=True)  # "chat" or "dev" — discriminator
+    session_type = KeyField(null=True)  # "pm", "teammate", or "dev" — discriminator
     project_key = KeyField()
     status = IndexedField(default="pending")  # Non-key field with secondary index for .filter()
 
@@ -170,7 +170,7 @@ class AgentSession(Model):
     # === Steering fields ===
     queued_steering_messages = ListField(null=True)
 
-    # === ChatSession delivery fields ===
+    # === PM/Teammate session delivery fields ===
     # Stop-hook review gate: agent's final delivery decision.
     # Set by the stop hook after the agent reviews its draft output.
     # "send" = deliver delivery_text; "react" = emoji only; "silent" = nothing.
@@ -182,7 +182,7 @@ class AgentSession(Model):
     # === PM self-messaging ===
     pm_sent_message_ids = ListField(null=True)
 
-    # === DevSession fields (null when session_type="chat") ===
+    # === DevSession fields (null when session_type="pm" or "teammate") ===
     parent_session_id = KeyField(null=True)  # Logical FK -> parent session (role-neutral)
     slug = Field(null=True)  # Derives branch, plan path, worktree
 
