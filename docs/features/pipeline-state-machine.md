@@ -71,7 +71,7 @@ sm.has_remaining_stages()     # True if pipeline not complete
 sm.has_failed_stage()         # True if any stage failed
 sm.get_display_progress()     # {stage: status} for DISPLAY_STAGES
 sm.get_display_progress(slug="my-feature")  # fills pending gaps from artifacts
-sm.classify_outcome(stage, stop_reason, output_tail)  # "success"/"fail"/"ambiguous"
+sm.classify_outcome(stage, stop_reason, output_tail)  # "success"/"fail"/"partial"/"ambiguous"
 ```
 
 ## Stage Statuses
@@ -109,11 +109,37 @@ All GitHub checks use a single `gh pr view` call with `timeout=5`. Stored state 
 
 ## Outcome Classification
 
-`classify_outcome()` uses a two-tier approach:
-1. **SDK stop_reason**: non-`end_turn` reasons (rate_limited, timeout, etc.) are process failures
-2. **Output tail patterns**: stage-specific patterns in the last 500 chars of output
+`classify_outcome()` uses a three-tier approach to classify the result of a completed stage:
 
-Falls back to `"ambiguous"` for the Observer LLM to handle.
+### Tier 0: OUTCOME Contract (Structured)
+
+Skills can emit a structured OUTCOME contract as an HTML comment in their output:
+
+```
+<!-- OUTCOME {"status":"success","stage":"BUILD","artifacts":{"pr_url":"..."}} -->
+```
+
+The contract is a JSON object with these fields:
+- `status` (required): `"success"`, `"fail"`, or `"partial"`
+- `stage` (optional): The stage name (e.g., `"BUILD"`, `"TEST"`, `"REVIEW"`). If present and mismatched with the expected stage, the contract is ignored and classification falls through to Tier 1/2.
+- `artifacts` (optional): Stage-specific metadata (PR URLs, test counts, etc.)
+
+If a valid OUTCOME block is found with a recognized status, it is returned immediately -- no further classification is performed. The `"partial"` status enables nuanced routing: for example, a REVIEW that approves but finds nits returns `"partial"`, which triggers a PATCH cycle via `pipeline_graph.py`.
+
+Skills that emit OUTCOME contracts:
+- `/do-build`: success (PR created) or fail (build failed)
+- `/do-test`: success (all tests passed), fail (test failures), or partial (flaky tests)
+- `/do-pr-review`: success (no findings), partial (approved with findings), or fail (changes requested)
+
+### Tier 1: SDK Stop Reason
+
+Non-`end_turn` stop reasons (rate_limited, timeout, etc.) indicate process failures and return `"fail"`.
+
+### Tier 2: Output Tail Patterns
+
+Stage-specific text patterns in the last ~500 chars of output. Each stage has its own pattern set (e.g., `"pull/"` for BUILD, `"passed"` for TEST).
+
+Falls back to `"ambiguous"` when no pattern matches, for the Observer LLM to handle.
 
 ## Integration Points
 

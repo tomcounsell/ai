@@ -514,6 +514,16 @@ For each stale xfail detected (either form):
 
 **Skip if:** No xfail markers found in the test suite.
 
+## OUTCOME Contract Emission
+
+As the very last line of your final response, emit an OUTCOME contract so the pipeline can classify the test result programmatically:
+
+- **Success** (all tests passed): `<!-- OUTCOME {"status":"success","stage":"TEST","artifacts":{"passed":<N>,"failed":0}} -->`
+- **Fail** (test failures found): `<!-- OUTCOME {"status":"fail","stage":"TEST","artifacts":{"passed":<N>,"failed":<N>}} -->`
+- **Partial** (tests passed but with flaky tests or warnings): `<!-- OUTCOME {"status":"partial","stage":"TEST","artifacts":{"passed":<N>,"failed":0,"flaky":<N>}} -->`
+
+This structured output is parsed by `classify_outcome()` in `bridge/pipeline_state.py` (Tier 0) before any text pattern matching.
+
 ## Notes
 
 - No temporary files in the repo -- use `/tmp` for any scratch work

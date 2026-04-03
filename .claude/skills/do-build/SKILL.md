@@ -486,6 +486,15 @@ This deletes the plan document and closes the tracking issue, completing the lif
 
 After plan migration completes, include the PR URL prominently in your final response. When running via Telegram bridge, the agent's response (containing the PR link) will be automatically sent back to the chat where the build was initiated. No special action required - just ensure the PR URL is visible in your completion report.
 
+### OUTCOME Contract Emission
+
+As the very last line of your final response, emit an OUTCOME contract so the pipeline can classify the build result programmatically:
+
+- **Success** (PR created): `<!-- OUTCOME {"status":"success","stage":"BUILD","artifacts":{"pr_url":"<URL>"}} -->`
+- **Fail** (build failed, no PR): `<!-- OUTCOME {"status":"fail","stage":"BUILD","artifacts":{}} -->`
+
+This structured output is parsed by `classify_outcome()` in `bridge/pipeline_state.py` (Tier 0) before any text pattern matching.
+
 ## Agent Deployment Context
 
 When deploying an agent, include:

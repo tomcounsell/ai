@@ -9,7 +9,7 @@ Tests cover:
 - get_display_progress(slug=...) artifact-based inference
 - current_stage() and next_stage() queries
 - has_remaining_stages() and has_failed_stage()
-- classify_outcome() two-tier classification (including CRITIQUE)
+- classify_outcome() three-tier classification (OUTCOME contract, stop_reason, text patterns)
 - Edge cases: double-complete, invalid stages, cycle re-entry
 """
 
@@ -595,6 +595,135 @@ class TestClassifyOutcome:
         sm = PipelineStateMachine(session)
         result = sm.classify_outcome("CRITIQUE", "end_turn", "Verdict: MAJOR REWORK required")
         assert result == "ambiguous"
+
+
+class TestClassifyOutcomeContract:
+    """Test Tier 0 OUTCOME contract parsing in classify_outcome()."""
+
+    def test_valid_outcome_success(self):
+        """Valid OUTCOME block with status=success returns success."""
+        session = _make_session()
+        sm = PipelineStateMachine(session)
+        tail = 'Build complete. <!-- OUTCOME {"status":"success","stage":"BUILD"} -->'
+        assert sm.classify_outcome("BUILD", "end_turn", tail) == "success"
+
+    def test_valid_outcome_fail(self):
+        """Valid OUTCOME block with status=fail returns fail."""
+        session = _make_session()
+        sm = PipelineStateMachine(session)
+        tail = 'Tests failed. <!-- OUTCOME {"status":"fail","stage":"TEST"} -->'
+        assert sm.classify_outcome("TEST", "end_turn", tail) == "fail"
+
+    def test_valid_outcome_partial(self):
+        """Valid OUTCOME block with status=partial returns partial."""
+        session = _make_session()
+        sm = PipelineStateMachine(session)
+        tail = (
+            "Review done. "
+            '<!-- OUTCOME {"status":"partial","stage":"REVIEW",'
+            '"artifacts":{"findings":3}} -->'
+        )
+        assert sm.classify_outcome("REVIEW", "end_turn", tail) == "partial"
+
+    def test_malformed_json_falls_through(self):
+        """Malformed JSON in OUTCOME block falls through to Tier 2."""
+        session = _make_session()
+        sm = PipelineStateMachine(session)
+        tail = "<!-- OUTCOME {not valid json} --> 42 passed, 0 warnings"
+        assert sm.classify_outcome("TEST", "end_turn", tail) == "success"
+
+    def test_missing_status_key_falls_through(self):
+        """OUTCOME block without status key falls through to Tier 2."""
+        session = _make_session()
+        sm = PipelineStateMachine(session)
+        tail = '<!-- OUTCOME {"stage":"BUILD"} --> PR created: https://github.com/org/repo/pull/42'
+        assert sm.classify_outcome("BUILD", "end_turn", tail) == "success"
+
+    def test_no_outcome_block_falls_through(self):
+        """No OUTCOME block in output falls through to Tier 2."""
+        session = _make_session()
+        sm = PipelineStateMachine(session)
+        tail = "42 passed, 0 warnings"
+        assert sm.classify_outcome("TEST", "end_turn", tail) == "success"
+
+    def test_stage_mismatch_falls_through(self):
+        """OUTCOME block with mismatched stage falls through to Tier 2."""
+        session = _make_session()
+        sm = PipelineStateMachine(session)
+        # OUTCOME says BUILD but we expect REVIEW
+        tail = '<!-- OUTCOME {"status":"success","stage":"BUILD"} --> approved'
+        assert sm.classify_outcome("REVIEW", "end_turn", tail) == "success"
+
+    def test_multiple_outcome_blocks_uses_last(self):
+        """Multiple OUTCOME blocks: uses the last one."""
+        session = _make_session()
+        sm = PipelineStateMachine(session)
+        tail = (
+            '<!-- OUTCOME {"status":"fail","stage":"TEST"} --> '
+            '<!-- OUTCOME {"status":"success","stage":"TEST"} -->'
+        )
+        assert sm.classify_outcome("TEST", "end_turn", tail) == "success"
+
+    def test_outcome_takes_priority_over_text_patterns(self):
+        """OUTCOME contract is used even when text patterns would match differently."""
+        session = _make_session()
+        sm = PipelineStateMachine(session)
+        # Text says "approved" (would match success in Tier 2) but OUTCOME says partial
+        tail = 'approved <!-- OUTCOME {"status":"partial","stage":"REVIEW"} -->'
+        assert sm.classify_outcome("REVIEW", "end_turn", tail) == "partial"
+
+    def test_outcome_without_stage_field_still_works(self):
+        """OUTCOME block without stage field is accepted (no mismatch check)."""
+        session = _make_session()
+        sm = PipelineStateMachine(session)
+        tail = '<!-- OUTCOME {"status":"success"} -->'
+        assert sm.classify_outcome("BUILD", "end_turn", tail) == "success"
+
+    def test_empty_output_tail(self):
+        """Empty output_tail returns ambiguous (no OUTCOME, no patterns)."""
+        session = _make_session()
+        sm = PipelineStateMachine(session)
+        assert sm.classify_outcome("BUILD", "end_turn", "") == "ambiguous"
+
+    def test_outcome_contract_takes_priority_over_sdk_failure(self):
+        """Tier 0 (OUTCOME contract) fires before Tier 1 (SDK stop_reason).
+
+        Even with a non-end_turn stop_reason like "timeout", a valid OUTCOME
+        contract in the output takes priority and returns its status.
+        """
+        session = _make_session()
+        sm = PipelineStateMachine(session)
+        tail = '<!-- OUTCOME {"status":"success","stage":"BUILD"} -->'
+        result = sm.classify_outcome("BUILD", "timeout", tail)
+        assert result == "success"
+
+
+class TestParseOutcomeContract:
+    """Test the _parse_outcome_contract() module-level function directly."""
+
+    def test_none_input(self):
+        """None-like input returns None."""
+        from bridge.pipeline_state import _parse_outcome_contract
+
+        assert _parse_outcome_contract("") is None
+        assert _parse_outcome_contract(None) is None
+
+    def test_valid_contract(self):
+        """Valid contract is parsed correctly."""
+        from bridge.pipeline_state import _parse_outcome_contract
+
+        result = _parse_outcome_contract('<!-- OUTCOME {"status":"success","stage":"BUILD"} -->')
+        assert result == {"status": "success", "stage": "BUILD"}
+
+    def test_with_artifacts(self):
+        """Contract with artifacts field is parsed correctly."""
+        from bridge.pipeline_state import _parse_outcome_contract
+
+        result = _parse_outcome_contract(
+            '<!-- OUTCOME {"status":"partial","stage":"REVIEW","artifacts":{"findings":3}} -->'
+        )
+        assert result["status"] == "partial"
+        assert result["artifacts"]["findings"] == 3
 
 
 class TestToDict:
