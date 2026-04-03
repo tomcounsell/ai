@@ -83,9 +83,6 @@
     <td class="mono">{{ s.duration | format_duration }}</td>
     <td>
         <div class="flex gap-2">
-            {% if s.tool_call_count %}
-            <span class="activity-bar" title="{{ s.tool_call_count }} tool calls" data-tools="{{ s.tool_call_count }}"><span class="activity-bar-fill"></span></span>
-            {% endif %}
             {% if s.issue_url %}
             <a href="{{ s.issue_url }}" class="link" target="_blank" onclick="event.stopPropagation()">issue</a>
             {% endif %}
@@ -110,17 +107,6 @@ function toggleChildren(el) {
         rows[i].style.display = collapsed ? 'none' : '';
     }
 }
-document.addEventListener('DOMContentLoaded', function() {
-    var bars = document.querySelectorAll('.activity-bar');
-    var max = 0;
-    bars.forEach(function(b) { max = Math.max(max, parseInt(b.dataset.tools) || 0); });
-    if (max > 0) {
-        bars.forEach(function(b) {
-            var pct = Math.max(8, (parseInt(b.dataset.tools) || 0) / max * 100);
-            b.querySelector('.activity-bar-fill').style.width = pct + '%';
-        });
-    }
-});
 </script>
 <table class="data-table">
     <thead>
