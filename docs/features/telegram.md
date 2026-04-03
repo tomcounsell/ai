@@ -135,23 +135,13 @@ During processing, the interface shows status through emoji reactions:
 | Success | 👍 | Completed successfully |
 | Error | ❌ | Something went wrong |
 
-### Intent-Specific Processing Emojis
+### Contextual Processing Emojis
 
-The processing emoji is determined by classifying the message intent using a local Ollama model (fast, ~100-500ms). This runs in parallel with the main agent processing:
+The processing emoji is selected via embedding cosine similarity against all 73 validated Telegram reaction emojis. The message text is embedded and compared to pre-computed emoji label embeddings, selecting the most contextually relevant reaction in under 50ms (after cache warm-up).
 
-| Intent | Emoji | Example Messages |
-|--------|-------|------------------|
-| search | 🔍 | "search for...", "what is...", "find..." |
-| code_execution | 💻 | "run this code", code blocks |
-| image_generation | 🎨 | "draw...", "create an image of..." |
-| image_analysis | 👁️ | "analyze this image", "what's in this photo" |
-| file_operation | 📁 | "read file...", "save to..." |
-| git_operation | 🔀 | "commit", "push", "create PR" |
-| chat | 🤔 | General conversation |
-| tool_use | 🔧 | Explicit tool requests |
-| system | ⚙️ | "status", "restart" |
+This replaces the previous Ollama intent classification approach, which was limited to 10 hardcoded emojis and had 2-10 second latency with frequent timeouts.
 
-This provides immediate visual feedback about what type of task is being processed.
+See [Emoji Embedding Reactions](emoji-embedding-reactions.md) for full details on the embedding index, caching, and `send_telegram --react` flag.
 
 ## Configuration
 

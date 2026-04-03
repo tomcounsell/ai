@@ -10,12 +10,12 @@ When a Telegram message arrives, the bridge automatically classifies it using Cl
 
 ### Auto-Classification (Bridge)
 
-The bridge's `classify_and_update_reaction()` function in `bridge/telegram_bridge.py` runs two parallel classification tasks:
+The bridge's message handler in `bridge/telegram_bridge.py` runs classification as a background task:
 
-1. **Intent classification** (existing) - determines the processing emoji reaction via Ollama
-2. **Work type classification** (new) - calls `classify_request_async()` from `tools/classifier.py` to determine bug/feature/chore
+1. **Emoji reaction** -- selected via embedding cosine similarity in `tools/emoji_embedding.py` (under 50ms, separate from classification)
+2. **Work type classification** -- calls `classify_request_async()` from `tools/classifier.py` to determine bug/feature/chore
 
-The work type result is stored in a mutable dict and passed to `enqueue_agent_session()` as `classification_type`. Both classifications run as a single `asyncio.create_task()`, keeping message intake non-blocking.
+The work type result is stored in a mutable dict and passed to `enqueue_agent_session()` as `classification_type`. Classification runs as an `asyncio.create_task()`, keeping message intake non-blocking.
 
 If classification fails, the field stays `null` and the user specifies the type manually during planning.
 

@@ -21,7 +21,7 @@ All tools are available in `tools/`:
 - **image-gen** - Image generation tool
 
 ### Supporting Modules (Added 2026-01-19)
-- **intent/** - Ollama-based intent classification with heuristic fallback
+- **tools/emoji_embedding.py** - Embedding-based emoji reaction selection (replaced intent/ module)
 
 See [tools/README.md](../tools/README.md) for usage documentation.
 

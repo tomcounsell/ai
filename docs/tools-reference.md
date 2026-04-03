@@ -79,6 +79,31 @@ for r in results:
     print(f"{r.relevance:.2f} | {r.path} | {r.section} | {r.impact_type}")
 ```
 
+### Emoji Embedding (`tools.emoji_embedding`)
+
+Embedding-based emoji selection for Telegram reactions. Maps feeling words to the nearest of 73 validated Telegram reaction emojis via cosine similarity.
+
+```python
+from tools.emoji_embedding import find_best_emoji, find_best_emoji_for_message
+
+emoji = find_best_emoji("excited")        # -> "🔥" or similar
+emoji = find_best_emoji_for_message(text)  # -> contextual emoji for message
+```
+
+Used by the bridge for automatic reaction selection and by `send_telegram --react` for agent-initiated reactions. See `docs/features/emoji-embedding-reactions.md` for full documentation.
+
+### Send Telegram Reactions (`tools.send_telegram --react`)
+
+Set an emoji reaction on a Telegram message by describing a feeling word. The feeling is resolved to the nearest emoji via the embedding index.
+
+```bash
+python tools/send_telegram.py --react "excited"
+python tools/send_telegram.py --react "great work"
+python tools/send_telegram.py --react "thinking"
+```
+
+Requires `TELEGRAM_REPLY_TO` to be set (identifies the message to react to). The reaction payload is queued to the Redis outbox and delivered by `bridge/telegram_relay.py`.
+
 ### Link Analysis (`tools.link_analysis`)
 
 URL extraction and metadata analysis.
