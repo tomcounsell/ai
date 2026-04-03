@@ -87,8 +87,6 @@ from bridge.response import (  # noqa: E402
     clean_message,
     extract_files_from_response,  # noqa: F401
     filter_tool_logs,
-    get_processing_emoji,  # noqa: F401
-    get_processing_emoji_async,
     send_response_with_files,
     set_reaction,
 )
@@ -1025,19 +1023,31 @@ async def main():
                 session_id = f"tg_{project_key}_{event.chat_id}_{message.id}"
                 logger.info(f"[routing] Session {session_id} (continuation=False)")
 
+        # === MARK AS READ ===
+        try:
+            await event.message.mark_read()
+        except Exception as e:
+            logger.debug(f"mark_read failed (non-fatal): {e}")
+
         # === REACTION WORKFLOW ===
         # 1. 👀 Eyes = Message received/acknowledged
         await set_reaction(client, event.chat_id, message.id, REACTION_RECEIVED)
 
-        # Classify intent with Ollama (fast, for reaction emoji)
+        # 2. Embedding-based emoji selection (fast, <50ms after cache warm)
+        try:
+            from tools.emoji_embedding import find_best_emoji_for_message
+
+            emoji = find_best_emoji_for_message(clean_text)
+            await set_reaction(client, event.chat_id, message.id, emoji)
+            logger.debug(f"Embedding emoji selected: {emoji}")
+        except Exception as e:
+            logger.debug(f"Embedding emoji selection failed (non-fatal): {e}")
+
+        # 3. Work-type classification (separate async task, non-blocking)
         classification_result = {}  # Mutable container for async classification result
 
-        async def classify_and_update_reaction():
-            """Classify intent with Ollama and update reaction emoji."""
-            emoji = await get_processing_emoji_async(clean_text)
-            await set_reaction(client, event.chat_id, message.id, emoji)
-            logger.debug(f"Intent classified, reaction set to {emoji}")
-            # Also classify work type (non-blocking, result stored for enqueue)
+        async def classify_work_type():
+            """Classify work type for session routing."""
             try:
                 from tools.classifier import classify_request_async
 
@@ -1051,8 +1061,7 @@ async def main():
             except Exception as e:
                 logger.debug(f"Work classification failed (non-fatal): {e}")
 
-        # Start intent classification (don't await)
-        asyncio.create_task(classify_and_update_reaction())
+        asyncio.create_task(classify_work_type())
 
         # Synchronous fast-path: PR/issue references always mean SDLC work.
         # The async classifier above may not finish before enqueue_agent_session runs,

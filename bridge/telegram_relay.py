@@ -43,6 +43,43 @@ def _get_redis_connection() -> redis.Redis:
     return redis.Redis.from_url(redis_url, decode_responses=True)
 
 
+async def _send_queued_reaction(
+    telegram_client,
+    message: dict,
+) -> bool:
+    """Send a queued reaction via Telethon.
+
+    Args:
+        telegram_client: The Telethon TelegramClient instance.
+        message: Parsed reaction dict with chat_id, reply_to, emoji.
+
+    Returns:
+        True on success, False on failure. Failed reactions are not re-queued.
+    """
+    chat_id = message.get("chat_id")
+    reply_to = message.get("reply_to")
+    emoji = message.get("emoji")
+
+    if not chat_id or not reply_to or not emoji:
+        logger.warning(f"Relay: skipping malformed reaction payload: {message}")
+        return False
+
+    try:
+        from bridge.response import set_reaction
+
+        ok = await set_reaction(telegram_client, int(chat_id), int(reply_to), emoji)
+        if ok:
+            logger.info(f"Relay: set reaction {emoji} on msg {reply_to} in chat {chat_id}")
+        else:
+            logger.warning(
+                f"Relay: failed to set reaction {emoji} on msg {reply_to} in chat {chat_id}"
+            )
+        return ok
+    except Exception as e:
+        logger.warning(f"Relay: reaction send failed: {e}")
+        return False
+
+
 async def _send_queued_message(
     telegram_client,
     message: dict,
@@ -204,6 +241,13 @@ async def process_outbox(telegram_client) -> int:
                     message = json.loads(raw)
                 except (json.JSONDecodeError, TypeError) as e:
                     logger.warning(f"Relay: skipping malformed queue entry in {key}: {e}")
+                    continue
+
+                # Handle reaction payloads separately
+                if message.get("type") == "reaction":
+                    reaction_ok = await _send_queued_reaction(telegram_client, message)
+                    if reaction_ok:
+                        sent_count += 1
                     continue
 
                 msg_id = await _send_queued_message(telegram_client, message)
