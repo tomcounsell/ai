@@ -86,7 +86,8 @@ Single Popoto model (`AgentSession`) with discriminator field. Popoto ORM does n
 - `result_text` -- what was delivered to Telegram
 
 ### DevSession-specific fields
-- `parent_chat_session_id` (KeyField) -- logical FK to parent ChatSession
+- `parent_session_id` (KeyField) -- logical FK to parent session (renamed from `parent_chat_session_id`)
+- `role` (DataField) -- session specialization ("pm", "dev", or null for legacy)
 - `stage_states` -- derived property reading from `session_events`
 - `slug` -- derives branch name, plan path, worktree
 - `issue_url`, `plan_url`, `pr_url` -- SDLC link URLs
@@ -166,7 +167,7 @@ The ChatSession can push steering messages to its running child DevSessions, ena
 
 ### Mechanism
 
-ChatSession invokes `scripts/steer_child.py` via bash with the child's session ID and a steering message. The script validates the parent-child relationship (via `parent_chat_session_id`) and pushes to the child's Redis steering queue. The child's watchdog hook picks up the message on the next tool call.
+ChatSession invokes `scripts/steer_child.py` via bash with the child's session ID and a steering message. The script validates the parent-child relationship (via `parent_session_id`) and pushes to the child's Redis steering queue. The child's watchdog hook picks up the message on the next tool call.
 
 ```bash
 # Steer a running child

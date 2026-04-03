@@ -44,7 +44,7 @@ class TestAsyncCreateMatchesFactoryMethods:
             **shared,
         )
         via_factory = AgentSession.create_dev(
-            parent_chat_session_id="parent-123",
+            parent_session_id="parent-123",
             chat_id=str(-time.time_ns() % 999_000),
             telegram_message_id=2,
             **shared,

@@ -1915,7 +1915,7 @@ class TestSummarizerBypass:
         mock_session.session_id = "test-session"
         mock_session.is_sdlc = False
         # Ensure parent lookup also returns no PM messages
-        mock_session.get_parent_chat_session.return_value = None
+        mock_session.get_parent_session.return_value = None
 
         # Mock send_markdown to avoid Telethon calls
         with patch("bridge.markdown.send_markdown", new_callable=AsyncMock) as mock_send:
@@ -1955,7 +1955,7 @@ class TestSummarizerBypassParentSession:
         mock_session.has_pm_messages.return_value = False
         mock_session.pm_sent_message_ids = []
         mock_session.session_id = "dev-session-1"
-        mock_session.get_parent_chat_session.return_value = mock_parent
+        mock_session.get_parent_session.return_value = mock_parent
 
         result = await send_response_with_files(
             mock_client,
@@ -1970,7 +1970,7 @@ class TestSummarizerBypassParentSession:
 
     @pytest.mark.asyncio
     async def test_no_bypass_when_parent_is_dangling(self):
-        """DevSession with dangling parent_chat_session_id -> bypass does not fire."""
+        """DevSession with dangling parent_session_id -> bypass does not fire."""
         from bridge.response import send_response_with_files
 
         mock_client = MagicMock()
@@ -1978,7 +1978,7 @@ class TestSummarizerBypassParentSession:
         mock_session.has_pm_messages.return_value = False
         mock_session.pm_sent_message_ids = []
         mock_session.session_id = "dev-session-2"
-        mock_session.get_parent_chat_session.return_value = None
+        mock_session.get_parent_session.return_value = None
         mock_session.is_sdlc = False
 
         with patch("bridge.markdown.send_markdown", new_callable=AsyncMock) as mock_send:
@@ -1996,7 +1996,7 @@ class TestSummarizerBypassParentSession:
 
     @pytest.mark.asyncio
     async def test_no_bypass_when_no_parent(self):
-        """Session without parent_chat_session_id -> no parent lookup, no bypass."""
+        """Session without parent_session_id -> no parent lookup, no bypass."""
         from bridge.response import send_response_with_files
 
         mock_client = MagicMock()
@@ -2005,8 +2005,8 @@ class TestSummarizerBypassParentSession:
         mock_session.pm_sent_message_ids = []
         mock_session.session_id = "chat-session-1"
         mock_session.is_sdlc = False
-        # Remove get_parent_chat_session to simulate a plain session
-        del mock_session.get_parent_chat_session
+        # Remove get_parent_session to simulate a plain session
+        del mock_session.get_parent_session
 
         with patch("bridge.markdown.send_markdown", new_callable=AsyncMock) as mock_send:
             mock_send.return_value = MagicMock()

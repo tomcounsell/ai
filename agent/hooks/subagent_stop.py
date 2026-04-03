@@ -80,7 +80,7 @@ def _register_dev_session_completion(
         from models.agent_session import AgentSession
 
         # Find dev sessions for this parent
-        dev_sessions = list(AgentSession.query.filter(parent_chat_session_id=parent_session_id))
+        dev_sessions = list(AgentSession.query.filter(parent_session_id=parent_session_id))
         for dev in dev_sessions:
             if dev.status not in ("completed", "failed"):
                 dev.status = "completed"

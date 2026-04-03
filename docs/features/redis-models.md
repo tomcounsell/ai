@@ -137,7 +137,8 @@ Popoto field types have different implications for how records behave on mutatio
 | `session_type` | KeyField | No | Set once at creation ("chat" or "dev") |
 | `project_key` | KeyField | No | Set once at creation |
 | `chat_id` | KeyField | No | Set once at creation |
-| `parent_chat_session_id` | KeyField | No | Set once at creation (DevSession only) |
+| `parent_session_id` | KeyField | No | Set once at creation (child sessions only, renamed from `parent_chat_session_id`) |
+| `role` | Field | No | Set once at creation ("pm", "dev", or null for legacy) |
 | `parent_agent_session_id` | KeyField | No | Set once at creation (child sessions only) |
 | `status` | IndexedField | Yes | Mutate and save directly; no delete-and-recreate |
 

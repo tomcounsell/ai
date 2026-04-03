@@ -1,14 +1,26 @@
 """AgentSession model - unified lifecycle tracking for agent work.
 
-Single Popoto model with session_type discriminator ("chat" or "dev").
+Single Popoto model with session_type discriminator ("chat" or "dev") and
+an optional role field for flexible specialization within each session type.
+
 Popoto does not support model inheritance, so ChatSession and DevSession
 are distinguished by the session_type field with factory methods and
 derived properties providing type-specific behavior.
 
-ChatSession (session_type="chat"): Read-only Agent SDK session, PM persona.
-  Owns the Telegram conversation, orchestrates work, spawns DevSessions.
-DevSession (session_type="dev"): Full-permission Agent SDK session, Dev persona.
-  Does the actual coding work, runs SDLC pipeline stages.
+Session types (permission model):
+  ChatSession (session_type="chat"): Read-only Agent SDK session, PM persona.
+    Owns the Telegram conversation, orchestrates work, spawns child sessions.
+  DevSession (session_type="dev"): Full-permission Agent SDK session, Dev persona.
+    Does the actual coding work, runs SDLC pipeline stages.
+
+Roles (specialization within a session type):
+  "pm"  - Project manager role (default for chat sessions)
+  "dev" - Developer role (default for dev sessions)
+  None  - Unspecialized (legacy sessions before role was introduced)
+
+Parent-child relationship:
+  parent_session_id links a child session to its parent (role-neutral).
+  Use create_child(role=...) to spawn child sessions.
 
 Status lifecycle:
   pending -> running -> active -> dormant -> completed | failed | waiting_for_children
@@ -50,14 +62,32 @@ SESSION_TYPE_DEV = SessionType.DEV
 class AgentSession(Model):
     """Unified model for all Agent SDK sessions, discriminated by session_type.
 
-    Single Popoto model with a session_type discriminator ("chat" or "dev").
+    Single Popoto model with a session_type discriminator ("chat" or "dev")
+    and an optional role field for flexible specialization.
 
-    ChatSession (session_type="chat"):
-        Read-only Agent SDK session, PM persona. Owns the Telegram
-        conversation, orchestrates work, spawns DevSessions.
-    DevSession (session_type="dev"):
-        Full-permission Agent SDK session, Dev persona. Does the actual
-        coding work, runs SDLC pipeline stages.
+    Session types (permission model):
+        ChatSession (session_type="chat"):
+            Read-only Agent SDK session, PM persona. Owns the Telegram
+            conversation, orchestrates work, spawns child sessions.
+        DevSession (session_type="dev"):
+            Full-permission Agent SDK session, Dev persona. Does the actual
+            coding work, runs SDLC pipeline stages.
+
+    Roles (specialization):
+        "pm"  - Project manager (default for chat sessions)
+        "dev" - Developer (default for dev sessions)
+        None  - Unspecialized (legacy or generic sessions)
+
+    Parent-child hierarchy:
+        parent_session_id: Links child to parent (role-neutral, replaces
+            the old parent_chat_session_id which implied a ChatSession parent).
+        parent_agent_session_id: Generic agent hierarchy link.
+
+    Factory methods:
+        create_chat(): Create a ChatSession (PM persona, read-only).
+        create_child(role=...): Create a child session with the given role.
+        create_dev(): Backward-compat wrapper for create_child(role="dev").
+        create_local(): Create a local CLI session.
 
     Status values:
         pending  - Queued, waiting for worker
@@ -147,8 +177,11 @@ class AgentSession(Model):
     pm_sent_message_ids = ListField(null=True)
 
     # === DevSession fields (null when session_type="chat") ===
-    parent_chat_session_id = KeyField(null=True)  # Logical FK -> ChatSession
+    parent_session_id = KeyField(null=True)  # Logical FK -> parent session (role-neutral)
     slug = Field(null=True)  # Derives branch, plan path, worktree
+
+    # === Role field (flexible specialization beyond session_type) ===
+    role = Field(null=True)  # "pm", "dev", or None for unspecialized sessions
 
     # === Session hierarchy fields ===
     parent_agent_session_id = KeyField(null=True)
@@ -158,10 +191,22 @@ class AgentSession(Model):
     # DatetimeField names that should auto-convert float timestamps
     _DATETIME_FIELDS = {"scheduled_at", "started_at", "updated_at", "completed_at"}
 
+    # Known roles for validation
+    _KNOWN_ROLES = {"pm", "dev"}
+
     def __init__(self, **kwargs):
         """Initialize AgentSession with backward-compatible field name support."""
         kwargs = self.__class__._normalize_kwargs(kwargs)
         super().__init__(**kwargs)
+
+    def save(self, *args, **kwargs):
+        """Save with soft validation: warn if role is None."""
+        if getattr(self, "role", None) is None and getattr(self, "session_type", None):
+            logger.debug(
+                f"AgentSession {getattr(self, 'session_id', '?')} saved with role=None "
+                f"(session_type={self.session_type})"
+            )
+        return super().save(*args, **kwargs)
 
     def __setattr__(self, name, value):
         """Auto-convert float timestamps to datetime for DatetimeField fields."""
@@ -228,6 +273,16 @@ class AgentSession(Model):
             kwargs["parent_agent_session_id"] = kwargs.pop("parent_job_id")  # legacy
         elif "parent_job_id" in kwargs:  # legacy
             kwargs.pop("parent_job_id")  # legacy
+
+        # Map deprecated parent_chat_session_id → parent_session_id
+        if "parent_chat_session_id" in kwargs and "parent_session_id" not in kwargs:
+            logger.warning(
+                "Deprecated: parent_chat_session_id passed to AgentSession; "
+                "use parent_session_id instead"
+            )
+            kwargs["parent_session_id"] = kwargs.pop("parent_chat_session_id")
+        elif "parent_chat_session_id" in kwargs:
+            kwargs.pop("parent_chat_session_id")
 
         if "agent_session_id" in kwargs:
             kwargs.pop("agent_session_id")  # AutoKeyField, ignore
@@ -309,6 +364,18 @@ class AgentSession(Model):
         """Create an AgentSession asynchronously with backward-compatible field name support."""
         kwargs = cls._normalize_kwargs(kwargs)
         return await super().async_create(**kwargs)
+
+    # === Backward-compatible property: parent_chat_session_id -> parent_session_id ===
+
+    @property
+    def parent_chat_session_id(self) -> str | None:
+        """Backward-compatible alias for parent_session_id."""
+        return self.parent_session_id
+
+    @parent_chat_session_id.setter
+    def parent_chat_session_id(self, value: str | None) -> None:
+        """Backward-compatible setter for parent_session_id."""
+        self.parent_session_id = value
 
     # === Backward-compatible property: agent_session_id -> id ===
 
@@ -727,19 +794,32 @@ class AgentSession(Model):
         return session
 
     @classmethod
-    def create_dev(
+    def create_child(
         cls,
         *,
+        role: str | None = None,
         session_id: str,
         project_key: str,
         working_dir: str,
-        parent_chat_session_id: str,
+        parent_session_id: str,
         message_text: str,
         slug: str | None = None,
         stage_states: dict | None = None,
         **kwargs,
     ) -> "AgentSession":
-        """Create a DevSession (Dev persona, full permissions)."""
+        """Create a child AgentSession with the given role.
+
+        Args:
+            role: Session role (e.g., "dev", "pm"). Defaults to None.
+            session_id: Unique session identifier.
+            project_key: Project this session belongs to.
+            working_dir: Working directory for the session.
+            parent_session_id: ID of the parent session.
+            message_text: Initial message text.
+            slug: Optional work item slug.
+            stage_states: Optional initial SDLC stage states.
+            **kwargs: Additional fields passed to the constructor.
+        """
         itm = {"message_text": message_text}
 
         # If stage_states provided, store as an initial event
@@ -753,9 +833,10 @@ class AgentSession(Model):
             session_type=SESSION_TYPE_DEV,
             project_key=project_key,
             working_dir=working_dir,
-            parent_chat_session_id=parent_chat_session_id,
+            parent_session_id=parent_session_id,
             initial_telegram_message=itm,
             slug=slug,
+            role=role,
             session_events=initial_events,
             created_at=datetime.now(tz=UTC),
             **kwargs,
@@ -763,28 +844,76 @@ class AgentSession(Model):
         session.save()
         return session
 
-    def get_parent_chat_session(self) -> "AgentSession | None":
-        """Return the parent ChatSession if this is a DevSession."""
-        if not self.parent_chat_session_id:
+    @classmethod
+    def create_dev(
+        cls,
+        *,
+        session_id: str,
+        project_key: str,
+        working_dir: str,
+        parent_session_id: str | None = None,
+        message_text: str,
+        slug: str | None = None,
+        stage_states: dict | None = None,
+        **kwargs,
+    ) -> "AgentSession":
+        """Create a DevSession (backward-compat wrapper for create_child(role='dev')).
+
+        Deprecated: Use create_child(role="dev", ...) instead.
+        """
+        # Support old kwarg name via _normalize_kwargs
+        if parent_session_id is None:
+            parent_session_id = kwargs.pop("parent_chat_session_id", None)
+            if parent_session_id is not None:
+                logger.warning(
+                    "Deprecated: parent_chat_session_id passed to create_dev(); "
+                    "use parent_session_id instead"
+                )
+        return cls.create_child(
+            role="dev",
+            session_id=session_id,
+            project_key=project_key,
+            working_dir=working_dir,
+            parent_session_id=parent_session_id or "",
+            message_text=message_text,
+            slug=slug,
+            stage_states=stage_states,
+            **kwargs,
+        )
+
+    def get_parent_session(self) -> "AgentSession | None":
+        """Return the parent session if this is a child session."""
+        if not self.parent_session_id:
             return None
         try:
-            return AgentSession.query.get(self.parent_chat_session_id)
+            return AgentSession.query.get(self.parent_session_id)
         except Exception:
             logger.warning(
-                f"Parent chat session {self.parent_chat_session_id} not found "
-                f"for dev session {self.id}"
+                f"Parent session {self.parent_session_id} not found for session {self.id}"
             )
             return None
 
-    def get_dev_sessions(self) -> list["AgentSession"]:
-        """Return all DevSessions spawned by this ChatSession."""
-        if not self.is_chat:
-            return []
+    def get_parent_chat_session(self) -> "AgentSession | None":
+        """Backward-compat wrapper for get_parent_session().
+
+        Deprecated: Use get_parent_session() instead.
+        """
+        return self.get_parent_session()
+
+    def get_child_sessions(self) -> list["AgentSession"]:
+        """Return all child sessions linked via parent_session_id."""
         try:
-            return list(AgentSession.query.filter(parent_chat_session_id=self.id))
+            return list(AgentSession.query.filter(parent_session_id=self.id))
         except Exception as e:
-            logger.warning(f"Failed to query dev sessions for chat {self.id}: {e}")
+            logger.warning(f"Failed to query child sessions for {self.id}: {e}")
             return []
+
+    def get_dev_sessions(self) -> list["AgentSession"]:
+        """Backward-compat wrapper for get_child_sessions().
+
+        Deprecated: Use get_child_sessions() instead.
+        """
+        return self.get_child_sessions()
 
     # === PM self-messaging helpers ===
 

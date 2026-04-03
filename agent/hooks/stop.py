@@ -71,8 +71,8 @@ def _has_pm_messages(session_id: str) -> bool:
         session = sessions[0]
         if hasattr(session, "has_pm_messages") and session.has_pm_messages():
             return True
-        if hasattr(session, "get_parent_chat_session"):
-            parent = session.get_parent_chat_session()
+        if hasattr(session, "get_parent_session"):
+            parent = session.get_parent_session()
             if parent and hasattr(parent, "has_pm_messages") and parent.has_pm_messages():
                 return True
     except Exception as e:

@@ -503,15 +503,15 @@ async def send_response_with_files(
     # returning, so file attachments are not lost on PM self-message sessions.
     pm_bypass = session and hasattr(session, "has_pm_messages") and session.has_pm_messages()
     pm_bypass_source = "session"
-    if not pm_bypass and session and hasattr(session, "get_parent_chat_session"):
-        parent = session.get_parent_chat_session()
+    if not pm_bypass and session and hasattr(session, "get_parent_session"):
+        parent = session.get_parent_session()
         if parent and hasattr(parent, "has_pm_messages") and parent.has_pm_messages():
             pm_bypass = True
             pm_bypass_source = "parent"
     if pm_bypass:
         # Log pm_sent_message_ids from the source that triggered the bypass
-        if pm_bypass_source == "parent" and hasattr(session, "get_parent_chat_session"):
-            _parent = session.get_parent_chat_session()
+        if pm_bypass_source == "parent" and hasattr(session, "get_parent_session"):
+            _parent = session.get_parent_session()
             _bypass_ids = getattr(_parent, "pm_sent_message_ids", []) if _parent else []
         else:
             _bypass_ids = getattr(session, "pm_sent_message_ids", [])
