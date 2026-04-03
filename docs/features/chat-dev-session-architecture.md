@@ -218,7 +218,7 @@ Hook returns {"reason": "Pipeline state: {stage_states}"}
 | `session_registry` | `agent/hooks/session_registry.py` | Maps Claude Code UUIDs to bridge session IDs (see [Session Isolation](session-isolation.md)) |
 | `PipelineStateMachine` | `bridge/pipeline_state.py` | Manages stage_states on the parent AgentSession |
 | `_extract_stage_from_prompt()` | `agent/hooks/pre_tool_use.py` | Parses "Stage: BUILD" patterns from dev-session prompts |
-| `classify_outcome()` | `bridge/pipeline_state.py` | Determines success/fail/ambiguous from output tail |
+| `classify_outcome()` | `bridge/pipeline_state.py` | Three-tier classification: OUTCOME contract, stop_reason, text patterns |
 
 ### Stage Extraction
 
@@ -226,7 +226,7 @@ The PreToolUse hook extracts the SDLC stage name from the dev-session prompt usi
 
 ### Outcome Classification
 
-When a DevSession completes, the SubagentStop hook extracts the last ~500 characters of output (from the agent transcript file or fallback summary) and passes them to `PipelineStateMachine.classify_outcome()`. The outcome determines whether the stage is marked as completed or failed on the parent session:
+When a DevSession completes, the SubagentStop hook extracts the last ~500 characters of output (from the agent transcript file or fallback summary) and passes them to `PipelineStateMachine.classify_outcome()`. Classification uses three tiers: Tier 0 parses structured `<!-- OUTCOME {...} -->` contracts emitted by skills, Tier 1 checks SDK stop_reason, and Tier 2 falls back to text pattern matching. The outcome determines whether the stage is marked as completed or failed on the parent session:
 
 - **success** or **ambiguous** -> `complete_stage()` (safe default for ambiguous)
 - **fail** or **partial** -> `fail_stage()`
