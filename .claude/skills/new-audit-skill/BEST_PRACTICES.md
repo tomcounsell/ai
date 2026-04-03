@@ -1,6 +1,6 @@
 # Audit Skill Best Practices
 
-Extracted from the 4 existing audit skills in this repo: `audit-models`, `audit-next-tool`, `do-docs-audit`, `do-skills-audit`.
+Extracted from the 8 existing audit skills in this repo: `audit-models`, `audit-tools`, `do-docs-audit`, `do-skills-audit`.
 
 ## Anatomy of a Good Audit Skill
 
@@ -19,7 +19,7 @@ Every audit skill answers five questions:
 |----------|-------------|---------|
 | **Script-backed** | Checks are deterministic, regex-based, or structural. Benefits from caching, CLI flags, JSON output. | `do-skills-audit` (Python script with 12 rules) |
 | **Prompt-only** | Checks require semantic understanding, cross-referencing, or judgment calls. | `audit-models` (relationship analysis), `do-docs-audit` (reference verification) |
-| **Hybrid** | Some checks are deterministic, others need LLM reasoning. | `audit-next-tool` (structure checks + quality judgment) |
+| **Hybrid** | Some checks are deterministic, others need LLM reasoning. | `audit-tools` (structure checks + quality judgment) |
 
 **Rule of thumb**: If you can write the check as a regex or AST walk, make it a script. If it requires "does this make sense?", keep it in the prompt.
 
@@ -58,7 +58,7 @@ Three tiers based on portability:
 | Pattern | When | Portable? | Examples |
 |---------|------|-----------|---------|
 | `do-{subject}-audit` | General-purpose audits usable in any repo (docs, skills, deps, env vars) | Yes — works anywhere | `do-docs-audit`, `do-skills-audit` |
-| `audit-{subject}` | Repo-specific feature audits tied to this project's domain | No — project-specific | `audit-models` (Popoto), `audit-next-tool` (Valor tools) |
+| `audit-{subject}` | Repo-specific feature audits tied to this project's domain | No — project-specific | `audit-models` (Popoto), `audit-tools` (Valor tools) |
 
 **Decision rule**:
 - Would this audit make sense in a different repo? → `do-{subject}-audit`
@@ -66,7 +66,7 @@ Three tiers based on portability:
 
 **Slash command ergonomics**:
 - General: `/do-docs-audit`, `/do-skills-audit`, `/do-deps-audit`
-- Feature-specific: `/audit-models`, `/audit-next-tool`, `/audit-prompts`
+- Feature-specific: `/audit-models`, `/audit-tools`, `/audit-prompts`
 
 The `do-` prefix groups general audits together in autocomplete. Feature-specific audits cluster under `audit-` and are clearly project-local.
 
@@ -74,11 +74,17 @@ The `do-` prefix groups general audits together in autocomplete. Feature-specifi
 
 ### SKILL.md Structure (required sections)
 
-1. **Frontmatter** — name, description, allowed-tools. Set `disable-model-invocation: true` if the audit should only run on explicit `/slash-command`.
+1. **Frontmatter** — name, description, allowed-tools. See `disable-model-invocation` guidance below.
 2. **What this skill does** — numbered list of steps (scan → check → report → act).
 3. **Audit Checks** — each check gets a subsection with name, description, and severity.
 4. **Output Format** — exact template of what the report looks like. Use code blocks.
 5. **After the Audit** — what happens with findings (disposition).
+
+### When to set `disable-model-invocation: true`
+
+Set this flag when the audit is domain-specific enough that the model should not auto-invoke it based on conversation context alone. Audits tied to a specific project domain (`audit-models`, `audit-tools`, `do-skills-audit`) typically set it because they only make sense when explicitly requested. General-purpose audits that should trigger from natural conversation (`do-docs-audit`, `do-integration-audit`, `do-design-audit`) leave it unset so the model can offer them proactively.
+
+**Decision rule**: Would a false-positive invocation waste significant time or produce confusing output? If yes, set `disable-model-invocation: true`. If the audit is lightweight and broadly useful, leave it unset.
 
 ### Check Design Rules
 
@@ -136,7 +142,7 @@ Match the instruction style to the audit's freedom level:
 | Autonomy | Instruction style | Example audit |
 |----------|-------------------|---------------|
 | **High** | Guiding principles, let model reason about edge cases | `audit-models` — "Flag when the same concept uses different names" |
-| **Medium** | Structured phases with judgment within each phase | `audit-next-tool` — 4-phase process, judgment on quality |
+| **Medium** | Structured phases with judgment within each phase | `audit-tools` — 4-phase process, judgment on quality |
 | **Low** | Step-by-step scripts, deterministic pass/fail | `do-skills-audit` — Python script with 12 boolean rules |
 
 Don't mix autonomy levels within a single check. If a check has a deterministic part and a judgment part, split it into two checks.
