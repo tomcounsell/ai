@@ -107,7 +107,12 @@ def migrate(dry_run: bool = True) -> dict:
             # Check if key contains :chat: segment
             if b":chat:" not in key and ":chat:" not in key_str:
                 # Check if already migrated
-                if b":pm:" in key or b":teammate:" in key or ":pm:" in key_str or ":teammate:" in key_str:
+                if (
+                    b":pm:" in key
+                    or b":teammate:" in key
+                    or ":pm:" in key_str
+                    or ":teammate:" in key_str
+                ):
                     stats["skipped_already_migrated"] += 1
                 else:
                     stats["skipped_no_chat_segment"] += 1
