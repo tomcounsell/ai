@@ -506,18 +506,21 @@ def _session_to_pipeline(session) -> PipelineProgress:
 # === Public query functions ===
 
 
-def get_all_sessions(limit: int = 50) -> list[PipelineProgress]:
+def get_all_sessions(limit: int = 15) -> list[PipelineProgress]:
     """Get agent sessions sorted by last activity.
 
-    Active sessions always appear (no cap). Inactive sessions are filtered
-    to those within the configured retention period (DASHBOARD_RETENTION_HOURS
-    env var, default 48h), capped at `limit` total.
+    Active parent sessions always appear (no cap). Inactive parent sessions
+    are filtered to those within the configured retention period
+    (DASHBOARD_RETENTION_HOURS env var, default 48h), capped at `limit`.
+
+    The limit applies only to top-level (parent) rows. All children of
+    included parents are attached regardless of the limit.
 
     Args:
-        limit: Maximum number of inactive sessions to show.
+        limit: Maximum number of inactive parent sessions to show.
 
     Returns:
-        List of PipelineProgress, newest activity first.
+        List of top-level PipelineProgress (with children nested), newest first.
     """
     from models.agent_session import AgentSession
 
@@ -528,47 +531,53 @@ def get_all_sessions(limit: int = 50) -> list[PipelineProgress]:
         return []
 
     cutoff = time.time() - DASHBOARD_RETENTION_HOURS * 3600
-    active = []
-    inactive = []
 
     def _best_timestamp(p: PipelineProgress) -> float:
         """Pick the best available timestamp for ordering/filtering."""
         return p.completed_at or p.updated_at or p.started_at or p.created_at or 0
 
+    # Convert all sessions to PipelineProgress
+    all_pipelines = []
     for session in all_sessions:
         try:
             pipeline = _session_to_pipeline(session)
         except Exception:
             logger.debug(f"Skipping corrupt session: {getattr(session, 'agent_session_id', '?')}")
             continue
-        if pipeline.status in (
+        if _best_timestamp(pipeline) >= cutoff or pipeline.status in (
             "running",
             "pending",
             "in_progress",
             "active",
             "waiting_for_children",
         ):
-            active.append(pipeline)
-        else:
-            if _best_timestamp(pipeline) >= cutoff:
-                inactive.append(pipeline)
+            all_pipelines.append(pipeline)
 
-    active.sort(key=lambda p: p.updated_at or p.created_at or 0, reverse=True)
-    inactive.sort(key=_best_timestamp, reverse=True)
-
-    flat_list = active + inactive[:limit]
-
-    # Group children under parents (no N+1 queries -- uses the flat list)
-    by_id: dict[str, PipelineProgress] = {p.agent_session_id: p for p in flat_list}
+    # Group children under parents (no N+1 queries)
+    by_id: dict[str, PipelineProgress] = {p.agent_session_id: p for p in all_pipelines}
     child_ids: set[str] = set()
-    for p in flat_list:
+    for p in all_pipelines:
         if p.parent_agent_session_id and p.parent_agent_session_id in by_id:
             parent = by_id[p.parent_agent_session_id]
             parent.children.append(p)
             child_ids.add(p.agent_session_id)
         # Orphaned children (parent not in list) remain as top-level rows
 
-    return [p for p in flat_list if p.agent_session_id not in child_ids]
+    top_level = [p for p in all_pipelines if p.agent_session_id not in child_ids]
+
+    # Split into active/inactive, apply limit only to inactive parents
+    active = []
+    inactive = []
+    for p in top_level:
+        if p.status in ("running", "pending", "in_progress", "active", "waiting_for_children"):
+            active.append(p)
+        else:
+            inactive.append(p)
+
+    active.sort(key=lambda p: p.updated_at or p.created_at or 0, reverse=True)
+    inactive.sort(key=_best_timestamp, reverse=True)
+
+    return active + inactive[:limit]
 
 
 def get_active_pipelines() -> list[PipelineProgress]:
