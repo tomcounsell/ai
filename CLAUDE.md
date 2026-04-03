@@ -32,6 +32,60 @@ gws sheets spreadsheets values get --params '{"spreadsheetId": "ID", "range": "S
 
 **Workflows:** `gws workflow +standup-report`, `+meeting-prep`, `+email-to-task`, `+weekly-digest`
 
+## OfficeCLI
+
+CLI for creating, reading, and editing Office documents (.docx, .xlsx, .pptx). Single binary at `~/.local/bin/officecli`, no dependencies.
+
+Usage: `officecli <command> <file> [path] [flags]`
+
+**Commands:** `create`, `view`, `get`, `query`, `set`, `add`, `remove`, `move`, `swap`, `batch`, `validate`, `open`, `close`
+
+**Strategy:** L1 (read) then L2 (DOM edit) then L3 (raw XML). Always prefer higher layers. Add `--json` for structured output.
+
+**Help system:** When unsure about property names or syntax, run help instead of guessing:
+```bash
+officecli pptx set              # All settable elements and properties
+officecli pptx set shape        # Shape properties in detail
+officecli pptx set shape.fill   # Specific property format and examples
+```
+
+**Common patterns:**
+```bash
+# Create files
+officecli create report.docx
+officecli create data.xlsx
+officecli create slides.pptx
+
+# Read and inspect
+officecli view report.docx outline           # Document structure
+officecli view report.docx stats             # Page/word/shape counts
+officecli view report.docx issues            # Formatting problems
+officecli get report.docx '/body/p[1]' --json
+officecli get slides.pptx '/slide[1]' --depth 1
+
+# Edit Word
+officecli add report.docx /body --type paragraph --prop text="Summary" --prop style=Heading1
+officecli set report.docx '/body/p[1]/r[1]' --prop font=Arial --prop size=12pt
+
+# Edit Excel
+officecli set data.xlsx /Sheet1/A1 --prop value="Name" --prop bold=true
+officecli set data.xlsx /Sheet1/B2 --prop value=95
+
+# Edit PowerPoint
+officecli add slides.pptx / --type slide --prop title="Q4 Report" --prop background=1A1A2E
+officecli add slides.pptx /slide[1] --type shape --prop text="Revenue grew 25%" --prop x=2cm --prop y=5cm
+
+# Batch operations (multiple edits in one save)
+echo '[{"command":"set","path":"/Sheet1/A1","props":{"value":"Name","bold":"true"}}]' | officecli batch data.xlsx --json
+
+# Resident mode (3+ commands on same file)
+officecli open report.docx    # Keep in memory
+officecli set report.docx ... # Fast, no file I/O
+officecli close report.docx   # Save and release
+```
+
+**Output:** Use `--json` for structured output. Use `--depth N` with `get` to expand children. Use `--max-lines N` with `view text` for large documents.
+
 ## Reading Telegram Messages
 
 Use `valor-telegram` to read messages from any chat. It checks Redis first, then falls back to the Telegram API automatically.
