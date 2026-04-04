@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: Shipped
 type: feature
 appetite: Medium
 owner: Valor
@@ -137,27 +137,27 @@ No prior attempts at custom emoji integration exist. Issue #658 listed it as a d
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `set_reaction()` with custom emoji: If `ReactionCustomEmoji` raises (non-Premium, invalid document_id), catch and retry with best standard emoji. Test asserts fallback occurs and standard reaction is set.
-- [ ] Custom emoji indexer API failure: If `getEmojiStickers` fails, log warning and return empty custom index. Test asserts standard-only search works when custom index is empty.
-- [ ] Relay custom emoji message send failure: If `send_message` with `MessageEntityCustomEmoji` fails, fall back to sending the emoji character as plain text. Test asserts fallback message sent.
+- [x] `set_reaction()` with custom emoji: If `ReactionCustomEmoji` raises (non-Premium, invalid document_id), catch and retry with best standard emoji. Test asserts fallback occurs and standard reaction is set.
+- [x] Custom emoji indexer API failure: If `getEmojiStickers` fails, log warning and return empty custom index. Test asserts standard-only search works when custom index is empty.
+- [x] Relay custom emoji message send failure: If `send_message` with `MessageEntityCustomEmoji` fails, fall back to sending the emoji character as plain text. Test asserts fallback message sent.
 
 ### Empty/Invalid Input Handling
-- [ ] `find_best_emoji("")` still returns default thinking emoji (unchanged behavior)
-- [ ] `find_best_emoji("excited")` with empty custom emoji cache returns best standard emoji
-- [ ] `--emoji ""` exits with clear error message
-- [ ] Custom emoji index with zero sticker sets returns empty dict (no crash)
+- [x] `find_best_emoji("")` still returns default thinking emoji (unchanged behavior)
+- [x] `find_best_emoji("excited")` with empty custom emoji cache returns best standard emoji
+- [x] `--emoji ""` exits with clear error message
+- [x] Custom emoji index with zero sticker sets returns empty dict (no crash)
 
 ### Error State Rendering
-- [ ] When custom emoji reaction fails and falls back to standard, the user sees a standard reaction (not nothing)
-- [ ] When emoji-only message fails, user sees a plain-text emoji message (not an error)
+- [x] When custom emoji reaction fails and falls back to standard, the user sees a standard reaction (not nothing)
+- [x] When emoji-only message fails, user sees a plain-text emoji message (not an error)
 
 ## Test Impact
 
-- [ ] `tests/unit/test_emoji_embedding.py::test_find_best_emoji_returns_string` -- UPDATE: assert returns `EmojiResult` with `__str__` compatibility
-- [ ] `tests/unit/test_emoji_embedding.py::test_find_best_emoji_fallback` -- UPDATE: assert returns `EmojiResult` with standard emoji on failure
-- [ ] `tests/unit/test_emoji_embedding.py::test_find_best_emoji_for_message` -- UPDATE: assert returns `EmojiResult`
-- [ ] `tests/unit/test_send_telegram.py::test_reaction_mode` -- UPDATE: handle `EmojiResult` in reaction payload
-- [ ] `tests/unit/test_delivery_execution.py` -- UPDATE: `set_reaction` mock may need to accept `EmojiResult` or string
+- [x] `tests/unit/test_emoji_embedding.py::test_find_best_emoji_returns_string` -- UPDATE: assert returns `EmojiResult` with `__str__` compatibility
+- [x] `tests/unit/test_emoji_embedding.py::test_find_best_emoji_fallback` -- UPDATE: assert returns `EmojiResult` with standard emoji on failure
+- [x] `tests/unit/test_emoji_embedding.py::test_find_best_emoji_for_message` -- UPDATE: assert returns `EmojiResult`
+- [x] `tests/unit/test_send_telegram.py::test_reaction_mode` -- UPDATE: handle `EmojiResult` in reaction payload
+- [x] `tests/unit/test_delivery_execution.py` -- UPDATE: `set_reaction` mock may need to accept `EmojiResult` or string
 
 ## Rabbit Holes
 
@@ -215,25 +215,25 @@ No update system changes required -- the new cache file is auto-generated at run
 
 ## Documentation
 
-- [ ] Update `docs/features/emoji-embedding-reactions.md` to cover custom emoji support, the `EmojiResult` type, `--emoji` flag, and graceful degradation behavior
-- [ ] Add custom emoji section to `docs/features/README.md` index table (or update existing emoji entry)
-- [ ] Update inline docstrings in `tools/emoji_embedding.py` (new `EmojiResult` class, updated `find_best_emoji()` return type)
-- [ ] Update inline docstrings in `bridge/response.py` (`set_reaction()` custom emoji support)
-- [ ] Update inline docstrings in `tools/send_telegram.py` (new `--emoji` flag)
-- [ ] Update `docs/tools-reference.md` to document `--emoji` flag for `send_telegram`
+- [x] Update `docs/features/emoji-embedding-reactions.md` to cover custom emoji support, the `EmojiResult` type, `--emoji` flag, and graceful degradation behavior
+- [x] Add custom emoji section to `docs/features/README.md` index table (or update existing emoji entry)
+- [x] Update inline docstrings in `tools/emoji_embedding.py` (new `EmojiResult` class, updated `find_best_emoji()` return type)
+- [x] Update inline docstrings in `bridge/response.py` (`set_reaction()` custom emoji support)
+- [x] Update inline docstrings in `tools/send_telegram.py` (new `--emoji` flag)
+- [x] Update `docs/tools-reference.md` to document `--emoji` flag for `send_telegram`
 
 ## Success Criteria
 
-- [ ] `find_best_emoji("excited")` returns an `EmojiResult` that may be standard or custom
-- [ ] `str(find_best_emoji("excited"))` returns a valid emoji string (backward compatible)
-- [ ] `set_reaction()` can set both standard and custom emoji reactions
-- [ ] Custom emoji reactions fall back to standard emoji on failure without errors
-- [ ] `send_telegram --emoji "celebration"` queues a custom emoji message payload
-- [ ] Custom emoji index is cached to `data/custom_emoji_embeddings.json`
-- [ ] Standard emoji behavior is completely unchanged when custom index is empty
-- [ ] `send_telegram --react "feeling"` works with both standard and custom emoji transparently
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] `find_best_emoji("excited")` returns an `EmojiResult` that may be standard or custom
+- [x] `str(find_best_emoji("excited"))` returns a valid emoji string (backward compatible)
+- [x] `set_reaction()` can set both standard and custom emoji reactions
+- [x] Custom emoji reactions fall back to standard emoji on failure without errors
+- [x] `send_telegram --emoji "celebration"` queues a custom emoji message payload
+- [x] Custom emoji index is cached to `data/custom_emoji_embeddings.json`
+- [x] Standard emoji behavior is completely unchanged when custom index is empty
+- [x] `send_telegram --react "feeling"` works with both standard and custom emoji transparently
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 

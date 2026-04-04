@@ -81,20 +81,26 @@ for r in results:
 
 ### Emoji Embedding (`tools.emoji_embedding`)
 
-Embedding-based emoji selection for Telegram reactions. Maps feeling words to the nearest of 73 validated Telegram reaction emojis via cosine similarity.
+Embedding-based emoji selection for Telegram reactions. Maps feeling words to the nearest emoji via cosine similarity, searching both the 73 standard Telegram reaction emojis and any available Premium custom emoji packs.
 
 ```python
-from tools.emoji_embedding import find_best_emoji, find_best_emoji_for_message
+from tools.emoji_embedding import find_best_emoji, find_best_emoji_for_message, EmojiResult
 
-emoji = find_best_emoji("excited")        # -> "🔥" or similar
-emoji = find_best_emoji_for_message(text)  # -> contextual emoji for message
+result = find_best_emoji("excited")        # -> EmojiResult
+str(result)                                 # -> "🔥" (backward compatible)
+result.is_custom                            # -> True if custom emoji matched
+result.document_id                          # -> Telegram document_id for custom emoji
+
+result = find_best_emoji_for_message(text)  # -> EmojiResult for message context
 ```
 
-Used by the bridge for automatic reaction selection and by `send_telegram --react` for agent-initiated reactions. See `docs/features/emoji-embedding-reactions.md` for full documentation.
+Returns an `EmojiResult` dataclass carrying both standard emoji and optional custom emoji data. `str(result)` preserves backward compatibility. Custom emoji wins only when its score exceeds the standard match by a 0.05 delta.
+
+Used by the bridge for automatic reaction selection and by `send_telegram --react` / `--emoji` for agent-initiated reactions and messages. See `docs/features/emoji-embedding-reactions.md` for full documentation.
 
 ### Send Telegram Reactions (`tools.send_telegram --react`)
 
-Set an emoji reaction on a Telegram message by describing a feeling word. The feeling is resolved to the nearest emoji via the embedding index.
+Set an emoji reaction on a Telegram message by describing a feeling word. The feeling is resolved to the nearest emoji (standard or custom) via the embedding index.
 
 ```bash
 python tools/send_telegram.py --react "excited"
@@ -102,7 +108,19 @@ python tools/send_telegram.py --react "great work"
 python tools/send_telegram.py --react "thinking"
 ```
 
-Requires `TELEGRAM_REPLY_TO` to be set (identifies the message to react to). The reaction payload is queued to the Redis outbox and delivered by `bridge/telegram_relay.py`.
+Requires `TELEGRAM_REPLY_TO` to be set (identifies the message to react to). The reaction payload is queued to the Redis outbox and delivered by `bridge/telegram_relay.py`. When a custom emoji is matched, the payload includes `custom_emoji_document_id` for the relay to dispatch via `ReactionCustomEmoji`.
+
+### Send Telegram Custom Emoji (`tools.send_telegram --emoji`)
+
+Send a standalone custom emoji message by describing a feeling word. The feeling is resolved to the best emoji via the embedding index, preferring custom emoji when available.
+
+```bash
+python tools/send_telegram.py --emoji "celebration"
+python tools/send_telegram.py --emoji "excited"
+python tools/send_telegram.py --emoji "sad"
+```
+
+Requires `TELEGRAM_CHAT_ID` and `VALOR_SESSION_ID`. Queues a `custom_emoji_message` payload to the Redis outbox. The relay renders it using `MessageEntityCustomEmoji` for Premium custom emoji, falling back to plain text if the send fails.
 
 ### Link Analysis (`tools.link_analysis`)
 

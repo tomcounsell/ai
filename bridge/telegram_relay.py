@@ -49,9 +49,15 @@ async def _send_queued_reaction(
 ) -> bool:
     """Send a queued reaction via Telethon.
 
+    Supports both standard emoji (``emoji`` field) and custom emoji
+    (``custom_emoji_document_id`` field). When a custom emoji document_id
+    is present, constructs an ``EmojiResult`` so ``set_reaction()`` can
+    dispatch to ``ReactionCustomEmoji`` with automatic fallback.
+
     Args:
         telegram_client: The Telethon TelegramClient instance.
-        message: Parsed reaction dict with chat_id, reply_to, emoji.
+        message: Parsed reaction dict with chat_id, reply_to, emoji,
+            and optional custom_emoji_document_id.
 
     Returns:
         True on success, False on failure. Failed reactions are not re-queued.
@@ -67,7 +73,20 @@ async def _send_queued_reaction(
     try:
         from bridge.response import set_reaction
 
-        ok = await set_reaction(telegram_client, int(chat_id), int(reply_to), emoji)
+        # If custom emoji document_id is present, wrap in EmojiResult
+        custom_doc_id = message.get("custom_emoji_document_id")
+        if custom_doc_id is not None:
+            from tools.emoji_embedding import EmojiResult
+
+            emoji_result = EmojiResult(
+                emoji=emoji,
+                document_id=int(custom_doc_id),
+                is_custom=True,
+            )
+            ok = await set_reaction(telegram_client, int(chat_id), int(reply_to), emoji_result)
+        else:
+            ok = await set_reaction(telegram_client, int(chat_id), int(reply_to), emoji)
+
         if ok:
             logger.info(f"Relay: set reaction {emoji} on msg {reply_to} in chat {chat_id}")
         else:
@@ -78,6 +97,82 @@ async def _send_queued_reaction(
     except Exception as e:
         logger.warning(f"Relay: reaction send failed: {e}")
         return False
+
+
+async def _send_custom_emoji_message(
+    telegram_client,
+    message: dict,
+) -> int | None:
+    """Send a standalone custom emoji message via Telethon.
+
+    Uses ``MessageEntityCustomEmoji`` to render the emoji as a custom
+    sticker in the message. Falls back to sending the emoji character
+    as plain text if the custom emoji send fails.
+
+    Args:
+        telegram_client: The Telethon TelegramClient instance.
+        message: Parsed message dict with chat_id, reply_to, emoji,
+            and optional custom_emoji_document_id.
+
+    Returns:
+        The Telegram message ID on success, None on failure.
+    """
+    chat_id = message.get("chat_id")
+    reply_to = message.get("reply_to")
+    emoji_char = message.get("emoji", "")
+    custom_doc_id = message.get("custom_emoji_document_id")
+
+    if not chat_id or not emoji_char:
+        logger.warning(f"Relay: skipping malformed custom emoji message: {message}")
+        return None
+
+    reply_to_id = int(reply_to) if reply_to else None
+
+    # Try sending with custom emoji entity
+    if custom_doc_id is not None:
+        try:
+            from telethon.tl.types import MessageEntityCustomEmoji
+
+            # Custom emoji entity replaces the placeholder text
+            placeholder = emoji_char
+            entity = MessageEntityCustomEmoji(
+                offset=0,
+                length=len(placeholder),
+                document_id=int(custom_doc_id),
+            )
+            sent = await telegram_client.send_message(
+                int(chat_id),
+                placeholder,
+                reply_to=reply_to_id,
+                formatting_entities=[entity],
+            )
+            msg_id = getattr(sent, "id", None)
+            logger.info(
+                f"Relay: sent custom emoji message (doc_id={custom_doc_id}) "
+                f"to chat {chat_id} (msg_id={msg_id})"
+            )
+            return msg_id
+        except Exception as e:
+            logger.warning(
+                f"Relay: custom emoji message failed (doc_id={custom_doc_id}), "
+                f"falling back to plain text: {e}"
+            )
+
+    # Fallback: send emoji character as plain text
+    try:
+        sent = await telegram_client.send_message(
+            int(chat_id),
+            emoji_char,
+            reply_to=reply_to_id,
+        )
+        msg_id = getattr(sent, "id", None)
+        logger.info(
+            f"Relay: sent emoji message (plain text fallback) to chat {chat_id} (msg_id={msg_id})"
+        )
+        return msg_id
+    except Exception as e:
+        logger.error(f"Relay: emoji message send failed entirely: {e}")
+        return None
 
 
 async def _send_queued_message(
@@ -248,6 +343,16 @@ async def process_outbox(telegram_client) -> int:
                     reaction_ok = await _send_queued_reaction(telegram_client, message)
                     if reaction_ok:
                         sent_count += 1
+                    continue
+
+                # Handle custom emoji message payloads
+                if message.get("type") == "custom_emoji_message":
+                    msg_id = await _send_custom_emoji_message(telegram_client, message)
+                    if msg_id is not None:
+                        sent_count += 1
+                        session_id = message.get("session_id")
+                        if session_id:
+                            await asyncio.to_thread(_record_sent_message, session_id, msg_id)
                     continue
 
                 msg_id = await _send_queued_message(telegram_client, message)

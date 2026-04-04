@@ -50,52 +50,63 @@ class TestFallbackBehavior:
     """Test fallback to default emoji on bad input."""
 
     def test_empty_string_returns_default(self):
-        """find_best_emoji('') should return the default thinking emoji."""
-        from tools.emoji_embedding import DEFAULT_EMOJI, find_best_emoji
+        """find_best_emoji('') should return EmojiResult with default emoji."""
+        from tools.emoji_embedding import DEFAULT_EMOJI, EmojiResult, find_best_emoji
 
-        assert find_best_emoji("") == DEFAULT_EMOJI
+        result = find_best_emoji("")
+        assert isinstance(result, EmojiResult)
+        assert str(result) == DEFAULT_EMOJI
 
     def test_none_returns_default(self):
-        """find_best_emoji(None) should return the default thinking emoji."""
-        from tools.emoji_embedding import DEFAULT_EMOJI, find_best_emoji
+        """find_best_emoji(None) should return EmojiResult with default emoji."""
+        from tools.emoji_embedding import DEFAULT_EMOJI, EmojiResult, find_best_emoji
 
-        assert find_best_emoji(None) == DEFAULT_EMOJI
+        result = find_best_emoji(None)
+        assert isinstance(result, EmojiResult)
+        assert str(result) == DEFAULT_EMOJI
 
     def test_whitespace_returns_default(self):
-        """find_best_emoji('   ') should return the default thinking emoji."""
-        from tools.emoji_embedding import DEFAULT_EMOJI, find_best_emoji
+        """find_best_emoji('   ') should return EmojiResult with default emoji."""
+        from tools.emoji_embedding import DEFAULT_EMOJI, EmojiResult, find_best_emoji
 
-        assert find_best_emoji("   ") == DEFAULT_EMOJI
+        result = find_best_emoji("   ")
+        assert isinstance(result, EmojiResult)
+        assert str(result) == DEFAULT_EMOJI
 
     def test_message_empty_returns_default(self):
-        """find_best_emoji_for_message('') should return default."""
-        from tools.emoji_embedding import DEFAULT_EMOJI, find_best_emoji_for_message
+        """find_best_emoji_for_message('') should return EmojiResult with default."""
+        from tools.emoji_embedding import DEFAULT_EMOJI, EmojiResult, find_best_emoji_for_message
 
-        assert find_best_emoji_for_message("") == DEFAULT_EMOJI
+        result = find_best_emoji_for_message("")
+        assert isinstance(result, EmojiResult)
+        assert str(result) == DEFAULT_EMOJI
 
     def test_message_none_returns_default(self):
-        """find_best_emoji_for_message(None) should return default."""
-        from tools.emoji_embedding import DEFAULT_EMOJI, find_best_emoji_for_message
+        """find_best_emoji_for_message(None) should return EmojiResult with default."""
+        from tools.emoji_embedding import DEFAULT_EMOJI, EmojiResult, find_best_emoji_for_message
 
-        assert find_best_emoji_for_message(None) == DEFAULT_EMOJI
+        result = find_best_emoji_for_message(None)
+        assert isinstance(result, EmojiResult)
+        assert str(result) == DEFAULT_EMOJI
 
 
 class TestEmbeddingApiFallback:
     """Test fallback when embedding API is unavailable."""
 
     def test_no_api_key_returns_default(self):
-        """Should return default emoji when OPENROUTER_API_KEY is not set."""
-        from tools.emoji_embedding import DEFAULT_EMOJI, clear_cache, find_best_emoji
+        """Should return EmojiResult with default when OPENROUTER_API_KEY is not set."""
+        from tools.emoji_embedding import DEFAULT_EMOJI, EmojiResult, clear_cache, find_best_emoji
 
         clear_cache()
         env = {}  # No OPENROUTER_API_KEY
         with patch.dict(os.environ, env, clear=True):
             result = find_best_emoji("excited")
-            assert result == DEFAULT_EMOJI
+            assert isinstance(result, EmojiResult)
+            assert str(result) == DEFAULT_EMOJI
 
     def test_api_failure_returns_default(self):
-        """Should return default emoji when embedding API call fails."""
-        from tools.emoji_embedding import DEFAULT_EMOJI, clear_cache, find_best_emoji
+        """Should return EmojiResult with default when embedding API call fails."""
+        from tools.emoji_embedding import DEFAULT_EMOJI, EmojiResult, clear_cache, find_best_emoji
 
         clear_cache()
         with (
@@ -106,7 +117,8 @@ class TestEmbeddingApiFallback:
             ),
         ):
             result = find_best_emoji("excited")
-            assert result == DEFAULT_EMOJI
+            assert isinstance(result, EmojiResult)
+            assert str(result) == DEFAULT_EMOJI
 
 
 class TestCacheRoundTrip:
@@ -177,7 +189,7 @@ class TestEmojiSelection:
 
     def test_selects_nearest_emoji(self):
         """Should select the emoji whose label embedding is nearest."""
-        from tools.emoji_embedding import clear_cache, find_best_emoji
+        from tools.emoji_embedding import EmojiResult, clear_cache, find_best_emoji
 
         clear_cache()
 
@@ -190,6 +202,7 @@ class TestEmojiSelection:
 
         with (
             patch("tools.emoji_embedding._embedding_cache", fake_cache),
+            patch("tools.emoji_embedding._custom_embedding_cache", {}),
             patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}),
             patch(
                 "tools.knowledge_search._compute_embedding",
@@ -197,13 +210,14 @@ class TestEmojiSelection:
             ),
         ):
             result = find_best_emoji("awesome")
-            assert result == "\U0001f525"
+            assert isinstance(result, EmojiResult)
+            assert str(result) == "\U0001f525"
 
         clear_cache()
 
     def test_message_function_uses_snippet(self):
         """find_best_emoji_for_message should work with message text."""
-        from tools.emoji_embedding import clear_cache, find_best_emoji_for_message
+        from tools.emoji_embedding import EmojiResult, clear_cache, find_best_emoji_for_message
 
         clear_cache()
 
@@ -213,6 +227,7 @@ class TestEmojiSelection:
 
         with (
             patch("tools.emoji_embedding._embedding_cache", fake_cache),
+            patch("tools.emoji_embedding._custom_embedding_cache", {}),
             patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}),
             patch(
                 "tools.knowledge_search._compute_embedding",
@@ -220,6 +235,7 @@ class TestEmojiSelection:
             ),
         ):
             result = find_best_emoji_for_message("This is a great message about programming")
-            assert result == "\U0001f44d"
+            assert isinstance(result, EmojiResult)
+            assert str(result) == "\U0001f44d"
 
         clear_cache()
