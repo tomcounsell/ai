@@ -1,11 +1,11 @@
 ---
-status: Planning
+status: Building
 type: chore
 appetite: Medium
 owner: Valor
 created: 2026-04-04
 tracking: https://github.com/tomcounsell/ai/issues/397
-last_comment_id:
+last_comment_id: 
 ---
 
 # Audit: Simplify project context propagation from channel to session

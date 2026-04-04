@@ -195,6 +195,7 @@ async def _push_agent_session(
     session_type: str = SessionType.PM,
     scheduling_depth: int = 0,  # ignored, now derived
     depends_on: list[str] | None = None,  # ignored, removed
+    project_config: dict | None = None,
     **_kwargs,
 ) -> int:
     """Create an agent session in Redis and return the pending queue depth for this chat.
@@ -266,6 +267,7 @@ async def _push_agent_session(
         scheduled_at=scheduled_at,
         parent_agent_session_id=parent_agent_session_id,
         telegram_message_key=telegram_message_key,
+        project_config=project_config or None,
     )
 
     # Initialize stage_states for SDLC sessions so the dashboard shows
@@ -1374,9 +1376,6 @@ DRAIN_TIMEOUT = 1.5  # seconds
 _active_workers: dict[str, asyncio.Task] = {}
 _active_events: dict[str, asyncio.Event] = {}
 
-# Project configs registered by the bridge
-_project_configs: dict[str, dict] = {}
-
 # Callbacks registered by the bridge for sending messages and reactions
 SendCallback = Callable[[str, str, int, Any], Awaitable[None]]  # (chat_id, text, reply_to, session)
 ReactionCallback = Callable[[str, int, str | None], Awaitable[None]]
@@ -1385,16 +1384,6 @@ ResponseCallback = Callable[[object, str, str, int], Awaitable[None]]
 _send_callbacks: dict[str, SendCallback] = {}
 _reaction_callbacks: dict[str, ReactionCallback] = {}
 _response_callbacks: dict[str, ResponseCallback] = {}
-
-
-def register_project_config(project_key: str, config: dict) -> None:
-    """Register a project's config for use by the session queue."""
-    _project_configs[project_key] = config
-
-
-def get_project_config(project_key: str) -> dict:
-    """Get a project's registered config."""
-    return _project_configs.get(project_key, {})
 
 
 def register_callbacks(
@@ -1483,9 +1472,17 @@ async def enqueue_agent_session(
     telegram_message_key: str | None = None,
     session_type: str = SessionType.PM,
     scheduling_depth: int = 0,  # ignored, now derived
+    project_config: dict | None = None,
 ) -> int:
     """
     Add a session to Redis and ensure worker is running.
+
+    Args:
+        project_config: Full project dict from projects.json. Stored on the
+            AgentSession so downstream code can read project properties without
+            re-deriving from a parallel registry. Pass None for backward compat
+            (legacy callers); the worker will fall back to loading from projects.json.
+
     Returns queue depth after push.
     """
     from tools.field_utils import log_large_field
@@ -1515,6 +1512,7 @@ async def enqueue_agent_session(
         parent_agent_session_id=parent_agent_session_id,
         telegram_message_key=telegram_message_key,
         session_type=session_type,
+        project_config=project_config,
     )
     _ensure_worker(chat_id)
 
@@ -2222,10 +2220,18 @@ async def _execute_agent_session(session: AgentSession) -> None:
             pass  # Non-critical: best-effort cross-reference
 
     # Run agent work directly in the project working directory.
-    # Use the full registered project config (from projects.json) so that
-    # downstream code (e.g., GH_REPO injection for cross-repo SDLC) has
-    # access to all fields including "github", "mode", etc.
-    project_config = get_project_config(session.project_key)
+    # Read project config from the session (populated at enqueue time).
+    # Transitional fallback: if session.project_config is empty (legacy sessions
+    # created before this migration), load from projects.json directly.
+    project_config = getattr(session, "project_config", None) or {}
+    if not project_config:
+        try:
+            from bridge.routing import load_config as _load_projects_config
+
+            _all_projects = _load_projects_config().get("projects", {})
+            project_config = _all_projects.get(session.project_key, {})
+        except Exception:
+            pass
     if not project_config:
         project_config = {
             "_key": session.project_key,
@@ -2603,11 +2609,25 @@ async def cleanup_stale_branches_all_projects() -> list[str]:
     """Clean up stale session branches across all registered projects.
 
     Called by the reflection scheduler as the 'stale-branch-cleanup' reflection.
+    Loads project configs directly from projects.json instead of relying on
+    a module-level registry.
     Returns list of all cleaned branch names.
     """
     all_cleaned = []
-    for project_key, config in list(_project_configs.items()):
-        working_dir = config.get("working_dir", "")
+    try:
+        from bridge.routing import load_config as _load_projects_config
+
+        all_projects = _load_projects_config().get("projects", {})
+    except Exception as e:
+        logger.error("[reflection] Failed to load projects.json for branch cleanup: %s", e)
+        return all_cleaned
+
+    if not all_projects:
+        logger.debug("[reflection] No projects in config, skipping branch cleanup")
+        return all_cleaned
+
+    for project_key, config in all_projects.items():
+        working_dir = config.get("working_directory", "")
         if not working_dir:
             continue
         try:
@@ -2615,8 +2635,6 @@ async def cleanup_stale_branches_all_projects() -> list[str]:
             all_cleaned.extend(cleaned)
         except Exception as e:
             logger.error("[reflection] Branch cleanup failed for %s: %s", project_key, e)
-    if not _project_configs:
-        logger.debug("[reflection] No projects registered, skipping branch cleanup")
     return all_cleaned
 
 

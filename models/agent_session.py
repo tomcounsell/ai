@@ -183,6 +183,11 @@ class AgentSession(Model):
     # === PM self-messaging ===
     pm_sent_message_ids = ListField(null=True)
 
+    # === Project config (full project dict from projects.json) ===
+    # Carried through the pipeline so downstream code never needs to re-derive
+    # project properties. Populated at enqueue time; empty dict for legacy sessions.
+    project_config = DictField(null=True)
+
     # === DevSession fields (null when session_type="pm" or "teammate") ===
     parent_session_id = KeyField(null=True)  # Logical FK -> parent session (role-neutral)
     slug = Field(null=True)  # Derives branch, plan path, worktree

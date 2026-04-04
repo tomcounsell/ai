@@ -6,11 +6,9 @@ from .agent_session_queue import (
     check_revival,
     cleanup_stale_branches,
     enqueue_agent_session,
-    get_project_config,
     queue_revival_agent_session,
     record_revival_cooldown,
     register_callbacks,
-    register_project_config,
 )
 from .branch_manager import (
     BranchState,
@@ -69,8 +67,6 @@ __all__ = [
     "PRIORITY_RANK",
     "check_revival",
     "register_callbacks",
-    "register_project_config",
-    "get_project_config",
     "cleanup_stale_branches",
     "record_revival_cooldown",
     "queue_revival_agent_session",

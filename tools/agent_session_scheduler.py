@@ -295,12 +295,13 @@ def cmd_schedule(args: argparse.Namespace) -> int:
             return 1
 
     try:
-        # Get working dir from project config
+        # Get working dir from project config (loaded from projects.json)
         working_dir = DEFAULT_WORKING_DIR
         try:
-            from agent.agent_session_queue import get_project_config
+            from bridge.routing import load_config as _load_projects_config
 
-            config = get_project_config(project_key)
+            _all_projects = _load_projects_config().get("projects", {})
+            config = _all_projects.get(project_key, {})
             if config:
                 working_dir = config.get("working_directory", working_dir)
         except Exception:
@@ -520,9 +521,10 @@ def cmd_push(args: argparse.Namespace) -> int:
 
     working_dir = DEFAULT_WORKING_DIR
     try:
-        from agent.agent_session_queue import get_project_config
+        from bridge.routing import load_config as _load_projects_config
 
-        config = get_project_config(project_key)
+        _all_projects = _load_projects_config().get("projects", {})
+        config = _all_projects.get(project_key, {})
         if config:
             working_dir = config.get("working_directory", working_dir)
     except Exception:

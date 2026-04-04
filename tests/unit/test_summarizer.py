@@ -473,9 +473,7 @@ class TestParseClassificationResponse:
             )
             result = _parse_classification_response(raw)
             assert result is not None
-            assert result.nudge_feedback is None, (
-                f"nudge_feedback should be None for {type_str}"
-            )
+            assert result.nudge_feedback is None, f"nudge_feedback should be None for {type_str}"
             assert result.was_rejected_completion is False, (
                 f"was_rejected_completion should be False for {type_str}"
             )
@@ -648,8 +646,7 @@ class TestEmptyPromiseDetection:
         assert result.output_type == OutputType.STATUS_UPDATE
         assert result.nudge_feedback is not None
         assert (
-            "empty" in result.nudge_feedback.lower()
-            or "evidence" in result.nudge_feedback.lower()
+            "empty" in result.nudge_feedback.lower() or "evidence" in result.nudge_feedback.lower()
         )
 
     def test_understood_without_evidence_is_empty_promise(self):
@@ -684,10 +681,7 @@ class TestEmptyPromiseDetection:
     def test_normal_status_not_flagged(self):
         """Regular status updates should not trigger empty promise detection."""
         result = _classify_with_heuristics("Running tests now, found 3 issues so far.")
-        assert (
-            result.nudge_feedback is None
-            or "empty" not in (result.nudge_feedback or "").lower()
-        )
+        assert result.nudge_feedback is None or "empty" not in (result.nudge_feedback or "").lower()
 
     def test_will_do_without_evidence(self):
         """'Will do' without proof = empty promise."""
@@ -1787,14 +1781,29 @@ class TestLinkifyReferences:
         session.project_key = project_key
         return session
 
-    def _register_config(self, project_key="valor", org="tomcounsell", repo="ai"):
-        """Register a project config with GitHub org/repo for testing."""
-        from agent.agent_session_queue import register_project_config
+    def setup_method(self):
+        """Initialize per-test project configs dict and patcher."""
+        self._project_configs = {}
+        self._patcher = None
 
-        register_project_config(
-            project_key,
-            {"github": {"org": org, "repo": repo}},
-        )
+    def teardown_method(self):
+        """Stop any active patcher."""
+        if self._patcher:
+            self._patcher.stop()
+            self._patcher = None
+
+    def _register_config(self, project_key="valor", org="tomcounsell", repo="ai"):
+        """Set up project config mock for testing.
+
+        Patches bridge.formatting.load_config to return a config with the
+        specified GitHub org/repo, replacing the old register_project_config approach.
+        """
+        self._project_configs[project_key] = {"github": {"org": org, "repo": repo}}
+        mock_config = {"projects": self._project_configs}
+        if self._patcher:
+            self._patcher.stop()
+        self._patcher = patch("bridge.formatting.load_config", return_value=mock_config)
+        self._patcher.start()
 
     def test_pr_reference_linkified(self):
         """PR #N is converted to a markdown link."""
@@ -1841,10 +1850,13 @@ class TestLinkifyReferences:
         assert result == "PR #323"
 
     def test_no_github_config_returns_unchanged(self):
-        """project_key exists but no GitHub config registered returns unchanged."""
-        from agent.agent_session_queue import register_project_config
-
-        register_project_config("no-github", {"name": "No GitHub"})
+        """project_key exists but no GitHub config returns unchanged."""
+        self._project_configs["no-github"] = {"name": "No GitHub"}
+        mock_config = {"projects": self._project_configs}
+        if self._patcher:
+            self._patcher.stop()
+        self._patcher = patch("bridge.formatting.load_config", return_value=mock_config)
+        self._patcher.start()
         session = self._make_session("no-github")
         result = _linkify_references("PR #323", session)
         assert result == "PR #323"

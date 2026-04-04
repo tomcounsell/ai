@@ -1494,6 +1494,7 @@ async def main():
                 _session_type = SessionType.PM  # PM session — orchestrates work, spawns children
 
         # Enqueue: session_type drives ChatSession vs DevSession creation.
+        # Pass full project config so the session carries it through the pipeline.
         depth = await enqueue_agent_session(
             project_key=project_key,
             session_id=session_id,
@@ -1509,6 +1510,7 @@ async def main():
             correlation_id=correlation_id,
             telegram_message_key=stored_msg_id,
             session_type=_session_type,
+            project_config=project,
         )
         logger.info(
             f"[{project_name}] Queued session for {sender_name} (msg {message_id}, depth={depth})"
@@ -1668,14 +1670,10 @@ async def main():
         logger.error(f"Dead letter replay failed: {e}")
 
     # Register session queue callbacks for each project
-    from agent.agent_session_queue import (
-        cleanup_stale_branches,
-        register_project_config,
-    )
+    from agent.agent_session_queue import cleanup_stale_branches
     from agent.agent_session_queue import register_callbacks as register_queue_callbacks
 
     for _pkey, _pconfig in CONFIG.get("projects", {}).items():
-        register_project_config(_pkey, _pconfig)
         _wd = _pconfig.get("working_directory", DEFAULTS.get("working_directory", ""))
         if not _wd:
             continue
