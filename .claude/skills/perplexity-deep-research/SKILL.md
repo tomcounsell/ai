@@ -267,14 +267,14 @@ python perplexity_deep_research.py --job-id abc123 \
 
 ## Comparison to Other Tools
 
-| Feature | Perplexity | Gemini | GPT-Researcher |
-|---------|-----------|--------|----------------|
-| Speed | 30-120s | 3-10 min | 6-20 min |
-| Cost | $$$ | $$ | $ (varies) |
-| Academic Focus | High | Low | Medium |
-| Async Support | Yes | Yes | Yes |
-| Citations | Inline + structured | Inline | Comprehensive |
-| API-Based | Yes | Yes | Yes |
+| Feature | Perplexity | Gemini | GPT-Researcher | Grok |
+|---------|-----------|--------|----------------|------|
+| Speed | 30-120s | 3-10 min | 6-20 min | 30-90s |
+| Cost | $$$ | $$ | $ (varies) | $$ |
+| Academic Focus | High | Low | Medium | Low |
+| Async Support | Yes | Yes | Yes | No |
+| Citations | Inline + structured | Inline | Comprehensive | Inline |
+| API-Based | Yes | Yes | Yes | Yes (OpenAI-compat) |
 
 **Recommendation:** Use Perplexity for Phase 1 academic research. Use `--async` for parallel research workflows.
 

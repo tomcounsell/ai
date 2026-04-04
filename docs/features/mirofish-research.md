@@ -1,6 +1,8 @@
 # MiroFish Swarm Intelligence Research
 
-MiroFish is the 6th automated research source in the podcast production pipeline. Unlike the other five tools (Perplexity, GPT-Researcher, Gemini, Together, Claude) which produce **factual web-sourced research**, MiroFish produces **perspective-oriented outputs**: stakeholder reaction modeling, prediction generation, counter-argument stress-testing, and audience reception simulation.
+> **Business context:** See [Podcasting](~/work-vault/Cuttlefish/Podcasting.md) in the work vault for how MiroFish fits into the podcast research pipeline.
+
+MiroFish is the 6th automated research source in the podcast production pipeline. Unlike the other six tools (Perplexity, GPT-Researcher, Gemini, Together, Claude, Grok) which produce **factual web-sourced research**, MiroFish produces **perspective-oriented outputs**: stakeholder reaction modeling, prediction generation, counter-argument stress-testing, and audience reception simulation.
 
 ## Architecture
 
