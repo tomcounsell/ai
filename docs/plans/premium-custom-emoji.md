@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Medium
 owner: Valor
@@ -343,6 +343,6 @@ No update system changes required -- the new cache file is auto-generated at run
 
 ## Open Questions
 
-1. **Custom emoji label quality**: The plan uses associated emoji characters + sticker set titles as labels for embedding. If this produces poor selection quality, should we invest in manual label curation (a `data/custom_emoji_labels.json` override file) as part of this work, or defer it?
-2. **Custom emoji index refresh**: When should the custom emoji index be rebuilt? Only when the cache file is deleted (manual), or also periodically (e.g., once per day) to pick up newly added emoji packs?
-3. **Preference weighting**: Should custom emoji be preferred over standard when similarity scores are close, or should standard emoji be the default with custom only winning on a clear margin? This affects how often custom emoji appear in practice.
+1. **Custom emoji label quality**: ✅ Resolved — use auto-generated labels (associated emoji + set title) for v1. Manual curation deferred to follow-up if quality is poor.
+2. **Custom emoji index refresh**: ✅ Resolved — rebuild only when cache file is missing (manual deletion or first run). Periodic refresh deferred.
+3. **Preference weighting**: ✅ Resolved — standard emoji is the default. Custom emoji wins only when similarity score exceeds the standard match by a clear margin (e.g., 0.05+ delta). This keeps behavior conservative.
