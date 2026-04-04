@@ -39,7 +39,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Deployment](deployment.md) | Multi-instance deployment configuration with per-machine project routing | Shipped |
 | [Design Audit](do-design-audit.md) | Audit web UI against 10 premium design criteria with severity ratings | Shipped |
 | [Do Test](do-test.md) | Intelligent test orchestration with parallel dispatch, changed-file detection, structured reporting, and pytest plugin configuration | Shipped |
-| [Emoji Embedding Reactions](emoji-embedding-reactions.md) | Embedding-based emoji reaction selection replacing Ollama intent classification, with send_telegram --react flag and mark-read on receipt | Shipped |
+| [Emoji Embedding Reactions](emoji-embedding-reactions.md) | Embedding-based emoji reaction selection with standard and Premium custom emoji support, EmojiResult type, send_telegram --react and --emoji flags, and graceful degradation | Shipped |
 | [Memory Hook Performance](memory-hook-performance.md) | Import chain optimization and deja vu removal for PostToolUse memory recall hook | Shipped |
 | [do-patch Skill](do-patch-skill.md) | Targeted fix skill for test failures and review blockers; called automatically by do-build | Shipped |
 | [Documentation Audit](documentation-audit.md) | Weekly LLM-powered audit of docs/ accuracy against codebase; KEEP / UPDATE / DELETE verdicts, directory and filename enforcement | Shipped |
