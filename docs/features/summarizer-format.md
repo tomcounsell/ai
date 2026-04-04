@@ -79,7 +79,7 @@ No checkbox icons are used. The ISSUE stage label includes the issue number when
 
 **How it works:**
 1. Reads `project_key` from the session object
-2. Looks up the GitHub org/repo from the registered project config via `get_project_config()`
+2. Looks up the GitHub org/repo from `projects.json` via `bridge.routing.load_config()`
 3. Applies regex replacement: `PR #123` becomes `[PR #123](https://github.com/org/repo/pull/123)`
 4. Similarly for `Issue #N` patterns
 

@@ -51,18 +51,21 @@ class TestGetAgentResponseSdkGhRepo:
 
     POPOTO_PROJECT = {
         "name": "Popoto",
+        "_key": "popoto",
         "working_directory": str(Path.home() / "src/popoto"),
         "github": {"org": "tomcounsell", "repo": "popoto"},
     }
 
     AI_PROJECT = {
         "name": "Valor AI",
+        "_key": "valor",
         "working_directory": AI_REPO_ROOT,
         "github": {"org": "tomcounsell", "repo": "ai"},
     }
 
     NO_GITHUB_PROJECT = {
         "name": "NoGithub",
+        "_key": "nogithub",
         "working_directory": str(Path.home() / "src/nogithub"),
     }
 
@@ -228,18 +231,14 @@ class TestGetAgentResponseSdkGhRepo:
         assert "GITHUB: tomcounsell/popoto" in enriched_msg
 
 
-class TestExecuteJobPassesFullProjectConfig:
-    """Test that _execute_agent_session passes the full project config (including github key)
-    to get_agent_response_sdk, not a minimal dict.
-
-    Regression test: _execute_agent_session previously constructed a minimal project_config
-    with only _key/working_directory/name, missing the github config needed for
-    GH_REPO env var injection.
+class TestSessionProjectConfig:
+    """Test that AgentSession.project_config carries the full project config
+    through the pipeline, replacing the old _project_configs parallel registry.
     """
 
-    def test_execute_agent_session_uses_registered_project_config(self):
-        """get_project_config should return full config including github key."""
-        from agent.agent_session_queue import get_project_config, register_project_config
+    def test_session_carries_project_config(self):
+        """AgentSession.project_config stores and returns the full config dict."""
+        from models.agent_session import AgentSession
 
         full_config = {
             "name": "Popoto",
@@ -248,14 +247,21 @@ class TestExecuteJobPassesFullProjectConfig:
             "github": {"org": "tomcounsell", "repo": "popoto"},
             "telegram": {"groups": ["Dev: Popoto"]},
         }
-        register_project_config("popoto", full_config)
+        session = AgentSession(
+            project_key="popoto",
+            working_dir=str(Path.home() / "src/popoto"),
+            project_config=full_config,
+        )
+        assert session.project_config.get("github") == {"org": "tomcounsell", "repo": "popoto"}
+        assert session.project_config.get("working_directory") == str(Path.home() / "src/popoto")
 
-        retrieved = get_project_config("popoto")
-        assert retrieved.get("github") == {"org": "tomcounsell", "repo": "popoto"}
-        assert retrieved.get("working_directory") == str(Path.home() / "src/popoto")
+    def test_session_without_project_config_defaults_to_none(self):
+        """Sessions created without project_config have None (backward compat)."""
+        from models.agent_session import AgentSession
 
-    def test_unregistered_project_returns_empty(self):
-        """Unregistered project key returns empty dict (fallback to minimal config)."""
-        from agent.agent_session_queue import get_project_config
-
-        assert get_project_config("nonexistent-project-xyz") == {}
+        session = AgentSession(
+            project_key="test",
+            working_dir="/tmp/test",
+        )
+        # DictField with null=True defaults to None
+        assert session.project_config is None or session.project_config == {}

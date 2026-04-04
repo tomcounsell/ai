@@ -64,7 +64,7 @@ When SDLC is invoked for a non-ai project (e.g., popoto), the worker runs with `
 
 The `gh` CLI supports a `GH_REPO` environment variable that automatically applies to all commands in the subprocess. This is the deterministic fix -- it requires no LLM cooperation.
 
-When `get_agent_response_sdk()` detects a cross-repo SDLC request (classification is "sdlc", project working directory differs from the ai repo root, and project mode is not "pm"), it:
+When `get_agent_response_sdk()` detects a cross-repo SDLC request (classification is "sdlc", project key is not "valor", and project mode is not "pm"), it:
 
 1. Extracts `github.org` and `github.repo` from the project config in `~/Desktop/Valor/projects.json`
 2. Passes `gh_repo="org/repo"` to `ValorAgent.__init__()`
@@ -74,7 +74,8 @@ All `gh` commands in the subprocess then automatically target the correct reposi
 
 ```python
 # In get_agent_response_sdk():
-if project_mode != "pm" and classification == "sdlc" and project_working_dir != AI_REPO_ROOT:
+is_cross_repo = project_key != "valor"
+if project_mode != "pm" and classification == "sdlc" and is_cross_repo:
     _github_config = project.get("github", {})
     _gh_org = _github_config.get("org", "")
     _gh_name = _github_config.get("repo", "")

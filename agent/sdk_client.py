@@ -1390,9 +1390,11 @@ async def get_agent_response_sdk(
 
     # Determine working directory based on work request classification
     project_name = project.get("name", "Valor") if project else "Valor"
+    project_key = project.get("_key", "valor") if project else "valor"
     project_working_dir = project.get("working_directory") if project else None
     if not project_working_dir:
         project_working_dir = AI_REPO_ROOT
+    is_cross_repo = project_key != "valor"
 
     # Check project mode: "pm" channels bypass SDLC classification entirely
     project_mode = project.get("mode", "dev") if project else "dev"
@@ -1441,7 +1443,7 @@ async def get_agent_response_sdk(
             else:
                 classification = ClassificationType.QUESTION
 
-        if classification == ClassificationType.SDLC and project_working_dir != AI_REPO_ROOT:
+        if classification == ClassificationType.SDLC and is_cross_repo:
             working_dir = AI_REPO_ROOT
             logger.info(
                 f"[{request_id}] SDLC routed: orchestrator in ai/, target={project_working_dir}"
@@ -1487,11 +1489,7 @@ async def get_agent_response_sdk(
             pass
 
     # Cross-repo SDLC: inject target repo context
-    if (
-        project_mode != "pm"
-        and classification == ClassificationType.SDLC
-        and project_working_dir != AI_REPO_ROOT
-    ):
+    if project_mode != "pm" and classification == ClassificationType.SDLC and is_cross_repo:
         github_config = project.get("github", {}) if project else {}
         github_org = github_config.get("org", "")
         github_repo = github_config.get("repo", "")
@@ -1628,7 +1626,8 @@ async def get_agent_response_sdk(
                 "To attach a file (screenshot, document, image):\n"
                 '  `python tools/send_telegram.py "Caption text" --file /path/to/file.png`\n'
                 "Multiple files as an album (max 10):\n"
-                '  `python tools/send_telegram.py "Album caption" --file a.png --file b.png --file c.png`\n'
+                "  `python tools/send_telegram.py"
+                ' "Album caption" --file a.png --file b.png --file c.png`\n'
                 "File-only (no caption):\n"
                 "  `python tools/send_telegram.py --file /path/to/file.png`\n"
                 "Use --file to attach screenshots, images, or documents. "
@@ -1701,9 +1700,7 @@ async def get_agent_response_sdk(
         # set GH_REPO so all gh commands automatically target the correct repo.
         _gh_repo = None
         is_cross_repo_sdlc = (
-            project_mode != "pm"
-            and classification == ClassificationType.SDLC
-            and project_working_dir != AI_REPO_ROOT
+            project_mode != "pm" and classification == ClassificationType.SDLC and is_cross_repo
         )
         if is_cross_repo_sdlc:
             _github_config = project.get("github", {}) if project else {}
