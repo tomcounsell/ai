@@ -39,10 +39,12 @@ OPUS = "claude-opus-4-5-20251101"
 # Override via environment variables for custom/proxy deployments
 # =============================================================================
 
-# Chat completions endpoint (used by summarizer, tools, scripts)
+# Chat completions endpoint (used by summarizer, tools, scripts).
+# Override: set OPENROUTER_URL env var to point at a custom or proxy endpoint.
 OPENROUTER_URL = os.environ.get("OPENROUTER_URL", "https://openrouter.ai/api/v1/chat/completions")
 
-# Embeddings endpoint (used by knowledge_search)
+# Embeddings endpoint (used by knowledge_search / doc_impact_finder).
+# Override: set OPENROUTER_EMBEDDINGS_URL env var for a custom embeddings proxy.
 OPENROUTER_EMBEDDINGS_URL = os.environ.get(
     "OPENROUTER_EMBEDDINGS_URL", "https://openrouter.ai/api/v1/embeddings"
 )
