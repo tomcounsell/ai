@@ -32,21 +32,29 @@ import httpx
 
 from bridge.message_quality import PROCESS_NARRATION_PATTERNS as _PROCESS_NARRATION_PATTERNS
 from config.enums import PersonaType
-from config.models import MODEL_FAST, OPENROUTER_HAIKU
+from config.models import MODEL_FAST, OPENROUTER_HAIKU, OPENROUTER_URL
 from utils.api_keys import get_anthropic_api_key
 
 logger = logging.getLogger(__name__)
 
-# Thresholds
-FILE_ATTACH_THRESHOLD = 3000  # Attach full output as file above this
-SAFETY_TRUNCATE = 4096  # Telegram hard limit
+# Thresholds (overridable via env vars; values must be positive integers)
+# FILE_ATTACH_THRESHOLD: character count above which the full agent response is
+# also sent as a .txt file attachment. Valid range: 500-10000 (default 3000).
+FILE_ATTACH_THRESHOLD = int(os.environ.get("FILE_ATTACH_THRESHOLD", "3000"))
+# SAFETY_TRUNCATE: hard ceiling in characters when all summarization backends
+# fail and we must truncate the raw text. Valid range: 1000-8192 (default 4096).
+SAFETY_TRUNCATE = int(os.environ.get("SAFETY_TRUNCATE", "4096"))
 
-# OpenRouter config
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+# OpenRouter config imported from config.models
 
 # Classification confidence threshold — below this, default to QUESTION
 # (conservative: pauses for human input rather than auto-continuing)
-CLASSIFICATION_CONFIDENCE_THRESHOLD = 0.80
+# Override via env var; value must be a float between 0.0 and 1.0.
+# Valid range: 0.0-1.0 (default 0.80). Higher values make the system more
+# conservative, defaulting to QUESTION when confidence is below this threshold.
+CLASSIFICATION_CONFIDENCE_THRESHOLD = float(
+    os.environ.get("CLASSIFICATION_CONFIDENCE_THRESHOLD", "0.80")
+)
 
 
 def _extract_open_questions(text: str) -> list[str]:

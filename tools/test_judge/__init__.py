@@ -11,9 +11,8 @@ from typing import Literal
 import anthropic
 import requests
 
-from config.models import MODEL_REASONING, OPENROUTER_SONNET
+from config.models import MODEL_REASONING, OPENROUTER_SONNET, OPENROUTER_URL
 
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = MODEL_REASONING
 DEFAULT_MODEL_OPENROUTER = OPENROUTER_SONNET
 

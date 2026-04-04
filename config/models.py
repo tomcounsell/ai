@@ -7,6 +7,8 @@ Import model constants from here rather than hardcoding model strings.
 When model versions change, update them in ONE place here.
 """
 
+import os
+
 # =============================================================================
 # ANTHROPIC DIRECT API MODELS
 # Format: model ID as used with Anthropic's API directly
@@ -30,6 +32,22 @@ SONNET_4 = "claude-sonnet-4-20250514"
 # Use cases: Complex multi-step reasoning, nuanced analysis, creative tasks
 # Strengths: Highest quality output, best at handling ambiguity
 OPUS = "claude-opus-4-5-20251101"
+
+
+# =============================================================================
+# OPENROUTER API ENDPOINTS
+# Override via environment variables for custom/proxy deployments
+# =============================================================================
+
+# Chat completions endpoint (used by summarizer, tools, scripts).
+# Override: set OPENROUTER_URL env var to point at a custom or proxy endpoint.
+OPENROUTER_URL = os.environ.get("OPENROUTER_URL", "https://openrouter.ai/api/v1/chat/completions")
+
+# Embeddings endpoint (used by knowledge_search / doc_impact_finder).
+# Override: set OPENROUTER_EMBEDDINGS_URL env var for a custom embeddings proxy.
+OPENROUTER_EMBEDDINGS_URL = os.environ.get(
+    "OPENROUTER_EMBEDDINGS_URL", "https://openrouter.ai/api/v1/embeddings"
+)
 
 
 # =============================================================================

@@ -13,9 +13,7 @@ from typing import Literal
 import requests
 
 from bridge.utc import utc_now
-from config.models import IMAGE_ASPECT_RATIOS, MODEL_IMAGE_GEN
-
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+from config.models import IMAGE_ASPECT_RATIOS, MODEL_IMAGE_GEN, OPENROUTER_URL
 
 
 class ImageGenError(Exception):
