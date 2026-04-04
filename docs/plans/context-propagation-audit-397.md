@@ -1,5 +1,5 @@
 ---
-status: Building
+status: Shipping
 type: chore
 appetite: Medium
 owner: Valor
