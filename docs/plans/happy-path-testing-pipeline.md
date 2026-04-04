@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: Shipped
 type: feature
 appetite: Large
 owner: Valor
@@ -240,20 +240,20 @@ Credential placeholders (`{{credentials.username}}`) are resolved at generation 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] Generator must handle malformed trace JSON gracefully -- validate schema before generation, emit clear error for missing required fields
-- [ ] Runner must handle Rodney exit code 2 (error) distinctly from exit code 1 (test failure)
-- [ ] Discovery must handle agent-browser failures (page not loading, element not found) without producing partial traces
+- [x] Generator must handle malformed trace JSON gracefully -- validate schema before generation, emit clear error for missing required fields
+- [x] Runner must handle Rodney exit code 2 (error) distinctly from exit code 1 (test failure)
+- [x] Discovery must handle agent-browser failures (page not loading, element not found) without producing partial traces
 
 ### Empty/Invalid Input Handling
-- [ ] Generator handles empty steps array -- produces no script, logs warning
-- [ ] Generator handles missing selector field -- skips step with warning
-- [ ] Runner handles empty `tests/happy-paths/scripts/` directory -- reports "no happy path scripts found" instead of crashing
-- [ ] Discovery handles unreachable URLs -- reports error, does not produce trace
+- [x] Generator handles empty steps array -- produces no script, logs warning
+- [x] Generator handles missing selector field -- skips step with warning
+- [x] Runner handles empty `tests/happy-paths/scripts/` directory -- reports "no happy path scripts found" instead of crashing
+- [x] Discovery handles unreachable URLs -- reports error, does not produce trace
 
 ### Error State Rendering
-- [ ] Runner produces clear pass/fail table even when all tests error
-- [ ] Failed assertions include the actual vs expected state from Rodney output
-- [ ] Screenshots are captured on failure for debugging evidence
+- [x] Runner produces clear pass/fail table even when all tests error
+- [x] Failed assertions include the actual vs expected state from Rodney output
+- [x] Screenshots are captured on failure for debugging evidence
 
 ## Test Impact
 
@@ -320,23 +320,23 @@ Stage 1 (discovery) is implemented as a new Claude skill (`.claude/skills/do-dis
 
 ## Documentation
 
-- [ ] Create `docs/features/happy-path-testing-pipeline.md` describing the three-stage pipeline, trace format, and usage
-- [ ] Add entry to `docs/features/README.md` index table
-- [ ] Add inline documentation in `tools/happy_path_generator.py` for the trace-to-script conversion logic
-- [ ] Document the trace JSON schema in `tests/happy-paths/SCHEMA.md`
-- [ ] Update `.claude/skills/do-test/SKILL.md` with the `happy-paths` target documentation
+- [x] Create `docs/features/happy-path-testing-pipeline.md` describing the three-stage pipeline, trace format, and usage
+- [x] Add entry to `docs/features/README.md` index table
+- [x] Add inline documentation in `tools/happy_path_generator.py` for the trace-to-script conversion logic
+- [x] Document the trace JSON schema in `tests/happy-paths/SCHEMA.md`
+- [x] Update `.claude/skills/do-test/SKILL.md` with the `happy-paths` target documentation
 
 ## Success Criteria
 
-- [ ] Discovery skill produces valid trace JSON from agent-browser exploration of a target URL
-- [ ] Generator converts trace JSON into executable Rodney shell scripts without LLM tokens
-- [ ] Runner executes Rodney scripts in batch and produces pass/fail summary
-- [ ] `/do-test happy-paths` target works end-to-end
-- [ ] Generated scripts run deterministically (same result on repeated execution)
-- [ ] Credentials are never inlined in generated scripts (environment variable substitution)
-- [ ] Existing `/do-test frontend` target is unaffected
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] Discovery skill produces valid trace JSON from agent-browser exploration of a target URL
+- [x] Generator converts trace JSON into executable Rodney shell scripts without LLM tokens
+- [x] Runner executes Rodney scripts in batch and produces pass/fail summary
+- [x] `/do-test happy-paths` target works end-to-end
+- [x] Generated scripts run deterministically (same result on repeated execution)
+- [x] Credentials are never inlined in generated scripts (environment variable substitution)
+- [x] Existing `/do-test frontend` target is unaffected
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
