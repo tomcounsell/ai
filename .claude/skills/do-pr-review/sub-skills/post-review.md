@@ -36,7 +36,7 @@ Use `gh pr comment` as fallback.
 ### Blockers
 - [ ] **`file.py:42`** — `actual_code()` — [description]
 
-### Tech Debt (non-blocking)
+### Tech Debt
 - **`file.py:15`** — `code()` — [description]
 
 ### Verification Results
@@ -46,7 +46,28 @@ Use `gh pr comment` as fallback.
 [screenshot references if captured]
 ```
 
-**If no blockers:**
+**If no blockers but has tech_debt or nits:**
+```
+## Review: Changes Requested — Tech Debt
+
+[summary — no blockers, but outstanding tech debt/nits must be resolved before merge]
+
+### Verified
+- [x] Code correctness
+- [x] Security (no vulnerabilities found)
+- [x] Plan requirements met
+
+### Tech Debt
+- [ ] **`file.py:15`** — `code()` — [description]
+
+### Nits
+- [ ] **`file.py:30`** — `code()` — [description]
+
+### Screenshots
+[screenshot references if captured]
+```
+
+**If zero findings (no blockers, no tech_debt, no nits):**
 ```
 ## Review: Approved
 
@@ -58,20 +79,25 @@ Use `gh pr comment` as fallback.
 - [x] Security (no vulnerabilities found)
 - [x] Plan requirements met
 
-### Tech Debt (optional follow-ups)
-- [any non-blocking items]
-
 ### Screenshots
 [screenshot references if captured]
 ```
 
 ### 3. Post the Review
 
+**Three-tier decision (apply in order):**
+1. **Blockers found** → `--request-changes`
+2. **No blockers, but tech_debt or nits** → `--request-changes`
+3. **Zero findings** → `--approve`
+
 ```bash
 if [ "$SELF_AUTHORED" = "true" ]; then
   gh pr comment $PR_NUMBER --body "$REVIEW_BODY"
+elif [ "$HAS_ANY_FINDINGS" = "true" ]; then
+  # Blockers, tech_debt, or nits — all require changes
+  gh pr review $PR_NUMBER --request-changes --body "$REVIEW_BODY"
 else
-  # Use --request-changes if blockers, --approve if clean
+  # Zero findings — the ONLY path to approval
   gh pr review $PR_NUMBER --approve --body "$REVIEW_BODY"
 fi
 ```
