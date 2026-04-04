@@ -37,13 +37,32 @@ from utils.api_keys import get_anthropic_api_key
 
 logger = logging.getLogger(__name__)
 
-# Thresholds (overridable via env vars; values must be positive integers)
+
+def _safe_int(env_key: str, default: int) -> int:
+    """Parse an env var as int, falling back to *default* on any error."""
+    try:
+        return int(os.environ.get(env_key, str(default)))
+    except (ValueError, TypeError):
+        logger.warning("%s has non-integer value, using default %d", env_key, default)
+        return default
+
+
+def _safe_float(env_key: str, default: float) -> float:
+    """Parse an env var as float, falling back to *default* on any error."""
+    try:
+        return float(os.environ.get(env_key, str(default)))
+    except (ValueError, TypeError):
+        logger.warning("%s has non-float value, using default %s", env_key, default)
+        return default
+
+
+# Thresholds (overridable via env vars)
 # FILE_ATTACH_THRESHOLD: character count above which the full agent response is
 # also sent as a .txt file attachment. Valid range: 500-10000 (default 3000).
-FILE_ATTACH_THRESHOLD = int(os.environ.get("FILE_ATTACH_THRESHOLD", "3000"))
+FILE_ATTACH_THRESHOLD = _safe_int("FILE_ATTACH_THRESHOLD", 3000)
 # SAFETY_TRUNCATE: hard ceiling in characters when all summarization backends
 # fail and we must truncate the raw text. Valid range: 1000-8192 (default 4096).
-SAFETY_TRUNCATE = int(os.environ.get("SAFETY_TRUNCATE", "4096"))
+SAFETY_TRUNCATE = _safe_int("SAFETY_TRUNCATE", 4096)
 
 # OpenRouter config imported from config.models
 
@@ -52,9 +71,7 @@ SAFETY_TRUNCATE = int(os.environ.get("SAFETY_TRUNCATE", "4096"))
 # Override via env var; value must be a float between 0.0 and 1.0.
 # Valid range: 0.0-1.0 (default 0.80). Higher values make the system more
 # conservative, defaulting to QUESTION when confidence is below this threshold.
-CLASSIFICATION_CONFIDENCE_THRESHOLD = float(
-    os.environ.get("CLASSIFICATION_CONFIDENCE_THRESHOLD", "0.80")
-)
+CLASSIFICATION_CONFIDENCE_THRESHOLD = _safe_float("CLASSIFICATION_CONFIDENCE_THRESHOLD", 0.80)
 
 
 def _extract_open_questions(text: str) -> list[str]:
