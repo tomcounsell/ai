@@ -447,3 +447,6 @@ config/personas/teammate.md
 
 # Git worktrees for session isolation
 .worktrees/
+
+# Happy path test evidence (screenshots, runtime artifacts)
+tests/happy-paths/evidence/

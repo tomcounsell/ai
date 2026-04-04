@@ -32,6 +32,7 @@ from scripts.update import (  # noqa: E402
     hooks,
     migrations,
     officecli,
+    rodney,
     service,
     verify,
 )
@@ -120,6 +121,7 @@ class UpdateResult:
     hook_audit: hooks.HookAuditResult | None = None
     migration_result: migrations.MigrationResult | None = None
     officecli_result: officecli.InstallResult | None = None
+    rodney_result: rodney.InstallResult | None = None
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -418,6 +420,19 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     else:
         log(f"WARN: OfficeCLI {oc.action}: {oc.error}", v)
         result.warnings.append(f"OfficeCLI: {oc.error}")
+
+    # Step 3.8: Rodney binary install/update (happy path testing)
+    log("Checking Rodney...", v)
+    result.rodney_result = rodney.install_or_update()
+    rr = result.rodney_result
+    if rr.success:
+        if rr.action == "skipped":
+            log(f"Rodney {rr.version} (up to date)", v)
+        else:
+            log(f"Rodney {rr.action}: {rr.version}", v, always=True)
+    else:
+        log(f"WARN: Rodney {rr.action}: {rr.error}", v)
+        result.warnings.append(f"Rodney: {rr.error}")
 
     # Step 4: Ollama model (full mode only)
     if config.do_ollama:
