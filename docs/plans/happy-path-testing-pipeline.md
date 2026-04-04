@@ -394,8 +394,16 @@ Stage 1 (discovery) is implemented as a new Claude skill (`.claude/skills/do-dis
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
-| CONCERN | [agent-type] | [The concern raised] | [How/whether it was addressed] |
+| Severity | Critic | Concern | Resolution |
+|----------|--------|---------|------------|
+| BLOCKER | Skeptic | `snapshot -i --json` does NOT provide CSS selectors -- only returns `name` and `role`. The core pipeline assumption (ref-to-selector resolution) is wrong. Discovery stage cannot produce trace JSON with CSS selectors. | OPEN -- requires plan revision. Options: JS injection via `eval`, semantic locators, or Rodney-native discovery. |
+| BLOCKER | Operator | Go toolchain not installed on any machine. Update script gates on `which go` and silently skips. Rodney will never be installed. | OPEN -- use prebuilt binary from GitHub Releases instead of `go install`. |
+| BLOCKER | Operator | `/do-test happy-paths` routing mechanism unspecified. Current SKILL.md has no `happy-paths` entry and plan does not specify whether it invokes runner via bash or subagent. | OPEN -- add explicit routing spec to plan. |
+| CONCERN | Skeptic | Rodney CLI command mapping (`navigate->open`, `input->input`, etc.) is unvalidated. No spike has verified these command names and argument formats. | OPEN -- run validation spike before build. |
+| CONCERN | Adversary | Credential security relies on convention (env vars) with no enforcement. No pre-commit hook or CI check to prevent accidental credential leaks in generated scripts. | OPEN -- add enforcement mechanism. |
+| CONCERN | Simplifier | Six team members defined for solo-dev project with mostly sequential task dependencies. Parallelism is illusory. | OPEN -- reduce to 2-3 builders. |
+| NIT | Simplifier | Duplicate SCHEMA.md ownership between Task 1 (schema-builder) and Task 8 (docs-writer). | OPEN -- assign to one builder. |
+| NIT | Operator | Missing `.gitignore` edit step in Task 6 for `tests/happy-paths/evidence/`. | OPEN -- add explicit step. |
 
 ---
 
