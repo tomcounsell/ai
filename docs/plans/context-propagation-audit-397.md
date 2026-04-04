@@ -1,5 +1,5 @@
 ---
-status: Shipping
+status: Done
 type: chore
 appetite: Medium
 owner: Valor
@@ -103,26 +103,26 @@ No prerequisites -- this work has no external dependencies. All changes are inte
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] Verify `_execute_agent_session()` handles missing/empty `project_config` gracefully (backward compat for sessions created before migration)
-- [ ] No new exception handlers introduced -- existing error handling paths remain unchanged
+- [x] Verify `_execute_agent_session()` handles missing/empty `project_config` gracefully (backward compat for sessions created before migration)
+- [x] No new exception handlers introduced -- existing error handling paths remain unchanged
 
 ### Empty/Invalid Input Handling
-- [ ] Test AgentSession creation with `project_config=None` and `project_config={}` -- both should work
-- [ ] Test `enqueue_agent_session()` without `project_config` parameter -- should default to empty dict
+- [x] Test AgentSession creation with `project_config=None` and `project_config={}` -- both should work
+- [x] Test `enqueue_agent_session()` without `project_config` parameter -- should default to empty dict
 
 ### Error State Rendering
-- [ ] No user-visible output changes -- this is an internal refactor
+- [x] No user-visible output changes -- this is an internal refactor
 
 ## Test Impact
 
-- [ ] `tests/unit/test_cross_repo_gh_resolution.py::test_get_project_config_returns_full_config` -- DELETE: tests `get_project_config()` which is being removed
-- [ ] `tests/unit/test_cross_repo_gh_resolution.py::test_get_project_config_returns_empty_for_unknown` -- DELETE: tests `get_project_config()` which is being removed
-- [ ] `tests/unit/test_cross_repo_gh_resolution.py` (other tests using `register_project_config`) -- UPDATE: replace registry setup with direct AgentSession.project_config assignment
-- [ ] `tests/unit/test_summarizer.py::test_summarizer_sends_to_correct_github_repo` (line 1792) -- UPDATE: replace `register_project_config()` with session-level config
-- [ ] `tests/unit/test_summarizer.py::test_summarizer_skips_github_summary_without_config` (line 1845) -- UPDATE: replace `register_project_config()` with session-level config
-- [ ] `tests/unit/test_formatting.py` (4 tests patching `get_project_config`) -- UPDATE: patch `session.project_config` instead
-- [ ] `tests/unit/test_duplicate_delivery.py` (tests referencing `enqueue_agent_session`) -- UPDATE: add `project_config` parameter to test calls
-- [ ] `tests/unit/test_ui_sdlc_data.py` (tests patching `_load_project_configs`) -- KEEP: this is a UI-layer config loader, not the same registry
+- [x] `tests/unit/test_cross_repo_gh_resolution.py::test_get_project_config_returns_full_config` -- DELETE: tests `get_project_config()` which is being removed
+- [x] `tests/unit/test_cross_repo_gh_resolution.py::test_get_project_config_returns_empty_for_unknown` -- DELETE: tests `get_project_config()` which is being removed
+- [x] `tests/unit/test_cross_repo_gh_resolution.py` (other tests using `register_project_config`) -- UPDATE: replace registry setup with direct AgentSession.project_config assignment
+- [x] `tests/unit/test_summarizer.py::test_summarizer_sends_to_correct_github_repo` (line 1792) -- UPDATE: replace `register_project_config()` with session-level config
+- [x] `tests/unit/test_summarizer.py::test_summarizer_skips_github_summary_without_config` (line 1845) -- UPDATE: replace `register_project_config()` with session-level config
+- [x] `tests/unit/test_formatting.py` (4 tests patching `get_project_config`) -- UPDATE: patch `session.project_config` instead
+- [x] `tests/unit/test_duplicate_delivery.py` (tests referencing `enqueue_agent_session`) -- UPDATE: add `project_config` parameter to test calls
+- [x] `tests/unit/test_ui_sdlc_data.py` (tests patching `_load_project_configs`) -- KEEP: this is a UI-layer config loader, not the same registry
 
 ## Rabbit Holes
 
@@ -163,21 +163,21 @@ No agent integration required -- this is a bridge-internal refactor. No new MCP 
 
 ## Documentation
 
-- [ ] Update `docs/features/session-isolation.md` to document that AgentSession now carries `project_config`
-- [ ] Add inline docstring on `AgentSession.project_config` field explaining its purpose and lifecycle
-- [ ] Update docstring on `enqueue_agent_session()` to document the `project_config` parameter
+- [x] Update `docs/features/session-isolation.md` to document that AgentSession now carries `project_config`
+- [x] Add inline docstring on `AgentSession.project_config` field explaining its purpose and lifecycle
+- [x] Update docstring on `enqueue_agent_session()` to document the `project_config` parameter
 
 ## Success Criteria
 
-- [ ] `_project_configs` module-level dict removed from `agent/agent_session_queue.py`
-- [ ] `register_project_config()` and `get_project_config()` functions removed
-- [ ] All 4 `AI_REPO_ROOT` string comparisons in `sdk_client.py` replaced with `project_key` checks
-- [ ] `AgentSession` model has a `project_config` DictField
-- [ ] `enqueue_agent_session()` accepts and stores full project config
-- [ ] `_execute_agent_session()` reads config from session, not from registry
-- [ ] No references to `_project_configs` remain in production code (test code excluded)
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] `_project_configs` module-level dict removed from `agent/agent_session_queue.py`
+- [x] `register_project_config()` and `get_project_config()` functions removed
+- [x] All 4 `AI_REPO_ROOT` string comparisons in `sdk_client.py` replaced with `project_key` checks
+- [x] `AgentSession` model has a `project_config` DictField
+- [x] `enqueue_agent_session()` accepts and stores full project config
+- [x] `_execute_agent_session()` reads config from session, not from registry
+- [x] No references to `_project_configs` remain in production code (test code excluded)
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
