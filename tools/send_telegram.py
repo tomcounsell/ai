@@ -180,7 +180,8 @@ def send_reaction(feeling: str) -> None:
     """Queue a reaction (emoji) for delivery by the bridge relay.
 
     Resolves the feeling word to an emoji via the emoji embedding index,
-    then queues a reaction payload for the relay to send.
+    then queues a reaction payload for the relay to send. Supports both
+    standard and custom emoji -- the relay handles dispatch.
 
     Args:
         feeling: A word or phrase describing the desired reaction
@@ -222,17 +223,21 @@ def send_reaction(feeling: str) -> None:
     # Resolve feeling to emoji
     from tools.emoji_embedding import find_best_emoji
 
-    emoji = find_best_emoji(feeling.strip())
+    result = find_best_emoji(feeling.strip())
 
     # Build reaction payload
     payload = {
         "type": "reaction",
         "chat_id": chat_id,
         "reply_to": int(reply_to),
-        "emoji": emoji,
+        "emoji": str(result),
         "session_id": session_id,
         "timestamp": time.time(),
     }
+
+    # Include custom emoji document_id if applicable
+    if result.is_custom and result.document_id is not None:
+        payload["custom_emoji_document_id"] = result.document_id
 
     message_payload = json.dumps(payload)
 
@@ -246,7 +251,82 @@ def send_reaction(feeling: str) -> None:
         print(f"Error: Failed to queue reaction in Redis: {e}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"Reaction queued: {emoji} (feeling: {feeling})")
+    if result.is_custom:
+        print(f"Reaction queued: custom emoji {result.document_id} (feeling: {feeling})")
+    else:
+        print(f"Reaction queued: {result} (feeling: {feeling})")
+
+
+def send_emoji(feeling: str) -> None:
+    """Queue a custom emoji standalone message for delivery by the bridge relay.
+
+    Resolves the feeling word to the best custom emoji (or standard emoji
+    fallback), then queues a ``custom_emoji_message`` payload for the relay.
+
+    Args:
+        feeling: A word or phrase describing the emoji to send
+                 (e.g., "celebration", "excited", "sad").
+
+    Raises:
+        SystemExit: On missing env vars, empty feeling, or Redis errors.
+    """
+    # Validate environment
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    reply_to = os.environ.get("TELEGRAM_REPLY_TO")
+    session_id = os.environ.get("VALOR_SESSION_ID")
+
+    if not chat_id:
+        print(
+            "Error: TELEGRAM_CHAT_ID not set. This tool is only available in ChatSession context.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if not session_id:
+        print(
+            "Error: VALOR_SESSION_ID not set. This tool is only available in ChatSession context.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if not feeling or not feeling.strip():
+        print("Error: --emoji requires a feeling word (e.g., 'celebration').", file=sys.stderr)
+        sys.exit(1)
+
+    # Resolve feeling to emoji
+    from tools.emoji_embedding import find_best_emoji
+
+    result = find_best_emoji(feeling.strip())
+
+    # Build payload
+    payload = {
+        "type": "custom_emoji_message",
+        "chat_id": chat_id,
+        "reply_to": int(reply_to) if reply_to else None,
+        "emoji": str(result),
+        "session_id": session_id,
+        "timestamp": time.time(),
+    }
+
+    if result.is_custom and result.document_id is not None:
+        payload["custom_emoji_document_id"] = result.document_id
+
+    message_payload = json.dumps(payload)
+
+    # Push to Redis outbox queue
+    queue_key = f"telegram:outbox:{session_id}"
+    try:
+        r = _get_redis_connection()
+        r.rpush(queue_key, message_payload)
+        r.expire(queue_key, 3600)
+    except Exception as e:
+        print(f"Error: Failed to queue emoji message in Redis: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if result.is_custom:
+        print(f"Custom emoji message queued: doc_id={result.document_id} (feeling: {feeling})")
+    else:
+        print(f"Emoji message queued: {result} (feeling: {feeling})")
 
 
 def main():
@@ -259,7 +339,7 @@ def main():
         "message",
         nargs="*",
         default=[],
-        help="Message text to send (can be omitted if --file or --react is provided)",
+        help="Message text to send (can be omitted if --file, --react, or --emoji is provided)",
     )
     parser.add_argument(
         "--file",
@@ -274,6 +354,12 @@ def main():
         default=None,
         help="React to the message with an emoji matching this feeling word (e.g., 'excited')",
     )
+    parser.add_argument(
+        "--emoji",
+        dest="emoji",
+        default=None,
+        help="Send a standalone emoji message matching this feeling word (e.g., 'celebration')",
+    )
 
     args = parser.parse_args()
 
@@ -282,10 +368,15 @@ def main():
         send_reaction(args.react)
         return
 
+    # Emoji message mode
+    if args.emoji:
+        send_emoji(args.emoji)
+        return
+
     text = " ".join(args.message)
 
     if not text and not args.file_paths:
-        parser.error("Either message text, --file, or --react must be provided.")
+        parser.error("Either message text, --file, --react, or --emoji must be provided.")
 
     send_message(text, file_paths=args.file_paths)
 

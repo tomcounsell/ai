@@ -1,13 +1,19 @@
 """Message cleaning, tool log filtering, file extraction,
 response sending, and reaction management."""
 
+from __future__ import annotations
+
 import logging
 import re
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from tools.emoji_embedding import EmojiResult
 
 from telethon import TelegramClient
 from telethon.tl.functions.messages import SendReactionRequest
-from telethon.tl.types import Message, ReactionEmoji
+from telethon.tl.types import Message, ReactionCustomEmoji, ReactionEmoji
 
 logger = logging.getLogger(__name__)
 
@@ -662,30 +668,66 @@ async def send_response_with_files(
 
 
 async def set_reaction(
-    client: TelegramClient, chat_id: int, msg_id: int, emoji: str | None
+    client: TelegramClient, chat_id: int, msg_id: int, emoji: str | EmojiResult | None
 ) -> bool:
-    """
-    Set a reaction on a message.
+    """Set a reaction on a message.
+
+    Supports both standard emoji strings and ``EmojiResult`` objects from
+    the emoji embedding system. When an ``EmojiResult`` with ``is_custom=True``
+    is provided, attempts to set a custom emoji reaction via
+    ``ReactionCustomEmoji(document_id=...)``. Falls back to the standard
+    emoji from the same result on failure (non-Premium, restricted chat, etc.).
 
     Args:
-        client: Telegram client
-        chat_id: Chat ID
-        msg_id: Message ID
-        emoji: Emoji to react with, or None to remove reactions
+        client: Telegram client.
+        chat_id: Chat ID.
+        msg_id: Message ID.
+        emoji: Emoji string, EmojiResult, or None to remove reactions.
 
     Returns:
-        True if successful, False otherwise
+        True if successful, False otherwise.
     """
-    try:
-        reaction = [ReactionEmoji(emoticon=emoji)] if emoji else []
-        await client(
-            SendReactionRequest(
-                peer=chat_id,
-                msg_id=msg_id,
-                reaction=reaction,
+    from tools.emoji_embedding import EmojiResult
+
+    # Normalize to EmojiResult if string
+    if isinstance(emoji, str):
+        emoji_result = EmojiResult(emoji=emoji)
+    elif isinstance(emoji, EmojiResult):
+        emoji_result = emoji
+    elif emoji is None:
+        # Remove reactions
+        try:
+            await client(SendReactionRequest(peer=chat_id, msg_id=msg_id, reaction=[]))
+            return True
+        except Exception as e:
+            logger.debug(f"Could not remove reaction: {e}")
+            return False
+    else:
+        logger.debug(f"set_reaction: unexpected emoji type {type(emoji)}")
+        return False
+
+    # Try custom emoji first if applicable
+    if emoji_result.is_custom and emoji_result.document_id is not None:
+        try:
+            reaction = [ReactionCustomEmoji(document_id=emoji_result.document_id)]
+            await client(SendReactionRequest(peer=chat_id, msg_id=msg_id, reaction=reaction))
+            return True
+        except Exception as e:
+            logger.debug(
+                f"Custom emoji reaction failed (doc_id={emoji_result.document_id}), "
+                f"falling back to standard: {e}"
             )
-        )
+            # Fall through to standard emoji
+
+    # Standard emoji path
+    standard_emoji = emoji_result.emoji or str(emoji_result)
+    if not standard_emoji:
+        return False
+
+    try:
+        reaction = [ReactionEmoji(emoticon=standard_emoji)]
+        await client(SendReactionRequest(peer=chat_id, msg_id=msg_id, reaction=reaction))
         return True
     except Exception as e:
-        logger.debug(f"Could not set reaction '{emoji}': {e}")
+        logger.debug(f"Could not set reaction '{standard_emoji}': {e}")
         return False

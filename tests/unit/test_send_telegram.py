@@ -480,6 +480,8 @@ class TestSendTelegramReaction:
 
     def test_react_queues_reaction_payload(self):
         """Should queue a reaction payload with type='reaction' and resolved emoji."""
+        from tools.emoji_embedding import EmojiResult
+
         env = {
             "TELEGRAM_CHAT_ID": "12345",
             "TELEGRAM_REPLY_TO": "67890",
@@ -487,11 +489,12 @@ class TestSendTelegramReaction:
         }
 
         mock_redis = MagicMock()
+        mock_result = EmojiResult(emoji="\U0001f525")
 
         with (
             patch.dict(os.environ, env, clear=True),
             patch("tools.send_telegram._get_redis_connection", return_value=mock_redis),
-            patch("tools.emoji_embedding.find_best_emoji", return_value="\U0001f525"),
+            patch("tools.emoji_embedding.find_best_emoji", return_value=mock_result),
         ):
             from tools.send_telegram import send_reaction
 
@@ -503,6 +506,37 @@ class TestSendTelegramReaction:
         assert payload["chat_id"] == "12345"
         assert payload["reply_to"] == 67890
         assert payload["session_id"] == "test-session"
+        assert "custom_emoji_document_id" not in payload
+
+    def test_react_queues_custom_emoji_reaction(self):
+        """Should include custom_emoji_document_id when result is custom."""
+        from tools.emoji_embedding import EmojiResult
+
+        env = {
+            "TELEGRAM_CHAT_ID": "12345",
+            "TELEGRAM_REPLY_TO": "67890",
+            "VALOR_SESSION_ID": "test-session",
+        }
+
+        mock_redis = MagicMock()
+        mock_result = EmojiResult(
+            emoji="\U0001f525",
+            document_id=99999,
+            is_custom=True,
+        )
+
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch("tools.send_telegram._get_redis_connection", return_value=mock_redis),
+            patch("tools.emoji_embedding.find_best_emoji", return_value=mock_result),
+        ):
+            from tools.send_telegram import send_reaction
+
+            send_reaction("excited")
+
+        payload = json.loads(mock_redis.rpush.call_args[0][1])
+        assert payload["type"] == "reaction"
+        assert payload["custom_emoji_document_id"] == 99999
 
     def test_react_requires_reply_to(self):
         """Should exit with error when TELEGRAM_REPLY_TO is not set."""
@@ -533,6 +567,8 @@ class TestSendTelegramReaction:
 
     def test_react_cli_flag(self):
         """Should parse --react flag from CLI and call send_reaction."""
+        from tools.emoji_embedding import EmojiResult
+
         env = {
             "TELEGRAM_CHAT_ID": "12345",
             "TELEGRAM_REPLY_TO": "67890",
@@ -540,11 +576,12 @@ class TestSendTelegramReaction:
         }
 
         mock_redis = MagicMock()
+        mock_result = EmojiResult(emoji="\U0001f44d")
 
         with (
             patch.dict(os.environ, env, clear=True),
             patch("tools.send_telegram._get_redis_connection", return_value=mock_redis),
-            patch("tools.emoji_embedding.find_best_emoji", return_value="\U0001f44d"),
+            patch("tools.emoji_embedding.find_best_emoji", return_value=mock_result),
             patch("sys.argv", ["send_telegram.py", "--react", "happy"]),
         ):
             from tools.send_telegram import main
@@ -554,3 +591,115 @@ class TestSendTelegramReaction:
         payload = json.loads(mock_redis.rpush.call_args[0][1])
         assert payload["type"] == "reaction"
         assert payload["emoji"] == "\U0001f44d"
+
+
+class TestSendTelegramEmoji:
+    """Test --emoji flag for standalone custom emoji messages."""
+
+    def test_emoji_queues_custom_emoji_message(self):
+        """Should queue a custom_emoji_message payload."""
+        from tools.emoji_embedding import EmojiResult
+
+        env = {
+            "TELEGRAM_CHAT_ID": "12345",
+            "TELEGRAM_REPLY_TO": "67890",
+            "VALOR_SESSION_ID": "test-session",
+        }
+
+        mock_redis = MagicMock()
+        mock_result = EmojiResult(
+            emoji="\U0001f389",
+            document_id=42,
+            is_custom=True,
+        )
+
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch("tools.send_telegram._get_redis_connection", return_value=mock_redis),
+            patch("tools.emoji_embedding.find_best_emoji", return_value=mock_result),
+        ):
+            from tools.send_telegram import send_emoji
+
+            send_emoji("celebration")
+
+        payload = json.loads(mock_redis.rpush.call_args[0][1])
+        assert payload["type"] == "custom_emoji_message"
+        assert payload["emoji"] == "\U0001f389"
+        assert payload["custom_emoji_document_id"] == 42
+        assert payload["chat_id"] == "12345"
+        assert payload["session_id"] == "test-session"
+
+    def test_emoji_standard_fallback(self):
+        """Should queue standard emoji when no custom match."""
+        from tools.emoji_embedding import EmojiResult
+
+        env = {
+            "TELEGRAM_CHAT_ID": "12345",
+            "VALOR_SESSION_ID": "test-session",
+        }
+
+        mock_redis = MagicMock()
+        mock_result = EmojiResult(emoji="\U0001f525")
+
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch("tools.send_telegram._get_redis_connection", return_value=mock_redis),
+            patch("tools.emoji_embedding.find_best_emoji", return_value=mock_result),
+        ):
+            from tools.send_telegram import send_emoji
+
+            send_emoji("fire")
+
+        payload = json.loads(mock_redis.rpush.call_args[0][1])
+        assert payload["type"] == "custom_emoji_message"
+        assert payload["emoji"] == "\U0001f525"
+        assert "custom_emoji_document_id" not in payload
+
+    def test_emoji_empty_feeling_exits(self):
+        """Should exit with error when feeling is empty."""
+        env = {
+            "TELEGRAM_CHAT_ID": "12345",
+            "VALOR_SESSION_ID": "test-session",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            from tools.send_telegram import send_emoji
+
+            with pytest.raises(SystemExit) as exc_info:
+                send_emoji("")
+            assert exc_info.value.code == 1
+
+    def test_emoji_missing_chat_id_exits(self):
+        """Should exit with error when TELEGRAM_CHAT_ID not set."""
+        env = {"VALOR_SESSION_ID": "test-session"}
+        with patch.dict(os.environ, env, clear=True):
+            from tools.send_telegram import send_emoji
+
+            with pytest.raises(SystemExit) as exc_info:
+                send_emoji("happy")
+            assert exc_info.value.code == 1
+
+    def test_emoji_cli_flag(self):
+        """Should parse --emoji flag from CLI."""
+        from tools.emoji_embedding import EmojiResult
+
+        env = {
+            "TELEGRAM_CHAT_ID": "12345",
+            "VALOR_SESSION_ID": "test-session",
+        }
+
+        mock_redis = MagicMock()
+        mock_result = EmojiResult(emoji="\U0001f525")
+
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch("tools.send_telegram._get_redis_connection", return_value=mock_redis),
+            patch("tools.emoji_embedding.find_best_emoji", return_value=mock_result),
+            patch("sys.argv", ["send_telegram.py", "--emoji", "excited"]),
+        ):
+            from tools.send_telegram import main
+
+            main()
+
+        payload = json.loads(mock_redis.rpush.call_args[0][1])
+        assert payload["type"] == "custom_emoji_message"
+        assert payload["emoji"] == "\U0001f525"
