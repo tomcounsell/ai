@@ -29,6 +29,7 @@ The env var is set in `ValorAgent._create_options()` and passed through `get_age
 ### Model Fields
 
 - `AgentSession.slug` -- Redis model field storing the active slug for a session. Set when `/do-plan {slug}` runs.
+- `AgentSession.project_config` -- DictField carrying the full project dict from `projects.json`. Populated at enqueue time so downstream code (queue worker, SDK client, formatting) can read project properties without re-deriving from config files or parallel registries. See [Chat Dev Session Architecture](chat-dev-session-architecture.md#project-config-propagation) for the propagation flow.
 - `Job.slug` -- Propagated from the session to each session for task list routing.
 - `Job.task_list_id` -- The computed task list ID (either slug or thread-derived).
 

@@ -83,6 +83,7 @@ Single Popoto model (`AgentSession`) with discriminator field. Popoto ORM does n
 - `session_type` (KeyField) -- "pm", "teammate", or "dev"
 - `status` (KeyField) -- pending/running/active/dormant/completed/failed
 - `project_key`, `created_at`, `history`, etc.
+- `project_config` (DictField) -- full project dict from `projects.json`, populated at enqueue time. Carries all project properties (name, working_directory, github, mode, telegram, etc.) through the pipeline so downstream code never re-derives from a parallel registry. Empty/None for legacy sessions created before this field existed; the worker falls back to loading from `projects.json` at execution time.
 
 ### PM/Teammate session-specific fields
 - `chat_id`, `message_id`, `sender_name`, `message_text` -- Telegram context
@@ -302,8 +303,27 @@ The `dev-session` agent is defined in `agent/agent_definitions.py`:
 |------|---------|
 | `models/agent_session.py` | AgentSession model with session_type discriminator |
 | `agent/agent_definitions.py` | Agent registry including dev-session |
-| `agent/agent_session_queue.py` | Queue with nudge loop and per-chat workers |
-| `agent/sdk_client.py` | SDK client (classification from session, not re-classified) |
+| `agent/agent_session_queue.py` | Queue with nudge loop and per-chat workers; reads `session.project_config` at execution time |
+| `agent/sdk_client.py` | SDK client; uses `project_key` identity checks for cross-repo detection |
+
+## Project Config Propagation
+
+When a Telegram message arrives, `find_project_for_chat()` resolves the full project config from `projects.json` once. This config is passed through `enqueue_agent_session(project_config=config)` and stored on the `AgentSession.project_config` DictField. At execution time, `_execute_agent_session()` reads the config directly from the session -- no parallel registry or re-derivation needed.
+
+```
+Telegram message
+    -> find_project_for_chat() resolves full project dict
+    -> enqueue_agent_session(project_config=project_dict)
+    -> AgentSession.project_config stores the dict in Redis
+    -> _execute_agent_session() reads session.project_config
+    -> get_agent_response_sdk() receives project dict with all fields
+```
+
+**Cross-repo detection**: `sdk_client.py` uses `project_key != "valor"` to determine whether a session targets a cross-repo project, replacing the previous `project_working_dir != AI_REPO_ROOT` string comparisons.
+
+**Backward compatibility**: Legacy sessions without `project_config` (created before this field existed) fall back to loading from `projects.json` at execution time. This transitional fallback can be removed after one deploy cycle.
+
+**Config consumers**: `bridge/formatting.py` and `tools/agent_session_scheduler.py` load config from `projects.json` directly via `bridge.routing.load_config()` rather than relying on a module-level registry.
 
 ## Migration
 
