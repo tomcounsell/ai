@@ -149,7 +149,7 @@ def install_or_update() -> InstallResult:
                         error=f"Binary '{BINARY_NAME}' not found in archive. Contents: {members}",
                     )
 
-                tar.extract(rodney_member, tmp_dir)
+                tar.extract(rodney_member, tmp_dir, filter="data")
                 extracted_path = Path(tmp_dir) / rodney_member
 
             # Install binary

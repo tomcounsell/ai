@@ -45,7 +45,6 @@ Parse `TEST_ARGS` to determine what to run:
 | `unit --direct` | Run `tests/unit/` directly (combinable with any target) |
 | `frontend <url> "<scenario>"` | Run a browser-based UI test via `frontend-tester` subagent |
 | `happy-paths` | Run `python tools/happy_path_runner.py tests/happy-paths/scripts/` directly via bash. No subagent dispatch. |
-| `happy-paths` | Run `python tools/happy_path_runner.py tests/happy-paths/scripts/` directly via bash. No subagent dispatch. |
 
 **Parsing rules:**
 1. Extract flags: `--changed`, `--no-lint`
