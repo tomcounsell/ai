@@ -32,12 +32,9 @@ from pathlib import Path
 
 import requests
 
-from config.models import MODEL_EXPERIMENT, OPENROUTER_HAIKU
+from config.models import MODEL_EXPERIMENT, OPENROUTER_HAIKU, OPENROUTER_URL
 
 logger = logging.getLogger(__name__)
-
-# OpenRouter endpoint
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 # Accumulates costs from eval function calls so the runner can track them.
 # Drained by ExperimentRunner after each eval_fn() call.

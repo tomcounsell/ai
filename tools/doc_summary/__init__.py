@@ -10,10 +10,9 @@ from typing import Literal
 
 import requests
 
-from config.models import MODEL_FAST, OPENROUTER_HAIKU
+from config.models import MODEL_FAST, OPENROUTER_HAIKU, OPENROUTER_URL
 
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 # Summarization is a fast/cheap task - use Haiku
 DEFAULT_MODEL = MODEL_FAST
 DEFAULT_MODEL_OPENROUTER = OPENROUTER_HAIKU

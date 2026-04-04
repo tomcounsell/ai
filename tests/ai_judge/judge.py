@@ -14,6 +14,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from config.models import OPENROUTER_URL
+
 
 class JudgmentScore(Enum):
     """Score levels for AI judgments."""
@@ -98,7 +100,7 @@ def _call_openrouter(prompt: str, config: JudgeConfig) -> str | None:
         import httpx
 
         response = httpx.post(
-            "https://openrouter.ai/api/v1/chat/completions",
+            OPENROUTER_URL,
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
