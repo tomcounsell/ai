@@ -609,6 +609,14 @@ async def send_response_with_files(
         except Exception as e:
             logger.error(f"Failed to send file {file_path}: {e}")
             await client.send_message(_chat_id, f"Failed to send file: {file_path.name}")
+        finally:
+            # Clean up temp files created by the summarizer
+            if str(file_path).startswith("/tmp/valor_full_output_"):
+                try:
+                    Path(file_path).unlink(missing_ok=True)
+                    logger.debug(f"Cleaned up temp file: {file_path}")
+                except Exception:
+                    pass  # Non-fatal: OS will clean /tmp eventually
 
     # PM bypass (dual-personality guard): files have been sent above,
     # skip text/summarizer output. This prevents sending both PM

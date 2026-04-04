@@ -928,8 +928,8 @@ def _get_status_emoji(session, is_completion: bool = True) -> str:
             # PR link on completed session suggests merge milestone
             if links.get("pr") and status in ("completed",):
                 is_milestone = True
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Failed to get session links for emoji selection: {e}")
 
     if status in ("completed",):
         return "✅" if is_milestone else ""
