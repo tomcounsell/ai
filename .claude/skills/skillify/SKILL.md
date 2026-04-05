@@ -57,8 +57,8 @@ You will use AskUserQuestion to understand what the user wants to automate. Impo
 - If you think the skill will require arguments, suggest arguments based on what you observed. Make sure you understand what someone would need to provide.
 - If it's not clear, ask if this skill should run inline (in the current conversation) or forked (as a sub-agent with its own context). Forked is better for self-contained tasks that don't need mid-process user input; inline is better when the user wants to steer mid-process.
 - Ask where the skill should be saved. Suggest a default based on context (repo-specific workflows -> repo, cross-repo personal workflows -> user). Options:
-  - **This repo** ('.claude/skills/<name>/SKILL.md') -- for workflows specific to this project
-  - **Personal** ('~/.claude/skills/<name>/SKILL.md') -- follows you across all repos
+  - **This repo** (`.claude/skills/<name>/SKILL.md`) -- for workflows specific to this project
+  - **Personal** (`~/.claude/skills/<name>/SKILL.md`) -- follows you across all repos
 
 **Round 3: Breaking down each step**
 For each major step, if it's not glaringly obvious, ask:
@@ -121,21 +121,21 @@ IMPORTANT: see the next section below for the per-step annotations you can optio
 
 **Per-step annotations**:
 - **Success criteria** is REQUIRED on every step. This helps the model understand what the user expects from their workflow, and when it should have the confidence to move on.
-- **Execution**: 'Direct' (default), 'Task agent' (straightforward subagents), 'Teammate' (agent with true parallelism and inter-agent communication), or '[human]' (user does it). Only needs specifying if not Direct.
+- **Execution**: `Direct` (default), `Task agent` (straightforward subagents), `Teammate` (agent with true parallelism and inter-agent communication), or `[human]` (user does it). Only needs specifying if not Direct.
 - **Artifacts**: Data this step produces that later steps need (e.g., PR number, commit SHA). Only include if later steps depend on it.
 - **Human checkpoint**: When to pause and ask the user before proceeding. Include for irreversible actions (merging, sending messages), error judgment (merge conflicts), or output review.
 - **Rules**: Hard rules for the workflow. User corrections during the reference session can be especially useful here.
 
 **Step structure tips:**
 - Steps that can run concurrently use sub-numbers: 3a, 3b
-- Steps requiring the user to act get '[human]' in the title
+- Steps requiring the user to act get `[human]` in the title
 - Keep simple skills simple -- a 2-step skill doesn't need annotations on every step
 
 **Frontmatter rules:**
-- 'allowed-tools': Minimum permissions needed (use patterns like 'Bash(gh:*)' not 'Bash')
-- 'context': Only set 'context: fork' for self-contained skills that don't need mid-process user input.
-- 'when_to_use' is CRITICAL -- tells the model when to auto-invoke. Start with "Use when..." and include trigger phrases. Example: "Use when the user wants to cherry-pick a PR to a release branch. Examples: 'cherry-pick to release', 'CP this PR', 'hotfix'."
-- 'arguments' and 'argument-hint': Only include if the skill takes parameters. Use '$name' in the body for substitution.
+- `allowed-tools`: Minimum permissions needed (use patterns like `Bash(gh:*)` not `Bash`)
+- `context`: Only set `context: fork` for self-contained skills that don't need mid-process user input.
+- `when_to_use` is CRITICAL -- tells the model when to auto-invoke. Start with "Use when..." and include trigger phrases. Example: "Use when the user wants to cherry-pick a PR to a release branch. Examples: 'cherry-pick to release', 'CP this PR', 'hotfix'."
+- `arguments` and `argument-hint`: Only include if the skill takes parameters. Use `$name` in the body for substitution.
 
 ### Step 4: Confirm and Save
 
@@ -143,5 +143,5 @@ Before writing the file, output the complete SKILL.md content as a yaml code blo
 
 After writing, tell the user:
 - Where the skill was saved
-- How to invoke it: '/{{skill-name}} [arguments]'
+- How to invoke it: `/{{skill-name}} [arguments]`
 - That they can edit the SKILL.md directly to refine it
