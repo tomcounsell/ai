@@ -73,8 +73,14 @@ SOFT_INSTANCE_LIMIT = 5  # Warn when more than this many active claude processes
 # Process name patterns to scan for zombies (CLI invocations only)
 # NOTE: "claude --" matches Claude Desktop app helper processes via their
 # --user-data-dir=.../Claude --standard-schemes=... arguments (false positives).
-# We match the specific CLI invocation pattern instead.
-ZOMBIE_PROCESS_PATTERNS = ("claude --dangerously-skip-permissions", "pyright")
+# We match specific CLI invocation patterns instead:
+# - "claude --dangerously-skip-permissions" — interactive CLI sessions
+# - "claude --output-format" — SDK-spawned agent sessions
+ZOMBIE_PROCESS_PATTERNS = (
+    "claude --dangerously-skip-permissions",
+    "claude --output-format",
+    "pyright",
+)
 
 # Patterns to exclude from process matching (Desktop app helpers)
 ZOMBIE_PROCESS_EXCLUDES = ("Claude.app", "Claude Helper")
