@@ -48,7 +48,7 @@ ChatSession composes and sends its own Telegram messages via a tool, with full c
 1. **Entry point**: Human sends Telegram message
 2. **Bridge**: Routes to ChatSession via `_execute_job()` in `agent/job_queue.py`
 3. **ChatSession**: Processes message, orchestrates DevSessions, returns text output
-4. **Nudge loop**: `send_to_chat()` classifies output via `classify_nudge_action()` — decides deliver/nudge
+4. **Nudge loop**: `send_to_chat()` classifies output via `determine_delivery_action()` — decides deliver/nudge
 5. **Bridge send callback**: `_send()` in `telegram_bridge.py` L1448 calls `send_response_with_files()`
 6. **Summarizer**: `bridge/response.py` L396-429 runs `summarize_response()` which rewrites the text
 7. **Telegram**: Summarized text sent via `send_markdown()` to Telegram
@@ -129,7 +129,7 @@ No prerequisites — this work uses existing Redis infrastructure and Telethon c
 ## Test Impact
 
 - [ ] `tests/unit/test_summarizer.py::TestSummarizeResponse` — UPDATE: add test cases for summarizer bypass when `pm_sent_message_ids` is non-empty
-- [ ] `tests/unit/test_nudge_loop.py` — UPDATE: add test cases for the new "pm already messaged" path in `classify_nudge_action()` or the delivery logic
+- [ ] `tests/unit/test_nudge_loop.py` — UPDATE: add test cases for the new "pm already messaged" path in `determine_delivery_action()` or the delivery logic
 - [ ] `tests/e2e/test_nudge_loop.py` — UPDATE: verify end-to-end flow with PM self-messaging
 - [ ] `tests/unit/test_sdk_client.py` — UPDATE: verify `TELEGRAM_CHAT_ID` and `TELEGRAM_REPLY_TO` env var injection for chat sessions
 

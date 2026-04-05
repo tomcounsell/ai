@@ -95,7 +95,7 @@ Three paths to silent text loss have been identified and guarded:
 | `bridge/response.py` | Reaction constants, OutputType enum, MAX_AUTO_CONTINUES, filter_tool_logs |
 | `agent/agent_session_queue.py` | Reaction selection logic, auto-continue re-enqueue, has_communicated() check |
 | `agent/messenger.py` | BossMessenger with `has_communicated()` tracking, BackgroundTask with internal health watchdog |
-| `agent/agent_session_queue.py` | Nudge loop: output routing decisions via `classify_nudge_action()` |
+| `agent/agent_session_queue.py` | Nudge loop: output routing decisions via `determine_delivery_action()` |
 | `tests/test_reply_delivery.py` | Tests for steering drain, reaction selection, filter fallback |
 
 ## See Also

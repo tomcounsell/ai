@@ -12,7 +12,7 @@
 Found 28 files across 6 surfaces:
 
 - **Implementation:** 4 files (`bridge/summarizer.py`, `bridge/formatting.py`, `bridge/message_quality.py`, `bridge/response.py`)
-- **Entry points:** 3 (`bridge/response.py:send_response_with_files`, `agent/hooks/stop.py`, `agent/agent_session_queue.py:classify_nudge_action`)
+- **Entry points:** 3 (`bridge/response.py:send_response_with_files`, `agent/hooks/stop.py`, `agent/agent_session_queue.py:determine_delivery_action`)
 - **Tests:** 5 files (unit: 3 — `test_summarizer.py` 2,160 lines, `test_cross_wire_fixes.py`, `test_work_request_classifier.py`; integration: 2 — `test_agent_session_lifecycle.py`, `test_connectivity_gaps.py`)
 - **Documentation:** 4 files (`docs/features/summarizer-format.md`, `docs/guides/summarizer-output-audit.md`, `docs/features/link-summarization.md`, `docs/features/agent-message-delivery.md`)
 - **Configuration:** 5 keys (`OPENROUTER_API_KEY`, `FILE_ATTACH_THRESHOLD`, `SAFETY_TRUNCATE`, `OPENROUTER_URL`, `CLASSIFICATION_CONFIDENCE_THRESHOLD`)
@@ -26,7 +26,7 @@ External references found in 12 additional files (docs, plans, config, CLAUDE.md
 |---------|------|--------|
 | entry point | `bridge/response.py:512` — `summarize_response()` | connected |
 | entry point | `agent/hooks/stop.py:93` — `summarize_response()` | connected |
-| entry point | `agent/agent_session_queue.py:57` — `classify_nudge_action()` | connected (separate classifier, not using `classify_output`) |
+| entry point | `agent/agent_session_queue.py:57` — `determine_delivery_action()` | connected (separate classifier, not using `classify_output`) |
 | implementation | `bridge/summarizer.py` | connected — core module |
 | implementation | `bridge/formatting.py` | connected — `linkify_references_from_session` imported by summarizer |
 | implementation | `bridge/message_quality.py` | connected — `PROCESS_NARRATION_PATTERNS` imported by summarizer |
@@ -113,12 +113,12 @@ These three constants control summarizer behavior but cannot be overridden via e
 
 #### [inconsistent-interface] Two parallel classifiers with different interfaces
 
-`bridge/summarizer.py:classify_output()` is an async LLM-based classifier returning `ClassificationResult` with `OutputType` enum values. `agent/agent_session_queue.py:classify_nudge_action()` is a sync pure function returning string action names. Both classify agent output for routing, but they use completely different type systems and are called at different points in the pipeline.
+`bridge/summarizer.py:classify_output()` is an async LLM-based classifier returning `ClassificationResult` with `OutputType` enum values. `agent/agent_session_queue.py:determine_delivery_action()` is a sync pure function returning string action names. Both classify agent output for routing, but they use completely different type systems and are called at different points in the pipeline.
 
 This is intentional by design (one classifies content type, the other decides delivery action), but the naming `classify_*` for both can be confusing. The nudge loop does not consume `ClassificationResult` at all -- it has its own independent routing logic.
 
 **File:** `bridge/summarizer.py:702`, `agent/agent_session_queue.py:57`
-**Recommendation:** Informational. The separation is correct (content classification vs. delivery routing). Consider renaming `classify_nudge_action` to `determine_delivery_action` or similar to reduce naming confusion.
+**Recommendation:** Informational. The separation is correct (content classification vs. delivery routing). The rename from `classify_nudge_action` to `determine_delivery_action` has been completed, resolving the naming confusion.
 
 ### INFO
 
