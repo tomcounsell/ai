@@ -1036,11 +1036,15 @@ async def main():
         # 2. Embedding-based emoji selection (fire-and-forget async task)
         # find_best_emoji_for_message makes a synchronous HTTP call for embeddings,
         # so we run it in a thread to avoid blocking the Telethon event loop.
+        # Minimum delay lets 👀 linger so it feels like natural "reading, thinking"
+        # before transitioning to the contextual emoji.
         async def select_and_set_emoji_reaction():
             """Select contextual emoji via embedding similarity and set as reaction."""
             try:
                 from tools.emoji_embedding import find_best_emoji_for_message
 
+                # Let 👀 stay visible for a natural "reading" moment
+                await asyncio.sleep(2)
                 emoji = await asyncio.to_thread(find_best_emoji_for_message, clean_text)
                 await set_reaction(client, event.chat_id, message.id, emoji)
                 logger.debug(f"Embedding emoji selected: {emoji}")
