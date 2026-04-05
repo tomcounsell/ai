@@ -51,7 +51,7 @@
         {% else %}
         <span class="text-muted">-</span>
         {% endif %}
-        {% if s.classification_type %}
+        {% if s.classification_type and s.classification_type != 'sdlc' %}
         <span class="badge badge-outline" style="font-size: 10px;">{{ s.classification_type }}</span>
         {% endif %}
     </td>
