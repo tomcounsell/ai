@@ -70,17 +70,9 @@ WATCHDOG_INTERVAL = 60  # Check every 60 seconds (hardcoded per plan)
 ZOMBIE_THRESHOLD_SECONDS = 7200  # 2 hours - processes older than this are zombies
 SOFT_INSTANCE_LIMIT = 5  # Warn when more than this many active claude processes
 
-# Process name patterns to scan for zombies (CLI invocations only)
-# NOTE: "claude --" matches Claude Desktop app helper processes via their
-# --user-data-dir=.../Claude --standard-schemes=... arguments (false positives).
-# We match specific CLI invocation patterns instead:
-# - "claude --dangerously-skip-permissions" — interactive CLI sessions
-# - "claude --output-format" — SDK-spawned agent sessions
-ZOMBIE_PROCESS_PATTERNS = (
-    "claude --dangerously-skip-permissions",
-    "claude --output-format",
-    "pyright",
-)
+# Process name patterns to scan for zombies.
+# ZOMBIE_PROCESS_EXCLUDES filters out Claude Desktop app helper processes.
+ZOMBIE_PROCESS_PATTERNS = ("claude ", "pyright")
 
 # Patterns to exclude from process matching (Desktop app helpers)
 ZOMBIE_PROCESS_EXCLUDES = ("Claude.app", "Claude Helper")
