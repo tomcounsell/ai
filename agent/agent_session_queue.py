@@ -123,8 +123,12 @@ AGENT_SESSION_HEALTH_MIN_RUNNING = (
 # Excludes agent_session_id (AutoKeyField, auto-generated on create).
 _AGENT_SESSION_FIELDS = [
     "project_key",
-    # status is an IndexedField (not KeyField), so it does not affect the Redis key
-    # and does not need delete-and-recreate — just mutate and save.
+    # status is an IndexedField (not KeyField), so it does not affect the Redis key.
+    # Included for defense-in-depth: any delete-and-recreate path (e.g., health check
+    # orphan-fixing) preserves the original status instead of defaulting to "pending".
+    # Callers that intentionally override status (retry, nudge fallback) already set
+    # fields["status"] explicitly after extraction.
+    "status",
     "priority",
     "scheduled_at",
     "created_at",
@@ -1687,7 +1691,48 @@ async def _worker_loop(chat_id: str, event: asyncio.Event) -> None:
                             session.agent_session_id,
                             snap_err,
                         )
-                    await _complete_agent_session(session, failed=session_failed)
+                    # Guard against nudge overwrite: re-read session from Redis
+                    # to check if a nudge was enqueued during execution. If the
+                    # session was set to "pending" by _enqueue_nudge(), or was
+                    # deleted by the nudge fallback path, skip completion to avoid
+                    # overwriting the nudge's status back to "completed".
+                    try:
+                        fresh_sessions = list(
+                            AgentSession.query.filter(
+                                agent_session_id=session.agent_session_id
+                            )
+                        )
+                        if not fresh_sessions:
+                            logger.info(
+                                "[chat:%s] Session %s no longer exists in Redis "
+                                "(likely recreated by nudge fallback) — skipping "
+                                "completion",
+                                chat_id,
+                                session.agent_session_id,
+                            )
+                        elif fresh_sessions[0].status == "pending":
+                            logger.info(
+                                "[chat:%s] Session %s has status 'pending' in Redis "
+                                "(nudge was enqueued) — skipping completion to "
+                                "preserve nudge",
+                                chat_id,
+                                session.agent_session_id,
+                            )
+                        else:
+                            await _complete_agent_session(
+                                session, failed=session_failed
+                            )
+                    except Exception as guard_err:
+                        logger.warning(
+                            "[chat:%s] Nudge guard check failed for %s: %s "
+                            "— completing session as fallback",
+                            chat_id,
+                            session.agent_session_id,
+                            guard_err,
+                        )
+                        await _complete_agent_session(
+                            session, failed=session_failed
+                        )
 
             # Clear the event after processing so the next drain wait starts fresh
             event.clear()
