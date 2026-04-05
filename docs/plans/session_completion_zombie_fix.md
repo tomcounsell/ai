@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Critiqued
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -247,8 +247,15 @@ No agent integration required — this is a bridge-internal change to the sessio
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
-| CONCERN | [agent-type] | [The concern raised] | [How/whether it was addressed] |
+<!-- Populated by /do-plan-critique (war room) on 2026-04-05. -->
+
+| Severity | Critics | Finding | Status |
+|----------|---------|---------|--------|
+| CONCERN | Adversary, Skeptic | Bug 2 re-read may find nothing in nudge fallback path (delete-and-recreate at line 1848-1862 creates a new record) — re-read must handle missing session gracefully by skipping completion | Open |
+| CONCERN | Operator | No logging or metric emitted when the finally block skips completion due to nudge detection — makes it hard to confirm the fix is working in production | Open |
+| CONCERN | Archaeologist | Plan line refs slightly off (claims field list at line 127, actual list starts line 124; claims comment at 126-128, actual 126-127) — could mislead the builder | Open |
+| NIT | Simplifier | Task 3 (validate-callers) is manual code review, not an automated validation — could be a PR review step instead of a formal task | Open |
+| NIT | User | Documentation task references `docs/features/session-lifecycle.md` with "(if it exists)" — file does not exist, task should clarify whether to create it or skip | Open |
 
 ---
 
