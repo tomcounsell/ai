@@ -95,7 +95,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Semantic Session Routing](semantic-session-routing.md) | Semantic matching of unthreaded messages to active sessions with declared expectations via structured summarizer output | Shipped |
 | [Session Health Check](session-health-check.md) | PostToolUse watchdog hook monitoring agent sessions for stuck loops using a Haiku judge with enriched tool summaries, activity stats, and pattern guidance | Shipped |
 | [Session Isolation](session-isolation.md) | Two-tier task list scoping and git worktrees for parallel session isolation | Shipped |
-| [Session Lifecycle](session-lifecycle.md) | Session state machine, field extraction status preservation, zombie loop prevention via health check and nudge overwrite guards | Shipped |
+| [Session Lifecycle](session-lifecycle.md) | Consolidated lifecycle module (`models/session_lifecycle.py`) with `finalize_session()` and `transition_status()` for all 11 session states, side effect consolidation, zombie loop prevention | Shipped |
 | [Session Lifecycle Diagnostics](session-lifecycle-diagnostics.md) | Structured LIFECYCLE logging at every state transition with stall detection and CLI status report | Shipped |
 | [Session Management](session-management.md) | Reply-chain root resolution ensuring all replies in a thread map to one canonical session_id | Shipped |
 | [Session Tagging](session-tagging.md) | Auto-tagging and CRUD for session categorization based on activity, classification, and transcript patterns | Shipped |

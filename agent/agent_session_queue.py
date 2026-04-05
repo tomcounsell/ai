@@ -32,6 +32,7 @@ from bridge.response import REACTION_COMPLETE, REACTION_ERROR, REACTION_SUCCESS
 from bridge.session_logs import save_session_snapshot
 from config.enums import ClassificationType, PersonaType, SessionType
 from models.agent_session import AgentSession
+from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
 
 logger = logging.getLogger(__name__)
 
@@ -244,14 +245,17 @@ async def _push_agent_session(
     try:
 
         def _mark_superseded():
+            from models.session_lifecycle import transition_status
+
             old_completed = [
                 s
                 for s in AgentSession.query.filter(session_id=session_id)
                 if s.status == "completed"
             ]
             for old in old_completed:
-                old.status = "superseded"
-                old.save()
+                transition_status(
+                    old, "superseded", reason=f"superseded by new session for {session_id}"
+                )
                 logger.info(
                     f"Marked old completed session {old.id} as superseded "
                     f"for session_id={session_id}"
@@ -489,8 +493,7 @@ def restore_branch_state(session: AgentSession) -> bool:
         return False
 
 
-# Terminal statuses for session hierarchy and lifecycle checks
-_TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
+# Terminal statuses — imported at top of file from models.session_lifecycle
 
 
 def dependency_status(session: AgentSession) -> dict[str, str]:
@@ -561,15 +564,10 @@ async def _pop_agent_session(chat_id: str) -> AgentSession | None:
         f"[chat:{chat_id}] Transitioning session {chosen.id} "
         f"(session {chosen.session_id}) pending->running"
     )
-    chosen.status = "running"
-    chosen.started_at = datetime.now(tz=UTC)
-    await chosen.async_save()
+    from models.session_lifecycle import transition_status
 
-    # Log lifecycle transition for session starting execution
-    try:
-        chosen.log_lifecycle_transition("running", "worker picked up session")
-    except Exception as e:
-        logger.warning(f"Failed to log lifecycle transition for session {chosen.id}: {e}")
+    chosen.started_at = datetime.now(tz=UTC)
+    transition_status(chosen, "running", reason="worker picked up session")
 
     # Drain any steering messages queued during the pending window (#619).
     # Follow-up messages arriving while the session was pending get pushed to
@@ -665,14 +663,10 @@ async def _pop_agent_session_with_fallback(chat_id: str) -> AgentSession | None:
             f"[chat:{chat_id}] Sync fallback: transitioning session {chosen.id} "
             f"(session {chosen.session_id}) pending->running"
         )
-        chosen.status = "running"
-        chosen.started_at = datetime.now(tz=UTC)
-        await chosen.async_save()
+        from models.session_lifecycle import transition_status
 
-        try:
-            chosen.log_lifecycle_transition("running", "worker picked up session (sync fallback)")
-        except Exception as e:
-            logger.warning(f"Failed to log lifecycle transition for session {chosen.id}: {e}")
+        chosen.started_at = datetime.now(tz=UTC)
+        transition_status(chosen, "running", reason="worker picked up session (sync fallback)")
 
         # Drain steering messages (same logic as _pop_agent_session) (#619)
         try:
@@ -776,9 +770,9 @@ def cancel_agent_session(agent_session_id: str) -> bool:
         )
         return False
 
-    session.status = "cancelled"
-    session.completed_at = datetime.now(tz=UTC)
-    session.save()
+    from models.session_lifecycle import finalize_session
+
+    finalize_session(session, "cancelled", reason=f"PM cancelled session {agent_session_id}")
     logger.info(f"[pm-controls] Cancelled session {agent_session_id}")
     return True
 
@@ -890,146 +884,33 @@ async def _complete_agent_session(session: AgentSession, *, failed: bool = False
     Sessions are retained in Redis with their terminal status so that followup
     messages can revive them. The model's TTL (90 days) handles eventual cleanup.
 
-    If this session is a child (has parent_agent_session_id), finalize the parent BEFORE
-    updating the child status.
+    Delegates all completion side effects (lifecycle log, auto-tag, branch checkpoint,
+    parent finalization, status save) to finalize_session() from the lifecycle module.
 
     Args:
         session: The AgentSession to complete.
         failed: If True, this session failed (used for parent finalization).
     """
-    # Checkpoint branch state before completion for audit trail
-    try:
-        checkpoint_branch_state(session)
-    except Exception as e:
-        logger.debug(f"[checkpoint] Non-fatal checkpoint error at completion: {e}")
+    from models.session_lifecycle import finalize_session
 
-    parent_id = getattr(session, "parent_agent_session_id", None)
-
-    # Finalize parent BEFORE updating child status
-    if parent_id:
-        child_status = "failed" if failed else "completed"
-        await _finalize_parent(
-            parent_id,
-            completing_child_id=session.agent_session_id,
-            completing_child_status=child_status,
-        )
-
-    # Persist terminal status instead of deleting — enables session revival
-    session.status = "failed" if failed else "completed"
-    session.completed_at = time.time()
-    session.save()
-
-
-async def _finalize_parent(
-    parent_id: str,
-    completing_child_id: str | None = None,
-    completing_child_status: str | None = None,
-) -> None:
-    """Check if all children of a parent are terminal; if so, finalize the parent.
-
-    Transitions parent from waiting_for_children to completed (all children
-    succeeded) or failed (any child failed). Idempotent: no-op if parent is
-    already in a terminal state or no longer exists.
-
-    Args:
-        parent_id: The id of the parent AgentSession.
-        completing_child_id: If provided, the agent_session_id of the child that is
-            currently completing. Its Redis status may still be "running",
-            so completing_child_status overrides it.
-        completing_child_status: The intended terminal status ("completed"
-            or "failed") of the completing child.
-    """
-    # NOTE: This function is async def but uses synchronous Redis operations
-    # (AgentSession.query.get, _transition_parent with sync delete/create).
-    # This is consistent with the existing codebase patterns — popoto's Redis
-    # operations are synchronous under the hood. If the codebase ever moves to
-    # true async Redis, these will need updating.
-    try:
-        parent = AgentSession.query.get(parent_id)
-    except Exception:
-        logger.warning(
-            f"[session-hierarchy] Parent session {parent_id} lookup raised "
-            f"exception during finalization — treating child as orphaned"
-        )
-        return
-
-    if parent is None:
-        logger.warning(
-            f"[session-hierarchy] Parent session {parent_id} not found during "
-            f"finalization — parent may have been deleted or already finalized"
-        )
-        return
-
-    # Only finalize if parent is in waiting_for_children status
-    if parent.status != "waiting_for_children":
-        logger.debug(
-            f"[session-hierarchy] Parent {parent_id} status is "
-            f"{parent.status!r}, skipping finalization"
-        )
-        return
-
-    # Check all children
-    children = parent.get_children()
-    if not children:
-        # Edge case: parent has no children but is waiting_for_children.
-        # Transition to completed as a safety guard.
-        logger.warning(
-            f"[session-hierarchy] Parent {parent_id} has no children but "
-            f"status is waiting_for_children — auto-completing"
-        )
-        _transition_parent(parent, "completed")
-        return
-
-    # Build effective status map: override the completing child's status
-    # since its Redis status hasn't been updated yet
-    terminal_statuses = _TERMINAL_STATUSES
-
-    def effective_status(child: AgentSession) -> str:
-        if completing_child_id and child.agent_session_id == completing_child_id:
-            return completing_child_status or "completed"
-        return child.status
-
-    child_statuses = [effective_status(c) for c in children]
-    non_terminal = [s for s in child_statuses if s not in terminal_statuses]
-
-    if non_terminal:
-        # Some children still running/pending — not ready to finalize
-        logger.debug(
-            f"[session-hierarchy] Parent {parent_id} has "
-            f"{len(non_terminal)} non-terminal children — waiting"
-        )
-        return
-
-    # All children are terminal — determine final parent status
-    any_failed = any(s == "failed" for s in child_statuses)
-    new_status = "failed" if any_failed else "completed"
-
-    completed_count = sum(1 for s in child_statuses if s == "completed")
-    failed_count = sum(1 for s in child_statuses if s == "failed")
-    logger.info(
-        f"[session-hierarchy] Finalizing parent {parent_id}: "
-        f"{completed_count} completed, {failed_count} failed -> {new_status}"
-    )
-
-    _transition_parent(parent, new_status)
+    status = "failed" if failed else "completed"
+    finalize_session(session, status, reason="agent session completed")
 
 
 def _transition_parent(parent: AgentSession, new_status: str) -> None:
     """Transition a parent session to a new status.
 
-    Status is an IndexedField, so direct mutation and save is safe.
-    No delete-and-recreate needed, which means agent_session_id stays the same
-    and children's parent_agent_session_id references remain valid.
+    Delegates to the lifecycle module for consistent lifecycle handling.
+    Uses finalize_session() for terminal statuses and transition_status()
+    for non-terminal statuses.
     """
-    parent.status = new_status
-    # Only set completed_at for terminal statuses, not for waiting_for_children
-    if new_status in ("completed", "failed"):
-        parent.completed_at = datetime.now(tz=UTC)
-    parent.save()
+    # NOTE: Imports private _transition_parent from lifecycle module — this is
+    # intentional. The function is private in the lifecycle module because it's
+    # a specialized parent-transition helper, not a general-purpose API. This
+    # wrapper exists to keep the import localized to one place.
+    from models.session_lifecycle import _transition_parent as _lifecycle_transition_parent
 
-    logger.info(
-        f"[session-hierarchy] Parent {parent.agent_session_id} transitioned to status={new_status}"
-    )
+    _lifecycle_transition_parent(parent, new_status)
 
 
 def _get_pending_agent_sessions_sync(project_key: str) -> list[AgentSession]:
@@ -1062,10 +943,11 @@ def _recover_interrupted_agent_sessions_startup() -> int:
             entry.message_text or "",
         )
         try:
-            entry.status = "pending"
+            from models.session_lifecycle import transition_status
+
             entry.priority = "high"
             entry.started_at = None
-            entry.save()
+            transition_status(entry, "pending", reason="startup recovery")
             logger.info("[startup-recovery] Recovered session %s", entry.agent_session_id)
         except Exception as e:
             logger.warning(
@@ -1185,22 +1067,30 @@ async def _agent_session_health_check() -> None:
                     is_local,
                     reason,
                 )
+                from models.session_lifecycle import finalize_session, transition_status
+
                 if is_local:
                     # Local CLI sessions have no bridge worker to resume them --
                     # mark abandoned instead of resetting to pending
-                    entry.status = "abandoned"
-                    entry.completed_at = now
-                    entry.save()
+                    finalize_session(
+                        entry,
+                        "abandoned",
+                        reason=f"health check: local session stuck (chat={worker_key})",
+                        skip_auto_tag=True,
+                    )
                     logger.info(
                         "[session-health] Marked local session %s as abandoned (chat=%s)",
                         entry.agent_session_id,
                         worker_key,
                     )
                 else:
-                    entry.status = "pending"
                     entry.priority = "high"
                     entry.started_at = None
-                    entry.save()
+                    transition_status(
+                        entry,
+                        "pending",
+                        reason=f"health check: recovered stuck session (chat={worker_key})",
+                    )
                     logger.info(
                         "[session-health] Recovered session %s (chat=%s)",
                         entry.agent_session_id,
@@ -1242,9 +1132,14 @@ async def _agent_session_health_check() -> None:
                         worker_key,
                         pending_seconds,
                     )
-                    entry.status = "abandoned"
-                    entry.completed_at = now
-                    entry.save()
+                    from models.session_lifecycle import finalize_session
+
+                    finalize_session(
+                        entry,
+                        "abandoned",
+                        reason=f"health check: orphaned local pending session (chat={worker_key})",
+                        skip_auto_tag=True,
+                    )
                 else:
                     logger.info(
                         "[session-health] Starting worker for orphaned pending "
@@ -1910,13 +1805,16 @@ async def _enqueue_nudge(
 
     session = sessions[0]
 
-    # Direct mutation -- status is an IndexedField, no delete-and-recreate needed.
-    session.status = "pending"
+    # Use lifecycle module for consistent transition logging.
+    from models.session_lifecycle import transition_status
+
     session.message_text = nudge_feedback
     session.auto_continue_count = auto_continue_count
     session.priority = "high"
     session.task_list_id = task_list_id
-    await session.async_save()
+    transition_status(
+        session, "pending", reason=f"nudge re-enqueue (auto_continue_count={auto_continue_count})"
+    )
 
     _ensure_worker(session.chat_id)
     logger.info(
@@ -2849,10 +2747,11 @@ def _cli_flush_agent_session(agent_session_id: str) -> None:
 
 def _cli_recover_single_agent_session(session: AgentSession) -> None:
     """Recover a stuck session by resetting it to pending."""
-    session.status = "pending"
+    from models.session_lifecycle import transition_status
+
     session.priority = "high"
     session.started_at = None
-    session.save()
+    transition_status(session, "pending", reason="CLI manual recovery")
     print(f"  Re-enqueued as pending (id: {session.agent_session_id})")
 
 

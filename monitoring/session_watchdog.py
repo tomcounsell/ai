@@ -183,11 +183,17 @@ async def check_all_sessions() -> None:
             # mark the session as failed to prevent the watchdog from looping
             # on it every cycle. See nudge loop related guards.
             try:
-                session.status = "failed"
+                from models.session_lifecycle import finalize_session
+
                 # Capture exception details so the reflections system can produce
                 # actionable bug reports instead of "empty error summary" issues.
                 session.summary = f"Watchdog: {type(e).__name__}: {e}"[:500]
-                session.save()
+                finalize_session(
+                    session, "failed",
+                    reason=f"watchdog: stale session ({type(e).__name__})",
+                    skip_auto_tag=True,
+                    skip_checkpoint=True,
+                )
                 logger.warning(
                     "[watchdog] Marked stale session %s as failed (%s)",
                     session.session_id,
@@ -576,13 +582,14 @@ def _safe_abandon_session(session: AgentSession, reason: str) -> bool:
         (session may have been deleted by another process).
     """
     try:
-        session.log_lifecycle_transition("abandoned", reason)
-    except Exception:
-        pass
+        from models.session_lifecycle import finalize_session
 
-    session.status = "abandoned"
-    try:
-        session.save()
+        finalize_session(
+            session, "abandoned",
+            reason=reason,
+            skip_auto_tag=True,
+            skip_checkpoint=True,
+        )
         return True
     except ModelException as e:
         # Session was likely deleted or modified by another process between

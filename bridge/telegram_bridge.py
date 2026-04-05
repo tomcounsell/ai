@@ -1351,12 +1351,13 @@ async def main():
                     elif intent == "acknowledgment":
                         # Only acknowledge dormant sessions with expectations
                         if target_session.status == "dormant" and target_session.expectations:
-                            target_session.status = "completed"
-                            target_session.log_lifecycle_transition(
+                            from models.session_lifecycle import finalize_session
+
+                            finalize_session(
+                                target_session,
                                 "completed",
-                                f"Acknowledged by {sender_name}: {clean_text[:80]}",
+                                reason=f"Acknowledged by {sender_name}: {clean_text[:80]}",
                             )
-                            target_session.save()
                             await set_reaction(
                                 client,
                                 event.chat_id,

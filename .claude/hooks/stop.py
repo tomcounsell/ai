@@ -131,8 +131,6 @@ def _complete_agent_session(session_id: str, hook_input: dict) -> None:
     Fails silently -- session completion errors never block stop.
     """
     try:
-        import time
-
         from hook_utils.memory_bridge import load_agent_session_sidecar
 
         sidecar = load_agent_session_sidecar(session_id)
@@ -151,13 +149,19 @@ def _complete_agent_session(session_id: str, hook_input: dict) -> None:
         agent_session = matches[0]
 
         stop_reason = hook_input.get("stop_reason", "unknown")
-        if stop_reason in ("error", "crash"):
-            agent_session.status = "failed"
-        else:
-            agent_session.status = "completed"
+        status = "failed" if stop_reason in ("error", "crash") else "completed"
 
-        agent_session.completed_at = time.time()
-        agent_session.save()
+        # Delegate to lifecycle module with skip flags for hooks subprocess context
+        # (no heavy imports for auto-tagging or branch checkpointing)
+        from models.session_lifecycle import finalize_session
+
+        finalize_session(
+            agent_session,
+            status,
+            reason=f"stop hook: {stop_reason}",
+            skip_auto_tag=True,
+            skip_checkpoint=True,
+        )
     except Exception:
         pass  # Silent failure -- never block session stop
 
