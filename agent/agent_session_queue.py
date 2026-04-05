@@ -62,6 +62,8 @@ def determine_delivery_action(
     session_status: str | None = None,
     completion_sent: bool = False,
     watchdog_unhealthy: str | None = None,
+    session_type: str | None = None,
+    classification_type: str | None = None,
 ) -> str:
     """Pure function: decide what send_to_chat should do with agent output.
 
@@ -70,6 +72,7 @@ def determine_delivery_action(
         "deliver_fallback" — send fallback message (empty output, cap reached)
         "nudge_rate_limited" — backoff then nudge (rate limited)
         "nudge_empty"   — nudge (empty output)
+        "nudge_continue" — nudge (PM/SDLC session, continue pipeline)
         "drop"          — drop output (completion already sent)
         "deliver_already_completed" — deliver without nudge (session already done)
     """
@@ -88,6 +91,11 @@ def determine_delivery_action(
         return "deliver_fallback"
     if auto_continue_count >= max_nudge_count:
         return "deliver"
+    # PM sessions running SDLC work should continue through pipeline stages
+    # rather than delivering after the first skill completes.
+    # The PM decides when to stop; the bridge just keeps it working.
+    if session_type == "pm" and classification_type == "sdlc":
+        return "nudge_continue"
     if stop_reason in ("end_turn", None) and len(msg.strip()) > 0:
         return "deliver"
     return "deliver"
@@ -873,12 +881,13 @@ async def get_active_session_for_chat(chat_id: str) -> AgentSession | None:
 
 
 async def _complete_agent_session(session: AgentSession, *, failed: bool = False) -> None:
-    """Mark a running session as completed and delete it from Redis.
+    """Mark a running session as completed (or failed) and persist to Redis.
+
+    Sessions are retained in Redis with their terminal status so that followup
+    messages can revive them. The model's TTL (90 days) handles eventual cleanup.
 
     If this session is a child (has parent_agent_session_id), finalize the parent BEFORE
-    deleting the child. The completing child's intended terminal status is
-    passed to _finalize_parent so it can correctly count terminal children
-    even though the child's Redis status hasn't been updated yet.
+    updating the child status.
 
     Args:
         session: The AgentSession to complete.
@@ -892,8 +901,7 @@ async def _complete_agent_session(session: AgentSession, *, failed: bool = False
 
     parent_id = getattr(session, "parent_agent_session_id", None)
 
-    # Finalize parent BEFORE deleting child, passing the completing child's
-    # intended status so _finalize_parent can treat it as terminal
+    # Finalize parent BEFORE updating child status
     if parent_id:
         child_status = "failed" if failed else "completed"
         await _finalize_parent(
@@ -902,7 +910,10 @@ async def _complete_agent_session(session: AgentSession, *, failed: bool = False
             completing_child_status=child_status,
         )
 
-    await session.async_delete()
+    # Persist terminal status instead of deleting — enables session revival
+    session.status = "failed" if failed else "completed"
+    session.completed_at = time.time()
+    session.save()
 
 
 async def _finalize_parent(
@@ -2041,6 +2052,15 @@ async def _execute_agent_session(session: AgentSession) -> None:
 
                 _effective_nudge_cap = TEAMMATE_MAX_NUDGE_COUNT
 
+        # Resolve session type and classification for PM auto-continue
+        _session_type = (
+            getattr(agent_session, "session_mode", None)
+            or getattr(agent_session, "session_type", None)
+            if agent_session
+            else None
+        )
+        _classification = getattr(session, "classification_type", None)
+
         action = determine_delivery_action(
             msg=msg,
             stop_reason=stop_reason,
@@ -2049,6 +2069,8 @@ async def _execute_agent_session(session: AgentSession) -> None:
             session_status=session_status,
             completion_sent=chat_state.completion_sent,
             watchdog_unhealthy=unhealthy_reason,
+            session_type=_session_type,
+            classification_type=_classification,
         )
 
         if action == "deliver_already_completed":
@@ -2088,6 +2110,23 @@ async def _execute_agent_session(session: AgentSession) -> None:
             chat_state.auto_continue_count += 1
             logger.info(
                 f"[{session.project_key}] Empty output — nudging "
+                f"(nudge {chat_state.auto_continue_count}/{MAX_NUDGE_COUNT})"
+            )
+            await _enqueue_nudge(
+                session,
+                branch_name,
+                task_list_id,
+                chat_state.auto_continue_count,
+                msg,
+                nudge_feedback=NUDGE_MESSAGE,
+            )
+            chat_state.completion_sent = True
+            chat_state.defer_reaction = True
+
+        elif action == "nudge_continue":
+            chat_state.auto_continue_count += 1
+            logger.info(
+                f"[{session.project_key}] PM/SDLC session — nudging to continue pipeline "
                 f"(nudge {chat_state.auto_continue_count}/{MAX_NUDGE_COUNT})"
             )
             await _enqueue_nudge(
