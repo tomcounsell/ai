@@ -1698,9 +1698,7 @@ async def _worker_loop(chat_id: str, event: asyncio.Event) -> None:
                     # overwriting the nudge's status back to "completed".
                     try:
                         fresh_sessions = list(
-                            AgentSession.query.filter(
-                                agent_session_id=session.agent_session_id
-                            )
+                            AgentSession.query.filter(agent_session_id=session.agent_session_id)
                         )
                         if not fresh_sessions:
                             logger.info(
@@ -1719,9 +1717,7 @@ async def _worker_loop(chat_id: str, event: asyncio.Event) -> None:
                                 session.agent_session_id,
                             )
                         else:
-                            await _complete_agent_session(
-                                session, failed=session_failed
-                            )
+                            await _complete_agent_session(session, failed=session_failed)
                     except Exception as guard_err:
                         logger.warning(
                             "[chat:%s] Nudge guard check failed for %s: %s "
@@ -1730,9 +1726,7 @@ async def _worker_loop(chat_id: str, event: asyncio.Event) -> None:
                             session.agent_session_id,
                             guard_err,
                         )
-                        await _complete_agent_session(
-                            session, failed=session_failed
-                        )
+                        await _complete_agent_session(session, failed=session_failed)
 
             # Clear the event after processing so the next drain wait starts fresh
             event.clear()
