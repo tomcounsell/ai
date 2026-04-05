@@ -179,8 +179,14 @@ No agent integration required -- this is a test and verification pass with no ne
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
-| CONCERN | [agent-type] | [The concern raised] | [How/whether it was addressed] |
+<!-- Populated by /do-plan-critique (war room) on 2026-04-05. -->
+<!-- Verdict: READY TO BUILD — 0 blockers, 2 concerns, 1 nit -->
+
+| Severity | Critic | Finding | Suggestion |
+|----------|--------|---------|------------|
+| CONCERN | Skeptic | Plan hardcodes "11 tests" in multiple places (Success Criteria, Task 2). If tests are added/removed before build, the count becomes a false gate. | Reference the test file rather than a fixed count: "all tests in test_session_completion_zombie.py pass" instead of "all 11 tests". |
+| CONCERN | Adversary | Integration test cleanup relies solely on `redis_test_db` fixture (autouse flushdb). If the test creates sessions with KeyField values that collide with other tests running in parallel (pytest-xdist), index corruption is possible. Plan does not mention xdist safety. | Note that `redis_test_db` already provides per-worker db isolation (gw0->db1, gw1->db2). No action needed, but the plan should acknowledge this is handled by the fixture rather than requiring custom cleanup. |
+| NIT | Simplifier | Task 4 ("Final Validation") is "confirm all success criteria met and generate summary report" — this duplicates what `/do-build` already does at the end of every build. It adds a task with no unique validation command. | Merge Task 4 into Task 2 as a final step, or remove it and let `/do-build` handle the summary. |
 
 ---
 
