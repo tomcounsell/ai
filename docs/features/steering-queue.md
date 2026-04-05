@@ -53,9 +53,11 @@ User sends new mention (not a reply) → Bridge sees active session for project 
 
 **Pending session merge (#619):**
 
-User sends two messages in quick succession (< 7s) → First message enqueues as pending job → Second message arrives before worker pops the first → Bridge detects pending session within `PENDING_MERGE_WINDOW_SECONDS` (7s) → Push to `steering:{session_id}` Redis list → Ack: "Adding to current task" → When worker pops the job, drain-on-start logic calls `pop_all_steering_messages()` and prepends follow-up text to `message_text` → Agent sees the combined message on first run
+User sends two messages in quick succession (< 8s) → First message enqueues as pending job → Second message arrives before worker pops the first → Bridge detects pending session within `PENDING_MERGE_WINDOW_SECONDS` (8s) → Push to `steering:{session_id}` Redis list → Ack: "Adding to current task" → When worker pops the job, drain-on-start logic calls `pop_all_steering_messages()` and prepends follow-up text to `message_text` → Agent sees the combined message on first run
 
-This covers both the reply-to fast path (direct Telegram replies to pending sessions) and the intake classifier path (non-reply follow-ups detected by Haiku). The 7s window prevents stale pending sessions from absorbing unrelated messages.
+For messages arriving within ~200ms (before the first session is written to Redis), an in-memory coalescing guard (`_recent_session_by_chat`) bridges the Redis visibility gap. See `docs/features/semantic-session-routing.md` for details on the coalescing guard.
+
+This covers both the reply-to fast path (direct Telegram replies to pending sessions) and the intake classifier path (non-reply follow-ups detected by Haiku). The 8s window prevents stale pending sessions from absorbing unrelated messages.
 
 **Abort:**
 

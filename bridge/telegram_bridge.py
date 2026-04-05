@@ -108,7 +108,8 @@ from config.enums import PersonaType, SessionType  # noqa: E402
 # Maximum age (seconds) of a pending session that can absorb follow-up messages.
 # Messages arriving within this window attach to the pending session via the
 # steering queue instead of spawning a competing session. See issue #619.
-PENDING_MERGE_WINDOW_SECONDS = 7
+PENDING_MERGE_WINDOW_SECONDS = 8
+
 from tools.link_analysis import (  # noqa: E402
     extract_urls,
     extract_youtube_urls,
@@ -118,6 +119,13 @@ from tools.telegram_history import (  # noqa: E402
     store_link,
     store_message,
 )
+
+# In-memory coalescing guard: bridges the Redis visibility gap for rapid-fire messages.
+# Maps chat_id -> (session_id, timestamp). Set before enqueue_agent_session() so the
+# second message can find the first's session even before Redis write completes.
+# Single-threaded asyncio means dict writes are atomic between await points.
+# See issue #705 for the race condition this solves.
+_recent_session_by_chat: dict[str, tuple[str, float]] = {}
 
 # =============================================================================
 # Message Queue for Graceful Restart
@@ -944,75 +952,69 @@ async def main():
             try:
                 from bridge.session_router import (
                     find_matching_session,
-                    is_semantic_routing_enabled,
                 )
 
-                if is_semantic_routing_enabled():
-                    matched_id, confidence = await find_matching_session(
-                        chat_id=telegram_chat_id,
-                        message_text=clean_text,
-                        project_key=project_key,
-                    )
-                    if matched_id:
-                        # Check if matched session is active (running/active).
-                        # If so, queue the message as a steering message instead
-                        # of creating a competing session. (#318)
-                        try:
-                            from models.agent_session import AgentSession
+                matched_id, confidence = await find_matching_session(
+                    chat_id=telegram_chat_id,
+                    message_text=clean_text,
+                    project_key=project_key,
+                )
+                if matched_id:
+                    # Check if matched session is active (running/active).
+                    # If so, queue the message as a steering message instead
+                    # of creating a competing session. (#318)
+                    try:
+                        from models.agent_session import AgentSession
 
-                            matched_sessions = list(
-                                AgentSession.query.filter(session_id=matched_id)
+                        matched_sessions = list(AgentSession.query.filter(session_id=matched_id))
+                        matched_session = matched_sessions[0] if matched_sessions else None
+                        if matched_session and matched_session.status in (
+                            "running",
+                            "active",
+                        ):
+                            # Active session: queue steering message, ack, return
+                            from agent.steering import ABORT_KEYWORDS, push_steering_message
+
+                            is_abort = clean_text.strip().lower() in ABORT_KEYWORDS
+                            push_steering_message(
+                                matched_id,
+                                clean_text,
+                                sender_name,
+                                is_abort=is_abort,
                             )
-                            matched_session = matched_sessions[0] if matched_sessions else None
-                            if matched_session and matched_session.status in (
-                                "running",
-                                "active",
-                            ):
-                                # Active session: queue steering message, ack, return
-                                from agent.steering import ABORT_KEYWORDS, push_steering_message
-
-                                is_abort = clean_text.strip().lower() in ABORT_KEYWORDS
-                                push_steering_message(
-                                    matched_id,
-                                    clean_text,
-                                    sender_name,
-                                    is_abort=is_abort,
-                                )
-                                ack_text = (
-                                    "Stopping current task."
-                                    if is_abort
-                                    else "Noted \u2014 I'll incorporate this on my next checkpoint."
-                                )
-                                from bridge.markdown import send_markdown
-
-                                await send_markdown(
-                                    client, event.chat_id, ack_text, reply_to=message.id
-                                )
-                                await set_reaction(
-                                    client, event.chat_id, message.id, REACTION_RECEIVED
-                                )
-                                action = "abort" if is_abort else "steer"
-                                logger.info(
-                                    f"[routing] Semantic routing: steered unthreaded message "
-                                    f"into {matched_session.status} session {matched_id} "
-                                    f"({action}, confidence: {confidence:.2f})"
-                                )
-                                return
-                        except Exception as e:
-                            # Steering into active session failed — fall through
-                            # to normal routing (use matched_id as session_id)
-                            logger.warning(
-                                f"Semantic routing active session check failed (non-fatal): {e}"
+                            ack_text = (
+                                "Stopping current task."
+                                if is_abort
+                                else "Noted \u2014 I'll incorporate this on my next checkpoint."
                             )
+                            from bridge.markdown import send_markdown
 
-                        # Dormant or other status: use matched session as before
-                        session_id = matched_id
-                        logger.info(
-                            f"[routing] Semantic routing: matched session {session_id} "
-                            f"(confidence: {confidence:.2f})"
+                            await send_markdown(
+                                client, event.chat_id, ack_text, reply_to=message.id
+                            )
+                            await set_reaction(client, event.chat_id, message.id, REACTION_RECEIVED)
+                            action = "abort" if is_abort else "steer"
+                            logger.info(
+                                f"[routing] Semantic routing: steered unthreaded message "
+                                f"into {matched_session.status} session {matched_id} "
+                                f"({action}, confidence: {confidence:.2f})"
+                            )
+                            return
+                    except Exception as e:
+                        # Steering into active session failed — fall through
+                        # to normal routing (use matched_id as session_id)
+                        logger.warning(
+                            f"Semantic routing active session check failed (non-fatal): {e}"
                         )
-                    else:
-                        logger.info("[routing] Semantic routing: no_match")
+
+                    # Dormant or other status: use matched session as before
+                    session_id = matched_id
+                    logger.info(
+                        f"[routing] Semantic routing: matched session {session_id} "
+                        f"(confidence: {confidence:.2f})"
+                    )
+                else:
+                    logger.info("[routing] Semantic routing: no_match")
             except Exception as e:
                 # Semantic routing failures are non-fatal — fall through
                 # to fresh session creation
@@ -1022,6 +1024,14 @@ async def main():
                 # Fresh session - use this message's ID as unique identifier
                 session_id = f"tg_{project_key}_{event.chat_id}_{message.id}"
                 logger.info(f"[routing] Session {session_id} (continuation=False)")
+
+            # Set in-memory coalescing guard EARLY, before any await calls.
+            # This bridges the Redis visibility gap for rapid-fire messages
+            # (<200ms apart). Must be set here so Message 2's guard check
+            # at line ~1268 can find Message 1's session even before the
+            # Redis write in enqueue_agent_session() completes. See #705.
+            if not (is_reply_to_valor and message.reply_to_msg_id):
+                _recent_session_by_chat[telegram_chat_id] = (session_id, time.time())
 
         # === MARK AS READ ===
         try:
@@ -1242,6 +1252,90 @@ async def main():
                     f"[{project_name}] Steering check failed unexpectedly, "
                     f"falling through to queue: {e}",
                     exc_info=True,
+                )
+
+        # === IN-MEMORY COALESCING GUARD (#705) ===
+        # Bridges the Redis visibility gap for rapid-fire messages (<200ms apart).
+        # The in-memory dict is set before enqueue_agent_session(), so the second
+        # message can find the first's session even before the Redis write completes.
+        if not (is_reply_to_valor and message.reply_to_msg_id):
+            try:
+                now_ts = time.time()
+                # Lazy cleanup: remove stale entries older than merge window
+                stale_chats = [
+                    cid
+                    for cid, (_, ts) in _recent_session_by_chat.items()
+                    if now_ts - ts > PENDING_MERGE_WINDOW_SECONDS
+                ]
+                for cid in stale_chats:
+                    del _recent_session_by_chat[cid]
+
+                if telegram_chat_id in _recent_session_by_chat:
+                    guard_session_id, guard_ts = _recent_session_by_chat[telegram_chat_id]
+                    guard_age = now_ts - guard_ts
+                    if (
+                        guard_age <= PENDING_MERGE_WINDOW_SECONDS
+                        and guard_session_id != session_id
+                    ):
+                        # Found a recent session in the in-memory guard — coalesce
+                        from models.agent_session import AgentSession
+
+                        guard_sessions = list(
+                            AgentSession.query.filter(session_id=guard_session_id)
+                        )
+                        if not guard_sessions:
+                            # Session not yet in Redis (Race 2) — brief retry
+                            await asyncio.sleep(0.2)
+                            guard_sessions = list(
+                                AgentSession.query.filter(session_id=guard_session_id)
+                            )
+
+                        if guard_sessions:
+                            guard_session = guard_sessions[0]
+                            # Push to AgentSession's queued_steering_messages
+                            # (Popoto model field) so ChatSession sees it on pickup.
+                            guard_session.push_steering_message(clean_text)
+
+                            # Also push to Redis steering queue so the
+                            # PostToolUse hook picks it up immediately
+                            from agent.steering import push_steering_message
+
+                            push_steering_message(
+                                guard_session_id,
+                                clean_text,
+                                sender_name,
+                            )
+
+                            from bridge.markdown import send_markdown
+
+                            await send_markdown(
+                                client,
+                                event.chat_id,
+                                "Adding to current task",
+                                reply_to=message.id,
+                            )
+                            logger.info(
+                                f"[{project_name}] In-memory coalescing guard: "
+                                f"merged message into session {guard_session_id} "
+                                f"(age={guard_age:.3f}s)"
+                            )
+                            # Record as processed so bridge restart
+                            # catch-up doesn't reprocess this message
+                            from bridge.dedup import record_message_processed
+
+                            await record_message_processed(event.chat_id, message.id)
+                            return
+                        else:
+                            # AgentSession still not in Redis after retry — fall through
+                            logger.warning(
+                                f"[{project_name}] In-memory coalescing guard: "
+                                f"session {guard_session_id} not found in Redis after retry, "
+                                f"falling through to normal routing"
+                            )
+            except Exception as e:
+                # Coalescing guard failures are non-fatal — fall through
+                logger.warning(
+                    f"[{project_name}] In-memory coalescing guard failed (non-fatal): {e}"
                 )
 
         # === INTAKE CLASSIFIER: Haiku triage for non-reply messages (#320) ===
@@ -1497,6 +1591,12 @@ async def main():
                 )  # Teammate session — read-only, no orchestration
             else:
                 _session_type = SessionType.PM  # PM session — orchestrates work, spawns children
+
+        # Refresh the coalescing guard timestamp right before enqueue.
+        # The initial guard was set early (before awaits) to close the race window;
+        # this refresh ensures the timestamp is accurate for subsequent messages.
+        if not (is_reply_to_valor and message.reply_to_msg_id):
+            _recent_session_by_chat[telegram_chat_id] = (session_id, time.time())
 
         # Enqueue: session_type drives ChatSession vs DevSession creation.
         # Pass full project config so the session carries it through the pipeline.
