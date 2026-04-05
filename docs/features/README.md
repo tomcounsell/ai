@@ -39,24 +39,24 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Deployment](deployment.md) | Multi-instance deployment configuration with per-machine project routing | Shipped |
 | [Design Audit](do-design-audit.md) | Audit web UI against 10 premium design criteria with severity ratings | Shipped |
 | [Do Test](do-test.md) | Intelligent test orchestration with parallel dispatch, changed-file detection, structured reporting, and pytest plugin configuration | Shipped |
-| [Emoji Embedding Reactions](emoji-embedding-reactions.md) | Embedding-based emoji reaction selection with standard and Premium custom emoji support, EmojiResult type, send_telegram --react and --emoji flags, and graceful degradation | Shipped |
-| [Memory Hook Performance](memory-hook-performance.md) | Import chain optimization and deja vu removal for PostToolUse memory recall hook | Shipped |
 | [do-patch Skill](do-patch-skill.md) | Targeted fix skill for test failures and review blockers; called automatically by do-build | Shipped |
 | [Documentation Audit](documentation-audit.md) | Weekly LLM-powered audit of docs/ accuracy against codebase; KEEP / UPDATE / DELETE verdicts, directory and filename enforcement | Shipped |
 | [Documentation Lifecycle](documentation-lifecycle.md) | Automated validation and migration system for plan documentation tasks | Shipped |
+| [Emoji Embedding Reactions](emoji-embedding-reactions.md) | Embedding-based emoji reaction selection with standard and Premium custom emoji support, EmojiResult type, send_telegram --react and --emoji flags, and graceful degradation | Shipped |
 | [Enforce REVIEW/DOCS Stages](enforce-review-docs-stages.md) | Hard delivery gates in Observer preventing SDLC pipeline from skipping REVIEW and DOCS stages | Shipped |
 | [Enhanced Planning](enhanced-planning.md) | Spike Resolution (Phase 1.5), RFC Review (Phase 2.8), Infrastructure Documentation, and task validation fields for /do-plan | Shipped |
 | [Features README Sort Check](features-readme-sort-check.md) | PostToolUse hook enforcing alphabetical sort order in the feature index table with auto-fix | Shipped |
 | [Git State Guard](git-state-guard.md) | Detects and resolves dirty git state (merges, rebases, cherry-picks) before SDLC branch operations | Shipped |
-| [Happy Path Testing Pipeline](happy-path-testing-pipeline.md) | Three-stage pipeline (discover, generate, run) for deterministic browser regression tests without LLM tokens | Shipped |
 | [Goal Gates](goal-gates.md) | Deterministic enforcement gates preventing SDLC pipeline from silently skipping stages | Shipped |
 | [Google Calendar Integration](google-calendar-integration.md) | Work session logging as Google Calendar events with segment rounding | Shipped |
+| [Happy Path Testing Pipeline](happy-path-testing-pipeline.md) | Three-stage pipeline (discover, generate, run) for deterministic browser regression tests without LLM tokens | Shipped |
 | [Hooks Best Practices & Audit](hooks-best-practices.md) | `/audit-hooks` skill, codified hook safety patterns, and daily reflections integration | Shipped |
 | [Image Vision Support](image-vision.md) | Ollama LLaVA image descriptions for visual content in Telegram | Shipped |
 | [Intake Classifier](intake-classifier.md) | Haiku-powered message intent triage (interjection/new_work/acknowledgment) for bridge routing | Shipped |
 | [Knowledge Document Integration](knowledge-document-integration.md) | Indexes work-vault markdown/text files into the memory system with project-scoped isolation, filesystem watching, and companion memories for subconscious recall | Shipped |
 | [Link Content Summarization](link-summarization.md) | Auto-fetch and summarize shared links via Perplexity API | Shipped |
 | [Lint Auto-Fix](lint-auto-fix.md) | Automatic lint/format fixing via pre-commit hook and PostToolUse hook, eliminating agent churn loops | Shipped |
+| [Memory Hook Performance](memory-hook-performance.md) | Import chain optimization and deja vu removal for PostToolUse memory recall hook | Shipped |
 | [Memory Search Tool](memory-search-tool.md) | Direct interface for searching, saving, inspecting, and forgetting memories from the Memory model | Shipped |
 | [Message Pipeline](message-pipeline.md) | Deferred enrichment pipeline for fast message acknowledgment and zero-loss restarts | Shipped |
 | [Message Reconciler](message-reconciler.md) | Periodic background scan detecting and recovering Telegram messages missed during live bridge connections | Shipped |
@@ -95,6 +95,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Semantic Session Routing](semantic-session-routing.md) | Semantic matching of unthreaded messages to active sessions with declared expectations via structured summarizer output | Shipped |
 | [Session Health Check](session-health-check.md) | PostToolUse watchdog hook monitoring agent sessions for stuck loops using a Haiku judge with enriched tool summaries, activity stats, and pattern guidance | Shipped |
 | [Session Isolation](session-isolation.md) | Two-tier task list scoping and git worktrees for parallel session isolation | Shipped |
+| [Session Lifecycle](session-lifecycle.md) | Session state machine, field extraction status preservation, zombie loop prevention via health check and nudge overwrite guards | Shipped |
 | [Session Lifecycle Diagnostics](session-lifecycle-diagnostics.md) | Structured LIFECYCLE logging at every state transition with stall detection and CLI status report | Shipped |
 | [Session Management](session-management.md) | Reply-chain root resolution ensuring all replies in a thread map to one canonical session_id | Shipped |
 | [Session Tagging](session-tagging.md) | Auto-tagging and CRUD for session categorization based on activity, classification, and transcript patterns | Shipped |

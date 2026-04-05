@@ -8,8 +8,6 @@ Covers:
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from agent.agent_session_queue import (
     _AGENT_SESSION_FIELDS,
     _extract_agent_session_fields,
@@ -124,9 +122,7 @@ class TestHealthCheckOrphanFix:
         fields = _extract_agent_session_fields(child)
         fields["parent_agent_session_id"] = None
 
-        assert fields["status"] == "failed", (
-            "Health check orphan-fix must preserve failed status"
-        )
+        assert fields["status"] == "failed", "Health check orphan-fix must preserve failed status"
 
 
 class TestWorkerFinallyBlockNudgeGuard:
@@ -142,12 +138,8 @@ class TestWorkerFinallyBlockNudgeGuard:
         mock_cls.query.filter.return_value = [fresh_session]
 
         # The guard logic: re-read from Redis and check status
-        fresh_sessions = list(
-            mock_cls.query.filter(agent_session_id="test-session")
-        )
-        should_skip = (
-            not fresh_sessions or fresh_sessions[0].status == "pending"
-        )
+        fresh_sessions = list(mock_cls.query.filter(agent_session_id="test-session"))
+        should_skip = not fresh_sessions or fresh_sessions[0].status == "pending"
 
         assert should_skip is True, (
             "Worker finally block must skip completion when session is pending"
@@ -159,16 +151,10 @@ class TestWorkerFinallyBlockNudgeGuard:
         _complete_agent_session must NOT be called."""
         mock_cls.query.filter.return_value = []
 
-        fresh_sessions = list(
-            mock_cls.query.filter(agent_session_id="test-session")
-        )
-        should_skip = (
-            not fresh_sessions or fresh_sessions[0].status == "pending"
-        )
+        fresh_sessions = list(mock_cls.query.filter(agent_session_id="test-session"))
+        should_skip = not fresh_sessions or fresh_sessions[0].status == "pending"
 
-        assert should_skip is True, (
-            "Worker finally block must skip completion when session is gone"
-        )
+        assert should_skip is True, "Worker finally block must skip completion when session is gone"
 
     @patch("agent.agent_session_queue.AgentSession")
     def test_completes_session_when_status_is_running(self, mock_cls):
@@ -178,12 +164,8 @@ class TestWorkerFinallyBlockNudgeGuard:
         fresh_session.status = "running"
         mock_cls.query.filter.return_value = [fresh_session]
 
-        fresh_sessions = list(
-            mock_cls.query.filter(agent_session_id="test-session")
-        )
-        should_skip = (
-            not fresh_sessions or fresh_sessions[0].status == "pending"
-        )
+        fresh_sessions = list(mock_cls.query.filter(agent_session_id="test-session"))
+        should_skip = not fresh_sessions or fresh_sessions[0].status == "pending"
 
         assert should_skip is False, (
             "Worker finally block must complete session when no nudge detected"
