@@ -132,7 +132,7 @@ The `AgentSession` model is used everywhere:
 
 ## Session Tagging
 
-The `tags` ListField stores session categorization tags (e.g., "bug", "sdlc", "pr-created", "reflections"). Auto-tagging runs automatically at session completion inside `complete_transcript()` via `tools/session_tags.py`. See [Session Tagging](session-tagging.md) for the full tagging system documentation.
+The `tags` ListField stores session categorization tags (e.g., "bug", "sdlc", "pr-created", "reflections"). Auto-tagging runs automatically at session completion inside `finalize_session()` in `models/session_lifecycle.py` via `tools/session_tags.py`. The `complete_transcript()` function delegates status mutation and all side effects to `finalize_session()`. See [Session Tagging](session-tagging.md) for the full tagging system documentation.
 
 ## Cleanup
 

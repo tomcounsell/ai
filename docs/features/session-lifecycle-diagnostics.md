@@ -16,13 +16,10 @@ The `AgentSession.log_lifecycle_transition()` method is called at every status c
 
 | Caller | Transition | Context |
 |--------|-----------|---------|
-| `session_transcript.start_transcript()` | →active | Transcript started |
-| `session_transcript.complete_transcript()` | →completed/failed/dormant | Transcript completed |
-| `agent_session_queue._push_agent_session()` | →pending | Session enqueued |
-| `agent_session_queue._pop_agent_session()` | →running | Worker picked up session |
-| `session_watchdog.fix_unhealthy_session()` | →abandoned | Watchdog remediation |
-| `_worker_loop()` CancelledError handler | →failed | Worker cancelled |
-| `_worker_loop()` finally block | →failed/completed | Worker finally block |
+| `models/session_lifecycle.finalize_session()` | →completed/failed/killed/abandoned/cancelled | All terminal transitions |
+| `models/session_lifecycle.transition_status()` | →pending/running/active/dormant/waiting_for_children/superseded | All non-terminal transitions |
+
+All lifecycle logging is now centralized in `models/session_lifecycle.py`. The `finalize_session()` and `transition_status()` functions call `session.log_lifecycle_transition()` internally, so callers no longer need to call it directly. See [Session Lifecycle](session-lifecycle.md) for the full module documentation.
 
 Each call:
 1. Emits a structured INFO log: `LIFECYCLE session=X transition=old→new session_id=Y project=Z duration_in_prev_state=Ns context="..."`

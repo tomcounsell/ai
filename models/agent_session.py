@@ -24,8 +24,9 @@ Parent-child relationship:
   parent_session_id links a child session to its parent (role-neutral).
   Use create_child(role=...) to spawn child sessions.
 
-Status lifecycle:
-  pending -> running -> active -> dormant -> completed | failed | waiting_for_children
+Status lifecycle (see models/session_lifecycle.py for canonical mutation functions):
+  Non-terminal: pending -> running -> active -> dormant | waiting_for_children | superseded
+  Terminal: completed | failed | killed | abandoned | cancelled
 """
 
 import json as _json
@@ -96,14 +97,27 @@ class AgentSession(Model):
         create_dev(): Backward-compat wrapper for create_child(role="dev").
         create_local(): Create a local CLI session.
 
-    Status values:
-        pending  - Queued, waiting for worker
-        running  - Worker picked up, agent executing
-        active   - Session in progress (transcript tracking)
-        dormant  - Paused on open question
-        waiting_for_children - Parent session waiting for child sessions to complete
-        completed - Work finished successfully
-        failed   - Work failed
+    Status values (11 total):
+        Non-terminal (use transition_status()):
+            pending              - Queued, waiting for worker
+            running              - Worker picked up, agent executing
+            active               - Session in progress (transcript tracking)
+            dormant              - Paused on open question, waiting for human reply
+            waiting_for_children - Parent session waiting for child sessions to complete
+            superseded           - Replaced by a newer session for the same session_id
+
+        Terminal (use finalize_session()):
+            completed  - Work finished successfully
+            failed     - Work failed (error, crash, or watchdog detection)
+            killed     - Terminated by user or scheduler
+            abandoned  - Unfinished, auto-detected by watchdog or health check
+            cancelled  - Cancelled before execution (pending -> cancelled)
+
+    Lifecycle management:
+        All status mutations go through models/session_lifecycle.py:
+        - finalize_session(session, status, reason) for terminal transitions
+        - transition_status(session, new_status, reason) for non-terminal transitions
+        Direct .status = mutations outside the lifecycle module are prohibited.
     """
 
     # === Identity ===

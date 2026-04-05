@@ -78,13 +78,18 @@ def _register_dev_session_completion(
 
     try:
         from models.agent_session import AgentSession
+        from models.session_lifecycle import finalize_session
 
         # Find dev sessions for this parent
         dev_sessions = list(AgentSession.query.filter(parent_session_id=parent_session_id))
         for dev in dev_sessions:
             if dev.status not in ("completed", "failed"):
-                dev.status = "completed"
-                dev.save()
+                finalize_session(
+                    dev,
+                    "completed",
+                    reason=f"subagent stop (parent={parent_session_id}, agent_id={agent_id})",
+                    skip_parent=True,  # Parent finalization handled separately below
+                )
                 logger.info(
                     f"[subagent_stop] DevSession {dev.agent_session_id} completed "
                     f"(parent={parent_session_id}, agent_id={agent_id})"

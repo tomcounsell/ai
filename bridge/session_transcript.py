@@ -276,33 +276,24 @@ def complete_transcript(
     except Exception as e:
         logger.debug(f"Failed to write transcript end for {session_id}: {e}")
 
-    # Auto-tag the session before finalizing status
+    # Delegate status mutation and all side effects to the lifecycle module.
+    # finalize_session() handles: lifecycle log, auto-tag, branch checkpoint,
+    # parent finalization, status + completed_at + save.
     try:
-        from tools.session_tags import auto_tag_session
+        from models.session_lifecycle import TERMINAL_STATUSES, finalize_session
 
-        auto_tag_session(session_id)
-    except Exception as e:
-        logger.debug(f"Auto-tagging failed for {session_id} (non-fatal): {e}")
-
-    # Update SessionLog
-    try:
         sessions = list(AgentSession.query.filter(session_id=session_id))
         if sessions:
             s = sessions[0]
-
-            # Log lifecycle transition BEFORE status change
-            # so log_lifecycle_transition captures old_status→new_status correctly
-            try:
-                s.log_lifecycle_transition(status, f"transcript completed: {status}")
-            except Exception:
-                pass
-
-            # status is an IndexedField — direct mutation is safe
-            s.status = status
-            s.completed_at = time.time()
-            s.updated_at = time.time()
             if summary:
                 s.summary = summary
-            s.save()
+                s.save()  # persist summary before finalize (finalize does its own save)
+            if status in TERMINAL_STATUSES:
+                finalize_session(s, status, reason=f"transcript completed: {status}")
+            else:
+                # Non-terminal status like "dormant" — use transition_status
+                from models.session_lifecycle import transition_status
+
+                transition_status(s, status, reason=f"transcript completed: {status}")
     except Exception as e:
         logger.warning(f"Failed to update SessionLog completion for {session_id}: {e}")

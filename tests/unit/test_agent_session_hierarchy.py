@@ -3,8 +3,8 @@
 Tests cover:
 - AgentSession.parent_agent_session_id field
 - get_parent(), get_children(), get_completion_progress() helpers
-- _finalize_parent() completion propagation logic
-- _transition_parent() status transitions
+- _finalize_parent_sync() completion propagation logic (models.session_lifecycle)
+- _transition_parent() status transitions (agent.agent_session_queue wrapper)
 - _agent_session_hierarchy_health_check() orphan and stuck parent detection
 - agent_session_scheduler --parent-session flag and children subcommand
 """
@@ -136,21 +136,24 @@ class TestAgentSessionHierarchyHelpers:
 
 
 # ===================================================================
-# _finalize_parent() and _transition_parent()
+# _finalize_parent_sync() and _transition_parent()
 # ===================================================================
 
 
 class TestFinalizeParent:
-    """Test completion propagation logic."""
+    """Test completion propagation logic via lifecycle module."""
 
     def _make_session(self, **kwargs):
         session = MagicMock()
         for k, v in kwargs.items():
             setattr(session, k, v)
+        # Ensure log_lifecycle_transition exists for lifecycle module calls
+        if not hasattr(session, "log_lifecycle_transition"):
+            session.log_lifecycle_transition = MagicMock()
         return session
 
     def test_transition_parent_completed(self):
-        """_transition_parent transitions parent to completed via direct mutation."""
+        """_transition_parent transitions parent to completed via lifecycle module."""
         from agent.agent_session_queue import _transition_parent
 
         parent = self._make_session(agent_session_id="p1", status="waiting_for_children")
@@ -163,7 +166,7 @@ class TestFinalizeParent:
         parent.save.assert_called_once()
 
     def test_transition_parent_failed(self):
-        """_transition_parent transitions parent to failed via direct mutation."""
+        """_transition_parent transitions parent to failed via lifecycle module."""
         from agent.agent_session_queue import _transition_parent
 
         parent = self._make_session(agent_session_id="p1", status="waiting_for_children")
@@ -188,12 +191,11 @@ class TestFinalizeParent:
         assert parent.completed_at is None
         parent.save.assert_called_once()
 
-    @patch("agent.agent_session_queue._transition_parent")
-    @patch("agent.agent_session_queue.AgentSession")
-    @pytest.mark.asyncio
-    async def test_finalize_parent_all_completed(self, mock_model, mock_transition):
-        """_finalize_parent completes parent when all children succeed."""
-        from agent.agent_session_queue import _finalize_parent
+    @patch("models.session_lifecycle._transition_parent")
+    @patch("models.agent_session.AgentSession")
+    def test_finalize_parent_sync_all_completed(self, mock_model, mock_transition):
+        """_finalize_parent_sync completes parent when all children succeed."""
+        from models.session_lifecycle import _finalize_parent_sync
 
         parent = self._make_session(
             agent_session_id="p1",
@@ -203,19 +205,18 @@ class TestFinalizeParent:
             self._make_session(agent_session_id="c1", status="completed"),
             self._make_session(agent_session_id="c2", status="completed"),
         ]
-        parent.get_children.return_value = children
         mock_model.query.get.return_value = parent
+        mock_model.query.filter.return_value = children
 
-        await _finalize_parent("p1")
+        _finalize_parent_sync("p1")
 
         mock_transition.assert_called_once_with(parent, "completed")
 
-    @patch("agent.agent_session_queue._transition_parent")
-    @patch("agent.agent_session_queue.AgentSession")
-    @pytest.mark.asyncio
-    async def test_finalize_parent_any_failed(self, mock_model, mock_transition):
-        """_finalize_parent fails parent when any child fails."""
-        from agent.agent_session_queue import _finalize_parent
+    @patch("models.session_lifecycle._transition_parent")
+    @patch("models.agent_session.AgentSession")
+    def test_finalize_parent_sync_any_failed(self, mock_model, mock_transition):
+        """_finalize_parent_sync fails parent when any child fails."""
+        from models.session_lifecycle import _finalize_parent_sync
 
         parent = self._make_session(
             agent_session_id="p1",
@@ -225,19 +226,18 @@ class TestFinalizeParent:
             self._make_session(agent_session_id="c1", status="completed"),
             self._make_session(agent_session_id="c2", status="failed"),
         ]
-        parent.get_children.return_value = children
         mock_model.query.get.return_value = parent
+        mock_model.query.filter.return_value = children
 
-        await _finalize_parent("p1")
+        _finalize_parent_sync("p1")
 
         mock_transition.assert_called_once_with(parent, "failed")
 
-    @patch("agent.agent_session_queue._transition_parent")
-    @patch("agent.agent_session_queue.AgentSession")
-    @pytest.mark.asyncio
-    async def test_finalize_parent_skips_non_terminal_children(self, mock_model, mock_transition):
-        """_finalize_parent does not finalize when children still running."""
-        from agent.agent_session_queue import _finalize_parent
+    @patch("models.session_lifecycle._transition_parent")
+    @patch("models.agent_session.AgentSession")
+    def test_finalize_parent_sync_skips_non_terminal_children(self, mock_model, mock_transition):
+        """_finalize_parent_sync does not finalize when children still running."""
+        from models.session_lifecycle import _finalize_parent_sync
 
         parent = self._make_session(
             agent_session_id="p1",
@@ -247,26 +247,23 @@ class TestFinalizeParent:
             self._make_session(agent_session_id="c1", status="completed"),
             self._make_session(agent_session_id="c2", status="running"),
         ]
-        parent.get_children.return_value = children
         mock_model.query.get.return_value = parent
+        mock_model.query.filter.return_value = children
 
-        await _finalize_parent("p1")
+        _finalize_parent_sync("p1")
 
         mock_transition.assert_not_called()
 
-    @patch("agent.agent_session_queue._transition_parent")
-    @patch("agent.agent_session_queue.AgentSession")
-    @pytest.mark.asyncio
-    async def test_finalize_parent_with_completing_child_override(
-        self, mock_model, mock_transition
-    ):
-        """_finalize_parent overrides status of completing child correctly.
+    @patch("models.session_lifecycle._transition_parent")
+    @patch("models.agent_session.AgentSession")
+    def test_finalize_parent_sync_with_completing_child_override(self, mock_model, mock_transition):
+        """_finalize_parent_sync overrides status of completing child correctly.
 
-        When called from _complete_agent_session, the completing child's Redis status is
+        When called from finalize_session, the completing child's Redis status is
         still 'running'. The completing_child_id/completing_child_status params
-        let _finalize_parent treat it as terminal.
+        let _finalize_parent_sync treat it as terminal.
         """
-        from agent.agent_session_queue import _finalize_parent
+        from models.session_lifecycle import _finalize_parent_sync
 
         parent = self._make_session(
             agent_session_id="p1",
@@ -277,11 +274,11 @@ class TestFinalizeParent:
             self._make_session(agent_session_id="c1", status="completed"),
             self._make_session(agent_session_id="c2", status="running"),
         ]
-        parent.get_children.return_value = children
         mock_model.query.get.return_value = parent
+        mock_model.query.filter.return_value = children
 
         # With completing_child_id, c2's status is overridden to "completed"
-        await _finalize_parent(
+        _finalize_parent_sync(
             "p1",
             completing_child_id="c2",
             completing_child_status="completed",
@@ -289,12 +286,11 @@ class TestFinalizeParent:
 
         mock_transition.assert_called_once_with(parent, "completed")
 
-    @patch("agent.agent_session_queue._transition_parent")
-    @patch("agent.agent_session_queue.AgentSession")
-    @pytest.mark.asyncio
-    async def test_finalize_parent_completing_child_failed(self, mock_model, mock_transition):
-        """_finalize_parent correctly handles a completing child that failed."""
-        from agent.agent_session_queue import _finalize_parent
+    @patch("models.session_lifecycle._transition_parent")
+    @patch("models.agent_session.AgentSession")
+    def test_finalize_parent_sync_completing_child_failed(self, mock_model, mock_transition):
+        """_finalize_parent_sync correctly handles a completing child that failed."""
+        from models.session_lifecycle import _finalize_parent_sync
 
         parent = self._make_session(
             agent_session_id="p1",
@@ -304,10 +300,10 @@ class TestFinalizeParent:
             self._make_session(agent_session_id="c1", status="completed"),
             self._make_session(agent_session_id="c2", status="running"),
         ]
-        parent.get_children.return_value = children
         mock_model.query.get.return_value = parent
+        mock_model.query.filter.return_value = children
 
-        await _finalize_parent(
+        _finalize_parent_sync(
             "p1",
             completing_child_id="c2",
             completing_child_status="failed",
@@ -315,12 +311,11 @@ class TestFinalizeParent:
 
         mock_transition.assert_called_once_with(parent, "failed")
 
-    @patch("agent.agent_session_queue._transition_parent")
-    @patch("agent.agent_session_queue.AgentSession")
-    @pytest.mark.asyncio
-    async def test_finalize_parent_skips_already_completed(self, mock_model, mock_transition):
-        """_finalize_parent is idempotent — skips if parent already completed."""
-        from agent.agent_session_queue import _finalize_parent
+    @patch("models.session_lifecycle._transition_parent")
+    @patch("models.agent_session.AgentSession")
+    def test_finalize_parent_sync_skips_already_completed(self, mock_model, mock_transition):
+        """_finalize_parent_sync is idempotent — skips if parent already terminal."""
+        from models.session_lifecycle import _finalize_parent_sync
 
         parent = self._make_session(
             agent_session_id="p1",
@@ -328,40 +323,38 @@ class TestFinalizeParent:
         )
         mock_model.query.get.return_value = parent
 
-        await _finalize_parent("p1")
+        _finalize_parent_sync("p1")
 
         mock_transition.assert_not_called()
 
-    @patch("agent.agent_session_queue._transition_parent")
-    @patch("agent.agent_session_queue.AgentSession")
-    @pytest.mark.asyncio
-    async def test_finalize_parent_missing_parent(self, mock_model, mock_transition):
-        """_finalize_parent handles missing parent gracefully."""
-        from agent.agent_session_queue import _finalize_parent
+    @patch("models.session_lifecycle._transition_parent")
+    @patch("models.agent_session.AgentSession")
+    def test_finalize_parent_sync_missing_parent(self, mock_model, mock_transition):
+        """_finalize_parent_sync handles missing parent gracefully."""
+        from models.session_lifecycle import _finalize_parent_sync
 
         mock_model.query.get.return_value = None
 
-        await _finalize_parent("nonexistent")
+        _finalize_parent_sync("nonexistent")
 
         mock_transition.assert_not_called()
 
-    @patch("agent.agent_session_queue._transition_parent")
-    @patch("agent.agent_session_queue.AgentSession")
-    @pytest.mark.asyncio
-    async def test_finalize_parent_no_children_auto_completes(self, mock_model, mock_transition):
-        """_finalize_parent auto-completes parent with no children."""
-        from agent.agent_session_queue import _finalize_parent
+    @patch("models.session_lifecycle._transition_parent")
+    @patch("models.agent_session.AgentSession")
+    def test_finalize_parent_sync_no_children(self, mock_model, mock_transition):
+        """_finalize_parent_sync does nothing when parent has no children."""
+        from models.session_lifecycle import _finalize_parent_sync
 
         parent = self._make_session(
             agent_session_id="p1",
             status="waiting_for_children",
         )
-        parent.get_children.return_value = []
         mock_model.query.get.return_value = parent
+        mock_model.query.filter.return_value = []
 
-        await _finalize_parent("p1")
+        _finalize_parent_sync("p1")
 
-        mock_transition.assert_called_once_with(parent, "completed")
+        mock_transition.assert_not_called()
 
 
 # ===================================================================
