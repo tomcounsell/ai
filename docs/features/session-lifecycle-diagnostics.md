@@ -118,7 +118,7 @@ Summaries are truncated to 500 characters at capture time. The `AgentSession.sum
 
 ## Crash-Path Diagnostic Snapshot (#626)
 
-When a session terminates (whether by failure, cancellation, or normal completion), the worker `finally` block now saves a diagnostic snapshot **before** `_complete_agent_session()` deletes the Redis record. This closes a gap where sessions that died silently left no trace because state was destroyed before diagnostics could run.
+When a session terminates (whether by failure, cancellation, or normal completion), the worker `finally` block saves a diagnostic snapshot **before** calling `_complete_agent_session()`. A nudge guard then re-reads the session from Redis: if the session status is `"pending"` (nudge enqueued) or the session no longer exists (nudge fallback recreated it), completion is skipped to avoid overwriting the nudge. Otherwise, `_complete_agent_session()` proceeds normally. See [Session Lifecycle](session-lifecycle.md) for the full zombie loop prevention design.
 
 ### What Gets Captured
 
@@ -164,7 +164,7 @@ This occurs when the session registry's reverse UUID lookup fails. The `get_acti
 
 **Session dies with no trace in logs or snapshots**
 
-Before #626, if a session crashed after the `_complete_agent_session()` call deleted the Redis record but before any snapshot was saved, the session vanished. The crash snapshot in the `finally` block now runs before deletion, ensuring at least one diagnostic record exists for every terminated session.
+Before #626, if a session crashed after `_complete_agent_session()` ran but before any snapshot was saved, the session vanished. The crash snapshot in the `finally` block now runs before completion, ensuring at least one diagnostic record exists for every terminated session.
 
 ### Files
 
@@ -182,5 +182,6 @@ Before #626, if a session crashed after the `_complete_agent_session()` call del
 - [Bridge Self-Healing](bridge-self-healing.md) — Process-level bridge health
 - [AgentSession Model](agent-session-model.md) — Unified session lifecycle model
 - [Agent Session Queue Reliability](agent-session-queue.md) — Queue-level reliability fixes
+- [Session Lifecycle](session-lifecycle.md) — Session state machine, zombie loop prevention
 - Issue #216 — Original tracking issue
 - Issue #626 — Silent session death fixes

@@ -23,7 +23,7 @@ This is applied in three functions (plus dependency-related operations):
 - `_reset_running_jobs()` -- running to pending (async, shutdown)
 - `retry_agent_session()` -- failed/cancelled to pending (PM queue management)
 
-The `_extract_agent_session_fields()` helper reads all non-auto fields (56+) from an AgentSession instance for recreation.
+The `_extract_agent_session_fields()` helper reads all non-auto fields (56+) from an AgentSession instance for recreation. The `status` field is included for defense-in-depth: any delete-and-recreate path (e.g., health check orphan-fixing) preserves the original status instead of defaulting to `"pending"`. Callers that intentionally override status (retry, nudge fallback) set `fields["status"]` explicitly after extraction.
 
 ## Worker Drain Guard (Event-Based)
 
@@ -126,7 +126,7 @@ The transition uses the same delete-and-recreate pattern as `_pop_agent_session(
 
 The periodic health check (`_job_hierarchy_health_check()`) detects and self-heals:
 
-- **Orphaned children**: `parent_agent_session_id` points to non-existent session -- cleared
+- **Orphaned children**: `parent_agent_session_id` points to non-existent session -- cleared (status preserved via `_extract_agent_session_fields()` to prevent zombie loops)
 - **Stuck parents**: `waiting_for_children` with all children terminal -- auto-finalized
 
 See [Agent Session Scheduling](agent-session-scheduling.md) for usage details and CLI commands.
@@ -136,4 +136,5 @@ See [Agent Session Scheduling](agent-session-scheduling.md) for usage details an
 - `docs/features/scale-agent-session-queue-with-popoto-and-worktrees.md` -- Original agent session queue architecture
 - `docs/features/agent-session-scheduling.md` -- Agent-initiated scheduling tool
 - `docs/features/agent-session-model.md` -- AgentSession model fields and lifecycle
+- `docs/features/session-lifecycle.md` -- Session state machine, zombie loop prevention
 - `agent/agent_session_queue.py` -- Implementation
