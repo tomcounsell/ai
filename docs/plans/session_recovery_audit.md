@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor
@@ -12,12 +12,13 @@ last_comment_id:
 
 ## Problem
 
-After the zombie loop fix in PR #703, 7 independent session recovery mechanisms exist, each written at a different time with different assumptions about session lifecycle. No systematic audit has verified that ALL of them properly respect terminal session states (`completed`, `failed`, `killed`, `abandoned`, `cancelled`).
+After the zombie loop fix in PR #703, 7 session recovery mechanisms exist (5 active + 2 confirmed safe), each written at a different time with different assumptions about session lifecycle. No systematic audit has verified that ALL active mechanisms properly respect terminal session states (`completed`, `failed`, `killed`, `abandoned`, `cancelled`).
 
 **Current behavior:**
-- The revival system (`check_revival()`) queries `pending`/`running` sessions from Redis but can match stale entries whose logical work is completed (Redis state not cleaned up, git branch still exists). This creates duplicate sessions for already-completed work.
-- `_enqueue_nudge()` has no explicit terminal status guard — it relies on `determine_delivery_action()` returning `deliver_already_completed` upstream. If the caller bypasses that check or the session status changes between the check and the nudge call, the nudge can overwrite a terminal status back to `pending`.
-- `transition_status()` in `session_lifecycle.py` allows `completed->pending` transitions as a deliberate escape hatch (line 140: "completed->pending is allowed for session revival/auto-continue") but has no audit trail for who invoked it, making it impossible to distinguish intentional revival from accidental respawn.
+- `determine_delivery_action()` (L80) checks only `session_status == "completed"` before returning `deliver_already_completed`. Sessions in `failed`, `killed`, `abandoned`, or `cancelled` states fall through to nudge logic, meaning terminal non-completed sessions can be nudged.
+- `_enqueue_nudge()` has no explicit terminal status guard — it relies on `determine_delivery_action()` upstream. Worse, the fallback path (L1778-1804) bypasses `transition_status()` entirely, setting `fields["status"] = "pending"` directly via `AgentSession.async_create()`. This path has zero terminal status protection.
+- `transition_status()` in `session_lifecycle.py` has NO source-status check. The docstring claims "completed->pending is allowed for session revival/auto-continue" (L140) but the code does not actually inspect the current status before allowing the transition. Any status can transition to any non-terminal status. This means `_mark_superseded()` in `enqueue_agent_session()` uses `transition_status(old, "superseded")` on completed sessions — this works because `superseded` is classified as NON_TERMINAL, but the lack of source-status validation is a latent risk.
+- The revival system (`check_revival()`) queries `pending`/`running` sessions from Redis by `project_key`+`status` (not by `session_id`), then matches by `chat_id`. It can match stale entries whose logical work is completed (Redis state not cleaned up, git branch still exists), creating duplicate sessions for already-completed work.
 
 **Desired outcome:**
 - Every recovery mechanism is verified safe against terminal status respawn, with fixes where gaps exist
@@ -45,7 +46,7 @@ Recovery mechanisms interact with session state at three layers:
 5. **Execution**: Worker calls `_execute_agent_session()` which runs the SDK agent
 6. **Output routing**: `send_to_chat()` → `determine_delivery_action()` → possibly `_enqueue_nudge()` which calls `transition_status(session, "pending")` again
 
-The race window is between steps 2 and 3: a session could transition to terminal between the query and the mutation. The `transition_status()` function does not reject terminal→pending transitions (by design, for revival), so the guard must live in the caller.
+The race window is between steps 2 and 3: a session could transition to terminal between the query and the mutation. The `transition_status()` function does not inspect the source status at all — it accepts any current status transitioning to any non-terminal status. Guards must live in callers, and additionally the fallback path in `_enqueue_nudge()` bypasses `transition_status()` entirely (uses raw `async_create()`), so it needs its own independent guard.
 
 ## Why Previous Fixes Failed
 
@@ -59,9 +60,9 @@ The race window is between steps 2 and 3: a session could transition to terminal
 ## Architectural Impact
 
 - **No new dependencies**: Pure audit and guard additions
-- **Interface changes**: `_enqueue_nudge()` gains a terminal status guard; `check_revival()` gains a completed-session filter
-- **Coupling**: No change — guards are added at the caller level, not the lifecycle module
-- **Reversibility**: High — guards are additive `if` checks that can be removed without structural changes
+- **Interface changes**: `determine_delivery_action()` checks all terminal statuses (not just `completed`); `_enqueue_nudge()` gains terminal guards on both main and fallback paths; `check_revival()` gains a terminal-session filter; `transition_status()` gains a `reject_from_terminal` parameter (default `True`, backward-compatible signature change)
+- **Coupling**: Minimal — `determine_delivery_action()` gains an import of `TERMINAL_STATUSES` from `models.session_lifecycle`; guards in `_enqueue_nudge()` use the same constant
+- **Reversibility**: High — guards are additive `if` checks that can be removed without structural changes. The `reject_from_terminal` parameter defaults to `True` so removing it restores the old permissive behavior
 
 ## Appetite
 
@@ -81,42 +82,54 @@ No prerequisites — this work operates on existing code with no external depend
 
 ### Key Elements
 
-- **Audit matrix**: Systematic checklist of all 7 mechanisms against terminal-status safety criteria
+- **Audit matrix**: Systematic checklist of all 5 active mechanisms against terminal-status safety criteria (2 confirmed-safe mechanisms documented but not modified)
+- **`determine_delivery_action()` fix**: Check all `TERMINAL_STATUSES`, not just `completed`
+- **Nudge guard (main path)**: Add explicit terminal status check at the top of `_enqueue_nudge()` before mutating status
+- **Nudge guard (fallback path)**: Add terminal status check in the fallback `async_create()` path (L1778-1804) that currently bypasses `transition_status()`
 - **Revival guard**: Add terminal-session check to `check_revival()` that filters out branches belonging to sessions with terminal status
-- **Nudge guard**: Add explicit terminal status check at the top of `_enqueue_nudge()` before mutating status
+- **`transition_status()` source-status guard**: Add an optional `reject_from_terminal=True` parameter that rejects transitions when the current status is terminal. Default `True` to prevent accidental respawns. Callers that legitimately need terminal→non-terminal (revival, `_mark_superseded`) pass `reject_from_terminal=False`.
 - **Regression test suite**: One test per mechanism proving completed/failed sessions are not respawned
 - **Reference doc**: Single document cataloguing all recovery mechanisms
 
 ### Flow
 
-**Audit phase** → Identify gaps → **Fix phase** (revival guard + nudge guard) → **Test phase** (regression tests per mechanism) → **Doc phase** (reference doc)
+**Audit phase** → Identify gaps → **Fix phase** (delivery action + nudge guards + revival guard + transition_status guard) → **Test phase** (regression tests per mechanism) → **Doc phase** (reference doc)
 
 ### Technical Approach
 
 - Each mechanism is checked against three criteria: (1) queries only non-terminal statuses, (2) re-reads status atomically before acting, (3) no race window between read and mutation
-- For `check_revival()`: after finding pending/running sessions for a chat, also query for terminal sessions with the same `session_id` to detect stale Redis entries. If a terminal session exists for the same work, skip the revival.
-- For `_enqueue_nudge()`: add a guard at function entry that re-reads the session from Redis and returns early if status is in `TERMINAL_STATUSES`. This makes the function self-defending rather than relying on caller discipline.
-- For `transition_status()`: tighten the `completed→pending` escape hatch by requiring an explicit `allow_revival=True` parameter. Default behavior rejects terminal→non-terminal transitions. This makes accidental respawns a hard error.
+- For `determine_delivery_action()`: change L80 from `if session_status == "completed"` to `if session_status in TERMINAL_STATUSES` (import from `models.session_lifecycle`). This ensures `failed`, `killed`, `abandoned`, and `cancelled` sessions are not nudged.
+- For `_enqueue_nudge()` main path: add a guard at function entry that re-reads the session from Redis and returns early if status is in `TERMINAL_STATUSES`. This makes the function self-defending rather than relying on caller discipline.
+- For `_enqueue_nudge()` fallback path (L1778-1804): before setting `fields["status"] = "pending"` and calling `async_create()`, check the extracted session status. If the original session's status is in `TERMINAL_STATUSES`, log a warning and return early. This path bypasses `transition_status()` so it needs its own independent guard.
+- For `check_revival()`: after finding pending/running sessions for a chat by `project_key`+`status`, also query terminal sessions for the same `chat_id`. If a terminal session exists with a matching branch name (derived from `session_id`), skip the revival for that branch. This handles the stale-Redis-entry scenario where a session is logically done but its pending/running record hasn't been cleaned up.
+- For `transition_status()`: add a `reject_from_terminal` parameter (default `True`). When `True` and the current session status is in `TERMINAL_STATUSES`, raise `ValueError`. Callers that legitimately need this transition:
+  - `_mark_superseded()` in `enqueue_agent_session()` → pass `reject_from_terminal=False` (transitioning `completed→superseded` is intentional)
+  - `queue_revival_agent_session()` → pass `reject_from_terminal=False` (intentional revival)
+  - All other callers use the default, making accidental terminal→non-terminal a hard error
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `_enqueue_nudge()` fallback path (line 1778-1803) catches all exceptions and recreates session — verify the recreated session respects terminal status
-- [ ] `check_revival()` catches Redis query failures (line 2441) — verify it returns `None` (no revival) rather than silently proceeding
-- [ ] Worker finally block (line 1594-1624) catches guard check failures — verify it still completes the session rather than leaving it in limbo
+- [ ] `_enqueue_nudge()` fallback path (L1778-1804) now has terminal guard BEFORE `async_create()` — verify a terminal session triggers early return and warning log, not session recreation
+- [ ] `_enqueue_nudge()` main path re-reads session from Redis — verify a session that became terminal between caller check and nudge call triggers early return
+- [ ] `check_revival()` catches Redis query failures (L2441) — verify it returns `None` (no revival) rather than silently proceeding
+- [ ] Worker finally block catches guard check failures — verify it still completes the session rather than leaving it in limbo
+- [ ] `determine_delivery_action()` with each terminal status (`completed`, `failed`, `killed`, `abandoned`, `cancelled`) returns `deliver_already_completed`
 
 ### Empty/Invalid Input Handling
 - [ ] `_enqueue_nudge()` called with a session that has `session_id=None` — verify it does not create an orphan pending session
 - [ ] `check_revival()` called with empty `chat_id` — verify no false positive matches
+- [ ] `transition_status()` called on terminal session without `reject_from_terminal=False` — verify `ValueError` raised
 
 ### Error State Rendering
 - [ ] When a terminal guard blocks a respawn, a warning log is emitted (observable in tests via caplog)
+- [ ] When `transition_status()` rejects a terminal→non-terminal transition, the error message includes both current and target status
 
 ## Test Impact
 
 - [ ] `tests/integration/test_session_zombie_health_check.py` — UPDATE: extend with tests for nudge path and revival path (currently only tests hierarchy health check)
-- [ ] `tests/unit/test_determine_delivery_action.py` — UPDATE: add test cases for terminal session input to `determine_delivery_action()`
-- [ ] `tests/unit/test_session_lifecycle.py` — UPDATE: add tests for `transition_status()` rejecting terminal→pending without `allow_revival=True`
+- [ ] `tests/unit/test_delivery_execution.py` — UPDATE: add test cases for each terminal status (`failed`, `killed`, `abandoned`, `cancelled`) as input to `determine_delivery_action()` returning `deliver_already_completed`
+- [ ] `tests/unit/test_session_lifecycle_consolidation.py` — UPDATE: add tests for `transition_status()` rejecting terminal→non-terminal by default, and allowing it when `reject_from_terminal=False`
 
 ## Rabbit Holes
 
@@ -126,9 +139,9 @@ No prerequisites — this work operates on existing code with no external depend
 
 ## Risks
 
-### Risk 1: Tightening `transition_status()` breaks intentional revival
-**Impact:** The revival system and auto-continue both rely on `completed→pending` transitions. Adding `allow_revival=True` could break callers that don't pass it.
-**Mitigation:** Grep all `transition_status()` call sites (found 10 in the codebase). Only `_enqueue_nudge()` and `queue_revival_agent_session()` (via `enqueue_agent_session()`) need the flag. Update all callers atomically.
+### Risk 1: Tightening `transition_status()` breaks `_mark_superseded` and intentional revival
+**Impact:** `_mark_superseded()` in `enqueue_agent_session()` calls `transition_status(old, "superseded")` on completed sessions — this is a legitimate `completed→superseded` transition. The revival system and auto-continue rely on `completed→pending` transitions. Adding `reject_from_terminal=True` default would break both paths.
+**Mitigation:** Grep all `transition_status()` call sites. Three callers need `reject_from_terminal=False`: (1) `_mark_superseded()` — completed→superseded is intentional bookkeeping, (2) `queue_revival_agent_session()` (via `enqueue_agent_session()`) — intentional revival, (3) `_enqueue_nudge()` main path if it ever processes a session that was legitimately terminal. All other callers use the default. Update all callers atomically in a single commit.
 
 ### Risk 2: Revival guard false negatives from Redis TTL
 **Impact:** If terminal session records expire from Redis before the revival check, the guard won't find them and revival proceeds.
@@ -174,11 +187,14 @@ No agent integration required — this is a bridge-internal change. All modifica
 
 ## Success Criteria
 
-- [ ] All 7 recovery mechanisms audited with findings documented in the reference doc
-- [ ] `_enqueue_nudge()` has explicit terminal status guard (re-read from Redis, return early if terminal)
+- [ ] All 5 active + 2 confirmed-safe recovery mechanisms audited with findings documented in the reference doc
+- [ ] `determine_delivery_action()` checks all `TERMINAL_STATUSES`, not just `completed`
+- [ ] `_enqueue_nudge()` main path has explicit terminal status guard (re-read from Redis, return early if terminal)
+- [ ] `_enqueue_nudge()` fallback path (L1778-1804) has terminal status guard before `async_create()`
 - [ ] `check_revival()` filters out branches whose sessions have terminal status siblings
-- [ ] `transition_status()` rejects terminal→non-terminal by default (requires `allow_revival=True`)
-- [ ] At least one regression test per mechanism proving completed sessions are not respawned
+- [ ] `transition_status()` rejects terminal→non-terminal by default (requires `reject_from_terminal=False`)
+- [ ] `_mark_superseded()` still works (passes `reject_from_terminal=False` for completed→superseded)
+- [ ] At least one regression test per mechanism proving completed/failed sessions are not respawned
 - [ ] Reference doc created at `docs/features/session-recovery-mechanisms.md`
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
@@ -216,15 +232,19 @@ No agent integration required — this is a bridge-internal change. All modifica
 ### 1. Audit All Mechanisms & Implement Guards
 - **Task ID**: build-guards
 - **Depends On**: none
-- **Validates**: `tests/unit/test_session_lifecycle.py`, `tests/unit/test_enqueue_nudge_terminal_guard.py` (create)
+- **Validates**: `tests/unit/test_session_lifecycle_consolidation.py`, `tests/unit/test_delivery_execution.py`
 - **Assigned To**: guard-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Audit all 7 mechanisms against the terminal-status safety checklist (query scope, atomic re-read, race window)
-- Add terminal status guard to `_enqueue_nudge()`: re-read session from Redis at entry, return early if status in `TERMINAL_STATUSES`
-- Add terminal-session filter to `check_revival()`: after finding pending/running sessions, check if any terminal session exists with the same session_id; if so, skip revival
-- Tighten `transition_status()` to reject terminal→non-terminal transitions unless `allow_revival=True` is passed
-- Update all `transition_status()` callers that legitimately need terminal→pending to pass `allow_revival=True`
+- Audit all 5 active mechanisms against the terminal-status safety checklist (query scope, atomic re-read, race window). Document the 2 confirmed-safe mechanisms (session watchdog, bridge watchdog) without code changes.
+- **Fix `determine_delivery_action()`** (BLOCKER 1): Change L80 from `if session_status == "completed"` to `if session_status in TERMINAL_STATUSES`. Import `TERMINAL_STATUSES` from `models.session_lifecycle`.
+- **Fix `_enqueue_nudge()` main path**: Add terminal status guard at function entry — re-read session from Redis, return early with warning log if status in `TERMINAL_STATUSES`
+- **Fix `_enqueue_nudge()` fallback path** (BLOCKER 2): Before `fields["status"] = "pending"` at L1784, check extracted session status. If in `TERMINAL_STATUSES`, log warning and return early. This path bypasses `transition_status()` so needs its own guard.
+- **Fix `transition_status()`**: Add `reject_from_terminal: bool = True` parameter. When `True` and `session.status in TERMINAL_STATUSES`, raise `ValueError` with both current and target status in the message. Update callers:
+  - `_mark_superseded()` in `enqueue_agent_session()` → pass `reject_from_terminal=False` (completed→superseded is intentional)
+  - `queue_revival_agent_session()` path → pass `reject_from_terminal=False`
+  - All other callers keep default `True`
+- **Fix `check_revival()`**: After finding pending/running sessions by `project_key`+`status`+`chat_id`, also query terminal sessions for the same `chat_id`. For each candidate branch, check if a terminal session exists with a matching `session_id` (derived from branch name). If so, skip that branch.
 
 ### 2. Write Regression Tests
 - **Task ID**: build-tests
@@ -237,11 +257,14 @@ No agent integration required — this is a bridge-internal change. All modifica
   - `test_startup_recovery_skips_completed` — create completed session, run `_recover_interrupted_agent_sessions_startup()`, verify not respawned
   - `test_health_check_skips_completed` — create completed session, run `_agent_session_health_check()`, verify not respawned
   - `test_hierarchy_check_skips_completed` — create completed parent, run `_agent_session_hierarchy_health_check()`, verify not respawned (existing test in `test_session_zombie_health_check.py` covers this, but add to unified suite)
-  - `test_nudge_skips_completed` — create completed session, call `_enqueue_nudge()`, verify returns early without mutating status
+  - `test_nudge_main_path_skips_terminal` — create completed session, call `_enqueue_nudge()`, verify returns early without mutating status
+  - `test_nudge_fallback_path_skips_terminal` — simulate missing session (fallback path), verify terminal status prevents `async_create()` with `status="pending"`
+  - `test_determine_delivery_action_all_terminal_statuses` — verify each of `completed`, `failed`, `killed`, `abandoned`, `cancelled` returns `deliver_already_completed`
   - `test_revival_skips_completed` — create completed session with matching branch, call `check_revival()`, verify returns None
   - `test_session_watchdog_safe` — verify watchdog only abandons, never respawns (document-only test asserting code path)
   - `test_bridge_watchdog_safe` — verify bridge watchdog has no `AgentSession` imports (document-only test asserting code path)
-- Add test for `transition_status()` rejecting `completed→pending` without `allow_revival=True`
+- Add test for `transition_status()` rejecting terminal→non-terminal by default, and allowing with `reject_from_terminal=False`
+- Add test for `transition_status()` allowing `completed→superseded` with `reject_from_terminal=False` (protecting `_mark_superseded` path)
 
 ### 3. Create Reference Documentation
 - **Task ID**: build-docs
@@ -278,15 +301,25 @@ No agent integration required — this is a bridge-internal change. All modifica
 | Tests pass | `pytest tests/ -x -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| Nudge guard exists | `grep -c 'TERMINAL_STATUSES' agent/agent_session_queue.py` | output > 1 |
+| Delivery action checks all terminal | `grep -c 'TERMINAL_STATUSES' agent/agent_session_queue.py` | output >= 3 |
+| Nudge fallback guard exists | `grep -A5 'Fallback: recreate' agent/agent_session_queue.py \| grep -c 'TERMINAL'` | output >= 1 |
 | Revival guard exists | `grep -c 'terminal' agent/agent_session_queue.py` | output > 0 |
+| transition_status has reject_from_terminal | `grep -c 'reject_from_terminal' models/session_lifecycle.py` | output >= 1 |
 | Reference doc exists | `test -f docs/features/session-recovery-mechanisms.md` | exit code 0 |
 | Recovery tests exist | `pytest tests/unit/test_recovery_respawn_safety.py -q` | exit code 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
-| CONCERN | [agent-type] | [The concern raised] | [How/whether it was addressed] |
+<!-- Populated by /do-plan-critique (war room) on 2026-04-05. Verdict: NEEDS REVISION (2 blockers). -->
+<!-- Revised 2026-04-05: All findings addressed. -->
+| Severity | Critic(s) | Finding | Resolution |
+|----------|-----------|---------|------------|
+| BLOCKER | Adversary, Skeptic | `determine_delivery_action()` L80 only checks `completed`, not all terminal statuses — `failed`/`killed`/`abandoned`/`cancelled` sessions fall through to nudge logic | FIXED: Plan now includes explicit fix to check `session_status in TERMINAL_STATUSES` instead of `== "completed"`. Added to Problem, Solution, Step 1, and Success Criteria. |
+| BLOCKER | Adversary, Skeptic | `_enqueue_nudge()` fallback path (L1778-1803) bypasses `transition_status()` entirely — sets `fields["status"] = "pending"` directly via `async_create()`, needs its own terminal guard | FIXED: Plan now includes independent terminal guard on fallback path before `async_create()`. Added to Problem, Solution (separate bullet), Step 1, Failure Path Tests, and Success Criteria. |
+| CONCERN | Archaeologist, Skeptic | `transition_status()` has NO source-status check at all (not a deliberate escape hatch as plan states); `_mark_superseded` at L256 transitions `completed->superseded` and would break under proposed `allow_revival` change | FIXED: Plan now correctly describes `transition_status()` as having no source-status check. Changed parameter from `allow_revival` to `reject_from_terminal` (default `True`). Explicitly lists `_mark_superseded` as a caller needing `reject_from_terminal=False`. Added regression test for completed→superseded path. |
+| CONCERN | Operator, Adversary | `check_revival()` terminal-session filter needs clarification: should match on `session_id` or `branch_name`? Current code queries by `project_key`+`status`, not `session_id` | FIXED: Plan now clarifies: query terminal sessions for same `chat_id`, then match by branch name (derived from `session_id` via `_session_branch_name()`). This aligns with how the existing code identifies branches. |
+| CONCERN | Operator | Test Impact references `tests/unit/test_determine_delivery_action.py` and `tests/unit/test_session_lifecycle.py` — neither exists; actual file is `tests/unit/test_session_lifecycle_consolidation.py` | FIXED: Test Impact now references correct files: `tests/unit/test_delivery_execution.py` and `tests/unit/test_session_lifecycle_consolidation.py`. |
+| NIT | Simplifier | Plan frames "7 mechanisms" but 2 (session watchdog, bridge watchdog) are confirmed no-ops by recon; consider framing as "5 active + 2 confirmed safe" | FIXED: Reframed throughout as "5 active + 2 confirmed safe". |
 
 ---
 
