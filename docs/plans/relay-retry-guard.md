@@ -1,5 +1,5 @@
 ---
-status: Draft
+status: Merged
 type: bug
 appetite: Small
 owner: Valor
