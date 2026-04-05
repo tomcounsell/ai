@@ -54,7 +54,7 @@ class SendToChatResult:
     auto_continue_count: int = 0
 
 
-def classify_nudge_action(
+def determine_delivery_action(
     msg: str,
     stop_reason: str | None,
     auto_continue_count: int,
@@ -2041,7 +2041,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
 
                 _effective_nudge_cap = TEAMMATE_MAX_NUDGE_COUNT
 
-        action = classify_nudge_action(
+        action = determine_delivery_action(
             msg=msg,
             stop_reason=stop_reason,
             auto_continue_count=chat_state.auto_continue_count,

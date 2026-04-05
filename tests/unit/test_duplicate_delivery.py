@@ -153,7 +153,7 @@ class TestCompletedSessionGuard:
 
         queue_code = Path("agent/agent_session_queue.py").read_text()
 
-        # The guard should check session_status == "completed" (in classify_nudge_action)
+        # The guard should check session_status == "completed" (in determine_delivery_action)
         assert 'session_status == "completed"' in queue_code
         # It should deliver to chat without nudge
         assert "delivering without nudge" in queue_code
