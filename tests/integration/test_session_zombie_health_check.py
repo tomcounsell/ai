@@ -8,7 +8,6 @@ Tests use real Redis via the autouse redis_test_db fixture in conftest.py.
 Per-worker db isolation (gw0->db1, gw1->db2) prevents xdist contamination.
 """
 
-import asyncio
 from datetime import UTC, datetime
 
 import pytest
@@ -117,9 +116,7 @@ class TestHealthCheckOrphanFixPreservesStatus:
         assert recreated.parent_agent_session_id is None
 
     @pytest.mark.asyncio
-    async def test_orphaned_parent_reference_is_cleared(
-        self, completed_child_with_orphaned_parent
-    ):
+    async def test_orphaned_parent_reference_is_cleared(self, completed_child_with_orphaned_parent):
         """The health check must clear the parent_agent_session_id when the
         parent no longer exists, allowing the child to stand alone."""
         from agent.agent_session_queue import _agent_session_hierarchy_health_check
@@ -128,15 +125,11 @@ class TestHealthCheckOrphanFixPreservesStatus:
 
         # Parent does not exist — verify by checking all sessions
         all_sessions = list(AgentSession.query.all())
-        parent_exists = any(
-            s.agent_session_id == "nonexistent-parent-id" for s in all_sessions
-        )
+        parent_exists = any(s.agent_session_id == "nonexistent-parent-id" for s in all_sessions)
         assert not parent_exists, "Test setup error: parent should not exist"
 
         await _agent_session_hierarchy_health_check()
 
-        sessions = list(
-            AgentSession.query.filter(session_id=child.session_id)
-        )
+        sessions = list(AgentSession.query.filter(session_id=child.session_id))
         assert len(sessions) == 1
         assert sessions[0].parent_agent_session_id is None
