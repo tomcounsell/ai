@@ -118,7 +118,7 @@ These three constants control summarizer behavior but cannot be overridden via e
 This is intentional by design (one classifies content type, the other decides delivery action), but the naming `classify_*` for both can be confusing. The nudge loop does not consume `ClassificationResult` at all -- it has its own independent routing logic.
 
 **File:** `bridge/summarizer.py:702`, `agent/agent_session_queue.py:57`
-**Recommendation:** Informational. The separation is correct (content classification vs. delivery routing). Consider renaming `determine_delivery_action` to `determine_delivery_action` or similar to reduce naming confusion.
+**Recommendation:** Informational. The separation is correct (content classification vs. delivery routing). The rename from `classify_nudge_action` to `determine_delivery_action` has been completed, resolving the naming confusion.
 
 ### INFO
 
