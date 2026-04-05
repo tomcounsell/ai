@@ -3,7 +3,7 @@
 Reflections - Autonomous Daily Maintenance System
 
 A long-running process that performs daily self-directed maintenance tasks.
-16 units: 13 independent items + 3 merged pipelines.
+17 units: 14 independent items + 3 merged pipelines.
 
 Independent units:
 1. legacy_code_scan — Clean Up Stale Code
@@ -19,11 +19,12 @@ Independent units:
 11. principal_staleness — Principal Context Staleness
 12. disk_space_check    — Disk Space Check
 13. pr_review_audit     — PR Review Audit
+14. linkedin_messages   — Check & Reply to LinkedIn Messages
 
 Merged pipelines (sub-steps run internally, one checkpoint per pipeline):
-14. session_intelligence    — Session Analysis + LLM Reflection + Bug Filing
-15. behavioral_learning     — Episode Cycle-Close + Pattern Crystallization
-16. daily_report_and_notify — Daily Report + GitHub Issues + Telegram (must be last)
+15. session_intelligence    — Session Analysis + LLM Reflection + Bug Filing
+16. behavioral_learning     — Episode Cycle-Close + Pattern Crystallization
+17. daily_report_and_notify — Daily Report + GitHub Issues + Telegram (must be last)
 
 All persistence is Redis-backed via Popoto models (see models/ directory).
 State: ReflectionRun | Ignore patterns: ReflectionIgnore
@@ -688,6 +689,7 @@ class ReflectionRunner:
             ("principal_staleness", "Principal Context Staleness", self.step_principal_staleness),
             ("disk_space_check", "Disk Space Check", self.step_disk_space_check),
             ("pr_review_audit", "PR Review Audit", self.step_pr_review_audit),
+            ("linkedin_messages", "LinkedIn Messages", self.step_linkedin_messages),
             ("session_intelligence", "Session Intelligence", self.step_session_intelligence),
             ("behavioral_learning", "Behavioral Learning", self.step_behavioral_learning),
             ("daily_report_and_notify", "Daily Report & Notify", self.step_daily_report_and_notify),
@@ -2070,8 +2072,9 @@ class ReflectionRunner:
         """
         import time as _time
 
-        from models.agent_session import AgentSession
         from models.cyclic_episode import CyclicEpisode
+
+        from models.agent_session import AgentSession
         from scripts.fingerprint_classifier import classify_session
 
         cutoff = _time.time() - 86400  # past 24 hours
@@ -2755,6 +2758,75 @@ class ReflectionRunner:
             )
         else:
             logger.info("PR review audit: scanned %d PRs, no unaddressed findings", prs_scanned)
+
+    async def step_linkedin_messages(self) -> None:
+        """Step 14: Check and reply to LinkedIn messages.
+
+        Spawns a Claude Code session with the linkedin-messaging skill to:
+        1. Open LinkedIn messaging inbox via agent-browser
+        2. Scan for unread/recent conversations
+        3. Research contacts against ~/work-vault/Consulting/leads/ and chats/
+        4. Reply where warranted using teammate persona voice
+        5. Update contact files in the knowledge base
+
+        Requires Chrome to be available on the local machine. The Claude CLI
+        session handles all browser automation via agent-browser CDP.
+        """
+        findings: list[str] = []
+
+        prompt = (
+            "/linkedin-messaging\n\n"
+            "Daily check: scan the LinkedIn inbox for unread or recent messages "
+            "(last 24 hours). For each conversation needing attention, follow the "
+            "full workflow in the skill: read the thread, research the contact, "
+            "draft and send a reply as Valor (teammate persona), and update the "
+            "knowledge base. Skip spam and automated messages. "
+            "Report a summary of actions taken."
+        )
+
+        claude_bin = shutil.which("claude")
+        if not claude_bin:
+            logger.warning("LinkedIn messages: claude CLI not found on PATH, skipping")
+            self.state.step_progress["linkedin_messages"] = {
+                "skipped": True,
+                "reason": "no claude CLI",
+            }
+            return
+
+        try:
+            result = subprocess.run(
+                [claude_bin, "--print", "--dangerously-skip-permissions", prompt],
+                capture_output=True,
+                text=True,
+                timeout=600,  # 10 minute cap
+                cwd=str(PROJECT_ROOT),
+                env={**os.environ, "CLAUDE_CODE_TASK_LIST_ID": "reflections-linkedin"},
+            )
+
+            if result.returncode == 0:
+                # Extract summary from output (last non-empty lines)
+                output_lines = [line for line in result.stdout.strip().splitlines() if line.strip()]
+                summary = "\n".join(output_lines[-10:]) if output_lines else "No output"
+                logger.info("LinkedIn messages: session completed successfully")
+                logger.info("LinkedIn summary: %s", summary[:500])
+
+                if "replied" in summary.lower() or "sent" in summary.lower():
+                    findings.append(f"LinkedIn: {summary[:200]}")
+                    self.state.add_finding("linkedin_messages", summary[:200])
+            else:
+                error_msg = result.stderr[:200] if result.stderr else "Unknown error"
+                logger.warning("LinkedIn messages: claude session failed: %s", error_msg)
+                findings.append(f"LinkedIn session failed: {error_msg}")
+
+        except subprocess.TimeoutExpired:
+            logger.warning("LinkedIn messages: session timed out after 600s")
+            findings.append("LinkedIn session timed out")
+        except Exception as e:
+            logger.warning("LinkedIn messages: %s: %s", type(e).__name__, str(e)[:200])
+
+        self.state.step_progress["linkedin_messages"] = {
+            "findings": len(findings),
+        }
 
     async def step_session_intelligence(self) -> None:
         """Pipeline: Session Analysis → LLM Reflection → Bug Filing.
