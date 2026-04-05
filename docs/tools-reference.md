@@ -182,6 +182,32 @@ python -m tools.agent_session_scheduler cleanup --age 30              # Delete
 
 See `docs/features/agent-session-scheduling.md` for full documentation.
 
+### SDLC Stage Query (`tools.sdlc_stage_query`)
+
+Query SDLC pipeline `stage_states` from a PM session. Used by the SDLC router skill as the primary signal for routing decisions (which sub-skill to dispatch next). Returns JSON mapping stage names to statuses.
+
+```bash
+# Query by session ID
+python -m tools.sdlc_stage_query --session-id tg_project_123_456
+
+# Query by GitHub issue number (finds the PM session tracking that issue)
+python -m tools.sdlc_stage_query --issue-number 704
+
+# No args — falls back to VALOR_SESSION_ID / AGENT_SESSION_ID env vars
+python -m tools.sdlc_stage_query
+```
+
+```python
+from tools.sdlc_stage_query import query_stage_states
+
+states = query_stage_states(session_id="tg_project_123_456")
+# {"ISSUE": "completed", "PLAN": "completed", "BUILD": "in_progress", ...}
+
+states = query_stage_states(issue_number=704)
+```
+
+Always exits 0 and returns `{}` on any error (missing session, Redis down, malformed data). See `docs/features/pipeline-state-machine.md` for how the router uses this tool.
+
 ## OfficeCLI
 
 Standalone binary at `~/.local/bin/officecli` for creating, reading, and editing Office documents (.docx, .xlsx, .pptx). No dependencies, no Office installation needed. Installed and updated automatically by the update system (`scripts/update/officecli.py`).
