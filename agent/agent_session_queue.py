@@ -881,13 +881,10 @@ async def get_active_session_for_chat(chat_id: str) -> AgentSession | None:
 
 
 async def _complete_agent_session(session: AgentSession, *, failed: bool = False) -> None:
-    """Mark a running session as completed (or failed) and persist to Redis.
-
-    Sessions are retained in Redis with their terminal status so that followup
-    messages can revive them. The model's TTL (90 days) handles eventual cleanup.
+    """Mark a running session as completed and delete it from Redis.
 
     If this session is a child (has parent_agent_session_id), finalize the parent BEFORE
-    updating the child status.
+    deleting the child.
 
     Args:
         session: The AgentSession to complete.
@@ -901,7 +898,7 @@ async def _complete_agent_session(session: AgentSession, *, failed: bool = False
 
     parent_id = getattr(session, "parent_agent_session_id", None)
 
-    # Finalize parent BEFORE updating child status
+    # Finalize parent BEFORE deleting child
     if parent_id:
         child_status = "failed" if failed else "completed"
         await _finalize_parent(
@@ -910,10 +907,9 @@ async def _complete_agent_session(session: AgentSession, *, failed: bool = False
             completing_child_status=child_status,
         )
 
-    # Persist terminal status instead of deleting — enables session revival
-    session.status = "failed" if failed else "completed"
-    session.completed_at = time.time()
-    session.save()
+    # Delete from Redis to prevent zombie re-pickup.
+    # Session data is preserved in session snapshots for audit trail.
+    await session.async_delete()
 
 
 async def _finalize_parent(
