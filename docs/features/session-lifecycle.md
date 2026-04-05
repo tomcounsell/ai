@@ -50,6 +50,8 @@ The guard re-reads the session from Redis before completing:
 
 This prevents the finally block from clobbering the nudge's `pending` status.
 
+Implementation note: nudge enqueue paths set `chat_state.defer_reaction` elsewhere in the worker, but the completion guard uses **Redis as the source of truth** (pending or missing session) so it also covers delete-and-recreate nudge fallbacks without relying on in-memory state alone.
+
 ## Related
 
 - [Agent Session Queue Reliability](agent-session-queue.md) -- KeyField index fixes and delete-and-recreate pattern
