@@ -12,6 +12,14 @@ Redis queue contract:
     Backward compatibility: legacy payloads with ``file_path`` (string) are
     normalized to ``file_paths`` (list) at relay time during rolling deployments.
 
+Retry and dead-letter behavior:
+    Failed messages are re-queued with a ``_relay_attempts`` counter embedded in
+    the JSON payload. After ``MAX_RELAY_RETRIES`` (default 3) failed attempts,
+    text messages are routed to the dead letter queue via ``bridge/dead_letters.py``
+    for later replay. Reactions and custom emoji messages are ephemeral and are
+    discarded after exhausting retries. Unknown message types are rejected
+    immediately without entering the retry loop.
+
 After successful send, records the Telegram message ID on the AgentSession's
 pm_sent_message_ids field. This list is checked by the summarizer bypass
 in bridge/response.py.
@@ -33,6 +41,12 @@ RELAY_BATCH_SIZE = 10
 
 # Redis key pattern for scanning outbox queues
 OUTBOX_KEY_PATTERN = "telegram:outbox:*"
+
+# Maximum relay attempts before routing to dead letter
+MAX_RELAY_RETRIES = 3
+
+# Known message types accepted by the relay dispatcher
+KNOWN_MESSAGE_TYPES = {None, "reaction", "custom_emoji_message"}
 
 
 def _get_redis_connection() -> redis.Redis:
@@ -304,6 +318,49 @@ def _record_sent_message(session_id: str, msg_id: int) -> None:
         logger.warning(f"Relay: failed to record msg_id on session {session_id}: {e}")
 
 
+async def _dead_letter_message(message: dict, reason: str) -> None:
+    """Route a failed message to the dead letter queue or discard it.
+
+    Text messages are persisted via bridge/dead_letters.py for later replay.
+    Reactions and custom emoji messages are ephemeral and not worth replaying,
+    so they are logged at WARNING level and discarded.
+
+    Args:
+        message: The message payload that exhausted retries.
+        reason: Human-readable reason for dead-lettering.
+    """
+    msg_type = message.get("type")
+    chat_id = message.get("chat_id")
+
+    if msg_type in ("reaction", "custom_emoji_message"):
+        logger.warning(
+            f"Relay: discarding {msg_type} after {reason} (chat_id={chat_id}): {message}"
+        )
+        return
+
+    # Text/file messages -- persist to dead letter queue
+    text = message.get("text", "")
+    reply_to = message.get("reply_to")
+    if chat_id and text:
+        try:
+            from bridge.dead_letters import persist_failed_delivery
+
+            await persist_failed_delivery(
+                chat_id=int(chat_id),
+                reply_to=int(reply_to) if reply_to else None,
+                text=text,
+            )
+            logger.warning(
+                f"Relay: dead-lettered message for chat {chat_id} ({reason}, {len(text)} chars)"
+            )
+        except Exception as e:
+            logger.error(f"Relay: failed to persist dead letter for chat {chat_id}: {e}")
+    else:
+        logger.warning(
+            f"Relay: discarding non-text message after {reason} (chat_id={chat_id}): {message}"
+        )
+
+
 async def process_outbox(telegram_client) -> int:
     """Process all pending outbox queues, sending messages via Telethon.
 
@@ -338,53 +395,75 @@ async def process_outbox(telegram_client) -> int:
                     logger.warning(f"Relay: skipping malformed queue entry in {key}: {e}")
                     continue
 
-                # Handle reaction payloads separately
-                if message.get("type") == "reaction":
-                    reaction_ok = await _send_queued_reaction(telegram_client, message)
-                    if reaction_ok:
-                        sent_count += 1
+                # Validate message type before dispatch
+                msg_type = message.get("type")
+                if msg_type not in KNOWN_MESSAGE_TYPES:
+                    logger.warning(
+                        f"Relay: unknown message type '{msg_type}', discarding: {message}"
+                    )
                     continue
 
-                # Handle custom emoji message payloads
-                if message.get("type") == "custom_emoji_message":
-                    msg_id = await _send_custom_emoji_message(telegram_client, message)
+                # Dispatch to handler with unified error handling
+                success = False
+                msg_id = None
+                try:
+                    if msg_type == "reaction":
+                        success = await _send_queued_reaction(telegram_client, message)
+                    elif msg_type == "custom_emoji_message":
+                        msg_id = await _send_custom_emoji_message(telegram_client, message)
+                        success = msg_id is not None
+                    else:
+                        msg_id = await _send_queued_message(telegram_client, message)
+                        success = msg_id is not None
+                except Exception as handler_err:
+                    logger.warning(
+                        f"Relay: handler exception for {msg_type or 'default'} "
+                        f"in {key}: {handler_err}"
+                    )
+                    success = False
+
+                if success:
+                    sent_count += 1
+                    # Record sent message ID on AgentSession
                     if msg_id is not None:
-                        sent_count += 1
                         session_id = message.get("session_id")
                         if session_id:
                             await asyncio.to_thread(_record_sent_message, session_id, msg_id)
-                    continue
 
-                msg_id = await _send_queued_message(telegram_client, message)
+                    # Store sent message for Redis history (text messages only)
+                    if msg_type is None and msg_id is not None:
+                        try:
+                            from bridge.telegram_bridge import store_message
+                            from bridge.utc import utc_now
 
-                if msg_id is not None:
-                    sent_count += 1
-                    session_id = message.get("session_id")
-                    if session_id:
-                        await asyncio.to_thread(_record_sent_message, session_id, msg_id)
-
-                    # Store sent message for Redis history
-                    try:
-                        from bridge.telegram_bridge import store_message
-                        from bridge.utc import utc_now
-
-                        await asyncio.to_thread(
-                            store_message,
-                            chat_id=message.get("chat_id"),
-                            content=message.get("text", ""),
-                            sender="system",
-                            timestamp=utc_now(),
-                            message_type="pm_direct",
-                        )
-                    except Exception:
-                        pass  # Non-fatal: history storage is best-effort
+                            await asyncio.to_thread(
+                                store_message,
+                                chat_id=message.get("chat_id"),
+                                content=message.get("text", ""),
+                                sender="system",
+                                timestamp=utc_now(),
+                                message_type="pm_direct",
+                            )
+                        except Exception:
+                            pass  # Non-fatal: history storage is best-effort
                 else:
-                    # Send failed -- re-push to queue tail for retry
-                    try:
-                        await asyncio.to_thread(r.rpush, key, raw)
-                        logger.info(f"Relay: re-queued failed message in {key} for retry")
-                    except Exception as re_err:
-                        logger.error(f"Relay: failed to re-queue message: {re_err}")
+                    # Bounded retry: increment attempt counter, dead-letter if exhausted
+                    attempts = message.get("_relay_attempts", 0) + 1
+                    message["_relay_attempts"] = attempts
+                    if attempts >= MAX_RELAY_RETRIES:
+                        await _dead_letter_message(
+                            message, reason=f"max retries ({MAX_RELAY_RETRIES}) exceeded"
+                        )
+                    else:
+                        try:
+                            requeue_raw = json.dumps(message)
+                            await asyncio.to_thread(r.rpush, key, requeue_raw)
+                            logger.info(
+                                f"Relay: re-queued failed message in {key} "
+                                f"(attempt {attempts}/{MAX_RELAY_RETRIES})"
+                            )
+                        except Exception as re_err:
+                            logger.error(f"Relay: failed to re-queue message: {re_err}")
 
     except Exception as e:
         logger.error(f"Relay: outbox processing error: {e}", exc_info=True)
