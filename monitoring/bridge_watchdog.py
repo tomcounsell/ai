@@ -71,9 +71,13 @@ ZOMBIE_THRESHOLD_SECONDS = 7200  # 2 hours - processes older than this are zombi
 SOFT_INSTANCE_LIMIT = 5  # Warn when more than this many active claude processes
 
 # Process name patterns to scan for zombies (CLI invocations only)
-# NOTE: "claude" alone matches Claude Desktop app processes (false positives).
-# We match specific CLI patterns instead.
-ZOMBIE_PROCESS_PATTERNS = ("claude --", "pyright")
+# NOTE: "claude --" matches Claude Desktop app helper processes via their
+# --user-data-dir=.../Claude --standard-schemes=... arguments (false positives).
+# We match the specific CLI invocation pattern instead.
+ZOMBIE_PROCESS_PATTERNS = ("claude --dangerously-skip-permissions", "pyright")
+
+# Patterns to exclude from process matching (Desktop app helpers)
+ZOMBIE_PROCESS_EXCLUDES = ("Claude.app", "Claude Helper")
 
 
 @dataclass
@@ -184,10 +188,14 @@ def _enumerate_claude_processes() -> list[dict]:
         # Check if this line matches any of our target patterns
         matched = False
         for pattern in ZOMBIE_PROCESS_PATTERNS:
-            if pattern in line.lower():
+            if pattern in line:
                 matched = True
                 break
         if not matched:
+            continue
+
+        # Exclude Desktop app helper processes
+        if any(excl in line for excl in ZOMBIE_PROCESS_EXCLUDES):
             continue
 
         # Parse: PID ETIME RSS COMMAND...
