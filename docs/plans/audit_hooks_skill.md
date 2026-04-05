@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Complete
 type: feature
 appetite: Medium
 owner: Valor
@@ -299,5 +299,5 @@ No agent integration required — this is a Claude Code skill invoked directly b
 
 ## Open Questions
 
-1. Should the best practices document include a version number or changelog, or is git history sufficient for tracking changes to the rules?
-2. The issue mentions an import weight check flagging imports >100ms — should we use a fixed list of known-heavy modules (e.g., anthropic, openai, pandas) or attempt actual timing? The plan assumes heuristic (fixed list) to avoid environment-dependent timing fragility.
+1. ~~Should the best practices document include a version number or changelog, or is git history sufficient for tracking changes to the rules?~~ **Resolved:** Git history is sufficient. No version number needed.
+2. ~~The issue mentions an import weight check flagging imports >100ms — should we use a fixed list of known-heavy modules (e.g., anthropic, openai, pandas) or attempt actual timing?~~ **Resolved:** Use heuristic (fixed list of known-heavy modules). Actual timing is fragile and environment-dependent.

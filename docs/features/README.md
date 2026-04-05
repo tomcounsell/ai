@@ -37,7 +37,6 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Deployment](deployment.md) | Multi-instance deployment configuration with per-machine project routing | Shipped |
 | [Design Review](do-design-review.md) | Review web UI against 10 premium design criteria with severity ratings | Shipped |
 | [Do Test](do-test.md) | Intelligent test orchestration with parallel dispatch, changed-file detection, structured reporting, and pytest plugin configuration | Shipped |
-| [Memory Hook Performance](memory-hook-performance.md) | Import chain optimization and deja vu removal for PostToolUse memory recall hook | Shipped |
 | [do-patch Skill](do-patch-skill.md) | Targeted fix skill for test failures and review blockers; called automatically by do-build | Shipped |
 | [Documentation Audit](documentation-audit.md) | Weekly LLM-powered audit of docs/ accuracy against codebase; KEEP / UPDATE / DELETE verdicts, directory and filename enforcement | Shipped |
 | [Documentation Lifecycle](documentation-lifecycle.md) | Automated validation and migration system for plan documentation tasks | Shipped |
@@ -47,12 +46,13 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Git State Guard](git-state-guard.md) | Detects and resolves dirty git state (merges, rebases, cherry-picks) before SDLC branch operations | Shipped |
 | [Goal Gates](goal-gates.md) | Deterministic enforcement gates preventing SDLC pipeline from silently skipping stages | Shipped |
 | [Google Calendar Integration](google-calendar-integration.md) | Work session logging as Google Calendar events with segment rounding | Shipped |
-| [Hooks & Session Logging](hooks-session-logging.md) | Claude Code hooks for session event capture and structured logging | Shipped |
+| [Hooks Best Practices](hooks-best-practices.md) | Audit skill and codified safety rules for Claude Code hooks, with daily reflections monitoring | Shipped |
 | [Image Vision Support](image-vision.md) | Ollama LLaVA image descriptions for visual content in Telegram | Shipped |
 | [Intake Classifier](intake-classifier.md) | Haiku-powered message intent triage (interjection/new_work/acknowledgment) for bridge routing | Shipped |
 | [Knowledge Document Integration](knowledge-document-integration.md) | Indexes work-vault markdown/text files into the memory system with project-scoped isolation, filesystem watching, and companion memories for subconscious recall | Shipped |
 | [Link Content Summarization](link-summarization.md) | Auto-fetch and summarize shared links via Perplexity API | Shipped |
 | [Lint Auto-Fix](lint-auto-fix.md) | Automatic lint/format fixing via pre-commit hook and PostToolUse hook, eliminating agent churn loops | Shipped |
+| [Memory Hook Performance](memory-hook-performance.md) | Import chain optimization and deja vu removal for PostToolUse memory recall hook | Shipped |
 | [Memory Search Tool](memory-search-tool.md) | Direct interface for searching, saving, inspecting, and forgetting memories from the Memory model | Shipped |
 | [Message Pipeline](message-pipeline.md) | Deferred enrichment pipeline for fast message acknowledgment and zero-loss restarts | Shipped |
 | [Message Reconciler](message-reconciler.md) | Periodic background scan detecting and recovering Telegram messages missed during live bridge connections | Shipped |

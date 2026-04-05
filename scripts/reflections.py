@@ -679,6 +679,7 @@ class ReflectionRunner:
             ("task_management", "Clean Up Task Management", self.step_clean_tasks),
             ("documentation_audit", "Audit Documentation", self.step_audit_docs),
             ("skills_audit", "Skills Audit", self.step_skills_audit),
+            ("hooks_audit", "Hooks Audit", self.step_hooks_audit),
             ("redis_ttl_cleanup", "Redis TTL Cleanup", self.step_redis_cleanup),
             ("redis_data_quality", "Redis Data Quality", self.step_redis_data_quality),
             ("branch_plan_cleanup", "Branch and Plan Cleanup", self.step_branch_plan_cleanup),
@@ -1437,6 +1438,113 @@ class ReflectionRunner:
         except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError) as e:
             logger.error(f"Skills audit failed: {e}")
             self.state.step_progress["skills_audit"] = {"error": str(e)}
+
+    async def step_hooks_audit(self) -> None:
+        """Audit Claude Code hooks: scan logs for errors and validate settings.json."""
+        error_count = 0
+        settings_issues = 0
+        findings: list[str] = []
+
+        try:
+            # 1. Scan logs/hooks.log for errors in the last 24h
+            hooks_log = PROJECT_ROOT / "logs" / "hooks.log"
+            if hooks_log.exists():
+                all_errors = extract_structured_errors(hooks_log)
+                cutoff = datetime.now() - timedelta(hours=24)
+                for err in all_errors:
+                    try:
+                        ts = datetime.strptime(err["timestamp"], "%Y-%m-%d %H:%M:%S")
+                        if ts >= cutoff:
+                            error_count += 1
+                    except (ValueError, KeyError):
+                        pass
+
+                if error_count > 0:
+                    findings.append(f"{error_count} hook error(s) in last 24h")
+
+            # 2. Validate .claude/settings.json
+            settings_path = PROJECT_ROOT / ".claude" / "settings.json"
+            if settings_path.exists():
+                try:
+                    settings_data = json.loads(settings_path.read_text())
+                    hooks_config = settings_data.get("hooks", {})
+
+                    # Hook types that require || true
+                    must_have_or_true_types = {"Stop", "SubagentStop"}
+                    # Advisory hooks: empty-matcher entries for these types
+                    advisory_types = {"UserPromptSubmit", "PreToolUse", "PostToolUse"}
+
+                    for hook_type, hook_groups in hooks_config.items():
+                        for group in hook_groups:
+                            matcher = group.get("matcher", "")
+                            for hook in group.get("hooks", []):
+                                cmd = hook.get("command", "")
+
+                                # Extract script path from command
+                                # Patterns: python path/to/script.py, ./scripts/foo.sh,
+                                # uv run path/to/script.py, etc.
+                                # Strip $CLAUDE_PROJECT_DIR references for resolution
+                                resolved_cmd = cmd.replace('"$CLAUDE_PROJECT_DIR"/', "").replace(
+                                    "$CLAUDE_PROJECT_DIR/", ""
+                                )
+                                # Find file paths (ending in .py or .sh)
+                                path_matches = re.findall(r"([\w./-]+\.(?:py|sh))", resolved_cmd)
+                                for script_path in path_matches:
+                                    full_path = PROJECT_ROOT / script_path
+                                    if not full_path.exists():
+                                        settings_issues += 1
+                                        findings.append(
+                                            f"Missing hook script: {script_path} "
+                                            f"(in {hook_type} hook)"
+                                        )
+
+                                # Check || true requirement for Stop/SubagentStop
+                                if hook_type in must_have_or_true_types:
+                                    if "|| true" not in cmd:
+                                        settings_issues += 1
+                                        findings.append(
+                                            f"{hook_type} hook missing '|| true': {cmd}"
+                                        )
+
+                                # Check advisory hooks (empty matcher)
+                                if hook_type in advisory_types and matcher == "":
+                                    # Validators (non-empty matcher) don't need || true
+                                    # but advisory hooks with empty matcher should have it
+                                    if "|| true" not in cmd:
+                                        # Skip validator scripts (they intentionally block)
+                                        if "/validators/" not in cmd:
+                                            settings_issues += 1
+                                            findings.append(
+                                                f"Advisory {hook_type} hook"
+                                                f" missing '|| true': {cmd}"
+                                            )
+                except (json.JSONDecodeError, OSError) as e:
+                    logger.warning(f"Could not parse settings.json: {e}")
+                    settings_issues += 1
+
+            # 3. Report findings
+            if findings:
+                self.state.findings.setdefault("ai:hooks_audit", []).extend(findings)
+
+            # 4. Log summary
+            logger.info(
+                f"Hooks audit: {error_count} errors in last 24h, {settings_issues} settings issues"
+            )
+
+            # 5. Store progress
+            self.state.step_progress["hooks_audit"] = {
+                "errors_24h": error_count,
+                "settings_issues": settings_issues,
+                "findings_count": len(findings),
+            }
+
+        except Exception as e:
+            logger.warning(f"Hooks audit failed: {e}")
+            self.state.step_progress["hooks_audit"] = {
+                "errors_24h": error_count,
+                "settings_issues": settings_issues,
+                "error": str(e),
+            }
 
     async def step_redis_cleanup(self) -> None:
         """Step 12: Run TTL cleanup on all Redis models.
