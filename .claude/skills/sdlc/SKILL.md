@@ -42,6 +42,31 @@ If NO issue or PR number was provided (just a feature description), invoke `/do-
 
 Check what already exists for this issue. Use `$SDLC_TARGET_REPO` for local operations (defaults to `.` for same-repo work). Run ALL of these checks — do not skip any.
 
+### Step 2.0: Query stage_states from PipelineStateMachine (primary signal)
+
+Before running artifact checks, query the PM session's `stage_states` for authoritative stage completion data. This is the **primary signal** for routing decisions. Artifact inference (steps 2a-2e) is the **fallback** when stage_states is unavailable.
+
+```bash
+# Query stage_states from the PM session via CLI tool
+STAGE_STATES=$(python -m tools.sdlc_stage_query --session-id "$VALOR_SESSION_ID" 2>/dev/null)
+
+# If VALOR_SESSION_ID is not set, try AGENT_SESSION_ID
+if [ -z "$STAGE_STATES" ] || [ "$STAGE_STATES" = "{}" ]; then
+    STAGE_STATES=$(python -m tools.sdlc_stage_query --session-id "$AGENT_SESSION_ID" 2>/dev/null)
+fi
+
+# Parse the result — if non-empty JSON, use it as primary signal
+# Example output: {"ISSUE": "completed", "PLAN": "completed", "BUILD": "in_progress", ...}
+```
+
+**Decision logic:**
+- If `STAGE_STATES` is non-empty JSON with stage data: use it as the **primary signal** for the dispatch table. A stage is considered complete ONLY if its value is `"completed"` in stage_states. Skip steps 2a-2e.
+- If `STAGE_STATES` is empty `{}` or unavailable (no PM session, local Claude Code): fall through to artifact inference (steps 2a-2e below) as fallback. Log a warning: "stage_states unavailable — falling back to artifact inference."
+
+### Steps 2a-2e: Artifact Inference (fallback)
+
+These checks run ONLY when stage_states is unavailable (empty JSON from step 2.0). When stage_states IS available, skip directly to the dispatch table using stage_states as the source of truth.
+
 ```bash
 REPO="${SDLC_TARGET_REPO:-.}"
 
@@ -81,8 +106,9 @@ if [ -n "$PLAN_PATH" ]; then
     sed -n '/^## Documentation/,/^## /p' "$PLAN_PATH" | grep -c '\- \[ \]' || echo "0"
 fi
 
-# 3c. Check session_progress for DOCS stage completion (if available)
-python -m tools.session_progress --session-id "$SESSION_ID" --stage DOCS --check 2>/dev/null || true
+# 3c. Check stage_states for DOCS stage completion (reuse $STAGE_STATES from Step 2.0)
+# NOTE: No re-query needed -- $STAGE_STATES was already fetched in Step 2.0
+echo "$STAGE_STATES" | python -c "import sys,json; s=json.load(sys.stdin); print('DOCS_DONE' if s.get('DOCS')=='completed' else 'DOCS_NOT_DONE')" 2>/dev/null || echo "DOCS_NOT_DONE"
 ```
 
 **Decision logic for docs**:
@@ -107,7 +133,9 @@ Based on the assessment, invoke exactly ONE sub-skill and return.
 | 8 | PR review has findings (blockers, nits, OR tech debt) | `/do-patch` | ALL findings must be addressed |
 | 8b | Patch applied after review findings | `/do-pr-review {pr_number}` | Re-review is REQUIRED after every patch |
 | 9 | Review APPROVED with zero findings, docs NOT done (see Step 3) | `/do-docs` | Docs are required before merge |
-| 10 | Review APPROVED with zero findings, docs done, ready to merge | Report done | PM delivers to human |
+| 10 | Review APPROVED with zero findings, docs done, AND all display stages show `completed` in stage_states (or stage_states unavailable), ready to merge | Report done | PM delivers to human |
+
+**Row 10 merge gate**: When stage_states is available, ALL display stages (ISSUE, PLAN, CRITIQUE, BUILD, TEST, REVIEW, DOCS) must show `completed` in stage_states before dispatching Row 10. This prevents stages from being silently skipped when artifacts happen to exist from a different stage's work (e.g., build creating docs does not satisfy the DOCS stage). When stage_states is unavailable (local invocations), fall back to artifact inference as before.
 
 **Row 8/8b is the patch-review cycle**: A "minimum approve" with unresolved nits or tech debt is NOT sufficient. Every finding from the review — blockers, nits, suggestions, and tech debt — must be patched or explicitly annotated with inline comments explaining why the finding was left in place. After patching, a fresh `/do-pr-review` is mandatory to verify all findings were addressed. This cycle repeats until the review returns zero unresolved findings.
 

@@ -141,8 +141,35 @@ Stage-specific text patterns in the last ~500 chars of output. Each stage has it
 
 Falls back to `"ambiguous"` when no pattern matches, for the Observer LLM to handle.
 
+## Router Integration (Read Path)
+
+The SDLC router skill (`.claude/skills/sdlc/SKILL.md`) reads `stage_states` as the **primary signal** for routing decisions. This completes the read/write cycle: hooks write stage transitions (via `start_stage()`/`complete_stage()`/`fail_stage()`), and the router reads the resulting state to determine which sub-skill to dispatch next.
+
+### How the Router Reads stage_states
+
+The router invokes `tools/sdlc_stage_query.py` via bash before artifact checks:
+
+```bash
+STAGE_STATES=$(python -m tools.sdlc_stage_query --session-id "$VALOR_SESSION_ID" 2>/dev/null)
+```
+
+The CLI tool loads the PM session from Redis, reads `stage_states`, and returns a JSON dict mapping stage names to statuses.
+
+### Routing Logic
+
+- **stage_states available**: Used as the primary signal. A stage is considered complete only if it shows `"completed"` in stage_states. Artifact inference (plan files, PR existence, review status) is skipped entirely.
+- **stage_states unavailable** (empty JSON `{}`): Falls back to artifact inference -- the same behavior as before this integration. This happens for local Claude Code invocations without a PM session.
+
+### Merge Gate
+
+Row 10 in the dispatch table (merge-ready) requires ALL display stages (ISSUE, PLAN, CRITIQUE, BUILD, TEST, REVIEW, DOCS) to show `"completed"` in stage_states. This prevents stages from being silently skipped when a prior stage's work happens to produce artifacts that satisfy a later stage's check (e.g., `/do-build` creating docs does not satisfy the DOCS stage).
+
+When stage_states is unavailable, the merge gate falls back to artifact inference.
+
 ## Integration Points
 
+- **SDLC Router** (`.claude/skills/sdlc/SKILL.md`): Reads `stage_states` via `tools/sdlc_stage_query.py` CLI tool as primary routing signal
+- **Stage Query Tool** (`tools/sdlc_stage_query.py`): CLI interface for reading `stage_states` from a PM session by session ID or issue number
 - **PreToolUse hook** (`agent/hooks/pre_tool_use.py`): Calls `start_stage()` when the PM dispatches a dev-session, marking the stage as `in_progress`
 - **SubagentStop hook** (`agent/hooks/subagent_stop.py`): Calls `complete_stage()` when the dev-session returns, marking the stage as `completed`
 - **ChatSession**: Uses state machine for stage queries and outcome classification
@@ -163,7 +190,10 @@ Falls back to `"ambiguous"` when no pattern matches, for the Observer LLM to han
 | `bridge/pipeline_state.py` | PipelineStateMachine class with artifact-based inference |
 | `bridge/pipeline_graph.py` | Transition table (PIPELINE_EDGES, DISPLAY_STAGES) |
 | `models/agent_session.py` | `stage_states` field on AgentSession |
+| `tools/sdlc_stage_query.py` | CLI tool for reading stage_states (used by SDLC router) |
+| `.claude/skills/sdlc/SKILL.md` | SDLC router skill (reads stage_states in Step 2.0) |
 | `agent/hooks/pre_tool_use.py` | `start_stage()` wiring via `_extract_stage_from_prompt()` and `_start_pipeline_stage()` |
 | `agent/hooks/subagent_stop.py` | `complete_stage()` wiring via `_record_stage_on_parent()` |
 | `tests/unit/test_pipeline_state_machine.py` | State machine unit tests |
+| `tests/unit/test_sdlc_stage_query.py` | Stage query CLI tool unit tests |
 | `tests/unit/test_pre_tool_use_start_stage.py` | Stage extraction and start_stage wiring tests |
