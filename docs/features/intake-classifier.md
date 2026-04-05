@@ -62,7 +62,7 @@ Unlike the existing `classify_request_async()` (which runs fire-and-forget), the
 
 For non-reply interjections, the classifier finds the most recent active/running/dormant session in the same chat (by `updated_at` or `created_at`). No multi-session disambiguation -- just pick the most recent one.
 
-As of #619, the classifier also includes **pending** sessions within a 7-second recency window (`PENDING_MERGE_WINDOW_SECONDS`). This allows follow-up messages sent in quick succession to be recognized as interjections into pending sessions, rather than spawning competing sessions. Pending sessions older than 7 seconds are excluded to prevent unrelated messages from attaching to stale jobs.
+As of #619, the classifier also includes **pending** sessions within an 8-second recency window (`PENDING_MERGE_WINDOW_SECONDS`, bumped from 7 to 8 in #705). This allows follow-up messages sent in quick succession to be recognized as interjections into pending sessions, rather than spawning competing sessions. Pending sessions older than 8 seconds are excluded to prevent unrelated messages from attaching to stale jobs. For sub-200ms arrivals (before Redis write completes), an in-memory coalescing guard provides coverage — see `docs/features/semantic-session-routing.md`.
 
 ### Race Condition Mitigation
 

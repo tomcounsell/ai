@@ -448,11 +448,11 @@ class TestPendingSessionSteering:
         age = time.time() - (_created or 0)
         assert age > PENDING_MERGE_WINDOW_SECONDS
 
-    def test_pending_merge_window_constant_is_7(self):
-        """The merge window constant should be 7 seconds."""
+    def test_pending_merge_window_constant_is_8(self):
+        """The merge window constant should be 8 seconds."""
         from bridge.telegram_bridge import PENDING_MERGE_WINDOW_SECONDS
 
-        assert PENDING_MERGE_WINDOW_SECONDS == 7
+        assert PENDING_MERGE_WINDOW_SECONDS == 8
 
     def test_multiple_steering_messages_into_pending(self):
         """Multiple follow-up messages should all queue into a pending session."""
