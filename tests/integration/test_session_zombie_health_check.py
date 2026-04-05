@@ -126,13 +126,12 @@ class TestHealthCheckOrphanFixPreservesStatus:
 
         child = completed_child_with_orphaned_parent
 
-        # Parent does not exist
-        parent_sessions = list(
-            AgentSession.query.filter(
-                agent_session_id="nonexistent-parent-id"
-            )
+        # Parent does not exist — verify by checking all sessions
+        all_sessions = list(AgentSession.query.all())
+        parent_exists = any(
+            s.agent_session_id == "nonexistent-parent-id" for s in all_sessions
         )
-        assert len(parent_sessions) == 0, "Test setup error: parent should not exist"
+        assert not parent_exists, "Test setup error: parent should not exist"
 
         await _agent_session_hierarchy_health_check()
 
