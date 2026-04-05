@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: Shipped
 type: bug
 appetite: Small
 owner: Valor
@@ -107,20 +107,20 @@ No prerequisites — this work has no external dependencies. All changes are to 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] The in-memory coalescing guard must be wrapped in try/except so failures fall through to normal session creation (match existing pattern at lines 1232-1245)
-- [ ] Verify that `push_steering_message()` failures on a not-yet-created AgentSession don't crash the handler
+- [x] The in-memory coalescing guard must be wrapped in try/except so failures fall through to normal session creation (match existing pattern at lines 1232-1245)
+- [x] Verify that `push_steering_message()` failures on a not-yet-created AgentSession don't crash the handler
 
 ### Empty/Invalid Input Handling
-- [ ] Test with empty `chat_id` — guard should not match
-- [ ] Test with `clean_text` being empty string — should still coalesce (message content doesn't affect routing)
+- [x] Test with empty `chat_id` — guard should not match
+- [x] Test with `clean_text` being empty string — should still coalesce (message content doesn't affect routing)
 
 ### Error State Rendering
-- [ ] If coalescing guard fails silently, the user gets a normal session (degraded but functional) — no broken error state visible
+- [x] If coalescing guard fails silently, the user gets a normal session (degraded but functional) — no broken error state visible
 
 ## Test Impact
 
-- [ ] `tests/integration/test_steering.py::test_pending_merge_window_constant_is_7` — UPDATE: change assertion from `== 7` to `== 8`
-- [ ] `tests/integration/test_steering.py` — UPDATE: all tests referencing `PENDING_MERGE_WINDOW_SECONDS` will import the updated value dynamically, so they should pass without changes (they already use the imported constant, not a hardcoded 7)
+- [x] `tests/integration/test_steering.py::test_pending_merge_window_constant_is_7` — UPDATE: change assertion from `== 7` to `== 8`
+- [x] `tests/integration/test_steering.py` — UPDATE: all tests referencing `PENDING_MERGE_WINDOW_SECONDS` will import the updated value dynamically, so they should pass without changes (they already use the imported constant, not a hardcoded 7)
 - No tests import `is_semantic_routing_enabled` — verified by grep (only `bridge/session_router.py` and `bridge/telegram_bridge.py` reference it)
 
 ## Rabbit Holes
@@ -171,24 +171,24 @@ No agent integration required — this is a bridge-internal change. The fix modi
 
 ## Documentation
 
-- [ ] Update `docs/features/semantic-session-routing.md` to remove feature flag references and document always-on behavior
-- [ ] Remove `SEMANTIC_ROUTING` row from configuration table in `docs/features/semantic-session-routing.md`
-- [ ] Add entry about the in-memory coalescing guard to `docs/features/semantic-session-routing.md`
-- [ ] No new feature doc needed — this extends existing documentation
+- [x] Update `docs/features/semantic-session-routing.md` to remove feature flag references and document always-on behavior
+- [x] Remove `SEMANTIC_ROUTING` row from configuration table in `docs/features/semantic-session-routing.md`
+- [x] Add entry about the in-memory coalescing guard to `docs/features/semantic-session-routing.md`
+- [x] No new feature doc needed — this extends existing documentation
 
 ## Success Criteria
 
-- [ ] Semantic routing runs on every non-reply message without requiring env var opt-in
-- [ ] `is_semantic_routing_enabled()` function and `SEMANTIC_ROUTING` env var references are removed
-- [ ] Two messages sent to the same chat within 8 seconds coalesce into a single session, even when arriving <200ms apart
-- [ ] Second message receives "Adding to current task" acknowledgment
-- [ ] `PENDING_MERGE_WINDOW_SECONDS` is 8
-- [ ] In-memory coalescing guard does not leak memory (stale entries cleaned up)
-- [ ] Existing steering tests pass (with constant updated from 7 to 8)
-- [ ] New test covers the sub-200ms race condition scenario
-- [ ] `docs/features/semantic-session-routing.md` updated to reflect always-on behavior
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] Semantic routing runs on every non-reply message without requiring env var opt-in
+- [x] `is_semantic_routing_enabled()` function and `SEMANTIC_ROUTING` env var references are removed
+- [x] Two messages sent to the same chat within 8 seconds coalesce into a single session, even when arriving <200ms apart
+- [x] Second message receives "Adding to current task" acknowledgment
+- [x] `PENDING_MERGE_WINDOW_SECONDS` is 8
+- [x] In-memory coalescing guard does not leak memory (stale entries cleaned up)
+- [x] Existing steering tests pass (with constant updated from 7 to 8)
+- [x] New test covers the sub-200ms race condition scenario
+- [x] `docs/features/semantic-session-routing.md` updated to reflect always-on behavior
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
