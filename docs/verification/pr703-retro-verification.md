@@ -1,7 +1,7 @@
 # Retroactive SDLC verification: PR #703 (#700)
 
 Verification performed after emergency merge (pipeline tracking lost to `kill --all`).
-GitHub issue comment was attempted but the integration token could not add comments; this file is the audit trail.
+GitHub issue comment was attempted but the integration token could not add comments; this file is the audit trail. Landed via PR #718.
 
 ## TEST (do-test equivalent)
 
