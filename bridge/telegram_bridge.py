@@ -1025,6 +1025,31 @@ async def main():
                 session_id = f"tg_{project_key}_{event.chat_id}_{message.id}"
                 logger.info(f"[routing] Session {session_id} (continuation=False)")
 
+            # Terminal-status guard on intake path (#730).
+            # If routing matched an existing session_id but that session has since
+            # reached a terminal status (completed/failed/killed/abandoned/cancelled),
+            # generate a fresh session_id instead of re-enqueuing the terminal session.
+            # This prevents _mark_superseded() from converting completed→superseded,
+            # which would re-activate the session for the worker and cause the
+            # completed→superseded→pending→running→completed cycling bug.
+            # Skipped for reply-to messages — those intentionally resume a prior session.
+            if not (is_reply_to_valor and message.reply_to_msg_id):
+                try:
+                    from models.agent_session import AgentSession
+                    from models.session_lifecycle import TERMINAL_STATUSES
+
+                    existing = list(AgentSession.query.filter(session_id=session_id))
+                    if existing and existing[0].status in TERMINAL_STATUSES:
+                        old_session_id = session_id
+                        session_id = f"tg_{project_key}_{event.chat_id}_{message.id}"
+                        logger.info(
+                            f"[routing] Intake terminal guard: session {old_session_id} "
+                            f"is terminal ({existing[0].status}), forcing fresh session "
+                            f"{session_id}"
+                        )
+                except Exception as e:
+                    logger.debug(f"Intake terminal guard check failed (non-fatal): {e}")
+
             # Set in-memory coalescing guard EARLY, before any await calls.
             # This bridges the Redis visibility gap for rapid-fire messages
             # (<200ms apart). Must be set here so Message 2's guard check
@@ -1273,10 +1298,7 @@ async def main():
                 if telegram_chat_id in _recent_session_by_chat:
                     guard_session_id, guard_ts = _recent_session_by_chat[telegram_chat_id]
                     guard_age = now_ts - guard_ts
-                    if (
-                        guard_age <= PENDING_MERGE_WINDOW_SECONDS
-                        and guard_session_id != session_id
-                    ):
+                    if guard_age <= PENDING_MERGE_WINDOW_SECONDS and guard_session_id != session_id:
                         # Found a recent session in the in-memory guard — coalesce
                         from models.agent_session import AgentSession
 

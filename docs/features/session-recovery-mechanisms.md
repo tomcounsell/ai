@@ -1,14 +1,14 @@
 # Session Recovery Mechanisms
 
-Catalogue of all 7 session recovery mechanisms, their triggers, terminal status safety, and guard implementations.
+Catalogue of all 8 session recovery mechanisms, their triggers, terminal status safety, and guard implementations.
 
 ## Overview
 
-The session system has 7 mechanisms that can revive, recover, or re-enqueue sessions. After the zombie loop fix (PR #703) and lifecycle consolidation (PR #721), a systematic audit (issue #723) verified that all mechanisms respect terminal session states.
+The session system has 8 mechanisms that can revive, recover, or re-enqueue sessions. After the zombie loop fix (PR #703) and lifecycle consolidation (PR #721), a systematic audit (issue #723) verified that all mechanisms respect terminal session states. PR #730 added the intake path terminal guard (8th mechanism).
 
 **Terminal statuses**: `completed`, `failed`, `killed`, `abandoned`, `cancelled`
 
-## Active Mechanisms (5)
+## Active Mechanisms (6)
 
 ### 1. Startup Recovery (`_recover_interrupted_agent_sessions_startup`)
 
@@ -60,9 +60,19 @@ The session system has 7 mechanisms that can revive, recover, or re-enqueue sess
 | Terminal safety | **Guarded** -- checks `session_status in TERMINAL_STATUSES` (all 5 statuses) |
 | Guard | First check in function: `if session_status in _TERMINAL_STATUSES` |
 
+### 6. Message Intake Path (`handle_new_message` / `_push_agent_session`)
+
+| Property | Value |
+|----------|-------|
+| Location | `bridge/telegram_bridge.py` |
+| Trigger | New Telegram message received (non-reply-to) |
+| What it does | Resolves the current session for the thread, calls `enqueue_agent_session()` to add a new work item |
+| Terminal safety | **Guarded** -- intake terminal guard |
+| Guard | Before calling `enqueue_agent_session()`, checks `session.status in TERMINAL_STATUSES`; if terminal, skips enqueue and creates a fresh session instead. Reply-to messages bypass the guard intentionally (explicit resumption of a prior session). |
+
 ## Confirmed Safe Mechanisms (2)
 
-### 6. Session Watchdog
+### 7. Session Watchdog
 
 | Property | Value |
 |----------|-------|
@@ -72,7 +82,7 @@ The session system has 7 mechanisms that can revive, recover, or re-enqueue sess
 | Terminal safety | **Safe by design** -- only sets flags on the running session, never mutates status. The flag feeds into `determine_delivery_action()` which routes to `deliver` instead of `nudge`. |
 | Guard | N/A (no status mutation) |
 
-### 7. Bridge Watchdog
+### 8. Bridge Watchdog
 
 | Property | Value |
 |----------|-------|
@@ -93,8 +103,9 @@ The `transition_status()` function in `models/session_lifecycle.py` now has a `r
 
 | Caller | Transition | Reason |
 |--------|-----------|--------|
-| `_mark_superseded()` in `enqueue_agent_session()` | `completed->superseded` | Intentional bookkeeping when a new session replaces an old one |
 | `.claude/hooks/user_prompt_submit.py` | `completed->running` | User types new prompt into a completed local session |
+
+Note: `_mark_superseded()` previously passed `reject_from_terminal=False` to convert `completed->superseded`. This override was removed by PR #730 as defense-in-depth — `completed` sessions now remain in their terminal state rather than being re-activated as `superseded`.
 
 All other callers use the default `reject_from_terminal=True`.
 
@@ -130,6 +141,13 @@ All mechanisms are covered by `tests/unit/test_recovery_respawn_safety.py`:
 | `test_startup_recovery_only_queries_running` | startup recovery | Only queries running, not terminal |
 | `test_watchdog_unhealthy_flag_routes_to_deliver` | session watchdog | Flag routes to deliver, not nudge |
 | `test_bridge_watchdog_has_no_agent_session_import` | bridge watchdog | No AgentSession imports |
+| `TestIntakePathTerminalGuard::test_guard_fires_for_each_terminal_status` | intake path (mechanism 8) | All 5 terminal statuses trigger guard |
+| `TestIntakePathTerminalGuard::test_guard_does_not_fire_for_non_terminal_sessions` | intake path | Non-terminal sessions pass through unblocked |
+| `TestIntakePathTerminalGuard::test_guard_skipped_for_reply_to_messages` | intake path | Reply-to bypasses guard (explicit resumption) |
+| `TestIntakePathTerminalGuard::test_guard_falls_back_gracefully_on_exception` | intake path | Guard failure is non-fatal |
+| `TestIntakePathTerminalGuard::test_guard_present_in_telegram_bridge` | intake path | Structural: guard code present in bridge |
+| `TestMarkSupersededTerminalGuard::test_completed_to_superseded_is_now_rejected` | _mark_superseded defense-in-depth | completed→superseded now rejected |
+| `TestMarkSupersededTerminalGuard::test_mark_superseded_kwarg_removed_from_source` | _mark_superseded defense-in-depth | Structural: override kwarg absent from source |
 
 ## Related
 
