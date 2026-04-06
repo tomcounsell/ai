@@ -53,11 +53,24 @@ The original 100ms sleep relied on `_pop_agent_session()` (which uses `async_fil
 
 ## Startup Session Cleanup and Recovery
 
-At startup, two cleanup passes run before session processing begins:
+At startup, two cleanup passes run before session processing begins. These are called exclusively from `worker/__main__.py` — the bridge does not call them.
 
 1. **Corrupted session cleanup** (`cleanup_corrupted_agent_sessions()`): Detects sessions with invalid IDs (e.g., length 60 instead of expected 32 for uuid4) or sessions whose `.save()` raises `ModelException`. These are deleted directly (with fallback to raw Redis key deletion), then `AgentSession.rebuild_indexes()` clears orphaned index entries. Also runs hourly as the `agent-session-cleanup` reflection and during `/update`.
 
-2. **Interrupted session recovery** (`_recover_interrupted_agent_sessions_startup()`): Resets stale running sessions to pending with high priority. Sessions started within the last `AGENT_SESSION_HEALTH_MIN_RUNNING` seconds (300s) are skipped — they may have been picked up by a worker in the current process before startup recovery fired. Sessions with `started_at=None` (legacy/corrupt) are always recovered. Uses the same timing guard as the periodic health check to prevent orphaning SDK subprocesses (issue #727).
+2. **Interrupted session recovery** (`_recover_interrupted_agent_sessions_startup()`): Resets stale running sessions to pending with high priority. Sessions started within the last `AGENT_SESSION_HEALTH_MIN_RUNNING` seconds (300s) are skipped — they may have been picked up by a worker in the current process before startup recovery fired. Sessions with `started_at=None` (missing or corrupt) are always recovered. Uses the same timing guard as the periodic health check to prevent orphaning SDK subprocesses (issue #727).
+
+3. **Orphaned process cleanup** (`_cleanup_orphaned_claude_processes()`): Kills Claude Agent SDK subprocesses from prior worker runs whose PPID is 1 (orphaned by parent death). Called from `worker/__main__.py` at startup after session recovery. Defined in `agent/agent_session_queue.py` so it is available to the worker without importing from the bridge.
+
+### Caller: Worker Only
+
+The following execution functions are called exclusively from `worker/__main__.py`:
+- `_ensure_worker(chat_id)` — spawns per-chat worker loops
+- `_recover_interrupted_agent_sessions_startup()` — startup session recovery
+- `_agent_session_health_loop()` — background health monitor
+- `_cleanup_orphaned_claude_processes()` — kill orphaned SDK subprocesses
+- `AgentSession.rebuild_indexes()` — repair Redis index entries
+
+The bridge only calls `enqueue_agent_session()` and `register_callbacks()`. See [Bridge/Worker Architecture](bridge-worker-architecture.md).
 
 ## Revival Chat Scoping Fix
 

@@ -5,10 +5,11 @@ Serializes agent work per project working directory so git operations
 never conflict. Agent runs directly in the project's working directory.
 
 This module has no module-level bridge/ imports and can be used by both
-the Telegram bridge (embedded worker) and the standalone worker
-(python -m worker). Output routing uses the OutputHandler protocol
-defined in agent/output_handler.py, with FileOutputHandler as fallback
-when no bridge callbacks are registered.
+the Telegram bridge (I/O only) and the standalone worker (python -m worker).
+The execution functions live here and are called by the standalone worker;
+the bridge handles Telegram I/O and registers output callbacks.
+Output routing uses the OutputHandler protocol defined in agent/output_handler.py,
+with FileOutputHandler as fallback when no bridge callbacks are registered.
 
 Architecture:
 - AgentSession: unified popoto Model persisted in Redis
@@ -2988,6 +2989,88 @@ async def cleanup_stale_branches_all_projects() -> list[str]:
         except Exception as e:
             logger.error("[reflection] Branch cleanup failed for %s: %s", project_key, e)
     return all_cleaned
+
+
+def _cleanup_orphaned_claude_processes() -> int:
+    """Kill orphaned Claude Code CLI subprocesses from prior worker/bridge runs.
+
+    On process restart, SDK subprocesses from the old process may still be alive
+    because Python only cancels asyncio tasks (not OS processes).
+    These zombies block new workers via _ensure_worker's .done() check and
+    consume resources.
+
+    Finds all 'claude' processes whose parent is PID 1 (orphaned), then
+    kills them with SIGTERM/SIGKILL.
+
+    Returns the number of processes killed.
+    """
+    logger = logging.getLogger(__name__)
+    killed = 0
+    current_pid = os.getpid()
+
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "claude_agent_sdk/_bundled/claude"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return 0
+
+        pids = result.stdout.strip().split("\n")
+        for pid_str in pids:
+            try:
+                pid = int(pid_str.strip())
+                if pid == current_pid:
+                    continue
+
+                # Check parent PID — if PPID is 1 (orphaned), it's stale
+                ppid_result = subprocess.run(
+                    ["ps", "-o", "ppid=", "-p", str(pid)],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                if ppid_result.returncode != 0:
+                    continue
+
+                ppid = int(ppid_result.stdout.strip())
+
+                # Only kill if truly orphaned (PPID=1, meaning parent died)
+                if ppid != 1:
+                    continue
+
+                logger.warning(
+                    "[cleanup] Killing orphaned Claude subprocess PID %d (PPID=%d)",
+                    pid,
+                    ppid,
+                )
+                os.kill(pid, signal.SIGTERM)
+                # Wait up to 3 seconds for graceful exit
+                for _ in range(6):
+                    time.sleep(0.5)
+                    try:
+                        os.kill(pid, 0)
+                    except ProcessLookupError:
+                        break
+                else:
+                    logger.warning("[cleanup] Force-killing Claude subprocess PID %d", pid)
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                killed += 1
+
+            except (ValueError, ProcessLookupError, PermissionError) as e:
+                logger.debug("[cleanup] Could not kill PID %s: %s", pid_str, e)
+
+    except subprocess.TimeoutExpired:
+        logger.warning("[cleanup] Timeout scanning for orphaned Claude processes")
+    except Exception as e:
+        logger.debug("[cleanup] Error scanning for orphaned processes: %s", e)
+
+    return killed
 
 
 # === CLI Entry Point ===

@@ -4,7 +4,7 @@ Standalone worker process for processing AgentSession records from Redis without
 
 ## Overview
 
-The worker extracts the session execution engine from the bridge monolith into an independently runnable service. Developer workstations run just the worker. Bridge machines run bridge + embedded worker (backward compatible). Future platform bridges (email, Slack) become thin I/O adapters that enqueue work to the same shared worker.
+The worker extracts the session execution engine from the bridge monolith into an independently runnable service. Developer workstations run just the worker. Bridge machines run both bridge and worker: the bridge handles Telegram I/O only, and the worker processes all sessions. Future platform bridges (email, Slack) become thin I/O adapters that enqueue work to the same shared worker.
 
 ## Architecture
 
@@ -18,15 +18,15 @@ The worker extracts the session execution engine from the bridge monolith into a
     ┌─────────▼──┐  ┌──────▼─────┐  ┌──▼──────────┐
     │   Bridge    │  │  Standalone │  │  Future      │
     │  (Telegram  │  │   Worker   │  │  Bridge      │
-    │   + worker) │  │            │  │  (email/etc) │
+    │   I/O only) │  │            │  │  (email/etc) │
     └─────────────┘  └────────────┘  └──────────────┘
 ```
 
 ### Entry Points
 
-- **Standalone worker**: `python -m worker` -- processes sessions, writes output to log files
-- **Bridge + embedded worker**: `python bridge/telegram_bridge.py` -- processes sessions, sends output via Telegram
-- **Both paths share**: `agent/agent_session_queue.py` for queue logic, `agent/output_handler.py` for output routing
+- **Standalone worker**: `python -m worker` -- processes sessions, writes output to log files (or sends via Telegram when callbacks are registered)
+- **Bridge** (I/O only): `python bridge/telegram_bridge.py` -- handles Telegram I/O, registers output callbacks, enqueues sessions; requires a running worker to process them
+- **Both processes share**: `agent/agent_session_queue.py` for queue logic, `agent/output_handler.py` for output routing
 
 ## OutputHandler Protocol
 
@@ -66,7 +66,7 @@ The worker supports two modes controlled by the `VALOR_WORKER_MODE` environment 
 | Mode | Env Var | Behavior | Use Case |
 |------|---------|----------|----------|
 | **Standalone** | `VALOR_WORKER_MODE=standalone` | Waits indefinitely for new work; never exits on empty queue | launchd service, persistent daemon |
-| **Bridge** | Not set (default) | Exits after drain timeout (1.5s) when queue is empty | Bridge's embedded worker |
+| **Bridge** | Not set (default) | Exits after drain timeout (1.5s) when queue is empty | Worker on bridge machines (short-lived drain after enqueue) |
 
 Standalone mode is set automatically by `python -m worker`. In this mode, nudge re-enqueues are processed within milliseconds (no 10s launchd restart gap), enabling full SDLC pipeline execution end-to-end.
 
@@ -136,12 +136,12 @@ The worker is installed after reflections and before stale session cleanup in th
 | Machine Type | Services | Output |
 |-------------|----------|--------|
 | Dev workstation | Worker only | File logs |
-| Bridge machine | Bridge + embedded worker | Telegram |
+| Bridge machine | Bridge + Worker (both required) | Telegram |
 | Both | Health monitor runs in worker process | Session recovery |
 
-### Constraint
+### Requirement
 
-Do not run both the standalone worker and the bridge on the same machine for the same project. They would both start worker loops for the same chat_id without coordination (the `_active_workers` dict is process-local). Bridge machines should use the bridge's embedded worker.
+Bridge machines MUST run both the bridge and the standalone worker. The bridge is I/O only and does not process sessions on its own. Without the worker running alongside it, sessions will be enqueued but never executed.
 
 ## Import Decoupling
 

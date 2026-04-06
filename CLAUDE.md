@@ -237,17 +237,20 @@ The standard flow from conversation to shipped feature:
 ## System Architecture
 
 ```
-Telegram → Python Bridge (Telethon) → ChatSession (read-only, PM persona)
+Telegram → Python Bridge (Telethon) → Enqueues AgentSession to Redis (I/O only)
               (bridge/telegram_bridge.py)     → Nudge loop (bridge has no SDLC awareness)
-                                              → Spawns DevSession (full permissions, Dev persona)
-                                                    → Claude Agent SDK → Claude API
-                                                        (agent/sdk_client.py)
+                                              → Registers output callbacks for delivery
 
-Standalone Worker (python -m worker) → Same session execution engine
-              (worker/__main__.py)         → Processes AgentSession records from Redis
+Standalone Worker (python -m worker) → Sole session execution engine
+              (worker/__main__.py)         → Startup: index rebuild → recovery → orphan cleanup
+                                           → Spawns ChatSession (PM persona, read-only)
+                                               → Spawns DevSession (Dev persona, full permissions)
+                                                   → Claude Agent SDK → Claude API
+                                                       (agent/sdk_client.py)
                                            → Uses OutputHandler protocol (agent/output_handler.py)
                                            → FileOutputHandler fallback when no bridge callbacks
 ```
+See `docs/features/bridge-worker-architecture.md` for the full bridge/worker separation design.
 
 **Session Types** (see `docs/features/chat-dev-session-architecture.md`):
 - **PM Session** (`session_type="pm"`) - Orchestrates work, PM persona, read-only

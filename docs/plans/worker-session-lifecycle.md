@@ -60,7 +60,7 @@ The nudge cycle data flow is the core path this plan modifies:
 - PM check-ins: 1 (scope confirmation)
 - Review rounds: 1
 
-The changes are concentrated in two files (`worker/__main__.py` and `agent/agent_session_queue.py`) with well-defined behavior boundaries. The complexity comes from preserving backward compatibility with the bridge's embedded worker.
+The changes are concentrated in two files (`worker/__main__.py` and `agent/agent_session_queue.py`) with well-defined behavior boundaries.
 
 ## Prerequisites
 
@@ -72,7 +72,7 @@ No prerequisites — this work uses only existing infrastructure (Redis, asyncio
 
 - **Persistent worker mode**: `_worker_loop` waits indefinitely on the asyncio.Event when queue is empty (no timeout exit) when `VALOR_WORKER_MODE=standalone` is set
 - **Graceful SIGTERM handler**: On SIGTERM, set a shutdown flag that `_worker_loop` checks after completing the current session — finish work, then exit cleanly
-- **Backward-compatible bridge mode**: The bridge's embedded worker retains existing drain-timeout-exit behavior unchanged
+- **Bridge is I/O only**: The bridge handles Telegram communication; all session execution is in the standalone worker
 
 ### Flow
 
@@ -149,7 +149,7 @@ No prerequisites — this work uses only existing infrastructure (Redis, asyncio
 - Telegram output from the standalone worker — output goes to `FileOutputHandler` only
 - Multi-process worker clustering — single process per machine
 - Changes to `determine_delivery_action()` logic — nudge decisions are unchanged
-- Changes to the bridge's embedded worker behavior — must remain backward compatible
+- Changes to bridge behavior — bridge is I/O only, no execution logic
 - Session priority rebalancing during shutdown — pending sessions keep their current priority
 
 ## Update System
