@@ -253,8 +253,18 @@ No agent integration required -- `valor-telegram` is a human-facing CLI tool. Th
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
-| CONCERN | [agent-type] | [The concern raised] | [How/whether it was addressed] |
+<!-- Populated by /do-plan-critique (war room) on 2026-04-06. -->
+
+| Severity | Critic | Finding | Resolution |
+|----------|--------|---------|------------|
+| BLOCKER | Skeptic, Simplifier | `--async` flag in Architectural Impact contradicts Rabbit Holes and No-Gos which both exclude delivery confirmation. Builder cannot know what to implement. | Remove `--async` from Architectural Impact; all sends are fire-and-forget. |
+| CONCERN | Simplifier | Task 1 says "copy pattern from send_telegram.py" for `_linkify_text()` -- duplicates code instead of importing. | Import from `tools.send_telegram` or call `bridge.formatting.linkify_references` directly. |
+| CONCERN | Skeptic | "Truncate at sentence boundary" is novel logic not in `send_telegram.py` (which uses simple char truncation). Plan underestimates this subtask. | Either match `send_telegram.py`'s simple truncation or add explicit subtask with test cases. |
+| CONCERN | Adversary | `cli-{int(time.time())}` session ID has second-level granularity; rapid invocations collide. | Use milliseconds or UUID fragment for collision resistance. |
+| NIT | Operator | Verification grep for "No direct Telethon in send" expects output "contains 1" but file already has 3+ matches from read path. | Narrow grep to `cmd_send` function scope or adjust expected output. |
+| NIT | User | Risk 1 (bridge down = warning after queue) and Solution item 5 (Redis down = hard error) are different failure modes but not clearly distinguished in tasks. | Clarify in Task 1: Redis failure = error exit, bridge down = warning after successful queue. |
+
+**Verdict: NEEDS REVISION** -- 1 blocker (--async contradiction), 3 concerns, 2 nits.
 
 ---
 
