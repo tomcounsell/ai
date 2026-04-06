@@ -18,6 +18,10 @@ The main module (`bridge/telegram_bridge.py`) serves as the entry point and coor
 - Loads configuration and propagates it to sub-modules
 - Contains the `handler()` event callback and `main()` startup function
 - Maintains backward-compatible imports so existing code continues to work
+- Enqueues `AgentSession` records to Redis via `enqueue_agent_session()`
+- Registers output callbacks for session reply delivery
+
+**The bridge does not manage session execution.** Session lifecycle (recovery, worker spawning, orphan cleanup, health loop) is exclusively the worker's responsibility. See [Bridge/Worker Architecture](bridge-worker-architecture.md) for the full separation design.
 
 ## Import Guidelines
 
