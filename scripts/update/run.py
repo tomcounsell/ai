@@ -21,8 +21,6 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from datetime import UTC  # noqa: E402
-
 from scripts.update import (  # noqa: E402
     cal_integration,
     deps,
@@ -142,8 +140,17 @@ def log(msg: str, verbose: bool = True, always: bool = False) -> None:
         print(line)
 
 
-def _cleanup_stale_sessions(project_dir: Path, age_minutes: int = 30) -> int:
+def _cleanup_stale_sessions(project_dir: Path, age_minutes: int = 120) -> int:
     """Kill running/pending sessions with no live process.
+
+    Age threshold is 120 minutes (raised from 30) to reduce false positives.
+    Sessions whose chat_id has a live entry in _active_workers are always skipped
+    regardless of age — the worker registry is authoritative for in-process liveness.
+
+    NOTE: _active_workers is only populated when the update script runs inside the
+    same process as the queue (e.g., bridge in-process update). When the update script
+    runs as a standalone subprocess (e.g., CLI invocation), _active_workers will be
+    empty — the 120-minute age threshold acts as the sole guard in that case.
 
     Terminal sessions (killed/abandoned/failed/completed) are preserved
     for reflections to analyze — reflections handles its own 90-day expiry.
@@ -153,8 +160,21 @@ def _cleanup_stale_sessions(project_dir: Path, age_minutes: int = 30) -> int:
     import time
     from datetime import datetime
 
-    from agent.agent_session_queue import _extract_agent_session_fields
     from models.agent_session import AgentSession
+    from models.session_lifecycle import finalize_session
+
+    # Attempt to import the live-worker registry; fails gracefully if the queue
+    # module is not initialized in this process (standalone subprocess invocation).
+    try:
+        from agent.agent_session_queue import _active_workers as active_workers_registry
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "[update] Could not import _active_workers from agent_session_queue — "
+            "falling back to age-threshold-only cleanup (120 min)"
+        )
+        active_workers_registry = {}
 
     now = time.time()
     threshold = age_minutes * 60
@@ -163,6 +183,13 @@ def _cleanup_stale_sessions(project_dir: Path, age_minutes: int = 30) -> int:
     for status in ("running", "pending"):
         sessions = list(AgentSession.query.filter(status=status))
         for s in sessions:
+            # Skip sessions with a live worker in the registry
+            chat_id = getattr(s, "chat_id", None)
+            if chat_id and chat_id in active_workers_registry:
+                worker = active_workers_registry[chat_id]
+                if worker is not None and not worker.done():
+                    continue  # live worker exists — do not kill
+
             created = s.created_at
             if not created:
                 continue
@@ -183,22 +210,26 @@ def _cleanup_stale_sessions(project_dir: Path, age_minutes: int = 30) -> int:
             if age < threshold:
                 continue
 
-            # Check if process is still alive
-            pid = getattr(s, "pid", None)
-            if pid:
-                try:
-                    os.kill(int(pid), 0)
-                    continue  # process alive, skip
-                except (OSError, ValueError):
-                    pass  # process dead
+            # Route through lifecycle layer so hooks fire (log_lifecycle_transition,
+            # auto_tag_session, parent finalization). skip_checkpoint=True because
+            # stale cleanup runs outside the normal worker context and branch state
+            # may be unavailable.
+            try:
+                finalize_session(
+                    s,
+                    "killed",
+                    reason="stale cleanup (no live process)",
+                    skip_checkpoint=True,
+                )
+                killed_count += 1
+            except Exception as exc:
+                import logging
 
-            # Transition via delete-and-recreate (Popoto KeyField pattern)
-            fields = _extract_agent_session_fields(s)
-            s.delete()
-            fields["status"] = "killed"
-            fields["completed_at"] = datetime.now(tz=UTC)
-            AgentSession.create(**fields)
-            killed_count += 1
+                logging.getLogger(__name__).warning(
+                    "[update] Failed to finalize stale session %s: %s",
+                    getattr(s, "agent_session_id", "?"),
+                    exc,
+                )
 
     return killed_count
 

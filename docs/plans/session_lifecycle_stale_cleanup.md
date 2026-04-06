@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Implemented
 type: bug
 appetite: Medium
 owner: Valor
