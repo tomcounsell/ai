@@ -57,7 +57,7 @@ At startup, two cleanup passes run before session processing begins:
 
 1. **Corrupted session cleanup** (`cleanup_corrupted_agent_sessions()`): Detects sessions with invalid IDs (e.g., length 60 instead of expected 32 for uuid4) or sessions whose `.save()` raises `ModelException`. These are deleted directly (with fallback to raw Redis key deletion), then `AgentSession.rebuild_indexes()` clears orphaned index entries. Also runs hourly as the `agent-session-cleanup` reflection and during `/update`.
 
-2. **Interrupted session recovery** (`_recover_interrupted_agent_sessions_startup()`): Resets stale running sessions to pending with high priority. Sessions started within the last `AGENT_SESSION_HEALTH_MIN_RUNNING` seconds (300s) are skipped — they may have been picked up by a worker in the current process before startup recovery fired. Sessions with `started_at=None` (legacy/corrupt) are always recovered. Uses the same timing guard as the periodic health check to prevent orphaning SDK subprocesses (issue #727).
+2. **Interrupted session recovery** (`_recover_interrupted_agent_sessions_startup()`): Resets all running sessions to pending with high priority, since any running session at startup is by definition orphaned from the previous process.
 
 ## Revival Chat Scoping Fix
 
