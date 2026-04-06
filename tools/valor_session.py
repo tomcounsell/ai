@@ -257,6 +257,7 @@ def cmd_list(args: argparse.Namespace) -> int:
                 {
                     "session_id": s.session_id,
                     "status": s.status,
+                    "priority": getattr(s, "priority", None) or "normal",
                     "session_type": getattr(s, "session_type", None),
                     "role": getattr(s, "role", None),
                     "auto_continue_count": s.auto_continue_count,
@@ -274,21 +275,24 @@ def cmd_list(args: argparse.Namespace) -> int:
 
         print(f"Sessions ({len(unique)}):")
         print()
-        hdr = f"{'Session ID':<36} {'Status':<12} {'Type':<10} {'Nudges':>6}"
+        hdr = f"{'Session ID':<36} {'Status':<12} {'Priority':<8} {'Type':<10} {'Nudges':>6}"
         hdr += f" {'Created':<20} {'Message':<40}"
         print(hdr)
-        print("-" * 128)
+        print("-" * 136)
 
         for s in unique:
             sid = s.session_id or "—"
             if len(sid) > 34:
                 sid = sid[:31] + "..."
             status = s.status or "—"
+            priority = getattr(s, "priority", None) or "normal"
             stype = getattr(s, "session_type", None) or getattr(s, "role", None) or "—"
             nudges = s.auto_continue_count or 0
             created = _format_ts(s.created_at)
             msg = (s.message_text or "")[:38]
-            print(f"{sid:<36} {status:<12} {stype:<10} {nudges:>6} {created:<20} {msg:<40}")
+            print(
+                f"{sid:<36} {status:<12} {priority:<8} {stype:<10} {nudges:>6} {created:<20} {msg:<40}"
+            )
 
         return 0
 

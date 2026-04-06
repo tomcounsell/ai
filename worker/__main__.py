@@ -102,15 +102,20 @@ def _load_projects(project_filter: str | None = None) -> dict:
 async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     """Main worker coroutine.
 
+    Startup sequence (deterministic):
     1. Registers FileOutputHandler for each project
-    2. Recovers interrupted sessions
-    3. Starts worker loops per project
-    4. Starts health monitor
-    5. Waits for shutdown signal
+    2. Rebuilds AgentSession indexes (idempotent SCAN-based, production-safe)
+    3. Cleans up corrupted sessions
+    4. Recovers interrupted sessions
+    5. Kills orphaned Claude subprocesses from prior runs
+    6. Starts worker loops for pending sessions
+    7. Starts health monitor
+    8. Waits for shutdown signal
     """
     from agent.agent_session_queue import (
         _active_workers,
         _agent_session_health_loop,
+        _cleanup_orphaned_claude_processes,
         _ensure_worker,
         _recover_interrupted_agent_sessions_startup,
         cleanup_corrupted_agent_sessions,
@@ -143,17 +148,35 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
         register_callbacks(project_key, handler=handler)
         logger.info(f"[{project_key}] Registered FileOutputHandler")
 
-    # Clean up corrupted sessions before recovery (prevents error spam)
+    # Step 1: Rebuild AgentSession indexes (SCAN-based, production-safe)
+    # Cleans up stale index entries from crashed/expired sessions
+    try:
+        from models.agent_session import AgentSession
+
+        rebuilt = AgentSession.rebuild_indexes()
+        logger.info(f"Rebuilt AgentSession indexes ({rebuilt} records reindexed)")
+    except Exception as e:
+        logger.warning(f"AgentSession index rebuild failed (non-fatal): {e}")
+
+    # Step 2: Clean up corrupted sessions before recovery (prevents error spam)
     cleaned = cleanup_corrupted_agent_sessions()
     if cleaned:
         logger.info(f"Cleaned up {cleaned} corrupted session(s)")
 
-    # Recover any sessions that were running when the previous process died
+    # Step 3: Recover any sessions that were running when the previous process died
     recovered = _recover_interrupted_agent_sessions_startup()
     if recovered:
         logger.info(f"Recovered {recovered} interrupted session(s)")
 
-    # Start worker loops -- one per project's known chat_ids
+    # Step 4: Kill orphaned Claude Code CLI subprocesses from prior runs
+    try:
+        orphans_killed = _cleanup_orphaned_claude_processes()
+        if orphans_killed:
+            logger.info(f"Killed {orphans_killed} orphaned Claude Code subprocess(es)")
+    except Exception as e:
+        logger.warning(f"Orphaned process cleanup failed (non-fatal): {e}")
+
+    # Step 5: Start worker loops -- one per project's known chat_ids
     # Workers are started on-demand by _ensure_worker when sessions are enqueued.
     # For startup, we need to kick workers for any pending sessions.
     from models.agent_session import AgentSession
