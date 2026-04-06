@@ -1611,10 +1611,8 @@ async def _worker_loop(chat_id: str, event: asyncio.Event) -> None:
                     # deleted by the nudge fallback path, skip completion to avoid
                     # overwriting the nudge's status back to "completed".
                     try:
-                        fresh_sessions = list(
-                            AgentSession.query.filter(agent_session_id=session.agent_session_id)
-                        )
-                        if not fresh_sessions:
+                        fresh = AgentSession.get(session.agent_session_id)
+                        if not fresh:
                             logger.info(
                                 "[chat:%s] Session %s no longer exists in Redis "
                                 "(likely recreated by nudge fallback) — skipping "
@@ -1622,7 +1620,7 @@ async def _worker_loop(chat_id: str, event: asyncio.Event) -> None:
                                 chat_id,
                                 session.agent_session_id,
                             )
-                        elif fresh_sessions[0].status == "pending":
+                        elif fresh.status == "pending":
                             logger.info(
                                 "[chat:%s] Session %s has status 'pending' in Redis "
                                 "(nudge was enqueued) — skipping completion to "
