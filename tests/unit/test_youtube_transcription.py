@@ -11,7 +11,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -30,7 +29,8 @@ def make_caption_segments(text: str) -> list[dict]:
 
 @pytest.mark.asyncio
 async def test_process_youtube_url_caption_success():
-    """When YouTubeTranscriptApi.fetch() returns snippets, result is successful and context contains transcript."""
+    """When YouTubeTranscriptApi.fetch() returns snippets, result is successful and context
+    contains transcript."""
     expected_text = "Hello world this is a test transcript"
 
     mock_snippet = MagicMock()
@@ -104,7 +104,8 @@ async def test_process_youtube_url_caption_success_long_transcript():
 
 @pytest.mark.asyncio
 async def test_process_youtube_url_all_fail_path():
-    """When captions are disabled and Whisper is not configured, returns actionable failure context."""
+    """When captions are disabled and Whisper is not configured, returns actionable failure
+    context."""
     from youtube_transcript_api import TranscriptsDisabled
 
     mock_api_instance = MagicMock()
@@ -168,7 +169,10 @@ async def test_process_youtube_url_caption_import_error_fallback():
 @pytest.mark.asyncio
 async def test_enrichment_applies_yt_text_even_on_failure():
     """bridge/enrichment.py sets enriched_text = yt_enriched even when successful == 0."""
-    failure_context = "[YouTube video: transcript unavailable (captions not found; Whisper API not configured). To discuss this video, paste the transcript or a summary directly into the chat.]"
+    failure_context = (
+        "[YouTube video: transcript unavailable (captions not found; Whisper API not configured)."
+        " To discuss this video, paste the transcript or a summary directly into the chat.]"
+    )
     original_text = "Check this out https://www.youtube.com/watch?v=dQw4w9WgXcQ"
     enriched_with_failure = original_text + "\n\n" + failure_context
 
@@ -191,7 +195,9 @@ async def test_enrichment_applies_yt_text_even_on_failure():
         result = await enrich_message(
             telegram_client=None,
             message_text=original_text,
-            youtube_urls=json.dumps([("https://www.youtube.com/watch?v=dQw4w9WgXcQ", "dQw4w9WgXcQ")]),
+            youtube_urls=json.dumps(
+                [("https://www.youtube.com/watch?v=dQw4w9WgXcQ", "dQw4w9WgXcQ")]
+            ),
         )
 
     # The failure context MUST be in the enriched output
@@ -201,7 +207,8 @@ async def test_enrichment_applies_yt_text_even_on_failure():
 
 @pytest.mark.asyncio
 async def test_enrichment_applies_yt_text_on_success():
-    """bridge/enrichment.py sets enriched_text = yt_enriched when successful > 0 (existing behavior preserved)."""
+    """bridge/enrichment.py sets enriched_text = yt_enriched when successful > 0 (existing
+    behavior preserved)."""
     transcript_context = "[YouTube video - My Video transcript: Great content here]"
     original_text = "Check this out https://www.youtube.com/watch?v=abc123"
     enriched_with_transcript = original_text + "\n\n" + transcript_context
