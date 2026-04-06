@@ -128,6 +128,27 @@ AGENT_SESSION_HEALTH_MIN_RUNNING = (
 )
 
 
+def _ts(val, *, default=None):
+    """Convert datetime or float to Unix timestamp.
+
+    Used by startup recovery and health check to normalize started_at/created_at
+    values which may be datetime objects, floats, or None depending on Redis state.
+
+    Args:
+        val: A datetime, int/float timestamp, or None.
+        default: Value to return when val is None or unrecognized. Defaults to None.
+    """
+    if val is None:
+        return default
+    if isinstance(val, datetime):
+        if val.tzinfo is None:
+            val = val.replace(tzinfo=UTC)
+        return val.timestamp()
+    if isinstance(val, int | float):
+        return float(val)
+    return default
+
+
 # Fields to extract from AgentSession for delete-and-recreate pattern.
 # Excludes agent_session_id (AutoKeyField, auto-generated on create).
 _AGENT_SESSION_FIELDS = [
@@ -991,18 +1012,6 @@ def _recover_interrupted_agent_sessions_startup() -> int:
     now = time.time()
     cutoff = now - AGENT_SESSION_HEALTH_MIN_RUNNING
 
-    def _ts(val):
-        """Convert datetime or float to Unix timestamp."""
-        if val is None:
-            return None
-        if isinstance(val, datetime):
-            if val.tzinfo is None:
-                val = val.replace(tzinfo=UTC)
-            return val.timestamp()
-        if isinstance(val, int | float):
-            return float(val)
-        return None
-
     # Filter out recently-started sessions (they are not orphans from a dead process)
     stale_sessions = []
     skipped = 0
@@ -1096,18 +1105,6 @@ async def _agent_session_health_check() -> None:
     checked = 0
     recovered = 0
     workers_started = 0
-
-    def _ts(val):
-        """Convert datetime or float to Unix timestamp."""
-        if val is None:
-            return None
-        if isinstance(val, datetime):
-            if val.tzinfo is None:
-                val = val.replace(tzinfo=UTC)
-            return val.timestamp()
-        if isinstance(val, int | float):
-            return float(val)
-        return None
 
     # === Check RUNNING sessions_list ===
     running_sessions = list(AgentSession.query.filter(status="running"))
@@ -2974,15 +2971,6 @@ def _cli_show_status() -> None:
 
     now_ts = time.time()
 
-    def _to_ts_safe(val):
-        if val is None:
-            return 0.0
-        if isinstance(val, datetime):
-            return val.timestamp() if val.tzinfo else val.replace(tzinfo=UTC).timestamp()
-        if isinstance(val, int | float):
-            return float(val)
-        return 0.0
-
     for chat_key, sessions_group in sorted(by_chat.items()):
         project_key = sessions_group[0].project_key if sessions_group else chat_key
         print(f"\n=== {project_key} (chat: {chat_key}) ===")
@@ -2990,13 +2978,15 @@ def _cli_show_status() -> None:
         worker_status = "alive" if (worker and not worker.done()) else "DEAD/missing"
         print(f"  Worker: {worker_status}")
 
-        for session in sorted(sessions_group, key=lambda j: _to_ts_safe(j.created_at)):
+        for session in sorted(sessions_group, key=lambda j: _ts(j.created_at, default=0.0)):
             duration = ""
-            started_ts = _to_ts_safe(getattr(session, "started_at", None))
+            started_ts = _ts(getattr(session, "started_at", None), default=0.0)
             if session.status == "running" and started_ts:
                 duration = f" (running {format_duration(now_ts - started_ts)})"
             elif session.created_at:
-                duration = f" (queued {format_duration(now_ts - _to_ts_safe(session.created_at))})"
+                duration = (
+                    f" (queued {format_duration(now_ts - _ts(session.created_at, default=0.0))})"
+                )
 
             session_id = (getattr(session, "session_id", "") or "")[:12]
             corr_id = (getattr(session, "correlation_id", "") or "")[:8]
