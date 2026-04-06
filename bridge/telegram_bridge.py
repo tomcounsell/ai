@@ -1581,9 +1581,9 @@ async def main():
     async def _graceful_shutdown(tg_client):
         """Disconnect from Telegram and stop bridge-owned tasks.
 
-        Running sessions persist in Redis and will be recovered at next worker
-        startup by _recover_interrupted_agent_sessions_startup(). Orphaned Claude
-        subprocess cleanup is the worker's responsibility.
+        Running sessions persist in Redis and will be recovered at next worker startup.
+        Session recovery, orphaned process cleanup, and worker spawning are all
+        the worker's exclusive responsibility.
         """
         # Note: _active_workers is worker-process-local; bridge no longer manages workers.
 
