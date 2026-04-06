@@ -746,6 +746,11 @@ a:hover {
     gap: 6px;
     align-items: center;
 }
+.health-label {
+    font-size: 0.75rem;
+    color: var(--text-secondary, #888);
+    margin-right: 2px;
+}
 
 /* Page title (no nav) */
 .page-title {

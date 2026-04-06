@@ -326,6 +326,7 @@ def create_app() -> FastAPI:
             worker_label = "worker"
 
         return HTMLResponse(
+            f'<span class="health-label">Services</span>'
             f'<span class="badge badge-{bridge["status"]}">{bridge_label}</span>'
             f'<span class="badge badge-{worker["status"]}">{worker_label}</span>'
             f'<span class="badge badge-ok">web</span>'
