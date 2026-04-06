@@ -77,7 +77,7 @@ def determine_delivery_action(
         "drop"          — drop output (completion already sent)
         "deliver_already_completed" — deliver without nudge (session already done)
     """
-    if session_status == "completed":
+    if session_status in _TERMINAL_STATUSES:
         return "deliver_already_completed"
     if completion_sent:
         return "drop"
@@ -254,7 +254,10 @@ async def _push_agent_session(
             ]
             for old in old_completed:
                 transition_status(
-                    old, "superseded", reason=f"superseded by new session for {session_id}"
+                    old,
+                    "superseded",
+                    reason=f"superseded by new session for {session_id}",
+                    reject_from_terminal=False,
                 )
                 logger.info(
                     f"Marked old completed session {old.id} as superseded "
@@ -1750,6 +1753,18 @@ async def _enqueue_nudge(
         nudge_feedback: Nudge message sent to the agent.
     """
 
+    # Terminal status guard: re-read session status from Redis and bail if terminal.
+    # This makes _enqueue_nudge() self-defending rather than relying on caller
+    # discipline (e.g., determine_delivery_action() upstream).
+    current_status = getattr(session, "status", None)
+    if current_status in _TERMINAL_STATUSES:
+        logger.warning(
+            f"[{session.project_key}] _enqueue_nudge() called for session "
+            f"{session.session_id} in terminal status {current_status!r} — "
+            f"returning early to prevent respawn"
+        )
+        return
+
     logger.info(
         f"[{session.project_key}] Nudge message "
         f"({len(nudge_feedback)} chars): {nudge_feedback[:120]!r}"
@@ -1775,6 +1790,16 @@ async def _enqueue_nudge(
             f"— falling back to recreate from AgentSession metadata. "
             f"Diagnostics: {_diag}"
         )
+        # Fallback path terminal guard: this path bypasses transition_status()
+        # entirely (uses raw async_create), so it needs its own independent
+        # terminal status check. The session object we have is from when it was
+        # popped — re-check against the status we already read above.
+        if current_status in _TERMINAL_STATUSES:
+            logger.warning(
+                f"[{session.project_key}] Fallback recreate blocked: session "
+                f"{session.session_id} has terminal status {current_status!r}"
+            )
+            return
         # Fallback: recreate session preserving ALL metadata from the
         # underlying AgentSession that was loaded when the session was popped.
         # This prevents loss of context_summary, expectations, issue_url,
@@ -1804,6 +1829,17 @@ async def _enqueue_nudge(
         return
 
     session = sessions[0]
+
+    # Re-read guard: session status may have changed between the initial check
+    # and this point (e.g., another process finalized the session).
+    reread_status = getattr(session, "status", None)
+    if reread_status in _TERMINAL_STATUSES:
+        logger.warning(
+            f"[{session.project_key}] _enqueue_nudge() main path: session "
+            f"{session.session_id} is now in terminal status {reread_status!r} "
+            f"(changed since entry check) — returning early"
+        )
+        return
 
     # Use lifecycle module for consistent transition logging.
     from models.session_lifecycle import transition_status
@@ -2440,6 +2476,31 @@ def check_revival(project_key: str, working_dir: str, chat_id: str) -> dict | No
                         branches.append(branch)
     except Exception as e:
         logger.warning(f"[{project_key}] Redis revival check failed: {e}")
+
+    # Terminal-session filter: check if any terminal session exists for the same
+    # chat with a matching branch. If so, the work is done — skip revival for
+    # that branch to avoid respawning completed/failed work.
+    if branches:
+        try:
+            terminal_branches = set()
+            for t_status in _TERMINAL_STATUSES:
+                for t_session in AgentSession.query.filter(
+                    project_key=project_key, status=t_status
+                ):
+                    if str(t_session.chat_id) == chat_id_str:
+                        t_branch = _session_branch_name(t_session.session_id)
+                        terminal_branches.add(t_branch)
+            # Remove branches that have a terminal sibling
+            filtered = [b for b in branches if b not in terminal_branches]
+            if len(filtered) < len(branches):
+                removed = set(branches) - set(filtered)
+                logger.info(
+                    f"[{project_key}] Revival: filtered out {len(removed)} branch(es) "
+                    f"with terminal sessions: {removed}"
+                )
+            branches = filtered
+        except Exception as e:
+            logger.warning(f"[{project_key}] Terminal-session revival filter failed: {e}")
 
     # Verify branches actually exist in git (they may have been cleaned up)
     if branches:

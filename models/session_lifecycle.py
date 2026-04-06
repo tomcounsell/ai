@@ -132,13 +132,17 @@ def transition_status(
     session,
     new_status: str,
     reason: str = "",
+    *,
+    reject_from_terminal: bool = True,
 ) -> None:
     """Transition a session to a non-terminal status.
 
     Logs the lifecycle transition and updates the status.
 
-    Special case: completed->pending is allowed for session revival/auto-continue.
-    This is the only terminal->non-terminal transition permitted.
+    By default, rejects transitions from terminal statuses to prevent accidental
+    respawning of completed/failed/killed sessions. Callers that legitimately need
+    terminal->non-terminal transitions (e.g., _mark_superseded, revival) must pass
+    reject_from_terminal=False explicitly.
 
     Idempotent: if the session is already in the target state, logs and returns.
 
@@ -146,10 +150,13 @@ def transition_status(
         session: AgentSession instance to transition.
         new_status: Non-terminal status to set.
         reason: Human-readable reason for the transition.
+        reject_from_terminal: If True (default), raise ValueError when the session's
+            current status is terminal. Pass False for intentional terminal->non-terminal
+            transitions (e.g., completed->superseded, revival).
 
     Raises:
-        ValueError: If session is None or new_status is a terminal status
-            (use finalize_session() instead).
+        ValueError: If session is None, new_status is a terminal status,
+            or current status is terminal and reject_from_terminal is True.
     """
     if session is None:
         raise ValueError("session must not be None")
@@ -164,8 +171,17 @@ def transition_status(
     if new_status not in NON_TERMINAL_STATUSES:
         raise ValueError(f"Unknown status {new_status!r}. Known: {', '.join(sorted(ALL_STATUSES))}")
 
-    # Idempotency: if already in this state, skip
+    # Guard: reject transitions from terminal statuses unless explicitly allowed
     current_status = getattr(session, "status", None)
+    if reject_from_terminal and current_status in TERMINAL_STATUSES:
+        raise ValueError(
+            f"Cannot transition session {getattr(session, 'session_id', '?')} "
+            f"from terminal status {current_status!r} to {new_status!r}. "
+            f"Pass reject_from_terminal=False if this is intentional "
+            f"(e.g., revival or superseding)."
+        )
+
+    # Idempotency: if already in this state, skip
     if current_status == new_status:
         logger.debug(
             f"[lifecycle] Session {getattr(session, 'session_id', '?')} "
