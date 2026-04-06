@@ -269,7 +269,7 @@ Standalone Worker (python -m worker) → Same session execution engine
 - `.claude/agents/` - Subagent definitions (including `dev-session`)
 - `bridge/` - Telegram integration, nudge loop
 - `worker/` - Standalone worker service (`python -m worker`)
-- `agent/` - Session queue, SDK client, output handler protocol, constants
+- `agent/` - Session queue, SDK client, output router (`output_router.py`), output handler protocol, constants
 - `tools/` - Local Python tools
 - `config/` - Configuration files
 

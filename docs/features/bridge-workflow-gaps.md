@@ -21,14 +21,14 @@ The bridge uses a two-path auto-continue strategy based on whether the session i
 
 ### Nudge Loop Routing (Current)
 
-All output routing decisions are made by the nudge loop in `agent/agent_session_queue.py`:
+All output routing decisions are made by `agent/output_router.py` (extracted from `agent/agent_session_queue.py`):
 
 1. Worker agent produces output
 2. **Pipeline State Machine** (`bridge/pipeline_state.py`) tracks stage transitions on `AgentSession.stage_states`
-3. **Nudge loop** evaluates the output and session state:
+3. **Output router** (`agent/output_router.py`) evaluates the output and session state via `determine_delivery_action()`:
    - **Nudge**: Re-enqueue with a continuation message to keep the agent working
    - **Deliver**: Send output to Telegram for human review
-4. **Hard guard** in `agent_session_queue.py`: nudge cap enforced
+4. **Hard guard**: nudge cap enforced via `MAX_NUDGE_COUNT` in `agent/output_router.py`
 
 ### Decision Matrix
 

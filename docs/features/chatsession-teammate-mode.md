@@ -88,11 +88,11 @@ Teammate sessions bypass structured formatting entirely:
 - `_compose_structured_summary()` returns the LLM summary directly without emoji prefix, bullet parsing, or structured template
 - `SUMMARIZER_SYSTEM_PROMPT` includes a teammate format rule: respond in prose, no bullets, no status emoji
 
-### `agent/agent_session_queue.py`
+### `agent/output_router.py` + `agent/agent_session_queue.py`
 
-In the nudge loop, checks the session's `session_mode` field:
+In the output router (`route_session_output()`), checks the `is_teammate` flag:
 
-- If `PersonaType.TEAMMATE`, uses `TEAMMATE_MAX_NUDGE_COUNT` (10) instead of the default `MAX_NUDGE_COUNT` (50)
+- If `is_teammate=True`, uses `TEAMMATE_MAX_NUDGE_COUNT` (10) instead of the default `MAX_NUDGE_COUNT` (50)
 - Teammate sessions resolve faster; the reduced cap prevents runaway sessions
 - On successful completion, teammate sessions clear the processing reaction (set to `None`) instead of setting a completion emoji
 
