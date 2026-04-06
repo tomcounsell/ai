@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Medium
 owner: Valor
@@ -195,10 +195,8 @@ valor-session kill --all                  # Kill all running
 **State prerequisite:** Redis session record must reflect current status
 **Mitigation:** `steer_session()` reads status first; if terminal, returns error. `re_enqueue_session()` re-reads before modifying. Atomic Redis operations prevent partial writes.
 
-### Race 2: Pending message consumed while new one being written
-**Location:** Worker popping from `pending_messages` while external process pushes
-**Trigger:** Concurrent RPOP (worker) and LPUSH (external caller)
-**Mitigation:** Redis list operations are atomic. RPOP and LPUSH are safe concurrent operations. No lock needed.
+### Race 2: N/A — pending_messages not expected to have concurrent access
+`pending_messages` is a Popoto ListField. No concurrent write scenario expected in practice.
 
 ## No-Gos (Out of Scope)
 
@@ -417,4 +415,4 @@ The `valor-session` CLI tool needs to be available on all machines. Add to the u
 
 ## Open Questions
 
-1. **`pending_messages` storage**: Should this be a Popoto ListField on AgentSession, or a separate Redis list (`session:steering:{session_id}`)? A separate list gives atomic LPUSH/RPOP without Popoto's read-modify-write. A model field keeps everything on the session record. Leaning toward separate Redis list with a helper method on the model.
+No open questions — all resolved. `pending_messages` will be a Popoto ListField on AgentSession (no race condition concern, simpler to inspect/debug).
