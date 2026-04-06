@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor
@@ -49,10 +49,10 @@ How stage completion flows through the system today, and where the breaks are:
 
 ## Architectural Impact
 
-- **Interface changes**: `get_display_progress()` behavior changes -- artifact inference no longer fills gaps by default
-- **Coupling**: Reduces coupling between artifact existence and stage completion status
-- **Data ownership**: Stage completion status becomes exclusively owned by PipelineStateMachine (stored state), not inferred from side effects
-- **Reversibility**: Fully reversible -- revert the `get_display_progress` change and restore fallback inference in SKILL.md
+- **Interface changes**: `get_display_progress()` simplified — returns stored state only, `_infer_stage_from_artifacts()` deleted
+- **Coupling**: Eliminates coupling between artifact existence and stage completion status entirely
+- **Data ownership**: Stage completion status exclusively owned by PipelineStateMachine (stored state)
+- **Reversibility**: Fully reversible — restore the deleted function from git history if needed
 
 ## Appetite
 
@@ -72,9 +72,9 @@ No prerequisites -- this work modifies existing internal components with no exte
 
 ### Key Elements
 
-- **Eliminate artifact inference from stage completion decisions**: Remove `_infer_stage_from_artifacts()` from `get_display_progress()` merge logic, and update the SDLC router fallback path to use conversation-scoped dispatch tracking instead of artifact inference
+- **Remove artifact inference entirely**: Delete `_infer_stage_from_artifacts()` and all callers from `get_display_progress()`. Stage completion is exclusively determined by stored state (PipelineStateMachine). No `for_routing` parameter — just remove the inference code. Rewrite tests accordingly.
 - **Replace dangling session_progress calls with PipelineStateMachine CLI**: Create a lightweight CLI tool that skills can call to write stage markers, replacing the deleted `tools/session_progress.py`
-- **Strengthen do-merge gate**: Block merge when stages show as pending/skipped instead of just warning
+- **Strengthen do-merge gate**: Show very strong warnings/reminders when stages are skipped. Not a hard blocker — the agent can override for emergency hotfixes, but only after explicit acknowledgment of what was skipped.
 
 ### Flow
 
@@ -82,15 +82,15 @@ No prerequisites -- this work modifies existing internal components with no exte
 
 ### Technical Approach
 
-#### Fix 1: Remove artifact inference from get_display_progress merge
+#### Fix 1: Remove artifact inference from get_display_progress entirely
 
-`get_display_progress(slug=...)` currently calls `_infer_stage_from_artifacts()` and merges inferred state into gaps (pending/ready slots). Change this so artifact inference is only used for **display/informational** purposes (e.g., dashboard) but NOT for routing decisions.
+`get_display_progress(slug=...)` currently calls `_infer_stage_from_artifacts()` and merges inferred state into gaps. This doesn't work in practice — rip it out completely.
 
 Concretely:
-- Add a `for_routing: bool = False` parameter to `get_display_progress()`
-- When `for_routing=True`, skip artifact inference entirely -- return only stored state
-- Update do-merge gate to use `for_routing=True`
-- The SDLC router skill's fallback path (Step 2.0 failure) already queries `sdlc_stage_query` which returns stored state only -- no change needed there
+- Delete `_infer_stage_from_artifacts()` function from `bridge/pipeline_state.py`
+- Remove the merge logic in `get_display_progress()` that calls it
+- `get_display_progress()` returns stored state only — no inference, no `for_routing` parameter
+- Rewrite all tests that relied on artifact inference to use stored state instead
 
 #### Fix 2: Create `tools/sdlc_stage_marker.py` CLI tool
 
@@ -119,17 +119,17 @@ Replace the 5 dangling `session_progress` calls and add markers to the 5 skills 
 
 #### Fix 4: Strengthen do-merge gate
 
-Change do-merge.md to block merge (not just warn) when `get_display_progress(for_routing=True)` shows stages as pending/skipped. The user can override with explicit confirmation, but the default is to block.
+Change do-merge.md to show very strong warnings when `get_display_progress()` shows stages as pending/skipped. The gate is a reminder, not a hard blocker. For emergency hotfixes, the agent can choose to proceed, but only after explicit acknowledgment listing every skipped stage.
 
 #### Fix 5: Update SDLC router fallback path
 
-Update SKILL.md Steps 2a-2e to document that artifact inference is informational only and cannot satisfy stage completion. When stage_states is unavailable AND the conversation has no dispatch history, the router should dispatch from the beginning of the pipeline rather than inferring completion from artifacts.
+Update SKILL.md Steps 2a-2e to remove artifact inference references entirely. When stage_states is unavailable AND the conversation has no dispatch history, the router should dispatch from the beginning of the pipeline rather than guessing.
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
 - [ ] `sdlc_stage_marker.py` -- verify tool returns exit code 0 and empty JSON on all error paths (no session found, invalid stage, Redis down)
-- [ ] `get_display_progress(for_routing=True)` -- verify no artifact inference is called
+- [ ] `get_display_progress()` -- verify no artifact inference is called (function deleted)
 
 ### Empty/Invalid Input Handling
 - [ ] `sdlc_stage_marker` with no env vars set -- should print `{}` and exit 0
@@ -140,13 +140,14 @@ Update SKILL.md Steps 2a-2e to document that artifact inference is informational
 
 ## Test Impact
 
-- [ ] `tests/integration/test_artifact_inference.py::TestDisplayProgress::test_display_progress_with_plan_slug_fills_gaps` -- UPDATE: this test verifies gap-filling behavior; update to test `for_routing=False` (display) vs `for_routing=True` (routing) split
-- [ ] `tests/integration/test_artifact_inference.py::TestDisplayProgress::test_display_progress_with_merged_pr_slug` -- UPDATE: same split
-- [ ] `tests/unit/test_pipeline_state_machine.py` -- UPDATE: add tests for `for_routing` parameter
+- [ ] `tests/integration/test_artifact_inference.py::TestDisplayProgress::test_display_progress_with_plan_slug_fills_gaps` -- REPLACE: rewrite to verify stored-state-only behavior (no artifact inference)
+- [ ] `tests/integration/test_artifact_inference.py::TestDisplayProgress::test_display_progress_with_merged_pr_slug` -- REPLACE: rewrite to verify stored-state-only behavior
+- [ ] `tests/unit/test_pipeline_state_machine.py` -- UPDATE: add tests verifying `_infer_stage_from_artifacts` is deleted and `get_display_progress` returns stored state only
+- [ ] Any other tests referencing `_infer_stage_from_artifacts` -- DELETE or REPLACE
 
 ## Rabbit Holes
 
-- **Rewriting artifact inference entirely** -- Artifact inference is still useful for dashboard display. Only its use in routing decisions is the problem. Don't delete `_infer_stage_from_artifacts()`.
+- **Building a new artifact inference system** -- We're deleting the old one. Don't build a replacement. Stored state is the single source of truth.
 - **Adding a full state persistence layer for local Claude Code** -- The fallback path (no PM session) doesn't need Redis-backed state. Conversation context is sufficient for the router to track what it dispatched in this invocation chain.
 - **Making skills aware of their own stage** -- Skills shouldn't need to know which pipeline stage they represent. The marker calls are a simple fire-and-forget pattern, not a two-way integration.
 
@@ -156,9 +157,9 @@ Update SKILL.md Steps 2a-2e to document that artifact inference is informational
 **Impact:** Stage markers not written, pipeline stalls at "pending" stages
 **Mitigation:** The CLI tool is designed to fail silently (exit 0, empty JSON) like the existing `sdlc_stage_query`. Skills add markers with `2>/dev/null || true`. The bridge hooks remain the primary marker path; skill markers are a belt-and-suspenders backup.
 
-### Risk 2: do-merge gate becomes too strict, blocks legitimate merges
-**Impact:** Developer friction when stages were legitimately completed outside the pipeline
-**Mitigation:** do-merge still allows explicit user override after showing which stages appear skipped. The change is from "warn and ask" to "block and ask" -- same UX flow, different default.
+### Risk 2: do-merge gate warnings get ignored
+**Impact:** Agent treats strong warnings as routine and skips past them
+**Mitigation:** Warnings list every skipped stage explicitly and require the agent to acknowledge. For emergency hotfixes, the agent can proceed but the language is designed to make this a deliberate, visible choice — not a routine click-through.
 
 ## Race Conditions
 
@@ -166,7 +167,7 @@ No race conditions identified -- stage marker writes are idempotent (start_stage
 
 ## No-Gos (Out of Scope)
 
-- Removing artifact inference entirely (still needed for dashboard/display)
+- Building a new inference system to replace the deleted one
 - Adding Redis-backed state for local Claude Code sessions (conversation context is sufficient)
 - Changing the bridge hook wiring (pre_tool_use/subagent_stop work correctly)
 - Modifying the pipeline graph or stage order
@@ -186,12 +187,12 @@ No new MCP server integration required. The `sdlc_stage_marker.py` CLI tool is i
 
 ## Success Criteria
 
-- [ ] The SDLC router's fallback path does not infer stage completion from artifacts for routing decisions
-- [ ] `get_display_progress(for_routing=True)` returns stored state only, no artifact inference
+- [ ] `_infer_stage_from_artifacts()` is deleted from `bridge/pipeline_state.py`
+- [ ] `get_display_progress()` returns stored state only — no artifact inference code remains
 - [ ] All 7 display-stage skills write in_progress/completed markers via `sdlc_stage_marker`
-- [ ] do-merge gate blocks (not just warns) when prior stages show as pending/skipped
-- [ ] A test verifies that artifact existence alone does not satisfy the docs stage check in routing mode
-- [ ] A test verifies the do-merge gate rejects when DOCS stage is not explicitly completed
+- [ ] do-merge gate shows strong warnings when prior stages are pending/skipped (not a hard blocker)
+- [ ] A test verifies that `get_display_progress()` returns only stored state
+- [ ] A test verifies the do-merge gate warns when DOCS stage is not explicitly completed
 - [ ] Dangling `session_progress` references removed from all skill files
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
@@ -214,17 +215,17 @@ No new MCP server integration required. The `sdlc_stage_marker.py` CLI tool is i
 
 ## Step by Step Tasks
 
-### 1. Add `for_routing` parameter to `get_display_progress()`
+### 1. Remove artifact inference from `get_display_progress()` entirely
 - **Task ID**: build-display-progress
 - **Depends On**: none
-- **Validates**: tests/unit/test_pipeline_state_machine.py (update), tests/integration/test_artifact_inference.py (update)
+- **Validates**: tests/unit/test_pipeline_state_machine.py (update), tests/integration/test_artifact_inference.py (rewrite)
 - **Assigned To**: pipeline-state-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add `for_routing: bool = False` parameter to `get_display_progress()` in `bridge/pipeline_state.py`
-- When `for_routing=True`, return stored state only (skip `_infer_stage_from_artifacts()` call)
-- When `for_routing=False` (default), preserve current behavior for backward compatibility
-- Update existing tests and add new tests for the `for_routing` parameter
+- Delete `_infer_stage_from_artifacts()` function from `bridge/pipeline_state.py`
+- Remove the merge/gap-filling logic in `get_display_progress()` that calls it
+- `get_display_progress()` now returns stored state only — simple and clean
+- Rewrite tests that relied on artifact inference to set up stored state instead
 
 ### 2. Create `tools/sdlc_stage_marker.py` CLI tool
 - **Task ID**: build-stage-marker
@@ -256,9 +257,10 @@ No new MCP server integration required. The `sdlc_stage_marker.py` CLI tool is i
 - **Assigned To**: pipeline-state-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Update do-merge.md to use `get_display_progress(for_routing=True)` (no slug parameter)
-- Change gate behavior from "warn and ask" to "block and ask" for skipped stages
-- Keep user override path (they can confirm after seeing what was skipped)
+- Update do-merge.md to call `get_display_progress()` (stored state only now)
+- Show very strong warnings listing every skipped/pending stage
+- Not a hard blocker — agent can proceed for emergency hotfixes after explicit acknowledgment
+- Include language like "WARNING: The following stages were NOT completed: ..." with clear emphasis
 
 ### 5. Update SDLC router SKILL.md fallback path
 - **Task ID**: build-router-fallback
@@ -267,8 +269,8 @@ No new MCP server integration required. The `sdlc_stage_marker.py` CLI tool is i
 - **Assigned To**: pipeline-state-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Update Steps 2a-2e to clarify that artifact checks are informational only
-- Add explicit instruction: "Never infer a stage is done from artifacts alone for routing decisions"
+- Remove artifact inference references from Steps 2a-2e entirely
+- Add explicit instruction: "Stage completion is determined exclusively by stored state. Never infer from artifacts."
 - When stage_states unavailable and no dispatch history in conversation, start from beginning of pipeline
 
 ### 6. Validate all changes
@@ -300,16 +302,26 @@ No new MCP server integration required. The `sdlc_stage_marker.py` CLI tool is i
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | No dangling session_progress | `grep -r 'session_progress' .claude/skills/` | exit code 1 |
 | All skills have markers | `grep -rl 'sdlc_stage_marker' .claude/skills/do-issue/ .claude/skills/do-plan/ .claude/skills/do-plan-critique/ .claude/skills/do-build/ .claude/skills/do-test/ .claude/skills/do-pr-review/ .claude/skills/do-docs/ \| wc -l` | output > 6 |
-| for_routing parameter exists | `grep -c 'for_routing' bridge/pipeline_state.py` | output > 0 |
+| Artifact inference deleted | `grep -c '_infer_stage_from_artifacts' bridge/pipeline_state.py` | exit code 1 (not found) |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
-| CONCERN | [agent-type] | [The concern raised] | [How/whether it was addressed] |
+<!-- Populated by /do-plan-critique (war room) on 2026-04-06. -->
+
+| Severity | Critic(s) | Finding | Suggestion |
+|----------|-----------|---------|------------|
+| CONCERN | Skeptic | Plan says "Replace 5 dangling session_progress calls" but grep found only 3 files (do-docs/SKILL.md, do-pr-review/SKILL.md, do-pr-review/sub-skills/post-review.md). The count "5" is inaccurate. | Update the count in Fix 3 to match reality (3 files with 5 call sites across them, or correct the wording). Verify with `grep -rn session_progress .claude/skills/` during build. |
+| CONCERN | Adversary | Skill writes `--status completed` marker, then subagent_stop hook fires and calls `classify_outcome()` which may call `fail_stage()`, overwriting the skill's completed marker. Two writers with no coordination. | Document that hooks are authoritative and skill markers are best-effort. Or add a guard: `complete_stage()` should no-op if status is already `completed` (it does), but `fail_stage()` should not overwrite `completed` (it already does no-op -- verify this is tested). |
+| CONCERN | Operator | After removing artifact inference, `get_display_progress()` returns stored state only. If stored state is empty (fresh session, Redis cleared, local Claude Code), the do-merge gate shows all stages pending and blocks merge. No cold-start fallback. | Add a note in do-merge gate: if ALL stages are pending/ready (cold start), fall back to artifact checks or warn clearly that "no pipeline state found" rather than listing every stage as skipped. |
+| CONCERN | Operator | do-merge.md currently calls `get_display_progress(slug='$SLUG')` on lines 23 and 77. After this change removes the slug parameter behavior, those calls need updating but Task 4 only mentions "show very strong warnings" without specifying the code change to remove `slug=` args. | Task 4 should explicitly include updating the two `get_display_progress(slug=...)` calls in do-merge.md to `get_display_progress()` (no slug). |
+| CONCERN | Archaeologist | The plan adds a second write path (skill CLI markers) alongside the existing hook path (pre_tool_use/subagent_stop). This mirrors the layering pattern from prior fixes that each addressed one layer without closing the loop. If hooks stop firing, skill markers become the only path -- but they depend on env vars that may not be set. | Acceptable as belt-and-suspenders if explicitly tested. Add a test that verifies the skill marker path works independently of hooks (env var set, no hook context). |
+| NIT | Simplifier | Fix 3 adds markers to do-build and do-test which already get markers from hooks (pre_tool_use/subagent_stop). This doubles write paths for those two skills with no additional safety benefit. | Consider only adding markers to the 5 skills that lack hook coverage. The "backup" argument is weak for skills that are always invoked via the bridge. |
+| NIT | User | All success criteria are technical (function deleted, tests pass, lint clean). No end-to-end validation that a full SDLC pipeline run correctly avoids stage skipping. | Add one success criterion: "A manual or scripted end-to-end run of the SDLC pipeline for a test issue completes all stages without skipping." |
+| NIT | Skeptic | Documentation section references `docs/features/sdlc-pipeline-graph.md` with "(or equivalent)" but this file does not exist. The builder will need to decide whether to create it or find the actual equivalent. | Specify the exact target file path. Check `docs/features/README.md` for the correct location. |
 
 ---
 
 ## Open Questions
 
-1. Should `_infer_stage_from_artifacts()` be removed entirely from `get_display_progress()` (breaking the display/dashboard use case), or should the `for_routing` parameter split be preserved? The plan currently proposes the split.
-2. For the do-merge gate, should there be a `--force` flag or env var to skip the stage check entirely (for emergency hotfixes), or is explicit user confirmation sufficient?
+1. ~~Should `_infer_stage_from_artifacts()` be removed entirely from `get_display_progress()`, or should the `for_routing` parameter split be preserved?~~ **RESOLVED**: Remove artifact inference entirely. It doesn't work in practice. Rip out `_infer_stage_from_artifacts()` and rewrite tests to validate the new behavior.
+2. ~~For the do-merge gate, should there be a `--force` flag or env var to skip the stage check entirely (for emergency hotfixes)?~~ **RESOLVED**: No force flag. The merge gate is a reminder, not a hard blocker. For emergency hotfixes, the agent can choose to ignore it, but only after very strong warnings and reminders.
