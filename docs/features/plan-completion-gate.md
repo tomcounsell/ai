@@ -8,9 +8,9 @@ Before this feature, the pipeline could mark a plan Complete and merge a PR with
 
 ## Components
 
-### 1. `/do-docs` no longer sets plan status
+### 1. `/do-docs` marks plan as `docs_complete` (not `Complete`)
 
-The "Plan Status Update" section was removed from `.claude/skills/do-docs/SKILL.md`. Previously, this section ran `sed` to change the plan frontmatter to `status: Complete` after any documentation commit. The DOCS stage completion is already tracked via `session_progress` in the pipeline state machine, so this status write was redundant and premature.
+After cascading documentation updates, `/do-docs` writes `status: docs_complete` to the plan's YAML frontmatter. Previously, the skill set `status: Complete` unconditionally, which caused premature pipeline advancement. Now `docs_complete` is a scoped signal that tells `do-merge` the DOCS stage finished — but the plan is not treated as Complete until `do-merge` verifies all checkboxes and executes the merge.
 
 ### 2. `scripts/validate_build.py` -- deterministic build validator
 
@@ -80,6 +80,6 @@ A plan checkbox scan in `.claude/commands/do-merge.md` runs between the pipeline
 1. Developer creates a plan with checkboxes across sections (Acceptance Criteria, Test Impact, Documentation, etc.)
 2. `/do-build` implements the plan and runs `validate_build.py` to verify file assertions and verification commands pass
 3. `/do-pr-review` cross-references unchecked plan items against the PR diff and flags unaddressed items
-4. `/do-docs` updates documentation but does NOT mark the plan Complete
+4. `/do-docs` updates documentation and writes `status: docs_complete` to the plan frontmatter, signaling DOCS stage completion
 5. `/do-merge` scans for any remaining unchecked items and blocks the merge if requirements are still open
 6. Only after all checkboxes are addressed (or `allow_unchecked: true` is set) can the PR be merged

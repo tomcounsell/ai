@@ -22,7 +22,7 @@ The `PipelineStateMachine.has_remaining_stages()` method walks the pipeline grap
 
 ### Plan Status Update in `/do-docs`
 
-The `/do-docs` skill now updates the plan document's `status:` frontmatter to "Complete" after documentation is created/updated.
+The `/do-docs` skill writes `status: docs_complete` to the plan document's frontmatter after documentation is created/updated. This signals DOCS stage completion to `do-merge`, which verifies all checklist items and then executes the final plan deletion via `scripts/migrate_completed_plan.py`.
 
 ## Related
 
