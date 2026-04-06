@@ -95,8 +95,8 @@ For `SDLC_STAGES`: replace with an import of `DISPLAY_STAGES` from `bridge.pipel
 - [ ] `tests/unit/test_ui_sdlc_data.py::TestArtifactInference::test_session_with_slug_uses_artifact_inference` — REPLACE: rewrite to verify `PipelineStateMachine.get_display_progress()` is called (without slug arg)
 - [ ] `tests/unit/test_ui_sdlc_data.py::TestArtifactInference::test_session_without_slug_uses_stored_state` — REPLACE: rewrite to verify sessions with no stage_states get empty stages without calling PipelineStateMachine
 - [ ] `tests/unit/test_ui_sdlc_data.py::TestArtifactInference::test_session_with_empty_slug_uses_stored_state` — REPLACE: rewrite to verify empty stage_states produces empty stages
-- [ ] `tests/unit/test_ui_sdlc_data.py::TestArtifactInference::test_artifact_inference_failure_falls_back_to_stored_state` — UPDATE: keep fallback test but remove references to `_artifact_inference_cache`
-- [ ] `tests/unit/test_ui_sdlc_data.py::TestArtifactInference::test_session_no_slug_no_stage_states_produces_empty_stages` — UPDATE: keep as-is (behavior unchanged)
+- [ ] `tests/unit/test_ui_sdlc_data.py::TestArtifactInference::test_artifact_inference_failure_falls_back_to_stored_state` — REPLACE: rewrite to verify `PipelineStateMachine` exception triggers `_parse_stage_states` fallback (current test imports removed `_artifact_inference_cache` symbol)
+- [ ] `tests/unit/test_ui_sdlc_data.py::TestArtifactInference::test_session_no_slug_no_stage_states_produces_empty_stages` — REPLACE: migrate to new test class (behavior unchanged, but host class `TestArtifactInference` is being replaced)
 - [ ] `tests/unit/test_ui_sdlc_data.py::TestArtifactInference::test_cache_hit_within_ttl` — DELETE: references removed `_artifact_inference_cache`
 - [ ] `tests/unit/test_ui_sdlc_data.py::TestArtifactInference::test_cache_miss_after_ttl` — DELETE: references removed `_artifact_inference_cache`
 - [ ] `tests/unit/test_ui_sdlc_data.py::TestStageStateParsing` — UPDATE: tests remain valid since `_parse_stage_states()` is kept as a fallback utility
@@ -134,7 +134,7 @@ No agent integration required — this is a dashboard-internal change. No MCP se
 
 ## Documentation
 
-- [ ] Update `docs/features/sdlc-pipeline-graph.md` if it references `SDLC_STAGES` in `ui/data/sdlc.py` (check and update if needed)
+- [ ] Grep `docs/` for references to `SDLC_STAGES` in `ui/data/sdlc.py` and update if found (note: `docs/features/sdlc-pipeline-graph.md` does not exist)
 - [ ] Inline docstring updates on `_session_to_pipeline()` to document the routing through `PipelineStateMachine`
 
 ## Success Criteria
@@ -208,7 +208,54 @@ No agent integration required — this is a dashboard-internal change. No MCP se
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+# Plan Critique: Dashboard SDLC Stages Column Route Through PipelineStateMachine
+
+**Plan**: docs/plans/dashboard_sdlc_stored_state.md
+**Issue**: #735
+**Critics**: Skeptic, Operator, Archaeologist, Adversary, Simplifier, User
+**Findings**: 3 total (1 blocker, 1 concern, 1 nit)
+
+## Blockers
+
+### Test disposition mismatch for `test_artifact_inference_failure_falls_back_to_stored_state`
+- **Severity**: BLOCKER
+- **Critics**: Skeptic, Archaeologist
+- **Location**: Test Impact section, line 4
+- **Finding**: The plan says to UPDATE this test by "removing references to `_artifact_inference_cache`", but the test imports `_artifact_inference_cache` from `ui.data.sdlc` (line 757 of test file) which no longer exists. The entire test body references removed symbols (`_artifact_inference_cache.clear()`). This test currently fails at import time and cannot be merely updated -- it must be rewritten from scratch.
+- **Suggestion**: Change disposition from UPDATE to REPLACE. Rewrite the test to verify that when `PipelineStateMachine()` raises an exception, `_session_to_pipeline()` falls back to `_parse_stage_states()` and produces valid stages.
+
+## Concerns
+
+### Ambiguous migration of `test_session_no_slug_no_stage_states_produces_empty_stages`
+- **Severity**: CONCERN
+- **Critics**: Simplifier
+- **Location**: Test Impact section, line 5
+- **Finding**: The plan says to keep this test "as-is (behavior unchanged)" but it lives inside the `TestArtifactInference` class which the plan says to REPLACE. The plan doesn't clarify whether this test migrates to the new replacement test class or stays in a remnant of the old class.
+- **Suggestion**: Explicitly state that this test moves to the new test class (or a more appropriate existing class like `TestSessionToPipeline`) during the REPLACE of `TestArtifactInference`.
+
+## Nits
+
+### Documentation task references non-existent file
+- **Severity**: NIT
+- **Critics**: Archaeologist
+- **Location**: Documentation section
+- **Finding**: The documentation task says to check `docs/features/sdlc-pipeline-graph.md` for references to `SDLC_STAGES` -- this file does not exist in the codebase.
+- **Suggestion**: Remove or update this documentation task. A `grep` for `SDLC_STAGES` across `docs/` would be more reliable than checking a specific non-existent file.
+
+## Structural Check Results
+
+| Check | Status | Detail |
+|-------|--------|--------|
+| Required sections | PASS | All 4 required sections present and non-empty |
+| Task numbering | PASS | Tasks 1, 2, 3 sequential with no gaps |
+| Dependencies valid | PASS | All Depends On references resolve to valid task IDs |
+| File paths exist | PASS | All primary paths exist (ui/data/sdlc.py, bridge/pipeline_state.py, bridge/pipeline_graph.py, tests/unit/test_ui_sdlc_data.py) |
+| Prerequisites met | PASS | No prerequisites defined |
+| Cross-references | PASS | Success criteria map to tasks; No-Gos do not appear as planned work |
+
+## Verdict
+
+**READY TO BUILD** -- The 1 blocker (test disposition mismatch) was resolved inline: changed UPDATE to REPLACE for `test_artifact_inference_failure_falls_back_to_stored_state` and `test_session_no_slug_no_stage_states_produces_empty_stages`. Documentation nit also fixed. Concerns are acknowledged risks, not plan defects.
 
 ---
 
