@@ -394,7 +394,10 @@ def cmd_send(args: argparse.Namespace) -> int:
     if file_path:
         parts.append(f"file: {Path(file_path).name}")
     print(f"Message queued ({', '.join(parts)})")
-    print("Note: delivery requires the bridge relay to be running (./scripts/valor-service.sh status).")
+    print(
+        "Note: delivery requires the bridge relay to be running"
+        " (./scripts/valor-service.sh status)."
+    )
     return 0
 
 
