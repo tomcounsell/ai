@@ -157,11 +157,18 @@ class TestPopJobDeleteAndRecreate:
 
 
 class TestRecoverInterruptedJobsStartup:
-    """Tests for _recover_interrupted_agent_sessions_startup delete-and-recreate pattern."""
+    """Tests for _recover_interrupted_agent_sessions_startup with timing guard.
+
+    The timing guard skips sessions started within AGENT_SESSION_HEALTH_MIN_RUNNING
+    seconds (300s). Tests that expect recovery must set started_at to an old timestamp.
+    """
 
     def test_no_stale_running_after_recovery(self):
         """After recovery, no sessions should remain in the running index."""
-        _create_test_session(status="running", session_id="crashed_session")
+        old_started = datetime.now(tz=UTC) - timedelta(seconds=600)
+        _create_test_session(
+            status="running", session_id="crashed_session", started_at=old_started
+        )
 
         running_before = AgentSession.query.filter(status="running")
         assert len(running_before) == 1
@@ -179,8 +186,19 @@ class TestRecoverInterruptedJobsStartup:
 
     def test_recover_multiple_running_jobs(self):
         """Recovery should handle multiple running sessions."""
-        _create_test_session(status="running", session_id="s1", message_text="msg1")
-        _create_test_session(status="running", session_id="s2", message_text="msg2")
+        old_started = datetime.now(tz=UTC) - timedelta(seconds=600)
+        _create_test_session(
+            status="running",
+            session_id="s1",
+            message_text="msg1",
+            started_at=old_started,
+        )
+        _create_test_session(
+            status="running",
+            session_id="s2",
+            message_text="msg2",
+            started_at=old_started,
+        )
 
         recovered = _recover_interrupted_agent_sessions_startup()
         assert recovered == 2
@@ -195,6 +213,72 @@ class TestRecoverInterruptedJobsStartup:
         """Recovery should return 0 when no running sessions exist."""
         recovered = _recover_interrupted_agent_sessions_startup()
         assert recovered == 0
+
+    def test_recent_session_skipped_by_timing_guard(self):
+        """A session started 10 seconds ago should NOT be recovered."""
+        recent_started = datetime.now(tz=UTC) - timedelta(seconds=10)
+        _create_test_session(
+            status="running", session_id="recent_session", started_at=recent_started
+        )
+
+        recovered = _recover_interrupted_agent_sessions_startup()
+        assert recovered == 0
+
+        # Session should still be running (not reset to pending)
+        running = AgentSession.query.filter(status="running")
+        assert len(running) == 1
+        assert running[0].session_id == "recent_session"
+
+    def test_old_session_recovered_by_timing_guard(self):
+        """A session started 600 seconds ago IS recovered."""
+        old_started = datetime.now(tz=UTC) - timedelta(seconds=600)
+        _create_test_session(
+            status="running", session_id="old_session", started_at=old_started
+        )
+
+        recovered = _recover_interrupted_agent_sessions_startup()
+        assert recovered == 1
+
+        running = AgentSession.query.filter(status="running")
+        assert len(running) == 0
+
+        pending = AgentSession.query.filter(status="pending")
+        assert len(pending) == 1
+
+    def test_none_started_at_is_recovered(self):
+        """A session with started_at=None (legacy/corrupt) IS recovered."""
+        _create_test_session(
+            status="running", session_id="legacy_session", started_at=None
+        )
+
+        recovered = _recover_interrupted_agent_sessions_startup()
+        assert recovered == 1
+
+        running = AgentSession.query.filter(status="running")
+        assert len(running) == 0
+
+    def test_mixed_recent_and_stale_sessions(self):
+        """Only stale sessions are recovered; recent ones are skipped."""
+        old_started = datetime.now(tz=UTC) - timedelta(seconds=600)
+        recent_started = datetime.now(tz=UTC) - timedelta(seconds=10)
+
+        _create_test_session(
+            status="running", session_id="stale", started_at=old_started
+        )
+        _create_test_session(
+            status="running", session_id="recent", started_at=recent_started
+        )
+
+        recovered = _recover_interrupted_agent_sessions_startup()
+        assert recovered == 1
+
+        running = AgentSession.query.filter(status="running")
+        assert len(running) == 1
+        assert running[0].session_id == "recent"
+
+        pending = AgentSession.query.filter(status="pending")
+        assert len(pending) == 1
+        assert pending[0].session_id == "stale"
 
 
 class TestDrainGuard:
