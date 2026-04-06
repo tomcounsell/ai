@@ -62,9 +62,9 @@ class TestReflectionFormatters:
         from ui.app import _filter_format_duration
 
         assert _filter_format_duration(None) == "-"
-        assert _filter_format_duration(5.0) == "5.0s"
-        assert _filter_format_duration(120.0) == "2.0m"
-        assert _filter_format_duration(7200.0) == "2.0h"
+        assert _filter_format_duration(5.0) == "<1m"
+        assert _filter_format_duration(120.0) == "2m"
+        assert _filter_format_duration(7200.0) == "2h"
 
     def test_format_timestamp(self):
         from ui.app import _filter_format_timestamp
