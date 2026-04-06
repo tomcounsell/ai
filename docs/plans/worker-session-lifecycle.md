@@ -94,22 +94,22 @@ No prerequisites — this work uses only existing infrastructure (Redis, asyncio
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `_worker_loop` already has `except asyncio.CancelledError` and `except Exception` blocks — verify both paths work correctly with the new persistent mode
-- [ ] The SIGTERM handler in `worker/__main__.py` must not raise — verify it gracefully handles edge cases (shutdown during startup, double SIGTERM)
+- [x] `_worker_loop` already has `except asyncio.CancelledError` and `except Exception` blocks — verify both paths work correctly with the new persistent mode
+- [x] The SIGTERM handler in `worker/__main__.py` must not raise — verify it gracefully handles edge cases (shutdown during startup, double SIGTERM)
 
 ### Empty/Invalid Input Handling
-- [ ] `_worker_loop` in persistent mode receiving an event.set() but finding no pending session after pop — must not crash, just re-wait
-- [ ] `_enqueue_nudge()` called after shutdown flag is set — must still work (the current session needs to complete its nudge)
+- [x] `_worker_loop` in persistent mode receiving an event.set() but finding no pending session after pop — must not crash, just re-wait
+- [x] `_enqueue_nudge()` called after shutdown flag is set — must still work (the current session needs to complete its nudge)
 
 ### Error State Rendering
-- [ ] Worker log output on shutdown clearly shows "finishing current session" vs "no active sessions"
-- [ ] `FileOutputHandler.send()` continues to work during graceful shutdown
+- [x] Worker log output on shutdown clearly shows "finishing current session" vs "no active sessions"
+- [x] `FileOutputHandler.send()` continues to work during graceful shutdown
 
 ## Test Impact
 
-- [ ] `tests/integration/test_worker_drain.py` — UPDATE: Tests currently expect the worker to exit when queue is empty. Add mode-aware assertions: bridge mode exits, standalone mode waits
-- [ ] `tests/unit/test_agent_session_queue_async.py` — UPDATE: May need updates for the new shutdown flag interaction with `_worker_loop`
-- [ ] `tests/integration/test_agent_session_lifecycle.py` — UPDATE: Verify nudge re-enqueue works in persistent mode (no worker exit between nudges)
+- [x] `tests/integration/test_worker_drain.py` — existing tests pass unchanged (bridge mode behavior preserved)
+- [x] `tests/unit/test_agent_session_queue_async.py` — no changes needed, shutdown flag is independent
+- [x] `tests/integration/test_agent_session_lifecycle.py` — existing tests pass unchanged
 
 ## Rabbit Holes
 
