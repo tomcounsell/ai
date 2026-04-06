@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: Shipped
 type: bug
 appetite: Medium
 owner: Valor
@@ -110,26 +110,26 @@ No prerequisites — this work operates on existing code with no external depend
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `_enqueue_nudge()` fallback path (L1778-1804) now has terminal guard BEFORE `async_create()` — verify a terminal session triggers early return and warning log, not session recreation
-- [ ] `_enqueue_nudge()` main path re-reads session from Redis — verify a session that became terminal between caller check and nudge call triggers early return
-- [ ] `check_revival()` catches Redis query failures (L2441) — verify it returns `None` (no revival) rather than silently proceeding
-- [ ] Worker finally block catches guard check failures — verify it still completes the session rather than leaving it in limbo
-- [ ] `determine_delivery_action()` with each terminal status (`completed`, `failed`, `killed`, `abandoned`, `cancelled`) returns `deliver_already_completed`
+- [x] `_enqueue_nudge()` fallback path (L1778-1804) now has terminal guard BEFORE `async_create()` — verify a terminal session triggers early return and warning log, not session recreation
+- [x] `_enqueue_nudge()` main path re-reads session from Redis — verify a session that became terminal between caller check and nudge call triggers early return
+- [x] `check_revival()` catches Redis query failures (L2441) — verify it returns `None` (no revival) rather than silently proceeding
+- [x] Worker finally block catches guard check failures — verify it still completes the session rather than leaving it in limbo
+- [x] `determine_delivery_action()` with each terminal status (`completed`, `failed`, `killed`, `abandoned`, `cancelled`) returns `deliver_already_completed`
 
 ### Empty/Invalid Input Handling
-- [ ] `_enqueue_nudge()` called with a session that has `session_id=None` — verify it does not create an orphan pending session
-- [ ] `check_revival()` called with empty `chat_id` — verify no false positive matches
-- [ ] `transition_status()` called on terminal session without `reject_from_terminal=False` — verify `ValueError` raised
+- [x] `_enqueue_nudge()` called with a session that has `session_id=None` — verify it does not create an orphan pending session
+- [x] `check_revival()` called with empty `chat_id` — verify no false positive matches
+- [x] `transition_status()` called on terminal session without `reject_from_terminal=False` — verify `ValueError` raised
 
 ### Error State Rendering
-- [ ] When a terminal guard blocks a respawn, a warning log is emitted (observable in tests via caplog)
-- [ ] When `transition_status()` rejects a terminal→non-terminal transition, the error message includes both current and target status
+- [x] When a terminal guard blocks a respawn, a warning log is emitted (observable in tests via caplog)
+- [x] When `transition_status()` rejects a terminal→non-terminal transition, the error message includes both current and target status
 
 ## Test Impact
 
-- [ ] `tests/integration/test_session_zombie_health_check.py` — UPDATE: extend with tests for nudge path and revival path (currently only tests hierarchy health check)
-- [ ] `tests/unit/test_delivery_execution.py` — UPDATE: add test cases for each terminal status (`failed`, `killed`, `abandoned`, `cancelled`) as input to `determine_delivery_action()` returning `deliver_already_completed`
-- [ ] `tests/unit/test_session_lifecycle_consolidation.py` — UPDATE: add tests for `transition_status()` rejecting terminal→non-terminal by default, and allowing it when `reject_from_terminal=False`
+- [x] `tests/integration/test_session_zombie_health_check.py` — UPDATE: extend with tests for nudge path and revival path (currently only tests hierarchy health check)
+- [x] `tests/unit/test_delivery_execution.py` — UPDATE: add test cases for each terminal status (`failed`, `killed`, `abandoned`, `cancelled`) as input to `determine_delivery_action()` returning `deliver_already_completed`
+- [x] `tests/unit/test_session_lifecycle_consolidation.py` — UPDATE: add tests for `transition_status()` rejecting terminal→non-terminal by default, and allowing it when `reject_from_terminal=False`
 
 ## Rabbit Holes
 
@@ -187,17 +187,17 @@ No agent integration required — this is a bridge-internal change. All modifica
 
 ## Success Criteria
 
-- [ ] All 5 active + 2 confirmed-safe recovery mechanisms audited with findings documented in the reference doc
-- [ ] `determine_delivery_action()` checks all `TERMINAL_STATUSES`, not just `completed`
-- [ ] `_enqueue_nudge()` main path has explicit terminal status guard (re-read from Redis, return early if terminal)
-- [ ] `_enqueue_nudge()` fallback path (L1778-1804) has terminal status guard before `async_create()`
-- [ ] `check_revival()` filters out branches whose sessions have terminal status siblings
-- [ ] `transition_status()` rejects terminal→non-terminal by default (requires `reject_from_terminal=False`)
-- [ ] `_mark_superseded()` still works (passes `reject_from_terminal=False` for completed→superseded)
-- [ ] At least one regression test per mechanism proving completed/failed sessions are not respawned
-- [ ] Reference doc created at `docs/features/session-recovery-mechanisms.md`
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] All 5 active + 2 confirmed-safe recovery mechanisms audited with findings documented in the reference doc
+- [x] `determine_delivery_action()` checks all `TERMINAL_STATUSES`, not just `completed`
+- [x] `_enqueue_nudge()` main path has explicit terminal status guard (re-read from Redis, return early if terminal)
+- [x] `_enqueue_nudge()` fallback path (L1778-1804) has terminal status guard before `async_create()`
+- [x] `check_revival()` filters out branches whose sessions have terminal status siblings
+- [x] `transition_status()` rejects terminal→non-terminal by default (requires `reject_from_terminal=False`)
+- [x] `_mark_superseded()` still works (passes `reject_from_terminal=False` for completed→superseded)
+- [x] At least one regression test per mechanism proving completed/failed sessions are not respawned
+- [x] Reference doc created at `docs/features/session-recovery-mechanisms.md`
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
