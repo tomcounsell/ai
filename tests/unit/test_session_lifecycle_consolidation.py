@@ -88,9 +88,7 @@ class TestFinalizeSessionLifecycleLog:
         with patch("agent.agent_session_queue.checkpoint_branch_state"):
             finalize_session(mock_session, "completed", "test reason")
 
-        mock_session.log_lifecycle_transition.assert_called_once_with(
-            "completed", "test reason"
-        )
+        mock_session.log_lifecycle_transition.assert_called_once_with("completed", "test reason")
 
     def test_lifecycle_log_failure_nonfatal(self, mock_session):
         """Lifecycle log failure doesn't block status save."""
@@ -158,9 +156,7 @@ class TestFinalizeSessionSkipFlags:
 
     def test_skip_checkpoint(self, mock_session):
         """skip_checkpoint prevents checkpoint_branch_state from running."""
-        with patch(
-            "agent.agent_session_queue.checkpoint_branch_state"
-        ) as mock_checkpoint:
+        with patch("agent.agent_session_queue.checkpoint_branch_state") as mock_checkpoint:
             finalize_session(mock_session, "completed", "test", skip_checkpoint=True)
 
         mock_checkpoint.assert_not_called()
@@ -287,9 +283,7 @@ class TestTransitionStatus:
         """log_lifecycle_transition is called."""
         transition_status(mock_session, "pending", "test reason")
 
-        mock_session.log_lifecycle_transition.assert_called_once_with(
-            "pending", "test reason"
-        )
+        mock_session.log_lifecycle_transition.assert_called_once_with("pending", "test reason")
 
 
 class TestTransitionStatusIdempotency:

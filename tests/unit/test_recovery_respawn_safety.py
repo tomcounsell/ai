@@ -19,7 +19,6 @@ Also tests transition_status() reject_from_terminal guard.
 
 from __future__ import annotations
 
-import asyncio
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -231,9 +230,7 @@ class TestCheckRevivalTerminalFilter:
             mock_as.query.filter.side_effect = mock_filter
             # Branch exists in git
             mock_run.return_value = SimpleNamespace(stdout="  session/chat-123-msg-2\n")
-            mock_bs.return_value = SimpleNamespace(
-                has_uncommitted_changes=False, active_plan=None
-            )
+            mock_bs.return_value = SimpleNamespace(has_uncommitted_changes=False, active_plan=None)
             result = check_revival(
                 project_key="test-project",
                 working_dir="/tmp/test",
