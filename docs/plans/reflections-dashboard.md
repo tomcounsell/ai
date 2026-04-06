@@ -12,7 +12,7 @@ last_comment_id:
 
 ## Problem
 
-The reflections system runs 4+ scheduled tasks (health checks every 5min, orphan recovery every 30min, branch cleanup daily, full maintenance pipeline daily) — but there's no way to see what happened without SSH and manual inspection.
+The reflections system runs 4+ scheduled tasks (health checks every 5min, agent-session-cleanup hourly, branch cleanup daily, full maintenance pipeline daily) — but there's no way to see what happened without SSH and manual inspection.
 
 **Current behavior:**
 To check if reflections ran successfully, you must: (1) read markdown files in `logs/reflections/`, (2) query Redis models via Python one-liners, (3) tail log files. There's no unified view and no way to browse history across reflection types.

@@ -114,11 +114,11 @@ Log rotation uses a dual-mechanism approach: Python-managed rotation for applica
 
 **Solution**: On bridge startup, before recovering interrupted/orphaned sessions, the bridge calls `AgentSession.rebuild_indexes()` (SCAN-based, production-safe) to purge Redis set entries that point to missing or invalid objects. This is a one-time cleanup that prevents the validation errors from recurring. See [Popoto Index Hygiene](popoto-index-hygiene.md) for the daily automated cleanup reflection that supplements this startup check.
 
-### 7. Orphan Recovery Hardening (`agent/agent_session_queue.py`)
+### 7. Agent Session Cleanup (`agent/agent_session_queue.py`)
 
-**Problem**: The `_recover_orphaned_sessions()` function calls `.decode()` on Redis byte data without error handling. Corrupted UTF-8 data in orphaned sessions causes `UnicodeDecodeError` crashes that abort the entire recovery loop.
+**Problem**: Sessions with corrupted IDs (e.g., length 60 instead of expected 32 for uuid4) or invalid fields cause `ModelException` on every health check and startup recovery cycle, spamming error logs and potentially blocking worker startup.
 
-**Solution**: All `.decode()` calls in `_recover_orphaned_sessions()` now use `errors='replace'`, which substitutes U+FFFD for corrupted bytes instead of crashing. The decode error context and raw key bytes are included in warning logs for forensic analysis.
+**Solution**: `cleanup_corrupted_agent_sessions()` runs at worker startup (before recovery), during `/update` (before stale cleanup), and hourly as the `agent-session-cleanup` reflection. It detects unsaveable sessions, deletes them (with fallback to direct Redis key deletion), and rebuilds indexes to clear orphaned `$IndexF`/`$KeyF`/`$SortF` entries. See also [Popoto Index Hygiene](popoto-index-hygiene.md) for the daily automated index rebuild that supplements this.
 
 ### 8. Perplexity Provider Error Handling (`tools/web/providers/perplexity.py`)
 

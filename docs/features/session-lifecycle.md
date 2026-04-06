@@ -140,4 +140,4 @@ When a nudge (auto-continue) is enqueued during session execution, the session s
 - [Agent Session Queue Reliability](agent-session-queue.md) -- KeyField index fixes and delete-and-recreate pattern
 - [Agent Session Health Monitor](agent-session-health-monitor.md) -- Stuck session detection
 - [Session Lifecycle Diagnostics](session-lifecycle-diagnostics.md) -- Structured LIFECYCLE logging at every state transition
-- [Agent Session Hierarchy](agent-session-scheduling.md#parent-child-session-hierarchy) -- Parent-child relationships and orphan recovery
+- [Agent Session Hierarchy](agent-session-scheduling.md#parent-child-session-hierarchy) -- Parent-child relationships and orphan handling

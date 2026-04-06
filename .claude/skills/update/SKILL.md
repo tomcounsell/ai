@@ -38,8 +38,9 @@ The orchestrator will:
 
 After running, report the result. If there are warnings or errors, list each one clearly.
 
-The orchestrator automatically cleans up stale sessions as part of Step 5.5:
-- Running/pending sessions older than 30 min with no live process are transitioned to `killed`
+The orchestrator automatically cleans up sessions as part of Step 5.5:
+- Corrupted sessions (invalid IDs, unsaveable records) are deleted and indexes rebuilt
+- Running/pending sessions older than 120 min with no live process are transitioned to `killed`
 - Terminal sessions (killed/abandoned/failed/completed) are preserved for reflections to analyze
 - Reflections handles its own 90-day expiry of old session records
 

@@ -11,7 +11,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Agent Session Health Monitor](agent-session-health-monitor.md) | Detects and recovers stuck running sessions in the queue | Shipped |
 | [Agent Session Hierarchy](agent-session-scheduling.md#parent-child-session-hierarchy) | Parent-child session decomposition with completion propagation, progress tracking, and orphan/stuck parent self-healing | Shipped |
 | [Agent Session Model](agent-session-model.md) | Unified lifecycle model with DatetimeFields, SessionEvent log, consolidated DictFields | Shipped |
-| [Agent Session Queue Reliability](agent-session-queue.md) | KeyField index fixes, Event-based drain guard, delete-and-recreate pattern, orphan recovery | Shipped |
+| [Agent Session Queue Reliability](agent-session-queue.md) | KeyField index fixes, Event-based drain guard, delete-and-recreate pattern, corrupted session cleanup | Shipped |
 | [Agent Session Scheduling](agent-session-scheduling.md) | Agent-initiated queue operations: schedule SDLC sessions, deferred execution, 4-tier priority, queue manipulation | Shipped |
 | [Agent-Controlled Delivery Protocol](agent-controlled-delivery.md) | Delivery-choice protocol (SEND/EDIT/REACT/SILENT/CONTINUE) with defense-in-depth filtering to prevent control signal text leaking to users | Shipped |
 | [Agent-Controlled Message Delivery](agent-message-delivery.md) | Stop-hook review gate giving the agent final say over output: SEND/EDIT/REACT/SILENT/CONTINUE delivery choices, classification context, false-stop detection | Shipped |
@@ -79,7 +79,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Race Condition Analysis](race-condition-analysis.md) | Structured concurrency analysis section in plan template with soft validator for async code | Shipped |
 | [Reaction Semantics](reaction-semantics.md) | Emoji reaction protocol for message delivery feedback and silent loss prevention | Shipped |
 | [Redis Model Relationships](redis-models.md) | Cross-references between Popoto models, project_key on all models, enrichment metadata ownership on TelegramMessage, field type semantics (KeyField vs IndexedField) | Shipped |
-| [Reflections](reflections.md) | Unified reflection scheduler with declarative YAML registry, Redis state tracking, skip-if-running guard; subsumes health check, orphan recovery, branch cleanup, and 16-unit daily maintenance pipeline (including hooks audit and PR review audit) | Shipped |
+| [Reflections](reflections.md) | Unified reflection scheduler with declarative YAML registry, Redis state tracking, skip-if-running guard; subsumes health check, agent-session-cleanup, branch cleanup, and 16-unit daily maintenance pipeline (including hooks audit and PR review audit) | Shipped |
 | [Reflections Dashboard](reflections-dashboard.md) | Web dashboard for monitoring reflection scheduler execution, run history, and ignore patterns at `/reflections/` | Shipped |
 | [Remote Update](remote-update.md) | Telegram command and cron for remote system updates across machines | Shipped |
 | [Review Workflow Screenshots](review-workflow-screenshots.md) | Screenshot capture during review for visual validation | Shipped |
