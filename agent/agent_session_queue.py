@@ -4,10 +4,17 @@ Agent Session Queue - FILO stack with per-project sequential workers.
 Serializes agent work per project working directory so git operations
 never conflict. Agent runs directly in the project's working directory.
 
+This module has no module-level bridge/ imports and can be used by both
+the Telegram bridge (embedded worker) and the standalone worker
+(python -m worker). Output routing uses the OutputHandler protocol
+defined in agent/output_handler.py, with FileOutputHandler as fallback
+when no bridge callbacks are registered.
+
 Architecture:
 - AgentSession: unified popoto Model persisted in Redis
 - Worker loop: one asyncio.Task per project, processes sessions sequentially
 - Revival detection: lightweight git state check, no SDK agent call
+- Output: OutputHandler protocol (Telegram callbacks or file logging)
 """
 
 import asyncio
@@ -27,9 +34,10 @@ from agent.branch_manager import (
     get_plan_context,
     sanitize_branch_name,
 )
+from agent.constants import REACTION_COMPLETE, REACTION_ERROR, REACTION_SUCCESS
+from agent.output_handler import OutputHandler
+from agent.session_logs import save_session_snapshot
 from agent.worktree_manager import WORKTREES_DIR, validate_workspace
-from bridge.response import REACTION_COMPLETE, REACTION_ERROR, REACTION_SUCCESS
-from bridge.session_logs import save_session_snapshot
 from config.enums import ClassificationType, PersonaType, SessionType
 from models.agent_session import AgentSession
 from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
@@ -1317,19 +1325,46 @@ _response_callbacks: dict[str, ResponseCallback] = {}
 
 def register_callbacks(
     project_key: str,
-    send_callback: SendCallback,
-    reaction_callback: ReactionCallback,
+    send_callback: SendCallback | None = None,
+    reaction_callback: ReactionCallback | None = None,
     response_callback: ResponseCallback | None = None,
+    *,
+    handler: OutputHandler | None = None,
 ) -> None:
     """
-    Register bridge callbacks for a project.
+    Register output callbacks for a project.
 
-    send_callback(chat_id, text, reply_to_msg_id) -> sends a Telegram message
-    reaction_callback(chat_id, msg_id, emoji) -> sets a reaction on a message
-    response_callback(event, text, chat_id, msg_id) -> sends response with file handling
+    Accepts either raw callables (backward compatible with bridge) or an
+    OutputHandler instance (for standalone worker and new platform bridges).
+
+    Args:
+        project_key: Project identifier to register callbacks for.
+        send_callback: Callable (chat_id, text, reply_to_msg_id, session) -> sends output.
+        reaction_callback: Callable (chat_id, msg_id, emoji) -> sets a reaction.
+        response_callback: Callable (event, text, chat_id, msg_id) ->
+            sends response with file handling.
+        handler: An OutputHandler instance. If provided, its send() and react()
+                 methods are wrapped as send_callback and reaction_callback.
     """
-    _send_callbacks[project_key] = send_callback
-    _reaction_callbacks[project_key] = reaction_callback
+    if handler is not None:
+        # Wrap OutputHandler methods as raw callbacks for internal use
+        if send_callback is None:
+            _send_callbacks[project_key] = handler.send
+        else:
+            _send_callbacks[project_key] = send_callback
+
+        if reaction_callback is None:
+            _reaction_callbacks[project_key] = handler.react
+        else:
+            _reaction_callbacks[project_key] = reaction_callback
+    else:
+        if send_callback is None:
+            raise ValueError("Either send_callback or handler must be provided")
+        if reaction_callback is None:
+            raise ValueError("Either reaction_callback or handler must be provided")
+        _send_callbacks[project_key] = send_callback
+        _reaction_callbacks[project_key] = reaction_callback
+
     if response_callback:
         _response_callbacks[project_key] = response_callback
 
@@ -1990,9 +2025,20 @@ async def _execute_agent_session(session: AgentSession) -> None:
     # Calendar heartbeat at session start
     asyncio.create_task(_calendar_heartbeat(session.project_key, project=session.project_key))
 
-    # Create messenger with bridge callbacks
+    # Create messenger with bridge callbacks, falling back to file output
     send_cb = _send_callbacks.get(session.project_key)
     react_cb = _reaction_callbacks.get(session.project_key)
+
+    if not send_cb:
+        from agent.output_handler import FileOutputHandler
+
+        _fallback = FileOutputHandler()
+        send_cb = _fallback.send
+        react_cb = react_cb or _fallback.react
+        logger.info(
+            f"[{session.project_key}] No bridge callbacks registered, "
+            f"using FileOutputHandler fallback"
+        )
 
     # Explicit state object replaces fragile nonlocal closures (_defer_reaction,
     # _completion_sent, auto_continue_count). State is passed as a mutable object
@@ -2015,9 +2061,6 @@ async def _execute_agent_session(session: AgentSession) -> None:
         - Safety cap of MAX_NUDGE_COUNT nudges → deliver regardless
         """
         nonlocal agent_session  # Re-read from Redis for fresh stage data
-
-        if not send_cb:
-            return
 
         from agent.health_check import is_session_unhealthy
         from agent.sdk_client import get_stop_reason

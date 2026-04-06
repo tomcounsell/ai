@@ -14,6 +14,8 @@ UPDATE_PLIST_NAME="com.valor.update"
 UPDATE_PLIST_PATH="$HOME/Library/LaunchAgents/${UPDATE_PLIST_NAME}.plist"
 WATCHDOG_PLIST_NAME="com.valor.bridge-watchdog"
 WATCHDOG_PLIST_PATH="$HOME/Library/LaunchAgents/${WATCHDOG_PLIST_NAME}.plist"
+WORKER_PLIST_NAME="com.valor.worker"
+WORKER_PLIST_PATH="$HOME/Library/LaunchAgents/${WORKER_PLIST_NAME}.plist"
 LOG_DIR="$PROJECT_DIR/logs"
 PID_FILE="$PROJECT_DIR/data/bridge.pid"
 
@@ -21,11 +23,11 @@ PID_FILE="$PROJECT_DIR/data/bridge.pid"
 mkdir -p "$LOG_DIR"
 
 usage() {
-    echo "Valor Bridge Service Manager"
+    echo "Valor Service Manager"
     echo ""
     echo "Usage: $0 <command>"
     echo ""
-    echo "Commands:"
+    echo "Bridge commands:"
     echo "  start       Start the bridge service"
     echo "  stop        Stop the bridge service"
     echo "  restart     Restart the bridge service"
@@ -34,6 +36,13 @@ usage() {
     echo "  uninstall   Remove launchd service"
     echo "  logs        Tail the bridge logs"
     echo "  health      Check if bridge is healthy and responding"
+    echo ""
+    echo "Worker commands:"
+    echo "  worker-start    Start the standalone worker"
+    echo "  worker-stop     Stop the standalone worker"
+    echo "  worker-restart  Restart the standalone worker"
+    echo "  worker-status   Check worker status"
+    echo "  worker-logs     Tail the worker logs"
     echo ""
 }
 
@@ -471,6 +480,137 @@ tail_logs() {
     tail -f "$LOG_DIR/bridge.log" "$LOG_DIR/bridge.error.log" 2>/dev/null
 }
 
+# === Worker Management ===
+
+get_worker_pid() {
+    pgrep -f "python -m worker" 2>/dev/null || pgrep -f "python.*worker/__main__" 2>/dev/null || true
+}
+
+is_worker_running() {
+    local pid=$(get_worker_pid)
+    [ -n "$pid" ]
+}
+
+is_worker_launchd_loaded() {
+    launchctl list "$WORKER_PLIST_NAME" &>/dev/null
+}
+
+start_worker() {
+    echo "Starting standalone worker..."
+
+    # Rotate worker logs
+    rotate_log "$LOG_DIR/worker.log"
+    rotate_log "$LOG_DIR/worker_error.log"
+
+    mkdir -p "$LOG_DIR/worker"
+
+    if [ -f "$WORKER_PLIST_PATH" ]; then
+        if ! is_worker_launchd_loaded; then
+            launchctl load "$WORKER_PLIST_PATH"
+        else
+            launchctl kickstart "gui/$(id -u)/$WORKER_PLIST_NAME"
+        fi
+    else
+        # Fallback: manual start
+        cd "$PROJECT_DIR"
+        nohup "$VENV/bin/python" -m worker \
+            >> "$LOG_DIR/worker.log" \
+            2>> "$LOG_DIR/worker_error.log" &
+    fi
+
+    sleep 2
+    if is_worker_running; then
+        local pid=$(get_worker_pid)
+        echo "Worker started (PID: $pid)"
+    else
+        echo "Failed to start worker. Check logs: $LOG_DIR/worker_error.log"
+        return 1
+    fi
+}
+
+stop_worker() {
+    local pid=$(get_worker_pid)
+
+    if [ -z "$pid" ]; then
+        echo "Worker is not running"
+        return 0
+    fi
+
+    echo "Stopping worker (PID: $pid)..."
+
+    if is_worker_launchd_loaded; then
+        launchctl unload "$WORKER_PLIST_PATH" 2>/dev/null || true
+        sleep 2
+        if ! is_worker_running; then
+            echo "Worker stopped (via launchd)"
+            return 0
+        fi
+    fi
+
+    kill "$pid" 2>/dev/null || true
+
+    for i in {1..10}; do
+        if ! is_worker_running; then
+            echo "Worker stopped"
+            return 0
+        fi
+        sleep 1
+    done
+
+    echo "Force killing worker..."
+    kill -9 "$pid" 2>/dev/null || true
+    echo "Worker stopped (forced)"
+}
+
+restart_worker() {
+    echo "Restarting worker..."
+
+    if is_worker_launchd_loaded; then
+        launchctl kickstart -k "gui/$(id -u)/$WORKER_PLIST_NAME"
+        sleep 2
+        if is_worker_running; then
+            local pid=$(get_worker_pid)
+            echo "Worker restarted (PID: $pid)"
+        else
+            echo "Worker restart failed. Check logs: $LOG_DIR/worker_error.log"
+            return 1
+        fi
+    else
+        stop_worker
+        sleep 1
+        start_worker
+    fi
+}
+
+status_worker() {
+    local pid=$(get_worker_pid)
+
+    if [ -n "$pid" ]; then
+        echo "Worker Status: RUNNING"
+        echo "PID: $pid"
+        echo "Uptime: $(ps -o etime= -p $pid 2>/dev/null | xargs)"
+        echo "Memory: $(ps -o rss= -p $pid 2>/dev/null | awk '{printf "%.1f MB", $1/1024}')"
+
+        if launchctl list | grep -q "$WORKER_PLIST_NAME"; then
+            echo "Launchd: INSTALLED (auto-start enabled)"
+        else
+            echo "Launchd: NOT INSTALLED (manual start only)"
+        fi
+        return 0
+    else
+        echo "Worker Status: STOPPED"
+        if launchctl list | grep -q "$WORKER_PLIST_NAME"; then
+            echo "Launchd: INSTALLED (will auto-start)"
+        fi
+        return 1
+    fi
+}
+
+tail_worker_logs() {
+    echo "Tailing worker logs (Ctrl+C to stop)..."
+    tail -f "$LOG_DIR/worker.log" "$LOG_DIR/worker_error.log" 2>/dev/null
+}
+
 # Main
 case "${1:-}" in
     start)
@@ -496,6 +636,21 @@ case "${1:-}" in
         ;;
     logs)
         tail_logs
+        ;;
+    worker-start)
+        start_worker
+        ;;
+    worker-stop)
+        stop_worker
+        ;;
+    worker-restart)
+        restart_worker
+        ;;
+    worker-status)
+        status_worker
+        ;;
+    worker-logs)
+        tail_worker_logs
         ;;
     *)
         usage

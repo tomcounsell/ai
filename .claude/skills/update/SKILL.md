@@ -32,7 +32,7 @@ The orchestrator will:
 - Verify critical dependency versions
 - Check/pull Ollama summarizer model
 - Verify CLI tools and SDK authentication
-- Install/restart bridge, caffeinate, and reflections services
+- Install/restart bridge, worker, caffeinate, and reflections services
 - Set up global calendar hook and generate config
 - Check MCP server configuration
 
@@ -86,6 +86,7 @@ After update, reinstall launchd plists to pick up any template changes:
 ```bash
 cd ~/src/ai
 ./scripts/install_reflections.sh
+./scripts/install_worker.sh
 ```
 
 The install script substitutes `__PROJECT_DIR__` and `__HOME_DIR__` placeholders with the current machine's paths. This ensures plists work on any machine without hardcoded usernames.
@@ -129,6 +130,21 @@ tail -50 ~/src/ai/logs/bridge.error.log
 
 # Check status
 ~/src/ai/scripts/valor-service.sh status
+```
+
+### Worker won't start
+```bash
+# Check logs
+tail -50 ~/src/ai/logs/worker_error.log
+
+# Manual restart
+~/src/ai/scripts/valor-service.sh worker-restart
+
+# Check status
+~/src/ai/scripts/valor-service.sh worker-status
+
+# Reinstall plist
+~/src/ai/scripts/install_worker.sh
 ```
 
 ## Module Details
@@ -190,11 +206,19 @@ config = calendar.generate_calendar_config(project_dir)
 ```python
 from scripts.update import service
 
-# Get status
+# Get bridge status
 status = service.get_service_status(project_dir)
 # status.running, status.pid, status.uptime, status.memory_mb
 
-# Install/restart
+# Install/restart bridge
 service.install_service(project_dir)  # Installs bridge + update cron
 service.restart_service(project_dir)
+
+# Get worker status
+worker = service.get_worker_status(project_dir)
+# worker.running, worker.pid, worker.uptime, worker.memory_mb
+
+# Install/restart worker
+service.install_worker(project_dir)   # Installs standalone worker service
+service.restart_worker(project_dir)
 ```

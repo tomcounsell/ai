@@ -72,6 +72,18 @@ if [ -f "$REFLECTIONS_PLIST" ]; then
     fi
 fi
 
+# ── Reload worker plist if present ───────────────────────────────────
+WORKER_PLIST="$PROJECT_DIR/com.valor.worker.plist"
+WORKER_DST="$HOME/Library/LaunchAgents/com.valor.worker.plist"
+WORKER_LABEL="com.valor.worker"
+if [ -f "$WORKER_PLIST" ] && [ -f "$WORKER_DST" ]; then
+    if launchctl list | grep -q "$WORKER_LABEL"; then
+        launchctl bootout "gui/$(id -u)/$WORKER_LABEL" 2>/dev/null || true
+    fi
+    sed "s|__PROJECT_DIR__|$PROJECT_DIR|g; s|__HOME_DIR__|$HOME|g" "$WORKER_PLIST" > "$WORKER_DST"
+    launchctl bootstrap "gui/$(id -u)" "$WORKER_DST" 2>/dev/null || true
+fi
+
 # ── Sync newsyslog log rotation config if changed ────────────────────
 NEWSYSLOG_SRC="$PROJECT_DIR/config/newsyslog.valor.conf"
 NEWSYSLOG_DST="/etc/newsyslog.d/valor.conf"
