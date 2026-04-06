@@ -38,7 +38,7 @@ No prior work on deterministic browser test generation or Rodney integration exi
 
 ## Architectural Impact
 
-- **New dependencies**: Rodney prebuilt binary (from `github.com/nicois/rodney/releases`) must be installed on each machine
+- **New dependencies**: Rodney prebuilt binary (from `github.com/simonw/rodney/releases`) must be installed on each machine
 - **Interface changes**: New `/do-test happy-paths` target in the test orchestrator; new trace JSON schema as the contract between stages 1 and 2
 - **Coupling**: Low -- stages communicate only through trace JSON files and shell scripts on disk. No new imports into bridge or agent code
 - **Data ownership**: Trace JSON and generated scripts live in `tests/happy-paths/` under version control
@@ -149,7 +149,7 @@ case "$ARCH" in
 esac
 
 RODNEY_VERSION="v0.4.0"
-RODNEY_URL="https://github.com/nicois/rodney/releases/download/${RODNEY_VERSION}/rodney-${OS}-${ARCH}.tar.gz"
+RODNEY_URL="https://github.com/simonw/rodney/releases/download/${RODNEY_VERSION}/rodney-${OS}-${ARCH}.tar.gz"
 
 curl -sL "$RODNEY_URL" | tar xz -C /usr/local/bin/ rodney
 chmod +x /usr/local/bin/rodney

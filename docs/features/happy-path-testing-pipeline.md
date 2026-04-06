@@ -100,7 +100,7 @@ The discovery skill extracts stable CSS selectors via `agent-browser eval` with 
 
 ## Rodney
 
-[Rodney](https://github.com/nicois/rodney) is a headless Chrome test runner. It is installed as a prebuilt binary via the update system (`scripts/update/rodney.py`). No Go toolchain required.
+[Rodney](https://github.com/simonw/rodney) is a headless Chrome test runner. It is installed as a prebuilt binary via the update system (`scripts/update/rodney.py`). No Go toolchain required.
 
 ### Rodney Command Mapping
 
