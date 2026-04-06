@@ -317,7 +317,73 @@ No agent integration required — this is an internal refactoring of the session
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Date**: 2026-04-06
+**Critics**: Skeptic, Operator, Archaeologist, Adversary, Simplifier, User
+**Findings**: 5 total (2 blockers, 2 concerns, 1 nit)
+
+### Blockers
+
+#### 1. `send_to_chat` is a mid-execution callback, not a post-execution hook
+- **Severity**: BLOCKER
+- **Critics**: Skeptic, Adversary
+- **Location**: Solution > Technical Approach, Task 3 (build-simplified-executor)
+- **Finding**: The plan says "Change `send_to_chat()` to always deliver via `send_cb()`" and "Move the routing decision to `_worker_loop()` after `_execute_agent_session()` returns." However, `send_to_chat` is wired as the `_send_callback` on `BossMessenger` (agent/messenger.py:68) and is invoked by `BackgroundTask._run_work()` (agent/messenger.py:152) when the SDK returns output. The nudge-enqueue currently happens *inside* this callback, which sets `chat_state.defer_reaction = True` and `chat_state.completion_sent = True` — these flags control critical post-execution behavior at agent/agent_session_queue.py:2446-2554 (reaction setting, transcript completion, branch cleanup, session snapshot). If `send_to_chat` always delivers and routing moves to after `_execute_agent_session()` returns, the post-execution cleanup will have already run with the wrong flags (it will think the session completed normally rather than being nudged). The `_worker_loop` finally block (L1725-1758) also has a "nudge guard" that re-reads session status to avoid overwriting nudge state — this guard assumes the nudge happened *during* execution.
+- **Suggestion**: The plan must address the temporal coupling between `send_to_chat` setting `chat_state` flags and the post-execution cleanup reading them. Either: (a) keep the routing decision inside `send_to_chat` but delegate to `output_router.route_session_output()` (extract logic, don't move the call site), or (b) restructure `_execute_agent_session()` so it returns *before* post-execution cleanup runs, and the caller handles both routing and cleanup based on the routing result. Option (a) is simpler and lower risk.
+
+#### 2. `_worker_loop` nudge guard depends on mid-execution enqueue
+- **Severity**: BLOCKER
+- **Critics**: Adversary, Skeptic
+- **Location**: Solution > Technical Approach, Data Flow > Target Flow
+- **Finding**: The `_worker_loop` finally block (agent/agent_session_queue.py:1725-1758) re-reads the session from Redis after execution. If the session status is "pending" (set by `_enqueue_nudge` during execution), it skips `_complete_agent_session()` to avoid overwriting the nudge. If routing moves to *after* `_execute_agent_session()` returns, this guard will see the session as NOT pending (because `re_enqueue_session` hasn't been called yet), and will call `_complete_agent_session()`, marking the session completed *before* the router can re-enqueue it. This creates a race where the session is finalized then re-enqueued — exactly the zombie scenario Risk 2 warns about.
+- **Suggestion**: The finally block's nudge guard must be updated to work with the new flow. If the router decision happens after execution but before completion, the finally block needs to know the routing result. This reinforces that option (a) from Blocker 1 is safer: keep the enqueue inside the execution scope where the guard already works correctly.
+
+### Concerns
+
+#### 3. Plan claims ~470 lines of nudge logic but actual count is ~345
+- **Severity**: CONCERN
+- **Critics**: Skeptic
+- **Location**: Problem statement
+- **Finding**: The plan states "~470 lines of nudge loop logic" but `determine_delivery_action` is 46 lines (L66-111), `_enqueue_nudge` is 130 lines (L1867-1996), and `send_to_chat` routing is 169 lines (L2137-2305), totaling ~345 lines. The discrepancy suggests either inflated scope estimation or inclusion of adjacent code that isn't actually nudge-specific (e.g., the PM outbox drain at L2278-2297, which is delivery logic, not nudge logic).
+- **Suggestion**: Audit the exact lines to be moved vs. lines that stay. The PM outbox drain and the enrichment code in `send_to_chat`'s deliver path are delivery concerns, not nudge concerns, and should remain in the executor.
+
+#### 4. No rollback procedure or feature flag
+- **Severity**: CONCERN
+- **Critics**: Operator
+- **Location**: Risks, Architectural Impact
+- **Finding**: The plan acknowledges "Reversibility: Medium" but provides no concrete rollback procedure. If the refactored nudge loop fails in production (sessions stalling, zombie sessions), the only recovery path is reverting the commit. For a 3000-line file that's the core execution engine, a revert may conflict with concurrent work. There's no feature flag to fall back to the old `send_to_chat` routing.
+- **Suggestion**: Consider a simple feature flag (env var like `VALOR_USE_LEGACY_NUDGE=1`) that keeps the old `send_to_chat` routing as a fallback during the transition period. Remove it once validated.
+
+### Nits
+
+#### 5. Task 1 references `TEAMMATE_MAX_NUDGE_COUNT` import from `agent/teammate_handler.py`
+- **Severity**: NIT
+- **Critics**: Simplifier
+- **Location**: Task 1 (build-output-router)
+- **Finding**: Task 1 says to "Import `TEAMMATE_MAX_NUDGE_COUNT` from `agent/teammate_handler.py` for teammate routing" into the new `output_router.py`. This creates a circular-looking dependency: the output router imports from teammate_handler, and the session queue already imports from teammate_handler. The constant (value: 10) could simply be defined in the output router since it's a routing concern, not a teammate persona concern.
+- **Suggestion**: Either move the constant to the output router (canonical location for all nudge caps) or to `agent/constants.py` alongside other session constants. Minor, but cleaner.
+
+### Structural Check Results
+
+| Check | Status | Detail |
+|-------|--------|--------|
+| Required sections | PASS | Documentation, Update System, Agent Integration, Test Impact all present and non-empty |
+| Task numbering | PASS | Sequential 1-7, no gaps |
+| Dependencies valid | PASS | All Depends On references resolve to valid Task IDs |
+| File paths exist | PASS | 7 of 8 source files exist; `agent/output_router.py` correctly noted as new (to be created) |
+| Test files exist | PASS | All 8 test files in Test Impact section exist |
+| Prerequisites met | PASS | Plan states no prerequisites |
+| Cross-references | PASS | Success criteria map to tasks; no-gos are not planned as work; rabbit holes are explicitly excluded |
+
+### Verdict
+
+**NEEDS REVISION** — 2 blockers must be resolved before build.
+
+The core issue is that the plan proposes moving the nudge routing decision from *inside* `send_to_chat` (mid-execution callback) to *after* `_execute_agent_session()` returns (post-execution), but the post-execution cleanup logic (reactions, transcript completion, branch cleanup, nudge guard in finally block) depends on flags set by the mid-execution routing decision. The plan needs to either:
+
+1. **Option A (recommended)**: Keep the routing call site inside `send_to_chat` but extract the logic to `agent/output_router.py`. The router module owns the decision logic; `send_to_chat` just calls it. This achieves the separation-of-concerns goal without restructuring the execution flow.
+2. **Option B (higher risk)**: Fully restructure `_execute_agent_session()` to separate execution from cleanup, returning a result object that the caller uses for both routing and cleanup. This is more architecturally clean but touches more code and has higher regression risk.
+
+The plan should be revised to explicitly address which option it takes and update the Data Flow and Technical Approach sections accordingly.
 
 ---
 
