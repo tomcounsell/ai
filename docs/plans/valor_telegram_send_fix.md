@@ -5,7 +5,7 @@ appetite: Small
 owner: Valor
 created: 2026-04-06
 tracking: https://github.com/tomcounsell/ai/issues/726
-last_comment_id:
+last_comment_id: 4189976223
 ---
 
 # Fix valor-telegram send — route through Redis relay
@@ -43,7 +43,11 @@ Additional missing capabilities vs the bridge relay path: no markdown formatting
 1. **Entry point**: `valor-telegram send --chat "X" "message"` -> `cmd_send()`
 2. **Resolution**: `resolve_chat()` maps chat name to numeric ID (unchanged)
 3. **Linkification**: Apply `linkify_references()` to message text
+<<<<<<< Updated upstream
 4. **Length check**: Truncate at 4096 chars with `...` suffix (simple char truncation, matching `send_telegram.py`)
+=======
+4. **Length check**: Truncate at 4096 chars (`text[:4093] + "..."` matching `send_telegram.py`)
+>>>>>>> Stashed changes
 5. **Queue**: Push to `telegram:outbox:cli-{timestamp}` Redis list (same format as `send_telegram.py`)
 6. **Relay**: Bridge relay (`bridge/telegram_relay.py`) picks up and sends with markdown, reply_to, retry
 7. **Output**: "Message queued" confirmation
@@ -86,8 +90,13 @@ No prerequisites -- Redis and relay infrastructure already exist and are stable.
 
 1. **Rewrite `cmd_send()`** to build a relay-compatible payload and push to Redis, mirroring `send_telegram.py`'s `send_message()` but sourcing chat_id/reply_to from CLI args instead of env vars
 2. **Add `--reply-to` flag** to the send subparser for forum group support
+<<<<<<< Updated upstream
 3. **Use synthetic session_id** (`cli-{uuid4().hex[:12]}`) for the queue key since CLI sends have no session context -- UUID fragment avoids collisions from rapid invocations
 4. **Import and call `linkify_text()` from `tools.send_telegram`** (rename from `_linkify_text` to make it public) and apply simple char truncation (`text[:4093] + "..."`) before queueing -- matches `send_telegram.py` behavior exactly
+=======
+3. **Use synthetic session_id** (`cli-{uuid4().hex[:12]}`) for the queue key since CLI sends have no session context
+4. **Apply `_linkify_text()`** and length truncation before queueing (same as `send_telegram.py`)
+>>>>>>> Stashed changes
 5. **Remove direct Telethon usage** from `cmd_send()` entirely -- no fallback to direct send. If Redis/relay is unavailable, error clearly.
 6. **Keep `_telethon_client()` and `_fetch_from_telegram_api()`** for the `read` command's API fallback (read operations don't conflict because they only hold the SQLite lock briefly)
 
@@ -134,6 +143,7 @@ No race conditions identified -- the CLI pushes a single atomic RPUSH to Redis a
 
 - Delivery confirmation/polling (future enhancement)
 - Fallback to direct Telethon when relay is down
+- Fuzzy `--reply-to` matching (e.g., `--reply-to "karpathy wiki"` to search recent messages and reply to best match) -- good UX idea from issue comment, deferred to follow-up issue since it requires wiring `read --search` into the send flow and is additive on top of the basic fix
 - Changes to the `read` or `chats` subcommands
 - Changes to `tools/send_telegram.py` (agent-facing tool)
 - Changes to `bridge/telegram_relay.py` (relay is already correct)
@@ -190,9 +200,15 @@ No agent integration required -- `valor-telegram` is a human-facing CLI tool. Th
 - Add `--reply-to` argument to send subparser
 - Preserve `--image` (`-i`) and `--audio` (`-a`) as aliases for `--file` -- these are existing CLI flags that users may rely on; treat all three identically as file attachment paths in the queue payload
 - Build relay-compatible payload: `{chat_id, reply_to, text, file_paths, session_id, timestamp}`
+<<<<<<< Updated upstream
 - Use synthetic session_id: `f"cli-{uuid4().hex[:12]}"` (UUID fragment for collision resistance)
 - Import and call `linkify_text()` from `tools.send_telegram` (rename from `_linkify_text` to make it public, since it's now used cross-module)
 - Truncate text using simple char truncation: `text[:4093] + "..."` (matches `send_telegram.py`)
+=======
+- Use synthetic session_id: `f"cli-{uuid4().hex[:12]}"`
+- Apply `linkify_text()` (import from `tools.send_telegram`, renaming `_linkify_text` to public) before queueing
+- Truncate text to 4096 chars (`text[:4093] + "..."`) before queueing
+>>>>>>> Stashed changes
 - Push to `telegram:outbox:{session_id}` via Redis RPUSH with 1-hour TTL
 - Handle file validation (exists check) before queueing
 - **Error handling**: Redis connection failure = error to stderr + exit 1; successful queue but bridge possibly down = print "Message queued ({N} chars)" + warning "Note: delivery requires the bridge relay to be running"
