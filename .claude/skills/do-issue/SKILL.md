@@ -7,6 +7,21 @@ argument-hint: "<title or description>"
 
 # Create Issue (Quality Issue Creator)
 
+## Stage Marker
+
+At the very start of this skill, write an in_progress marker:
+
+```bash
+python -m tools.sdlc_stage_marker --stage ISSUE --status in_progress 2>/dev/null || true
+```
+
+After the issue is created (Step 7), write the completion marker:
+
+```bash
+python -m tools.sdlc_stage_marker --stage ISSUE --status completed 2>/dev/null || true
+```
+
+
 Creates GitHub issues that are self-contained documents a stranger could understand. Every issue must teach the reader what they need to know — define terms, link sources, and state the problem from the reader's perspective.
 
 ## Core Philosophy: Think Like a Teacher

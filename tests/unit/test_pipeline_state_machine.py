@@ -424,6 +424,31 @@ class TestDisplayProgress:
         assert progress["ISSUE"] == "ready"
         assert progress["PLAN"] == "pending"
 
+    def test_no_slug_parameter_accepted(self):
+        """get_display_progress() takes no slug parameter (artifact inference removed)."""
+        session = _make_session()
+        sm = PipelineStateMachine(session)
+        with pytest.raises(TypeError):
+            sm.get_display_progress(slug="some-slug")
+
+    def test_infer_method_deleted(self):
+        """_infer_stage_from_artifacts() no longer exists (deleted in #729)."""
+        session = _make_session()
+        sm = PipelineStateMachine(session)
+        assert not hasattr(sm, "_infer_stage_from_artifacts"), (
+            "_infer_stage_from_artifacts still exists — should have been deleted"
+        )
+
+    def test_returns_stored_state_only(self):
+        """get_display_progress returns exactly what is stored — no inference."""
+        # Mark DOCS as pending — even if docs/ files exist on disk, it must stay pending
+        session = _make_session(stage_states=json.dumps({"DOCS": "pending"}))
+        sm = PipelineStateMachine(session)
+        progress = sm.get_display_progress()
+        assert progress["DOCS"] in ("pending", "ready"), (
+            "DOCS was inferred as completed from artifacts — inference must be removed"
+        )
+
 
 class TestCurrentAndNextStage:
     """Test current_stage() and next_stage()."""
@@ -811,307 +836,68 @@ class TestStageStatesValidation:
         session.save.assert_called()
 
 
-class TestArtifactInference:
-    """Test get_display_progress(slug=...) artifact-based inference."""
+class TestArtifactInferenceDeleted:
+    """Tests verifying that artifact inference was removed (issue #729).
 
-    def test_no_slug_returns_stored_state_only(self):
-        """get_display_progress() without slug returns stored state unchanged."""
-        states = {"ISSUE": "completed", "PLAN": "pending"}
-        session = _make_session(stage_states=json.dumps(states))
+    _infer_stage_from_artifacts() and the slug= parameter to get_display_progress()
+    were deleted as part of SDLC Stage Skip Prevention. These tests confirm deletion.
+    """
+
+    def test_infer_method_does_not_exist(self):
+        """_infer_stage_from_artifacts() must not exist on PipelineStateMachine."""
+        session = _make_session()
+        sm = PipelineStateMachine(session)
+        assert not hasattr(sm, "_infer_stage_from_artifacts"), (
+            "_infer_stage_from_artifacts still exists — must be deleted per #729"
+        )
+
+    def test_get_display_progress_no_slug_parameter(self):
+        """get_display_progress() must not accept a slug parameter."""
+        session = _make_session()
+        sm = PipelineStateMachine(session)
+        with pytest.raises(TypeError):
+            sm.get_display_progress(slug="some-slug")
+
+    def test_display_progress_returns_stored_state_only(self):
+        """get_display_progress() returns stored state — no artifact inference."""
+        session = _make_session(stage_states=json.dumps({"DOCS": "pending"}))
         sm = PipelineStateMachine(session)
         progress = sm.get_display_progress()
-        assert progress["PLAN"] == "pending"
+        # DOCS must reflect stored pending, not inferred from any artifacts
+        assert progress["DOCS"] in ("pending", "ready"), (
+            "DOCS was inferred as completed — artifact inference must be removed"
+        )
 
-    def test_slug_none_returns_stored_state_only(self):
-        """get_display_progress(slug=None) returns stored state unchanged."""
-        states = {"ISSUE": "completed", "PLAN": "pending"}
-        session = _make_session(stage_states=json.dumps(states))
-        sm = PipelineStateMachine(session)
-        progress = sm.get_display_progress(slug=None)
-        assert progress["PLAN"] == "pending"
-
-    @patch("bridge.pipeline_state.subprocess.run")
-    @patch("bridge.pipeline_state.Path")
-    def test_plan_file_exists_infers_plan_and_issue(self, mock_path_cls, mock_run):
-        """Plan file existing infers PLAN and ISSUE as completed."""
-        # Setup: plan file exists with status: Ready
-        mock_path_instance = MagicMock()
-        mock_path_cls.return_value = mock_path_instance
-        mock_path_instance.exists.return_value = True
-        mock_path_instance.read_text.return_value = "---\nstatus: Ready\n---\n# Plan"
-        # Setup: gh call fails (no PR)
-        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="")
-
+    def test_display_progress_plan_not_inferred_from_files(self):
+        """PLAN must not be inferred from docs/plans/ files."""
         session = _make_session()
         sm = PipelineStateMachine(session)
-        progress = sm.get_display_progress(slug="test-feature")
+        progress = sm.get_display_progress()
+        # With empty stored state, PLAN should be pending — not completed from plan files
+        assert progress["PLAN"] == "pending", (
+            "PLAN was inferred as completed from plan file — artifact inference must be removed"
+        )
 
-        assert progress["ISSUE"] == "completed"
-        assert progress["PLAN"] == "completed"
-        assert progress["CRITIQUE"] == "completed"
+    def test_subprocess_not_used_in_get_display_progress(self):
+        """get_display_progress() does not call subprocess (no gh CLI calls)."""
+        import subprocess
 
-    @patch("bridge.pipeline_state.subprocess.run")
-    @patch("bridge.pipeline_state.Path")
-    def test_plan_without_ready_status_does_not_infer_critique(self, mock_path_cls, mock_run):
-        """Plan file without status: Ready does not infer CRITIQUE."""
-        mock_path_instance = MagicMock()
-        mock_path_cls.return_value = mock_path_instance
-        mock_path_instance.exists.return_value = True
-        mock_path_instance.read_text.return_value = "---\nstatus: Draft\n---\n# Plan"
-        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="")
-
-        session = _make_session()
+        session = _make_session(stage_states=json.dumps({"BUILD": "completed"}))
         sm = PipelineStateMachine(session)
-        progress = sm.get_display_progress(slug="test-feature")
+        # Should not make any subprocess calls
+        original_run = subprocess.run
+        calls = []
 
-        assert progress["PLAN"] == "completed"
-        assert progress["CRITIQUE"] == "pending"
+        def mock_run(*args, **kwargs):
+            calls.append(args)
+            return original_run(*args, **kwargs)
 
-    @patch("bridge.pipeline_state.subprocess.run")
-    @patch("bridge.pipeline_state.Path")
-    def test_stored_failed_not_overridden_by_inference(self, mock_path_cls, mock_run):
-        """Stored 'failed' state is NOT overridden by artifact inference."""
-        mock_path_instance = MagicMock()
-        mock_path_cls.return_value = mock_path_instance
-        mock_path_instance.exists.return_value = True
-        mock_path_instance.read_text.return_value = "---\nstatus: Ready\n---\n# Plan"
-        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="")
-
-        states = {"PLAN": "failed"}
-        session = _make_session(stage_states=json.dumps(states))
-        sm = PipelineStateMachine(session)
-        progress = sm.get_display_progress(slug="test-feature")
-
-        # Failed state must NOT be overridden
-        assert progress["PLAN"] == "failed"
-
-    @patch("bridge.pipeline_state.subprocess.run")
-    @patch("bridge.pipeline_state.Path")
-    def test_stored_in_progress_not_overridden(self, mock_path_cls, mock_run):
-        """Stored 'in_progress' state is NOT overridden by artifact inference."""
-        mock_path_instance = MagicMock()
-        mock_path_cls.return_value = mock_path_instance
-        mock_path_instance.exists.return_value = True
-        mock_path_instance.read_text.return_value = "---\nstatus: Ready\n---\n# Plan"
-        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="")
-
-        states = {"PLAN": "in_progress"}
-        session = _make_session(stage_states=json.dumps(states))
-        sm = PipelineStateMachine(session)
-        progress = sm.get_display_progress(slug="test-feature")
-
-        assert progress["PLAN"] == "in_progress"
-
-    @patch("bridge.pipeline_state.subprocess.run")
-    @patch("bridge.pipeline_state.Path")
-    def test_gh_pr_view_infers_build(self, mock_path_cls, mock_run):
-        """PR existing infers BUILD as completed."""
-        mock_path_instance = MagicMock()
-        mock_path_cls.return_value = mock_path_instance
-        mock_path_instance.exists.return_value = False
-
-        pr_data = {
-            "number": 42,
-            "state": "OPEN",
-            "reviewDecision": "",
-            "statusCheckRollup": [],
-            "files": [],
-        }
-        mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(pr_data), stderr="")
-
-        session = _make_session()
-        sm = PipelineStateMachine(session)
-        progress = sm.get_display_progress(slug="test-feature")
-
-        assert progress["BUILD"] == "completed"
-
-    @patch("bridge.pipeline_state.subprocess.run")
-    @patch("bridge.pipeline_state.Path")
-    def test_gh_pr_view_infers_review(self, mock_path_cls, mock_run):
-        """reviewDecision APPROVED infers REVIEW as completed."""
-        mock_path_instance = MagicMock()
-        mock_path_cls.return_value = mock_path_instance
-        mock_path_instance.exists.return_value = False
-
-        pr_data = {
-            "number": 42,
-            "state": "OPEN",
-            "reviewDecision": "APPROVED",
-            "statusCheckRollup": [],
-            "files": [],
-        }
-        mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(pr_data), stderr="")
-
-        session = _make_session()
-        sm = PipelineStateMachine(session)
-        progress = sm.get_display_progress(slug="test-feature")
-
-        assert progress["REVIEW"] == "completed"
-
-    @patch("bridge.pipeline_state.subprocess.run")
-    @patch("bridge.pipeline_state.Path")
-    def test_gh_pr_view_infers_test_from_status_checks(self, mock_path_cls, mock_run):
-        """statusCheckRollup with passing test check infers TEST as completed."""
-        mock_path_instance = MagicMock()
-        mock_path_cls.return_value = mock_path_instance
-        mock_path_instance.exists.return_value = False
-
-        pr_data = {
-            "number": 42,
-            "state": "OPEN",
-            "reviewDecision": "",
-            "statusCheckRollup": [
-                {"context": "ci/test-suite", "conclusion": "SUCCESS"},
-            ],
-            "files": [],
-        }
-        mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(pr_data), stderr="")
-
-        session = _make_session()
-        sm = PipelineStateMachine(session)
-        progress = sm.get_display_progress(slug="test-feature")
-
-        assert progress["TEST"] == "completed"
-
-    @patch("bridge.pipeline_state.subprocess.run")
-    @patch("bridge.pipeline_state.Path")
-    def test_gh_pr_view_infers_docs_from_files(self, mock_path_cls, mock_run):
-        """PR files with docs/ paths infer DOCS as completed."""
-        mock_path_instance = MagicMock()
-        mock_path_cls.return_value = mock_path_instance
-        mock_path_instance.exists.return_value = False
-
-        pr_data = {
-            "number": 42,
-            "state": "OPEN",
-            "reviewDecision": "",
-            "statusCheckRollup": [],
-            "files": [{"path": "docs/features/my-feature.md"}, {"path": "bridge/foo.py"}],
-        }
-        mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(pr_data), stderr="")
-
-        session = _make_session()
-        sm = PipelineStateMachine(session)
-        progress = sm.get_display_progress(slug="test-feature")
-
-        assert progress["DOCS"] == "completed"
-
-    @patch("bridge.pipeline_state.subprocess.run")
-    @patch("bridge.pipeline_state.Path")
-    def test_docs_plans_only_does_not_infer_docs(self, mock_path_cls, mock_run):
-        """PR with only docs/plans/ files does NOT infer DOCS as completed."""
-        mock_path_instance = MagicMock()
-        mock_path_cls.return_value = mock_path_instance
-        mock_path_instance.exists.return_value = False
-
-        pr_data = {
-            "number": 42,
-            "state": "OPEN",
-            "reviewDecision": "",
-            "statusCheckRollup": [],
-            "files": [{"path": "docs/plans/my-feature.md"}, {"path": "bridge/foo.py"}],
-        }
-        mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(pr_data), stderr="")
-
-        session = _make_session()
-        sm = PipelineStateMachine(session)
-        progress = sm.get_display_progress(slug="test-feature")
-
-        assert progress["DOCS"] != "completed"
-
-    @patch("bridge.pipeline_state.subprocess.run")
-    @patch("bridge.pipeline_state.Path")
-    def test_docs_features_infers_docs_completed(self, mock_path_cls, mock_run):
-        """PR with docs/features/ files DOES infer DOCS as completed."""
-        mock_path_instance = MagicMock()
-        mock_path_cls.return_value = mock_path_instance
-        mock_path_instance.exists.return_value = False
-
-        pr_data = {
-            "number": 42,
-            "state": "OPEN",
-            "reviewDecision": "",
-            "statusCheckRollup": [],
-            "files": [{"path": "docs/features/my-feature.md"}],
-        }
-        mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(pr_data), stderr="")
-
-        session = _make_session()
-        sm = PipelineStateMachine(session)
-        progress = sm.get_display_progress(slug="test-feature")
-
-        assert progress["DOCS"] == "completed"
-
-    @patch("bridge.pipeline_state.subprocess.run")
-    @patch("bridge.pipeline_state.Path")
-    def test_gh_timeout_returns_stored_state(self, mock_path_cls, mock_run):
-        """Subprocess timeout does not crash, returns stored state."""
-        import subprocess as sp
-
-        mock_path_instance = MagicMock()
-        mock_path_cls.return_value = mock_path_instance
-        mock_path_instance.exists.return_value = False
-        mock_run.side_effect = sp.TimeoutExpired(cmd="gh", timeout=5)
-
-        session = _make_session()
-        sm = PipelineStateMachine(session)
-        progress = sm.get_display_progress(slug="test-feature")
-
-        # Should not crash, returns stored state
-        assert progress["BUILD"] in ("pending", "ready")
-
-    @patch("bridge.pipeline_state.subprocess.run")
-    @patch("bridge.pipeline_state.Path")
-    def test_gh_called_with_timeout_5(self, mock_path_cls, mock_run):
-        """subprocess.run for gh is called with timeout=5."""
-        mock_path_instance = MagicMock()
-        mock_path_cls.return_value = mock_path_instance
-        mock_path_instance.exists.return_value = False
-        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="")
-
-        session = _make_session()
-        sm = PipelineStateMachine(session)
-        sm.get_display_progress(slug="test-feature")
-
-        mock_run.assert_called_once()
-        call_kwargs = mock_run.call_args
-        assert call_kwargs.kwargs.get("timeout") == 5 or call_kwargs[1].get("timeout") == 5
-
-    @patch("bridge.pipeline_state.subprocess.run")
-    @patch("bridge.pipeline_state.Path")
-    def test_nonexistent_slug_returns_stored_state(self, mock_path_cls, mock_run):
-        """Slug with no artifacts returns stored state unchanged."""
-        mock_path_instance = MagicMock()
-        mock_path_cls.return_value = mock_path_instance
-        mock_path_instance.exists.return_value = False
-        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="")
-
-        session = _make_session()
-        sm = PipelineStateMachine(session)
-        progress = sm.get_display_progress(slug="nonexistent")
-
-        # All display stages present, none inferred to completed
-        assert progress["ISSUE"] == "ready"
-        assert progress["PLAN"] == "pending"
-        assert progress["BUILD"] == "pending"
-
-    @patch("bridge.pipeline_state.subprocess.run")
-    @patch("bridge.pipeline_state.Path")
-    def test_malformed_plan_frontmatter_does_not_crash(self, mock_path_cls, mock_run):
-        """Plan file with unreadable content does not crash inference."""
-        mock_path_instance = MagicMock()
-        mock_path_cls.return_value = mock_path_instance
-        mock_path_instance.exists.return_value = True
-        mock_path_instance.read_text.side_effect = OSError("Permission denied")
-        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="")
-
-        session = _make_session()
-        sm = PipelineStateMachine(session)
-        progress = sm.get_display_progress(slug="test-feature")
-
-        # Plan exists -> PLAN completed, but read failed -> no CRITIQUE
-        assert progress["PLAN"] == "completed"
-        assert progress["CRITIQUE"] == "pending"
+        subprocess.run = mock_run
+        try:
+            sm.get_display_progress()
+        finally:
+            subprocess.run = original_run
+        assert len(calls) == 0, "get_display_progress() made subprocess calls — inference removed"
 
 
 class TestSaveWarningOnFailure:

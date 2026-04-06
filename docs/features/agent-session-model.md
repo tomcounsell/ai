@@ -61,7 +61,7 @@ Pipeline stage state is stored in `session_events` (as `stage` type events) on A
 |---|---|---|
 | `PipelineStateMachine.has_remaining_stages()` | `bool` | `True` if pipeline graph has a non-terminal next stage from the last completed stage |
 | `PipelineStateMachine.has_failed_stage()` | `bool` | `True` if any stage has `FAILED` or `ERROR` status |
-| `PipelineStateMachine.get_display_progress(slug=None)` | `dict` | Maps stage names to status; with slug, fills gaps via artifact inference |
+| `PipelineStateMachine.get_display_progress()` | `dict` | Maps stage names to status — stored state only, no artifact inference |
 
 `is_sdlc` (property) returns `True` if either (1) `stage_states` contains any non-pending/non-ready stage, or (2) `classification_type == ClassificationType.SDLC` for freshly-classified sessions.
 

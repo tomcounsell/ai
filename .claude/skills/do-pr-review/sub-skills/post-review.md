@@ -128,7 +128,7 @@ fi
 
 ```bash
 # On approval (no blockers):
-python -m tools.session_progress --session-id "$SESSION_ID" --stage REVIEW --status completed 2>/dev/null || true
+python -m tools.sdlc_stage_marker --stage REVIEW --status completed 2>/dev/null || true
 ```
 
 ## Completion

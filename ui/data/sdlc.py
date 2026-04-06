@@ -30,14 +30,6 @@ _project_configs_cache: dict | None = None
 _project_configs_ts: float = 0.0
 _PROJECT_CONFIGS_TTL = 60.0  # seconds
 
-# Module-level cache for artifact inference results.
-# Keyed by (slug, time_bucket) where time_bucket = int(time.time() / 30).
-# This avoids repeated `gh pr view` subprocess calls when rendering the
-# dashboard list view with many sessions that have slugs. Entries older
-# than 60 seconds are evicted on each access.
-_artifact_inference_cache: dict[tuple[str, int], dict[str, str]] = {}
-_ARTIFACT_INFERENCE_TTL = 30  # seconds per bucket
-
 
 # === Pydantic models ===
 
@@ -357,72 +349,15 @@ def _safe_float(val) -> float | None:
     return None
 
 
-def _get_artifact_enriched_stages(session, slug: str) -> list[StageState]:
-    """Get stage states enriched with artifact inference via PipelineStateMachine.
-
-    Uses a module-level TTL cache (30s buckets) to avoid repeated `gh pr view`
-    subprocess calls when rendering the dashboard list view.
-
-    Falls back to _parse_stage_states() if PipelineStateMachine raises an
-    exception, ensuring the dashboard never crashes due to artifact inference.
-
-    Args:
-        session: AgentSession instance to build the state machine from.
-        slug: Non-empty slug for artifact-based inference.
-
-    Returns:
-        List of StageState objects with artifact-inferred completions merged in.
-    """
-    now = time.time()
-    time_bucket = int(now / _ARTIFACT_INFERENCE_TTL)
-    cache_key = (slug, time_bucket)
-
-    # Evict stale entries (older than 60s = 2 buckets)
-    stale_cutoff = int(now / _ARTIFACT_INFERENCE_TTL) - 2
-    stale_keys = [k for k in _artifact_inference_cache if k[1] < stale_cutoff]
-    for k in stale_keys:
-        del _artifact_inference_cache[k]
-
-    if cache_key in _artifact_inference_cache:
-        display_progress = _artifact_inference_cache[cache_key]
-    else:
-        try:
-            from bridge.pipeline_state import PipelineStateMachine
-
-            psm = PipelineStateMachine(session)
-            display_progress = psm.get_display_progress(slug=slug)
-            _artifact_inference_cache[cache_key] = display_progress
-        except Exception:
-            logger.debug(
-                "Artifact inference failed for slug=%s, falling back to stored state",
-                slug,
-            )
-            return _parse_stage_states(session.stage_states)
-
-    stages = []
-    for name in SDLC_STAGES:
-        status = display_progress.get(name, "pending")
-        stages.append(StageState(name=name, status=str(status)))
-    return stages
-
-
 def _session_to_pipeline(session) -> PipelineProgress:
     """Convert an AgentSession instance to a PipelineProgress model.
 
-    When the session has a slug, uses PipelineStateMachine.get_display_progress()
-    to enrich stored stage states with artifact-inferred completions (e.g.,
-    plan file on disk, PR on GitHub). This ensures the dashboard shows the same
-    pipeline state as the merge gate.
-
-    Sessions without a slug use _parse_stage_states() for stored state only.
+    Uses stored stage_states as the authoritative source for all sessions.
+    Artifact inference was removed in PR #733 (issue #729).
     """
     slug = _safe_str(session.slug) or ""
 
-    # Use artifact-enriched stages when slug is available
-    if slug:
-        stages = _get_artifact_enriched_stages(session, slug)
-    else:
-        stages = _parse_stage_states(session.stage_states)
+    stages = _parse_stage_states(session.stage_states)
 
     history_list = session.history if isinstance(session.history, list) else None
     events = _parse_history(history_list)

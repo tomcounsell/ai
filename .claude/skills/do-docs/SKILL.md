@@ -7,24 +7,18 @@ description: "Use when cascading documentation updates after code changes. Finds
 
 After a code change lands, find every document that references the changed area and make targeted, surgical updates so docs match the actual implementation.
 
-## Session Progress Tracking
+## Stage Marker
 
-Extract the session ID from the conversation context. The bridge injects `SESSION_ID: {id}` into enriched messages. Look for this pattern and store it:
+At the very start of this skill, write an in_progress marker:
 
 ```bash
-# Extract SESSION_ID from context
-# Look for a line like "SESSION_ID: abc123" in the message you received
-# Store in variable: SESSION_ID="abc123"
-
-# Mark DOCS stage as in_progress at the start
-python -m tools.session_progress --session-id "$SESSION_ID" --stage DOCS --status in_progress 2>/dev/null || true
+python -m tools.sdlc_stage_marker --stage DOCS --status in_progress 2>/dev/null || true
 ```
 
-After all documentation updates are complete and committed (Step 4):
+After all documentation updates are complete and committed (Step 4), write the completion marker:
 
 ```bash
-# Mark DOCS stage complete
-python -m tools.session_progress --session-id "$SESSION_ID" --stage DOCS --status completed 2>/dev/null || true
+python -m tools.sdlc_stage_marker --stage DOCS --status completed 2>/dev/null || true
 ```
 
 ## Goal Alignment
