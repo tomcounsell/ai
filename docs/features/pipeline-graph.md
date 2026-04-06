@@ -103,9 +103,9 @@ The result routes to `complete_stage()` (success/ambiguous) or `fail_stage()` (f
 
 SDLC sessions have `stage_states` initialized eagerly at session creation (ISSUE=ready, all others=pending).
 
-### Dashboard Artifact Inference
+### Dashboard Stage Routing
 
-The dashboard (`ui/data/sdlc.py`) uses `PipelineStateMachine.get_display_progress(slug=slug)` for sessions with a slug, ensuring the dashboard shows the same artifact-enriched pipeline state as the merge gate. When hook-based tracking fails to record a stage transition, artifact inference fills the gap by checking observable artifacts (plan files, PR existence, review status). Results are cached with a 30-second TTL to avoid repeated subprocess calls. The deprecated `_infer_stages_from_history()` fallback has been removed.
+The dashboard (`ui/data/sdlc.py`) routes stage reads through `PipelineStateMachine(session).get_display_progress()` (PR #747, issue #735). This ensures the dashboard is a direct consumer of the canonical `DISPLAY_STAGES` stored-state path — the same path used by the merge gate. `get_display_progress()` takes no arguments and returns stored state only. Artifact inference was removed in PR #733 (issue #729).
 
 ## Integration
 

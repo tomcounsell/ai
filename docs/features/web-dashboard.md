@@ -10,7 +10,7 @@ AgentSession (Popoto/Redis)
     v
 ui/data/sdlc.py
     _session_to_pipeline()         # converts AgentSession -> PipelineProgress
-        _parse_stage_states()      # parses stage_states JSON -> StageState list (all sessions)
+        PipelineStateMachine.get_display_progress()  # canonical stage read (falls back to _parse_stage_states)
         _get_project_metadata()    # resolves project_key -> name + metadata
     |
     v
@@ -40,19 +40,17 @@ Browser (HTMX polling for live updates)
 
 Each session row displays a horizontal strip of SDLC stage indicators. The eight stages in pipeline order are: ISSUE, PLAN, CRITIQUE, BUILD, TEST, REVIEW, DOCS, MERGE.
 
-### Primary Source: `stage_states`
+### Primary Source: `PipelineStateMachine.get_display_progress()`
 
-The `AgentSession.stage_states` field (populated by the PipelineStateMachine since issue #492) is the authoritative source. `_parse_stage_states()` handles three input formats:
+`_session_to_pipeline()` routes stage reads through `PipelineStateMachine.get_display_progress()` (PR #747, issue #735) when `stage_states` are present. This makes the dashboard a direct consumer of the same canonical path used by the merge gate and the SDLC pipeline.
 
-- **JSON string**: parsed with `json.loads()` first
-- **Dict**: used directly
-- **Nested dict**: `{"STAGE": {"status": "completed", ...}}` -- extracts the inner `status` value
+The `AgentSession.stage_states` field (populated by the PipelineStateMachine since issue #492) is the authoritative source. `get_display_progress()` returns a dict mapping `DISPLAY_STAGES` (from `bridge.pipeline_graph`) to their stored status strings. `_parse_stage_states()` is retained as a private fallback utility used when `PipelineStateMachine` construction fails.
 
-Internal metadata keys like `_patch_cycle_count` and `_critique_cycle_count` are ignored because the parser only iterates over the known `SDLC_STAGES` list.
+Internal metadata keys like `_patch_cycle_count` and `_critique_cycle_count` are safely ignored — `get_display_progress()` iterates over the canonical `DISPLAY_STAGES` list only.
 
 ### Stored State Only
 
-All sessions (with or without a slug) use `_parse_stage_states()` to read `AgentSession.stage_states` directly. Artifact inference was removed in PR #733 (issue #729) — the dashboard no longer checks plan files on disk, PR existence, or GitHub review state. `stage_states` is the single source of truth for the dashboard just as it is for the merge gate.
+Artifact inference was removed in PR #733 (issue #729). All sessions use the stored state path: `PipelineStateMachine(session).get_display_progress()` for sessions with `stage_states`, empty list for sessions without. The dashboard no longer checks plan files on disk, PR existence, or GitHub review state. `stage_states` is the single source of truth.
 
 ### CSS Rendering
 
