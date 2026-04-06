@@ -1251,6 +1251,18 @@ async def _dependency_health_check() -> None:
     pass
 
 
+def _write_worker_heartbeat() -> None:
+    """Write worker heartbeat file so the dashboard can show worker status."""
+    heartbeat_file = Path(__file__).parent.parent / "data" / "last_worker_connected"
+    try:
+        heartbeat_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp = heartbeat_file.with_suffix(".tmp")
+        tmp.write_text(datetime.now(UTC).isoformat())
+        os.replace(tmp, heartbeat_file)
+    except OSError:
+        pass
+
+
 async def _agent_session_health_loop() -> None:
     """Periodically check running sessions for liveness and timeout."""
     logger.info(
@@ -1259,6 +1271,7 @@ async def _agent_session_health_loop() -> None:
     )
     while True:
         try:
+            _write_worker_heartbeat()
             await _agent_session_health_check()
             await _agent_session_hierarchy_health_check()
             await _dependency_health_check()
