@@ -135,7 +135,9 @@ class TestCLIParsing:
 class TestCmdSend:
     """Tests for the Redis-queue-based cmd_send() implementation."""
 
-    def _make_args(self, chat="-123456", message="hello", file=None, image=None, audio=None, reply_to=None):
+    def _make_args(
+        self, chat="-123456", message="hello", file=None, image=None, audio=None, reply_to=None
+    ):
         """Build a mock Namespace matching what argparse produces for 'send'."""
         ns = argparse.Namespace(
             chat=chat,
@@ -308,8 +310,6 @@ class TestCmdSend:
     def test_send_subparser_has_reply_to_flag(self):
         """Verify --reply-to flag is registered on the send subparser."""
         import argparse
-
-        from tools.valor_telegram import main
 
         # Parse a send command with --reply-to
         sys.argv = ["valor-telegram", "send", "--chat", "-123", "--reply-to", "456", "msg"]
