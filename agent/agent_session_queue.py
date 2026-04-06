@@ -969,6 +969,19 @@ def _get_pending_agent_sessions_sync(project_key: str) -> list[AgentSession]:
     return AgentSession.query.filter(project_key=project_key, status="pending")
 
 
+def _ts(val):
+    """Convert datetime or float to Unix timestamp."""
+    if val is None:
+        return None
+    if isinstance(val, datetime):
+        if val.tzinfo is None:
+            val = val.replace(tzinfo=UTC)
+        return val.timestamp()
+    if isinstance(val, int | float):
+        return float(val)
+    return None
+
+
 def _recover_interrupted_agent_sessions_startup() -> int:
     """Reset stale running sessions to pending at startup.
 
@@ -1084,18 +1097,6 @@ async def _agent_session_health_check() -> None:
     checked = 0
     recovered = 0
     workers_started = 0
-
-    def _ts(val):
-        """Convert datetime or float to Unix timestamp."""
-        if val is None:
-            return None
-        if isinstance(val, datetime):
-            if val.tzinfo is None:
-                val = val.replace(tzinfo=UTC)
-            return val.timestamp()
-        if isinstance(val, int | float):
-            return float(val)
-        return None
 
     # === Check RUNNING sessions_list ===
     running_sessions = list(AgentSession.query.filter(status="running"))
