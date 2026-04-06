@@ -7,7 +7,7 @@ The Telegram bridge (`bridge/telegram_bridge.py`) is organized into focused sub-
 | `bridge/media.py` | Media detection, download, transcription, image description |
 | `bridge/routing.py` | Message routing, project config, mention/response classification |
 | `bridge/context.py` | Context building, conversation history, reply chains |
-| `bridge/response.py` | Message formatting, reactions, file extraction, sending |
+| `bridge/response.py` | Message formatting, reactions (re-exports from `agent/constants.py`), file extraction, sending |
 | `bridge/catchup.py` | Abandoned session revival and re-enqueueing |
 | `bridge/reconciler.py` | Periodic scan for messages missed during live connection |
 

@@ -303,8 +303,12 @@ The `dev-session` agent is defined in `agent/agent_definitions.py`:
 |------|---------|
 | `models/agent_session.py` | AgentSession model with session_type discriminator |
 | `agent/agent_definitions.py` | Agent registry including dev-session |
-| `agent/agent_session_queue.py` | Queue with nudge loop and per-chat workers; reads `session.project_config` at execution time |
+| `agent/agent_session_queue.py` | Queue with nudge loop and per-chat workers; reads `session.project_config` at execution time; zero module-level bridge imports |
+| `agent/output_handler.py` | `OutputHandler` protocol for routing agent output; `FileOutputHandler` (logs to `logs/worker/`) and `LoggingOutputHandler` implementations |
+| `agent/constants.py` | Canonical location for `REACTION_SUCCESS/COMPLETE/ERROR` (re-exported from `bridge/response.py`) |
+| `agent/session_logs.py` | Canonical location for `save_session_snapshot()` (re-exported from `bridge/session_logs.py`) |
 | `agent/sdk_client.py` | SDK client; uses `project_key` identity checks for cross-repo detection |
+| `worker/__main__.py` | Standalone worker entry point (`python -m worker`); processes sessions without Telegram bridge |
 
 ## Project Config Propagation
 

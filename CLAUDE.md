@@ -102,7 +102,10 @@ valor-telegram read --chat "Dev: Valor" --since "1 hour ago"
 |---------|-------------|
 | `./scripts/start_bridge.sh` | Start Telegram bridge |
 | `./scripts/valor-service.sh status` | Check bridge status |
-| `./scripts/valor-service.sh restart` | Restart after code changes |
+| `./scripts/valor-service.sh restart` | Restart bridge after code changes |
+| `./scripts/valor-service.sh worker-start` | Start standalone worker service |
+| `./scripts/valor-service.sh worker-restart` | Restart standalone worker |
+| `./scripts/valor-service.sh worker-status` | Check worker service status |
 | `tail -f logs/bridge.log` | Stream bridge logs |
 | `pytest tests/` | Run all tests |
 | `pytest tests/unit/` | Run unit tests only (fast, ~60s) |
@@ -230,6 +233,11 @@ Telegram → Python Bridge (Telethon) → ChatSession (read-only, PM persona)
                                               → Spawns DevSession (full permissions, Dev persona)
                                                     → Claude Agent SDK → Claude API
                                                         (agent/sdk_client.py)
+
+Standalone Worker (python -m worker) → Same session execution engine
+              (worker/__main__.py)         → Processes AgentSession records from Redis
+                                           → Uses OutputHandler protocol (agent/output_handler.py)
+                                           → FileOutputHandler fallback when no bridge callbacks
 ```
 
 **Session Types** (see `docs/features/chat-dev-session-architecture.md`):
@@ -253,6 +261,8 @@ Telegram → Python Bridge (Telethon) → ChatSession (read-only, PM persona)
 - `.claude/commands/` - Slash command skills
 - `.claude/agents/` - Subagent definitions (including `dev-session`)
 - `bridge/` - Telegram integration, nudge loop
+- `worker/` - Standalone worker service (`python -m worker`)
+- `agent/` - Session queue, SDK client, output handler protocol, constants
 - `tools/` - Local Python tools
 - `config/` - Configuration files
 
@@ -306,6 +316,7 @@ See `docs/features/session-isolation.md` for the full technical design.
 ### Emergency Recovery
 
 - **Bridge Issues**: `./scripts/valor-service.sh restart`
+- **Worker Issues**: `./scripts/valor-service.sh worker-restart`
 - **Telegram Auth**: `python scripts/telegram_login.py`
 - **SDK Issues**: Check SDK configuration in `.env`
 

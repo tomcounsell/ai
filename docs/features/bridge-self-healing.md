@@ -133,9 +133,12 @@ The watchdog is installed alongside the bridge:
 ./scripts/valor-service.sh install
 # Installs:
 # - com.valor.bridge (main bridge, with log rotation on startup)
+# - com.valor.worker (standalone session worker, KeepAlive)
 # - com.valor.update (polls every 30 minutes)
 # - com.valor.bridge-watchdog (every 60s)
 ```
+
+The worker can also be installed separately via `./scripts/install_worker.sh`. See [Worker Service](worker-service.md) for details.
 
 ### 10. Flood-Backoff Persistence (`bridge/telegram_bridge.py`)
 
