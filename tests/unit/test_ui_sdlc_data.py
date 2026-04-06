@@ -667,7 +667,7 @@ class TestPipelineStateMachineRouting:
     """Tests for stage routing through PipelineStateMachine in _session_to_pipeline."""
 
     def test_session_with_stage_states_uses_pipeline_state_machine(self):
-        """Sessions with stage_states should route through PipelineStateMachine.get_display_progress()."""
+        """Sessions with stage_states route through PipelineStateMachine."""
         from ui.data.sdlc import _session_to_pipeline
 
         mock_display = {
@@ -696,7 +696,7 @@ class TestPipelineStateMachineRouting:
         mock_psm.return_value.get_display_progress.assert_called_once()
 
     def test_session_without_stage_states_produces_empty_stages(self):
-        """Sessions with no stage_states should get empty stages without calling PipelineStateMachine."""
+        """Sessions with no stage_states get empty stages (no PSM call)."""
         from ui.data.sdlc import _session_to_pipeline
 
         session = _make_mock_session(
