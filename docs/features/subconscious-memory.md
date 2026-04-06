@@ -1,5 +1,7 @@
 # Subconscious Memory
 
+> **Business context:** See [Cognitive Memory Design](~/work-vault/AI Valor Engels System/Harness/Cognitive Memory Design.md) in the work vault for the original design rationale, MuninnDB analysis, and episodic memory architecture vision.
+
 Automatic memory injection and extraction system that gives agents persistent context across sessions. Human instructions and agent observations are stored as Memory records in Redis, surfaced as `<thought>` blocks during tool calls, and reinforced by outcome detection.
 
 Memories carry structured metadata (category, file paths, tags) from extraction, track effectiveness via dismissal counting with importance decay, and use multi-query decomposition for broader retrieval coverage.

@@ -1,5 +1,7 @@
 # Knowledge Document Integration
 
+> **Business context:** See [Cognitive Memory Design](~/work-vault/AI Valor Engels System/Harness/Cognitive Memory Design.md) in the work vault for the broader memory architecture vision that motivated this feature.
+
 Indexes markdown and text files from the work-vault (`~/work-vault/`) into the memory system, giving agents subconscious awareness of business context, project notes, and decisions that exist outside of conversations. Documents are scoped by project for NDA isolation.
 
 ## Architecture
