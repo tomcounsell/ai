@@ -148,31 +148,59 @@ class TestCompletedSessionGuard:
 
     def test_completed_session_skips_auto_continue(self):
         """When session_status is terminal, output is delivered without nudge."""
-        # Verify the guard exists in the code
+        # Verify the guard exists in the code — now in output_router.py (extracted from queue)
         from pathlib import Path
 
+        router_code = Path("agent/output_router.py").read_text()
         queue_code = Path("agent/agent_session_queue.py").read_text()
 
         # The guard should check session_status against all TERMINAL_STATUSES
         # (was previously just == "completed", now checks all terminal statuses)
-        assert "session_status in _TERMINAL_STATUSES" in queue_code
-        # It should deliver to chat without nudge
+        # Guard may be in output_router.py (canonical) or agent_session_queue.py (legacy)
+        assert (
+            "session_status in _TERMINAL_STATUSES" in router_code
+            or "session_status in _TERMINAL_STATUSES" in queue_code
+        )
+        # It should deliver to chat without nudge (this message is in the executor, not the router)
         assert "delivering without nudge" in queue_code
 
     def test_guard_is_before_nudge_routing(self):
-        """The completed-session guard must come before the nudge routing logic."""
+        """The completed-session guard must come before the nudge routing logic.
+
+        The guard now lives in output_router.determine_delivery_action() which
+        is called before any _enqueue_nudge() in the send_to_chat() execution path.
+        The test verifies the guard exists and that the nudge call site exists.
+        """
         from pathlib import Path
 
+        router_code = Path("agent/output_router.py").read_text()
         queue_code = Path("agent/agent_session_queue.py").read_text()
 
-        # Find positions
-        guard_pos = queue_code.find("Session already completed")
-        nudge_pos = queue_code.find("await _enqueue_nudge(")
+        # Guard is now in output_router.py — confirm it returns deliver_already_completed
+        assert "deliver_already_completed" in router_code, (
+            "deliver_already_completed guard not found in output_router.py"
+        )
+        # Guard must check session_status against terminal statuses
+        assert "session_status in _TERMINAL_STATUSES" in router_code, (
+            "terminal status guard not found in output_router.py"
+        )
+        # The nudge call site should still exist in the queue executor (inside send_to_chat)
+        # Note: re_enqueue_session() also calls _enqueue_nudge, so find the one in send_to_chat
+        send_to_chat_pos = queue_code.find("async def send_to_chat(")
+        assert send_to_chat_pos > 0, "send_to_chat not found in agent_session_queue.py"
+        nudge_pos = queue_code.find("await _enqueue_nudge(", send_to_chat_pos)
+        assert nudge_pos > 0, "await _enqueue_nudge() call not found in send_to_chat"
 
-        # Guard should be BEFORE the nudge call site
-        assert guard_pos > 0, "completed-session guard not found in agent_session_queue.py"
-        assert nudge_pos > 0, "await _enqueue_nudge() call not found in agent_session_queue.py"
-        assert guard_pos < nudge_pos, "completed-session guard should be before nudge call"
+        # The executor must check the routing action before calling _enqueue_nudge
+        # i.e. action == "deliver_already_completed" check appears before the nudge call
+        deliver_check_pos = queue_code.find('"deliver_already_completed"', send_to_chat_pos)
+        assert deliver_check_pos > 0, (
+            "deliver_already_completed action check not found in agent_session_queue.py"
+        )
+        assert deliver_check_pos < nudge_pos, (
+            "deliver_already_completed check should appear before "
+            "_enqueue_nudge call in send_to_chat"
+        )
 
 
 class TestCatchupCodeStructure:

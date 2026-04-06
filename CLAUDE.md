@@ -134,6 +134,12 @@ valor-telegram send --chat "Tom" --file ./screenshot.png "Caption"
 | `python -m tools.agent_session_scheduler kill --all` | Kill all running and pending sessions |
 | `python -m tools.agent_session_scheduler cleanup --age 30 --dry-run` | Preview stale session cleanup |
 | `python -m tools.agent_session_scheduler cleanup --age 30` | Delete stale killed/abandoned/failed sessions |
+| `python -m tools.valor_session list` | List all sessions |
+| `python -m tools.valor_session status --id <ID>` | Show session status and pending steering messages |
+| `python -m tools.valor_session steer --id <ID> --message "..."` | Inject a steering message into a running session |
+| `python -m tools.valor_session kill --id <ID>` | Kill a session |
+| `python -m tools.valor_session kill --all` | Kill all running sessions |
+| `python -m tools.valor_session create --role pm --message "..."` | Create and enqueue a new session |
 | `python -m tools.memory_search search "query"` | Search memories by query |
 | `python -m tools.memory_search search "query" --category correction` | Search filtered by category |
 | `python -m tools.memory_search search "query" --tag redis` | Search filtered by tag |
@@ -248,6 +254,7 @@ Standalone Worker (python -m worker) → Same session execution engine
 - **Teammate Session** (`session_type="teammate"`) - Conversational, Teammate persona
 - **DevSession** (`session_type="dev"`) - Does coding work, Dev persona, full permissions
 - **Nudge loop** - Bridge output routing (deliver or nudge, no SDLC awareness)
+- **Session Steering** (see `docs/features/session-steering.md`): `AgentSession.queued_steering_messages` is the steering inbox — any process writes messages, worker injects at turn boundary. `agent/output_router.py` contains routing decision logic extracted from executor. Use `valor-session steer --id <id> --message "..."` to steer externally.
 
 **Subconscious Memory** (see `docs/features/subconscious-memory.md`):
 - Human Telegram messages are saved as Memory records on receipt (importance=6.0)
@@ -265,7 +272,7 @@ Standalone Worker (python -m worker) → Same session execution engine
 - `.claude/agents/` - Subagent definitions (including `dev-session`)
 - `bridge/` - Telegram integration, nudge loop
 - `worker/` - Standalone worker service (`python -m worker`)
-- `agent/` - Session queue, SDK client, output handler protocol, constants
+- `agent/` - Session queue, SDK client, output router (`output_router.py`), output handler protocol, constants
 - `tools/` - Local Python tools
 - `config/` - Configuration files
 
