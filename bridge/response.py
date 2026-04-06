@@ -156,9 +156,12 @@ INVALID_REACTIONS = [
 # Reaction emojis for different stages (all validated 2026-02-13)
 REACTION_RECEIVED = "👀"  # Message acknowledged
 REACTION_PROCESSING = "🤔"  # Default thinking emoji
-REACTION_SUCCESS = "👍"  # Simple ack, no text reply needed
-REACTION_COMPLETE = "🏆"  # Work done, text reply attached
-REACTION_ERROR = "😱"  # Something went wrong
+
+# These three are re-exported from agent.constants (canonical location).
+# Kept here for backward compatibility with existing imports.
+from agent.constants import REACTION_COMPLETE  # noqa: E402, F401
+from agent.constants import REACTION_ERROR  # noqa: E402, F401
+from agent.constants import REACTION_SUCCESS  # noqa: E402, F401
 
 
 def filter_tool_logs(response: str) -> str:

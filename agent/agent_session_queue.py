@@ -28,8 +28,8 @@ from agent.branch_manager import (
     sanitize_branch_name,
 )
 from agent.worktree_manager import WORKTREES_DIR, validate_workspace
-from bridge.response import REACTION_COMPLETE, REACTION_ERROR, REACTION_SUCCESS
-from bridge.session_logs import save_session_snapshot
+from agent.constants import REACTION_COMPLETE, REACTION_ERROR, REACTION_SUCCESS
+from agent.session_logs import save_session_snapshot
 from config.enums import ClassificationType, PersonaType, SessionType
 from models.agent_session import AgentSession
 from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
