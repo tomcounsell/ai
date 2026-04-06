@@ -371,8 +371,19 @@ No agent integration required -- this is an infrastructure change to the session
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
-| CONCERN | [agent-type] | [The concern raised] | [How/whether it was addressed] |
+<!-- Populated by /do-plan-critique (war room) on 2026-04-06. Verdict: NEEDS REVISION (1 blocker). -->
+
+| Severity | Critic(s) | Finding | Suggestion |
+|----------|-----------|---------|------------|
+| BLOCKER | Skeptic, Archaeologist | Lazy import count is 7 not 6; `bridge.pipeline_state` (line 301) lacks ImportError guard and will crash SDLC enqueue on headless worker | Enumerate all 7 lazy imports explicitly in Phase 1; add try/except to line 301 |
+| CONCERN | Skeptic, Adversary | `send_to_chat` hard-returns on missing callback; plan is ambiguous on whether `FileOutputHandler` registers via `register_callbacks` or via a separate fallback path | Clarify in Task 2: register `FileOutputHandler` through `register_callbacks` so `send_cb` is never None |
+| CONCERN | Simplifier | Worker imports `bridge.routing.load_config()` -- still coupled to bridge | Resolve Open Question #2: move `load_config()` to `config/projects.py`, re-export from bridge |
+| CONCERN | Adversary, Operator | `bridge.pipeline_state.PipelineStateMachine` at line 301 has no ImportError guard; crashes headless SDLC sessions | Add to Phase 1 decoupling scope or guard with try/except ImportError |
+| CONCERN | Operator | No health monitoring for standalone worker; launchd KeepAlive only catches crashes, not hangs | Add worker watchdog or heartbeat file touch to Phase 4 |
+| CONCERN | Operator | Task 4 (build-service) has no automated validation -- only manual plist check | Add `plutil -lint com.valor.worker.plist` as validation command |
+| NIT | Operator | Verification table references `--dry-run` flag but Task 3 doesn't implement it | Add `--dry-run` to Task 3 scope |
+| NIT | Adversary | `_calendar_heartbeat` fires on every session; will produce warning logs on headless workers without Google Calendar | Document in worker-service.md as expected noise; no code change needed |
+| NIT | Archaeologist | #727 (startup recovery) is still OPEN; its resolution may affect worker recovery behavior | Note dependency; no structural change needed |
 
 ---
 
