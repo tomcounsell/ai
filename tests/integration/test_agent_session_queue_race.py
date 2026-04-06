@@ -166,9 +166,7 @@ class TestRecoverInterruptedJobsStartup:
     def test_no_stale_running_after_recovery(self):
         """After recovery, no sessions should remain in the running index."""
         old_started = datetime.now(tz=UTC) - timedelta(seconds=600)
-        _create_test_session(
-            status="running", session_id="crashed_session", started_at=old_started
-        )
+        _create_test_session(status="running", session_id="crashed_session", started_at=old_started)
 
         running_before = AgentSession.query.filter(status="running")
         assert len(running_before) == 1
@@ -232,9 +230,7 @@ class TestRecoverInterruptedJobsStartup:
     def test_old_session_recovered_by_timing_guard(self):
         """A session started 600 seconds ago IS recovered."""
         old_started = datetime.now(tz=UTC) - timedelta(seconds=600)
-        _create_test_session(
-            status="running", session_id="old_session", started_at=old_started
-        )
+        _create_test_session(status="running", session_id="old_session", started_at=old_started)
 
         recovered = _recover_interrupted_agent_sessions_startup()
         assert recovered == 1
@@ -247,9 +243,7 @@ class TestRecoverInterruptedJobsStartup:
 
     def test_none_started_at_is_recovered(self):
         """A session with started_at=None (legacy/corrupt) IS recovered."""
-        _create_test_session(
-            status="running", session_id="legacy_session", started_at=None
-        )
+        _create_test_session(status="running", session_id="legacy_session", started_at=None)
 
         recovered = _recover_interrupted_agent_sessions_startup()
         assert recovered == 1
@@ -262,12 +256,8 @@ class TestRecoverInterruptedJobsStartup:
         old_started = datetime.now(tz=UTC) - timedelta(seconds=600)
         recent_started = datetime.now(tz=UTC) - timedelta(seconds=10)
 
-        _create_test_session(
-            status="running", session_id="stale", started_at=old_started
-        )
-        _create_test_session(
-            status="running", session_id="recent", started_at=recent_started
-        )
+        _create_test_session(status="running", session_id="stale", started_at=old_started)
+        _create_test_session(status="running", session_id="recent", started_at=recent_started)
 
         recovered = _recover_interrupted_agent_sessions_startup()
         assert recovered == 1

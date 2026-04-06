@@ -1011,8 +1011,7 @@ def _recover_interrupted_agent_sessions_startup() -> int:
         if started_ts is not None and started_ts > cutoff:
             skipped += 1
             logger.info(
-                "[startup-recovery] Skipping recent session %s "
-                "(started %ds ago, guard=%ds)",
+                "[startup-recovery] Skipping recent session %s (started %ds ago, guard=%ds)",
                 entry.agent_session_id,
                 int(now - started_ts),
                 AGENT_SESSION_HEALTH_MIN_RUNNING,
@@ -1021,9 +1020,7 @@ def _recover_interrupted_agent_sessions_startup() -> int:
             stale_sessions.append(entry)
 
     if skipped:
-        logger.info(
-            "[startup-recovery] Skipped %d recently-started session(s)", skipped
-        )
+        logger.info("[startup-recovery] Skipped %d recently-started session(s)", skipped)
 
     if not stale_sessions:
         return 0
