@@ -376,7 +376,9 @@ class TestSessionToPipeline:
         """datetime.datetime values in timestamp fields should be converted to float."""
         from ui.data.sdlc import _session_to_pipeline
 
-        now = datetime.datetime.now()
+        # Use UTC-aware datetime to avoid timezone ambiguity: _safe_float() re-attaches UTC
+        # to naive datetimes, so using a naive local datetime would shift the result.
+        now = datetime.datetime.now(tz=datetime.UTC)
         mock_session = _make_mock_session(
             created_at=now,
             started_at=now,
@@ -631,10 +633,12 @@ class TestSafeFloat:
         assert _safe_float("") is None
 
     def test_datetime_input(self):
-        """datetime.datetime objects should be converted via .timestamp()."""
+        """datetime.datetime objects should be converted to a float timestamp."""
         from ui.data.sdlc import _safe_float
 
-        dt = datetime.datetime(2026, 1, 1)
+        # Use UTC-aware datetime: _safe_float() re-attaches UTC to naive datetimes,
+        # so comparing against dt.timestamp() (local-tz) would fail in non-UTC zones.
+        dt = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
         result = _safe_float(dt)
         assert result is not None
         assert isinstance(result, float)
@@ -663,34 +667,11 @@ class TestSafeFloat:
         assert reconstructed.month == 6
 
 
-class TestArtifactInference:
-    """Tests for artifact-enriched stage states via PipelineStateMachine."""
+class TestPipelineStateMachineRouting:
+    """Tests for routing stage reads through PipelineStateMachine.get_display_progress()."""
 
-    def _make_session(self, **overrides):
-        """Create a mock session with sensible defaults."""
-        session = MagicMock()
-        session.agent_session_id = overrides.get("agent_session_id", "test-123")
-        session.session_id = overrides.get("session_id", "sess-1")
-        session.session_type = overrides.get("session_type", "pm")
-        session.session_mode = overrides.get("session_mode", None)
-        session.status = overrides.get("status", "running")
-        session.slug = overrides.get("slug", None)
-        session.message_text = overrides.get("message_text", "test")
-        session.project_key = overrides.get("project_key", None)
-        session.branch_name = overrides.get("branch_name", None)
-        session.created_at = overrides.get("created_at", time.time())
-        session.started_at = overrides.get("started_at", time.time())
-        session.completed_at = overrides.get("completed_at", None)
-        session.updated_at = overrides.get("updated_at", None)
-        session.stage_states = overrides.get("stage_states", None)
-        session.history = overrides.get("history", None)
-        session.issue_url = overrides.get("issue_url", None)
-        session.plan_url = overrides.get("plan_url", None)
-        session.pr_url = overrides.get("pr_url", None)
-        return session
-
-    def test_session_with_slug_uses_artifact_inference(self):
-        """Sessions with a slug should use PipelineStateMachine.get_display_progress()."""
+    def test_session_with_stage_states_uses_pipeline_state_machine(self):
+        """Sessions with stage_states should call PipelineStateMachine.get_display_progress()."""
         from ui.data.sdlc import _session_to_pipeline
 
         mock_display = {
@@ -703,151 +684,80 @@ class TestArtifactInference:
             "DOCS": "pending",
             "MERGE": "pending",
         }
-        session = self._make_session(
-            slug="my-feature",
-            stage_states={"ISSUE": "completed", "PLAN": "pending"},
+        session = _make_mock_session(
+            stage_states={"ISSUE": "completed", "PLAN": "completed"},
         )
 
-        with patch("bridge.pipeline_state.PipelineStateMachine") as mock_psm:
+        with patch("ui.data.sdlc.PipelineStateMachine") as mock_psm:
             mock_psm.return_value.get_display_progress.return_value = mock_display
             pipeline = _session_to_pipeline(session)
 
         assert len(pipeline.stages) == 8
         by_name = {s.name: s for s in pipeline.stages}
-        # Artifact inference should show PLAN as completed (overriding stored "pending")
-        assert by_name["PLAN"].is_done
         assert by_name["BUILD"].is_active
-        mock_psm.return_value.get_display_progress.assert_called_once_with(slug="my-feature")
-
-    def test_session_without_slug_uses_stored_state(self):
-        """Sessions without a slug should use _parse_stage_states() only."""
-        from ui.data.sdlc import _session_to_pipeline
-
-        session = self._make_session(
-            slug=None,
-            stage_states={"ISSUE": "completed", "PLAN": "in_progress"},
-        )
-
-        with patch("bridge.pipeline_state.PipelineStateMachine") as mock_psm:
-            pipeline = _session_to_pipeline(session)
-
-        # PipelineStateMachine should not be called without a slug
-        mock_psm.assert_not_called()
-        assert len(pipeline.stages) == 8
-        by_name = {s.name: s for s in pipeline.stages}
         assert by_name["ISSUE"].is_done
-        assert by_name["PLAN"].is_active
+        mock_psm.return_value.get_display_progress.assert_called_once_with()
 
-    def test_session_with_empty_slug_uses_stored_state(self):
-        """Sessions with empty string slug should not use artifact inference."""
+    def test_pipeline_state_machine_exception_falls_back_to_parse(self):
+        """When PipelineStateMachine raises, fall back to _parse_stage_states()."""
         from ui.data.sdlc import _session_to_pipeline
 
-        session = self._make_session(
-            slug="",
-            stage_states={"ISSUE": "completed"},
-        )
-
-        with patch("bridge.pipeline_state.PipelineStateMachine") as mock_psm:
-            _session_to_pipeline(session)
-
-        mock_psm.assert_not_called()
-
-    def test_artifact_inference_failure_falls_back_to_stored_state(self):
-        """When PipelineStateMachine raises, fall back to _parse_stage_states()."""
-        from ui.data.sdlc import _artifact_inference_cache, _session_to_pipeline
-
-        # Clear cache to force a fresh call
-        _artifact_inference_cache.clear()
-
-        session = self._make_session(
-            slug="failing-feature",
+        session = _make_mock_session(
             stage_states={"ISSUE": "completed", "PLAN": "in_progress"},
         )
 
         with patch(
-            "bridge.pipeline_state.PipelineStateMachine",
-            side_effect=Exception("gh not available"),
+            "ui.data.sdlc.PipelineStateMachine",
+            side_effect=Exception("state machine error"),
         ):
             pipeline = _session_to_pipeline(session)
 
         assert len(pipeline.stages) == 8
         by_name = {s.name: s for s in pipeline.stages}
-        # Should fall back to stored state
+        # Should fall back to stored state via _parse_stage_states()
         assert by_name["ISSUE"].is_done
         assert by_name["PLAN"].is_active
 
-    def test_session_no_slug_no_stage_states_produces_empty_stages(self):
-        """Sessions with no slug and no stage_states should have empty stages."""
+    def test_session_with_no_stage_states_gets_empty_stages(self):
+        """Sessions with no stage_states should have empty stages, no PipelineStateMachine call."""
         from ui.data.sdlc import _session_to_pipeline
 
-        session = self._make_session(slug=None, stage_states=None)
-        pipeline = _session_to_pipeline(session)
+        session = _make_mock_session(stage_states=None)
+
+        with patch("ui.data.sdlc.PipelineStateMachine") as mock_psm:
+            pipeline = _session_to_pipeline(session)
+
+        mock_psm.assert_not_called()
         assert pipeline.stages == []
 
-    def test_cache_hit_within_ttl(self):
-        """Cache should return cached results within the same time bucket."""
-        from ui.data.sdlc import (
-            _ARTIFACT_INFERENCE_TTL,
-            _artifact_inference_cache,
-            _get_artifact_enriched_stages,
-        )
+    def test_session_with_empty_string_stage_states_gets_empty_stages(self):
+        """Sessions with empty string stage_states should not call PipelineStateMachine."""
+        from ui.data.sdlc import _session_to_pipeline
 
-        _artifact_inference_cache.clear()
+        session = _make_mock_session(stage_states="")
 
-        cached_display = {
-            "ISSUE": "completed",
-            "PLAN": "completed",
-            "CRITIQUE": "pending",
-            "BUILD": "pending",
-            "TEST": "pending",
-            "REVIEW": "pending",
-            "DOCS": "pending",
-            "MERGE": "pending",
-        }
-        time_bucket = int(time.time() / _ARTIFACT_INFERENCE_TTL)
-        _artifact_inference_cache[("cached-slug", time_bucket)] = cached_display
+        with patch("ui.data.sdlc.PipelineStateMachine") as mock_psm:
+            pipeline = _session_to_pipeline(session)
 
-        session = self._make_session(slug="cached-slug")
-
-        with patch("bridge.pipeline_state.PipelineStateMachine") as mock_psm:
-            result = _get_artifact_enriched_stages(session, "cached-slug")
-
-        # PipelineStateMachine should NOT be called -- cache hit
         mock_psm.assert_not_called()
-        by_name = {s.name: s for s in result}
-        assert by_name["ISSUE"].is_done
-        assert by_name["PLAN"].is_done
+        assert pipeline.stages == []
 
-    def test_cache_miss_after_ttl(self):
-        """Cache should miss when the time bucket has changed."""
-        from ui.data.sdlc import (
-            _ARTIFACT_INFERENCE_TTL,
-            _artifact_inference_cache,
-            _get_artifact_enriched_stages,
-        )
+    def test_session_with_malformed_stage_states_falls_back_gracefully(self):
+        """Sessions with malformed stage_states fall back gracefully via _parse_stage_states."""
+        from ui.data.sdlc import _session_to_pipeline
 
-        _artifact_inference_cache.clear()
+        # "not-valid-json{{{" is truthy so PipelineStateMachine is attempted
+        # It will raise, and _parse_stage_states("not-valid-json{{{") returns []
+        session = _make_mock_session(stage_states="not-valid-json{{{")
 
-        # Insert with an old time bucket
-        old_bucket = int(time.time() / _ARTIFACT_INFERENCE_TTL) - 5
-        _artifact_inference_cache[("stale-slug", old_bucket)] = {"ISSUE": "completed"}
+        with patch(
+            "ui.data.sdlc.PipelineStateMachine",
+            side_effect=Exception("cannot parse"),
+        ):
+            pipeline = _session_to_pipeline(session)
 
-        session = self._make_session(slug="stale-slug")
-
-        fresh_display = {
-            s: "pending"
-            for s in ["ISSUE", "PLAN", "CRITIQUE", "BUILD", "TEST", "REVIEW", "DOCS", "MERGE"]
-        }
-        fresh_display["ISSUE"] = "in_progress"
-
-        with patch("bridge.pipeline_state.PipelineStateMachine") as mock_psm:
-            mock_psm.return_value.get_display_progress.return_value = fresh_display
-            result = _get_artifact_enriched_stages(session, "stale-slug")
-
-        # Should have called PipelineStateMachine (cache miss)
-        mock_psm.return_value.get_display_progress.assert_called_once_with(slug="stale-slug")
-        by_name = {s.name: s for s in result}
-        assert by_name["ISSUE"].is_active
+        # Malformed JSON falls back to empty list from _parse_stage_states
+        assert isinstance(pipeline.stages, list)
 
 
 class TestProjectMetadata:
