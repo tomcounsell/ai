@@ -13,5 +13,26 @@
     <main class="container">
         {% block content %}{% endblock %}
     </main>
+
+    {# Session detail modal #}
+    <div id="session-modal" class="modal-overlay" onclick="if(event.target===this)closeSessionModal()">
+        <div class="modal-panel">
+            <button class="modal-close" onclick="closeSessionModal()" title="Close">&#10005;</button>
+            <div id="session-modal-body">
+                <div class="text-muted" style="padding: 24px;">Loading&hellip;</div>
+            </div>
+        </div>
+    </div>
+    <script>
+    function openSessionModal() {
+        document.getElementById('session-modal').classList.add('open');
+    }
+    function closeSessionModal() {
+        document.getElementById('session-modal').classList.remove('open');
+    }
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape') closeSessionModal();
+    });
+    </script>
 </body>
 </html>

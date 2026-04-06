@@ -1,6 +1,6 @@
 {# Macro for rendering a single session row (reused for parent and child rows) #}
 {% macro session_row(s, is_child=false, has_children=false) %}
-<tr class="session-row{% if is_child %} child-row{% endif %}{% if s.is_stale %} stale{% endif %}"{% if is_child %} data-parent="{{ s.parent_agent_session_id }}" style="display: none; cursor: pointer;"{% else %} style="cursor: pointer;"{% endif %} hx-get="/sdlc/{{ s.job_id }}/_inline/" hx-target="#detail-{{ s.job_id }}" hx-swap="innerHTML" hx-trigger="click">
+<tr class="session-row{% if is_child %} child-row{% endif %}{% if s.is_stale %} stale{% endif %}"{% if is_child %} data-parent="{{ s.parent_agent_session_id }}" style="display: none; cursor: pointer;"{% else %} style="cursor: pointer;"{% endif %} hx-get="/session/{{ s.agent_session_id }}/modal-content" hx-target="#session-modal-body" hx-swap="innerHTML" hx-trigger="click" hx-on::after-request="openSessionModal()">
     <td>
         {% if is_child %}
         <span class="child-connector"></span>
@@ -92,7 +92,6 @@
         </div>
     </td>
 </tr>
-<tr id="detail-{{ s.job_id }}" class="session-detail-row"></tr>
 {% endmacro %}
 
 {% if sessions %}

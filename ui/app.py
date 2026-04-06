@@ -151,6 +151,18 @@ def create_app() -> FastAPI:
             {"sessions": sessions},
         )
 
+    @app.get("/session/{agent_session_id}/modal-content", response_class=HTMLResponse)
+    def session_modal_content(request: Request, agent_session_id: str):
+        """HTMX partial: session detail content for modal."""
+        from ui.data.sdlc import get_pipeline_detail
+
+        pipeline = get_pipeline_detail(agent_session_id)
+        return templates.TemplateResponse(
+            request,
+            "_partials/session_detail_inline.html",
+            {"pipeline": pipeline},
+        )
+
     def _get_bridge_health() -> dict:
         """Check bridge health from last_connected file freshness."""
         import time
