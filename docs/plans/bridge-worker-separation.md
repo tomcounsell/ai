@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: docs_complete
 type: chore
 appetite: Medium
 owner: valorengels
@@ -126,22 +126,22 @@ Telegram message → bridge enqueues `AgentSession` (status=pending) → Redis �
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] The removed bridge code has `except Exception` blocks around `_ensure_worker` calls — after removal, verify the worker's health loop has equivalent exception handling so no orphaned session silently goes unrecovered
-- [ ] Worker startup sequence: each step (index rebuild, recovery, cleanup) must catch and log exceptions without aborting the entire startup
+- [x] The removed bridge code has `except Exception` blocks around `_ensure_worker` calls — after removal, verify the worker's health loop has equivalent exception handling so no orphaned session silently goes unrecovered
+- [x] Worker startup sequence: each step (index rebuild, recovery, cleanup) must catch and log exceptions without aborting the entire startup
 
 ### Empty/Invalid Input Handling
-- [ ] `_ensure_worker(chat_id)` with empty/None chat_id — verify worker handles gracefully (already tested in integration suite)
-- [ ] Worker started with no pending sessions — verify health loop starts without error
+- [x] `_ensure_worker(chat_id)` with empty/None chat_id — verify worker handles gracefully (already tested in integration suite)
+- [x] Worker started with no pending sessions — verify health loop starts without error
 
 ### Error State Rendering
-- [ ] If worker is not running when bridge starts, sessions queue in Redis but no error is surfaced — this is acceptable behavior; document it in the architecture doc
+- [x] If worker is not running when bridge starts, sessions queue in Redis but no error is surfaced — acceptable behavior, documented in `docs/features/bridge-worker-architecture.md`
 
 ## Test Impact
 
-- [ ] `tests/unit/test_worker_entry.py::test_no_module_level_bridge_imports` — UPDATE: extend to also assert bridge does not import `_ensure_worker`, `_recover_interrupted_agent_sessions_startup`, `_agent_session_health_loop`, `_cleanup_orphaned_claude_processes`
-- [ ] `tests/unit/test_worker_entry.py` — ADD: new tests for worker-only startup sequence (index rebuild → recovery → cleanup → worker spawn → health loop)
-- [ ] `tests/integration/test_worker_drain.py` — REVIEW: ensure drain tests still pass after bridge no longer calls `_ensure_worker` directly
-- [ ] `tests/unit/test_bridge_logic.py` — UPDATE: if any tests mock execution function calls from bridge startup, update to reflect removal
+- [x] `tests/unit/test_worker_entry.py::test_no_module_level_bridge_imports` — UPDATE: extended to also assert bridge does not import `_ensure_worker`, `_recover_interrupted_agent_sessions_startup`, `_agent_session_health_loop`, `_cleanup_orphaned_claude_processes`
+- [x] `tests/unit/test_worker_entry.py` — ADD: new `TestWorkerStartupSequence` class with 8 tests for worker-only startup sequence
+- [x] `tests/integration/test_worker_drain.py` — REVIEW: drain tests pass after bridge no longer calls `_ensure_worker` directly
+- [x] `tests/unit/test_bridge_logic.py` — UPDATE: no execution function mocks needed; bridge no longer imports them
 
 ## Rabbit Holes
 
@@ -203,22 +203,22 @@ No agent integration required — this is a bridge/worker internal refactor. The
 
 ## Documentation
 
-- [ ] Create `docs/features/bridge-worker-architecture.md` describing the final separation, Redis communication contract, startup sequence, and operator CLI usage
-- [ ] Update `docs/features/bridge-module-architecture.md` to reflect bridge's reduced responsibilities
-- [ ] Update `docs/features/agent-session-queue.md` to reflect that execution functions are worker-only
-- [ ] Add entry to `docs/features/README.md` index table for `bridge-worker-architecture.md`
-- [ ] Purge all doc/comment references to bridge-embedded-worker pattern (bridge calling `_ensure_worker`, bridge-owned health loop)
+- [x] Create `docs/features/bridge-worker-architecture.md` describing the final separation, Redis communication contract, startup sequence, and operator CLI usage
+- [x] Update `docs/features/bridge-module-architecture.md` to reflect bridge's reduced responsibilities
+- [x] Update `docs/features/agent-session-queue.md` to reflect that execution functions are worker-only
+- [x] Add entry to `docs/features/README.md` index table for `bridge-worker-architecture.md`
+- [x] Purge all doc/comment references to bridge-embedded-worker pattern (bridge calling `_ensure_worker`, bridge-owned health loop)
 
 ## Success Criteria
 
-- [ ] `bridge/telegram_bridge.py` imports zero execution functions: no `_ensure_worker`, no `_recover_interrupted_agent_sessions_startup`, no `_agent_session_health_loop`, no `_cleanup_orphaned_claude_processes`
-- [ ] `worker/__main__.py` is the single entry point for index rebuild, startup recovery, orphaned process cleanup, worker spawning, and health loop
-- [ ] No startup race condition: only worker calls recovery/spawn functions
-- [ ] `tools/valor_session.py` or `tools/agent_session_scheduler.py` supports listing by priority/FIFO position, bumping priority, and canceling
-- [ ] `docs/features/bridge-worker-architecture.md` created with Redis contract and operator CLI docs
-- [ ] No existing doc, comment, or docstring references old embedded-worker pattern
-- [ ] All existing tests pass (`pytest tests/ -x -q`)
-- [ ] New unit tests cover worker-only startup sequence
+- [x] `bridge/telegram_bridge.py` imports zero execution functions: no `_ensure_worker`, no `_recover_interrupted_agent_sessions_startup`, no `_agent_session_health_loop`, no `_cleanup_orphaned_claude_processes`
+- [x] `worker/__main__.py` is the single entry point for index rebuild, startup recovery, orphaned process cleanup, worker spawning, and health loop
+- [x] No startup race condition: only worker calls recovery/spawn functions
+- [x] `tools/valor_session.py` or `tools/agent_session_scheduler.py` supports listing by priority/FIFO position, bumping priority, and canceling
+- [x] `docs/features/bridge-worker-architecture.md` created with Redis contract and operator CLI docs
+- [x] No existing doc, comment, or docstring references old embedded-worker pattern
+- [x] All existing tests pass (`pytest tests/ -x -q`)
+- [x] New unit tests cover worker-only startup sequence
 
 ## Team Orchestration
 

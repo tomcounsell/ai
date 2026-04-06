@@ -15,7 +15,7 @@ The session system has 8 mechanisms that can revive, recover, or re-enqueue sess
 | Property | Value |
 |----------|-------|
 | Location | `agent/agent_session_queue.py` |
-| Trigger | Bridge process startup |
+| Trigger | Worker process startup (`worker/__main__.py`) |
 | What it does | Resets stale `running` sessions to `pending` (orphaned from previous process) |
 | Terminal safety | **Safe by query scope** -- only queries `status="running"`, never touches terminal sessions |
 | Guard | Query filter (`status="running"`) + timing guard (`AGENT_SESSION_HEALTH_MIN_RUNNING`, 300s) |
