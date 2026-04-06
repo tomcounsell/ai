@@ -11,9 +11,9 @@ rodney assert 'document.body.innerText.includes('\''This domain is for use in il
 rodney assert 'document.querySelector('\''h1'\'') !== null'
 
 # Final URL assertion
-rodney assert 'window.location.href.includes('example.com')'
+rodney assert 'window.location.href.includes('\''example.com'\'')'
 
 # Final text assertions
-rodney assert 'document.body.innerText.includes('Example Domain')'
+rodney assert 'document.body.innerText.includes('\''Example Domain'\'')'
 
 echo 'PASS: example-homepage'

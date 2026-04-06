@@ -190,15 +190,14 @@ def generate_script(trace: Trace, output_path: Path) -> bool:
         js_expr = f"window.location.href.includes('{pattern}')"
         lines.append("")
         lines.append("# Final URL assertion")
-        lines.append(f"rodney assert '{js_expr}'")
+        lines.append(f"rodney assert {_shell_escape(js_expr)}")
 
     if trace.expected_text:
         lines.append("")
         lines.append("# Final text assertions")
         for text in trace.expected_text:
-            escaped = text.replace("'", "\\'")
-            js_expr = f"document.body.innerText.includes('{escaped}')"
-            lines.append(f"rodney assert '{js_expr}'")
+            js_expr = f"document.body.innerText.includes('{text}')"
+            lines.append(f"rodney assert {_shell_escape(js_expr)}")
 
     lines.append("")
     lines.append(f"echo 'PASS: {trace.name}'")
