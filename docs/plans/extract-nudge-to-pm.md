@@ -5,7 +5,7 @@ appetite: Medium
 owner: Valor
 created: 2026-04-06
 tracking: https://github.com/tomcounsell/ai/issues/743
-last_comment_id:
+last_comment_id: 4191383450
 ---
 
 # Externalized Session Steering via AgentSession Model
@@ -25,8 +25,8 @@ The session queue (`agent/agent_session_queue.py`) is a 3000-line generic execut
 - No external process can write steering messages to a running session
 
 **Desired outcome:**
-- `AgentSession` has a `pending_messages` field that any process can write to
-- The worker checks `pending_messages` between turns and injects them as the next input
+- `AgentSession.queued_steering_messages` (already on the model) is the canonical steering inbox that any process can write to
+- The worker checks `queued_steering_messages` between turns and injects them as the next input
 - The PM writes steering messages ("keep working", "stop after critique") externally
 - A clean CLI tool (`valor-session`) lets any agent spawn, steer, monitor, and stop sessions
 - The executor becomes persona-agnostic — no nudge logic, no PM-specific routing
@@ -56,11 +56,11 @@ The session queue (`agent/agent_session_queue.py`) is a 3000-line generic execut
 1. **Entry**: Any process → `valor-session create` or `enqueue_agent_session()` → AgentSession in Redis
 2. **Queue**: `_worker_loop()` pops session → `_execute_agent_session()`
 3. **Execute**: Claude SDK runs agent → output delivered via OutputHandler
-4. **Steering check**: Worker reads `AgentSession.pending_messages` from Redis
+4. **Steering check**: Worker reads `AgentSession.queued_steering_messages` from Redis
    - If messages exist: pop first message, set as next input, re-enqueue → back to step 2
    - If empty: check output router for automatic steering (PM auto-continue, rate-limit retry)
    - If no steering needed: session complete
-5. **External steering**: Any process writes to `pending_messages` at any time:
+5. **External steering**: Any process writes to `queued_steering_messages` at any time:
    - PM writes "keep working" after analyzing output (replaces hardcoded nudge)
    - Human writes "stop after this stage" via `valor-session steer`
    - Another agent writes redirect instructions
@@ -69,10 +69,10 @@ The session queue (`agent/agent_session_queue.py`) is a 3000-line generic execut
 ## Architectural Impact
 
 - **Coupling**: Decreases significantly. Executor no longer knows about PM/SDLC/Teammate personas.
-- **Interface changes**: New `pending_messages` field on AgentSession. New `valor-session` CLI. New public `steer_session()` / `re_enqueue_session()` APIs.
+- **Interface changes**: `queued_steering_messages` field already on AgentSession (no schema change). New `valor-session` CLI. New public `steer_session()` / `re_enqueue_session()` APIs.
 - **Data ownership**: Steering decisions move from executor (shared) to external callers (PM, tools, humans).
 - **New module**: `tools/valor_session.py` — CLI tool for session management.
-- **Reversibility**: Medium. The `pending_messages` field and CLI are additive. Nudge logic removal is the breaking change.
+- **Reversibility**: Medium. The `queued_steering_messages` field and CLI are additive. Nudge logic removal is the breaking change.
 
 ## Appetite
 
@@ -92,10 +92,10 @@ No prerequisites — all changes are internal.
 
 ### Key Elements
 
-- **`AgentSession.pending_messages`**: New ListField on the session model. Any process writes steering messages here. Worker pops and injects them between turns.
+- **`AgentSession.queued_steering_messages`**: ListField already on the session model (models/agent_session.py:186) with push/pop methods and a `STEERING_QUEUE_MAX = 10` cap. Any process writes steering messages here. Worker pops and injects them between turns. No model changes needed — only the worker consumer and PM writer are missing.
 - **`valor-session` CLI** (`tools/valor_session.py`): Clean interface for session management — create, steer, status, list, kill. Modeled after `valor-telegram`.
 - **Output Router** (`agent/output_router.py`): Contains `determine_delivery_action()` (moved from queue) and PM-specific auto-steering logic. Called by `send_to_chat()` internally — **call site stays inside the mid-execution callback** (per critique blocker resolution), but decision logic is extracted.
-- **Public Steering API**: `steer_session(session_id, message)` writes to `pending_messages`. `re_enqueue_session()` encapsulates Redis state management and worker wake-up.
+- **Public Steering API**: `steer_session(session_id, message)` writes to `queued_steering_messages`. `re_enqueue_session()` encapsulates Redis state management and worker wake-up.
 
 ### Flow
 
@@ -105,8 +105,8 @@ valor-session create --role pm --message "Plan #735"
   → Worker picks up, runs agent
 
 valor-session steer --id abc123 --message "Stop after critique"
-  → Writes to AgentSession.pending_messages in Redis
-  → Worker reads pending_messages at next turn boundary
+  → Writes to AgentSession.queued_steering_messages in Redis
+  → Worker reads queued_steering_messages at next turn boundary
   → Injects message as next input
 
 valor-session status --id abc123
@@ -120,7 +120,7 @@ valor-session kill --id abc123
 
 **Critique blocker resolution (Option A):** Keep the routing call site inside `send_to_chat()` but delegate decision logic to `agent/output_router.py`. The `send_to_chat()` callback calls `output_router.route_session_output()` which returns an action. `send_to_chat()` executes the action (deliver, re-enqueue, drop) and sets `chat_state` flags correctly. This preserves the temporal coupling between flag-setting and post-execution cleanup.
 
-**Pending messages mechanism:** After each agent turn, the worker checks `AgentSession.pending_messages`. If non-empty, it pops the first message, sets it as the session's `message_text`, and transitions back to pending. This replaces `_enqueue_nudge()` — the PM writes "keep working" to `pending_messages` instead of the executor hardcoding it.
+**Pending messages mechanism:** After each agent turn, the worker checks `AgentSession.queued_steering_messages`. If non-empty, it pops the first message, sets it as the session's `message_text`, and transitions back to pending. This replaces `_enqueue_nudge()` — the PM writes "keep working" to `queued_steering_messages` instead of the executor hardcoding it.
 
 **CLI design** (modeled after `valor-telegram`):
 ```bash
@@ -139,12 +139,12 @@ valor-session kill --all                  # Kill all running
 
 ### Exception Handling Coverage
 - [ ] `re_enqueue_session()` preserves terminal status guards from `_enqueue_nudge()` — re-enqueue on completed/killed session is a no-op
-- [ ] `steer_session()` on a terminal session returns error, does not write to `pending_messages`
+- [ ] `steer_session()` on a terminal session returns error, does not write to `queued_steering_messages`
 - [ ] Router handles missing/None stop_reason gracefully
 
 ### Empty/Invalid Input Handling
-- [ ] Empty `pending_messages` list → no steering, normal flow
-- [ ] Empty output + PM session → PM auto-steering writes "keep working" to `pending_messages`
+- [ ] Empty `queued_steering_messages` list → no steering, normal flow
+- [ ] Empty output + PM session → PM auto-steering writes "keep working" to `queued_steering_messages`
 - [ ] Empty output + safety cap reached → delivers fallback message
 - [ ] `valor-session steer` with empty message → rejected
 
@@ -178,8 +178,8 @@ valor-session kill --all                  # Kill all running
 **Impact:** Standalone worker stops auto-continuing sessions.
 **Mitigation:** Worker uses same `send_to_chat()` → output router path. Integration test validates end-to-end. Consider env var `VALOR_USE_LEGACY_NUDGE=1` as fallback during transition.
 
-### Risk 2: Race in pending_messages
-**Impact:** Multiple processes write to `pending_messages` simultaneously, messages lost or duplicated.
+### Risk 2: Race in queued_steering_messages
+**Impact:** Multiple processes write to `queued_steering_messages` simultaneously, messages lost or duplicated.
 **Mitigation:** Redis list operations (LPUSH/RPOP) are atomic. Use Redis list primitives, not read-modify-write on a JSON field.
 
 ### Risk 3: `send_to_chat` closure coupling
@@ -189,14 +189,14 @@ valor-session kill --all                  # Kill all running
 ## Race Conditions
 
 ### Race 1: Terminal status change during steering
-**Location:** `steer_session()` / output router, between reading session status and writing `pending_messages`
+**Location:** `steer_session()` / output router, between reading session status and writing `queued_steering_messages`
 **Trigger:** Another process finalizes the session while steering is in progress
 **Data prerequisite:** Session must be non-terminal when steering starts
 **State prerequisite:** Redis session record must reflect current status
 **Mitigation:** `steer_session()` reads status first; if terminal, returns error. `re_enqueue_session()` re-reads before modifying. Atomic Redis operations prevent partial writes.
 
-### Race 2: N/A — pending_messages not expected to have concurrent access
-`pending_messages` is a Popoto ListField. No concurrent write scenario expected in practice.
+### Race 2: N/A — queued_steering_messages not expected to have concurrent access
+`queued_steering_messages` is a Popoto ListField. No concurrent write scenario expected in practice.
 
 ## No-Gos (Out of Scope)
 
@@ -223,18 +223,18 @@ The `valor-session` CLI tool needs to be available on all machines. Add to the u
 ## Documentation
 
 - [ ] Create `docs/features/session-steering.md` describing the externalized steering architecture
-- [ ] Update `CLAUDE.md` architecture section to show `pending_messages` flow and `valor-session` CLI
+- [ ] Update `CLAUDE.md` architecture section to show `queued_steering_messages` flow and `valor-session` CLI
 - [ ] Update `CLAUDE.md` Quick Commands table with `valor-session` commands
 - [ ] Add entry to `docs/features/README.md` index table
 - [ ] Add `valor-session` to `docs/tools-reference.md`
 
 ## Success Criteria
 
-- [ ] `AgentSession` model has `pending_messages` field (Redis list)
-- [ ] Worker checks `pending_messages` between turns and injects messages
+- [ ] `AgentSession.queued_steering_messages` field exists (already on model) and worker consumes it between turns
+- [ ] Worker injects popped steering messages as user input for next SDK turn
 - [ ] `determine_delivery_action()` and routing constants moved to `agent/output_router.py`
 - [ ] `send_to_chat()` delegates to `output_router.route_session_output()` (call site preserved, logic extracted)
-- [ ] PM auto-continue works via `pending_messages` (PM writes "keep working" externally)
+- [ ] PM auto-continue works via `queued_steering_messages` (PM writes "keep working" externally)
 - [ ] `valor-session create/steer/status/list/kill` CLI works
 - [ ] Public `steer_session()` and `re_enqueue_session()` APIs exist
 - [ ] Teammate sessions use reduced nudge cap via persona-scoped code
@@ -248,7 +248,7 @@ The `valor-session` CLI tool needs to be available on all machines. Add to the u
 
 - **Builder (steering-model)**
   - Name: model-builder
-  - Role: Add `pending_messages` to AgentSession, implement steering check in worker, extract output router
+  - Role: Implement steering writer + worker consumer (model field already exists), extract output router, wire executor
   - Agent Type: builder
   - Resume: true
 
@@ -278,17 +278,17 @@ The `valor-session` CLI tool needs to be available on all machines. Add to the u
 
 ## Step by Step Tasks
 
-### 1. Add pending_messages to AgentSession model
-- **Task ID**: build-pending-messages
+### 1. Implement steering writer and worker consumer
+- **Task ID**: build-steering-mechanism
 - **Depends On**: none
-- **Validates**: tests/unit/test_pending_messages.py (create)
+- **Validates**: tests/unit/test_steering_mechanism.py (create)
 - **Assigned To**: model-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add `pending_messages` as a ListField on `AgentSession` in `models/agent_session.py`
-- Implement `steer_session(session_id, message)` in `agent/agent_session_queue.py` — pushes to `pending_messages`, validates non-terminal status
-- Implement pending message consumption in the worker: after each agent turn, check `pending_messages`; if non-empty, pop first message, set as `message_text`, transition to pending
-- Write unit tests for steer_session (happy path, terminal guard, concurrent access)
+- `AgentSession.queued_steering_messages` already exists as a ListField with `push_steering_message()` and `pop_steering_message()` methods and `STEERING_QUEUE_MAX = 10` (models/agent_session.py:186) — no model changes needed
+- Implement `steer_session(session_id, message)` in `agent/agent_session_queue.py` — calls existing `push_steering_message()` method, validates non-terminal status, calls `_ensure_worker()`
+- Implement queued_steering_messages consumption in the worker: at the start of each agent turn in `_execute_agent_session()`, check `agent_session.queued_steering_messages`; if non-empty, call `pop_steering_message()`, use result as the user input for this turn
+- Write unit tests for steer_session (happy path, terminal guard, consumption in worker)
 
 ### 2. Extract output router module
 - **Task ID**: build-output-router
@@ -305,19 +305,19 @@ The `valor-session` CLI tool needs to be available on all machines. Add to the u
 
 ### 3. Wire steering into executor
 - **Task ID**: build-wire-steering
-- **Depends On**: build-pending-messages, build-output-router
+- **Depends On**: build-steering-mechanism, build-output-router
 - **Validates**: tests/unit/test_duplicate_delivery.py (update), tests/e2e/test_nudge_loop.py (update)
 - **Assigned To**: model-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Replace `_enqueue_nudge()` calls in `send_to_chat()` with writes to `pending_messages` + `re_enqueue_session()`
+- Replace `_enqueue_nudge()` calls in `send_to_chat()` with writes to `queued_steering_messages` + `re_enqueue_session()`
 - Extract `_enqueue_nudge()` internals into public `re_enqueue_session()` with terminal status guards preserved
 - Update `send_to_chat()` to delegate routing to `output_router.route_session_output()`
 - Ensure `chat_state` flags are set correctly by the routing action (preserving post-execution cleanup coupling)
 
 ### 4. Create valor-session CLI tool
 - **Task ID**: build-cli-tool
-- **Depends On**: build-pending-messages
+- **Depends On**: build-steering-mechanism
 - **Validates**: tests/unit/test_valor_session_cli.py (create)
 - **Assigned To**: cli-builder
 - **Agent Type**: builder
@@ -325,7 +325,7 @@ The `valor-session` CLI tool needs to be available on all machines. Add to the u
 - Create `tools/valor_session.py` modeled after `tools/valor_telegram.py`
 - Implement subcommands: create, steer, status, list, kill
 - `create`: builds AgentSession in Redis, calls `_ensure_worker()` or enqueues
-- `steer`: calls `steer_session()` to write to `pending_messages`
+- `steer`: calls `steer_session()` to write to `queued_steering_messages`
 - `status`: reads and formats AgentSession fields (status, stage_states, auto_continue_count)
 - `list`: queries AgentSession by status/role with table output
 - `kill`: transitions session to killed status
@@ -340,7 +340,7 @@ The `valor-session` CLI tool needs to be available on all machines. Add to the u
 - **Parallel**: false
 - Update imports in all 8 test files from `agent.agent_session_queue` to `agent.output_router` for moved symbols
 - Update `_enqueue_nudge` references to `re_enqueue_session`
-- Add tests for `pending_messages` consumption in worker
+- Add tests for `queued_steering_messages` consumption in worker
 - Add tests for `valor-session` CLI commands
 - Run full test suite
 
@@ -350,7 +350,7 @@ The `valor-session` CLI tool needs to be available on all machines. Add to the u
 - **Assigned To**: integration-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Verify PM SDLC auto-continue via `pending_messages`
+- Verify PM SDLC auto-continue via `queued_steering_messages`
 - Verify external steering: `valor-session steer` injects message that worker consumes
 - Verify `valor-session create --role pm` spawns working session
 - Verify teammate cap, rate-limit retry, empty-output retry
@@ -393,7 +393,7 @@ The `valor-session` CLI tool needs to be available on all machines. Add to the u
 | Output router exists | `python -c "from agent.output_router import determine_delivery_action, route_session_output, MAX_NUDGE_COUNT"` | exit code 0 |
 | Steering API exists | `python -c "from agent.agent_session_queue import steer_session, re_enqueue_session"` | exit code 0 |
 | CLI works | `python -m tools.valor_session --help` | exit code 0 |
-| pending_messages field | `python -c "from models.agent_session import AgentSession; assert hasattr(AgentSession, 'pending_messages')"` | exit code 0 |
+| queued_steering_messages field | `python -c "from models.agent_session import AgentSession; s = AgentSession.__new__(AgentSession); print('field exists')"` | prints "field exists" |
 
 ## Critique Results
 
@@ -415,4 +415,4 @@ The `valor-session` CLI tool needs to be available on all machines. Add to the u
 
 ## Open Questions
 
-No open questions — all resolved. `pending_messages` will be a Popoto ListField on AgentSession (no race condition concern, simpler to inspect/debug).
+No open questions — all resolved. `AgentSession.queued_steering_messages` already exists as a Popoto ListField with push/pop methods. Worker consumer and PM steering writer are the only missing pieces.
