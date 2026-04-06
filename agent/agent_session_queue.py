@@ -4,10 +4,17 @@ Agent Session Queue - FILO stack with per-project sequential workers.
 Serializes agent work per project working directory so git operations
 never conflict. Agent runs directly in the project's working directory.
 
+This module has no module-level bridge/ imports and can be used by both
+the Telegram bridge (embedded worker) and the standalone worker
+(python -m worker). Output routing uses the OutputHandler protocol
+defined in agent/output_handler.py, with FileOutputHandler as fallback
+when no bridge callbacks are registered.
+
 Architecture:
 - AgentSession: unified popoto Model persisted in Redis
 - Worker loop: one asyncio.Task per project, processes sessions sequentially
 - Revival detection: lightweight git state check, no SDK agent call
+- Output: OutputHandler protocol (Telegram callbacks or file logging)
 """
 
 import asyncio

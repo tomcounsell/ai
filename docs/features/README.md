@@ -68,7 +68,6 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Personas](personas.md) | Configurable persona system: base + overlay files replacing monolithic SOUL.md for developer, PM, and teammate roles | Shipped |
 | [Pipeline Graph](pipeline-graph.md) | Canonical directed graph for SDLC stage routing with cycle support for test-failure and review-feedback loops | Shipped |
 | [Pipeline State Machine](pipeline-state-machine.md) | Programmatic stage tracking replacing inference-based detection with direct state recording at transition points | Shipped |
-| [SDLC Stage Tracking](sdlc-stage-tracking.md) | Stored-state-only stage completion: artifact inference removed, skill stage markers added, do-merge gate strengthened | Shipped |
 | [Plan Completion Gate](plan-completion-gate.md) | Deterministic validation preventing plan completion and PR merge while checkboxes remain unchecked | Shipped |
 | [Plan Prerequisites Validation](plan-prerequisites.md) | Declare and validate environment requirements before plan execution | Shipped |
 | [PM Channels](pm-channels.md) | Project manager mode routing Telegram groups to work-vault folders with SDLC bypass | Shipped |
@@ -91,6 +90,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [SDLC Observer](sdlc-observer.md) | Web dashboard for real-time SDLC pipeline tracking with stage indicators, event timelines, and artifact links at `/sdlc/` | Shipped |
 | [SDLC Pipeline Integrity](sdlc-pipeline-integrity.md) | Session continuation hardening, deterministic URL construction, merge guard hook, and MERGE pipeline stage | Shipped |
 | [SDLC Stage Handoff](sdlc-stage-handoff.md) | Structured GitHub issue comments for cross-stage context relay -- each stage posts findings on completion and reads prior stage context on start | Shipped |
+| [SDLC Stage Tracking](sdlc-stage-tracking.md) | Stored-state-only stage completion: artifact inference removed, skill stage markers added, do-merge gate strengthened | Shipped |
 | [SDLC-First Routing](sdlc-first-routing.md) | Automatic work request classification (Ollama/Haiku) and orchestrator routing for SDLC vs conversational requests, with cross-repo `gh` resolution via `GH_REPO` env var | Shipped |
 | [Semantic Doc Impact Finder](semantic-doc-impact-finder.md) | Two-stage semantic search (embedding recall + LLM reranking) for finding docs affected by code changes | Shipped |
 | [Semantic Session Routing](semantic-session-routing.md) | Semantic matching of unthreaded messages to active sessions with declared expectations via structured summarizer output | Shipped |
@@ -129,6 +129,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [UTC Timestamps](utc-timestamps.md) | All timestamps normalized to tz-aware UTC with `bridge/utc.py` utilities; local conversion only at display boundary | Shipped |
 | [Web Dashboard](web-dashboard.md) | Session table with SDLC stage pills, project metadata popovers, history-based stage inference, and configurable retention via DASHBOARD_RETENTION_HOURS | Shipped |
 | [Web UI](web-ui.md) | Localhost FastAPI web application at port 8500 serving observability dashboards with HTMX interactivity and dark theme | Shipped |
+| [Worker Service](worker-service.md) | Standalone worker process for AgentSession processing without Telegram, OutputHandler protocol, FileOutputHandler fallback, launchd service | Shipped |
 | [Workspace Safety Invariants](workspace-safety-invariants.md) | Pre-launch validation of agent working directories with CWD existence, path containment, and slug sanitization | Shipped |
 | [Worktree SDK Compatibility Experiment](worktree-sdk-compatibility.md) | Experiment results for Claude Agent SDK compatibility with git worktrees | Archived |
 | [xfail Hygiene](xfail-hygiene.md) | Three-layer xfail hygiene system preventing stale test markers after bug fixes land | Shipped |
