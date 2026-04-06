@@ -88,12 +88,15 @@ officecli close report.docx   # Save and release
 
 ## Reading Telegram Messages
 
-Use `valor-telegram` to read messages from any chat. It checks Redis first, then falls back to the Telegram API automatically.
+Use `valor-telegram` to read messages from any chat. It checks Redis first, then falls back to the Telegram API automatically. Sending routes through the Redis relay (requires bridge to be running).
 
 ```bash
 valor-telegram read --chat "Dev: Valor" --limit 10
 valor-telegram read --chat "Tom" --search "deployment"
 valor-telegram read --chat "Dev: Valor" --since "1 hour ago"
+valor-telegram send --chat "Dev: Valor" "Hello world"
+valor-telegram send --chat "Forum Group" --reply-to 123 "Message to topic"
+valor-telegram send --chat "Tom" --file ./screenshot.png "Caption"
 ```
 
 ## Quick Commands
