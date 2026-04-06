@@ -186,7 +186,7 @@ def generate_script(trace: Trace, output_path: Path) -> bool:
 
     # Add final assertions if specified in trace
     if trace.expected_final_url:
-        pattern = trace.expected_final_url
+        pattern = trace.expected_final_url.replace("'", "\\'")
         js_expr = f"window.location.href.includes('{pattern}')"
         lines.append("")
         lines.append("# Final URL assertion")
@@ -196,7 +196,8 @@ def generate_script(trace: Trace, output_path: Path) -> bool:
         lines.append("")
         lines.append("# Final text assertions")
         for text in trace.expected_text:
-            js_expr = f"document.body.innerText.includes('{text}')"
+            safe_text = text.replace("'", "\\'")
+            js_expr = f"document.body.innerText.includes('{safe_text}')"
             lines.append(f"rodney assert {_shell_escape(js_expr)}")
 
     lines.append("")
