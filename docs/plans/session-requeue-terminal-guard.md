@@ -36,20 +36,21 @@ Once a session reaches a terminal status (`completed`, `failed`, `killed`, `aban
 
 ## Data Flow
 
-The bug occurs when:
+The bug is a **timing race** triggered by two cooperating defects:
 
-1. **User sends follow-up message** (not a Telegram reply — no `reply_to_msg_id`) to a chat where a session just completed.
-2. **Routing** (`telegram_bridge.py:948–1025`): No reply-to → semantic routing runs → either matches the completed session's `session_id` or creates a fresh one.
-3. **Intake classifier** (`telegram_bridge.py:1341–1489`): Queries for `running/active/dormant` sessions only — completed sessions are invisible here. Falls through to enqueue.
-4. **Enqueue call** (`telegram_bridge.py:1603`): `enqueue_agent_session()` called with the `session_id`.
-5. **`_push_agent_session()`** (`agent_session_queue.py:188`): Calls `_mark_superseded()` which queries all sessions with status=`completed` and transitions each to `superseded` (non-terminal). Creates new `pending` record under same `session_id`.
-6. **Worker picks up `superseded` session** (or the new `pending` one): Executes again, doing nothing useful.
-7. **Repeat** until nudge threshold fires.
+1. **User sends follow-up message** (not a Telegram reply — no `reply_to_msg_id`) to a chat where a session is in progress or has recently completed.
+2. **Routing** (`telegram_bridge.py:948–1025`): No reply-to → semantic routing runs (`session_router.py:58`). Semantic routing **only considers `active`/`dormant` sessions** — it cannot return a terminal `session_id`. It matches a dormant session and assigns its `session_id` at line 1011.
+3. **Async gap** (between line 1011 and the enqueue call at line 1603): The matched dormant session finishes — status transitions to `completed` (terminal) while the bridge is still processing the intake path.
+4. **Intake classifier** (`telegram_bridge.py:1341–1489`): Queries for `running/active/dormant` sessions only — the now-completed session is invisible here. Falls through to enqueue.
+5. **Enqueue call** (`telegram_bridge.py:1603`): `enqueue_agent_session()` called with the stale (now-terminal) `session_id`.
+6. **`_push_agent_session()`** (`agent_session_queue.py:247`): Calls `_mark_superseded()` which queries all sessions for that `session_id` with status=`completed` and transitions each to `superseded` (non-terminal via `reject_from_terminal=False`). Creates new `pending` record under same `session_id`.
+7. **Worker picks up the re-activated session**: Executes again, doing nothing useful.
+8. **Repeat** until nudge threshold fires.
 
 **The two cooperating defects:**
 
-- **Defect 1 (bridge):** Intake path does not check if the current session for `session_id` is already terminal before calling `enqueue_agent_session()`.
-- **Defect 2 (queue):** `_mark_superseded()` converts terminal `completed` to non-terminal `superseded`, re-activating the session.
+- **Defect 1 (bridge, primary):** Intake path does not check if the session for `session_id` went terminal in the async gap before calling `enqueue_agent_session()`. The guard needs to fire after line 1025 where `session_id` is first assigned.
+- **Defect 2 (queue, defense-in-depth):** `_mark_superseded()` passes `reject_from_terminal=False` to `transition_status()`, which explicitly bypasses the terminal guard and converts `completed` → `superseded` (non-terminal), re-activating the session for the worker.
 
 ## Architectural Impact
 
@@ -116,30 +117,33 @@ This approach is preferable to guarding inside `_mark_superseded()` because it s
 
 **Fix 2 — `_mark_superseded()` defense in depth**:
 
-Even with Fix 1, `_mark_superseded()` should be tightened as defense-in-depth. The current filter `if s.status == "completed"` already limits to completed sessions, but the real problem is that it transitions a terminal status to a non-terminal one. Change the filter to only supersede sessions that are in a non-terminal status — which is no sessions at all if they're `completed`. Alternatively, skip `_mark_superseded()` entirely when the found sessions are all terminal. 
+Even with Fix 1, `_mark_superseded()` should be tightened as defense-in-depth. The root issue is not the filter (changing it to `not in TERMINAL_STATUSES` would incorrectly supersede `pending`/`running`/`dormant` sessions, breaking PR #721 reply-to resumption). The root issue is the explicit `reject_from_terminal=False` override that bypasses the existing terminal guard.
 
-The safest approach: change `_mark_superseded()` to skip sessions already in `TERMINAL_STATUSES`:
+The fix: **remove `reject_from_terminal=False`** from the `transition_status()` call, so `transition_status()` uses its default behavior (terminal → reject). A `completed` session will be rejected rather than moved to `superseded`. The session record stays `completed`; no re-activation occurs.
 
 ```python
-old_completed = [
-    s
-    for s in AgentSession.query.filter(session_id=session_id)
-    if s.status == "completed" and s.status not in _TERMINAL_STATUSES  # redundant but explicit
-]
+def _mark_superseded():
+    from models.session_lifecycle import transition_status
+
+    old_completed = [
+        s
+        for s in AgentSession.query.filter(session_id=session_id)
+        if s.status == "completed"
+    ]
+    for old in old_completed:
+        transition_status(
+            old,
+            "superseded",
+            reason=f"superseded by new session for {session_id}",
+            # reject_from_terminal=False removed — terminal sessions must not be re-activated
+        )
+        logger.info(
+            f"Marked old completed session {old.id} as superseded "
+            f"for session_id={session_id}"
+        )
 ```
 
-Wait — `completed` IS in `TERMINAL_STATUSES`. The real fix: the filter should be `status not in TERMINAL_STATUSES` to find sessions that need superseding. Sessions with terminal status should be left alone. Only non-terminal sessions (e.g., `pending`, `dormant`) need to be marked superseded when a new session arrives.
-
-Revised `_mark_superseded()` filter:
-```python
-old_to_supersede = [
-    s
-    for s in AgentSession.query.filter(session_id=session_id)
-    if s.status not in _TERMINAL_STATUSES
-]
-```
-
-This is the correct semantics: supersede non-terminal sessions, leave terminal sessions alone.
+The existing filter (`s.status == "completed"`) and loop structure remain unchanged. Only the `reject_from_terminal=False` override is removed. This means `_mark_superseded()` will log a warning when it tries to supersede a `completed` session and fails (the existing `except Exception` wrapper handles this gracefully).
 
 ## Failure Path Test Strategy
 
@@ -178,9 +182,13 @@ This is the correct semantics: supersede non-terminal sessions, leave terminal s
 **Impact:** If semantic routing (`find_matching_session`) returns a `session_id` for a terminal session, the guard correctly intercepts and generates a fresh ID. This is the exact bug scenario — the guard handles it correctly.
 **Mitigation:** The guard fires after routing assigns `session_id` and before enqueue. Any terminal `session_id` (whether from semantic routing or the coalescing guard) is caught.
 
-### Risk 3: `_mark_superseded()` filter change breaks existing tests
-**Impact:** Tests that expect `completed→superseded` transition may fail.
-**Mitigation:** The test `test_completed_to_superseded_with_reject_false` in `test_recovery_respawn_safety.py` tests the `transition_status()` mechanics, not `_mark_superseded()` logic. The change to `_mark_superseded()` filter changes which sessions are selected for superseding, not how superseding works. Review test assertions before changing.
+### Risk 3: Removing `reject_from_terminal=False` breaks existing tests
+**Impact:** `test_completed_to_superseded_with_reject_false` may fail if it exercises `_mark_superseded()` rather than `transition_status()` mechanics directly.
+**Mitigation:** Verify the test calls `transition_status()` directly, not via `_mark_superseded()`. If it tests `_mark_superseded()`, the test itself documents the now-unwanted behavior and should be updated to expect rejection. The failing test is a signal, not a blocker.
+
+### Risk 4: Removing `reject_from_terminal=False` accumulates orphaned `completed` records
+**Impact:** Old `completed` records are no longer promoted to `superseded`; queries for a `session_id` may return multiple `completed` records.
+**Mitigation:** Fix 1 (intake guard) prevents the scenario that creates duplicate records under the same `session_id` in the first place. Accumulation only occurs if Fix 1 is bypassed. The existing `except Exception` wrapper in `_push_agent_session()` means `_mark_superseded()` failure is logged but non-fatal — the new `pending` record is still created correctly.
 
 ## Race Conditions
 
@@ -224,7 +232,7 @@ No agent integration required — this is a bridge-internal change to the intake
 - [ ] The `completed → superseded → pending → running → completed` cycling does not occur
 - [ ] `docs/features/session-recovery-mechanisms.md` documents the intake path as Mechanism 8 with its guard status
 - [ ] New tests cover the intake path guard (Fix 1) and revised `_mark_superseded()` behavior (Fix 2)
-- [ ] All 31 existing `test_recovery_respawn_safety.py` tests continue to pass
+- [ ] All 15 existing `test_recovery_respawn_safety.py` tests continue to pass
 - [ ] Ruff lint and format pass
 
 ## Team Orchestration
@@ -268,11 +276,12 @@ See plan template for full list.
 - **Assigned To**: intake-guard-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add terminal-status guard in `bridge/telegram_bridge.py` immediately before the `enqueue_agent_session()` call at line ~1603
+- Add terminal-status guard in `bridge/telegram_bridge.py` after line 1025 where `session_id` is first assigned (and before any downstream use — the enqueue call at ~1603 is the latest acceptable insertion point)
 - Guard: if existing session for `session_id` is in `TERMINAL_STATUSES`, force fresh `session_id = f"tg_{project_key}_{event.chat_id}_{message.id}"`
 - Skip the guard for `is_reply_to_valor and message.reply_to_msg_id` (reply-to resumption is a different path)
 - Log at INFO level when the guard fires (terminal detected, fresh session_id assigned)
 - Wrap in `except Exception` with `logger.debug` fallback (non-fatal)
+- Ensure `_recent_session_by_chat` write at line ~1034 uses the post-guard `session_id` (it will naturally since the guard fires before line 1034 if placed after 1025)
 
 ### 2. Implement Fix 2 — `_mark_superseded()` Filter Fix
 - **Task ID**: build-mark-superseded-fix
@@ -281,9 +290,10 @@ See plan template for full list.
 - **Assigned To**: intake-guard-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- In `agent_session_queue.py:_push_agent_session()`, change `_mark_superseded()` filter from `if s.status == "completed"` to `if s.status not in _TERMINAL_STATUSES`
-- This makes `_mark_superseded()` only supersede non-terminal sessions (e.g., `pending`, `dormant`) — never terminal ones
-- Verify `test_completed_to_superseded_with_reject_false` in `test_recovery_respawn_safety.py` still passes (it tests `transition_status()` mechanics, not the filter)
+- In `agent_session_queue.py:_push_agent_session()`, remove `reject_from_terminal=False` from the `transition_status()` call inside `_mark_superseded()` (line ~260)
+- Keep the filter `if s.status == "completed"` and loop structure unchanged — only the override kwarg is removed
+- This allows the existing terminal guard in `transition_status()` to reject the `completed → superseded` transition, preventing re-activation
+- Note: `test_completed_to_superseded_with_reject_false` in `test_recovery_respawn_safety.py` tests the `transition_status()` mechanics directly — verify it does NOT test `_mark_superseded()` internals before changing
 
 ### 3. Write Tests for Both Fixes
 - **Task ID**: write-tests
@@ -297,8 +307,8 @@ See plan template for full list.
   - Test: intake guard does NOT fire for reply-to messages (skipped)
   - Test: intake guard falls back gracefully when AgentSession query raises exception
 - Add test for revised `_mark_superseded()` to `tests/unit/test_agent_session_queue_async.py` (or `test_recovery_respawn_safety.py`)
-  - Test: `_mark_superseded()` skips sessions in each terminal status
-  - Test: `_mark_superseded()` supersedes sessions in non-terminal statuses as before
+  - Test: `_mark_superseded()` does NOT transition `completed` sessions (transition is rejected by terminal guard)
+  - Test: `_mark_superseded()` behavior is unchanged for non-completed sessions (if any filter path exists)
 
 ### 4. Update Documentation
 - **Task ID**: document-fix
