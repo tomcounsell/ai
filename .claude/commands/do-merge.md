@@ -20,7 +20,7 @@ try:
     session = AgentSession.get_by_slug('$SLUG')
     if session:
         sm = PipelineStateMachine(session)
-        states = sm.get_display_progress(slug='$SLUG')
+        states = sm.get_display_progress()
     else:
         states = {}
 except Exception:
@@ -40,18 +40,32 @@ for stage in DISPLAY_STAGES:
         skipped.append(stage)
 
 print('Pipeline: ' + '  '.join(stages_display))
-if skipped:
+all_pending = all(s in ('pending', 'ready') for s in states.values())
+if all_pending and not states:
+    print()
+    print('WARNING: No pipeline state found (cold start or Redis cleared).')
+    print('Stage completion cannot be verified. Treat all stages as unconfirmed.')
+    print('Proceed only if you have manually verified all stages completed.')
+elif skipped:
     print()
     names = ', '.join(skipped)
-    print(f'⚠ These stages appear to have been skipped: {names}')
-    print('Are you sure you want to merge without completing them?')
+    print(f'WARNING: The following stages were NOT recorded as completed: {names}')
+    print()
+    print('These stages may have been skipped entirely or run without writing state markers.')
+    print('Do NOT proceed without explicitly acknowledging each skipped stage.')
+    print('For emergency hotfixes only: state which stages you are intentionally skipping and why.')
 else:
     print()
     print('All stages completed. Good to merge.')
 "
 ```
 
-If stages were skipped, pause and confirm with the user before proceeding. The user may have good reasons — respect their judgment — but make sure they saw what was skipped.
+If the pipeline state shows ALL stages as pending/ready (cold start — no Redis state recorded), warn
+clearly that no pipeline state was found and require explicit acknowledgment before merging.
+
+If specific stages were skipped, STOP and list them. Do NOT proceed until the user explicitly
+acknowledges each skipped stage and provides a reason. Emergency hotfixes are the only valid
+exception, and even then the acknowledgment must be explicit and on-record.
 
 ## Prerequisites Check
 
@@ -74,7 +88,7 @@ if not session:
     exit()
 
 sm = PipelineStateMachine(session)
-states = sm.get_display_progress(slug='$SLUG')
+states = sm.get_display_progress()
 required = ['TEST', 'REVIEW', 'DOCS']
 all_pass = True
 for stage in required:

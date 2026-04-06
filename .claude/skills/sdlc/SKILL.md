@@ -44,7 +44,7 @@ Check what already exists for this issue. Use `$SDLC_TARGET_REPO` for local oper
 
 ### Step 2.0: Query stage_states from PipelineStateMachine (primary signal)
 
-Before running artifact checks, query the PM session's `stage_states` for authoritative stage completion data. This is the **primary signal** for routing decisions. Artifact inference (steps 2a-2e) is the **fallback** when stage_states is unavailable.
+Query the PM session's `stage_states` for authoritative stage completion data. This is the **exclusive signal** for routing decisions. Stage completion is determined ONLY by stored state — never by artifact inference.
 
 ```bash
 # Query stage_states from the PM session via CLI tool
@@ -60,12 +60,16 @@ fi
 ```
 
 **Decision logic:**
-- If `STAGE_STATES` is non-empty JSON with stage data: use it as the **primary signal** for the dispatch table. A stage is considered complete ONLY if its value is `"completed"` in stage_states. Skip steps 2a-2e.
-- If `STAGE_STATES` is empty `{}` or unavailable (no PM session, local Claude Code): fall through to artifact inference (steps 2a-2e below) as fallback. Log a warning: "stage_states unavailable — falling back to artifact inference."
+- If `STAGE_STATES` is non-empty JSON with stage data: use it as the **exclusive signal** for the dispatch table. A stage is considered complete ONLY if its value is `"completed"` in stage_states. Skip steps 2a-2e.
+- If `STAGE_STATES` is empty `{}` or unavailable (no PM session, local Claude Code): use conversation dispatch history to determine what was already dispatched in this session. Do NOT infer from artifacts. If nothing has been dispatched, start from the beginning of the pipeline.
 
-### Steps 2a-2e: Artifact Inference (fallback)
+### Steps 2a-2e: Dispatch History Fallback
 
 These checks run ONLY when stage_states is unavailable (empty JSON from step 2.0). When stage_states IS available, skip directly to the dispatch table using stage_states as the source of truth.
+
+**IMPORTANT: Never infer stage completion from artifacts (plan files, PR existence, docs/ files, etc.). Stage completion is exclusively determined by stored state.**
+
+When stage_states is unavailable, use conversation context to identify which skills were already dispatched in this session. Artifacts are used only to check preconditions (e.g., "does a PR exist?") — not to declare stages complete.
 
 ```bash
 REPO="${SDLC_TARGET_REPO:-.}"
@@ -135,7 +139,7 @@ Based on the assessment, invoke exactly ONE sub-skill and return.
 | 9 | Review APPROVED with zero findings, docs NOT done (see Step 3) | `/do-docs` | Docs are required before merge |
 | 10 | Review APPROVED with zero findings, docs done, AND all display stages show `completed` in stage_states (or stage_states unavailable), ready to merge | Report done | PM delivers to human |
 
-**Row 10 merge gate**: When stage_states is available, ALL display stages (ISSUE, PLAN, CRITIQUE, BUILD, TEST, REVIEW, DOCS) must show `completed` in stage_states before dispatching Row 10. This prevents stages from being silently skipped when artifacts happen to exist from a different stage's work (e.g., build creating docs does not satisfy the DOCS stage). When stage_states is unavailable (local invocations), fall back to artifact inference as before.
+**Row 10 merge gate**: ALL display stages (ISSUE, PLAN, CRITIQUE, BUILD, TEST, REVIEW, DOCS) must show `completed` in stage_states before dispatching Row 10. This prevents stages from being silently skipped when artifacts happen to exist from a different stage's work (e.g., build creating docs does not satisfy the DOCS stage). If stage_states is unavailable, use conversation dispatch history — if DOCS was never dispatched in this session, dispatch it.
 
 **Row 8/8b is the patch-review cycle**: A "minimum approve" with unresolved nits or tech debt is NOT sufficient. Every finding from the review — blockers, nits, suggestions, and tech debt — must be patched or explicitly annotated with inline comments explaining why the finding was left in place. After patching, a fresh `/do-pr-review` is mandatory to verify all findings were addressed. This cycle repeats until the review returns zero unresolved findings.
 

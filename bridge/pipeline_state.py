@@ -28,8 +28,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-import subprocess
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, field_validator
@@ -399,127 +397,17 @@ class PipelineStateMachine:
             f"Stage {stage} failed. Next: {next_info[0] if next_info else 'terminal (escalate)'}"
         )
 
-    def get_display_progress(self, slug: str | None = None) -> dict[str, str]:
+    def get_display_progress(self) -> dict[str, str]:
         """Return stage statuses for display (excludes PATCH).
 
-        When slug is provided, fills in "pending"/"ready" gaps by checking
-        observable artifacts (plan file, PR existence, review status, etc.).
-        Stored state that is not "pending"/"ready" always takes precedence
-        over inferred state.
-
-        Args:
-            slug: Optional work item slug for artifact-based inference.
-                  When None, returns stored state only (backward compatible).
+        Returns stored state only. Stage completion is exclusively determined
+        by PipelineStateMachine stored state — no artifact inference.
 
         Returns:
             Dict mapping display stage names to their status strings.
             Only includes DISPLAY_STAGES (not PATCH).
         """
-        stored = {stage: self.states.get(stage, "pending") for stage in DISPLAY_STAGES}
-
-        if not slug:
-            return stored
-
-        # Merge inferred state into gaps
-        inferred = self._infer_stage_from_artifacts(slug)
-        for stage in DISPLAY_STAGES:
-            if stored[stage] in ("pending", "ready") and stage in inferred:
-                stored[stage] = inferred[stage]
-
-        return stored
-
-    def _infer_stage_from_artifacts(self, slug: str) -> dict[str, str]:
-        """Infer stage statuses from observable artifacts.
-
-        Checks filesystem and GitHub for evidence that stages completed:
-        - ISSUE/PLAN: plan file exists at docs/plans/{slug}.md
-        - CRITIQUE: plan frontmatter has status: Ready
-        - BUILD/TEST/REVIEW/DOCS: single gh pr view call
-
-        All checks are wrapped in try/except -- failures return an empty
-        dict rather than crashing.
-
-        Args:
-            slug: Work item slug (e.g., "implicit-pipeline-tracking").
-
-        Returns:
-            Dict mapping stage names to inferred status strings.
-            Only contains stages where inference found evidence.
-        """
-        inferred: dict[str, str] = {}
-
-        # --- Filesystem checks (ISSUE, PLAN, CRITIQUE) ---
-        try:
-            plan_path = Path(f"docs/plans/{slug}.md")
-            if plan_path.exists():
-                inferred["PLAN"] = "completed"
-                # If a plan exists, ISSUE is implicitly done
-                inferred["ISSUE"] = "completed"
-
-                # Check for critique completion via frontmatter
-                try:
-                    plan_text = plan_path.read_text()
-                    # Check frontmatter status: Ready
-                    if "status: Ready" in plan_text or "status: ready" in plan_text:
-                        inferred["CRITIQUE"] = "completed"
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-        # --- GitHub checks (BUILD, TEST, REVIEW, DOCS) via single gh call ---
-        try:
-            result = subprocess.run(
-                [
-                    "gh",
-                    "pr",
-                    "view",
-                    f"session/{slug}",
-                    "--json",
-                    "number,reviewDecision,state,statusCheckRollup,files",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                pr_data = json.loads(result.stdout)
-
-                # BUILD: PR exists
-                if pr_data.get("number"):
-                    inferred["BUILD"] = "completed"
-
-                # TEST: check statusCheckRollup for passing checks
-                checks = pr_data.get("statusCheckRollup") or []
-                for check in checks:
-                    context = (check.get("context") or check.get("name") or "").lower()
-                    conclusion = (check.get("conclusion") or check.get("status") or "").upper()
-                    if ("test" in context or "ci" in context) and conclusion == "SUCCESS":
-                        inferred["TEST"] = "completed"
-                        break
-
-                # REVIEW: reviewDecision indicates review happened
-                review_decision = (pr_data.get("reviewDecision") or "").upper()
-                if review_decision in ("APPROVED", "CHANGES_REQUESTED"):
-                    inferred["REVIEW"] = "completed"
-
-                # DOCS: files array contains docs/ paths (excluding docs/plans/)
-                files = pr_data.get("files") or []
-                for f in files:
-                    file_path = f.get("path") or ""
-                    if file_path.startswith("docs/") and not file_path.startswith("docs/plans/"):
-                        inferred["DOCS"] = "completed"
-                        break
-
-                # MERGE: PR state is MERGED
-                if (pr_data.get("state") or "").upper() == "MERGED":
-                    inferred["MERGE"] = "completed"
-        except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
-            pass
-        except Exception:
-            pass
-
-        return inferred
+        return {stage: self.states.get(stage, "pending") for stage in DISPLAY_STAGES}
 
     def current_stage(self) -> str | None:
         """Return the stage currently in_progress, or None.

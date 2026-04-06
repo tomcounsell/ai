@@ -7,6 +7,22 @@ context: fork
 
 # Plan Critique (War Room)
 
+## Stage Marker
+
+At the very start of this skill, write an in_progress marker:
+
+```bash
+python -m tools.sdlc_stage_marker --stage CRITIQUE --status in_progress 2>/dev/null || true
+```
+
+After posting the verdict (Step 5), write the completion marker if READY TO BUILD, leave in_progress otherwise:
+
+```bash
+# On READY TO BUILD verdict:
+python -m tools.sdlc_stage_marker --stage CRITIQUE --status completed 2>/dev/null || true
+```
+
+
 ## What this skill does
 
 Critiques a plan document from six expert perspectives plus automated structural validation. Each critic has a defined lens and returns severity-rated findings. The skill aggregates, deduplicates, and produces a verdict: READY TO BUILD, NEEDS REVISION, or MAJOR REWORK.
