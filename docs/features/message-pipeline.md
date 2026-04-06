@@ -27,7 +27,7 @@ A background worker picks up enqueued messages and runs four independent enrichm
 | Operation | Description | Failure Mode |
 |-----------|-------------|--------------|
 | **Media processing** | Download and describe images/documents via Ollama | Skip on timeout; message delivered without media context |
-| **YouTube transcription** | Fetch transcript for YouTube URLs | Skip on failure; URL included without transcript |
+| **YouTube transcription** | Fetch transcript for YouTube URLs (caption-first, Whisper fallback) | Failure context always delivered to agent — never silently dropped |
 | **Link summarization** | Fetch and summarize non-YouTube URLs via Perplexity | Skip on failure; raw URL preserved |
 | **Reply chain fetch** | Retrieve parent messages for threading context | Skip on failure; reply delivered without parent context |
 
