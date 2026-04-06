@@ -893,11 +893,48 @@ async def _complete_agent_session(session: AgentSession, *, failed: bool = False
     Delegates all completion side effects (lifecycle log, auto-tag, branch checkpoint,
     parent finalization, status save) to finalize_session() from the lifecycle module.
 
+    Re-reads the session from Redis before finalizing to capture any stage events
+    written during execution (e.g., SDLC pipeline transitions). This prevents the
+    stale in-memory snapshot from overwriting accumulated stage_states when
+    _cleanup_stale_sessions ran and created a new Redis record mid-execution.
+
     Args:
         session: The AgentSession to complete.
         failed: If True, this session failed (used for parent finalization).
     """
     from models.session_lifecycle import finalize_session
+
+    # Re-read from Redis to capture stage events accumulated during execution.
+    # The in-memory object may hold a stale snapshot if _cleanup_stale_sessions
+    # ran during the session's lifetime (it does finalize and re-create the record).
+    # Querying by session_id (not id) finds the current record regardless of id changes.
+    session_id = getattr(session, "session_id", None)
+    if session_id:
+        try:
+            running_records = list(
+                AgentSession.query.filter(session_id=session_id, status="running")
+            )
+            if running_records:
+                if len(running_records) > 1:
+                    # Multiple running records — take most recent by created_at
+                    running_records.sort(
+                        key=lambda r: r.created_at or 0,
+                        reverse=True,
+                    )
+                    logger.warning(
+                        "[lifecycle] Multiple running records for session_id=%s — "
+                        "using most recent (id=%s)",
+                        session_id,
+                        getattr(running_records[0], "id", "?"),
+                    )
+                session = running_records[0]
+        except Exception as exc:
+            logger.warning(
+                "[lifecycle] Redis re-read failed for session_id=%s, falling back to "
+                "in-memory object: %s",
+                session_id,
+                exc,
+            )
 
     status = "failed" if failed else "completed"
     finalize_session(session, status, reason="agent session completed")
