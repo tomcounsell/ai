@@ -294,27 +294,41 @@ def create_app() -> FastAPI:
             }
         )
 
+    def _format_uptime(age_s: int | None) -> str:
+        """Format heartbeat age as uptime string (e.g. '12m', '3h')."""
+        if age_s is None:
+            return ""
+        if age_s < 60:
+            return f" {age_s}s"
+        minutes = age_s // 60
+        if minutes < 60:
+            return f" {minutes}m"
+        hours = minutes // 60
+        return f" {hours}h"
+
     @app.get("/_partials/health/", response_class=HTMLResponse)
     def partial_health(request: Request):
         """HTMX partial: health indicator badges."""
         bridge = _get_bridge_health()
-        bridge_label = "bridge: ok"
-        if bridge["status"] == "running":
-            bridge_label = f"bridge: slow ({bridge['age_s']}s)"
-        elif bridge["status"] == "error":
-            bridge_label = "bridge: down"
+        if bridge["status"] == "ok":
+            bridge_label = f"bridge{_format_uptime(bridge['age_s'])}"
+        elif bridge["status"] == "running":
+            bridge_label = f"bridge {bridge['age_s']}s"
+        else:
+            bridge_label = "bridge"
 
         worker = _get_worker_health()
-        worker_label = "worker: ok"
-        if worker["status"] == "running":
-            worker_label = f"worker: slow ({worker['age_s']}s)"
-        elif worker["status"] == "error":
-            worker_label = "worker: down"
+        if worker["status"] == "ok":
+            worker_label = f"worker{_format_uptime(worker['age_s'])}"
+        elif worker["status"] == "running":
+            worker_label = f"worker {worker['age_s']}s"
+        else:
+            worker_label = "worker"
 
         return HTMLResponse(
             f'<span class="badge badge-{bridge["status"]}">{bridge_label}</span>'
             f'<span class="badge badge-{worker["status"]}">{worker_label}</span>'
-            f'<span class="badge badge-ok">web: ok</span>'
+            f'<span class="badge badge-ok">web</span>'
         )
 
     # Exception handler for Redis connection failures
