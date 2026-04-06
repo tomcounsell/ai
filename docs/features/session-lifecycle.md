@@ -43,16 +43,21 @@ For terminal transitions. Executes all completion side effects in order:
 
 **Skip flags**: The hooks subprocess paths (`stop.py`, `subagent_stop.py`) use `skip_auto_tag=True, skip_checkpoint=True` to avoid importing heavy dependencies that may not be available in the subprocess context.
 
-### `transition_status(session, new_status, reason)`
+### `transition_status(session, new_status, reason, *, reject_from_terminal=True)`
 
 For non-terminal transitions. Logs the lifecycle transition and updates the status.
 
-1. **Lifecycle log** -- `session.log_lifecycle_transition(new_status, reason)` (always)
-2. **Status + save** -- sets `session.status`, calls `session.save()`
+1. **Terminal guard** -- if `reject_from_terminal=True` (default) and current status is terminal, raises `ValueError`
+2. **Lifecycle log** -- `session.log_lifecycle_transition(new_status, reason)` (always)
+3. **Status + save** -- sets `session.status`, calls `session.save()`
 
 **Idempotent**: if the session is already in the target state, logs and returns.
 
-**Revival**: `completed->pending` is explicitly allowed for session revival/auto-continue. This is the only terminal-to-non-terminal transition permitted.
+**Terminal respawn protection**: By default, `transition_status()` rejects transitions from terminal statuses (`completed`, `failed`, `killed`, `abandoned`, `cancelled`). This prevents accidental respawning of finished sessions. Callers that legitimately need terminal-to-non-terminal transitions must pass `reject_from_terminal=False` explicitly. Currently two callers use this opt-out:
+- `_mark_superseded()`: `completed->superseded` (intentional bookkeeping)
+- `user_prompt_submit.py` hook: `completed->running` (user reactivates local session)
+
+See [Session Recovery Mechanisms](session-recovery-mechanisms.md) for the full audit of all recovery paths.
 
 ## Completion Flow
 
