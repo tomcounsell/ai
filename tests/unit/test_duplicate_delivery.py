@@ -147,14 +147,15 @@ class TestCompletedSessionGuard:
     """Fix 3: Auto-continue skips when session is already completed."""
 
     def test_completed_session_skips_auto_continue(self):
-        """When agent_session.status == 'completed', output is delivered without nudge."""
+        """When session_status is terminal, output is delivered without nudge."""
         # Verify the guard exists in the code
         from pathlib import Path
 
         queue_code = Path("agent/agent_session_queue.py").read_text()
 
-        # The guard should check session_status == "completed" (in determine_delivery_action)
-        assert 'session_status == "completed"' in queue_code
+        # The guard should check session_status against all TERMINAL_STATUSES
+        # (was previously just == "completed", now checks all terminal statuses)
+        assert "session_status in _TERMINAL_STATUSES" in queue_code
         # It should deliver to chat without nudge
         assert "delivering without nudge" in queue_code
 

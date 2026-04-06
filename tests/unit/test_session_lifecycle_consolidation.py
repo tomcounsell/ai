@@ -88,9 +88,7 @@ class TestFinalizeSessionLifecycleLog:
         with patch("agent.agent_session_queue.checkpoint_branch_state"):
             finalize_session(mock_session, "completed", "test reason")
 
-        mock_session.log_lifecycle_transition.assert_called_once_with(
-            "completed", "test reason"
-        )
+        mock_session.log_lifecycle_transition.assert_called_once_with("completed", "test reason")
 
     def test_lifecycle_log_failure_nonfatal(self, mock_session):
         """Lifecycle log failure doesn't block status save."""
@@ -158,9 +156,7 @@ class TestFinalizeSessionSkipFlags:
 
     def test_skip_checkpoint(self, mock_session):
         """skip_checkpoint prevents checkpoint_branch_state from running."""
-        with patch(
-            "agent.agent_session_queue.checkpoint_branch_state"
-        ) as mock_checkpoint:
+        with patch("agent.agent_session_queue.checkpoint_branch_state") as mock_checkpoint:
             finalize_session(mock_session, "completed", "test", skip_checkpoint=True)
 
         mock_checkpoint.assert_not_called()
@@ -271,9 +267,14 @@ class TestTransitionStatus:
         mock_session.save.assert_called_once()
 
     def test_superseded_transition(self, mock_session):
-        """Session transitions to superseded."""
+        """Session transitions to superseded (from terminal requires explicit opt-out)."""
         mock_session.status = "completed"
-        transition_status(mock_session, "superseded", "replaced by newer session")
+        transition_status(
+            mock_session,
+            "superseded",
+            "replaced by newer session",
+            reject_from_terminal=False,
+        )
 
         assert mock_session.status == "superseded"
         mock_session.save.assert_called_once()
@@ -282,9 +283,7 @@ class TestTransitionStatus:
         """log_lifecycle_transition is called."""
         transition_status(mock_session, "pending", "test reason")
 
-        mock_session.log_lifecycle_transition.assert_called_once_with(
-            "pending", "test reason"
-        )
+        mock_session.log_lifecycle_transition.assert_called_once_with("pending", "test reason")
 
 
 class TestTransitionStatusIdempotency:
@@ -321,10 +320,21 @@ class TestTransitionStatusInvalidInput:
 class TestTransitionStatusRevival:
     """completed->pending revival flow works through transition_status."""
 
-    def test_completed_to_pending(self, mock_session):
-        """completed->pending is the auto-continue/revival path."""
+    def test_completed_to_pending_blocked_by_default(self, mock_session):
+        """completed->pending is blocked by default reject_from_terminal=True."""
         mock_session.status = "completed"
-        transition_status(mock_session, "pending", "auto-continue re-enqueue")
+        with pytest.raises(ValueError, match="terminal status"):
+            transition_status(mock_session, "pending", "auto-continue re-enqueue")
+
+    def test_completed_to_pending_with_explicit_opt_out(self, mock_session):
+        """completed->pending is allowed with reject_from_terminal=False (revival path)."""
+        mock_session.status = "completed"
+        transition_status(
+            mock_session,
+            "pending",
+            "auto-continue re-enqueue",
+            reject_from_terminal=False,
+        )
 
         assert mock_session.status == "pending"
         mock_session.save.assert_called_once()

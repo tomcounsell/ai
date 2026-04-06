@@ -71,6 +71,7 @@ def main():
                             agent_session,
                             "running",
                             reason="subsequent prompt reactivated local session",
+                            reject_from_terminal=False,
                         )
                         # If transition was idempotent (already running), field
                         # changes above were not saved. Ensure they persist.

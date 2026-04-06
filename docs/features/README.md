@@ -98,6 +98,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Session Lifecycle](session-lifecycle.md) | Consolidated lifecycle module (`models/session_lifecycle.py`) with `finalize_session()` and `transition_status()` for all 11 session states, side effect consolidation, zombie loop prevention | Shipped |
 | [Session Lifecycle Diagnostics](session-lifecycle-diagnostics.md) | Structured LIFECYCLE logging at every state transition with stall detection and CLI status report | Shipped |
 | [Session Management](session-management.md) | Reply-chain root resolution ensuring all replies in a thread map to one canonical session_id | Shipped |
+| [Session Recovery Mechanisms](session-recovery-mechanisms.md) | Catalogue of all 7 recovery mechanisms with terminal status safety audit, guards, race condition analysis, and regression tests | Shipped |
 | [Session Tagging](session-tagging.md) | Auto-tagging and CRUD for session categorization based on activity, classification, and transcript patterns | Shipped |
 | [Session Transcripts](session-transcripts.md) | Append-only session transcript files with AgentSession Redis model for metadata | Shipped |
 | [Session Watchdog](session-watchdog.md) | Active session monitoring with proper cleanup and state management | Shipped |
