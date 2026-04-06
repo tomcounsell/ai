@@ -126,6 +126,9 @@ class PipelineProgress(BaseModel):
     current_stage: str | None = None
     events: list[PipelineEvent] = []
 
+    # Source context
+    working_dir: str | None = None
+
     # Links
     issue_url: str | None = None
     plan_url: str | None = None
@@ -150,11 +153,24 @@ class PipelineProgress(BaseModel):
 
     @property
     def display_name(self) -> str:
-        """Human-friendly name: context_summary, then slug, then truncated message."""
+        """Human-friendly name: context_summary > slug > local label > truncated message."""
         if self.context_summary:
             return self.context_summary
         if self.slug:
             return self.slug
+        # Local Claude Code sessions: show "Claude Code  <dir>  <branch>" instead of raw prompt
+        is_local = self.session_id and self.session_id.startswith("local-")
+        if is_local and self.message_text and not self.message_text.startswith("/"):
+            import os
+
+            dir_part = os.path.basename(self.working_dir.rstrip("/")) if self.working_dir else ""
+            branch_part = self.branch_name or ""
+            parts = ["Claude Code"]
+            if dir_part:
+                parts.append(dir_part)
+            if branch_part:
+                parts.append(branch_part)
+            return "  ".join(parts)
         if self.message_text:
             text = self.message_text[:60]
             if len(self.message_text) > 60:
@@ -436,6 +452,7 @@ def _session_to_pipeline(session) -> PipelineProgress:
         stages=stages,
         current_stage=current,
         events=events,
+        working_dir=_safe_str(getattr(session, "working_dir", None)),
         issue_url=_safe_str(session.issue_url),
         plan_url=_safe_str(session.plan_url),
         pr_url=_safe_str(session.pr_url),
