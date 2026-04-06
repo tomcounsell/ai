@@ -4,7 +4,7 @@ type: bug
 appetite: Small
 owner: Valor
 created: 2026-04-06
-tracking:
+tracking: https://github.com/tomcounsell/ai/issues/727
 last_comment_id:
 ---
 
