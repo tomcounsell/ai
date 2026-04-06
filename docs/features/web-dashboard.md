@@ -48,7 +48,7 @@ The `AgentSession.stage_states` field (populated by the PipelineStateMachine sin
 
 Internal metadata keys like `_patch_cycle_count` and `_critique_cycle_count` are safely ignored — `get_display_progress()` iterates over the canonical `DISPLAY_STAGES` list only.
 
-### Stored State Only
+### Routing Through PipelineStateMachine
 
 Artifact inference was removed in PR #733 (issue #729). All sessions use the stored state path: `PipelineStateMachine(session).get_display_progress()` for sessions with `stage_states`, empty list for sessions without. The dashboard no longer checks plan files on disk, PR existence, or GitHub review state. `stage_states` is the single source of truth.
 
