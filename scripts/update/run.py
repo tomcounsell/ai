@@ -592,6 +592,25 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         elif (project_dir / "com.valor.reflections.plist").exists():
             result.warnings.append("Reflections plist install failed")
 
+        # Install/reload standalone worker service
+        if (project_dir / "com.valor.worker.plist").exists():
+            if service.install_worker(project_dir):
+                log("Worker service installed", v)
+                # Verify worker starts
+                import time as _time
+
+                for _ in range(5):
+                    _time.sleep(2)
+                    if service.is_worker_running():
+                        worker_pid = service.get_worker_pid()
+                        log(f"Worker running (PID: {worker_pid})", v)
+                        break
+                else:
+                    log("WARN: Worker not running after install", v, always=True)
+                    result.warnings.append("Worker not running after install")
+            else:
+                result.warnings.append("Worker plist install failed")
+
     elif result.git_result and result.git_result.commit_count > 0:
         # Cron mode: set restart flag instead of restarting
         log("Setting restart flag for graceful restart...", v, always=True)
