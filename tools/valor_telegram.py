@@ -7,6 +7,7 @@ Usage:
     valor-telegram read --chat "Tom" --search "deployment"
     valor-telegram read --chat "Dev: Valor" --since "1 hour ago"
     valor-telegram send --chat "Dev: Valor" "Hello world"
+    valor-telegram send --chat "Forum Group" --reply-to 123 "Message to topic"
     valor-telegram send --chat "Tom" --file ./screenshot.png "Caption"
     valor-telegram chats
 """
@@ -17,10 +18,14 @@ import json
 import os
 import re
 import sys
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
 from bridge.utc import utc_now
+
+# Telegram message length limit (same constant as send_telegram.py)
+TELEGRAM_MAX_LENGTH = 4096
 
 
 def parse_since(text: str) -> datetime | None:
@@ -282,8 +287,43 @@ def cmd_read(args: argparse.Namespace) -> int:
     return 0
 
 
+def _linkify_text(text: str) -> str:
+    """Apply PR/Issue linkification to the message text.
+
+    Mirrors the same helper in send_telegram.py. Falls back to unmodified
+    text if the formatting module is unavailable.
+    """
+    try:
+        from bridge.formatting import linkify_references
+
+        project_key = os.environ.get("PROJECT_KEY", "ai")
+        return linkify_references(text, project_key)
+    except Exception:
+        return text
+
+
+def _get_redis_connection():
+    """Get a Redis connection using the project's standard pattern."""
+    import redis
+
+    redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+    return redis.Redis.from_url(redis_url, decode_responses=True)
+
+
 def cmd_send(args: argparse.Namespace) -> int:
-    """Send a message to a chat."""
+    """Send a message to a chat via the Redis relay.
+
+    Routes through the bridge relay (bridge/telegram_relay.py) rather than
+    creating a direct Telethon client. This avoids the SQLite session lock
+    conflict when the bridge is running, and gives us markdown formatting,
+    forum/reply_to support, and retry logic for free.
+
+    Queue contract (matches send_telegram.py and telegram_relay.py):
+        Key: telegram:outbox:{session_id}
+        Payload: {chat_id, reply_to, text, file_paths, session_id, timestamp}
+        TTL: 1 hour
+    """
+    # Resolve chat name to numeric ID
     chat_id = resolve_chat(args.chat)
     if not chat_id:
         if args.chat.lstrip("-").isdigit():
@@ -296,37 +336,66 @@ def cmd_send(args: argparse.Namespace) -> int:
     text = args.message or ""
     file_path = args.file or args.image or args.audio
 
+    # Validate: must have either text or a file
     if not text and not file_path:
         print("Error: Must provide a message or file to send.", file=sys.stderr)
         return 1
 
+    # Validate file exists before queueing
     if file_path and not Path(file_path).exists():
         print(f"Error: File not found: {file_path}", file=sys.stderr)
         return 1
 
-    async def _send():
-        try:
-            client = _telethon_client()
-        except RuntimeError as e:
-            print(f"Error: {e}", file=sys.stderr)
-            return 1
+    # Apply linkification and length truncation to text
+    if text:
+        text = _linkify_text(text)
+        if len(text) > TELEGRAM_MAX_LENGTH:
+            # Truncate at sentence boundary if possible
+            truncated = text[: TELEGRAM_MAX_LENGTH - 3]
+            last_period = truncated.rfind(". ")
+            if last_period > TELEGRAM_MAX_LENGTH // 2:
+                truncated = truncated[: last_period + 1]
+            text = truncated + "..."
 
-        await client.start()
-        try:
-            entity = await client.get_entity(int(chat_id))
-            if file_path:
-                await client.send_file(entity, file_path, caption=text)
-            else:
-                await client.send_message(entity, text)
-            print(f"Sent to {args.chat}")
-            return 0
-        except Exception as e:
-            print(f"Error sending: {e}", file=sys.stderr)
-            return 1
-        finally:
-            await client.disconnect()
+    # Build relay-compatible payload
+    # Use synthetic session_id with cli- prefix to avoid collision with bridge session IDs
+    session_id = f"cli-{int(time.time())}"
+    reply_to = getattr(args, "reply_to", None)
 
-    return asyncio.run(_send())
+    payload: dict = {
+        "chat_id": chat_id,
+        "reply_to": int(reply_to) if reply_to else None,
+        "text": text,
+        "session_id": session_id,
+        "timestamp": time.time(),
+    }
+    if file_path:
+        # Relay expects file_paths as a list of absolute paths
+        payload["file_paths"] = [str(Path(file_path).resolve())]
+
+    # Push to Redis outbox queue
+    queue_key = f"telegram:outbox:{session_id}"
+    try:
+        r = _get_redis_connection()
+        r.rpush(queue_key, json.dumps(payload))
+        r.expire(queue_key, 3600)
+    except Exception as e:
+        print(f"Error: Failed to queue message in Redis: {e}", file=sys.stderr)
+        print(
+            "Ensure Redis is running and REDIS_URL is configured (default: redis://localhost:6379/0).",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Confirmation
+    parts = []
+    if text:
+        parts.append(f"{len(text)} chars")
+    if file_path:
+        parts.append(f"file: {Path(file_path).name}")
+    print(f"Message queued ({', '.join(parts)})")
+    print("Note: delivery requires the bridge relay to be running (./scripts/valor-service.sh status).")
+    return 0
 
 
 def cmd_chats(args: argparse.Namespace) -> int:
@@ -390,6 +459,12 @@ def main() -> int:
     send_parser.add_argument("--file", "-f", help="File to attach")
     send_parser.add_argument("--image", "-i", help="Image to send")
     send_parser.add_argument("--audio", "-a", help="Audio file to send")
+    send_parser.add_argument(
+        "--reply-to",
+        type=int,
+        default=None,
+        help="Message ID to reply to (required for forum groups/topics)",
+    )
 
     # chats subcommand
     chats_parser = subparsers.add_parser("chats", help="List known chats")
