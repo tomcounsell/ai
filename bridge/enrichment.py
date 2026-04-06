@@ -109,18 +109,18 @@ async def enrich_message(
                 # so we pass the enriched_text which should contain the URLs.
                 yt_enriched, youtube_results = await process_youtube_urls_in_text(enriched_text)
                 successful = sum(1 for r in youtube_results if r.get("success"))
+                # Always apply enriched text — failure context strings must reach the agent too
+                enriched_text = yt_enriched
                 if successful > 0:
-                    enriched_text = yt_enriched
                     logger.info(
                         f"Enrichment: transcribed {successful}/{len(parsed_urls)} YouTube video(s)"
                     )
-                else:
-                    for r in youtube_results:
-                        if r.get("error"):
-                            logger.warning(
-                                f"Enrichment: YouTube processing failed for "
-                                f"{r.get('video_id')}: {r.get('error')}"
-                            )
+                for r in youtube_results:
+                    if r.get("error"):
+                        logger.warning(
+                            f"Enrichment: YouTube processing failed for "
+                            f"{r.get('video_id')}: {r.get('error')}"
+                        )
         except Exception as e:
             logger.warning(f"Enrichment: YouTube processing failed: {e}")
             failed_steps.append("youtube")
