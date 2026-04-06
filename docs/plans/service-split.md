@@ -371,19 +371,24 @@ No agent integration required -- this is an infrastructure change to the session
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room) on 2026-04-06. Verdict: NEEDS REVISION (1 blocker). -->
+<!-- Populated by /do-plan-critique (war room) on 2026-04-06. Re-critiqued 2026-04-06 with source verification. Verdict: READY TO BUILD (0 blockers). -->
 
 | Severity | Critic(s) | Finding | Suggestion |
 |----------|-----------|---------|------------|
-| BLOCKER | Skeptic, Archaeologist | Lazy import count is 7 not 6; `bridge.pipeline_state` (line 301) lacks ImportError guard and will crash SDLC enqueue on headless worker | Enumerate all 7 lazy imports explicitly in Phase 1; add try/except to line 301 |
-| CONCERN | Skeptic, Adversary | `send_to_chat` hard-returns on missing callback; plan is ambiguous on whether `FileOutputHandler` registers via `register_callbacks` or via a separate fallback path | Clarify in Task 2: register `FileOutputHandler` through `register_callbacks` so `send_cb` is never None |
-| CONCERN | Simplifier | Worker imports `bridge.routing.load_config()` -- still coupled to bridge | Resolve Open Question #2: move `load_config()` to `config/projects.py`, re-export from bridge |
-| CONCERN | Adversary, Operator | `bridge.pipeline_state.PipelineStateMachine` at line 301 has no ImportError guard; crashes headless SDLC sessions | Add to Phase 1 decoupling scope or guard with try/except ImportError |
-| CONCERN | Operator | No health monitoring for standalone worker; launchd KeepAlive only catches crashes, not hangs | Add worker watchdog or heartbeat file touch to Phase 4 |
-| CONCERN | Operator | Task 4 (build-service) has no automated validation -- only manual plist check | Add `plutil -lint com.valor.worker.plist` as validation command |
-| NIT | Operator | Verification table references `--dry-run` flag but Task 3 doesn't implement it | Add `--dry-run` to Task 3 scope |
-| NIT | Adversary | `_calendar_heartbeat` fires on every session; will produce warning logs on headless workers without Google Calendar | Document in worker-service.md as expected noise; no code change needed |
-| NIT | Archaeologist | #727 (startup recovery) is still OPEN; its resolution may affect worker recovery behavior | Note dependency; no structural change needed |
+| CONCERN | Skeptic | Plan says "6 lazy imports" but actual count is 7: `bridge.pipeline_state` (line 301), `bridge.telegram_relay` (2139), `bridge.enrichment` (2206), `bridge.routing` (2244, 2658), `bridge.session_transcript` (2303), `bridge.health` (2743). All 7 already have try/except guards. | Update plan text to say 7 lazy imports; enumerate all 7 explicitly in Phase 1 task description |
+| CONCERN | Skeptic, Adversary | `send_to_chat` hard-returns at line 2008 when `send_cb is None`; plan says `FileOutputHandler` replaces this but does not specify whether it registers via `register_callbacks()` (setting `send_cb`) or via a separate fallback path checked after the `if not send_cb` guard | Clarify in Task 2: `FileOutputHandler` should register through `register_callbacks()` so `send_cb` is never None when a worker is running |
+| CONCERN | Simplifier | Task 3 imports `bridge.routing.load_config()` for project config -- the worker still has a runtime dependency on `bridge/` | Resolve Open Question #2 before build: move `load_config()` to `config/projects.py` and re-export from `bridge.routing` for backward compat |
+| CONCERN | Operator | No health monitoring for standalone worker beyond launchd KeepAlive; hangs (stuck worker loop) would not be detected | Add a heartbeat file touch or watchdog to Phase 4, following the `bridge_watchdog.py` pattern |
+| CONCERN | Operator | Task 4 (build-service) has "manual verification" as its only validation; no automated check | Add `plutil -lint com.valor.worker.plist` and a startup smoke test as validation commands |
+| CONCERN | Adversary | `_active_workers` is process-local (line 1458); two processes (bridge + standalone worker) on the same machine can both call `_ensure_worker` for the same chat_id without coordination. Plan documents this as "don't do it" but provides no runtime guard. | Add a startup check or Redis advisory lock that warns/exits if another worker is already processing the same project |
+| NIT | Operator | Verification table references `--dry-run` flag (`timeout 5 python -m worker --dry-run`) but Task 3 does not mention implementing `--dry-run` | Add `--dry-run` to Task 3 scope (load config, verify Redis, exit without processing) |
+| NIT | Adversary | `_calendar_heartbeat` (line 1980) fires unconditionally on every session start; headless workers without `valor-calendar` will produce warning logs per session | Document in worker-service.md as expected noise; no code change needed |
+| NIT | Archaeologist | #727 (startup recovery) is still OPEN; `_recover_interrupted_agent_sessions_startup()` behavior may change if that issue lands first | Note dependency in plan; no structural change needed |
+| NIT | User | All 11 success criteria are technical (tests pass, imports clean, service runs); none validate that a human-pushed session actually produces readable output in `logs/worker/` | Add one user-facing acceptance criterion: "Session output in logs/worker/ is human-readable and includes timestamps" |
+
+### Previous BLOCKER Resolution
+
+The prior critique (2026-04-06 first pass) flagged `bridge.pipeline_state` at line 301 as a BLOCKER claiming it lacked an ImportError guard. **Source verification shows this is incorrect**: the import at line 301 is inside a `try:` block (line 298) with `except Exception` (line 311-312). The BLOCKER is dismissed. The remaining valid concern (lazy import count is 7 not 6) is retained as a CONCERN.
 
 ---
 
