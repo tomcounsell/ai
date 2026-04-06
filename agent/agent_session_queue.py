@@ -5,10 +5,11 @@ Serializes agent work per project working directory so git operations
 never conflict. Agent runs directly in the project's working directory.
 
 This module has no module-level bridge/ imports and can be used by both
-the Telegram bridge (embedded worker) and the standalone worker
-(python -m worker). Output routing uses the OutputHandler protocol
-defined in agent/output_handler.py, with FileOutputHandler as fallback
-when no bridge callbacks are registered.
+the Telegram bridge (I/O only) and the standalone worker (python -m worker).
+The execution functions live here and are called by the standalone worker;
+the bridge handles Telegram I/O and registers output callbacks.
+Output routing uses the OutputHandler protocol defined in agent/output_handler.py,
+with FileOutputHandler as fallback when no bridge callbacks are registered.
 
 Architecture:
 - AgentSession: unified popoto Model persisted in Redis
