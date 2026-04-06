@@ -47,7 +47,7 @@ The six competing recovery mechanisms from the old system were replaced with one
 
 ### Startup Recovery
 
-`_recover_interrupted_sessions_startup()` runs once synchronously at bridge startup before the event loop. It resets ALL running sessions to pending unconditionally (at startup, all running sessions are orphaned from the previous process).
+`_recover_interrupted_agent_sessions_startup()` runs once synchronously at bridge startup before the event loop. It resets stale running sessions to pending. Sessions started within the last `AGENT_SESSION_HEALTH_MIN_RUNNING` seconds (300s) are skipped — they may belong to a worker that started in the current process before this function fired. Sessions with `started_at=None` are always recovered. This matches the same timing guard used by the periodic health check (issue #727).
 
 ### What Was Removed
 
