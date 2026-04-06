@@ -310,18 +310,14 @@ def create_app() -> FastAPI:
     def partial_health(request: Request):
         """HTMX partial: health indicator badges."""
         bridge = _get_bridge_health()
-        if bridge["status"] == "ok":
+        if bridge["status"] in ("ok", "running"):
             bridge_label = f"bridge{_format_uptime(bridge['age_s'])}"
-        elif bridge["status"] == "running":
-            bridge_label = f"bridge {bridge['age_s']}s"
         else:
             bridge_label = "bridge"
 
         worker = _get_worker_health()
-        if worker["status"] == "ok":
+        if worker["status"] in ("ok", "running"):
             worker_label = f"worker{_format_uptime(worker['age_s'])}"
-        elif worker["status"] == "running":
-            worker_label = f"worker {worker['age_s']}s"
         else:
             worker_label = "worker"
 
