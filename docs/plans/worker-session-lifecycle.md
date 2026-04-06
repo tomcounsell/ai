@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: docs_complete
 type: feature
 appetite: Medium
 owner: Valor
@@ -166,19 +166,19 @@ No agent integration required — this is a worker-internal change. The agent se
 
 ## Documentation
 
-- [ ] Update `docs/features/worker-service.md` to document persistent mode behavior, graceful shutdown, and the `VALOR_WORKER_MODE` environment variable
-- [ ] Update `CLAUDE.md` worker-related entries if any operational commands change
+- [x] Update `docs/features/worker-service.md` to document persistent mode behavior, graceful shutdown, and the `VALOR_WORKER_MODE` environment variable
+- [x] Update `CLAUDE.md` worker-related entries if any operational commands change — no changes needed, existing commands unchanged
 
 ## Success Criteria
 
-- [ ] Worker process stays alive indefinitely (no exit on empty queue) when `VALOR_WORKER_MODE=standalone`
-- [ ] `_enqueue_nudge()` re-enqueue is processed within 2 seconds (no 10s launchd gap)
-- [ ] SIGTERM finishes current session before exit (no orphaned SDK subprocesses)
-- [ ] `auto_continue_count` increments correctly across nudge cycles in headless mode
-- [ ] Worker survives 10+ consecutive nudge cycles without exiting
-- [ ] Existing bridge behavior is unchanged (backward compatible) — drain-timeout-exit still works when `VALOR_WORKER_MODE` is not `standalone`
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] Worker process stays alive indefinitely (no exit on empty queue) when `VALOR_WORKER_MODE=standalone`
+- [x] `_enqueue_nudge()` re-enqueue is processed within 2 seconds (no 10s launchd gap)
+- [x] SIGTERM finishes current session before exit (no orphaned SDK subprocesses)
+- [x] `auto_continue_count` increments correctly across nudge cycles in headless mode
+- [x] Worker survives 10+ consecutive nudge cycles without exiting
+- [x] Existing bridge behavior is unchanged (backward compatible) — drain-timeout-exit still works when `VALOR_WORKER_MODE` is not `standalone`
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 

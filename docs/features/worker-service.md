@@ -59,6 +59,27 @@ register_callbacks("my-project", handler=FileOutputHandler())
 register_callbacks("my-project", send_callback=my_send, reaction_callback=my_react)
 ```
 
+## Worker Modes
+
+The worker supports two modes controlled by the `VALOR_WORKER_MODE` environment variable:
+
+| Mode | Env Var | Behavior | Use Case |
+|------|---------|----------|----------|
+| **Standalone** | `VALOR_WORKER_MODE=standalone` | Waits indefinitely for new work; never exits on empty queue | launchd service, persistent daemon |
+| **Bridge** | Not set (default) | Exits after drain timeout (1.5s) when queue is empty | Bridge's embedded worker |
+
+Standalone mode is set automatically by `python -m worker`. In this mode, nudge re-enqueues are processed within milliseconds (no 10s launchd restart gap), enabling full SDLC pipeline execution end-to-end.
+
+### Graceful Shutdown
+
+On SIGTERM (e.g., `launchctl kickstart -k` or `/update` restart):
+
+1. `request_shutdown()` sets a flag and wakes all waiting workers
+2. Workers finish their current session (no mid-session kills)
+3. `_run_worker()` awaits all active worker loops with a 60s timeout
+4. If timeout expires, remaining tasks are cancelled (triggers cleanup)
+5. Sessions that were pending but not started remain as "pending" in Redis for next startup
+
 ## CLI Usage
 
 ```bash
