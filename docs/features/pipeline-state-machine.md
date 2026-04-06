@@ -69,8 +69,7 @@ sm.current_stage()            # "BUILD" or None
 sm.next_stage("success")      # ("TEST", "/do-test")
 sm.has_remaining_stages()     # True if pipeline not complete
 sm.has_failed_stage()         # True if any stage failed
-sm.get_display_progress()     # {stage: status} for DISPLAY_STAGES
-sm.get_display_progress(slug="my-feature")  # fills pending gaps from artifacts
+sm.get_display_progress()     # {stage: status} for DISPLAY_STAGES — stored state only
 sm.classify_outcome(stage, stop_reason, output_tail)  # "success"/"fail"/"partial"/"ambiguous"
 ```
 
@@ -95,17 +94,9 @@ The state machine validates transitions using `PIPELINE_EDGES` from `bridge/pipe
 
 ## Artifact-Based Inference
 
-When `get_display_progress(slug=...)` is called with a slug, the state machine supplements stored state with observable artifact checks. This fills in "pending"/"ready" gaps when hook-based tracking failed silently.
+Artifact inference was **deleted in PR #733** (issue #729). `get_display_progress()` no longer accepts a `slug=` parameter and does not check plan files, PRs, or GitHub review state. Stored `stage_states` is the single source of truth.
 
-**Inference sources:**
-- **ISSUE/PLAN**: `docs/plans/{slug}.md` file exists on disk
-- **CRITIQUE**: Plan frontmatter contains `status: Ready`
-- **BUILD**: PR exists for branch `session/{slug}` (from `gh pr view`)
-- **TEST**: `statusCheckRollup` contains a passing check with "test" or "ci" in the name
-- **REVIEW**: `reviewDecision` is APPROVED or CHANGES_REQUESTED
-- **DOCS**: PR files array contains entries under `docs/`
-
-All GitHub checks use a single `gh pr view` call with `timeout=5`. Stored state always takes precedence -- artifact inference only fills in gaps where stored status is "pending" or "ready".
+See `docs/features/sdlc-stage-tracking.md` for why inference was removed and how the belt-and-suspenders skill marker system replaces it.
 
 ## Outcome Classification
 
@@ -147,7 +138,7 @@ The SDLC router skill (`.claude/skills/sdlc/SKILL.md`) reads `stage_states` as t
 
 ### How the Router Reads stage_states
 
-The router invokes `tools/sdlc_stage_query.py` via bash before artifact checks:
+The router invokes `tools/sdlc_stage_query.py` via bash to read stored stage state:
 
 ```bash
 STAGE_STATES=$(python -m tools.sdlc_stage_query --session-id "$VALOR_SESSION_ID" 2>/dev/null)
@@ -157,14 +148,14 @@ The CLI tool loads the PM session from Redis, reads `stage_states`, and returns 
 
 ### Routing Logic
 
-- **stage_states available**: Used as the primary signal. A stage is considered complete only if it shows `"completed"` in stage_states. Artifact inference (plan files, PR existence, review status) is skipped entirely.
-- **stage_states unavailable** (empty JSON `{}`): Falls back to artifact inference -- the same behavior as before this integration. This happens for local Claude Code invocations without a PM session.
+- **stage_states available**: Used as the primary signal. A stage is considered complete only if it shows `"completed"` in stage_states.
+- **stage_states unavailable** (empty JSON `{}`): Falls back to conversation dispatch history to determine what has already run. Artifact inference is not used. This happens for local Claude Code invocations without a PM session.
 
 ### Merge Gate
 
 Row 10 in the dispatch table (merge-ready) requires ALL display stages (ISSUE, PLAN, CRITIQUE, BUILD, TEST, REVIEW, DOCS) to show `"completed"` in stage_states. This prevents stages from being silently skipped when a prior stage's work happens to produce artifacts that satisfy a later stage's check (e.g., `/do-build` creating docs does not satisfy the DOCS stage).
 
-When stage_states is unavailable, the merge gate falls back to artifact inference.
+When stage_states is unavailable (cold start), the merge gate emits an explicit warning listing every unrecorded stage and requires acknowledgment before proceeding. Artifact inference is not used.
 
 ## Integration Points
 
@@ -187,7 +178,8 @@ When stage_states is unavailable, the merge gate falls back to artifact inferenc
 
 | File | Purpose |
 |------|---------|
-| `bridge/pipeline_state.py` | PipelineStateMachine class with artifact-based inference |
+| `bridge/pipeline_state.py` | PipelineStateMachine class — stored-state-only stage tracking |
+| `tools/sdlc_stage_marker.py` | CLI tool for skills to write in_progress/completed markers |
 | `bridge/pipeline_graph.py` | Transition table (PIPELINE_EDGES, DISPLAY_STAGES) |
 | `models/agent_session.py` | `stage_states` field on AgentSession |
 | `tools/sdlc_stage_query.py` | CLI tool for reading stage_states (used by SDLC router) |

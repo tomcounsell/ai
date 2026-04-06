@@ -10,8 +10,7 @@ AgentSession (Popoto/Redis)
     v
 ui/data/sdlc.py
     _session_to_pipeline()         # converts AgentSession -> PipelineProgress
-        _get_artifact_enriched_stages()  # slug sessions: PipelineStateMachine + artifact inference
-        _parse_stage_states()      # no-slug sessions: parses stage_states JSON -> StageState list
+        _parse_stage_states()      # parses stage_states JSON -> StageState list (all sessions)
         _get_project_metadata()    # resolves project_key -> name + metadata
     |
     v
@@ -51,13 +50,9 @@ The `AgentSession.stage_states` field (populated by the PipelineStateMachine sin
 
 Internal metadata keys like `_patch_cycle_count` and `_critique_cycle_count` are ignored because the parser only iterates over the known `SDLC_STAGES` list.
 
-### Artifact Inference (Sessions with Slug)
+### Stored State Only
 
-When a session has a slug, `_session_to_pipeline()` delegates to `_get_artifact_enriched_stages()`, which instantiates `PipelineStateMachine(session)` and calls `get_display_progress(slug=slug)`. This enriches stored stage states with artifact-inferred completions -- for example, if a plan file exists on disk but the stored state shows PLAN as "pending", the dashboard will show PLAN as "completed". This ensures the dashboard shows the same pipeline state as the merge gate.
-
-Results are cached in a module-level dict with a 30-second TTL (keyed by `(slug, time_bucket)`) to avoid repeated `gh pr view` subprocess calls when rendering the list view. Stale cache entries (older than 60 seconds) are evicted on each access.
-
-If `PipelineStateMachine` raises an exception (e.g., `gh` CLI not available), the function falls back silently to `_parse_stage_states()` with stored state only -- the dashboard never crashes due to artifact inference failures.
+All sessions (with or without a slug) use `_parse_stage_states()` to read `AgentSession.stage_states` directly. Artifact inference was removed in PR #733 (issue #729) — the dashboard no longer checks plan files on disk, PR existence, or GitHub review state. `stage_states` is the single source of truth for the dashboard just as it is for the merge gate.
 
 ### CSS Rendering
 
