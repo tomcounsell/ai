@@ -72,7 +72,7 @@ The session system has 8 mechanisms that can revive, recover, or re-enqueue sess
 
 ## Confirmed Safe Mechanisms (2)
 
-### 6. Session Watchdog
+### 7. Session Watchdog
 
 | Property | Value |
 |----------|-------|
@@ -82,7 +82,7 @@ The session system has 8 mechanisms that can revive, recover, or re-enqueue sess
 | Terminal safety | **Safe by design** -- only sets flags on the running session, never mutates status. The flag feeds into `determine_delivery_action()` which routes to `deliver` instead of `nudge`. |
 | Guard | N/A (no status mutation) |
 
-### 7. Bridge Watchdog
+### 8. Bridge Watchdog
 
 | Property | Value |
 |----------|-------|
