@@ -13,6 +13,7 @@ dependencies = [
     "requests>=2.31.0", # Required for Google API requests transport
     "ollama>=0.3.0", # Local LLM fallback for summarization
     "yt-dlp>=2024.1.0", # YouTube audio download for transcription
+    "youtube-transcript-api>=0.6.0", # Caption-based YouTube transcription (no API key required)
     "popoto>=1.4.4", # Redis ORM — agent memory primitives (requires long filename fix)
     "google-auth-oauthlib>=1.2.0", # Google OAuth for Workspace APIs
     "google-auth-httplib2>=0.2.0", # Google Auth HTTP transport

@@ -429,18 +429,51 @@ async def process_youtube_url(url: str) -> dict:
             )
             return result
 
-    # Download audio
-    audio_path = await download_youtube_audio_async(video_id)
-    if not audio_path:
-        result["error"] = "Failed to download audio"
-        result["context"] = f"[YouTube video, could not download: {url}]"
-        return result
+    # --- Caption-first path (no API key required) ---
+    transcript = None
+    try:
+        from youtube_transcript_api import (
+            NoTranscriptFound,
+            TranscriptsDisabled,
+            VideoUnavailable,
+            YouTubeTranscriptApi,
+        )
 
-    # Transcribe audio
-    transcript = await transcribe_audio_file(audio_path)
+        def _fetch_captions(vid_id: str) -> str | None:
+            fetched = YouTubeTranscriptApi().fetch(vid_id)
+            text = " ".join(s.text for s in fetched).strip()
+            return text if text else None
+
+        loop = asyncio.get_event_loop()
+        transcript = await loop.run_in_executor(None, _fetch_captions, video_id)
+        if transcript:
+            logger.info(f"Caption transcript retrieved for {video_id} ({len(transcript)} chars)")
+    except ImportError:
+        logger.warning("youtube-transcript-api not installed; falling through to Whisper path")
+    except (TranscriptsDisabled, NoTranscriptFound, VideoUnavailable) as e:
+        logger.info(f"Captions unavailable for {video_id}: {e}; falling through to Whisper path")
+    except Exception as e:
+        logger.warning(f"Caption fetch failed for {video_id}: {e}; falling through to Whisper path")
+
+    # --- Whisper fallback (requires OPENAI_API_KEY) ---
     if not transcript:
-        result["error"] = "Failed to transcribe audio"
-        result["context"] = f"[YouTube video, transcription failed: {url}]"
+        audio_path = await download_youtube_audio_async(video_id)
+        if audio_path:
+            transcript = await transcribe_audio_file(audio_path)
+            if transcript:
+                logger.info(
+                    f"Whisper transcript retrieved for {video_id} ({len(transcript)} chars)"
+                )
+
+    # --- All paths failed ---
+    if not transcript:
+        title_part = f'"{result["title"]}" — ' if result["title"] else ""
+        result["error"] = "Transcription failed: captions unavailable and Whisper not configured"
+        result["context"] = (
+            f"[YouTube video: {title_part}transcript unavailable "
+            f"(captions not found; Whisper API not configured). "
+            f"To discuss this video, paste the transcript or a summary directly into the chat.]"
+        )
         return result
 
     result["transcript"] = transcript
