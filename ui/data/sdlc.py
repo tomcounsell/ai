@@ -15,12 +15,10 @@ import time
 
 from pydantic import BaseModel
 
+from bridge.pipeline_graph import DISPLAY_STAGES
 from config.enums import PersonaType
 
 logger = logging.getLogger(__name__)
-
-# SDLC stages in pipeline order (matches models/agent_session.py)
-SDLC_STAGES = ["ISSUE", "PLAN", "CRITIQUE", "BUILD", "TEST", "REVIEW", "DOCS", "MERGE"]
 
 # Configurable retention for inactive sessions (default 48h)
 DASHBOARD_RETENTION_HOURS = int(os.environ.get("DASHBOARD_RETENTION_HOURS", "48"))
@@ -266,7 +264,7 @@ def _parse_stage_states(raw: str | dict | None) -> list[StageState]:
         return []
 
     stages = []
-    for name in SDLC_STAGES:
+    for name in DISPLAY_STAGES:
         status = raw.get(name, "pending")
         if isinstance(status, dict):
             # Handle nested status dict (e.g., {"status": "completed", ...})
@@ -372,12 +370,24 @@ def _safe_float(val) -> float | None:
 def _session_to_pipeline(session) -> PipelineProgress:
     """Convert an AgentSession instance to a PipelineProgress model.
 
-    Uses stored stage_states as the authoritative source for all sessions.
-    Artifact inference was removed in PR #733 (issue #729).
+    Routes stage reads through PipelineStateMachine.get_display_progress()
+    for sessions with stage_states data (canonical stored-state path).
+    Falls back to _parse_stage_states() if PipelineStateMachine raises.
     """
     slug = _safe_str(session.slug) or ""
 
-    stages = _parse_stage_states(session.stage_states)
+    if session.stage_states:
+        try:
+            from bridge.pipeline_state import PipelineStateMachine
+
+            sm = PipelineStateMachine(session)
+            progress = sm.get_display_progress()
+            stages = [StageState(name=name, status=status) for name, status in progress.items()]
+        except Exception:
+            # Fallback to direct parse if state machine fails
+            stages = _parse_stage_states(session.stage_states)
+    else:
+        stages = []
 
     history_list = session.history if isinstance(session.history, list) else None
     events = _parse_history(history_list)
