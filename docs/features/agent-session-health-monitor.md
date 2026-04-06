@@ -88,5 +88,6 @@ Constants in `agent/agent_session_queue.py`:
 - [session-watchdog.md](session-watchdog.md) -- Session-level health monitoring (complementary layer)
 - [bridge-self-healing.md](bridge-self-healing.md) -- Bridge process-level health monitoring
 - [agent-session-model.md](agent-session-model.md) -- AgentSession model fields and lifecycle
+- [session-recovery-mechanisms.md](session-recovery-mechanisms.md) -- All 7 recovery paths and terminal guards
 - `agent/agent_session_queue.py` -- Implementation source
 - Issue #127 -- Original tracking issue

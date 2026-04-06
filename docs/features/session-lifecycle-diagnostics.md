@@ -19,7 +19,7 @@ The `AgentSession.log_lifecycle_transition()` method is called at every status c
 | `models/session_lifecycle.finalize_session()` | →completed/failed/killed/abandoned/cancelled | All terminal transitions |
 | `models/session_lifecycle.transition_status()` | →pending/running/active/dormant/waiting_for_children/superseded | All non-terminal transitions |
 
-All lifecycle logging is now centralized in `models/session_lifecycle.py`. The `finalize_session()` and `transition_status()` functions call `session.log_lifecycle_transition()` internally, so callers no longer need to call it directly. See [Session Lifecycle](session-lifecycle.md) for the full module documentation.
+All lifecycle logging is now centralized in `models/session_lifecycle.py`. The `finalize_session()` and `transition_status()` functions call `session.log_lifecycle_transition()` internally, so callers no longer need to call it directly. `transition_status()` accepts a `reject_from_terminal` parameter (default `True`) that blocks transitions out of terminal states; callers like `_mark_superseded()` pass `reject_from_terminal=False` when they legitimately need to transition terminal sessions. See [Session Lifecycle](session-lifecycle.md) for the full module documentation.
 
 Each call:
 1. Emits a structured INFO log: `LIFECYCLE session=X transition=old→new session_id=Y project=Z duration_in_prev_state=Ns context="..."`
@@ -180,5 +180,6 @@ Before #626, if a session crashed after `_complete_agent_session()` ran but befo
 - [AgentSession Model](agent-session-model.md) — Unified session lifecycle model
 - [Agent Session Queue Reliability](agent-session-queue.md) — Queue-level reliability fixes
 - [Session Lifecycle](session-lifecycle.md) — Session state machine, zombie loop prevention
+- [Session Recovery Mechanisms](session-recovery-mechanisms.md) — All 7 recovery paths and terminal guards
 - Issue #216 — Original tracking issue
 - Issue #626 — Silent session death fixes

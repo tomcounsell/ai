@@ -72,6 +72,8 @@ for status in ("pending", "running"):
             branches.append(branch)
 ```
 
+After collecting candidate branches, a **terminal-session filter** removes any branch that has a sibling session in a terminal status (`completed`, `failed`, `killed`, `abandoned`, `cancelled`). This prevents revival from respawning work that has already finished. See [Session Recovery Mechanisms](session-recovery-mechanisms.md) for the full terminal guard design.
+
 Branch existence is then verified individually in git (`git branch --list <specific-branch>`), rather than enumerating all branches. Redis is the sole source of truth for session state.
 
 ### Behavioral Change
@@ -81,6 +83,7 @@ Branch existence is then verified individually in git (`git branch --list <speci
 | All `session/*` branches visible to any chat | Only branches belonging to the calling `chat_id` |
 | Revival could notify wrong chat | Revival only notifies the chat that owns the session |
 | File-based state checked as fallback | Redis is the sole source of truth |
+| Completed/failed branches could trigger revival | Terminal sessions are filtered out before revival |
 
 ## Deferred Execution (`scheduled_at`)
 
@@ -137,4 +140,5 @@ See [Agent Session Scheduling](agent-session-scheduling.md) for usage details an
 - `docs/features/agent-session-scheduling.md` -- Agent-initiated scheduling tool
 - `docs/features/agent-session-model.md` -- AgentSession model fields and lifecycle
 - `docs/features/session-lifecycle.md` -- Session state machine, zombie loop prevention
+- `docs/features/session-recovery-mechanisms.md` -- All 7 recovery paths and their terminal guards
 - `agent/agent_session_queue.py` -- Implementation
