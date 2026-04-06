@@ -193,7 +193,23 @@ gh pr merge $ARGUMENTS --squash --delete-branch
 rm -f data/merge_authorized_$ARGUMENTS
 ```
 
-4. Report success.
+4. Delete the plan file now that the PR is merged:
+
+```bash
+BRANCH=$(gh pr view $ARGUMENTS --json headRefName -q .headRefName 2>/dev/null || echo "")
+SLUG=$(echo "$BRANCH" | sed 's|^session/||')
+PLAN_PATH="docs/plans/${SLUG}.md"
+
+if [ -f "$PLAN_PATH" ]; then
+  python scripts/migrate_completed_plan.py "$PLAN_PATH" && echo "Plan deleted: $PLAN_PATH" || echo "WARN: Plan migration failed for $PLAN_PATH — delete manually if needed"
+else
+  echo "No plan at $PLAN_PATH — skipping cleanup"
+fi
+```
+
+   If plan deletion fails, report a warning but do NOT block success reporting. The plan can always be deleted manually.
+
+5. Report success.
 
 ### If any gate fails:
 

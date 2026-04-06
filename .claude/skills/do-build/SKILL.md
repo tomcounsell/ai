@@ -470,17 +470,15 @@ This invokes the cascade skill defined in `.claude/skills/do-docs/SKILL.md`, whi
 - Creates GitHub issues for conflicts needing human review
 - Commits any doc updates to the PR branch before merge
 
-**Note**: The cascade is best-effort. If it finds nothing to update, that's fine — proceed to plan migration. If it makes edits, those are committed directly to the PR branch.
+**Note**: The cascade is best-effort. If it finds nothing to update, that's fine — proceed to reporting. If it makes edits, those are committed directly to the PR branch.
 
-### Step 8: Plan Migration
+### Step 8: Plan Stays Until Merge
 
-After PR is successfully created and documentation cascade completes, clean up the completed plan:
+After PR is created and documentation cascade completes, the plan document is **not deleted here**. It remains at `{PLAN_PATH}` so that:
+- `do-merge` can read it to verify all checklist items are done
+- `do-docs` can use it as context during the DOCS stage
 
-```bash
-cd $(git rev-parse --show-toplevel) && python scripts/migrate_completed_plan.py {PLAN_PATH}
-```
-
-This deletes the plan document and closes the tracking issue, completing the lifecycle.
+The plan will be deleted by `do-merge` after the PR is successfully merged.
 
 ### Step 9: Report PR Link
 

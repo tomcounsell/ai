@@ -330,7 +330,40 @@ After all edits are complete:
    **No changes needed**: (list if applicable)
    ```
 
-5. **Commit and push changes:**
+5. **Mark plan as docs-complete (if plan file exists):**
+
+   Locate the plan file using the current branch slug or PR context:
+   ```bash
+   BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+   SLUG=$(echo "$BRANCH" | sed 's|^session/||')   PLAN_PATH="docs/plans/${SLUG}.md"
+   ```
+
+   If the plan file exists, add `status: docs_complete` to its YAML frontmatter:
+   ```python
+   import re
+   from pathlib import Path
+
+   plan_path = Path('docs/plans/{slug}.md')
+   if plan_path.exists():
+       text = plan_path.read_text()
+       if text.startswith('---\n'):
+           end = text.index('\n---', 4)
+           frontmatter = text[4:end]
+           if 'status:' not in frontmatter:
+               new_fm = frontmatter + '\nstatus: docs_complete'
+           else:
+               new_fm = re.sub(r'status:\s*\S+', 'status: docs_complete', frontmatter)
+           plan_path.write_text('---\n' + new_fm + '\n---' + text[end + 4:])
+       else:
+           plan_path.write_text('---\nstatus: docs_complete\n---\n\n' + text)
+       print(f'Marked {plan_path} as docs_complete')
+   else:
+       print(f'No plan found at {plan_path} — skipping plan marker')
+   ```
+
+   This marks the plan ready for deletion at merge time.
+
+6. **Commit and push changes:**
    ```bash
    git add -A && git commit -m "Docs: cascade updates for <brief change description>" && git push
    ```
