@@ -290,9 +290,9 @@ def cmd_list(args: argparse.Namespace) -> int:
             nudges = s.auto_continue_count or 0
             created = _format_ts(s.created_at)
             msg = (s.message_text or "")[:38]
-            print(
-                f"{sid:<36} {status:<12} {priority:<8} {stype:<10} {nudges:>6} {created:<20} {msg:<40}"
-            )
+            row = f"{sid:<36} {status:<12} {priority:<8} {stype:<10} {nudges:>6}"
+            row += f" {created:<20} {msg:<40}"
+            print(row)
 
         return 0
 

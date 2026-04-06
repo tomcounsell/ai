@@ -1135,7 +1135,7 @@ def main():
         "--sort",
         choices=["priority", "fifo", "status"],
         default="fifo",
-        help="Sort order: priority (priority+FIFO rank), fifo (creation order), status (default: fifo)",
+        help="Sort order: priority (by tier+FIFO), fifo (creation order), status (default: fifo)",
     )
 
     # cleanup
