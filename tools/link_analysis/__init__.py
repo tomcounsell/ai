@@ -439,15 +439,15 @@ async def process_youtube_url(url: str) -> dict:
             YouTubeTranscriptApi,
         )
 
+        def _fetch_captions(vid_id: str) -> str | None:
+            fetched = YouTubeTranscriptApi().fetch(vid_id)
+            text = " ".join(s.text for s in fetched).strip()
+            return text if text else None
+
         loop = asyncio.get_event_loop()
-        caption_data = await loop.run_in_executor(
-            None, YouTubeTranscriptApi.get_transcript, video_id
-        )
-        transcript = " ".join(segment.get("text", "") for segment in caption_data).strip()
+        transcript = await loop.run_in_executor(None, _fetch_captions, video_id)
         if transcript:
             logger.info(f"Caption transcript retrieved for {video_id} ({len(transcript)} chars)")
-        else:
-            transcript = None
     except ImportError:
         logger.warning("youtube-transcript-api not installed; falling through to Whisper path")
     except (TranscriptsDisabled, NoTranscriptFound, VideoUnavailable) as e:
@@ -461,7 +461,9 @@ async def process_youtube_url(url: str) -> dict:
         if audio_path:
             transcript = await transcribe_audio_file(audio_path)
             if transcript:
-                logger.info(f"Whisper transcript retrieved for {video_id} ({len(transcript)} chars)")
+                logger.info(
+                    f"Whisper transcript retrieved for {video_id} ({len(transcript)} chars)"
+                )
 
     # --- All paths failed ---
     if not transcript:
