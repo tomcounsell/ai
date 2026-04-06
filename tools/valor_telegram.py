@@ -346,7 +346,8 @@ def cmd_send(args: argparse.Namespace) -> int:
         print(f"Error: File not found: {file_path}", file=sys.stderr)
         return 1
 
-    # Apply linkification and length truncation to text
+    # Apply linkification and length truncation to text (skip for empty string,
+    # matching send_telegram.py's guard at line 138)
     if text:
         text = _linkify_text(text)
         if len(text) > TELEGRAM_MAX_LENGTH:
