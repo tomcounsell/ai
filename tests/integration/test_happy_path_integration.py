@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -19,7 +18,9 @@ from tools.happy_path_generator import generate_script
 from tools.happy_path_schema import parse_trace, validate_trace_file
 
 # Path to example trace committed in the repo
-EXAMPLE_TRACE_PATH = Path(__file__).parent.parent / "happy-paths" / "traces" / "example-homepage.json"
+EXAMPLE_TRACE_PATH = (
+    Path(__file__).parent.parent / "happy-paths" / "traces" / "example-homepage.json"
+)
 
 
 class TestTraceToScriptGeneration:
@@ -122,7 +123,9 @@ class TestTraceToScriptGeneration:
 
     def test_committed_script_matches_generation(self, tmp_path):
         """The committed example script matches what the generator produces."""
-        committed_script = Path(__file__).parent.parent / "happy-paths" / "scripts" / "example-homepage.sh"
+        committed_script = (
+            Path(__file__).parent.parent / "happy-paths" / "scripts" / "example-homepage.sh"
+        )
         if not committed_script.exists():
             pytest.skip("Committed example script not found")
 
