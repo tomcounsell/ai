@@ -248,7 +248,7 @@ def main() -> int:
 
     if not check_rodney_installed():
         logger.error(
-            "Rodney is not installed. Install from: https://github.com/nicois/rodney/releases"
+            "Rodney is not installed. Install from: https://github.com/simonw/rodney/releases"
         )
         return 2
 

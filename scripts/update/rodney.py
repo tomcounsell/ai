@@ -19,7 +19,7 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
-GITHUB_REPO = "nicois/rodney"
+GITHUB_REPO = "simonw/rodney"
 INSTALL_DIR = Path.home() / ".local" / "bin"
 BINARY_NAME = "rodney"
 
