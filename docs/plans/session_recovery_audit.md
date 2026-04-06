@@ -181,9 +181,9 @@ No agent integration required — this is a bridge-internal change. All modifica
 
 ## Documentation
 
-- [ ] Create `docs/features/session-recovery-mechanisms.md` — reference doc listing all 7 mechanisms, their triggers, guards, and intended behavior
-- [ ] Update `docs/features/session-lifecycle.md` — add section on terminal status respawn protection
-- [ ] Add entry to `docs/features/README.md` index table for the new recovery mechanisms doc
+- [x] Create `docs/features/session-recovery-mechanisms.md` — reference doc listing all 7 mechanisms, their triggers, guards, and intended behavior
+- [x] Update `docs/features/session-lifecycle.md` — add section on terminal status respawn protection
+- [x] Add entry to `docs/features/README.md` index table for the new recovery mechanisms doc
 
 ## Success Criteria
 
