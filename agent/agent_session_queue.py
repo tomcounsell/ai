@@ -257,7 +257,10 @@ async def _push_agent_session(
                     old,
                     "superseded",
                     reason=f"superseded by new session for {session_id}",
-                    reject_from_terminal=False,
+                    # (#730) The reject_from_terminal override was intentionally removed.
+                    # Terminal sessions must not be re-activated. The guard in
+                    # transition_status() will reject completed→superseded transitions,
+                    # leaving the completed record intact and preventing worker re-activation.
                 )
                 logger.info(
                     f"Marked old completed session {old.id} as superseded "
