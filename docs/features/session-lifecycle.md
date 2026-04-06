@@ -72,6 +72,11 @@ When a session finishes execution, all paths converge on `finalize_session()`:
 | Bridge acknowledgment | `telegram_bridge.py` dormant->completed | None |
 | PM cancel | `agent_session_queue.py` | None |
 | Watchdog abandon/fail | `session_watchdog.py` | None |
+| Deploy stale cleanup | `_cleanup_stale_sessions()` in `scripts/update/run.py` | `skip_checkpoint=True` |
+
+### Worker Completion — Redis Re-read
+
+`_complete_agent_session()` re-reads the session record from Redis before calling `finalize_session()`. This ensures that any `stage_states` accumulated during execution (e.g., SDLC pipeline transitions written while the worker was running) are captured rather than overwritten by the stale in-memory snapshot. If no running record is found for the `session_id`, it falls back to the original in-memory object.
 
 ## Side Effect Consolidation
 
@@ -111,6 +116,18 @@ When a nudge (auto-continue) is enqueued during session execution, the session s
 - If `status = "pending"`: a nudge was enqueued, skip completion
 - If session no longer exists: nudge fallback recreated it, skip completion
 - Otherwise: proceed with normal completion via `finalize_session()`
+
+## Stale Session Cleanup
+
+`_cleanup_stale_sessions()` in `scripts/update/run.py` runs during every `/update` deploy and terminates `running` or `pending` sessions that have no live process. It is a safety net for sessions that were never finalized due to a crash or abrupt restart.
+
+**Liveness check (authoritative when available):** Before checking age, the function imports `_active_workers` from `agent.agent_session_queue`. Any session whose `chat_id` maps to a not-done asyncio Task is unconditionally skipped — the worker is still running.
+
+**Age threshold:** 120 minutes (raised from the original 30 to reduce false positives). When the update script runs as a standalone subprocess and `_active_workers` is empty, this threshold is the sole guard.
+
+**Lifecycle routing:** All terminal transitions go through `finalize_session(session, "killed", reason="stale cleanup (no live process)", skip_checkpoint=True)`. This fires all lifecycle hooks (lifecycle log, auto-tag, parent finalization) while skipping the branch checkpoint, which is unavailable outside the normal worker context.
+
+**In-process vs. standalone:** When the update script runs inside the same process as the queue (bridge in-process update), `_active_workers` is populated and fully authoritative. When it runs as a CLI subprocess, `_active_workers` will always be empty and the function logs a warning before falling back to age-threshold-only cleanup.
 
 ## Design Constraints
 
