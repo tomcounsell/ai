@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor
@@ -43,7 +43,7 @@ Additional missing capabilities vs the bridge relay path: no markdown formatting
 1. **Entry point**: `valor-telegram send --chat "X" "message"` -> `cmd_send()`
 2. **Resolution**: `resolve_chat()` maps chat name to numeric ID (unchanged)
 3. **Linkification**: Apply `linkify_references()` to message text
-4. **Length check**: Truncate at 4096 chars at sentence boundary
+4. **Length check**: Truncate at 4096 chars with `...` suffix (simple char truncation, matching `send_telegram.py`)
 5. **Queue**: Push to `telegram:outbox:cli-{timestamp}` Redis list (same format as `send_telegram.py`)
 6. **Relay**: Bridge relay (`bridge/telegram_relay.py`) picks up and sends with markdown, reply_to, retry
 7. **Output**: "Message queued" confirmation
@@ -51,7 +51,7 @@ Additional missing capabilities vs the bridge relay path: no markdown formatting
 ## Architectural Impact
 
 - **New dependencies**: None -- Redis and relay already exist
-- **Interface changes**: New `--reply-to` CLI flag on `valor-telegram send`; `--async` flag for fire-and-forget
+- **Interface changes**: New `--reply-to` CLI flag on `valor-telegram send`; all sends are fire-and-forget (queue and return immediately)
 - **Coupling**: Increases coupling to Redis/relay infrastructure, but this is the proven send path
 - **Data ownership**: Send responsibility moves from CLI-direct to relay (matches agent send path)
 - **Reversibility**: Easy -- revert `cmd_send()` to direct Telethon if needed
@@ -76,7 +76,7 @@ No prerequisites -- Redis and relay infrastructure already exist and are stable.
 
 - **Queue-based send**: `cmd_send()` pushes to Redis outbox instead of creating a Telethon client
 - **CLI argument mapping**: Map `--chat`, `--reply-to`, `--file` to the relay payload format
-- **Delivery confirmation**: Brief poll for relay delivery (default), or fire-and-forget with `--async`
+- **Fire-and-forget**: All sends queue and return immediately; no delivery confirmation polling
 
 ### Flow
 
@@ -86,8 +86,8 @@ No prerequisites -- Redis and relay infrastructure already exist and are stable.
 
 1. **Rewrite `cmd_send()`** to build a relay-compatible payload and push to Redis, mirroring `send_telegram.py`'s `send_message()` but sourcing chat_id/reply_to from CLI args instead of env vars
 2. **Add `--reply-to` flag** to the send subparser for forum group support
-3. **Use synthetic session_id** (`cli-{unix_timestamp}`) for the queue key since CLI sends have no session context
-4. **Apply `_linkify_text()`** and length truncation before queueing (same as `send_telegram.py`)
+3. **Use synthetic session_id** (`cli-{uuid4().hex[:12]}`) for the queue key since CLI sends have no session context -- UUID fragment avoids collisions from rapid invocations
+4. **Import and call `_linkify_text()` from `tools.send_telegram`** (not copy) and apply simple char truncation (`text[:4093] + "..."`) before queueing -- matches `send_telegram.py` behavior exactly
 5. **Remove direct Telethon usage** from `cmd_send()` entirely -- no fallback to direct send. If Redis/relay is unavailable, error clearly.
 6. **Keep `_telethon_client()` and `_fetch_from_telegram_api()`** for the `read` command's API fallback (read operations don't conflict because they only hold the SQLite lock briefly)
 
@@ -156,7 +156,7 @@ No agent integration required -- `valor-telegram` is a human-facing CLI tool. Th
 - [ ] `valor-telegram send --chat "Agent Builders Chat" "test message"` works while bridge is running
 - [ ] `valor-telegram send --chat "Forum Group" --reply-to 123 "message"` works for forum groups
 - [ ] Messages sent via CLI have markdown formatting applied (via relay)
-- [ ] Messages over 4096 chars are truncated before queueing
+- [ ] Messages over 4096 chars are truncated with `...` suffix before queueing
 - [ ] `--file` attachments work through the queue path
 - [ ] No `sqlite3.OperationalError` when bridge is running
 - [ ] Tests pass (`/do-test`)
@@ -189,12 +189,12 @@ No agent integration required -- `valor-telegram` is a human-facing CLI tool. Th
 - Remove direct Telethon client creation from `cmd_send()`
 - Add `--reply-to` argument to send subparser
 - Build relay-compatible payload: `{chat_id, reply_to, text, file_paths, session_id, timestamp}`
-- Use synthetic session_id: `f"cli-{int(time.time())}"`
-- Apply `_linkify_text()` (copy pattern from `send_telegram.py`) before queueing
-- Truncate text to 4096 chars at sentence boundary before queueing
+- Use synthetic session_id: `f"cli-{uuid4().hex[:12]}"` (UUID fragment for collision resistance)
+- Import and call `_linkify_text()` from `tools.send_telegram` (no code duplication)
+- Truncate text using simple char truncation: `text[:4093] + "..."` (matches `send_telegram.py`)
 - Push to `telegram:outbox:{session_id}` via Redis RPUSH with 1-hour TTL
 - Handle file validation (exists check) before queueing
-- Print "Message queued ({N} chars)" on success, error to stderr on failure
+- **Error handling**: Redis connection failure = error to stderr + exit 1; successful queue but bridge possibly down = print "Message queued ({N} chars)" + warning "Note: delivery requires the bridge relay to be running"
 
 ### 2. Write tests for cmd_send()
 - **Task ID**: build-tests
@@ -207,7 +207,7 @@ No agent integration required -- `valor-telegram` is a human-facing CLI tool. Th
 - Test chat name resolution failure
 - Test empty message / no file error
 - Test file not found error
-- Test message truncation at 4096 chars
+- Test message truncation at 4096 chars (simple char truncation with `...` suffix)
 - Test reply_to included in payload when --reply-to provided
 - Test file_paths included in payload when --file provided
 
@@ -248,7 +248,7 @@ No agent integration required -- `valor-telegram` is a human-facing CLI tool. Th
 | Tests pass | `pytest tests/unit/test_valor_telegram_send.py -x -q` | exit code 0 |
 | Lint clean | `python -m ruff check tools/valor_telegram.py` | exit code 0 |
 | Format clean | `python -m ruff format --check tools/valor_telegram.py` | exit code 0 |
-| No direct Telethon in send | `grep -c 'telethon_client\|TelegramClient' tools/valor_telegram.py` | output contains 1 |
+| No direct Telethon in cmd_send | `sed -n '/^def cmd_send/,/^def /p' tools/valor_telegram.py \| grep -c 'telethon_client\|TelegramClient'` | output 0 |
 | Queue key uses cli prefix | `grep -c 'cli-' tools/valor_telegram.py` | output > 0 |
 
 ## Critique Results
@@ -257,14 +257,14 @@ No agent integration required -- `valor-telegram` is a human-facing CLI tool. Th
 
 | Severity | Critic | Finding | Resolution |
 |----------|--------|---------|------------|
-| BLOCKER | Skeptic, Simplifier | `--async` flag in Architectural Impact contradicts Rabbit Holes and No-Gos which both exclude delivery confirmation. Builder cannot know what to implement. | Remove `--async` from Architectural Impact; all sends are fire-and-forget. |
-| CONCERN | Simplifier | Task 1 says "copy pattern from send_telegram.py" for `_linkify_text()` -- duplicates code instead of importing. | Import from `tools.send_telegram` or call `bridge.formatting.linkify_references` directly. |
-| CONCERN | Skeptic | "Truncate at sentence boundary" is novel logic not in `send_telegram.py` (which uses simple char truncation). Plan underestimates this subtask. | Either match `send_telegram.py`'s simple truncation or add explicit subtask with test cases. |
-| CONCERN | Adversary | `cli-{int(time.time())}` session ID has second-level granularity; rapid invocations collide. | Use milliseconds or UUID fragment for collision resistance. |
-| NIT | Operator | Verification grep for "No direct Telethon in send" expects output "contains 1" but file already has 3+ matches from read path. | Narrow grep to `cmd_send` function scope or adjust expected output. |
-| NIT | User | Risk 1 (bridge down = warning after queue) and Solution item 5 (Redis down = hard error) are different failure modes but not clearly distinguished in tasks. | Clarify in Task 1: Redis failure = error exit, bridge down = warning after successful queue. |
+| BLOCKER | Skeptic, Simplifier | `--async` flag in Architectural Impact contradicts Rabbit Holes and No-Gos which both exclude delivery confirmation. Builder cannot know what to implement. | **RESOLVED**: Removed `--async` from Architectural Impact; all sends are fire-and-forget. |
+| CONCERN | Simplifier | Task 1 says "copy pattern from send_telegram.py" for `_linkify_text()` -- duplicates code instead of importing. | **RESOLVED**: Changed to import `_linkify_text` from `tools.send_telegram`. |
+| CONCERN | Skeptic | "Truncate at sentence boundary" is novel logic not in `send_telegram.py` (which uses simple char truncation). Plan underestimates this subtask. | **RESOLVED**: Changed to simple char truncation (`text[:4093] + "..."`) matching `send_telegram.py`. |
+| CONCERN | Adversary | `cli-{int(time.time())}` session ID has second-level granularity; rapid invocations collide. | **RESOLVED**: Changed to `uuid4().hex[:12]` for collision resistance. |
+| NIT | Operator | Verification grep for "No direct Telethon in send" expects output "contains 1" but file already has 3+ matches from read path. | **RESOLVED**: Narrowed grep to `cmd_send` function scope. |
+| NIT | User | Risk 1 (bridge down = warning after queue) and Solution item 5 (Redis down = hard error) are different failure modes but not clearly distinguished in tasks. | **RESOLVED**: Task 1 now explicitly distinguishes: Redis failure = error exit, bridge down = warning after successful queue. |
 
-**Verdict: NEEDS REVISION** -- 1 blocker (--async contradiction), 3 concerns, 2 nits.
+**Verdict: REVISED** -- All 6 findings addressed.
 
 ---
 
