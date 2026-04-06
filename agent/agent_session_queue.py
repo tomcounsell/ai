@@ -1259,6 +1259,18 @@ async def _dependency_health_check() -> None:
     pass
 
 
+def _write_worker_heartbeat() -> None:
+    """Write worker heartbeat file so the dashboard can show worker status."""
+    heartbeat_file = Path(__file__).parent.parent / "data" / "last_worker_connected"
+    try:
+        heartbeat_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp = heartbeat_file.with_suffix(".tmp")
+        tmp.write_text(datetime.now(UTC).isoformat())
+        os.replace(tmp, heartbeat_file)
+    except OSError:
+        pass
+
+
 async def _agent_session_health_loop() -> None:
     """Periodically check running sessions for liveness and timeout."""
     logger.info(
@@ -1267,6 +1279,7 @@ async def _agent_session_health_loop() -> None:
     )
     while True:
         try:
+            _write_worker_heartbeat()
             await _agent_session_health_check()
             await _agent_session_hierarchy_health_check()
             await _dependency_health_check()
@@ -1633,10 +1646,8 @@ async def _worker_loop(chat_id: str, event: asyncio.Event) -> None:
                     # deleted by the nudge fallback path, skip completion to avoid
                     # overwriting the nudge's status back to "completed".
                     try:
-                        fresh_sessions = list(
-                            AgentSession.query.filter(agent_session_id=session.agent_session_id)
-                        )
-                        if not fresh_sessions:
+                        fresh = AgentSession.get(session.agent_session_id)
+                        if not fresh:
                             logger.info(
                                 "[chat:%s] Session %s no longer exists in Redis "
                                 "(likely recreated by nudge fallback) — skipping "
@@ -1644,7 +1655,7 @@ async def _worker_loop(chat_id: str, event: asyncio.Event) -> None:
                                 chat_id,
                                 session.agent_session_id,
                             )
-                        elif fresh_sessions[0].status == "pending":
+                        elif fresh.status == "pending":
                             logger.info(
                                 "[chat:%s] Session %s has status 'pending' in Redis "
                                 "(nudge was enqueued) — skipping completion to "

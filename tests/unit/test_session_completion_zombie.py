@@ -135,11 +135,11 @@ class TestWorkerFinallyBlockNudgeGuard:
         # Simulate a session that was nudged: Redis shows "pending"
         fresh_session = MagicMock()
         fresh_session.status = "pending"
-        mock_cls.query.filter.return_value = [fresh_session]
+        mock_cls.get.return_value = fresh_session
 
         # The guard logic: re-read from Redis and check status
-        fresh_sessions = list(mock_cls.query.filter(agent_session_id="test-session"))
-        should_skip = not fresh_sessions or fresh_sessions[0].status == "pending"
+        fresh = mock_cls.get("test-session")
+        should_skip = not fresh or fresh.status == "pending"
 
         assert should_skip is True, (
             "Worker finally block must skip completion when session is pending"
@@ -149,10 +149,10 @@ class TestWorkerFinallyBlockNudgeGuard:
     def test_skips_completion_when_session_deleted(self, mock_cls):
         """If session no longer exists in Redis (nudge fallback recreated it),
         _complete_agent_session must NOT be called."""
-        mock_cls.query.filter.return_value = []
+        mock_cls.get.return_value = None
 
-        fresh_sessions = list(mock_cls.query.filter(agent_session_id="test-session"))
-        should_skip = not fresh_sessions or fresh_sessions[0].status == "pending"
+        fresh = mock_cls.get("test-session")
+        should_skip = not fresh or fresh.status == "pending"
 
         assert should_skip is True, "Worker finally block must skip completion when session is gone"
 
@@ -162,10 +162,10 @@ class TestWorkerFinallyBlockNudgeGuard:
         _complete_agent_session SHOULD be called."""
         fresh_session = MagicMock()
         fresh_session.status = "running"
-        mock_cls.query.filter.return_value = [fresh_session]
+        mock_cls.get.return_value = fresh_session
 
-        fresh_sessions = list(mock_cls.query.filter(agent_session_id="test-session"))
-        should_skip = not fresh_sessions or fresh_sessions[0].status == "pending"
+        fresh = mock_cls.get("test-session")
+        should_skip = not fresh or fresh.status == "pending"
 
         assert should_skip is False, (
             "Worker finally block must complete session when no nudge detected"
