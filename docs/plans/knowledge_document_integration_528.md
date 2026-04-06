@@ -337,7 +337,7 @@ No new MCP server or tool needed. The agent already has `read_file` access — t
 - Import and start KnowledgeWatcher in bridge startup
 - Call `popoto.configure(embedding_provider=OpenAIProvider())` before starting watcher
 - Stop watcher on bridge shutdown
-- Add periodic liveness check: bridge calls `watcher.is_healthy()` every 60s (piggyback on existing bridge health loop or add asyncio.create_task). If unhealthy, log warning and call `watcher.stop(); watcher.start()` to auto-restart.
+- Add periodic liveness check: bridge calls `watcher.is_healthy()` every 60s via `asyncio.create_task`. If unhealthy, log warning and call `watcher.stop(); watcher.start()` to auto-restart.
 - Add health logging: "Knowledge watcher started, monitoring N files"
 
 ### 7. Validate end-to-end flow
