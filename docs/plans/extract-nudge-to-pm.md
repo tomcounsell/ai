@@ -1,6 +1,6 @@
 ---
 status: Planning
-type: chore
+type: feature
 appetite: Medium
 owner: Valor
 created: 2026-04-06
@@ -8,35 +8,40 @@ tracking: https://github.com/tomcounsell/ai/issues/743
 last_comment_id:
 ---
 
-# Extract Nudge Loop from Session Queue into PM-Scoped Output Router
+# Externalized Session Steering via AgentSession Model
 
 ## Problem
 
-The session queue (`agent/agent_session_queue.py`) is a 3000-line generic executor that processes agent sessions regardless of persona type (PM, Teammate, Dev). However, it contains ~470 lines of "nudge loop" logic — output routing that decides whether to deliver agent output to Telegram or silently re-enqueue the session with a "keep working" message.
+The session queue (`agent/agent_session_queue.py`) is a 3000-line generic executor that contains ~345 lines of hardcoded "nudge loop" logic — output routing that decides whether to deliver agent output or silently re-enqueue the session with "keep working." This creates two problems:
 
-This nudge logic makes PM-specific orchestration decisions (e.g., "Is this a PM running SDLC work? Keep it going through pipeline stages") inside a generic executor, violating the architecture principle that the bridge/queue is a dumb pipe and the PM owns orchestration intelligence.
+1. **PM-specific orchestration decisions are embedded in the generic executor.** The nudge loop knows about SDLC sessions, teammate caps, and PM pipeline stages. The executor should be persona-agnostic.
+
+2. **No external process can steer a running session.** The nudge loop is the only steering mechanism, and it's hardcoded inside the executor. Claude Code sessions, scripts, and humans have no way to inject "stop after this stage" or "skip to review" into a running session. This was directly observed when we couldn't stop background subagents after their critique stage completed — there's no message inbox.
 
 **Current behavior:**
-- `determine_delivery_action()` (L66-111) decides deliver vs. nudge, including PM-specific `nudge_continue` for SDLC sessions
-- `send_to_chat()` (L2137-2305) is a 170-line nested closure routing output through 7 action paths
-- `_enqueue_nudge()` (L1867-1996) re-enqueues sessions with nudge messages, managing Redis state
-- The standalone worker shares the same nudge loop, coupling it to PM orchestration logic
+- `determine_delivery_action()` (L66-111) makes persona-specific deliver-vs-nudge decisions inside the executor
+- `send_to_chat()` (L2137-2305) is a mid-execution callback that routes output through 7 action paths
+- `_enqueue_nudge()` (L1867-1996) re-enqueues sessions with hardcoded nudge messages
+- No external process can write steering messages to a running session
 
 **Desired outcome:**
-- Session queue is a generic executor: run agent, return output, deliver via OutputHandler
-- Nudge intelligence is owned by persona-specific code (PM router, teammate handler)
-- Each persona type can define its own output routing without touching the shared executor
+- `AgentSession` has a `pending_messages` field that any process can write to
+- The worker checks `pending_messages` between turns and injects them as the next input
+- The PM writes steering messages ("keep working", "stop after critique") externally
+- A clean CLI tool (`valor-session`) lets any agent spawn, steer, monitor, and stop sessions
+- The executor becomes persona-agnostic — no nudge logic, no PM-specific routing
 
 ## Prior Art
 
-- **PR #466**: [SDLC Redesign Phase 2: Nudge loop, per-chat queue, Observer deletion](https://github.com/tomcounsell/ai/pull/466) — Introduced the current nudge model, replacing the Observer agent. Established the "bridge just nudges" principle, but implemented it inside the executor rather than the PM.
-- **PR #696**: [Rename classify_nudge_action to determine_delivery_action](https://github.com/tomcounsell/ai/pull/696) — Naming cleanup. Confirms the function is a pure decision function, easy to relocate.
-- **Issue #731**: [Extract standalone worker from bridge monolith](https://github.com/tomcounsell/ai/issues/731) — Separated worker from bridge. Both still share nudge code in `agent_session_queue.py`.
-- **Issue #741**: [Worker persistent event loop with headless nudge loop](https://github.com/tomcounsell/ai/issues/741) — Added persistent mode to worker. Worker shares same nudge logic.
+- **PR #466**: Introduced the current nudge model, replacing the Observer agent. Established "bridge just nudges" but implemented it inside the executor.
+- **PR #696**: Renamed `classify_nudge_action` → `determine_delivery_action`. Confirms it's a pure function, easy to relocate.
+- **Issue #731**: Extracted standalone worker from bridge. Both still share nudge code.
+- **Issue #741**: Added persistent worker mode with headless nudge loop.
+- **`tools/valor_telegram.py`**: Example of a clean CLI tool that obscures Telethon/Redis complexity behind a simple interface. Model for `valor-session`.
 
 ## Data Flow
 
-### Current Flow (nudge embedded in executor)
+### Current Flow (nudge hardcoded in executor)
 
 1. **Entry**: Telegram message → `bridge/telegram_bridge.py` → `enqueue_agent_session()`
 2. **Queue**: `_worker_loop()` pops session → `_execute_agent_session()`
@@ -44,27 +49,30 @@ This nudge logic makes PM-specific orchestration decisions (e.g., "Is this a PM 
 4. **Nudge decision** (embedded): `send_to_chat()` calls `determine_delivery_action()` → 7 action paths
 5. **Nudge path**: `_enqueue_nudge()` → updates Redis session → `_ensure_worker()` → back to step 2
 6. **Deliver path**: `send_cb()` → OutputHandler → Telegram
+7. **No external steering possible** — only the executor can decide what happens next
 
-### Target Flow (nudge as post-execution router)
+### Target Flow (externalized steering)
 
-1. **Entry**: Telegram message → `bridge/telegram_bridge.py` → `enqueue_agent_session()`
+1. **Entry**: Any process → `valor-session create` or `enqueue_agent_session()` → AgentSession in Redis
 2. **Queue**: `_worker_loop()` pops session → `_execute_agent_session()`
-3. **Execute**: Claude SDK runs agent → agent produces output → always delivered via OutputHandler
-4. **Post-execution**: `_execute_agent_session()` returns execution result (output, stop_reason, session state)
-5. **Output router**: Persona-specific router inspects result:
-   - PM router: decides deliver-to-user vs re-enqueue based on SDLC state, empty output, rate limits
-   - Teammate router: uses reduced cap, simpler logic
-   - Dev sessions: no routing needed (returns to parent PM via `subagent_stop.py`)
-6. **Re-enqueue path**: Router calls public `re_enqueue_session()` API → back to step 2
-7. **Deliver path**: Output already delivered in step 3; router just decides whether to also re-enqueue
+3. **Execute**: Claude SDK runs agent → output delivered via OutputHandler
+4. **Steering check**: Worker reads `AgentSession.pending_messages` from Redis
+   - If messages exist: pop first message, set as next input, re-enqueue → back to step 2
+   - If empty: check output router for automatic steering (PM auto-continue, rate-limit retry)
+   - If no steering needed: session complete
+5. **External steering**: Any process writes to `pending_messages` at any time:
+   - PM writes "keep working" after analyzing output (replaces hardcoded nudge)
+   - Human writes "stop after this stage" via `valor-session steer`
+   - Another agent writes redirect instructions
+6. **Output**: Always delivered via OutputHandler; steering is orthogonal to delivery
 
 ## Architectural Impact
 
-- **Coupling**: Decreases. Session queue no longer needs to know about PM/SDLC/Teammate personas.
-- **Interface changes**: New public `re_enqueue_session()` API on the queue. `_execute_agent_session()` returns a result object instead of handling delivery internally.
-- **Data ownership**: Nudge decision ownership moves from queue (shared) to persona handlers (scoped).
-- **New dependencies**: `agent/output_router.py` (new module) depends on queue's public API + session model.
-- **Reversibility**: Medium. The public API is additive; the removal of nudge logic from the queue is the breaking change. Tests are the main migration cost.
+- **Coupling**: Decreases significantly. Executor no longer knows about PM/SDLC/Teammate personas.
+- **Interface changes**: New `pending_messages` field on AgentSession. New `valor-session` CLI. New public `steer_session()` / `re_enqueue_session()` APIs.
+- **Data ownership**: Steering decisions move from executor (shared) to external callers (PM, tools, humans).
+- **New module**: `tools/valor_session.py` — CLI tool for session management.
+- **Reversibility**: Medium. The `pending_messages` field and CLI are additive. Nudge logic removal is the breaking change.
 
 ## Appetite
 
@@ -73,48 +81,77 @@ This nudge logic makes PM-specific orchestration decisions (e.g., "Is this a PM 
 **Team:** Solo dev
 
 **Interactions:**
-- PM check-ins: 1 (scope alignment on router placement)
-- Review rounds: 1 (code review)
+- PM check-ins: 1 (scope alignment on CLI interface)
+- Review rounds: 1
 
 ## Prerequisites
 
-No prerequisites — this work has no external dependencies. All changes are internal refactoring.
+No prerequisites — all changes are internal.
 
 ## Solution
 
 ### Key Elements
 
-- **Output Router Module** (`agent/output_router.py`): Contains `determine_delivery_action()` (moved, unchanged) and persona-specific router functions that decide deliver vs. re-enqueue after session execution.
-- **Public Re-enqueue API**: `re_enqueue_session()` on the session queue — encapsulates Redis state management, terminal guards, and worker wake-up so routers don't reach into internals.
-- **Simplified Executor**: `_execute_agent_session()` returns an execution result; `send_to_chat()` becomes a simple always-deliver passthrough.
-- **Post-execution routing hook**: After `_execute_agent_session()` completes, the worker loop calls the output router to decide whether to re-enqueue.
+- **`AgentSession.pending_messages`**: New ListField on the session model. Any process writes steering messages here. Worker pops and injects them between turns.
+- **`valor-session` CLI** (`tools/valor_session.py`): Clean interface for session management — create, steer, status, list, kill. Modeled after `valor-telegram`.
+- **Output Router** (`agent/output_router.py`): Contains `determine_delivery_action()` (moved from queue) and PM-specific auto-steering logic. Called by `send_to_chat()` internally — **call site stays inside the mid-execution callback** (per critique blocker resolution), but decision logic is extracted.
+- **Public Steering API**: `steer_session(session_id, message)` writes to `pending_messages`. `re_enqueue_session()` encapsulates Redis state management and worker wake-up.
 
 ### Flow
 
-**Message arrives** → Queue pops session → Executor runs agent → Output delivered to OutputHandler → Worker loop calls output router → Router decides: done (exit) or re-enqueue (loop) → If re-enqueue: `re_enqueue_session()` → back to queue
+```
+valor-session create --role pm --message "Plan #735"
+  → AgentSession created in Redis (status=pending)
+  → Worker picks up, runs agent
+
+valor-session steer --id abc123 --message "Stop after critique"
+  → Writes to AgentSession.pending_messages in Redis
+  → Worker reads pending_messages at next turn boundary
+  → Injects message as next input
+
+valor-session status --id abc123
+  → Reads AgentSession from Redis, shows status/stage/output
+
+valor-session kill --id abc123
+  → Transitions session to killed status
+```
 
 ### Technical Approach
 
-- Move `determine_delivery_action()` as-is to `agent/output_router.py` (it's already a pure function)
-- Create `route_session_output()` in `agent/output_router.py` that wraps the decision logic with persona-specific behavior (PM SDLC continuation, teammate cap, rate-limit retry)
-- Extract `_enqueue_nudge()` internals into public `re_enqueue_session(session_id, message, auto_continue_count)` on the queue
-- Change `send_to_chat()` to always call `send_cb()` — no routing, no nudge
-- Move the routing decision to `_worker_loop()` after `_execute_agent_session()` returns, calling `route_session_output()` to decide whether to loop
+**Critique blocker resolution (Option A):** Keep the routing call site inside `send_to_chat()` but delegate decision logic to `agent/output_router.py`. The `send_to_chat()` callback calls `output_router.route_session_output()` which returns an action. `send_to_chat()` executes the action (deliver, re-enqueue, drop) and sets `chat_state` flags correctly. This preserves the temporal coupling between flag-setting and post-execution cleanup.
+
+**Pending messages mechanism:** After each agent turn, the worker checks `AgentSession.pending_messages`. If non-empty, it pops the first message, sets it as the session's `message_text`, and transitions back to pending. This replaces `_enqueue_nudge()` — the PM writes "keep working" to `pending_messages` instead of the executor hardcoding it.
+
+**CLI design** (modeled after `valor-telegram`):
+```bash
+valor-session create --role pm --chat-id 123 --message "Plan issue #735"
+valor-session create --role dev --message "Fix the bug" --parent abc123
+valor-session steer --id abc123 --message "Stop after critique stage"
+valor-session status --id abc123          # Show session state
+valor-session list                        # All sessions
+valor-session list --status running       # Filter by status
+valor-session list --role pm              # Filter by role
+valor-session kill --id abc123            # Kill a session
+valor-session kill --all                  # Kill all running
+```
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `re_enqueue_session()` must preserve terminal status guards from `_enqueue_nudge()` — test that calling re-enqueue on a completed/killed/failed session is a no-op
-- [ ] Router must handle missing/None stop_reason gracefully (already handled by `determine_delivery_action`)
+- [ ] `re_enqueue_session()` preserves terminal status guards from `_enqueue_nudge()` — re-enqueue on completed/killed session is a no-op
+- [ ] `steer_session()` on a terminal session returns error, does not write to `pending_messages`
+- [ ] Router handles missing/None stop_reason gracefully
 
 ### Empty/Invalid Input Handling
-- [ ] Empty output + PM session → router re-enqueues (not delivers empty string)
-- [ ] Empty output + safety cap reached → router delivers fallback message
-- [ ] None/whitespace output treated same as empty
+- [ ] Empty `pending_messages` list → no steering, normal flow
+- [ ] Empty output + PM session → PM auto-steering writes "keep working" to `pending_messages`
+- [ ] Empty output + safety cap reached → delivers fallback message
+- [ ] `valor-session steer` with empty message → rejected
 
 ### Error State Rendering
-- [ ] Fallback message ("The task completed but produced no output") still delivered when cap reached
-- [ ] Watchdog unhealthy path still forces delivery
+- [ ] `valor-session status` on non-existent session → clear error message
+- [ ] `valor-session create` with invalid role → clear error message
+- [ ] Fallback message still delivered when nudge cap reached
 
 ## Test Impact
 
@@ -122,81 +159,104 @@ No prerequisites — this work has no external dependencies. All changes are int
 - [ ] `tests/unit/test_qa_nudge_cap.py` — UPDATE: change imports for `MAX_NUDGE_COUNT`, `determine_delivery_action`
 - [ ] `tests/unit/test_recovery_respawn_safety.py` — UPDATE: change imports for `determine_delivery_action`, `_enqueue_nudge` → `re_enqueue_session`
 - [ ] `tests/unit/test_agent_session_queue_async.py` — UPDATE: change `_enqueue_nudge` import to `re_enqueue_session`
-- [ ] `tests/unit/test_duplicate_delivery.py` — UPDATE: adjust for new delivery model (always-deliver + post-routing)
+- [ ] `tests/unit/test_duplicate_delivery.py` — UPDATE: adjust for new delivery model
 - [ ] `tests/e2e/test_nudge_loop.py` — UPDATE: change imports for `MAX_NUDGE_COUNT`, `SendToChatResult`
 - [ ] `tests/integration/test_stage_aware_auto_continue.py` — UPDATE: change `MAX_NUDGE_COUNT` import
 - [ ] `tests/integration/test_silent_failures.py` — UPDATE: change `_enqueue_nudge` reference
 
 ## Rabbit Holes
 
-- **Splitting the summarizer's `nudge_feedback`**: The summarizer has its own `nudge_feedback` field for LLM-generated completion rejection feedback. This is a completely separate concept from the auto-continue nudge and must NOT be moved or modified.
-- **Making the router a Claude Code hook**: Hooks in `.claude/hooks/` run as shell subprocesses — they can't call async Python APIs like `re_enqueue_session()`. The router must be a Python module called directly by the worker loop, not a hook.
-- **Refactoring `_execute_agent_session()`**: The 500+ line function has many concerns beyond nudging. Only extract the nudge-related parts; don't try to refactor the entire function.
-- **Per-persona hook system**: Building a generic hook system where personas register output handlers. Overkill — just use if/elif on session_type in the router.
+- **Splitting the summarizer's `nudge_feedback`**: Separate concept (LLM-generated completion rejection feedback). Do NOT move or modify.
+- **Making the router a Claude Code hook**: Hooks run as shell subprocesses — can't call async Python APIs. Router must be a Python module called within `send_to_chat()`.
+- **Refactoring `_execute_agent_session()` beyond nudge extraction**: The 500+ line function has many concerns. Only extract nudge-related parts.
+- **Building a generic per-persona plugin system**: Overkill. Simple if/elif on session_type in the router.
+- **Post-execution routing (critique blocker)**: Moving the routing call site to after `_execute_agent_session()` returns breaks `chat_state` flag coupling and the `_worker_loop` nudge guard. Keep call site inside `send_to_chat()`.
 
 ## Risks
 
 ### Risk 1: Worker regression
-**Impact:** Standalone worker stops auto-continuing sessions, causing sessions to stall after first turn.
-**Mitigation:** Worker uses the same `_worker_loop()` → output router path as the bridge. Integration test with `test_stage_aware_auto_continue.py` validates end-to-end.
+**Impact:** Standalone worker stops auto-continuing sessions.
+**Mitigation:** Worker uses same `send_to_chat()` → output router path. Integration test validates end-to-end. Consider env var `VALOR_USE_LEGACY_NUDGE=1` as fallback during transition.
 
-### Risk 2: Race in re-enqueue
-**Impact:** Session finalized by one process while router tries to re-enqueue, creating zombie sessions.
-**Mitigation:** `re_enqueue_session()` inherits the same terminal status guards (entry + re-read) from `_enqueue_nudge()`. No new race surfaces.
+### Risk 2: Race in pending_messages
+**Impact:** Multiple processes write to `pending_messages` simultaneously, messages lost or duplicated.
+**Mitigation:** Redis list operations (LPUSH/RPOP) are atomic. Use Redis list primitives, not read-modify-write on a JSON field.
 
 ### Risk 3: `send_to_chat` closure coupling
-**Impact:** Extracting `send_to_chat()` from its nested closure breaks access to scoped variables (`session`, `branch_name`, `task_list_id`, `agent_session`, `chat_state`).
-**Mitigation:** Change `_execute_agent_session()` to return a result object containing stop_reason, output, and session state. The router receives this object instead of being embedded in the closure.
+**Impact:** Extracting decision logic from `send_to_chat()` while keeping the call site requires passing context.
+**Mitigation:** `route_session_output()` receives all needed context as parameters (output, stop_reason, session_type, classification_type, auto_continue_count, watchdog status). Pure function, no closure access needed.
 
 ## Race Conditions
 
-### Race 1: Terminal status change during routing
-**Location:** Output router, between reading session status and calling `re_enqueue_session()`
-**Trigger:** Another process (watchdog, human kill) finalizes the session while the router is deciding
-**Data prerequisite:** Session must be non-terminal when router starts
+### Race 1: Terminal status change during steering
+**Location:** `steer_session()` / output router, between reading session status and writing `pending_messages`
+**Trigger:** Another process finalizes the session while steering is in progress
+**Data prerequisite:** Session must be non-terminal when steering starts
 **State prerequisite:** Redis session record must reflect current status
-**Mitigation:** `re_enqueue_session()` re-reads session from Redis before modifying — same double-check pattern as existing `_enqueue_nudge()`. Terminal status at re-read time → no-op.
+**Mitigation:** `steer_session()` reads status first; if terminal, returns error. `re_enqueue_session()` re-reads before modifying. Atomic Redis operations prevent partial writes.
+
+### Race 2: Pending message consumed while new one being written
+**Location:** Worker popping from `pending_messages` while external process pushes
+**Trigger:** Concurrent RPOP (worker) and LPUSH (external caller)
+**Mitigation:** Redis list operations are atomic. RPOP and LPUSH are safe concurrent operations. No lock needed.
 
 ## No-Gos (Out of Scope)
 
-- Modifying `bridge/summarizer.py` `nudge_feedback` — separate concept, separate system
-- Refactoring `_execute_agent_session()` beyond extracting nudge concerns
-- Building a generic per-persona plugin/hook system
-- Changing DevSession output routing (already uses `subagent_stop.py` hook)
+- Modifying `bridge/summarizer.py` `nudge_feedback` — separate concept
+- Restructuring `_execute_agent_session()` beyond extracting nudge decision logic
+- Moving the `send_to_chat()` call site to post-execution (critique blocker)
+- Changing DevSession output routing (uses `subagent_stop.py` hook)
 - Modifying the OutputHandler protocol
+- Building a web UI for session management (CLI only for now)
 
 ## Update System
 
-No update system changes required — this is a pure internal refactoring. No new dependencies, config files, or migration steps. The worker process uses the same code path and will pick up the changes on next restart.
+The `valor-session` CLI tool needs to be available on all machines. Add to the update skill:
+- Install/symlink `valor-session` alongside `valor-telegram`
+- No new dependencies beyond what's already installed (Redis, popoto)
 
 ## Agent Integration
 
-No agent integration required — this is an internal refactoring of the session execution layer. No new tools, MCP servers, or bridge imports needed.
+- `valor-session` CLI must be registered as an MCP tool or made available to agents so they can spawn and steer sessions
+- Consider adding to `.mcp.json` if agents need to call it programmatically
+- Bridge does NOT need changes — it continues using `enqueue_agent_session()` as today
+- The CLI is the primary interface for external callers (Claude Code, scripts, humans)
 
 ## Documentation
 
-- [ ] Update `docs/features/nudge-loop.md` (if exists) or create it to document the new output router architecture
-- [ ] Update architecture section in `CLAUDE.md` to reflect that nudge intelligence lives in `agent/output_router.py`, not the session queue
-- [ ] Add entry to `docs/features/README.md` index table for the output router
+- [ ] Create `docs/features/session-steering.md` describing the externalized steering architecture
+- [ ] Update `CLAUDE.md` architecture section to show `pending_messages` flow and `valor-session` CLI
+- [ ] Update `CLAUDE.md` Quick Commands table with `valor-session` commands
+- [ ] Add entry to `docs/features/README.md` index table
+- [ ] Add `valor-session` to `docs/tools-reference.md`
 
 ## Success Criteria
 
-- [ ] `agent/agent_session_queue.py` has no `determine_delivery_action()`, no nudge-specific `send_to_chat()` routing, no `_enqueue_nudge()`
-- [ ] `agent/output_router.py` exists with `determine_delivery_action()`, `route_session_output()`, and constants
-- [ ] Public `re_enqueue_session()` API exists on session queue
-- [ ] PM SDLC auto-continue works end-to-end (session progresses through pipeline stages without human intervention)
-- [ ] Teammate sessions use reduced nudge cap (10) via teammate-scoped code
+- [ ] `AgentSession` model has `pending_messages` field (Redis list)
+- [ ] Worker checks `pending_messages` between turns and injects messages
+- [ ] `determine_delivery_action()` and routing constants moved to `agent/output_router.py`
+- [ ] `send_to_chat()` delegates to `output_router.route_session_output()` (call site preserved, logic extracted)
+- [ ] PM auto-continue works via `pending_messages` (PM writes "keep working" externally)
+- [ ] `valor-session create/steer/status/list/kill` CLI works
+- [ ] Public `steer_session()` and `re_enqueue_session()` APIs exist
+- [ ] Teammate sessions use reduced nudge cap via persona-scoped code
 - [ ] Rate-limit retry and empty-output retry still function
-- [ ] All tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [ ] All tests pass
+- [ ] Documentation updated
 
 ## Team Orchestration
 
 ### Team Members
 
-- **Builder (output-router)**
-  - Name: router-builder
-  - Role: Create `agent/output_router.py`, extract nudge logic, add public re-enqueue API, simplify executor
+- **Builder (steering-model)**
+  - Name: model-builder
+  - Role: Add `pending_messages` to AgentSession, implement steering check in worker, extract output router
+  - Agent Type: builder
+  - Resume: true
+
+- **Builder (cli-tool)**
+  - Name: cli-builder
+  - Role: Create `valor-session` CLI tool with create/steer/status/list/kill commands
   - Agent Type: builder
   - Resume: true
 
@@ -208,91 +268,110 @@ No agent integration required — this is an internal refactoring of the session
 
 - **Validator (integration)**
   - Name: integration-validator
-  - Role: Verify end-to-end nudge behavior, PM auto-continue, teammate cap, rate-limit retry
+  - Role: Verify end-to-end steering, PM auto-continue, CLI commands, teammate cap
   - Agent Type: validator
   - Resume: true
 
 - **Documentarian**
   - Name: docs-writer
-  - Role: Update CLAUDE.md architecture section, create/update feature docs
+  - Role: Create session-steering docs, update CLAUDE.md, tools reference
   - Agent Type: documentarian
   - Resume: true
 
 ## Step by Step Tasks
 
-### 1. Create output router module
+### 1. Add pending_messages to AgentSession model
+- **Task ID**: build-pending-messages
+- **Depends On**: none
+- **Validates**: tests/unit/test_pending_messages.py (create)
+- **Assigned To**: model-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- Add `pending_messages` as a ListField on `AgentSession` in `models/agent_session.py`
+- Implement `steer_session(session_id, message)` in `agent/agent_session_queue.py` — pushes to `pending_messages`, validates non-terminal status
+- Implement pending message consumption in the worker: after each agent turn, check `pending_messages`; if non-empty, pop first message, set as `message_text`, transition to pending
+- Write unit tests for steer_session (happy path, terminal guard, concurrent access)
+
+### 2. Extract output router module
 - **Task ID**: build-output-router
 - **Depends On**: none
 - **Validates**: tests/unit/test_nudge_loop.py (update imports)
-- **Assigned To**: router-builder
-- **Agent Type**: builder
-- **Parallel**: true
-- Move `determine_delivery_action()` to `agent/output_router.py` (pure function, no changes needed)
-- Move `MAX_NUDGE_COUNT`, `NUDGE_MESSAGE`, `SendToChatResult` constants to `agent/output_router.py`
-- Create `route_session_output(session, output, stop_reason, auto_continue_count, ...)` that contains the persona-specific routing logic currently in `send_to_chat()`
-- Import `TEAMMATE_MAX_NUDGE_COUNT` from `agent/teammate_handler.py` for teammate routing
-
-### 2. Add public re-enqueue API
-- **Task ID**: build-re-enqueue-api
-- **Depends On**: none
-- **Validates**: tests/unit/test_recovery_respawn_safety.py (update)
-- **Assigned To**: router-builder
+- **Assigned To**: model-builder
 - **Agent Type**: builder
 - **Parallel**: true (with task 1)
-- Extract `_enqueue_nudge()` internals into public `async re_enqueue_session(session_id, message, auto_continue_count, task_list_id, branch_name)` in `agent/agent_session_queue.py`
-- Preserve all terminal status guards (entry check + re-read)
-- Preserve fallback recreate path for missing sessions
-- Keep `_ensure_worker()` call at the end
+- Move `determine_delivery_action()` to `agent/output_router.py` (pure function, no changes)
+- Move `MAX_NUDGE_COUNT`, `NUDGE_MESSAGE`, `SendToChatResult` constants to `agent/output_router.py`
+- Create `route_session_output()` wrapping the persona-specific routing logic
+- Define all nudge cap constants in the router (including teammate cap of 10)
+- Keep `send_to_chat()` call site inside `_execute_agent_session()` — it calls `output_router.route_session_output()` and executes the returned action
 
-### 3. Simplify executor and wire router
-- **Task ID**: build-simplified-executor
-- **Depends On**: build-output-router, build-re-enqueue-api
-- **Validates**: tests/unit/test_duplicate_delivery.py, tests/e2e/test_nudge_loop.py (update)
-- **Assigned To**: router-builder
+### 3. Wire steering into executor
+- **Task ID**: build-wire-steering
+- **Depends On**: build-pending-messages, build-output-router
+- **Validates**: tests/unit/test_duplicate_delivery.py (update), tests/e2e/test_nudge_loop.py (update)
+- **Assigned To**: model-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Change `send_to_chat()` in `_execute_agent_session()` to always deliver via `send_cb()` — remove all 7-path routing
-- Have `_execute_agent_session()` return an execution result object (stop_reason, last_output, session state)
-- In `_worker_loop()`, after `_execute_agent_session()` returns, call `route_session_output()` from the output router
-- If router returns "re-enqueue", call `re_enqueue_session()` and loop; otherwise exit
+- Replace `_enqueue_nudge()` calls in `send_to_chat()` with writes to `pending_messages` + `re_enqueue_session()`
+- Extract `_enqueue_nudge()` internals into public `re_enqueue_session()` with terminal status guards preserved
+- Update `send_to_chat()` to delegate routing to `output_router.route_session_output()`
+- Ensure `chat_state` flags are set correctly by the routing action (preserving post-execution cleanup coupling)
 
-### 4. Migrate tests
+### 4. Create valor-session CLI tool
+- **Task ID**: build-cli-tool
+- **Depends On**: build-pending-messages
+- **Validates**: tests/unit/test_valor_session_cli.py (create)
+- **Assigned To**: cli-builder
+- **Agent Type**: builder
+- **Parallel**: true (with task 3)
+- Create `tools/valor_session.py` modeled after `tools/valor_telegram.py`
+- Implement subcommands: create, steer, status, list, kill
+- `create`: builds AgentSession in Redis, calls `_ensure_worker()` or enqueues
+- `steer`: calls `steer_session()` to write to `pending_messages`
+- `status`: reads and formats AgentSession fields (status, stage_states, auto_continue_count)
+- `list`: queries AgentSession by status/role with table output
+- `kill`: transitions session to killed status
+- Add `valor-session` entry point (symlink or script)
+
+### 5. Migrate tests
 - **Task ID**: build-test-migration
-- **Depends On**: build-simplified-executor
+- **Depends On**: build-wire-steering
 - **Validates**: all test files listed in Test Impact section
 - **Assigned To**: test-migrator
 - **Agent Type**: builder
 - **Parallel**: false
 - Update imports in all 8 test files from `agent.agent_session_queue` to `agent.output_router` for moved symbols
 - Update `_enqueue_nudge` references to `re_enqueue_session`
-- Adjust test assertions that depend on `send_to_chat` behavior (now always-deliver)
-- Run full test suite to verify
+- Add tests for `pending_messages` consumption in worker
+- Add tests for `valor-session` CLI commands
+- Run full test suite
 
-### 5. Validate integration
+### 6. Validate integration
 - **Task ID**: validate-integration
-- **Depends On**: build-test-migration
+- **Depends On**: build-test-migration, build-cli-tool
 - **Assigned To**: integration-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Verify PM SDLC auto-continue: session with `session_type=pm, classification_type=sdlc` gets re-enqueued
-- Verify teammate cap: teammate sessions cap at 10 nudges
-- Verify rate-limit retry: `stop_reason=rate_limited` triggers backoff + re-enqueue
-- Verify empty output retry: empty/whitespace output triggers re-enqueue
-- Verify terminal guard: completed/killed sessions cannot be re-enqueued
-- Verify watchdog override: unhealthy sessions force delivery
-- Run: `pytest tests/unit/test_nudge_loop.py tests/unit/test_qa_nudge_cap.py tests/unit/test_recovery_respawn_safety.py tests/integration/test_stage_aware_auto_continue.py -v`
+- Verify PM SDLC auto-continue via `pending_messages`
+- Verify external steering: `valor-session steer` injects message that worker consumes
+- Verify `valor-session create --role pm` spawns working session
+- Verify teammate cap, rate-limit retry, empty-output retry
+- Verify terminal guard: steering a completed session returns error
+- Verify `valor-session kill` stops a running session
+- Run: `pytest tests/ -x -q`
 
-### 6. Documentation
+### 7. Documentation
 - **Task ID**: document-feature
 - **Depends On**: validate-integration
 - **Assigned To**: docs-writer
 - **Agent Type**: documentarian
 - **Parallel**: false
-- Create/update `docs/features/output-router.md` documenting the PM output router architecture
-- Update CLAUDE.md architecture diagram to show output router as separate from session queue
+- Create `docs/features/session-steering.md`
+- Update CLAUDE.md architecture section and Quick Commands table
+- Add `valor-session` to `docs/tools-reference.md`
 - Add entry to `docs/features/README.md`
 
-### 7. Final Validation
+### 8. Final Validation
 - **Task ID**: validate-all
 - **Depends On**: document-feature
 - **Assigned To**: integration-validator
@@ -300,9 +379,10 @@ No agent integration required — this is an internal refactoring of the session
 - **Parallel**: false
 - Run full test suite: `pytest tests/ -x -q`
 - Run lint: `python -m ruff check .`
-- Run format check: `python -m ruff format --check .`
+- Run format: `python -m ruff format --check .`
 - Verify no remaining imports of nudge symbols from `agent.agent_session_queue`
-- Verify `agent/output_router.py` exists and exports expected symbols
+- Verify `valor-session --help` works
+- Verify `agent/output_router.py` exports expected symbols
 
 ## Verification
 
@@ -313,82 +393,28 @@ No agent integration required — this is an internal refactoring of the session
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | No nudge imports from queue | `grep -rn 'from agent.agent_session_queue import.*determine_delivery_action\|from agent.agent_session_queue import.*NUDGE_MESSAGE\|from agent.agent_session_queue import.*_enqueue_nudge' tests/ agent/` | exit code 1 |
 | Output router exists | `python -c "from agent.output_router import determine_delivery_action, route_session_output, MAX_NUDGE_COUNT"` | exit code 0 |
-| Re-enqueue API exists | `python -c "from agent.agent_session_queue import re_enqueue_session"` | exit code 0 |
+| Steering API exists | `python -c "from agent.agent_session_queue import steer_session, re_enqueue_session"` | exit code 0 |
+| CLI works | `python -m tools.valor_session --help` | exit code 0 |
+| pending_messages field | `python -c "from models.agent_session import AgentSession; assert hasattr(AgentSession, 'pending_messages')"` | exit code 0 |
 
 ## Critique Results
 
 **Date**: 2026-04-06
-**Critics**: Skeptic, Operator, Archaeologist, Adversary, Simplifier, User
-**Findings**: 5 total (2 blockers, 2 concerns, 1 nit)
+**Verdict**: NEEDS REVISION → **REVISED** (blockers addressed, scope expanded)
 
-### Blockers
+### Blocker Resolutions
 
-#### 1. `send_to_chat` is a mid-execution callback, not a post-execution hook
-- **Severity**: BLOCKER
-- **Critics**: Skeptic, Adversary
-- **Location**: Solution > Technical Approach, Task 3 (build-simplified-executor)
-- **Finding**: The plan says "Change `send_to_chat()` to always deliver via `send_cb()`" and "Move the routing decision to `_worker_loop()` after `_execute_agent_session()` returns." However, `send_to_chat` is wired as the `_send_callback` on `BossMessenger` (agent/messenger.py:68) and is invoked by `BackgroundTask._run_work()` (agent/messenger.py:152) when the SDK returns output. The nudge-enqueue currently happens *inside* this callback, which sets `chat_state.defer_reaction = True` and `chat_state.completion_sent = True` — these flags control critical post-execution behavior at agent/agent_session_queue.py:2446-2554 (reaction setting, transcript completion, branch cleanup, session snapshot). If `send_to_chat` always delivers and routing moves to after `_execute_agent_session()` returns, the post-execution cleanup will have already run with the wrong flags (it will think the session completed normally rather than being nudged). The `_worker_loop` finally block (L1725-1758) also has a "nudge guard" that re-reads session status to avoid overwriting nudge state — this guard assumes the nudge happened *during* execution.
-- **Suggestion**: The plan must address the temporal coupling between `send_to_chat` setting `chat_state` flags and the post-execution cleanup reading them. Either: (a) keep the routing decision inside `send_to_chat` but delegate to `output_router.route_session_output()` (extract logic, don't move the call site), or (b) restructure `_execute_agent_session()` so it returns *before* post-execution cleanup runs, and the caller handles both routing and cleanup based on the routing result. Option (a) is simpler and lower risk.
+1. **`send_to_chat` mid-execution callback** → Resolved: keep call site inside `send_to_chat()`, extract decision logic to `agent/output_router.py`. `chat_state` flag coupling preserved.
+2. **`_worker_loop` nudge guard** → Resolved: routing still happens during execution (inside `send_to_chat`), so the finally block guard sees the correct status.
 
-#### 2. `_worker_loop` nudge guard depends on mid-execution enqueue
-- **Severity**: BLOCKER
-- **Critics**: Adversary, Skeptic
-- **Location**: Solution > Technical Approach, Data Flow > Target Flow
-- **Finding**: The `_worker_loop` finally block (agent/agent_session_queue.py:1725-1758) re-reads the session from Redis after execution. If the session status is "pending" (set by `_enqueue_nudge` during execution), it skips `_complete_agent_session()` to avoid overwriting the nudge. If routing moves to *after* `_execute_agent_session()` returns, this guard will see the session as NOT pending (because `re_enqueue_session` hasn't been called yet), and will call `_complete_agent_session()`, marking the session completed *before* the router can re-enqueue it. This creates a race where the session is finalized then re-enqueued — exactly the zombie scenario Risk 2 warns about.
-- **Suggestion**: The finally block's nudge guard must be updated to work with the new flow. If the router decision happens after execution but before completion, the finally block needs to know the routing result. This reinforces that option (a) from Blocker 1 is safer: keep the enqueue inside the execution scope where the guard already works correctly.
+### Incorporated Feedback
 
-### Concerns
-
-#### 3. Plan claims ~470 lines of nudge logic but actual count is ~345
-- **Severity**: CONCERN
-- **Critics**: Skeptic
-- **Location**: Problem statement
-- **Finding**: The plan states "~470 lines of nudge loop logic" but `determine_delivery_action` is 46 lines (L66-111), `_enqueue_nudge` is 130 lines (L1867-1996), and `send_to_chat` routing is 169 lines (L2137-2305), totaling ~345 lines. The discrepancy suggests either inflated scope estimation or inclusion of adjacent code that isn't actually nudge-specific (e.g., the PM outbox drain at L2278-2297, which is delivery logic, not nudge logic).
-- **Suggestion**: Audit the exact lines to be moved vs. lines that stay. The PM outbox drain and the enrichment code in `send_to_chat`'s deliver path are delivery concerns, not nudge concerns, and should remain in the executor.
-
-#### 4. No rollback procedure or feature flag
-- **Severity**: CONCERN
-- **Critics**: Operator
-- **Location**: Risks, Architectural Impact
-- **Finding**: The plan acknowledges "Reversibility: Medium" but provides no concrete rollback procedure. If the refactored nudge loop fails in production (sessions stalling, zombie sessions), the only recovery path is reverting the commit. For a 3000-line file that's the core execution engine, a revert may conflict with concurrent work. There's no feature flag to fall back to the old `send_to_chat` routing.
-- **Suggestion**: Consider a simple feature flag (env var like `VALOR_USE_LEGACY_NUDGE=1`) that keeps the old `send_to_chat` routing as a fallback during the transition period. Remove it once validated.
-
-### Nits
-
-#### 5. Task 1 references `TEAMMATE_MAX_NUDGE_COUNT` import from `agent/teammate_handler.py`
-- **Severity**: NIT
-- **Critics**: Simplifier
-- **Location**: Task 1 (build-output-router)
-- **Finding**: Task 1 says to "Import `TEAMMATE_MAX_NUDGE_COUNT` from `agent/teammate_handler.py` for teammate routing" into the new `output_router.py`. This creates a circular-looking dependency: the output router imports from teammate_handler, and the session queue already imports from teammate_handler. The constant (value: 10) could simply be defined in the output router since it's a routing concern, not a teammate persona concern.
-- **Suggestion**: Either move the constant to the output router (canonical location for all nudge caps) or to `agent/constants.py` alongside other session constants. Minor, but cleaner.
-
-### Structural Check Results
-
-| Check | Status | Detail |
-|-------|--------|--------|
-| Required sections | PASS | Documentation, Update System, Agent Integration, Test Impact all present and non-empty |
-| Task numbering | PASS | Sequential 1-7, no gaps |
-| Dependencies valid | PASS | All Depends On references resolve to valid Task IDs |
-| File paths exist | PASS | 7 of 8 source files exist; `agent/output_router.py` correctly noted as new (to be created) |
-| Test files exist | PASS | All 8 test files in Test Impact section exist |
-| Prerequisites met | PASS | Plan states no prerequisites |
-| Cross-references | PASS | Success criteria map to tasks; no-gos are not planned as work; rabbit holes are explicitly excluded |
-
-### Verdict
-
-**NEEDS REVISION** — 2 blockers must be resolved before build.
-
-The core issue is that the plan proposes moving the nudge routing decision from *inside* `send_to_chat` (mid-execution callback) to *after* `_execute_agent_session()` returns (post-execution), but the post-execution cleanup logic (reactions, transcript completion, branch cleanup, nudge guard in finally block) depends on flags set by the mid-execution routing decision. The plan needs to either:
-
-1. **Option A (recommended)**: Keep the routing call site inside `send_to_chat` but extract the logic to `agent/output_router.py`. The router module owns the decision logic; `send_to_chat` just calls it. This achieves the separation-of-concerns goal without restructuring the execution flow.
-2. **Option B (higher risk)**: Fully restructure `_execute_agent_session()` to separate execution from cleanup, returning a result object that the caller uses for both routing and cleanup. This is more architecturally clean but touches more code and has higher regression risk.
-
-The plan should be revised to explicitly address which option it takes and update the Data Flow and Technical Approach sections accordingly.
+3. **Line count** → Corrected to ~345 lines. PM outbox drain stays in executor.
+4. **Rollback** → Consider `VALOR_USE_LEGACY_NUDGE=1` env var during transition.
+5. **Teammate cap** → All nudge cap constants defined in output router module.
 
 ---
 
 ## Open Questions
 
-1. **Rate-limit retry ownership**: Rate-limit backoff (`asyncio.sleep(5)` then re-enqueue) is arguably generic resilience, not PM-specific. Should it stay in the executor as a built-in retry, or move to the output router with all other nudge logic? Current plan moves it to the router for simplicity — all nudge paths in one place.
-
-2. **Execution result shape**: The result object returned by `_execute_agent_session()` needs to carry stop_reason, last output text, session state, and auto_continue_count. Should this be a new dataclass (e.g., `ExecutionResult`), or can we reuse/extend `SendToChatResult`? Current plan: rename `SendToChatResult` → `ExecutionResult` and extend it.
+1. **`pending_messages` storage**: Should this be a Popoto ListField on AgentSession, or a separate Redis list (`session:steering:{session_id}`)? A separate list gives atomic LPUSH/RPOP without Popoto's read-modify-write. A model field keeps everything on the session record. Leaning toward separate Redis list with a helper method on the model.
