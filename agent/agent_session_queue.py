@@ -34,9 +34,10 @@ from agent.branch_manager import (
     get_plan_context,
     sanitize_branch_name,
 )
-from agent.worktree_manager import WORKTREES_DIR, validate_workspace
 from agent.constants import REACTION_COMPLETE, REACTION_ERROR, REACTION_SUCCESS
+from agent.output_handler import OutputHandler
 from agent.session_logs import save_session_snapshot
+from agent.worktree_manager import WORKTREES_DIR, validate_workspace
 from config.enums import ClassificationType, PersonaType, SessionType
 from models.agent_session import AgentSession
 from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
@@ -1315,7 +1316,7 @@ def register_callbacks(
     reaction_callback: ReactionCallback | None = None,
     response_callback: ResponseCallback | None = None,
     *,
-    handler: Any | None = None,
+    handler: OutputHandler | None = None,
 ) -> None:
     """
     Register output callbacks for a project.
@@ -1327,7 +1328,8 @@ def register_callbacks(
         project_key: Project identifier to register callbacks for.
         send_callback: Callable (chat_id, text, reply_to_msg_id, session) -> sends output.
         reaction_callback: Callable (chat_id, msg_id, emoji) -> sets a reaction.
-        response_callback: Callable (event, text, chat_id, msg_id) -> sends response with file handling.
+        response_callback: Callable (event, text, chat_id, msg_id) ->
+            sends response with file handling.
         handler: An OutputHandler instance. If provided, its send() and react()
                  methods are wrapped as send_callback and reaction_callback.
     """
@@ -2048,10 +2050,6 @@ async def _execute_agent_session(session: AgentSession) -> None:
         - Safety cap of MAX_NUDGE_COUNT nudges → deliver regardless
         """
         nonlocal agent_session  # Re-read from Redis for fresh stage data
-
-        if not send_cb:
-            logger.warning(f"[{session.project_key}] No send callback available, dropping output")
-            return
 
         from agent.health_check import is_session_unhealthy
         from agent.sdk_client import get_stop_reason
