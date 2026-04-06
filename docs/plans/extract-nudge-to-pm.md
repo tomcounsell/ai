@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: build_complete
 type: feature
 appetite: Medium
 owner: Valor

@@ -24,7 +24,6 @@ import signal
 import subprocess
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -36,6 +35,15 @@ from agent.branch_manager import (
 )
 from agent.constants import REACTION_COMPLETE, REACTION_ERROR, REACTION_SUCCESS
 from agent.output_handler import OutputHandler
+
+# Output routing — decision logic lives in output_router; re-exported here
+# for backward compatibility with callers that import from agent_session_queue.
+from agent.output_router import (
+    MAX_NUDGE_COUNT,  # noqa: F401
+    NUDGE_MESSAGE,
+    SendToChatResult,
+    determine_delivery_action,  # noqa: F401
+)
 from agent.session_logs import save_session_snapshot
 from agent.worktree_manager import WORKTREES_DIR, validate_workspace
 from config.enums import ClassificationType, PersonaType, SessionType
@@ -46,75 +54,6 @@ logger = logging.getLogger(__name__)
 
 # 4-tier priority ranking: lower number = higher priority
 PRIORITY_RANK = {"urgent": 0, "high": 1, "normal": 2, "low": 3}
-
-
-@dataclass
-class SendToChatResult:
-    """Explicit state returned from send_to_chat instead of fragile nonlocal closures.
-
-    Replaces the _defer_reaction and _completion_sent nonlocal variables that were
-    set in send_to_chat() and read in the outer _execute_agent_session() scope. Multiple code
-    paths previously set these via closure mutation; this dataclass makes the state
-    explicit and eliminates inconsistency if an exception occurs between set and read.
-    """
-
-    completion_sent: bool = False
-    defer_reaction: bool = False
-    auto_continue_count: int = 0
-
-
-def determine_delivery_action(
-    msg: str,
-    stop_reason: str | None,
-    auto_continue_count: int,
-    max_nudge_count: int,
-    session_status: str | None = None,
-    completion_sent: bool = False,
-    watchdog_unhealthy: str | None = None,
-    session_type: str | None = None,
-    classification_type: str | None = None,
-) -> str:
-    """Pure function: decide what send_to_chat should do with agent output.
-
-    Returns one of:
-        "deliver"       — send to Telegram
-        "deliver_fallback" — send fallback message (empty output, cap reached)
-        "nudge_rate_limited" — backoff then nudge (rate limited)
-        "nudge_empty"   — nudge (empty output)
-        "nudge_continue" — nudge (PM/SDLC session, continue pipeline)
-        "drop"          — drop output (completion already sent)
-        "deliver_already_completed" — deliver without nudge (session already done)
-    """
-    if session_status in _TERMINAL_STATUSES:
-        return "deliver_already_completed"
-    if completion_sent:
-        return "drop"
-    # Watchdog flagged this session as stuck — deliver instead of nudging
-    if watchdog_unhealthy:
-        return "deliver" if msg and msg.strip() else "deliver_fallback"
-    if stop_reason == "rate_limited":
-        return "nudge_rate_limited"
-    if not msg or not msg.strip():
-        if auto_continue_count + 1 <= max_nudge_count:
-            return "nudge_empty"
-        return "deliver_fallback"
-    if auto_continue_count >= max_nudge_count:
-        return "deliver"
-    # PM sessions running SDLC work should continue through pipeline stages
-    # rather than delivering after the first skill completes.
-    # The PM decides when to stop; the bridge just keeps it working.
-    if session_type == "pm" and classification_type == "sdlc":
-        return "nudge_continue"
-    if stop_reason in ("end_turn", None) and len(msg.strip()) > 0:
-        return "deliver"
-    return "deliver"
-
-
-# Nudge loop: single nudge model for bridge output routing.
-# The bridge has ONE response to any non-completion: nudge.
-# ChatSession owns all SDLC intelligence; the bridge just keeps it working.
-MAX_NUDGE_COUNT = 50  # Safety cap — deliver to Telegram after this many nudges
-NUDGE_MESSAGE = "Keep working — only stop when you need human input or you're done."
 
 
 # Agent session health check constants
@@ -2039,6 +1978,92 @@ async def _enqueue_nudge(
     )
 
 
+# ---------------------------------------------------------------------------
+# Public steering API
+# ---------------------------------------------------------------------------
+
+
+async def re_enqueue_session(
+    session: AgentSession,
+    branch_name: str,
+    task_list_id: str,
+    auto_continue_count: int,
+    output_msg: str,
+    nudge_feedback: str = "continue",
+) -> None:
+    """Public wrapper for _enqueue_nudge — re-enqueue a session with a nudge message.
+
+    Encapsulates Redis state management and worker wake-up. Callers outside
+    this module (e.g., output_router, valor-session CLI) should use this
+    instead of _enqueue_nudge directly.
+
+    Args:
+        session: The current AgentSession being re-enqueued.
+        branch_name: Git branch name for the session.
+        task_list_id: Task list ID for sub-agent isolation.
+        auto_continue_count: Current nudge count (already incremented).
+        output_msg: The agent output that triggered the nudge.
+        nudge_feedback: Nudge message sent to the agent.
+    """
+    await _enqueue_nudge(
+        session=session,
+        branch_name=branch_name,
+        task_list_id=task_list_id,
+        auto_continue_count=auto_continue_count,
+        output_msg=output_msg,
+        nudge_feedback=nudge_feedback,
+    )
+
+
+def steer_session(session_id: str, message: str) -> dict:
+    """Write a steering message to a session's queued_steering_messages.
+
+    Any process can call this to inject a message into a running or pending
+    session. The worker checks queued_steering_messages between turns and
+    injects any pending messages as user input for the next SDK turn.
+
+    Args:
+        session_id: The session_id of the target AgentSession.
+        message: The steering message to inject.
+
+    Returns:
+        dict with keys: success (bool), session_id (str), error (str | None)
+    """
+    if not message or not message.strip():
+        return {"success": False, "session_id": session_id, "error": "Empty message rejected"}
+
+    try:
+        sessions = list(AgentSession.query.filter(session_id=session_id))
+        if not sessions:
+            return {
+                "success": False,
+                "session_id": session_id,
+                "error": f"Session not found: {session_id}",
+            }
+
+        session = sessions[0]
+        current_status = getattr(session, "status", None)
+
+        if current_status in _TERMINAL_STATUSES:
+            return {
+                "success": False,
+                "session_id": session_id,
+                "error": f"Session is in terminal status {current_status!r} — steering rejected",
+            }
+
+        session.push_steering_message(message)
+        _ensure_worker(session.chat_id)
+        logger.info(
+            f"[steering] Queued steering message for session {session_id}: "
+            f"{message[:80]!r} (status={current_status})"
+        )
+        return {"success": True, "session_id": session_id, "error": None}
+
+    except Exception as e:
+        logger.error(f"[steering] steer_session failed for {session_id}: {e}")
+        return {"success": False, "session_id": session_id, "error": str(e)}
+
+
 async def _execute_agent_session(session: AgentSession) -> None:
     """
     Execute a single agent session:
@@ -2205,14 +2230,6 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 f"[{session.project_key}] Watchdog flagged session unhealthy: {unhealthy_reason}"
             )
 
-        # Use reduced nudge cap for Teammate sessions
-        _effective_nudge_cap = MAX_NUDGE_COUNT
-        if agent_session:
-            if getattr(agent_session, "session_mode", None) == PersonaType.TEAMMATE:
-                from agent.teammate_handler import TEAMMATE_MAX_NUDGE_COUNT
-
-                _effective_nudge_cap = TEAMMATE_MAX_NUDGE_COUNT
-
         # Resolve session type and classification for PM auto-continue
         _session_type = (
             getattr(agent_session, "session_mode", None)
@@ -2221,17 +2238,24 @@ async def _execute_agent_session(session: AgentSession) -> None:
             else None
         )
         _classification = getattr(session, "classification_type", None)
+        _is_teammate = (
+            agent_session is not None
+            and getattr(agent_session, "session_mode", None) == PersonaType.TEAMMATE
+        )
 
-        action = determine_delivery_action(
+        # Delegate routing decision to output_router (call site preserved here)
+        from agent.output_router import route_session_output
+
+        action, _effective_nudge_cap = route_session_output(
             msg=msg,
             stop_reason=stop_reason,
             auto_continue_count=chat_state.auto_continue_count,
-            max_nudge_count=_effective_nudge_cap,
             session_status=session_status,
             completion_sent=chat_state.completion_sent,
             watchdog_unhealthy=unhealthy_reason,
             session_type=_session_type,
             classification_type=_classification,
+            is_teammate=_is_teammate,
         )
 
         if action == "deliver_already_completed":
@@ -2253,7 +2277,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
             chat_state.auto_continue_count += 1
             logger.warning(
                 f"[{session.project_key}] Rate limited — backoff then nudge "
-                f"(nudge {chat_state.auto_continue_count}/{MAX_NUDGE_COUNT})"
+                f"(nudge {chat_state.auto_continue_count}/{_effective_nudge_cap})"
             )
             await asyncio.sleep(5)
             await _enqueue_nudge(
@@ -2271,7 +2295,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
             chat_state.auto_continue_count += 1
             logger.info(
                 f"[{session.project_key}] Empty output — nudging "
-                f"(nudge {chat_state.auto_continue_count}/{MAX_NUDGE_COUNT})"
+                f"(nudge {chat_state.auto_continue_count}/{_effective_nudge_cap})"
             )
             await _enqueue_nudge(
                 session,
@@ -2288,7 +2312,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
             chat_state.auto_continue_count += 1
             logger.info(
                 f"[{session.project_key}] PM/SDLC session — nudging to continue pipeline "
-                f"(nudge {chat_state.auto_continue_count}/{MAX_NUDGE_COUNT})"
+                f"(nudge {chat_state.auto_continue_count}/{_effective_nudge_cap})"
             )
             await _enqueue_nudge(
                 session,
@@ -2439,9 +2463,32 @@ async def _execute_agent_session(session: AgentSession) -> None:
             "name": session.project_key,
         }
 
+    # Check queued_steering_messages before starting this agent turn.
+    # If the session has pending steering messages (written by steer_session()
+    # or the PM), pop the first one and use it as the user input for this turn.
+    # This is the mechanism that replaces hardcoded nudge text — any process
+    # can write to queued_steering_messages to steer the session externally.
+    _turn_input = enriched_text
+    if agent_session:
+        try:
+            steering_msgs = agent_session.pop_steering_messages()
+            if steering_msgs:
+                _turn_input = steering_msgs[0]
+                logger.info(
+                    f"[{session.project_key}] Injecting steering message for session "
+                    f"{session.session_id}: {_turn_input[:80]!r} "
+                    f"({len(steering_msgs)} queued, used first)"
+                )
+                if len(steering_msgs) > 1:
+                    # Re-queue remaining messages for future turns
+                    for _remaining in steering_msgs[1:]:
+                        agent_session.push_steering_message(_remaining)
+        except Exception as _steer_err:
+            logger.debug(f"[{session.project_key}] Steering check failed (non-fatal): {_steer_err}")
+
     async def do_work() -> str:
         return await get_agent_response_sdk(
-            enriched_text,
+            _turn_input,
             session.session_id,
             session.sender_name,
             session.chat_title,
