@@ -48,7 +48,7 @@ reflections:
 | Name | Interval | Priority | Type | Description |
 |------|----------|----------|------|-------------|
 | `health-check` | 5 min | high | function | Check running jobs for liveness, recover stuck ones |
-| `orphan-recovery` | 30 min | normal | function | Recover stranded AgentSession objects |
+| `agent-session-cleanup` | 1 hour | normal | function | Delete corrupted AgentSession records (invalid IDs, unsaveable) and rebuild indexes |
 | `stale-branch-cleanup` | daily | low | function | Clean up session branches older than 72 hours |
 | `popoto-index-cleanup` | daily | low | function | Rebuild Popoto model indexes to remove orphaned entries (see [Popoto Index Hygiene](popoto-index-hygiene.md)) |
 

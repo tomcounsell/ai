@@ -647,8 +647,19 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         log("Setting restart flag for graceful restart...", v, always=True)
         git.set_restart_requested(project_dir, result.git_result.commit_count)
 
-    # Step 5.5: Clean up stale sessions (kill orphaned running/pending)
-    # Terminal sessions are preserved for reflections to analyze.
+    # Step 5.5: Clean up corrupted + stale sessions
+    # Corrupted sessions (invalid IDs) are deleted first to prevent error spam.
+    # Then stale running/pending sessions are killed. Terminal sessions are
+    # preserved for reflections to analyze.
+    try:
+        from agent.agent_session_queue import cleanup_corrupted_agent_sessions
+
+        corrupted = cleanup_corrupted_agent_sessions()
+        if corrupted > 0:
+            log(f"Cleaned up {corrupted} corrupted session(s)", v)
+    except Exception as e:
+        log(f"WARN: Corrupted session cleanup failed: {e}", v)
+
     try:
         stale_killed = _cleanup_stale_sessions(project_dir)
         if stale_killed > 0:

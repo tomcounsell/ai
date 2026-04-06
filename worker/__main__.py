@@ -113,6 +113,7 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
         _agent_session_health_loop,
         _ensure_worker,
         _recover_interrupted_agent_sessions_startup,
+        cleanup_corrupted_agent_sessions,
         register_callbacks,
         request_shutdown,
     )
@@ -141,6 +142,11 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     for project_key in projects:
         register_callbacks(project_key, handler=handler)
         logger.info(f"[{project_key}] Registered FileOutputHandler")
+
+    # Clean up corrupted sessions before recovery (prevents error spam)
+    cleaned = cleanup_corrupted_agent_sessions()
+    if cleaned:
+        logger.info(f"Cleaned up {cleaned} corrupted session(s)")
 
     # Recover any sessions that were running when the previous process died
     recovered = _recover_interrupted_agent_sessions_startup()

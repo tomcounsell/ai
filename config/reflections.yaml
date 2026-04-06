@@ -34,13 +34,13 @@ reflections:
     callable: "agent.agent_session_queue._agent_session_health_check"
     enabled: true
 
-  - name: orphan-recovery
-    description: "Recover AgentSession objects stranded by index corruption"
-    interval: 1800  # 30 minutes
+  - name: agent-session-cleanup
+    description: "Delete corrupted AgentSession records (invalid IDs, unsaveable) and rebuild indexes"
+    interval: 3600  # 1 hour
     priority: normal
     execution_type: function
-    callable: "agent.agent_session_queue.recover_orphaned_agent_sessions_all_projects"
-    enabled: false
+    callable: "agent.agent_session_queue.cleanup_corrupted_agent_sessions"
+    enabled: true
 
   - name: stale-branch-cleanup
     description: "Clean up session branches older than 72 hours"

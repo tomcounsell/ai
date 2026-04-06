@@ -2777,13 +2777,104 @@ async def cleanup_stale_branches(working_dir: str, max_age_hours: float = 72) ->
 # and iterate all registered projects, so they don't need a project_key argument.
 
 
-def recover_orphaned_agent_sessions_all_projects() -> int:
-    """No-op: orphan recovery is now handled by the unified _agent_session_health_check.
+def cleanup_corrupted_agent_sessions() -> int:
+    """Delete AgentSession records with corrupted data that prevent .save().
 
-    Kept for backward compatibility with the reflection scheduler.
+    Detects sessions where the ID field has an invalid length (e.g., 60 chars
+    instead of the expected 32 for uuid4), or where .save() raises ModelException.
+    These records jam the health check and startup recovery loops with repeated
+    errors because they can't be transitioned or finalized through normal ORM ops.
+
+    After deleting corrupted records, rebuilds AgentSession indexes to clean
+    orphaned $IndexF/$KeyF/$SortF entries pointing to deleted objects.
+
+    Called by the reflection scheduler as the 'agent-session-cleanup' reflection.
+    Also safe to call from startup recovery or the update script.
+
+    Returns the number of corrupted sessions deleted.
     """
-    logger.debug("[reflection] Orphan recovery delegated to unified health check")
-    return 0
+    from popoto.exceptions import ModelException
+
+    cleaned = 0
+    all_sessions = list(AgentSession.query.all())
+
+    for session in all_sessions:
+        session_id_str = str(getattr(session, "id", "") or "")
+        is_corrupt = False
+
+        # Check 1: ID length validation (uuid4 strategy expects 32 chars)
+        if session_id_str and len(session_id_str) != 32:
+            logger.warning(
+                "[agent-session-cleanup] Corrupted session detected: id=%s "
+                "(length %d, expected 32), session_id=%s",
+                session_id_str[:20],
+                len(session_id_str),
+                getattr(session, "session_id", "?"),
+            )
+            is_corrupt = True
+
+        # Check 2: Try a no-op save to detect other validation failures
+        if not is_corrupt:
+            try:
+                session.save()
+            except (ModelException, Exception) as e:
+                if "invalid" in str(e).lower() or "validation" in str(e).lower():
+                    logger.warning(
+                        "[agent-session-cleanup] Unsaveable session detected: "
+                        "id=%s, session_id=%s, error=%s",
+                        session_id_str[:20],
+                        getattr(session, "session_id", "?"),
+                        e,
+                    )
+                    is_corrupt = True
+
+        if is_corrupt:
+            try:
+                session.delete()
+                cleaned += 1
+            except Exception as del_err:
+                logger.warning(
+                    "[agent-session-cleanup] ORM delete failed for %s, "
+                    "attempting direct Redis cleanup: %s",
+                    session_id_str[:20],
+                    del_err,
+                )
+                # Fallback: direct Redis key deletion
+                try:
+                    import redis as _redis
+
+                    r = _redis.Redis()
+                    pattern = f"*{session_id_str}*"
+                    for key in r.scan_iter(match=pattern):
+                        r.delete(key)
+                    cleaned += 1
+                except Exception as redis_err:
+                    logger.error(
+                        "[agent-session-cleanup] Direct Redis cleanup failed for %s: %s",
+                        session_id_str[:20],
+                        redis_err,
+                    )
+
+    # Rebuild indexes to clean any remaining orphaned references
+    if cleaned > 0:
+        try:
+            AgentSession.rebuild_indexes()
+            logger.info(
+                "[agent-session-cleanup] Rebuilt AgentSession indexes after "
+                "cleaning %d corrupted session(s)",
+                cleaned,
+            )
+        except Exception as idx_err:
+            logger.warning("[agent-session-cleanup] Index rebuild failed: %s", idx_err)
+    else:
+        logger.debug("[agent-session-cleanup] No corrupted sessions found")
+
+    return cleaned
+
+
+def recover_orphaned_agent_sessions_all_projects() -> int:
+    """Backward-compat alias for cleanup_corrupted_agent_sessions."""
+    return cleanup_corrupted_agent_sessions()
 
 
 async def cleanup_stale_branches_all_projects() -> list[str]:
