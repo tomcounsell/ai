@@ -22,7 +22,7 @@ class TestWorkerImport:
 
     def test_worker_main_importable(self):
         """worker.__main__ should be importable."""
-        from worker.__main__ import main, _parse_args, _load_projects
+        from worker.__main__ import _load_projects, _parse_args, main
 
         assert callable(main)
         assert callable(_parse_args)
@@ -77,9 +77,7 @@ class TestWorkerDryRun:
         )
         # Should contain "worker" in output somewhere
         combined = result.stdout + result.stderr
-        assert "worker" in combined.lower(), (
-            f"Expected 'worker' in output, got: {combined[:500]}"
-        )
+        assert "worker" in combined.lower(), f"Expected 'worker' in output, got: {combined[:500]}"
 
     def test_dry_run_with_bad_project(self):
         """--project with nonexistent project should exit with error."""
@@ -98,7 +96,11 @@ class TestRegisterCallbacksWithHandler:
 
     def test_register_with_handler(self):
         """register_callbacks should accept an OutputHandler via handler kwarg."""
-        from agent.agent_session_queue import register_callbacks, _send_callbacks, _reaction_callbacks
+        from agent.agent_session_queue import (
+            _reaction_callbacks,
+            _send_callbacks,
+            register_callbacks,
+        )
         from agent.output_handler import FileOutputHandler
 
         handler = FileOutputHandler()
@@ -113,7 +115,11 @@ class TestRegisterCallbacksWithHandler:
 
     def test_register_with_raw_callables(self):
         """register_callbacks should still accept raw callables (backward compat)."""
-        from agent.agent_session_queue import register_callbacks, _send_callbacks, _reaction_callbacks
+        from agent.agent_session_queue import (
+            _reaction_callbacks,
+            _send_callbacks,
+            register_callbacks,
+        )
 
         async def fake_send(chat_id, text, reply_to, session):
             pass
@@ -153,7 +159,11 @@ class TestImportDecoupling:
         for line in lines:
             stripped = line.strip()
             # Once we hit a function/class def, we're past module-level imports
-            if stripped.startswith("def ") or stripped.startswith("class ") or stripped.startswith("async def "):
+            if (
+                stripped.startswith("def ")
+                or stripped.startswith("class ")
+                or stripped.startswith("async def ")
+            ):
                 if not stripped.startswith("def _"):
                     # Could be a top-level function
                     pass
@@ -161,9 +171,7 @@ class TestImportDecoupling:
                 continue
 
             if in_imports and stripped.startswith("from bridge."):
-                pytest.fail(
-                    f"Module-level bridge import found: {stripped}"
-                )
+                pytest.fail(f"Module-level bridge import found: {stripped}")
 
     def test_bridge_has_no_execution_function_imports(self):
         """bridge/telegram_bridge.py must not import execution functions from agent_session_queue.
@@ -174,9 +182,7 @@ class TestImportDecoupling:
         - _agent_session_health_loop
         - _cleanup_orphaned_claude_processes
         """
-        source = (
-            Path(__file__).parent.parent.parent / "bridge" / "telegram_bridge.py"
-        ).read_text()
+        source = (Path(__file__).parent.parent.parent / "bridge" / "telegram_bridge.py").read_text()
 
         forbidden_imports = [
             "_ensure_worker",
@@ -184,8 +190,6 @@ class TestImportDecoupling:
             "_agent_session_health_loop",
             "_cleanup_orphaned_claude_processes",
         ]
-
-        import re
 
         # Find all import statements in the file
         import_lines = [
@@ -197,9 +201,7 @@ class TestImportDecoupling:
         for fn_name in forbidden_imports:
             for import_line in import_lines:
                 if fn_name in import_line:
-                    pytest.fail(
-                        f"Execution function '{fn_name}' imported in bridge: {import_line}"
-                    )
+                    pytest.fail(f"Execution function '{fn_name}' imported in bridge: {import_line}")
 
     def test_reaction_constants_importable_from_agent(self):
         """REACTION_* constants should be importable from agent.constants."""
@@ -239,54 +241,42 @@ class TestWorkerStartupSequence:
 
     def test_worker_imports_cleanup_orphaned(self):
         """worker/__main__.py must import _cleanup_orphaned_claude_processes."""
-        source = (
-            Path(__file__).parent.parent.parent / "worker" / "__main__.py"
-        ).read_text()
+        source = (Path(__file__).parent.parent.parent / "worker" / "__main__.py").read_text()
         assert "_cleanup_orphaned_claude_processes" in source, (
             "worker/__main__.py must import and call _cleanup_orphaned_claude_processes"
         )
 
     def test_worker_calls_rebuild_indexes(self):
         """worker/__main__.py must call AgentSession.rebuild_indexes()."""
-        source = (
-            Path(__file__).parent.parent.parent / "worker" / "__main__.py"
-        ).read_text()
+        source = (Path(__file__).parent.parent.parent / "worker" / "__main__.py").read_text()
         assert "rebuild_indexes" in source, (
             "worker/__main__.py must call AgentSession.rebuild_indexes() at startup"
         )
 
     def test_worker_calls_recover_interrupted(self):
         """worker/__main__.py must call _recover_interrupted_agent_sessions_startup."""
-        source = (
-            Path(__file__).parent.parent.parent / "worker" / "__main__.py"
-        ).read_text()
+        source = (Path(__file__).parent.parent.parent / "worker" / "__main__.py").read_text()
         assert "_recover_interrupted_agent_sessions_startup" in source, (
             "worker/__main__.py must call _recover_interrupted_agent_sessions_startup at startup"
         )
 
     def test_worker_calls_cleanup_corrupted(self):
         """worker/__main__.py must call cleanup_corrupted_agent_sessions."""
-        source = (
-            Path(__file__).parent.parent.parent / "worker" / "__main__.py"
-        ).read_text()
+        source = (Path(__file__).parent.parent.parent / "worker" / "__main__.py").read_text()
         assert "cleanup_corrupted_agent_sessions" in source, (
             "worker/__main__.py must call cleanup_corrupted_agent_sessions at startup"
         )
 
     def test_worker_calls_health_loop(self):
         """worker/__main__.py must start _agent_session_health_loop."""
-        source = (
-            Path(__file__).parent.parent.parent / "worker" / "__main__.py"
-        ).read_text()
+        source = (Path(__file__).parent.parent.parent / "worker" / "__main__.py").read_text()
         assert "_agent_session_health_loop" in source, (
             "worker/__main__.py must start _agent_session_health_loop as background task"
         )
 
     def test_worker_calls_ensure_worker_for_pending(self):
         """worker/__main__.py must call _ensure_worker for pending sessions at startup."""
-        source = (
-            Path(__file__).parent.parent.parent / "worker" / "__main__.py"
-        ).read_text()
+        source = (Path(__file__).parent.parent.parent / "worker" / "__main__.py").read_text()
         assert "_ensure_worker" in source, (
             "worker/__main__.py must call _ensure_worker for pending sessions at startup"
         )
@@ -310,14 +300,13 @@ class TestWorkerStartupSequence:
     def test_worker_startup_sequence_order(self):
         """Verify the startup sequence order in worker/__main__.py.
 
-        Checks line numbers of actual function calls (not imports) to confirm:
-        rebuild_indexes -> cleanup_corrupted -> recover_interrupted -> cleanup_orphaned -> ensure_workers
+        Checks line numbers of actual function calls (not imports) to confirm the
+        deterministic order: rebuild_indexes -> cleanup_corrupted -> recover_interrupted
+        -> cleanup_orphaned -> ensure_workers.
         """
         import re
 
-        source = (
-            Path(__file__).parent.parent.parent / "worker" / "__main__.py"
-        ).read_text()
+        source = (Path(__file__).parent.parent.parent / "worker" / "__main__.py").read_text()
 
         lines = source.split("\n")
 
