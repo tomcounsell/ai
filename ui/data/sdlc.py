@@ -606,10 +606,12 @@ def get_pipeline_detail(agent_session_id: str) -> PipelineProgress | None:
     from models.agent_session import AgentSession
 
     try:
-        session = AgentSession.query.get(agent_session_id)
-        if not session:
+        # AgentSession.query.get() requires a Popoto key object, not a raw string.
+        # Filter via all() instead.
+        matches = [s for s in AgentSession.query.all() if s.id == agent_session_id]
+        if not matches:
             return None
-        return _session_to_pipeline(session)
+        return _session_to_pipeline(matches[0])
     except Exception as e:
         logger.warning(f"Failed to get pipeline detail for {agent_session_id}: {e}")
         return None

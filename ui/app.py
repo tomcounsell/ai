@@ -159,7 +159,7 @@ def create_app() -> FastAPI:
         pipeline = get_pipeline_detail(agent_session_id)
         return templates.TemplateResponse(
             request,
-            "_partials/session_detail_inline.html",
+            "_partials/session_modal_content.html",
             {"pipeline": pipeline},
         )
 

@@ -861,11 +861,15 @@ a:hover {
 .modal-overlay {
     display: none;
     position: fixed;
-    inset: 0;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
     background: rgba(0, 0, 0, 0.65);
     z-index: 1000;
     align-items: center;
     justify-content: center;
+    overflow-y: auto;
 }
 
 .modal-overlay.open {
@@ -906,5 +910,30 @@ a:hover {
 
 .modal-panel .inline-detail {
     border-top: none;
+    padding: 20px 24px 24px;
+}
+
+.modal-content {
+    display: flex;
+    flex-direction: column;
+}
+
+.modal-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 18px 24px 14px;
+    border-bottom: 1px solid var(--border);
+}
+
+.modal-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text-primary);
+    flex: 1;
+    margin: 0;
+}
+
+.modal-body {
     padding: 20px 24px 24px;
 }
