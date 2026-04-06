@@ -87,7 +87,7 @@ No prerequisites -- Redis and relay infrastructure already exist and are stable.
 1. **Rewrite `cmd_send()`** to build a relay-compatible payload and push to Redis, mirroring `send_telegram.py`'s `send_message()` but sourcing chat_id/reply_to from CLI args instead of env vars
 2. **Add `--reply-to` flag** to the send subparser for forum group support
 3. **Use synthetic session_id** (`cli-{uuid4().hex[:12]}`) for the queue key since CLI sends have no session context -- UUID fragment avoids collisions from rapid invocations
-4. **Import and call `_linkify_text()` from `tools.send_telegram`** (not copy) and apply simple char truncation (`text[:4093] + "..."`) before queueing -- matches `send_telegram.py` behavior exactly
+4. **Import and call `linkify_text()` from `tools.send_telegram`** (rename from `_linkify_text` to make it public) and apply simple char truncation (`text[:4093] + "..."`) before queueing -- matches `send_telegram.py` behavior exactly
 5. **Remove direct Telethon usage** from `cmd_send()` entirely -- no fallback to direct send. If Redis/relay is unavailable, error clearly.
 6. **Keep `_telethon_client()` and `_fetch_from_telegram_api()`** for the `read` command's API fallback (read operations don't conflict because they only hold the SQLite lock briefly)
 
@@ -100,7 +100,7 @@ No prerequisites -- Redis and relay infrastructure already exist and are stable.
 ### Empty/Invalid Input Handling
 - [ ] Test empty message with no file -- should error
 - [ ] Test non-existent file path -- should error before queueing
-- [ ] Test message over 4096 chars -- should truncate at sentence boundary
+- [ ] Test message over 4096 chars -- should truncate with simple char truncation (`text[:4093] + "..."`) and `...` suffix
 
 ### Error State Rendering
 - [ ] All error paths print to stderr and return non-zero exit code
@@ -188,9 +188,10 @@ No agent integration required -- `valor-telegram` is a human-facing CLI tool. Th
 - **Parallel**: true
 - Remove direct Telethon client creation from `cmd_send()`
 - Add `--reply-to` argument to send subparser
+- Preserve `--image` (`-i`) and `--audio` (`-a`) as aliases for `--file` -- these are existing CLI flags that users may rely on; treat all three identically as file attachment paths in the queue payload
 - Build relay-compatible payload: `{chat_id, reply_to, text, file_paths, session_id, timestamp}`
 - Use synthetic session_id: `f"cli-{uuid4().hex[:12]}"` (UUID fragment for collision resistance)
-- Import and call `_linkify_text()` from `tools.send_telegram` (no code duplication)
+- Import and call `linkify_text()` from `tools.send_telegram` (rename from `_linkify_text` to make it public, since it's now used cross-module)
 - Truncate text using simple char truncation: `text[:4093] + "..."` (matches `send_telegram.py`)
 - Push to `telegram:outbox:{session_id}` via Redis RPUSH with 1-hour TTL
 - Handle file validation (exists check) before queueing
@@ -253,7 +254,9 @@ No agent integration required -- `valor-telegram` is a human-facing CLI tool. Th
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room) on 2026-04-06. -->
+<!-- Populated by /do-plan-critique (war room) round 1 on 2026-04-06. -->
+
+### Round 1 (Resolved)
 
 | Severity | Critic | Finding | Resolution |
 |----------|--------|---------|------------|
@@ -264,7 +267,15 @@ No agent integration required -- `valor-telegram` is a human-facing CLI tool. Th
 | NIT | Operator | Verification grep for "No direct Telethon in send" expects output "contains 1" but file already has 3+ matches from read path. | **RESOLVED**: Narrowed grep to `cmd_send` function scope. |
 | NIT | User | Risk 1 (bridge down = warning after queue) and Solution item 5 (Redis down = hard error) are different failure modes but not clearly distinguished in tasks. | **RESOLVED**: Task 1 now explicitly distinguishes: Redis failure = error exit, bridge down = warning after successful queue. |
 
-**Verdict: REVISED** -- All 6 findings addressed.
+### Round 2 (2026-04-06)
+
+| Severity | Critic | Finding | Resolution |
+|----------|--------|---------|------------|
+| CONCERN | Skeptic | Failure Path Test Strategy (line 103) says "should truncate at sentence boundary" but Solution section says simple char truncation (`text[:4093] + "..."`). Stale text from round 1 fix -- builder may implement the wrong truncation logic. | **RESOLVED**: Updated Failure Path Test Strategy to match: "simple char truncation (`text[:4093] + '...'`) and `...` suffix". |
+| CONCERN | Adversary | Current `cmd_send()` accepts `--image` and `--audio` flags (lines 391-392) as aliases for `--file`. Plan Task 1 only mentions `--file` and `--reply-to`. Builder needs explicit guidance: preserve, drop, or unify these flags in the rewrite. | **RESOLVED**: Added explicit guidance to Task 1: preserve `--image` and `--audio` as aliases for `--file`, treat all three identically as file attachment paths. |
+| NIT | Skeptic | `_linkify_text()` is a private function (underscore prefix) in `tools.send_telegram`. Importing it creates coupling to an internal API. Consider making it public or extracting to a shared module. | **RESOLVED**: Plan now specifies renaming `_linkify_text` to `linkify_text` (public) in `send_telegram.py` since it's used cross-module. |
+
+**Verdict: READY TO BUILD** -- all round 2 findings resolved.
 
 ---
 
