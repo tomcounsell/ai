@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Done
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -162,8 +162,8 @@ The existing filter (`s.status == "completed"`) and loop structure remain unchan
 
 ## Test Impact
 
-- [ ] `tests/unit/test_recovery_respawn_safety.py` — UPDATE: add test class `TestIntakePathTerminalGuard` covering the new guard. No existing tests break since we're adding to the module, not modifying existing guards.
-- [ ] `tests/unit/test_agent_session_queue_async.py` — UPDATE: add test for revised `_mark_superseded()` behavior (skips terminal sessions, only supersedes non-terminal ones). Check existing `test_mark_superseded` tests if present.
+- [x] `tests/unit/test_recovery_respawn_safety.py` — UPDATE: add test class `TestIntakePathTerminalGuard` covering the new guard. No existing tests break since we're adding to the module, not modifying existing guards.
+- [x] `tests/unit/test_agent_session_queue_async.py` — UPDATE: add test for revised `_mark_superseded()` behavior (skips terminal sessions, only supersedes non-terminal ones). Check existing `test_mark_superseded` tests if present.
 
 ## Rabbit Holes
 
@@ -221,19 +221,19 @@ No agent integration required — this is a bridge-internal change to the intake
 
 ## Documentation
 
-- [ ] Update `docs/features/session-recovery-mechanisms.md`: change "7 mechanisms" to "8 mechanisms" in the overview, add a new "8. Message Intake Path" section under Active Mechanisms (location, trigger, what it does, guard description), and add a row to the Test Coverage table.
-- [ ] Add entry for mechanism 8 to the `## Test Coverage` table in `docs/features/session-recovery-mechanisms.md` linking to the new `TestIntakePathTerminalGuard` tests.
+- [x] Update `docs/features/session-recovery-mechanisms.md`: change "7 mechanisms" to "8 mechanisms" in the overview, add a new "8. Message Intake Path" section under Active Mechanisms (location, trigger, what it does, guard description), and add a row to the Test Coverage table.
+- [x] Add entry for mechanism 8 to the `## Test Coverage` table in `docs/features/session-recovery-mechanisms.md` linking to the new `TestIntakePathTerminalGuard` tests.
 
 ## Success Criteria
 
-- [ ] A `completed` `AgentSession` is never transitioned to `superseded` by a follow-up message (Fix 2)
-- [ ] The intake path in `telegram_bridge.py` has an explicit terminal-status guard before `enqueue_agent_session()` (Fix 1)
-- [ ] `_mark_superseded()` skips sessions that are already in `TERMINAL_STATUSES` (Fix 2)
-- [ ] The `completed → superseded → pending → running → completed` cycling does not occur
-- [ ] `docs/features/session-recovery-mechanisms.md` documents the intake path as Mechanism 8 with its guard status
-- [ ] New tests cover the intake path guard (Fix 1) and revised `_mark_superseded()` behavior (Fix 2)
-- [ ] All 15 existing `test_recovery_respawn_safety.py` tests continue to pass
-- [ ] Ruff lint and format pass
+- [x] A `completed` `AgentSession` is never transitioned to `superseded` by a follow-up message (Fix 2)
+- [x] The intake path in `telegram_bridge.py` has an explicit terminal-status guard before `enqueue_agent_session()` (Fix 1)
+- [x] `_mark_superseded()` skips sessions that are already in `TERMINAL_STATUSES` (Fix 2)
+- [x] The `completed → superseded → pending → running → completed` cycling does not occur
+- [x] `docs/features/session-recovery-mechanisms.md` documents the intake path as Mechanism 8 with its guard status
+- [x] New tests cover the intake path guard (Fix 1) and revised `_mark_superseded()` behavior (Fix 2)
+- [x] All 15 existing `test_recovery_respawn_safety.py` tests continue to pass
+- [x] Ruff lint and format pass
 
 ## Team Orchestration
 
