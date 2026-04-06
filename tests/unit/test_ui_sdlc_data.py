@@ -376,7 +376,7 @@ class TestSessionToPipeline:
         """datetime.datetime values in timestamp fields should be converted to float."""
         from ui.data.sdlc import _session_to_pipeline
 
-        now = datetime.datetime.now()
+        now = datetime.datetime.now(datetime.UTC)
         mock_session = _make_mock_session(
             created_at=now,
             started_at=now,
@@ -634,7 +634,7 @@ class TestSafeFloat:
         """datetime.datetime objects should be converted via .timestamp()."""
         from ui.data.sdlc import _safe_float
 
-        dt = datetime.datetime(2026, 1, 1)
+        dt = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
         result = _safe_float(dt)
         assert result is not None
         assert isinstance(result, float)
