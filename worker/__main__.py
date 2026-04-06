@@ -81,8 +81,7 @@ def _load_projects(project_filter: str | None = None) -> dict:
         config = load_config()
     except ImportError:
         logger.error(
-            "Could not import bridge.routing.load_config. "
-            "Ensure the project root is on PYTHONPATH."
+            "Could not import bridge.routing.load_config. Ensure the project root is on PYTHONPATH."
         )
         sys.exit(1)
 
@@ -110,10 +109,12 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     5. Waits for shutdown signal
     """
     from agent.agent_session_queue import (
+        _active_workers,
         _agent_session_health_loop,
         _ensure_worker,
         _recover_interrupted_agent_sessions_startup,
         register_callbacks,
+        request_shutdown,
     )
     from agent.output_handler import FileOutputHandler
 
@@ -173,13 +174,25 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
 
     def _signal_handler(sig, frame):
         logger.info(f"Received signal {sig}, shutting down gracefully...")
+        request_shutdown()  # Signal all worker loops to finish current sessions
         shutdown_event.set()
 
     signal.signal(signal.SIGTERM, _signal_handler)
     signal.signal(signal.SIGINT, _signal_handler)
 
-    # Wait for shutdown
+    # Wait for shutdown signal
     await shutdown_event.wait()
+
+    # Wait for active worker loops to finish their current sessions
+    active_tasks = [t for t in _active_workers.values() if not t.done()]
+    if active_tasks:
+        logger.info(f"Waiting for {len(active_tasks)} active worker(s) to finish...")
+        done, pending = await asyncio.wait(active_tasks, timeout=60)
+        if pending:
+            logger.warning(f"{len(pending)} worker(s) did not finish in 60s, cancelling...")
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
 
     # Cancel health monitor
     health_task.cancel()

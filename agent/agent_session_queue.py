@@ -1350,6 +1350,25 @@ DRAIN_TIMEOUT = 1.5  # seconds
 _active_workers: dict[str, asyncio.Task] = {}
 _active_events: dict[str, asyncio.Event] = {}
 
+# Graceful shutdown coordination: when set, worker loops finish their current
+# session and exit instead of waiting for new work.
+_shutdown_requested: bool = False
+
+
+def request_shutdown() -> None:
+    """Signal all worker loops to finish current work and exit.
+
+    Called by the standalone worker's SIGTERM handler. Sets the shutdown flag
+    and wakes all waiting workers so they can check the flag and exit.
+    """
+    global _shutdown_requested
+    _shutdown_requested = True
+    # Wake all waiting workers so they see the flag
+    for event in _active_events.values():
+        event.set()
+    logger.info("Shutdown requested — workers will finish current sessions and exit")
+
+
 # Callbacks registered by the bridge for sending messages and reactions
 SendCallback = Callable[[str, str, int, Any], Awaitable[None]]  # (chat_id, text, reply_to, session)
 ReactionCallback = Callable[[str, int, str | None], Awaitable[None]]
@@ -1554,7 +1573,14 @@ def _ensure_worker(chat_id: str) -> None:
 async def _worker_loop(chat_id: str, event: asyncio.Event) -> None:
     """
     Process sessions sequentially for one chat.
-    Runs until queue is empty, then exits (restarted on next enqueue).
+
+    In bridge mode (default): runs until queue is empty, then exits
+    (restarted on next enqueue via _ensure_worker).
+
+    In standalone mode (VALOR_WORKER_MODE=standalone): waits indefinitely
+    for new work — never exits on empty queue. This eliminates the 10s
+    launchd restart gap that breaks nudge cycles in multi-turn pipelines.
+
     After each session, checks for a restart flag written by remote-update.sh.
 
     Workers are per-chat_id so different chat groups can run in parallel.
@@ -1565,32 +1591,51 @@ async def _worker_loop(chat_id: str, event: asyncio.Event) -> None:
     2. If the event fires (new work enqueued), pop the next session via _pop_agent_session().
     3. If the timeout expires, use _pop_agent_session_with_fallback() which includes a
        synchronous Popoto query that bypasses the to_thread() index visibility race.
-    4. Before exiting, run a final _pop_agent_session_with_fallback() as a safety net.
+    4. (Bridge mode only) Before exiting, run a final _pop_agent_session_with_fallback().
 
     CancelledError is caught explicitly to ensure proper session completion
     and worker cleanup instead of silent death.
     """
+    standalone = os.environ.get("VALOR_WORKER_MODE") == "standalone"
     try:
         while True:
+            # Check shutdown flag before starting new work
+            if _shutdown_requested:
+                logger.info(f"[chat:{chat_id}] Shutdown requested, worker exiting")
+                break
+
             session = await _pop_agent_session(chat_id)
             if session is None:
                 # Event-based drain: wait for enqueue_agent_session() to signal new work,
                 # or fall back to sync query after timeout.
                 event.clear()
-                try:
-                    await asyncio.wait_for(event.wait(), timeout=DRAIN_TIMEOUT)
-                    # Event fired — new work was enqueued
+
+                if standalone:
+                    # Persistent mode: wait indefinitely for new work
+                    await event.wait()
+                    if _shutdown_requested:
+                        logger.info(f"[chat:{chat_id}] Woke from wait, shutdown requested")
+                        break
                     session = await _pop_agent_session(chat_id)
-                except TimeoutError:
-                    # Timeout — use sync fallback to bypass index visibility race
-                    session = await _pop_agent_session_with_fallback(chat_id)
+                else:
+                    # Bridge mode: timeout and exit if no work arrives
+                    try:
+                        await asyncio.wait_for(event.wait(), timeout=DRAIN_TIMEOUT)
+                        # Event fired — new work was enqueued
+                        session = await _pop_agent_session(chat_id)
+                    except TimeoutError:
+                        # Timeout — use sync fallback to bypass index visibility race
+                        session = await _pop_agent_session_with_fallback(chat_id)
 
                 if session is not None:
                     logger.info(
                         f"[chat:{chat_id}] Drain guard caught session that would have been lost"
                     )
+                elif standalone:
+                    # Persistent mode: event fired but no session found — loop back
+                    continue
                 else:
-                    # Exit-time safety check: one final sync scan before giving up
+                    # Bridge mode: exit-time safety check
                     session = await _pop_agent_session_with_fallback(chat_id)
                     if session is not None:
                         logger.warning(
@@ -1714,6 +1759,11 @@ async def _worker_loop(chat_id: str, event: asyncio.Event) -> None:
 
             # Clear the event after processing so the next drain wait starts fresh
             event.clear()
+
+            # Check shutdown flag after each completed session
+            if _shutdown_requested:
+                logger.info(f"[chat:{chat_id}] Shutdown requested after session, exiting")
+                break
 
             # Check restart flag after each completed session
             if _check_restart_flag():
