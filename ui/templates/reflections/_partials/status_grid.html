@@ -3,16 +3,19 @@
 <table class="data-table">
     <thead>
         <tr>
+            <th style="width: 20px;"></th>
             <th>Name</th>
-            <th>Status</th>
-            <th>Last Run</th>
             <th>Timing</th>
-            <th>Priority</th>
         </tr>
     </thead>
     <tbody>
         {% for r in reflections %}
         <tr>
+            <td style="text-align: center;">
+                {% if not r.enabled %}<span class="badge badge-skipped">off</span>
+                {% elif r.last_status in ('error', 'failed') %}<span style="color: var(--red);">●</span>
+                {% else %}<span style="color: #22c55e;">●</span>{% endif %}
+            </td>
             <td>
                 <div class="card-title">{{ r.name }}</div>
                 <div class="text-muted" style="font-size: 12px;">{{ r.description }}</div>
@@ -20,14 +23,13 @@
                 <div style="font-size: 11px; color: var(--red); margin-top: 4px; font-family: var(--font-mono);">{{ r.last_error }}</div>
                 {% endif %}
             </td>
-            <td>{% if not r.enabled %}<span class="badge badge-skipped">disabled</span>{% else %}{{ status_badge(r.last_status) }}{% endif %}</td>
-            <td class="mono">{{ format_ts(r.last_run) }}</td>
-            <td class="mono">
-                <span style="display: inline-block; min-width: 5ch;">{{ format_interval(r.interval) }}</span>
-                <span class="text-muted">/</span>
-                <span style="display: inline-block; min-width: 5ch;">{{ format_dur(r.last_duration) }}</span>
+            <td class="mono" style="white-space: nowrap;">
+                <span class="priority-icon">{% if r.priority == 'urgent' %}⬆⬆{% elif r.priority == 'high' %}⬆{% elif r.priority == 'low' %}⬇{% endif %}</span>
+                <span style="display: inline-block; width: 80px;">{{ format_ts(r.last_run) }}</span>
+                <span class="duration-label">{{ format_dur(r.last_duration) }}</span>
+                <span class="text-muted" style="margin: 0 4px;">→</span>
+                <span style="display: inline-block; width: 80px;">{{ format_ts(r.next_due) }}</span>
             </td>
-            <td><span class="badge badge-{{ r.priority }}">{{ r.priority }}</span></td>
         </tr>
         {% endfor %}
     </tbody>

@@ -54,7 +54,7 @@ def _filter_format_duration(seconds: float | None) -> str:
     if seconds is None:
         return "-"
     if seconds < 60:
-        return "<1m"
+        return f"{round(seconds)}s"
     if seconds < 3600:
         return f"{int(seconds / 60)}m"
     return f"{int(seconds / 3600)}h"
