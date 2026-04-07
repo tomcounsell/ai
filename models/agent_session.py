@@ -627,14 +627,11 @@ class AgentSession(Model):
             pid = current.parent_agent_session_id
             if not pid:
                 break
-            try:
-                parent = AgentSession.query.get(pid)
-                if parent is None:
-                    break
-                depth += 1
-                current = parent
-            except Exception:
+            parent = AgentSession.get_by_id(pid)
+            if parent is None:
                 break
+            depth += 1
+            current = parent
         return depth
 
     # === Derived properties from session_events ===
@@ -1008,17 +1005,23 @@ class AgentSession(Model):
             **kwargs,
         )
 
+    @classmethod
+    def get_by_id(cls, agent_session_id: str | None) -> "AgentSession | None":
+        """Look up a session by its raw string id.
+
+        Use this instead of query.get(string) — Popoto's query.get() requires
+        a key object, not a positional string. Returns None for missing/empty ids.
+        """
+        if not agent_session_id or not agent_session_id.strip():
+            return None
+        results = list(cls.query.filter(id=agent_session_id))
+        return results[0] if results else None
+
     def get_parent_session(self) -> "AgentSession | None":
         """Return the parent session if this is a child session."""
         if not self.parent_agent_session_id:
             return None
-        try:
-            return AgentSession.query.get(self.parent_agent_session_id)
-        except Exception:
-            logger.warning(
-                f"Parent session {self.parent_agent_session_id} not found for session {self.id}"
-            )
-            return None
+        return AgentSession.get_by_id(self.parent_agent_session_id)
 
     def get_parent_chat_session(self) -> "AgentSession | None":
         """Backward-compat wrapper for get_parent_session().
@@ -1270,14 +1273,7 @@ class AgentSession(Model):
         """Return the parent AgentSession if this is a child session."""
         if not self.parent_agent_session_id:
             return None
-        try:
-            parent = AgentSession.query.get(self.parent_agent_session_id)
-            return parent
-        except Exception:
-            logger.warning(
-                f"Parent agent session {self.parent_agent_session_id} not found for child {self.id}"
-            )
-            return None
+        return AgentSession.get_by_id(self.parent_agent_session_id)
 
     def get_children(self) -> list["AgentSession"]:
         """Return all child AgentSessions linked via parent_agent_session_id."""

@@ -33,12 +33,7 @@ def _list_children(parent_id: str) -> int:
     """
     from models.agent_session import AgentSession
 
-    try:
-        parent = AgentSession.query.get(parent_id)
-    except Exception:
-        print(f"Error: parent session '{parent_id}' not found", file=sys.stderr)
-        return 1
-
+    parent = AgentSession.get_by_id(parent_id)
     if parent is None:
         print(f"Error: parent session '{parent_id}' not found", file=sys.stderr)
         return 1
@@ -74,11 +69,7 @@ def _steer_child(session_id: str, message: str, parent_id: str, abort: bool) -> 
         return 1
 
     # Look up the target child session
-    try:
-        child = AgentSession.query.get(session_id)
-    except Exception:
-        child = None
-
+    child = AgentSession.get_by_id(session_id)
     if child is None:
         print(f"Error: session '{session_id}' not found", file=sys.stderr)
         return 1

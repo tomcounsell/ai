@@ -221,14 +221,7 @@ def _finalize_parent_sync(
     """
     from models.agent_session import AgentSession
 
-    try:
-        parent = AgentSession.query.get(parent_id)
-    except Exception:
-        logger.warning(
-            f"[session-hierarchy] Parent session {parent_id} lookup raised "
-            f"exception during finalization — treating child as orphaned"
-        )
-        return
+    parent = AgentSession.get_by_id(parent_id)
 
     if parent is None:
         logger.warning(
