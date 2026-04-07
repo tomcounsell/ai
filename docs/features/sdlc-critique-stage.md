@@ -45,6 +45,21 @@ The CRITIQUE -> PLAN -> CRITIQUE revision loop is capped at `MAX_CRITIQUE_CYCLES
 | `.claude/skills/do-plan-critique/SKILL.md` | Step 1.5 for SOURCE_FILES extraction |
 | `.claude/skills/do-plan-critique/CRITICS.md` | SOURCE_FILES block in critic prompt template |
 | `.claude/skills/sdlc/SKILL.md` | CRITIQUE row in dispatch table |
+| `config/personas/project-manager.md` | Hard gate rule: CRITIQUE mandatory after PLAN (in-repo fallback) |
+| `agent/sdk_client.py` line 1611 | Stage list injection includes CRITIQUE: `<PLAN\|CRITIQUE\|BUILD\|...>` |
+
+## Gate Enforcement
+
+The CRITIQUE gate is enforced at two levels so it cannot be silently bypassed:
+
+1. **PM persona** (`config/personas/project-manager.md`): Hard rule text in the PM system prompt
+   states explicitly that there is no path from PLAN to BUILD without CRITIQUE. Loaded as the
+   in-repo fallback when `~/Desktop/Valor/personas/project-manager.md` is absent (dev machines).
+   The private overlay should include these same rules.
+
+2. **Python stage list** (`agent/sdk_client.py` line 1611): The PM dispatch injection string
+   lists valid stages as `<PLAN|CRITIQUE|BUILD|TEST|PATCH|REVIEW|DOCS>`. CRITIQUE is structurally
+   present in the canonical sequence at the Python level — no persona text can omit it.
 
 ## Outcome Classification
 

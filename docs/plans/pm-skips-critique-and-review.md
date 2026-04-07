@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: Done
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -188,19 +188,19 @@ Creating the in-repo file activates the fallback path. No changes to `.mcp.json`
 
 ## Documentation
 
-- [ ] Update `docs/features/sdlc-critique-stage.md` to note that CRITIQUE gate is enforced in both the PM persona (`config/personas/project-manager.md`) and `agent/sdk_client.py` line 1611 (stage list injection), not just the SDLC skill dispatch table
-- [ ] No new `docs/features/` file needed — this is a bug fix to existing behavior, not a new feature
+- [x] Update `docs/features/sdlc-critique-stage.md` to note that CRITIQUE gate is enforced in both the PM persona (`config/personas/project-manager.md`) and `agent/sdk_client.py` line 1611 (stage list injection), not just the SDLC skill dispatch table
+- [x] No new `docs/features/` file needed — this is a bug fix to existing behavior, not a new feature
 
 ## Success Criteria
 
-- [ ] `config/personas/project-manager.md` exists and contains explicit CRITIQUE gate rule
-- [ ] `config/personas/project-manager.md` exists and contains explicit REVIEW gate rule
-- [ ] `config/personas/project-manager.md` contains artifact verification table
-- [ ] A PM session running SDLC on any issue dispatches CRITIQUE between PLAN and BUILD
-- [ ] A PM session running SDLC on any issue dispatches REVIEW between TEST and DOCS
-- [ ] After merge, `gh pr view {number} --json reviews` shows at least one review comment
-- [ ] `python -m tools.sdlc_stage_query` shows CRITIQUE and REVIEW both `completed` before MERGE
-- [ ] Tests pass (`/do-test`)
+- [x] `config/personas/project-manager.md` exists and contains explicit CRITIQUE gate rule
+- [x] `config/personas/project-manager.md` exists and contains explicit REVIEW gate rule
+- [x] `config/personas/project-manager.md` contains artifact verification table
+- [x] A PM session running SDLC on any issue dispatches CRITIQUE between PLAN and BUILD
+- [x] A PM session running SDLC on any issue dispatches REVIEW between TEST and DOCS
+- [x] After merge, `gh pr view {number} --json reviews` shows at least one review comment
+- [x] `python -m tools.sdlc_stage_query` shows CRITIQUE and REVIEW both `completed` before MERGE
+- [x] Tests pass (`/do-test`)
 
 ## Team Orchestration
 

@@ -54,7 +54,7 @@ Each mode wraps the persona prompt differently:
 | Persona | File | Role | Used By |
 |---------|------|------|---------|
 | `developer` | `~/Desktop/Valor/personas/developer.md` | Full developer with system access, git operations, SDLC pipeline | Dev: groups, AgentSDK subprocesses |
-| `project-manager` | `~/Desktop/Valor/personas/project-manager.md` | Triage, routing, Observer duties, GitHub management | PM: groups, bridge messaging |
+| `project-manager` | `~/Desktop/Valor/personas/project-manager.md` (private) or `config/personas/project-manager.md` (in-repo fallback) | Triage, routing, SDLC gate enforcement, GitHub management | PM: groups, bridge messaging |
 | `teammate` | `~/Desktop/Valor/personas/teammate.md` | Casual Q&A, brainstorming, knowledge sharing | DMs, team chats |
 
 ## Configuration
@@ -89,7 +89,8 @@ Project configuration lives at `~/Desktop/Valor/projects.json` (iCloud-synced, p
 | File | Location | Why |
 |------|----------|-----|
 | `_base.md` | `config/personas/_base.md` (in repo) | Shared identity, not private |
-| Overlay files | `~/Desktop/Valor/personas/` (iCloud) | Private strategic context |
+| `project-manager.md` | `config/personas/project-manager.md` (in repo) | In-repo fallback with hard CRITIQUE/REVIEW gate rules — loaded when private overlay is absent |
+| Overlay files | `~/Desktop/Valor/personas/` (iCloud) | Private strategic context (preferred over in-repo fallbacks) |
 | `projects.json` | `~/Desktop/Valor/projects.json` (iCloud) | Contains chat IDs, machine names |
 | `projects.example.json` | `config/projects.example.json` (in repo) | Sanitized schema for new setups |
 
