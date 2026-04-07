@@ -119,7 +119,9 @@ def _format_ts(ts: str | float | None) -> str:
             dt = datetime.fromtimestamp(ts, tz=UTC)
         else:
             dt = datetime.fromisoformat(str(ts))
-        return dt.strftime("%Y-%m-%d %H:%M:%S")
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=UTC)
+        return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
     except Exception:
         return str(ts)[:19]
 

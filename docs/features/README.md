@@ -87,7 +87,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Review Workflow Screenshots](review-workflow-screenshots.md) | Screenshot capture during review for visual validation | Shipped |
 | [Scale Agent Session Queue (Popoto + Worktrees)](scale-agent-session-queue-with-popoto-and-worktrees.md) | Redis persistence and git worktrees for parallel build execution | Shipped |
 | [SDK Modernization](sdk-modernization.md) | Upgrade to SDK v0.1.35 with programmatic agents and expanded hooks | Shipped |
-| [SDLC Critique Stage](sdlc-critique-stage.md) | Automated plan validation between PLAN and BUILD stages with parallel war-room critics, Implementation Note enforcement, concern-triggered revision pass, and propagation check | Shipped |
+| [SDLC Critique Stage](sdlc-critique-stage.md) | Automated plan validation between PLAN and BUILD stages with parallel war-room critics and inline source file verification | Shipped |
 | [SDLC Enforcement](sdlc-enforcement.md) | Quality gates for code sessions: user-level hooks, pipeline stage model, settings merger, cross-repo enforcement | Shipped |
 | [SDLC Observer](sdlc-observer.md) | Web dashboard for real-time SDLC pipeline tracking with stage indicators, event timelines, and artifact links at `/sdlc/` | Shipped |
 | [SDLC Pipeline Integrity](sdlc-pipeline-integrity.md) | Session continuation hardening, deterministic URL construction, merge guard hook, and MERGE pipeline stage | Shipped |
@@ -129,7 +129,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Test Reliability: Flaky Filter](test-reliability-flaky-filter.md) | Branch-side retry for flaky tests, deterministic junitxml baseline parsing, and completeness validation for test classification | Shipped |
 | [Tools Standard](tools-standard.md) | Tool compliance standard, audit checks, and remediation results for the tools/ directory | Shipped |
 | [Trace & Verify Protocol](trace-and-verify.md) | Data-driven root cause analysis replacing narrative-only 5 Whys with forward verification | Shipped |
-| [UTC Timestamps](utc-timestamps.md) | All timestamps normalized to tz-aware UTC with `bridge/utc.py` utilities; local conversion only at display boundary | Shipped |
+| [UTC Timestamps](utc-timestamps.md) | All timestamps normalized to tz-aware UTC; CLI/log surfaces show explicit UTC labels, conversational surfaces convert to local time | Shipped |
 | [Web Dashboard](web-dashboard.md) | Session table with SDLC stage pills, project metadata popovers, history-based stage inference, and configurable retention via DASHBOARD_RETENTION_HOURS | Shipped |
 | [Web UI](web-ui.md) | Localhost FastAPI web application at port 8500 serving observability dashboards with HTMX interactivity and dark theme | Shipped |
 | [Worker Service](worker-service.md) | Standalone worker process for AgentSession processing without Telegram, OutputHandler protocol, FileOutputHandler fallback, launchd service | Shipped |

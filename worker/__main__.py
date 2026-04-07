@@ -19,6 +19,7 @@ import logging
 import os
 import signal
 import sys
+import time
 from pathlib import Path
 
 logger = logging.getLogger("worker")
@@ -28,6 +29,12 @@ logger = logging.getLogger("worker")
 _shutdown_via_signal = False
 
 
+class _UTCFormatter(logging.Formatter):
+    """Log formatter that always uses UTC for timestamps."""
+
+    converter = staticmethod(time.gmtime)
+
+
 def _configure_logging() -> None:
     """Set up logging for the standalone worker."""
     log_dir = Path(__file__).parent.parent / "logs"
@@ -35,16 +42,22 @@ def _configure_logging() -> None:
 
     log_file = log_dir / "worker.log"
 
+    formatter = _UTCFormatter(
+        fmt="%(asctime)s UTC %(name)s %(levelname)s %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
     handlers: list[logging.Handler] = [
         logging.StreamHandler(sys.stderr),
         logging.FileHandler(str(log_file)),
     ]
+    for handler in handlers:
+        handler.setFormatter(formatter)
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(name)s %(levelname)s %(message)s",
-        handlers=handlers,
-    )
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    for handler in handlers:
+        root_logger.addHandler(handler)
 
 
 def _parse_args() -> argparse.Namespace:
