@@ -40,6 +40,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Deployment](deployment.md) | Multi-instance deployment configuration with per-machine project routing | Shipped |
 | [Design Audit](do-design-audit.md) | Audit web UI against 10 premium design criteria with severity ratings | Shipped |
 | [Do Test](do-test.md) | Intelligent test orchestration with parallel dispatch, changed-file detection, structured reporting, and pytest plugin configuration | Shipped |
+| [Do-Build AI Evaluator](do-build-ai-evaluator.md) | AI semantic evaluator step in /do-build pipeline: reads plan Acceptance Criteria, compares against git diff, returns PASS/PARTIAL/FAIL verdicts with evidence | Shipped |
 | [do-patch Skill](do-patch-skill.md) | Targeted fix skill for test failures and review blockers; called automatically by do-build | Shipped |
 | [Documentation Audit](documentation-audit.md) | Weekly LLM-powered audit of docs/ accuracy against codebase; KEEP / UPDATE / DELETE verdicts, directory and filename enforcement | Shipped |
 | [Documentation Lifecycle](documentation-lifecycle.md) | Automated validation and migration system for plan documentation tasks | Shipped |
