@@ -118,6 +118,7 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
         _cleanup_orphaned_claude_processes,
         _ensure_worker,
         _recover_interrupted_agent_sessions_startup,
+        _session_notify_listener,
         cleanup_corrupted_agent_sessions,
         register_callbacks,
         request_shutdown,
@@ -204,6 +205,18 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     # Start health monitor as background task
     health_task = asyncio.create_task(_agent_session_health_loop())
 
+    # Start pub/sub listener — delivers ~1s session pickup vs 5-minute health check
+    notify_task = asyncio.create_task(_session_notify_listener(), name="session-notify-listener")
+
+    def _notify_task_done(t: asyncio.Task) -> None:
+        if t.cancelled():
+            return  # Normal shutdown path
+        exc = t.exception()
+        if exc is not None:
+            logger.error("Session notify listener exited unexpectedly: %s", exc)
+
+    notify_task.add_done_callback(_notify_task_done)
+
     # Set up graceful shutdown
     shutdown_event = asyncio.Event()
 
@@ -233,6 +246,13 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     health_task.cancel()
     try:
         await health_task
+    except asyncio.CancelledError:
+        pass
+
+    # Cancel pub/sub listener
+    notify_task.cancel()
+    try:
+        await notify_task
     except asyncio.CancelledError:
         pass
 

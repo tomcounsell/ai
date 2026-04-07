@@ -57,6 +57,27 @@ The worker's startup sequence is deterministic:
 
 At runtime, the worker processes sessions via `_worker_loop(chat_id)` until the queue is empty, then waits for new enqueue events.
 
+The worker also runs `_session_notify_listener()` as a background task (step 7 below). This listener subscribes to the `valor:sessions:new` Redis pub/sub channel and calls `_ensure_worker(chat_id)` immediately when a new session is published — enabling ~1s pickup latency for CLI-created sessions.
+
+| Step | Function | Purpose |
+|------|----------|---------|
+| 7 | `_session_notify_listener()` | Background task: subscribe to `valor:sessions:new`, wake worker on notification |
+
+## Session Pickup: Fast Path vs Safety Net
+
+The worker uses two mechanisms to discover new sessions:
+
+| Mechanism | Latency | How It Works |
+|-----------|---------|-------------|
+| **Redis pub/sub** (fast path) | ~1 second | `_push_agent_session()` publishes `{"chat_id", "session_id"}` to `valor:sessions:new`. `_session_notify_listener()` subscribes and calls `_ensure_worker(chat_id)` immediately. |
+| **Health check loop** (safety net) | Up to 10 minutes | `_agent_session_health_loop()` fires every 300s. Sessions pending longer than 300s trigger `_ensure_worker(chat_id)` recovery. |
+
+The fast path covers normal operation. The health check catches edge cases: missed pub/sub messages (network blip, worker restart during publish), sessions created by paths that bypass `_push_agent_session()`, and sessions orphaned from a prior worker process.
+
+**Bridge path**: `enqueue_agent_session()` → `_push_agent_session()` publishes notification → worker receives within ~1s.
+
+**CLI path** (`python -m tools.valor_session create`): Same — `_push_agent_session()` publishes to `valor:sessions:new` → worker receives within ~1s. Prior to issue #778, CLI-created sessions relied solely on the health check (worst case: 10 minutes).
+
 ## Redis Communication Contract
 
 The bridge and worker share a single contract: the `AgentSession` Popoto model in Redis.

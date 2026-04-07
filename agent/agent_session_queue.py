@@ -19,6 +19,7 @@ Architecture:
 """
 
 import asyncio
+import json
 import logging
 import os
 import signal
@@ -288,6 +289,19 @@ async def _push_agent_session(
         await asyncio.to_thread(_log_lifecycle)
     except Exception as e:
         logger.warning(f"Failed to log lifecycle transition for session {session_id}: {e}")
+
+    # Publish notification so the standalone worker picks up immediately (~1s latency)
+    # instead of waiting for the 5-minute health check. Fire-and-forget: publish
+    # failure is logged as a warning and never raises. If the worker is not running
+    # or Redis pub/sub drops the message, the health check is the safety net.
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        payload = json.dumps({"chat_id": chat_id, "session_id": session_id})
+        await asyncio.to_thread(POPOTO_REDIS_DB.publish, "valor:sessions:new", payload)
+        logger.debug(f"Published session notification for chat_id={chat_id}")
+    except Exception as e:
+        logger.warning(f"Failed to publish session notification for {session_id}: {e}")
 
     return await AgentSession.query.async_count(chat_id=chat_id, status="pending")
 
@@ -1326,6 +1340,79 @@ async def _agent_session_health_loop() -> None:
         except Exception as e:
             logger.error("[session-health] Error in health check: %s", e, exc_info=True)
         await asyncio.sleep(AGENT_SESSION_HEALTH_CHECK_INTERVAL)
+
+
+async def _session_notify_listener() -> None:
+    """Subscribe to valor:sessions:new and wake the worker on new sessions.
+
+    Fire-and-forget coroutine started by the standalone worker alongside the
+    health monitor. Reconnects automatically on transient Redis errors.
+
+    Uses a queue to bridge the blocking pubsub.listen() thread and the asyncio
+    event loop: the background thread puts chat_ids onto the queue, and the
+    coroutine awaits them and calls _ensure_worker / sets the event.
+    """
+    while True:
+        notify_queue: asyncio.Queue = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+
+        def _listen_in_thread() -> None:
+            """Blocking loop that drains pubsub and forwards chat_ids to the queue."""
+            try:
+                from popoto.redis_db import POPOTO_REDIS_DB
+
+                pubsub = POPOTO_REDIS_DB.pubsub()
+                pubsub.subscribe("valor:sessions:new")
+                logger.info("Session notify listener subscribed to valor:sessions:new")
+                for message in pubsub.listen():
+                    if message["type"] != "message":
+                        continue
+                    try:
+                        data = json.loads(message["data"])
+                        chat_id = data.get("chat_id")
+                        session_id = data.get("session_id")
+                        if chat_id is not None:
+                            logger.info(
+                                "Received session notify: chat_id=%s session_id=%s",
+                                chat_id,
+                                session_id,
+                            )
+                            loop.call_soon_threadsafe(notify_queue.put_nowait, chat_id)
+                    except json.JSONDecodeError as e:
+                        logger.warning("Session notify: bad JSON payload: %s", e)
+                    except Exception as e:
+                        logger.warning("Session notify: error processing message: %s", e)
+            except Exception as e:
+                logger.warning("Session notify listener thread error: %s", e)
+            finally:
+                # Signal the coroutine side to restart
+                loop.call_soon_threadsafe(notify_queue.put_nowait, None)
+
+        try:
+            # Run the blocking pubsub loop in a thread; process results here
+            listener_future = asyncio.to_thread(_listen_in_thread)
+            task = asyncio.create_task(listener_future)
+
+            while True:
+                chat_id = await notify_queue.get()
+                if chat_id is None:
+                    # Thread exited (error path); restart after delay
+                    break
+                _ensure_worker(chat_id)
+                event = _active_events.get(chat_id)
+                if event is not None:
+                    event.set()
+
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+        except Exception as e:
+            logger.warning("Session notify listener error: %s. Retrying in 5s...", e)
+
+        await asyncio.sleep(5)
 
 
 # === CLI Helpers ===
