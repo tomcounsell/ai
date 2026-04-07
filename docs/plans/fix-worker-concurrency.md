@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Building
 type: bug
 appetite: Medium
 owner: Tom Counsell
@@ -224,10 +224,10 @@ No agent integration required — this is a worker-internal change. The agent's 
 - **Assigned To**: concurrency-builder
 - **Agent Type**: async-specialist
 - **Parallel**: true
-- Add `_global_session_semaphore: asyncio.Semaphore | None = None` at module level
-- Initialize eagerly in `_run_worker()` before the first `asyncio.Task(_worker_loop(...))` is created, with `int(os.environ.get("MAX_CONCURRENT_SESSIONS", "3"))`, minimum 1
-- Wrap `_execute_agent_session(session)` in `async with _global_session_semaphore`
-- Log semaphore value at worker startup
+- Add `_global_session_semaphore: asyncio.Semaphore | None = None` at module level in `agent/agent_session_queue.py`
+- In `worker/__main__.py`, inside `_run_worker()`, initialize the semaphore BEFORE the first `asyncio.Task(_worker_loop(...))` is created: `import agent.agent_session_queue as _queue; _queue._global_session_semaphore = asyncio.Semaphore(max(1, int(os.environ.get("MAX_CONCURRENT_SESSIONS", "3"))))` — clamp minimum to 1 to prevent deadlock
+- Log the semaphore value at worker startup (e.g., `logger.info(f"Global session semaphore: {max_sessions}")`)
+- In `_worker_loop()` in `agent_session_queue.py`, wrap the ENTIRE pop+execute block with the semaphore: acquire BEFORE calling `_pop_agent_session()`, release AFTER `_execute_agent_session()` completes. Use `async with _global_session_semaphore` as a context manager so the slot is always released on exception. This ensures `transition_status("running")` never occurs without a semaphore slot, keeping the dashboard count accurate.
 
 ### 3. Fix `create_local()` to use session UUID as `chat_id`
 - **Task ID**: build-local-chat-id
@@ -246,7 +246,6 @@ No agent integration required — this is a worker-internal change. The agent's 
 - **Agent Type**: test-engineer
 - **Parallel**: false
 - Add tests in `tests/unit/test_agent_session_queue.py` for lock acquisition, lock contention (returns None), lock release on success
-- Add test for `create_local()` using `session_id` as `chat_id`
 
 ### 5. Write integration test: enqueue 3 sessions, assert max 1 running
 - **Task ID**: test-integration-concurrency
@@ -294,6 +293,15 @@ No agent integration required — this is a worker-internal change. The agent's 
 | Semaphore in _run_worker | `grep -n "_global_session_semaphore\|MAX_CONCURRENT_SESSIONS" worker/__main__.py` | output > 0 |
 
 ## Critique Results
+
+### Fifth Pass — APPROVED (2026-04-07)
+
+All three findings from the fourth pass were addressed:
+- **Blocker resolved**: Task 2 now wraps the entire pop+execute block — semaphore acquired before `_pop_agent_session()`, released after `_execute_agent_session()`.
+- **Concern resolved**: Task 2 now explicitly specifies the cross-module injection: `import agent.agent_session_queue as _queue; _queue._global_session_semaphore = asyncio.Semaphore(...)` in `worker/__main__.py`.
+- **Nit resolved**: `create_local()` test bullet removed from Task 4 — it belongs in `tests/unit/test_agent_session.py` per the Test Impact section.
+
+---
 
 ### Fourth Pass — NEEDS REVISION (2026-04-07)
 
