@@ -9,11 +9,23 @@ from __future__ import annotations
 import hashlib
 import platform
 import shutil
+import ssl
 import subprocess
 import tempfile
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+
+
+def _ssl_context() -> ssl.SSLContext:
+    """Return an SSL context using certifi's CA bundle if available."""
+    try:
+        import certifi
+
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        return ssl.create_default_context()
+
 
 GITHUB_REPO = "iOfficeAI/OfficeCLI"
 INSTALL_DIR = Path.home() / ".local" / "bin"
@@ -93,7 +105,7 @@ def get_installed_version() -> str | None:
 def _download_file(url: str, dest: Path, timeout: int = 60) -> None:
     """Download a file from URL to destination path."""
     req = urllib.request.Request(url, headers={"User-Agent": "valor-update/1.0"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as resp:
         with open(dest, "wb") as f:
             shutil.copyfileobj(resp, f)
 
@@ -104,7 +116,7 @@ def _fetch_sha256sums(version: str, timeout: int = 10) -> dict[str, str]:
     req = urllib.request.Request(url, headers={"User-Agent": "valor-update/1.0"})
 
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as resp:
             content = resp.read().decode("utf-8")
     except Exception:
         return {}

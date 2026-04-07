@@ -12,12 +12,24 @@ from __future__ import annotations
 
 import platform
 import shutil
+import ssl
 import subprocess
 import tarfile
 import tempfile
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+
+
+def _ssl_context() -> ssl.SSLContext:
+    """Return an SSL context using certifi's CA bundle if available."""
+    try:
+        import certifi
+
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        return ssl.create_default_context()
+
 
 GITHUB_REPO = "simonw/rodney"
 INSTALL_DIR = Path.home() / ".local" / "bin"
@@ -128,7 +140,7 @@ def install_or_update() -> InstallResult:
             tmp_path = Path(tmp_dir) / asset_name
 
             req = urllib.request.Request(download_url, headers={"User-Agent": "valor-update/1.0"})
-            with urllib.request.urlopen(req, timeout=60) as resp:
+            with urllib.request.urlopen(req, timeout=60, context=_ssl_context()) as resp:
                 with open(tmp_path, "wb") as f:
                     shutil.copyfileobj(resp, f)
 
