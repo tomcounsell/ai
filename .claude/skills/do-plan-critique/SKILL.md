@@ -230,7 +230,7 @@ Output the final report in this format:
 ## Verdict
 
 {One of:}
-- **READY TO BUILD** — No CONCERN or BLOCKER findings (NITs do not trigger this variant). Proceed directly to build.
+- **READY TO BUILD (no concerns)** — No CONCERN or BLOCKER findings (NITs do not trigger this variant). Proceed directly to build.
 - **READY TO BUILD (with concerns)** — No BLOCKERs, but one or more CONCERN findings exist. A revision pass will embed Implementation Notes before build.
 - **NEEDS REVISION** — {N} blockers must be resolved before build.
 - **MAJOR REWORK** — Fundamental issues identified. Recommend re-planning.
