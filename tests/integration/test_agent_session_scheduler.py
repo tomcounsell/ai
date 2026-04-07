@@ -354,21 +354,50 @@ class TestJobSchedulerCLI:
 
 
 class TestSelfSchedulingProtection:
-    """Tests for self-scheduling depth limits.
+    def test_scheduling_depth_increments(self):
+        """Pushed jobs increment scheduling_depth."""
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "tools.agent_session_scheduler",
+                "push",
+                "--message",
+                "depth test",
+                "--project",
+                "test-scheduler",
+            ],
+            capture_output=True,
+            text=True,
+            cwd=_PROJECT_ROOT,
+            env=_subprocess_env(PROJECT_KEY="test-scheduler"),
+        )
+        assert result.returncode == 0
+        data = json.loads(result.stdout)
+        assert data["scheduling_depth"] >= 1
 
-    scheduling_depth is a derived property on AgentSession that walks the
-    parent_agent_session_id chain (see models/agent_session.py::scheduling_depth).
-    It is not stored and not included in _AGENT_SESSION_FIELDS. Tests that
-    assert scheduling_depth appears in push JSON output or that exercise the
-    derivation walker are skipped here -- they belong alongside tests for the
-    derivation itself, not the scheduler CLI.
-    """
+    def test_depth_cap_enforced(self):
+        """Cannot schedule beyond MAX_SCHEDULING_DEPTH via direct function call."""
+        from tools.agent_session_scheduler import MAX_SCHEDULING_DEPTH, _get_scheduling_depth
 
-    def test_max_depth_constant(self):
-        """MAX_SCHEDULING_DEPTH exposed by the scheduler tool is 3."""
-        from tools.agent_session_scheduler import MAX_SCHEDULING_DEPTH
-
+        # Test the constant
         assert MAX_SCHEDULING_DEPTH == 3
+
+        # Create a chain of 3 parent sessions to reach depth 3
+        s0 = _create_pending(session_id="chain-root")
+        s1 = _create_pending(session_id="chain-1", parent_agent_session_id=s0.id)
+        s2 = _create_pending(session_id="chain-2", parent_agent_session_id=s1.id)
+        leaf = _create_pending(session_id="chain-leaf", parent_agent_session_id=s2.id)
+
+        import os
+
+        os.environ["VALOR_SESSION_ID"] = leaf.session_id
+        try:
+            depth = _get_scheduling_depth()
+            assert depth == 3, f"Expected depth 3, got {depth}"
+            assert depth >= MAX_SCHEDULING_DEPTH
+        finally:
+            del os.environ["VALOR_SESSION_ID"]
 
 
 # === Kill Command Integration Tests ===

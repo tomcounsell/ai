@@ -91,9 +91,7 @@ class TestSuccessRoundTrip:
         assert _extract_stage_from_prompt(tool_input["prompt"]) == "BUILD"
 
         # Verify a DevSession was created in Redis
-        dev_sessions = list(
-            AgentSession.query.filter(parent_agent_session_id=pm_session.session_id)
-        )
+        dev_sessions = list(AgentSession.query.filter(parent_session_id=pm_session.session_id))
         assert len(dev_sessions) == 1
         dev = dev_sessions[0]
         assert dev.session_type == "dev"
@@ -145,9 +143,7 @@ class TestSuccessRoundTrip:
         )
 
         # Verify DevSession status is completed
-        dev_sessions = list(
-            AgentSession.query.filter(parent_agent_session_id=pm_session.session_id)
-        )
+        dev_sessions = list(AgentSession.query.filter(parent_session_id=pm_session.session_id))
         assert len(dev_sessions) == 1
         assert dev_sessions[0].status == "completed"
 
@@ -234,9 +230,7 @@ class TestEdgeCases:
         _maybe_register_dev_session(tool_input, claude_uuid=FAKE_CLAUDE_UUID)
 
         # DevSession should still be created
-        dev_sessions = list(
-            AgentSession.query.filter(parent_agent_session_id=pm_session.session_id)
-        )
+        dev_sessions = list(AgentSession.query.filter(parent_session_id=pm_session.session_id))
         assert len(dev_sessions) == 1
 
         # But parent should have no in_progress stage (only ISSUE=ready default)
@@ -275,9 +269,7 @@ class TestEdgeCases:
         _maybe_register_dev_session(tool_input, claude_uuid=FAKE_CLAUDE_UUID)
 
         # No DevSession created for non-dev-session types
-        dev_sessions = list(
-            AgentSession.query.filter(parent_agent_session_id=pm_session.session_id)
-        )
+        dev_sessions = list(AgentSession.query.filter(parent_session_id=pm_session.session_id))
         assert len(dev_sessions) == 0
 
     def test_stage_extraction_patterns(self):

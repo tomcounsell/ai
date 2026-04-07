@@ -50,7 +50,7 @@ class TestDevSessionCreation:
         assert dev.status == "pending"
 
         # Verify we can find it via parent lookup
-        dev_sessions = list(AgentSession.query.filter(parent_agent_session_id=parent_session_id))
+        dev_sessions = list(AgentSession.query.filter(parent_session_id=parent_session_id))
         assert len(dev_sessions) >= 1
         found = [d for d in dev_sessions if d.session_id == f"dev-{parent_session_id}"]
         assert len(found) == 1
@@ -191,7 +191,7 @@ class TestDevSessionCompletion:
             dev.save()
 
         # All should be findable by parent
-        all_devs = list(AgentSession.query.filter(parent_agent_session_id=parent_sid))
+        all_devs = list(AgentSession.query.filter(parent_session_id=parent_sid))
         assert len(all_devs) >= 3
 
         # Complete them

@@ -137,7 +137,7 @@ Jobs support parent-child decomposition via the `parent_agent_session_id` field 
 
 When a child session completes, `_complete_agent_session()` calls `_finalize_parent()` **before** deleting the child from Redis. The completing child's intended terminal status is passed as a parameter (since its Redis status is still "running" at that point). `_finalize_parent()` queries all siblings and uses the override status for the completing child. When all siblings are terminal (`completed` or `failed`), the parent transitions to `completed` (all succeeded) or `failed` (any failed). Only after finalization does `_complete_agent_session()` delete the child.
 
-Parent finalization mutates the parent's status in place via `transition_status()` (since `status` is an IndexedField, not a KeyField). `_pop_agent_session()` likewise uses in-place mutation -- delete-and-recreate is only required for callers that change a KeyField (e.g., `parent_agent_session_id` reparenting in retry/orphan-fix paths).
+The transition uses the same delete-and-recreate pattern as `_pop_agent_session()` to avoid KeyField index corruption.
 
 ### Health Monitor Extensions
 
