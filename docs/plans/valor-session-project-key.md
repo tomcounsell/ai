@@ -130,21 +130,21 @@ No agent integration required — `valor-session` is a CLI tool invoked by human
 
 ## Documentation
 
-- [ ] Update docstring in `tools/valor_session.py` to document the `--project-key` flag and the automatic cwd-based resolution.
-- [ ] Add a note to `docs/tools-reference.md` under the `valor-session` entry describing project_key resolution behavior.
+- [x] Update docstring in `tools/valor_session.py` to document the `--project-key` flag and the automatic cwd-based resolution.
+- [x] Add a note to `docs/tools-reference.md` under the `valor-session` entry describing project_key resolution behavior.
 
 No new feature doc required — this is a bug fix to existing behavior.
 
 ## Success Criteria
 
-- [ ] Running `valor-session create` from `/Users/valorengels/src/ai` resolves `project_key="ai"`
-- [ ] Running it from `/Users/valorengels/src/valor` resolves `project_key="valor"`
-- [ ] Running it from an unrecognized directory falls back to `"valor"` with a warning on stderr
-- [ ] `--project-key ai` flag overrides resolution and uses `"ai"` directly
-- [ ] Unit tests cover: matched project, fallback (no match), explicit flag override
-- [ ] `--json` output is valid JSON even when fallback warning fires
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] Running `valor-session create` from `/Users/valorengels/src/ai` resolves `project_key="ai"`
+- [x] Running it from `/Users/valorengels/src/valor` resolves `project_key="valor"`
+- [x] Running it from an unrecognized directory falls back to `"valor"` with a warning on stderr
+- [x] `--project-key ai` flag overrides resolution and uses `"ai"` directly
+- [x] Unit tests cover: matched project, fallback (no match), explicit flag override
+- [x] `--json` output is valid JSON even when fallback warning fires
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
