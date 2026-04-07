@@ -68,11 +68,16 @@ When three PM sessions were enqueued with `chat_id="0"` (via `python -m tools.va
 - **Global asyncio semaphore:** `_global_session_semaphore = asyncio.Semaphore(MAX_CONCURRENT_SESSIONS)` (configurable via env var, default 3). Every `_worker_loop` acquires this before calling `_execute_agent_session()` and releases after.
 - **`create_local()` UUID fix:** Replace `f"local{int(now.timestamp()) % 10000}"` with the `session_id` parameter (which is the Claude Code UUID), giving each CLI session an isolated queue automatically.
 - **`MAX_CONCURRENT_SESSIONS` config:** Read from env var at module import, default 3. Logged at worker startup.
-- **Fallback path coverage:** The Redis pop lock is placed only in `_pop_agent_session()`. Because `_pop_agent_session_with_fallback()` calls `_pop_agent_session()` internally, the fallback path is automatically covered — adding a second lock in `_pop_agent_session_with_fallback()` would cause a deadlock by attempting to re-acquire the same lock on the same `chat_id`.
+- **Fallback path coverage:** The Redis pop lock must be applied in BOTH code paths:
+  1. In `_pop_agent_session()` — wraps the async `async_filter` + `transition_status` block.
+  2. In the **sync fallback branch only** of `_pop_agent_session_with_fallback()` (lines ~629+) — the branch that runs ONLY when `_pop_agent_session()` returned `None`. This branch does its own independent `AgentSession.query.filter()` + `transition_status()` call without going through `_pop_agent_session()` at all, so it is NOT covered by the lock in step 1.
+  - This is **not re-entrant**: `_pop_agent_session()` acquires the lock, does its work, RELEASES the lock, and returns `None`. Only then does the sync fallback branch start — it acquires a fresh lock on the same key. No lock is held when the second acquisition happens.
 
 ### Flow
 
-Enqueue session → `_ensure_worker(chat_id)` → `_worker_loop` waits for global semaphore → acquires Redis pop lock → `_pop_agent_session()` (atomic) → releases pop lock → `_execute_agent_session()` → releases semaphore
+**Hot path:** Enqueue session → `_ensure_worker(chat_id)` → `_worker_loop` waits for global semaphore → acquires Redis pop lock → `_pop_agent_session()` (atomic) → releases pop lock → `_execute_agent_session()` → releases semaphore
+
+**Drain/fallback path:** `_pop_agent_session_with_fallback()` → calls `_pop_agent_session()` (lock acquired + released inside) → if None: acquires Redis pop lock → sync fallback query + `transition_status` → releases pop lock → returns session
 
 ### Technical Approach
 
@@ -208,7 +213,9 @@ No agent integration required — this is a worker-internal change. The agent's 
 - Add `_acquire_pop_lock(chat_id)` / `_release_pop_lock(chat_id)` helpers using Redis `SETNX` with TTL=5s
 - Wrap the `async_filter` + `transition_status` block in `_pop_agent_session()` with the lock
 - If lock is held, return `None` immediately (worker will retry naturally)
-- Lock is placed only in `_pop_agent_session()` — do NOT add it to `_pop_agent_session_with_fallback()`, as that function calls `_pop_agent_session()` and a second lock would deadlock on the same `chat_id`
+- ALSO add the same `setnx worker:pop_lock:{chat_id}` guard at the top of the **sync fallback branch only** in `_pop_agent_session_with_fallback()` (the branch that executes when `_pop_agent_session()` returns `None`). That branch does its own independent `AgentSession.query.filter()` + `transition_status()` and is NOT covered by the lock in `_pop_agent_session()`.
+- This is NOT re-entrant: `_pop_agent_session()` acquires the lock, does its work, RELEASES it, and returns `None`. The sync fallback branch then acquires a fresh lock — no lock is held at that point.
+- `_run_worker()` lives in `worker/__main__.py`. The semaphore is initialized there, not in `agent_session_queue.py`.
 
 ### 2. Add global `asyncio.Semaphore` in `_run_worker()`
 - **Task ID**: build-semaphore
@@ -253,6 +260,7 @@ No agent integration required — this is a worker-internal change. The agent's 
 - Assert: at no point are more than 1 session in `running` state for `chat_id="0"`
 - Assert: at no point are more than `MAX_CONCURRENT_SESSIONS` sessions running globally
 - Patch `_execute_agent_session` to be a no-op with controlled delay (`asyncio.sleep`) to make tests fast and deterministic without needing real Claude API calls
+- Use the `redis_test_db` fixture pattern from `tests/integration/test_agent_session_queue_race.py` for Redis isolation
 
 ### 6. Validate and run full test suite
 - **Task ID**: validate-all-tests
@@ -282,7 +290,8 @@ No agent integration required — this is a worker-internal change. The agent's 
 | Format clean | `python -m black --check agent/agent_session_queue.py models/agent_session.py` | exit code 0 |
 | No timestamp chat_id | `grep -n "timestamp.*10000\|10000.*timestamp" models/agent_session.py` | exit code 1 |
 | Semaphore present | `grep -n "MAX_CONCURRENT_SESSIONS\|_global_session_semaphore" agent/agent_session_queue.py` | output > 0 |
-| Pop lock in pop function | `grep -n "_acquire_pop_lock\|pop_lock" agent/agent_session_queue.py` | output > 0 |
+| Pop lock in async pop | `grep -n "pop_lock" agent/agent_session_queue.py` | output ≥ 2 (once in `_pop_agent_session`, once in sync fallback of `_pop_agent_session_with_fallback`) |
+| Semaphore in _run_worker | `grep -n "_global_session_semaphore\|MAX_CONCURRENT_SESSIONS" worker/__main__.py` | output > 0 |
 
 ## Critique Results
 
