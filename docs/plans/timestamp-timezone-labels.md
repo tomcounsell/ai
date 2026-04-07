@@ -1,5 +1,5 @@
 ---
-status: docs_complete
+status: Ready
 type: bug
 appetite: Small
 owner: tomcounsell
