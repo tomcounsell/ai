@@ -1,5 +1,7 @@
 # MCP Server Development Guide
 
+> **Business context:** See [MCP Hosting](~/work-vault/Cuttlefish/MCP%20Hosting.md) in the work vault for product overview, live servers, and distribution model.
+
 ## Overview
 
 Model Context Protocol (MCP) servers in this project use **FastMCP** from the official MCP Python SDK.

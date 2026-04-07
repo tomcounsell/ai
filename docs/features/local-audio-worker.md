@@ -1,5 +1,7 @@
 # Local Audio Worker
 
+> **Business context:** See [Podcasting](~/work-vault/Cuttlefish/Podcasting.md) in the work vault for product overview and the audio generation phase of the production pipeline.
+
 The local audio worker offloads audio generation from the production server to a local machine. NotebookLM requires browser cookies for authentication, which cannot run on Render's headless environment. The worker polls the production API for episodes waiting on audio, generates audio locally via `notebooklm-py`, uploads to storage, and calls back to resume the workflow.
 
 ## Architecture

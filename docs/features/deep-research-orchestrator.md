@@ -1,5 +1,7 @@
 # Deep Research Orchestrator
 
+> **Business context:** See [Podcasting](~/work-vault/Cuttlefish/Podcasting.md) in the work vault for how deep research fits into the 12-phase podcast production pipeline.
+
 Multi-agent research pipeline that replicates claude.ai's deep research feature using the Anthropic API.
 
 ## Architecture

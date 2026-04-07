@@ -1,5 +1,7 @@
 # Episode Brief Editor
 
+> **Business context:** See [Podcasting](~/work-vault/Cuttlefish/Podcasting.md) in the work vault for product overview and the role of the episode brief in the production pipeline.
+
 Inline editing for episode title and description on workflow step 1.
 
 ## Purpose

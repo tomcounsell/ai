@@ -1,5 +1,7 @@
 # WebMCP AI Agent Integration
 
+> **Business context:** See [MCP Hosting](~/work-vault/Cuttlefish/MCP%20Hosting.md) in the work vault for product overview and MCP distribution strategy.
+
 WebMCP exposes structured data and guided instructions on every podcast page so AI agents can browse the site and manage the entire podcast production system via the MCP protocol.
 
 ## How It Works

@@ -1,5 +1,7 @@
 # Yudame Research Podcast: Content Framework
 
+> **Business context:** See [Podcasting](~/work-vault/Cuttlefish/Podcasting.md) in the work vault for product overview and 12-phase workflow summary.
+
 **Version:** 4.0
 **Updated:** 2026-02-06
 **Purpose:** Reference for podcast episode content design and toolkit

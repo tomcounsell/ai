@@ -1,5 +1,7 @@
 # Creative Juices MCP Specification
 
+> **Business context:** See [MCP Hosting](~/work-vault/Cuttlefish/MCP%20Hosting.md) in the work vault for product overview and distribution model.
+
 ## Overview
 
 **Name**: Creative Juices MCP
