@@ -103,7 +103,7 @@ No prerequisites — this work has no external dependencies.
 
 - [ ] `tests/integration/test_agent_session_queue_race.py::TestRecoverInterruptedJobsStartup::test_no_stale_running_after_recovery` — UPDATE: Must set `started_at` to a timestamp older than 300s for the session to be recovered, or the test will fail because the session gets skipped.
 - [ ] `tests/integration/test_agent_session_queue_race.py::TestRecoverInterruptedJobsStartup::test_recover_multiple_running_jobs` — UPDATE: Same — set `started_at` to old timestamps.
-- [ ] `tests/unit/test_recovery_respawn_safety.py::test_startup_recovery_only_recovers_running` — UPDATE: Set `started_at` to old timestamps on the running session fixture.
+- [ ] `tests/unit/test_recovery_respawn_safety.py::TestStartupRecoverySkipsTerminal::test_startup_recovery_only_queries_running` — UPDATE: Set `started_at` to old timestamps on the running session fixture.
 - [ ] `tests/unit/test_agent_session_scheduler_kill.py::test_recover_interrupted_agent_sessions_startup_filters_running` — UPDATE: Set `started_at` to old timestamps.
 
 ## Rabbit Holes
@@ -229,8 +229,32 @@ No agent integration required — this is a bridge/worker-internal change to the
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
-| CONCERN | [agent-type] | [The concern raised] | [How/whether it was addressed] |
+<!-- Populated by /do-plan-critique (war room) on 2026-04-06. -->
+
+### Findings: 0 blockers, 3 concerns, 2 nits
+
+| Severity | Critic(s) | Finding | Suggestion |
+|----------|-----------|---------|------------|
+| CONCERN | Skeptic, Adversary | **Type handling for `started_at` not in Technical Approach**: The Failure Path section (line 97-98) notes `started_at` could be float vs datetime, and the health check uses a `_ts()` helper (line 1056-1066) to normalize. But the Technical Approach section (line 83-87) only says "filter by `started_at`" with no mention of type coercion. The builder needs to replicate or extract `_ts()`. | Add explicit note in Technical Approach that `started_at` requires the same `_ts()` normalization pattern used in `_agent_session_health_check`. |
+| CONCERN | Archaeologist | **Wrong test name in Test Impact**: Plan references `test_startup_recovery_only_recovers_running` in `test_recovery_respawn_safety.py` but the actual test is `test_startup_recovery_only_queries_running` in class `TestStartupRecoverySkipsTerminal` (line 293). Builder will waste time looking for a non-existent test. | Correct to `tests/unit/test_recovery_respawn_safety.py::TestStartupRecoverySkipsTerminal::test_startup_recovery_only_queries_running`. |
+| CONCERN | Adversary | **Race window not fully eliminated, only narrowed**: The plan correctly identifies the race (worker starts before startup recovery) and adds a 300s guard. But if the bridge restarts and a session from the *previous* process was started <300s ago (e.g., process crashed 2 minutes in), that session will NOT be recovered at startup, and it has no live worker. The plan acknowledges this in Risk 1 and defers to the periodic health check, which is reasonable, but the 5-minute delay could leave a session stuck. | Acceptable risk as documented. No change needed, but the builder should ensure the health check interval (60s per source code) catches these promptly -- not the 5-minute interval stated in the plan's Risk 1 mitigation. |
+| NIT | Simplifier | **Task 4 (Final Validation) is redundant with Task 2**: Task 2 already validates via the Verification table commands. Task 4 just re-runs them. For a Small bug fix this adds ceremony without value. | Merge Task 4 into Task 2, or remove Task 4. |
+| NIT | Operator | **Existing test `test_recover_interrupted_agent_sessions_startup_filters_running` uses mock, not real Redis**: This test (line 562-582 in `test_agent_session_scheduler_kill.py`) patches `AgentSession` entirely, so it won't actually validate the timing guard against real Redis behavior. The integration tests in `test_agent_session_queue_race.py` use real Redis, which is better. | Consider whether the mocked test needs updating at all -- it only checks query filter args, not timing logic. May be irrelevant to this change. |
+
+### Structural Check Results
+
+| Check | Status | Detail |
+|-------|--------|--------|
+| Required sections | PASS | All 4 present: Documentation, Update System, Agent Integration, Test Impact |
+| Task numbering | PASS | Tasks 1-4 sequential, no gaps |
+| Dependencies valid | PASS | Linear chain: 1 -> 2 -> 3 -> 4 |
+| File paths exist | PARTIAL | 5/6 exist. `test_startup_recovery_only_recovers_running` does not exist (actual name: `test_startup_recovery_only_queries_running`) |
+| Prerequisites met | PASS | No prerequisites declared |
+| Cross-references | PASS | All success criteria map to tasks; no-gos are not in solution |
+
+### Verdict
+
+**READY TO BUILD** -- No blockers. The three concerns are: (1) a minor implementation detail the builder can resolve inline, (2) a wrong test name that should be corrected before build, and (3) an acknowledged acceptable risk. The plan is well-scoped, the fix is surgical, and the approach mirrors the existing health check pattern.
 
 ---
 

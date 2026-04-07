@@ -5,7 +5,7 @@ appetite: Small
 owner: Valor
 created: 2026-04-06
 tracking: https://github.com/tomcounsell/ai/issues/726
-last_comment_id: 4189976223
+last_comment_id:
 ---
 
 # Fix valor-telegram send — route through Redis relay
@@ -43,7 +43,7 @@ Additional missing capabilities vs the bridge relay path: no markdown formatting
 1. **Entry point**: `valor-telegram send --chat "X" "message"` -> `cmd_send()`
 2. **Resolution**: `resolve_chat()` maps chat name to numeric ID (unchanged)
 3. **Linkification**: Apply `linkify_references()` to message text
-4. **Length check**: Truncate at 4096 chars (`text[:4093] + "..."` matching `send_telegram.py`)
+4. **Length check**: Truncate at 4096 chars at sentence boundary
 5. **Queue**: Push to `telegram:outbox:cli-{timestamp}` Redis list (same format as `send_telegram.py`)
 6. **Relay**: Bridge relay (`bridge/telegram_relay.py`) picks up and sends with markdown, reply_to, retry
 7. **Output**: "Message queued" confirmation
@@ -134,7 +134,6 @@ No race conditions identified -- the CLI pushes a single atomic RPUSH to Redis a
 
 - Delivery confirmation/polling (future enhancement)
 - Fallback to direct Telethon when relay is down
-- Fuzzy `--reply-to` matching (e.g., `--reply-to "karpathy wiki"` to search recent messages and reply to best match) -- good UX idea from issue comment, deferred to follow-up issue since it requires wiring `read --search` into the send flow and is additive on top of the basic fix
 - Changes to the `read` or `chats` subcommands
 - Changes to `tools/send_telegram.py` (agent-facing tool)
 - Changes to `bridge/telegram_relay.py` (relay is already correct)
@@ -192,7 +191,7 @@ No agent integration required -- `valor-telegram` is a human-facing CLI tool. Th
 - Build relay-compatible payload: `{chat_id, reply_to, text, file_paths, session_id, timestamp}`
 - Use synthetic session_id: `f"cli-{int(time.time())}"`
 - Apply `_linkify_text()` (copy pattern from `send_telegram.py`) before queueing
-- Truncate text to 4096 chars (`text[:4093] + "..."`) before queueing
+- Truncate text to 4096 chars at sentence boundary before queueing
 - Push to `telegram:outbox:{session_id}` via Redis RPUSH with 1-hour TTL
 - Handle file validation (exists check) before queueing
 - Print "Message queued ({N} chars)" on success, error to stderr on failure

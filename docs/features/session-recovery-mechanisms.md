@@ -16,10 +16,9 @@ The session system has 8 mechanisms that can revive, recover, or re-enqueue sess
 |----------|-------|
 | Location | `agent/agent_session_queue.py` |
 | Trigger | Bridge process startup |
-| What it does | Resets stale `running` sessions to `pending` (orphaned from previous process) |
+| What it does | Resets all `running` sessions to `pending` (orphaned from previous process) |
 | Terminal safety | **Safe by query scope** -- only queries `status="running"`, never touches terminal sessions |
-| Guard | Query filter (`status="running"`) + timing guard (`AGENT_SESSION_HEALTH_MIN_RUNNING`, 300s) |
-| Timing guard | Sessions with `started_at` within the last 300s are skipped -- they were likely started by a worker in the current process, not orphaned from the previous one. Sessions with `started_at=None` are always recovered. Matches the same guard used by the periodic health check (mechanism 2). Added by issue #727 to fix a race where a worker picks up a session before startup recovery fires. |
+| Guard | Query filter (`status="running"`) |
 
 ### 2. Health Check (`_agent_session_health_check`)
 
@@ -117,11 +116,6 @@ All other callers use the default `reject_from_terminal=True`.
 - **Window**: External process finalizes session between delivery decision and nudge enqueue
 - **Mitigation**: `_enqueue_nudge()` re-reads session status from Redis at entry and after query, returns early if terminal
 
-### Worker starts session before startup recovery fires (issue #727)
-
-- **Window**: Worker dequeues a pending session and transitions it to `running` in the 1-2 seconds between process start and startup recovery execution
-- **Mitigation**: Startup recovery now uses the same `AGENT_SESSION_HEALTH_MIN_RUNNING` (300s) timing guard as the health check. Sessions with `started_at` within the last 300 seconds are skipped. A session started 1-2 seconds ago has `started_at` well within the guard window.
-
 ### Revival check finds session about to complete
 
 - **Window**: `check_revival()` finds pending session that completes between query and user response
@@ -145,10 +139,6 @@ All mechanisms are covered by `tests/unit/test_recovery_respawn_safety.py`:
 | `test_rejects_from_terminal_by_default` | transition_status | Default rejects all 5 terminal->non-terminal |
 | `test_allows_from_terminal_when_explicitly_permitted` | transition_status | Explicit opt-out works |
 | `test_startup_recovery_only_queries_running` | startup recovery | Only queries running, not terminal |
-| `test_recent_session_skipped_by_timing_guard` | startup recovery | Sessions started <300s ago are skipped |
-| `test_old_session_recovered_by_timing_guard` | startup recovery | Sessions started >300s ago are recovered |
-| `test_none_started_at_is_recovered` | startup recovery | Legacy sessions (no started_at) are recovered |
-| `test_mixed_recent_and_stale_sessions` | startup recovery | Only stale sessions recovered, recent skipped |
 | `test_watchdog_unhealthy_flag_routes_to_deliver` | session watchdog | Flag routes to deliver, not nudge |
 | `test_bridge_watchdog_has_no_agent_session_import` | bridge watchdog | No AgentSession imports |
 | `TestIntakePathTerminalGuard::test_guard_fires_for_each_terminal_status` | intake path (mechanism 8) | All 5 terminal statuses trigger guard |
@@ -165,6 +155,5 @@ All mechanisms are covered by `tests/unit/test_recovery_respawn_safety.py`:
 - [Agent Session Health Monitor](agent-session-health-monitor.md) -- Health check details
 - [Bridge Self-Healing](bridge-self-healing.md) -- Bridge watchdog and crash recovery
 - Issue #723 -- Original audit issue
-- Issue #727 -- Startup recovery timing guard (race condition fix)
 - PR #703 -- Zombie loop fix (hierarchy health check vector)
 - PR #721 -- Lifecycle consolidation

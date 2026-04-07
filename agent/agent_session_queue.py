@@ -970,16 +970,10 @@ def _get_pending_agent_sessions_sync(project_key: str) -> list[AgentSession]:
 
 
 def _recover_interrupted_agent_sessions_startup() -> int:
-    """Reset stale running sessions to pending at startup.
+    """Reset ALL running sessions to pending at startup.
 
-    At startup, running sessions are likely orphaned from the previous process.
-    However, sessions that started very recently (within AGENT_SESSION_HEALTH_MIN_RUNNING
-    seconds) may have been picked up by a worker that started before this recovery
-    function fired. These are skipped to avoid orphaning their SDK subprocesses.
-
-    This uses the same timing guard as _agent_session_health_check() to avoid a race
-    where a worker transitions a session to running, then startup recovery resets it
-    back to pending -- orphaning the already-spawned SDK subprocess.
+    At startup, all running sessions are by definition orphaned from the previous
+    process. This runs synchronously before the event loop processes messages.
 
     Status is an IndexedField, so direct mutation and save is safe.
     Returns the number of recovered sessions.
@@ -988,45 +982,8 @@ def _recover_interrupted_agent_sessions_startup() -> int:
     if not running_sessions:
         return 0
 
-    now = time.time()
-    cutoff = now - AGENT_SESSION_HEALTH_MIN_RUNNING
-
-    def _ts(val):
-        """Convert datetime or float to Unix timestamp."""
-        if val is None:
-            return None
-        if isinstance(val, datetime):
-            if val.tzinfo is None:
-                val = val.replace(tzinfo=UTC)
-            return val.timestamp()
-        if isinstance(val, int | float):
-            return float(val)
-        return None
-
-    # Filter out recently-started sessions (they are not orphans from a dead process)
-    stale_sessions = []
-    skipped = 0
+    count = len(running_sessions)
     for entry in running_sessions:
-        started_ts = _ts(getattr(entry, "started_at", None))
-        if started_ts is not None and started_ts > cutoff:
-            skipped += 1
-            logger.info(
-                "[startup-recovery] Skipping recent session %s (started %ds ago, guard=%ds)",
-                entry.agent_session_id,
-                int(now - started_ts),
-                AGENT_SESSION_HEALTH_MIN_RUNNING,
-            )
-        else:
-            stale_sessions.append(entry)
-
-    if skipped:
-        logger.info("[startup-recovery] Skipped %d recently-started session(s)", skipped)
-
-    if not stale_sessions:
-        return 0
-
-    count = 0
-    for entry in stale_sessions:
         chat_id = entry.chat_id or entry.project_key
         logger.warning(
             "[startup-recovery] Recovering interrupted session %s "
@@ -1043,7 +1000,6 @@ def _recover_interrupted_agent_sessions_startup() -> int:
             entry.started_at = None
             transition_status(entry, "pending", reason="startup recovery")
             logger.info("[startup-recovery] Recovered session %s", entry.agent_session_id)
-            count += 1
         except Exception as e:
             logger.warning(
                 "[startup-recovery] Failed to recover session %s, deleting corrupted session: %s",
