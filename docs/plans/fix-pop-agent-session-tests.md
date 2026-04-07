@@ -160,16 +160,16 @@ For `_extract_agent_session_fields`:
 
 ## Test Impact
 
-- [ ] `tests/integration/test_agent_session_queue_race.py::test_pop_agent_session_preserves_fields` — UPDATE: assert same `agent_session_id` and `status == "running"` after pop.
-- [ ] `tests/integration/test_agent_session_queue_race.py` line 88 (`assert new_job.agent_session_id != original.agent_session_id`) — UPDATE: flip assertion.
-- [ ] `tests/integration/test_agent_session_queue_race.py` module docstring (line 3: "delete-and-recreate pattern used by _pop_agent_session") — UPDATE: describe in-place mutation.
-- [ ] `tests/integration/test_agent_session_queue_race.py` class docstring (line 94) — UPDATE: remove delete-and-recreate language for the pop path.
-- [ ] `tests/integration/test_agent_session_scheduler.py` — UPDATE: any assertions on `_pop_agent_session` behavior that expect a new ID.
-- [ ] `tests/integration/test_lifecycle_transition.py` — UPDATE: pop-path assertions only; leave L176/L191 (`complete_transcript` delete-and-recreate) as-is.
-- [ ] `tests/integration/test_agent_session_health_monitor.py` — UPDATE: pop-path assertions.
-- [ ] `tests/integration/test_silent_failures.py` — UPDATE: pop-path assertions.
-- [ ] `tests/unit/test_agent_session_queue.py` (create if missing) — ADD: round-trip unit test for `_extract_agent_session_fields` preserving `message_text` via `initial_telegram_message`.
-- [ ] Any test asserting `scheduling_depth` appears in the extracted field dict — DELETE or adjust to derive via parent walk.
+- [x] `tests/integration/test_agent_session_queue_race.py::test_pop_agent_session_preserves_fields` — UPDATE: assert same `agent_session_id` and `status == "running"` after pop.
+- [x] `tests/integration/test_agent_session_queue_race.py` line 88 (`assert new_job.agent_session_id != original.agent_session_id`) — UPDATE: flip assertion.
+- [x] `tests/integration/test_agent_session_queue_race.py` module docstring (line 3: "delete-and-recreate pattern used by _pop_agent_session") — UPDATE: describe in-place mutation.
+- [x] `tests/integration/test_agent_session_queue_race.py` class docstring (line 94) — UPDATE: remove delete-and-recreate language for the pop path.
+- [x] `tests/integration/test_agent_session_scheduler.py` — UPDATE: any assertions on `_pop_agent_session` behavior that expect a new ID.
+- [x] `tests/integration/test_lifecycle_transition.py` — UPDATE: pop-path assertions only; leave L176/L191 (`complete_transcript` delete-and-recreate) as-is.
+- [x] `tests/integration/test_agent_session_health_monitor.py` — UPDATE: pop-path assertions.
+- [x] `tests/integration/test_silent_failures.py` — UPDATE: pop-path assertions.
+- [x] `tests/unit/test_agent_session_queue.py` (create if missing) — ADD: round-trip unit test for `_extract_agent_session_fields` preserving `message_text` via `initial_telegram_message`.
+- [x] Any test asserting `scheduling_depth` appears in the extracted field dict — DELETE or adjust to derive via parent walk.
 
 ## Rabbit Holes
 
@@ -229,32 +229,32 @@ No MCP tools, bridge imports, or `.mcp.json` changes are affected.
 
 ## Documentation
 
-- [ ] Update the module docstring of `agent/agent_session_queue.py` around
+- [x] Update the module docstring of `agent/agent_session_queue.py` around
   `_AGENT_SESSION_FIELDS` (lines 71-123) to clarify which callers use
   delete-and-recreate (retry, orphan fix, continuation) and why
   `_pop_agent_session` does NOT.
-- [ ] Update `docs/features/popoto-index-hygiene.md` (if it references
+- [x] Update `docs/features/popoto-index-hygiene.md` (if it references
   `_pop_agent_session`) to reflect the in-place mutation pattern. If it does not
   mention `_pop_agent_session`, no change is needed.
-- [ ] No new feature doc needed — this is a bugfix, not a new capability.
-- [ ] No external docs site changes — internal bugfix.
+- [x] No new feature doc needed — this is a bugfix, not a new capability.
+- [x] No external docs site changes — internal bugfix.
 
 ## Success Criteria
 
-- [ ] All 13 previously-failing integration tests in `test_agent_session_queue_race.py`,
+- [x] All 13 previously-failing integration tests in `test_agent_session_queue_race.py`,
   `test_agent_session_scheduler.py`, `test_lifecycle_transition.py`,
   `test_agent_session_health_monitor.py`, and `test_silent_failures.py` pass.
-- [ ] New unit test asserts `_extract_agent_session_fields` round-trips
+- [x] New unit test asserts `_extract_agent_session_fields` round-trips
   `message_text` via `initial_telegram_message`.
-- [ ] No remaining test docstring or module docstring describes
+- [x] No remaining test docstring or module docstring describes
   `_pop_agent_session` as "delete-and-recreate".
-- [ ] No Redis warnings of the form "one or more redis keys points to missing
+- [x] No Redis warnings of the form "one or more redis keys points to missing
   objects" appear in the test log.
-- [ ] `_pop_agent_session` production behavior is byte-identical before and
+- [x] `_pop_agent_session` production behavior is byte-identical before and
   after the change (diff touches only tests, docstrings, and the comment on
   `_AGENT_SESSION_FIELDS`).
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
