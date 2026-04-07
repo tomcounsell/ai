@@ -346,7 +346,7 @@ EOF
     stop_bridge
 
     # Load the bridge service
-    launchctl load "$PLIST_PATH"
+    launchctl bootstrap "gui/$(id -u)" "$PLIST_PATH"
 
     echo "Bridge service installed and started"
     echo "Bridge will auto-start on boot"
@@ -384,7 +384,8 @@ EOF
 </dict>
 </plist>
 UPDATEEOF
-    launchctl load "$UPDATE_PLIST_PATH"
+    launchctl bootout "gui/$(id -u)/$UPDATE_PLIST_NAME" 2>/dev/null || true
+    launchctl bootstrap "gui/$(id -u)" "$UPDATE_PLIST_PATH"
     echo "Update polling installed (runs every 30 minutes)"
 
     # Install bridge watchdog (runs every 60 seconds)
@@ -420,7 +421,8 @@ UPDATEEOF
 </dict>
 </plist>
 WATCHDOGEOF
-    launchctl load "$WATCHDOG_PLIST_PATH"
+    launchctl bootout "gui/$(id -u)/$WATCHDOG_PLIST_NAME" 2>/dev/null || true
+    launchctl bootstrap "gui/$(id -u)" "$WATCHDOG_PLIST_PATH"
     echo "Bridge watchdog installed (runs every 60 seconds)"
 
     # Install newsyslog config for launchd-managed log rotation.
@@ -434,8 +436,12 @@ WATCHDOGEOF
     NEWSYSLOG_DST="/etc/newsyslog.d/valor.conf"
     if [ -f "$NEWSYSLOG_SRC" ]; then
         # Update paths in the config to match this machine's project directory
-        sed "s|/Users/valorengels/src/ai|${PROJECT_DIR}|g" "$NEWSYSLOG_SRC" | sudo tee "$NEWSYSLOG_DST" > /dev/null
-        echo "newsyslog config installed at $NEWSYSLOG_DST"
+        # sudo may fail in non-interactive contexts (e.g. launchd, CI) — treat as non-fatal
+        if sed "s|/Users/valorengels/src/ai|${PROJECT_DIR}|g" "$NEWSYSLOG_SRC" | sudo tee "$NEWSYSLOG_DST" > /dev/null 2>&1; then
+            echo "newsyslog config installed at $NEWSYSLOG_DST"
+        else
+            echo "WARNING: newsyslog config install skipped (sudo not available in this context)"
+        fi
     else
         echo "WARNING: newsyslog config not found at $NEWSYSLOG_SRC"
     fi
