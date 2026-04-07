@@ -158,7 +158,44 @@ No documentation changes needed — the `valor_session` CLI docs and help text a
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room) on 2026-04-07 -->
+
+**Verdict**: READY TO BUILD
+**Findings**: 3 total (0 blockers, 2 concerns, 1 nit)
+
+### Concerns
+
+**C1: finalize_session side effects not evaluated**
+- Critics: Skeptic, Operator
+- Location: Solution / Technical Approach
+- Finding: `finalize_session()` executes four side effects beyond the status save: auto_tag_session(), checkpoint_branch_state(), _finalize_parent_sync(), and lifecycle logging. For `kill --all` across many sessions, these compound silently. The plan asserts "no logic changes to surrounding control flow" but doesn't evaluate whether these side effects are appropriate for a forced kill vs a graceful completion.
+- Suggestion: The unit test should verify these side effects are exercised (or add `skip_auto_tag=True, skip_checkpoint=True` if they are undesirable for force-kill). At minimum, document the accepted behavior in the plan.
+
+**C2: kill --all misses dormant, waiting_for_children, superseded sessions**
+- Critics: Adversary, User
+- Location: Solution / Flow
+- Finding: `cmd_kill --all` only queries `("pending", "running", "active")` (line 403 of valor_session.py). The full `NON_TERMINAL_STATUSES` set includes `dormant`, `waiting_for_children`, and `superseded`. A user running `kill --all` expecting to kill all live sessions will silently miss sessions in those states.
+- Suggestion: Either expand the status list in `cmd_kill` to cover all `NON_TERMINAL_STATUSES`, or document the known limitation in the plan and add a note to the CLI help text. This is a pre-existing gap, not introduced by this fix — acceptable to defer, but should be noted.
+
+### Nits
+
+**N1: Task 2 (validate-all) uses "validator" agent type but builder is assigned**
+- Critics: Simplifier
+- Location: Step by Step Tasks / Task 2
+- Finding: Task 2 specifies `Agent Type: validator` but `Assigned To: kill-fix-builder`. This is inconsistent — the same agent is doing both build and validation, which is fine for a small fix, but the mixed type label could confuse the `/do-build` runner.
+- Suggestion: Change `Agent Type` on Task 2 to `builder` to match the assignment, or remove the distinction since both tasks go to the same agent.
+
+### Structural Check Results
+
+| Check | Status | Detail |
+|-------|--------|--------|
+| Required sections | PASS | All 4 required sections present and non-empty |
+| Task numbering | PASS | build-fix → validate-all, sequential, no gaps |
+| Dependencies valid | PASS | validate-all depends on build-fix (valid) |
+| File paths exist | PASS | 5/6 exist; test_valor_session_kill.py intentionally new |
+| Prerequisites met | PASS | Bug confirmed: transition_status called at lines 408, 431 |
+| Cross-references | PASS | Success criteria map to tasks; No-Gos not in tasks |
+| Line numbers | PASS | Lines 396, 408, 431 verified against actual source |
 
 ---
 
