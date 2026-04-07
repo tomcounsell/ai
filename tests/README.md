@@ -112,6 +112,7 @@ tests/
 | unit | `test_pending_recovery.py` | 21 | Pending stall recovery (consolidated) |
 | unit | `test_escape_hatch.py` | 18 | Escape hatch for stuck sessions |
 | unit | `test_session_status.py` | 15 | Session status tracking |
+| unit | `test_worker_entry.py` | 24 | Worker entry point startup, config loading, argument parsing |
 | integration | `test_agent_session_lifecycle.py` | 58 | Session lifecycle, history, summarizer |
 | integration | `test_lifecycle_transition.py` | 16 | Session state transitions |
 | e2e | `test_session_continuity.py` | 11 | Session creation, resume, transcript |
@@ -176,6 +177,7 @@ tests/
 | Level | File | Tests | Description |
 |-------|------|------:|-------------|
 | unit | `test_job_hierarchy.py` | 22 | Job priority and hierarchy |
+| unit | `test_agent_session_queue_revival_helper.py` | 7 | Queue revival prompt helper, cooldown tracking |
 | integration | `test_enqueue_continuation.py` | 29 | Continuation job enqueuing |
 | integration | `test_job_scheduler.py` | 21 | 4-tier priority, FIFO |
 | integration | `test_job_health_monitor.py` | 20 | Job health monitoring |

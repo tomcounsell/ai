@@ -88,8 +88,8 @@ No prerequisites — this work modifies existing config loading and install scri
 
 2. **VALOR_USERNAMES removal** — In `bridge/routing.py`:
    - Remove the `VALOR_USERNAMES` constant at line 34
-   - Modify `get_valor_usernames()` to build the set entirely from config `mention_triggers` (which are already loaded from `projects.json` defaults)
-   - Add a `BOT_USERNAMES` field to `projects.json` `defaults.telegram` for the Telegram bot username(s) that should always trigger responses, separate from conversational mention triggers
+   - Modify `get_valor_usernames()` to build the set entirely from config `mention_triggers` (already loaded from `projects.json` defaults)
+   - **No new field** — fold the existing hardcoded handles (`"valor"`, `"valorengels"`) into `defaults.telegram.mention_triggers` in `config/projects.example.json`. The bridge runs as a Telethon userbot (user account, not a Telegram bot), so there is no separate "bot username" concept; `mention_triggers` is already the single source of truth for self-mention detection.
    - Fallback: if no config is loaded (e.g., tests), use an empty set so mention detection is inert rather than crashing
 
 3. **Service label prefix** — `SERVICE_LABEL_PREFIX` is an **install-time-only** concern. launchd sees only the `Label` baked into the plist at install time; runtime `.env` changes do not affect a registered service. Scope:
@@ -174,7 +174,7 @@ No agent integration required — this is a config/install infrastructure change
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/guides/setup.md` with new config fields (`SERVICE_LABEL_PREFIX`, `bot_usernames`)
+- [ ] Update `docs/guides/setup.md` with new config fields (`SERVICE_LABEL_PREFIX`) and note that self-mention handles live in `mention_triggers`
 - [ ] Update `docs/guides/valor-name-references.md` to reflect removed hardcoded references
 - [ ] Update `docs/features/deployment.md` with newsyslog install step
 
@@ -236,9 +236,8 @@ No agent integration required — this is a config/install infrastructure change
 - **Agent Type**: builder
 - **Parallel**: true
 - Remove `VALOR_USERNAMES` constant from `bridge/routing.py:34`
-- Add `bot_usernames` field to `defaults.telegram` in `config/projects.example.json`
-- Modify `get_valor_usernames()` to build set from config `mention_triggers` + `bot_usernames` only
-- Update `telegram_bridge.py` config propagation to pass `bot_usernames` to routing module
+- Fold `"valor"` and `"valorengels"` into `defaults.telegram.mention_triggers` in `config/projects.example.json` (no new field)
+- Modify `get_valor_usernames()` to build set from config `mention_triggers` only
 - Add fallback empty set when no config is loaded
 - Write unit test verifying config-only mention detection
 
@@ -323,6 +322,8 @@ No agent integration required — this is a config/install infrastructure change
 
 ## Open Questions
 
-1. **Bot username field naming**: The plan proposes `bot_usernames` in `projects.json` `defaults.telegram` to hold Telegram bot usernames (e.g., `["valor", "valorengels"]`). Is this the right field name, or should it merge with `mention_triggers`? The distinction is: `mention_triggers` includes casual phrases like "hey valor" while `bot_usernames` are strict Telegram @username handles.
+_All open questions resolved._
+
+> **Resolved — Self-mention field naming** (formerly OQ1): The bridge is a Telethon userbot, not a Telegram bot. There is no separate "bot username" concept. Fold existing hardcoded handles into `defaults.telegram.mention_triggers` — single source of truth, no new field.
 
 > **Resolved — Plist filename/Label drift** (formerly OQ2): Source-of-truth templates in the repo remain `com.valor.*.plist` for recognizability; install scripts rename the installed copy to `${SERVICE_LABEL_PREFIX}.*.plist` so on-disk filename and internal `Label` stay in sync. See Task 3.

@@ -175,34 +175,60 @@ class TestImportDecoupling:
                 pytest.fail(f"Module-level bridge import found: {stripped}")
 
     def test_bridge_has_no_execution_function_imports(self):
-        """bridge/telegram_bridge.py must not import execution functions from agent_session_queue.
+        """bridge/telegram_bridge.py may only import allowlisted functions from agent_session_queue.
 
-        These functions are worker-only responsibilities after the bridge/worker separation:
-        - _ensure_worker
-        - _recover_interrupted_agent_sessions_startup
-        - _agent_session_health_loop
-        - _cleanup_orphaned_claude_processes
+        The allowlist represents the public API the bridge is permitted to use.
+        Any import not on this list is a boundary violation — update the allowlist
+        (and the docs/features/bridge-worker-architecture.md boundary section) if
+        a new function is intentionally added.
         """
+        import re
+
+        # Hardcoded allowlist — only these functions may be imported from agent_session_queue
+        allowed_imports = {
+            "enqueue_agent_session",
+            "maybe_send_revival_prompt",
+            "queue_revival_agent_session",
+            "cleanup_stale_branches",
+            "register_callbacks",
+            "clear_restart_flag",
+        }
+
         source = (Path(__file__).parent.parent.parent / "bridge" / "telegram_bridge.py").read_text()
 
-        forbidden_imports = [
-            "_ensure_worker",
-            "_recover_interrupted_agent_sessions_startup",
-            "_agent_session_health_loop",
-            "_cleanup_orphaned_claude_processes",
-        ]
+        # Collect all names imported from agent.agent_session_queue
+        # Handles both single-line and multi-line imports:
+        #   from agent.agent_session_queue import foo
+        #   from agent.agent_session_queue import (foo, bar, ...)
+        imported_names: set[str] = set()
+        # Find each import block starting with "from agent.agent_session_queue import"
+        pattern = re.compile(
+            r"from agent\.agent_session_queue import\s+"
+            r"(?:\(([^)]+)\)|([^\n#(]+))",
+            re.MULTILINE,
+        )
+        for match in pattern.finditer(source):
+            block = match.group(1) or match.group(2)
+            # Each import item may look like "foo" or "foo as bar"
+            # Split on commas and whitespace, then take only the original name
+            for item in re.split(r",", block):
+                item = item.strip()
+                if not item:
+                    continue
+                # "name as alias" or just "name" (possibly with trailing whitespace/newline)
+                parts = re.split(r"\s+as\s+", item)
+                name = parts[0].strip()
+                if name:
+                    imported_names.add(name)
 
-        # Find all import statements in the file
-        import_lines = [
-            line.strip()
-            for line in source.split("\n")
-            if line.strip().startswith("from ") or line.strip().startswith("import ")
-        ]
-
-        for fn_name in forbidden_imports:
-            for import_line in import_lines:
-                if fn_name in import_line:
-                    pytest.fail(f"Execution function '{fn_name}' imported in bridge: {import_line}")
+        unauthorized = imported_names - allowed_imports
+        if unauthorized:
+            pytest.fail(
+                f"bridge/telegram_bridge.py imports unauthorized functions from "
+                f"agent.agent_session_queue: {sorted(unauthorized)}. "
+                f"Either remove these imports or add them to the allowlist in this test "
+                f"and update docs/features/bridge-worker-architecture.md."
+            )
 
     def test_reaction_constants_importable_from_agent(self):
         """REACTION_* constants should be importable from agent.constants."""
