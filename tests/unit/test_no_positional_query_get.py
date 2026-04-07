@@ -30,17 +30,50 @@ ALLOWLIST = (
     "docs/plans/",
 )
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+def _find_repo_root() -> Path:
+    """Walk up from this file looking for a ``pyproject.toml`` marker."""
+    here = Path(__file__).resolve()
+    for candidate in (here, *here.parents):
+        if (candidate / "pyproject.toml").exists():
+            return candidate
+    # Fallback: original heuristic
+    return here.parents[2]
+
+
+REPO_ROOT = _find_repo_root()
+
+# Scan only first-party source directories. We deliberately do NOT use
+# ``REPO_ROOT.rglob("*.py")`` because the repo contains sibling worktrees
+# under ``.worktrees/`` AND ``.claude/worktrees/`` (skill-isolation worktrees)
+# which would surface stale copies of the same files as false positives.
+SCAN_DIRS = (
+    "agent",
+    "bridge",
+    "models",
+    "scripts",
+    "tests",
+    "tools",
+    "ui",
+    "worker",
+)
 
 
 def _iter_python_files() -> list[Path]:
-    skip_dirs = {".git", ".venv", "venv", "__pycache__", ".worktrees", "node_modules"}
+    skip_dirs = {".git", ".venv", "venv", "__pycache__", "node_modules", "worktrees"}
     files: list[Path] = []
-    for path in REPO_ROOT.rglob("*.py"):
-        parts = set(path.relative_to(REPO_ROOT).parts)
-        if parts & skip_dirs:
+    for top in SCAN_DIRS:
+        root = REPO_ROOT / top
+        if not root.exists():
             continue
-        files.append(path)
+        for path in root.rglob("*.py"):
+            parts = set(path.relative_to(REPO_ROOT).parts)
+            if parts & skip_dirs:
+                continue
+            # Defensive: skip anything under any worktrees dir (e.g. .worktrees,
+            # .claude/worktrees) regardless of leading dot.
+            if any(p == "worktrees" or p == ".worktrees" for p in path.parts):
+                continue
+            files.append(path)
     return files
 
 

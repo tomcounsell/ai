@@ -420,14 +420,12 @@ class AgentSession(Model):
         you pass a bare string. Use this helper instead.
 
         Args:
-            agent_session_id: Raw string id of the session, or None/empty.
+            agent_session_id: Raw string id of the session, or ``None``.
 
         Returns:
             The matching AgentSession, or None if not found / input is empty.
         """
-        if not agent_session_id or not isinstance(agent_session_id, str):
-            return None
-        if not agent_session_id.strip():
+        if not isinstance(agent_session_id, str) or not agent_session_id.strip():
             return None
         try:
             results = list(cls.query.filter(id=agent_session_id))
