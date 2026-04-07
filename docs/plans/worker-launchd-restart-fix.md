@@ -128,7 +128,7 @@ This matches the API used in `scripts/install_worker.sh` (line 49) and properly 
 No existing tests affected — the worker signal handling and launchd interaction are infrastructure-level behaviors that are not covered by the existing unit or integration test suite. The worker startup/shutdown tests in `tests/unit/` test the `_run_worker` logic directly without simulating launchd or OS signals at the process level.
 
 New tests to add:
-- [ ] `tests/unit/test_worker_main.py` — CREATE: unit test that sends SIGTERM to the signal handler and asserts `_shutdown_via_signal` is set to True
+- [x] `tests/unit/test_worker_main.py` — CREATE: unit test that sends SIGTERM to the signal handler and asserts `_shutdown_via_signal` is set to True (implemented in `tests/unit/test_worker_entry.py::TestSigtermExitCode`)
 
 ## Race Conditions
 
@@ -153,17 +153,17 @@ No agent integration required — this is a launchd service lifecycle fix intern
 
 ## Documentation
 
-- [ ] Update `docs/features/bridge-worker-architecture.md` to note that the worker exits with code 1 on SIGTERM so launchd respects `ThrottleInterval`
-- [ ] No new feature doc needed — this is a bug fix with no new user-facing capability
+- [x] Update `docs/features/bridge-worker-architecture.md` to note that the worker exits with code 1 on SIGTERM so launchd respects `ThrottleInterval`
+- [x] No new feature doc needed — this is a bug fix with no new user-facing capability
 
 ## Success Criteria
 
-- [ ] Worker killed via SIGTERM restarts within 15 seconds
-- [ ] `valor-service.sh worker-restart` completes and worker is confirmed running within 15 seconds
-- [ ] `stop_worker()` uses `launchctl bootout` (confirmed via `grep`)
-- [ ] Worker logs show "Exiting with code 1 (SIGTERM)" on termination
-- [ ] Unit test for `_shutdown_via_signal` flag passes
-- [ ] Tests pass (`/do-test`)
+- [x] Worker killed via SIGTERM restarts within 15 seconds
+- [x] `valor-service.sh worker-restart` completes and worker is confirmed running within 15 seconds
+- [x] `stop_worker()` uses `launchctl bootout` (confirmed via `grep`)
+- [x] Worker logs show "Exiting with code 1 (SIGTERM)" on termination
+- [x] Unit test for `_shutdown_via_signal` flag passes
+- [x] Tests pass (`/do-test`)
 
 ## Team Orchestration
 
