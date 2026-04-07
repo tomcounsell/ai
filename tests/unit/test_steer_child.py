@@ -47,7 +47,7 @@ class TestSteerChild:
     @patch(_AGENT_SESSION)
     def test_valid_steering(self, mock_agent_session_cls, mock_push, mock_child):
         """Successful steering pushes message and exits 0."""
-        mock_agent_session_cls.query.get.return_value = mock_child
+        mock_agent_session_cls.get_by_id.return_value = mock_child
 
         result = main(
             [
@@ -72,7 +72,7 @@ class TestSteerChild:
     @patch(_AGENT_SESSION)
     def test_abort_flag(self, mock_agent_session_cls, mock_push, mock_child):
         """--abort flag sets is_abort=True in steering message."""
-        mock_agent_session_cls.query.get.return_value = mock_child
+        mock_agent_session_cls.get_by_id.return_value = mock_child
 
         result = main(
             [
@@ -97,7 +97,7 @@ class TestSteerChild:
     @patch(_AGENT_SESSION)
     def test_empty_message_rejected(self, mock_agent_session_cls, mock_child):
         """Empty message text is rejected with exit code 1."""
-        mock_agent_session_cls.query.get.return_value = mock_child
+        mock_agent_session_cls.get_by_id.return_value = mock_child
 
         result = main(
             [
@@ -115,7 +115,7 @@ class TestSteerChild:
     @patch(_AGENT_SESSION)
     def test_whitespace_only_message_rejected(self, mock_agent_session_cls, mock_child):
         """Whitespace-only message is stripped and rejected."""
-        mock_agent_session_cls.query.get.return_value = mock_child
+        mock_agent_session_cls.get_by_id.return_value = mock_child
 
         result = main(
             [
@@ -133,7 +133,7 @@ class TestSteerChild:
     @patch(_AGENT_SESSION)
     def test_nonexistent_session_rejected(self, mock_agent_session_cls):
         """Non-existent session ID results in exit code 1."""
-        mock_agent_session_cls.query.get.return_value = None
+        mock_agent_session_cls.get_by_id.return_value = None
 
         result = main(
             [
@@ -152,7 +152,7 @@ class TestSteerChild:
     def test_non_child_rejected(self, mock_agent_session_cls, mock_child):
         """Session that is not a child of the parent is rejected."""
         mock_child.parent_session_id = "other-parent"
-        mock_agent_session_cls.query.get.return_value = mock_child
+        mock_agent_session_cls.get_by_id.return_value = mock_child
 
         result = main(
             [
@@ -172,7 +172,7 @@ class TestSteerChild:
         """Chat session (not DevSession) is rejected as steering target."""
         chat = MagicMock()
         chat.is_dev = False
-        mock_agent_session_cls.query.get.return_value = chat
+        mock_agent_session_cls.get_by_id.return_value = chat
 
         result = main(
             [
@@ -191,7 +191,7 @@ class TestSteerChild:
     def test_inactive_session_rejected(self, mock_agent_session_cls, mock_child):
         """Completed/non-running session is rejected."""
         mock_child.status = "completed"
-        mock_agent_session_cls.query.get.return_value = mock_child
+        mock_agent_session_cls.get_by_id.return_value = mock_child
 
         result = main(
             [
@@ -253,7 +253,7 @@ class TestSteerChild:
     @patch(_AGENT_SESSION)
     def test_parent_id_from_env(self, mock_agent_session_cls, mock_push, mock_child):
         """VALOR_SESSION_ID env var is used when --parent-id not given."""
-        mock_agent_session_cls.query.get.return_value = mock_child
+        mock_agent_session_cls.get_by_id.return_value = mock_child
 
         with patch.dict("os.environ", {"VALOR_SESSION_ID": "parent-001"}):
             result = main(
@@ -271,7 +271,7 @@ class TestSteerChild:
     @patch(_AGENT_SESSION)
     def test_session_lookup_exception(self, mock_agent_session_cls):
         """Exception during session lookup is handled gracefully."""
-        mock_agent_session_cls.query.get.side_effect = Exception("Redis down")
+        mock_agent_session_cls.get_by_id.side_effect = Exception("Redis down")
 
         result = main(
             [
@@ -299,7 +299,7 @@ class TestListChildren:
         capsys,
     ):
         """--list shows active child sessions."""
-        mock_agent_session_cls.query.get.return_value = mock_parent
+        mock_agent_session_cls.get_by_id.return_value = mock_parent
         mock_parent.get_child_sessions.return_value = [mock_child]
 
         result = main(["--list", "--parent-id", "parent-001"])
@@ -312,7 +312,7 @@ class TestListChildren:
     @patch(_AGENT_SESSION)
     def test_list_no_active_children(self, mock_agent_session_cls, mock_parent, capsys):
         """--list with no active children shows informative message."""
-        mock_agent_session_cls.query.get.return_value = mock_parent
+        mock_agent_session_cls.get_by_id.return_value = mock_parent
         mock_parent.get_child_sessions.return_value = []
 
         result = main(["--list", "--parent-id", "parent-001"])
@@ -334,7 +334,7 @@ class TestListChildren:
         completed_child.status = "completed"
         completed_child.agent_session_id = "child-002"
 
-        mock_agent_session_cls.query.get.return_value = mock_parent
+        mock_agent_session_cls.get_by_id.return_value = mock_parent
         mock_parent.get_child_sessions.return_value = [mock_child, completed_child]
 
         result = main(["--list", "--parent-id", "parent-001"])
@@ -347,7 +347,7 @@ class TestListChildren:
     @patch(_AGENT_SESSION)
     def test_list_nonexistent_parent(self, mock_agent_session_cls):
         """--list with non-existent parent returns error."""
-        mock_agent_session_cls.query.get.return_value = None
+        mock_agent_session_cls.get_by_id.return_value = None
 
         result = main(["--list", "--parent-id", "nonexistent"])
 
@@ -356,7 +356,7 @@ class TestListChildren:
     @patch(_AGENT_SESSION)
     def test_list_parent_lookup_exception(self, mock_agent_session_cls):
         """--list handles exception during parent lookup."""
-        mock_agent_session_cls.query.get.side_effect = Exception("Redis down")
+        mock_agent_session_cls.get_by_id.side_effect = Exception("Redis down")
 
         result = main(["--list", "--parent-id", "parent-001"])
 
