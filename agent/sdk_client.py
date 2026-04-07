@@ -541,6 +541,11 @@ def load_persona_prompt(persona: str = "developer") -> str:
     # Overlay is optional — fall back to SOUL.md if missing
     if overlay_path.exists():
         overlay_content = overlay_path.read_text()
+        if persona == "project-manager" and "CRITIQUE" not in overlay_content:
+            logger.warning(
+                f"PM persona overlay '{overlay_path}' is missing CRITIQUE gate rules "
+                "— pipeline integrity may be compromised"
+            )
         logger.info(f"Loaded persona '{persona}' from {overlay_path}")
         return f"{base_content}\n\n---\n\n{overlay_content}"
 
@@ -1608,7 +1613,7 @@ async def get_agent_response_sdk(
                 "2. **Spawn one dev-session for the next stage** — use the Agent tool "
                 "to dispatch exactly one stage at a time:\n"
                 '   Agent(subagent_type="dev-session", description="<stage>: <short desc>", '
-                'prompt="Stage: <PLAN|BUILD|TEST|PATCH|REVIEW|DOCS>\\n'
+                'prompt="Stage: <PLAN|CRITIQUE|BUILD|TEST|PATCH|REVIEW|DOCS>\\n'
                 "Issue: <URL>\\nPR: <URL if exists>\\n"
                 "Current state: <what's already done>\\n"
                 'Acceptance criteria: <what done looks like>")\n'

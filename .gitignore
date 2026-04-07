@@ -441,8 +441,9 @@ agents/*/logs/
 data/doc_embeddings.json
 
 # Persona overlay files (private, live in ~/Desktop/Valor/personas/)
+# Note: config/personas/project-manager.md is tracked — it is the in-repo fallback
+# for the PM pipeline gate rules (CRITIQUE mandatory, REVIEW mandatory).
 config/personas/developer.md
-config/personas/project-manager.md
 config/personas/teammate.md
 
 # Git worktrees for session isolation
