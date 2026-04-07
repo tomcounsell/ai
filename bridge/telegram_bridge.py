@@ -1160,8 +1160,11 @@ async def main():
                     )
                     return
                 else:
-                    # No running/active session found -- check for pending (race window)
-                    # If within PENDING_MERGE_WINDOW_SECONDS, steer into it (#619)
+                    # No running/active session found -- check for pending.
+                    # For explicit reply-to messages the user's intent is unambiguous:
+                    # they want to add to that specific session regardless of how long
+                    # it has been waiting. Skip the age window check here -- that guard
+                    # only applies to non-reply coalescing (handled below).
                     pending_sessions = AgentSession.query.filter(
                         session_id=session_id, status="pending"
                     )
@@ -1175,38 +1178,26 @@ async def main():
                                 else _ct.replace(tzinfo=UTC).timestamp()
                             )
                         age = time.time() - (_ct or 0)
-                        if age <= PENDING_MERGE_WINDOW_SECONDS:
-                            # Recent pending session: push to steering queue
-                            from agent.steering import ABORT_KEYWORDS
+                        from agent.steering import ABORT_KEYWORDS
 
-                            is_abort = clean_text.strip().lower() in ABORT_KEYWORDS
-                            push_steering_message(
-                                session_id,
-                                clean_text,
-                                sender_name,
-                                is_abort=is_abort,
-                            )
-                            ack_text = (
-                                "Stopping current task." if is_abort else "Adding to current task"
-                            )
-                            from bridge.markdown import send_markdown
+                        is_abort = clean_text.strip().lower() in ABORT_KEYWORDS
+                        push_steering_message(
+                            session_id,
+                            clean_text,
+                            sender_name,
+                            is_abort=is_abort,
+                        )
+                        ack_text = (
+                            "Stopping current task." if is_abort else "Adding to current task"
+                        )
+                        from bridge.markdown import send_markdown
 
-                            await send_markdown(
-                                client, event.chat_id, ack_text, reply_to=message.id
-                            )
-                            logger.info(
-                                f"[{project_name}] Steered message into "
-                                f"pending session {session_id} "
-                                f"(age={age:.1f}s <= {PENDING_MERGE_WINDOW_SECONDS}s)"
-                            )
-                            return
-                        else:
-                            logger.info(
-                                f"[{project_name}] Steering check found session {session_id} "
-                                f"in 'pending' status but too old "
-                                f"(age={age:.1f}s > {PENDING_MERGE_WINDOW_SECONDS}s) "
-                                f"-- message will queue normally"
-                            )
+                        await send_markdown(client, event.chat_id, ack_text, reply_to=message.id)
+                        logger.info(
+                            f"[{project_name}] Steered reply-to into "
+                            f"pending session {session_id} (age={age:.1f}s)"
+                        )
+                        return
             except (ConnectionError, OSError) as e:
                 # Redis/DB connection errors -- log at ERROR with traceback
                 logger.error(
