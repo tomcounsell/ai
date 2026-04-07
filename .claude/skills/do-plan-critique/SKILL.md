@@ -230,7 +230,8 @@ Output the final report in this format:
 ## Verdict
 
 {One of:}
-- **READY TO BUILD** — No blockers. Concerns are acknowledged risks, not plan defects.
+- **READY TO BUILD** — No CONCERN or BLOCKER findings (NITs do not trigger this variant). Proceed directly to build.
+- **READY TO BUILD (with concerns)** — No BLOCKERs, but one or more CONCERN findings exist. A revision pass will embed Implementation Notes before build.
 - **NEEDS REVISION** — {N} blockers must be resolved before build.
 - **MAJOR REWORK** — Fundamental issues identified. Recommend re-planning.
 ```
@@ -259,5 +260,6 @@ Use **"READY TO BUILD (no concerns)"** when there are zero CONCERN or BLOCKER fi
 
 ## Version history
 
+- v1.2.0 (2026-04-07): Fix Step 5 Verdict template to show both READY TO BUILD variants so critics output the correct form for SDLC routing
 - v1.1.0 (2026-03-23): Add SOURCE_FILES inline context to prevent critic hallucination (Step 1.5)
 - v1.0.0 (2026-03-21): Initial — war room critique with six parallel critics + structural checks
