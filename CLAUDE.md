@@ -376,6 +376,7 @@ Standalone CLI scripts for external service integrations and file processing.
 ### Management Commands
 | Command | Purpose |
 |---------|---------|
+| `ep` | Inspect and update an episode by slug: `ep <slug>` (show), `ep <slug> set field=value`, `ep <slug> brief` (p1-brief content), `ep <slug> setup` (run setup_episode) |
 | `start_episode` | Pull draft Episode from DB, call `setup_episode()`, enqueue `produce_episode` task pipeline |
 | `publish_episode` | Call `services.publishing.publish_episode()` |
 | `backfill_episodes` | One-time import of existing episodes from research repo (see [Migration Guide](docs/operations/podcast-migration.md)) |
