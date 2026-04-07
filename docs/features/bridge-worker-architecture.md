@@ -129,8 +129,8 @@ python -m tools.valor_session kill --id <ID>                # Kill a session
 
 ```bash
 ./scripts/valor-service.sh status          # Check both bridge and worker
-./scripts/valor-service.sh restart         # Restart bridge
-./scripts/valor-service.sh worker-restart  # Restart worker
+./scripts/valor-service.sh restart         # Restart bridge, watchdog, and worker
+./scripts/valor-service.sh worker-restart  # Restart worker only
 ./scripts/valor-service.sh worker-status   # Worker-specific status
 ```
 

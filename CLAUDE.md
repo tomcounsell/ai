@@ -195,8 +195,8 @@ valor-telegram send --chat "Tom" --file ./screenshot.png "Caption"
 - See `.claude/skills/sdlc/SKILL.md` for the ground truth on pipeline stages
 
 ### 10. ALWAYS RESTART RUNNING SERVICES
-- If bridge is running and you modify bridge/agent code, restart immediately after committing
-- Restart: `./scripts/valor-service.sh restart`
+- If bridge or worker is running and you modify bridge/agent code, restart immediately after committing
+- Restart: `./scripts/valor-service.sh restart` (cycles bridge, watchdog, and worker)
 - Verify: `tail -5 logs/bridge.log` shows "Connected to Telegram"
 
 ## Development Workflow
