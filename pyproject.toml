@@ -5,7 +5,7 @@ description = "Telegram bridge for Valor AI"
 requires-python = ">=3.11"
 dependencies = [
     "telethon==1.42.0", # CRITICAL — pin exact, upgrade via /update only
-    "anthropic==0.90.0", # CRITICAL — pin exact, upgrade via /update only
+    "anthropic==0.91.0", # CRITICAL — pin exact, upgrade via /update only
     "claude-agent-sdk==0.1.56", # CRITICAL — pin exact, upgrade via /update only
     "mcp>=1.8.0", # Required by claude-agent-sdk for ToolAnnotations (see issue #235)
     "python-dotenv>=1.0.0",
