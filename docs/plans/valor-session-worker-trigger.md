@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -51,7 +51,7 @@ No prior issues found related to this work.
 ### Fixed path (after this plan):
 1. `tools/valor_session.py:81` → `asyncio.run(_push_agent_session(...))`
 2. `_push_agent_session()` writes `AgentSession` to Redis (status=`pending`)
-3. `_push_agent_session()` publishes `{"chat_id": chat_id}` to `valor:sessions:new` channel (sync, fire-and-forget)
+3. `_push_agent_session()` publishes `{"chat_id": chat_id}` to `valor:sessions:new` channel via `asyncio.to_thread()` (non-blocking, fire-and-forget)
 4. Standalone worker's async subscriber loop receives message immediately
 5. Worker calls `_ensure_worker(chat_id)` → session picked up within ~1s
 
@@ -101,9 +101,9 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/valor-session-
 
 ### Technical Approach
 
-- `_push_agent_session()` (`agent/agent_session_queue.py`): Add sync Redis publish at the end. Use `try/except Exception` to ensure publish failure never crashes enqueue. Use `POPOTO_REDIS_DB.publish("valor:sessions:new", msgpack.packb({"chat_id": chat_id}))` or equivalent.
-- `_session_notify_listener()` (new function in `agent/agent_session_queue.py`): `async def` that creates a `redis.asyncio` pubsub, subscribes to `valor:sessions:new`, loops `async for message in pubsub.listen()`, decodes msgpack, calls `_ensure_worker(chat_id)`. Handles Redis disconnects by catching `ConnectionError` and sleeping before retry.
-- `worker/__main__.py:205`: After `asyncio.create_task(_agent_session_health_loop())`, add `asyncio.create_task(_session_notify_listener())`. Cancel in shutdown block.
+- `_push_agent_session()` (`agent/agent_session_queue.py`): At the end, call `await asyncio.to_thread(POPOTO_REDIS_DB.publish, "valor:sessions:new", json.dumps({"chat_id": chat_id, "session_id": session_id}))`. Wrap in `try/except Exception: logger.warning(...)` — publish failure must never crash enqueue. Use `json.dumps()` not msgpack — simpler, no extra dependency, debuggable in Redis CLI.
+- `_session_notify_listener()` (new function in `agent/agent_session_queue.py`): `async def` that creates a `redis.asyncio` pubsub, subscribes to `valor:sessions:new`, loops `async for message in pubsub.listen()`, parses JSON payload, calls `_ensure_worker(chat_id)`, then also sets `_active_events.get(chat_id)` if it exists (to wake an already-running but idle worker blocked on `event.wait()`). Handles Redis disconnects by catching `ConnectionError`, logging, sleeping 5s, and retrying.
+- `worker/__main__.py:205`: After `asyncio.create_task(_agent_session_health_loop())`, add `notify_task = asyncio.create_task(_session_notify_listener())`. Attach `.add_done_callback(lambda t: logger.error("notify listener exited: %s", t.exception()) if not t.cancelled() else None)` for liveness monitoring. In the shutdown block, cancel `notify_task` alongside `health_task`.
 
 ## Failure Path Test Strategy
 
@@ -112,7 +112,7 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/valor-session-
 - [ ] Subscriber `ConnectionError` on Redis restart: subscriber loop catches, logs, sleeps 5s, retries subscribe — test with a mock that raises then succeeds
 
 ### Empty/Invalid Input Handling
-- [ ] Worker receives malformed msgpack on channel: current Subscriber silently drops (`msgpack.FormatError`); replicate this pattern in the async listener
+- [ ] Worker receives malformed JSON on channel: catch `json.JSONDecodeError`, log and skip — replicate the Subscriber's silent-drop pattern for bad messages
 - [ ] Worker receives `chat_id` for a session that no longer exists: `_ensure_worker()` is idempotent, no session found → no task spawned → no error
 
 ### Error State Rendering
@@ -225,8 +225,9 @@ No agent integration required — this is an internal worker/queue change. The `
 - **Assigned To**: queue-worker-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- In `agent/agent_session_queue.py`, at the end of `_push_agent_session()` (after session is written), add a fire-and-forget sync Redis publish to channel `valor:sessions:new` with payload `{"chat_id": chat_id, "session_id": session_id}` (msgpack-encoded)
+- In `agent/agent_session_queue.py`, at the end of `_push_agent_session()` (after session is written), add `await asyncio.to_thread(POPOTO_REDIS_DB.publish, "valor:sessions:new", json.dumps({"chat_id": chat_id, "session_id": session_id}))` — non-blocking, won't hold the event loop
 - Wrap in `try/except Exception: logger.warning(...)` — publish failure must never raise
+- Use `json.dumps()` not msgpack — simpler payload, debuggable via `redis-cli subscribe valor:sessions:new`
 
 ### 2. Add `_session_notify_listener()` to worker
 - **Task ID**: build-subscriber
@@ -236,8 +237,9 @@ No agent integration required — this is an internal worker/queue change. The `
 - **Assigned To**: queue-worker-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add `async def _session_notify_listener()` to `agent/agent_session_queue.py` (or `worker/__main__.py`): subscribe to `valor:sessions:new` via `redis.asyncio`, decode msgpack payload, call `_ensure_worker(chat_id)`, handle `ConnectionError` with sleep+retry
-- In `worker/__main__.py`, after the `_agent_session_health_loop()` task creation, add `asyncio.create_task(_session_notify_listener())` and cancel it in the shutdown block
+- Add `async def _session_notify_listener()` to `agent/agent_session_queue.py`: subscribe to `valor:sessions:new` via `redis.asyncio`, parse JSON payload, call `_ensure_worker(chat_id)`, then also set `_active_events.get(chat_id)` if present (wakes idle workers blocked on `event.wait()`). Handle `ConnectionError` with log + 5s sleep + retry. Handle `json.JSONDecodeError` with log + skip.
+- In `worker/__main__.py`, after `_agent_session_health_loop()` task: `notify_task = asyncio.create_task(_session_notify_listener())` with `.add_done_callback()` to log unexpected exits
+- In shutdown block: cancel `notify_task` explicitly alongside `health_task`
 
 ### 3. Write tests
 - **Task ID**: write-tests
@@ -248,7 +250,7 @@ No agent integration required — this is an internal worker/queue change. The `
 - **Parallel**: false
 - Update `tests/unit/test_agent_session_queue_async.py`: mock `POPOTO_REDIS_DB.publish`, assert it is called after enqueue, assert session still written when publish raises
 - Update `tests/integration/test_silent_failures.py`, `test_bridge_routing.py`, `test_lifecycle_transition.py`: mock publish call to prevent side effects
-- Create `tests/integration/test_session_notify.py`: enqueue a session via `_push_agent_session()`, assert `valor:sessions:new` channel receives message within 1s; simulate subscriber receiving message, assert `_ensure_worker()` is called
+- Create `tests/integration/test_session_notify.py`: enqueue a session via `_push_agent_session()`, assert `valor:sessions:new` channel receives message within 1s; for the `pending→running` within 10s assertion, start a real worker subprocess in test setup (e.g. `asyncio.create_subprocess_exec("python", "-m", "worker")`) and teardown after assertion
 
 ### 4. Documentation
 - **Task ID**: document-feature
