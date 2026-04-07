@@ -141,9 +141,13 @@ def _get_parent_session(parent_id: str):
 
     Returns the parent session or None if not found.
     """
-    from models.agent_session import AgentSession
+    try:
+        from models.agent_session import AgentSession
 
-    return AgentSession.get_by_id(parent_id)
+        return AgentSession.get_by_id(parent_id)
+    except Exception as exc:
+        logger.warning("Parent AgentSession lookup failed for %s: %s", parent_id, exc)
+        return None
 
 
 # --- Persona gate ---

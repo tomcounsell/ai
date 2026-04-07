@@ -29,6 +29,7 @@ The env var is set in `ValorAgent._create_options()` and passed through `get_age
 ### Model Fields
 
 - `AgentSession.slug` -- Redis model field storing the active slug for a session. Set when `/do-plan {slug}` runs.
+- **Looking up an AgentSession by id** -- Use `AgentSession.get_by_id(agent_session_id)` for any raw-string lookup. Popoto's `AgentSession.query.get()` requires a key kwarg (`db_key=` / `redis_key=`) and raises `AttributeError` on bare strings, which historically got swallowed by silent `except` blocks (issue #765). The `get_by_id` helper handles None/empty/whitespace input, logs warnings on backend failures, and is the canonical entry point for CLI args, parent references, and Redis hash fields.
 - `AgentSession.project_config` -- DictField carrying the full project dict from `projects.json`. Populated at enqueue time so downstream code (queue worker, SDK client, formatting) can read project properties without re-deriving from config files or parallel registries. See [Chat Dev Session Architecture](chat-dev-session-architecture.md#project-config-propagation) for the propagation flow.
 - `Job.slug` -- Propagated from the session to each session for task list routing.
 - `Job.task_list_id` -- The computed task list ID (either slug or thread-derived).
