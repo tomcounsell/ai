@@ -101,9 +101,9 @@ Phase 3 (skipped state) → see "Copy prompt" + textarea → copy prompt → pas
 
 ## Test Impact
 
-- [ ] `tests/unit/test_workflow_progress.py` — no changes needed; `_resolve_substep_status()` logic is unchanged
-- [ ] `tests/integration/test_podcast_workflow_views.py` (or equivalent) — ADD: test `PastePerplexityResearchView` with valid content, empty content, and sentinel-prefixed content
-- [ ] Existing retry/paste view tests — no changes needed; new view is additive
+- [x] `tests/unit/test_workflow_progress.py` — no changes needed; `_resolve_substep_status()` logic is unchanged
+- [x] `tests/integration/test_podcast_workflow_views.py` (or equivalent) — ADD: test `PastePerplexityResearchView` with valid content, empty content, and sentinel-prefixed content
+- [x] Existing retry/paste view tests — no changes needed; new view is additive
 
 No existing tests broken — this is a purely additive new view and template block.
 
@@ -151,19 +151,19 @@ No agent integration required — this is a web UI change. The agent does not ne
 
 ## Documentation
 
-- [ ] Create `docs/features/perplexity-manual-paste.md` describing the manual paste fallback flow
-- [ ] Update `docs/features/README.md` index table with the new entry
+- [x] Create `docs/features/perplexity-manual-paste.md` describing the manual paste fallback flow
+- [x] Update `docs/features/README.md` index table with the new entry
 
 ## Success Criteria
 
-- [ ] When `p2-perplexity` is `skipped` or `failed`, Phase 3 shows the `prompt-perplexity` content in a read-only block with a "Copy prompt" button
-- [ ] A textarea and "Save research" button are visible in the same state
-- [ ] Submitting non-empty, non-sentinel content writes to `p2-perplexity` and re-enqueues Question Discovery
-- [ ] Submitting empty or sentinel-prefixed content is rejected (no write, no enqueue)
-- [ ] The existing "Retry" button remains available alongside the paste panel
-- [ ] After a successful paste, Phase 3 reloads and the `p2-perplexity` substep shows as complete (or running)
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation created at `docs/features/perplexity-manual-paste.md`
+- [x] When `p2-perplexity` is `skipped` or `failed`, Phase 3 shows the `prompt-perplexity` content in a read-only block with a "Copy prompt" button
+- [x] A textarea and "Save research" button are visible in the same state
+- [x] Submitting non-empty, non-sentinel content writes to `p2-perplexity` and re-enqueues Question Discovery
+- [x] Submitting empty or sentinel-prefixed content is rejected (no write, no enqueue)
+- [x] The existing "Retry" button remains available alongside the paste panel
+- [x] After a successful paste, Phase 3 reloads and the `p2-perplexity` substep shows as complete (or running)
+- [x] Tests pass (`/do-test`)
+- [x] Documentation created at `docs/features/perplexity-manual-paste.md`
 
 ## Team Orchestration
 

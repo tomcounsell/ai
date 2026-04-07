@@ -19,6 +19,7 @@ from apps.podcast.views import (
 from apps.podcast.workflow import (
     ArtifactSignedDownloadView,
     ArtifactSignedFetchView,
+    PastePerplexityResearchView,
     RetryResearchSourceView,
     WorkflowPollView,
 )
@@ -90,6 +91,11 @@ urlpatterns = [
         "<slug:slug>/<slug:episode_slug>/paste-research/",
         PasteResearchView.as_view(),
         name="paste_research",
+    ),
+    path(
+        "<slug:slug>/<slug:episode_slug>/perplexity-paste/",
+        PastePerplexityResearchView.as_view(),
+        name="paste_perplexity_research",
     ),
     path(
         "<slug:slug>/<slug:episode_slug>/regenerate-cover/",

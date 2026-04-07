@@ -352,6 +352,57 @@ async function nlmCopyText(btn) {
 </div>
 {% endif %}
 
+<!-- Perplexity manual paste panel (Phase 3 only, when p2-perplexity is skipped or failed) -->
+{% if current_step == 3 %}{% if perplexity_status == "skipped" or perplexity_status == "failed" %}
+<div class="mb-6 px-4 py-4 border border-amber-200 bg-amber-50">
+  <h3 class="text-sm font-semibold text-amber-800 mb-1 font-mono uppercase tracking-wider">
+    <i class="fas fa-paste mr-1"></i> Manual Perplexity Research
+  </h3>
+  <p class="text-xs text-gray-600 mb-3">
+    The automated Perplexity step {% if perplexity_status == "skipped" %}was skipped{% else %}failed{% endif %}.
+    Copy the prompt below, run it on
+    <a href="https://www.perplexity.ai/" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline">Perplexity Deep Research</a>,
+    then paste the result to continue.
+  </p>
+
+  {% if perplexity_prompt_content %}
+  <div class="mb-4">
+    <label class="block text-xs font-medium text-gray-500 font-mono mb-1">Research Prompt (copy to Perplexity)</label>
+    <div class="relative">
+      <pre id="perplexity-prompt-text" class="w-full px-3 py-2 bg-white border border-gray-200 text-xs font-mono whitespace-pre-wrap max-h-48 overflow-y-auto">{{ perplexity_prompt_content }}</pre>
+      <button type="button"
+              id="perplexity-copy-btn"
+              onclick="navigator.clipboard.writeText(document.getElementById('perplexity-prompt-text').textContent).then(function(){var b=document.getElementById('perplexity-copy-btn');b.innerHTML='<i class=\'fas fa-check mr-1\'></i>Copied!';setTimeout(function(){b.innerHTML='<i class=\'fas fa-copy mr-1\'></i>Copy prompt';},2000);})"
+              class="absolute top-2 right-2 text-xs font-mono px-2 py-1 text-gray-600 bg-white border border-gray-300 hover:bg-gray-50">
+        <i class="fas fa-copy mr-1"></i>Copy prompt
+      </button>
+    </div>
+  </div>
+  {% else %}
+  <p class="text-xs text-amber-700 mb-3 font-mono">
+    <i class="fas fa-exclamation-triangle mr-1"></i>
+    No research prompt available — the prompt artifact has not been generated yet.
+  </p>
+  {% endif %}
+
+  <form method="post"
+        action="{{ perplexity_paste_url }}"
+        hx-post="{{ perplexity_paste_url }}"
+        hx-swap="none">
+    {% csrf_token %}
+    <label class="block text-xs font-medium text-gray-600 mb-1">Paste Perplexity Result</label>
+    <textarea name="content"
+              rows="10"
+              class="w-full px-3 py-2 border border-gray-300 text-sm font-mono mb-3"
+              placeholder="Paste the Perplexity research output here..."></textarea>
+    <button type="submit"
+            class="px-4 py-2 text-sm text-white bg-gray-900 hover:bg-gray-800 font-mono">
+      <i class="fas fa-save mr-1"></i> Save research
+    </button>
+  </form>
+</div>
+{% endif %}{% endif %}
+
 <!-- Sub-steps checklist -->
 <div class="space-y-3">
   {% for step in current_phase.sub_steps %}

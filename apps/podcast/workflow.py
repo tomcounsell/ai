@@ -11,7 +11,10 @@ from django.views import View
 
 from apps.podcast.models import Episode, EpisodeWorkflow, Podcast
 from apps.podcast.services.workflow import WORKFLOW_STEPS
-from apps.podcast.services.workflow_progress import compute_workflow_progress
+from apps.podcast.services.workflow_progress import (
+    _resolve_substep_status,
+    compute_workflow_progress,
+)
 from apps.public.views.helpers.main_content_view import MainContentView
 
 logger = logging.getLogger(__name__)
@@ -225,6 +228,38 @@ def _compute_button_state(episode: Episode, step: int) -> dict:
     return {"show": False}
 
 
+def _get_perplexity_paste_context(
+    episode,
+    workflow_is_running: bool,
+    workflow_is_stale: bool,
+    podcast_slug: str,
+    episode_slug: str,
+) -> dict:
+    """Return the Phase 3 Perplexity manual-paste context keys.
+
+    Extracted to avoid verbatim duplication between EpisodeWorkflowView._load_context()
+    and WorkflowPollView.get().
+    """
+    perplexity_artifact = episode.artifacts.filter(title="p2-perplexity").first()
+    perplexity_content = perplexity_artifact.content if perplexity_artifact else ""
+    perplexity_status, _ = _resolve_substep_status(
+        perplexity_content,
+        workflow_is_running=workflow_is_running,
+        workflow_is_stale=workflow_is_stale,
+    )
+    prompt_artifact = episode.artifacts.filter(title="prompt-perplexity").first()
+    perplexity_prompt_content = prompt_artifact.content if prompt_artifact else ""
+    perplexity_paste_url = reverse(
+        "podcast:paste_perplexity_research",
+        kwargs={"slug": podcast_slug, "episode_slug": episode_slug},
+    )
+    return {
+        "perplexity_status": perplexity_status,
+        "perplexity_prompt_content": perplexity_prompt_content,
+        "perplexity_paste_url": perplexity_paste_url,
+    }
+
+
 class EpisodeWorkflowView(LoginRequiredMixin, UserPassesTestMixin, MainContentView):
     """Staff-only episode workflow view showing 12-phase production progress.
 
@@ -304,6 +339,18 @@ class EpisodeWorkflowView(LoginRequiredMixin, UserPassesTestMixin, MainContentVi
         self.context["workflow_is_running"] = (
             workflow_is_running and not workflow_is_stale
         )
+
+        # Build Perplexity manual paste context for Phase 3
+        if step == 3:
+            self.context.update(
+                _get_perplexity_paste_context(
+                    episode,
+                    workflow_is_running=workflow_is_running,
+                    workflow_is_stale=workflow_is_stale,
+                    podcast_slug=slug,
+                    episode_slug=episode_slug,
+                )
+            )
 
         # Build research prompt map for Phase 4 paste modals
         if step == 4:
@@ -684,6 +731,18 @@ class WorkflowPollView(LoginRequiredMixin, UserPassesTestMixin, View):
             "workflow_is_running": is_running and not is_stale,
         }
 
+        # Perplexity manual paste context for Phase 3
+        if step == 3:
+            ctx.update(
+                _get_perplexity_paste_context(
+                    episode,
+                    workflow_is_running=is_running,
+                    workflow_is_stale=is_stale,
+                    podcast_slug=podcast.slug,
+                    episode_slug=episode.slug,
+                )
+            )
+
         # Research prompts for Phase 4 paste modals
         if step == 4:
             ctx["research_prompts"] = {
@@ -877,6 +936,109 @@ class PasteResearchView(LoginRequiredMixin, UserPassesTestMixin, View):
         return HttpResponseRedirect(url)
 
 
+class PastePerplexityResearchView(LoginRequiredMixin, UserPassesTestMixin, View):
+    """Accept manually pasted Perplexity research content for Phase 3 recovery.
+
+    When the p2-perplexity artifact is skipped or failed, the user can run the
+    prompt-perplexity prompt manually on Perplexity and paste the result here.
+    The pasted content replaces the p2-perplexity artifact and re-enqueues
+    Question Discovery so the pipeline can continue.
+    """
+
+    def test_func(self) -> bool:
+        slug = self.kwargs.get("slug")
+        if not slug:
+            return False
+        podcast = get_object_or_404(Podcast, slug=slug)
+        return self.request.user.is_staff or podcast.owner == self.request.user
+
+    def post(self, request, slug: str, episode_slug: str):
+        from apps.podcast.models import EpisodeArtifact
+
+        podcast = get_object_or_404(Podcast, slug=slug)
+        episode = get_object_or_404(Episode, podcast=podcast, slug=episode_slug)
+
+        content = request.POST.get("content", "").strip()
+
+        # Validate: reject empty, whitespace-only, or sentinel-prefixed content
+        if (
+            not content
+            or content.startswith("[SKIPPED:")
+            or content.startswith("[FAILED:")
+        ):
+            logger.warning(
+                "PastePerplexityResearchView: rejected invalid content for episode %d "
+                "(empty=%r, sentinel=%r)",
+                episode.pk,
+                not content,
+                content[:10] if content else "",
+            )
+            return self._redirect(slug, episode_slug)
+
+        # Write to the p2-perplexity artifact
+        try:
+            artifact = EpisodeArtifact.objects.get(
+                episode=episode, title="p2-perplexity"
+            )
+        except EpisodeArtifact.DoesNotExist:
+            logger.warning(
+                "PastePerplexityResearchView: p2-perplexity artifact not found for episode %d",
+                episode.pk,
+            )
+            return self._redirect(slug, episode_slug)
+
+        from django.utils import timezone
+
+        artifact.content = content
+        artifact.metadata = artifact.metadata or {}
+        artifact.metadata["manually_pasted"] = True
+        artifact.metadata["manually_pasted_at"] = timezone.now().isoformat()
+        artifact.save()
+        logger.info(
+            "PastePerplexityResearchView: wrote %d chars to p2-perplexity for episode %d",
+            len(content),
+            episode.pk,
+        )
+
+        # Resume workflow if it is paused or failed
+        try:
+            wf = episode.workflow
+            if wf.status in ("paused_for_human", "failed", "paused_at_gate"):
+                from apps.podcast.services import workflow as wf_service
+
+                wf_service.resume_workflow(episode.pk)
+        except EpisodeWorkflow.DoesNotExist:
+            pass
+
+        # Re-enqueue Question Discovery
+        try:
+            task_fn = _resolve_task("apps.podcast.tasks.step_question_discovery")
+            task_fn.enqueue(episode_id=episode.pk)
+            logger.info(
+                "PastePerplexityResearchView: re-enqueued step_question_discovery for episode %d",
+                episode.pk,
+            )
+        except Exception:
+            logger.exception(
+                "PastePerplexityResearchView: failed to enqueue step_question_discovery "
+                "for episode %d",
+                episode.pk,
+            )
+
+        return self._redirect(slug, episode_slug)
+
+    def _redirect(self, slug: str, episode_slug: str) -> HttpResponse:
+        url = reverse(
+            "podcast:episode_workflow",
+            kwargs={"slug": slug, "episode_slug": episode_slug, "step": 3},
+        )
+        if getattr(self.request, "htmx", False):
+            response = HttpResponse(status=204)
+            response["HX-Redirect"] = url
+            return response
+        return HttpResponseRedirect(url)
+
+
 class RegenerateCoverArtView(LoginRequiredMixin, UserPassesTestMixin, View):
     """Trigger cover art regeneration for an episode."""
 
@@ -1051,7 +1213,7 @@ class ArtifactSignedDownloadView(LoginRequiredMixin, UserPassesTestMixin, View):
             f' class="text-xs font-mono text-blue-600 hover:underline"'
             f' title="{safe_url}">Open</a>'
             f' <button type="button"'
-            f' onclick="navigator.clipboard.writeText(\'{url.replace(chr(39), "")}\');this.textContent=\'Copied!\';setTimeout(()=>this.textContent=\'Copy URL\',2000)"'
+            f" onclick=\"navigator.clipboard.writeText('{url.replace(chr(39), '')}');this.textContent='Copied!';setTimeout(()=>this.textContent='Copy URL',2000)\""
             f' class="text-xs font-mono px-2 py-0.5 text-gray-500 border border-gray-200 hover:bg-gray-50">Copy URL</button>'
         )
         return HttpResponse(html)
