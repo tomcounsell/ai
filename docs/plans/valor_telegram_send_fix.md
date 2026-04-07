@@ -86,7 +86,7 @@ No prerequisites -- Redis and relay infrastructure already exist and are stable.
 
 1. **Rewrite `cmd_send()`** to build a relay-compatible payload and push to Redis, mirroring `send_telegram.py`'s `send_message()` but sourcing chat_id/reply_to from CLI args instead of env vars
 2. **Add `--reply-to` flag** to the send subparser for forum group support
-3. **Use synthetic session_id** (`cli-{uuid4().hex[:12]}`) for the queue key since CLI sends have no session context
+3. **Use synthetic session_id** (`cli-{unix_timestamp}`) for the queue key since CLI sends have no session context
 4. **Apply `_linkify_text()`** and length truncation before queueing (same as `send_telegram.py`)
 5. **Remove direct Telethon usage** from `cmd_send()` entirely -- no fallback to direct send. If Redis/relay is unavailable, error clearly.
 6. **Keep `_telethon_client()` and `_fetch_from_telegram_api()`** for the `read` command's API fallback (read operations don't conflict because they only hold the SQLite lock briefly)
@@ -190,8 +190,8 @@ No agent integration required -- `valor-telegram` is a human-facing CLI tool. Th
 - Remove direct Telethon client creation from `cmd_send()`
 - Add `--reply-to` argument to send subparser
 - Build relay-compatible payload: `{chat_id, reply_to, text, file_paths, session_id, timestamp}`
-- Use synthetic session_id: `f"cli-{uuid4().hex[:12]}"`
-- Apply `linkify_text()` (import from `tools.send_telegram`, renaming `_linkify_text` to public) before queueing
+- Use synthetic session_id: `f"cli-{int(time.time())}"`
+- Apply `_linkify_text()` (copy pattern from `send_telegram.py`) before queueing
 - Truncate text to 4096 chars (`text[:4093] + "..."`) before queueing
 - Push to `telegram:outbox:{session_id}` via Redis RPUSH with 1-hour TTL
 - Handle file validation (exists check) before queueing
