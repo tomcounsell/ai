@@ -280,8 +280,16 @@ No agent integration required — this is an internal worker/queue change. The `
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
-| CONCERN | [agent-type] | [The concern raised] | [How/whether it was addressed] |
+<!-- Populated by /do-plan-critique (war room). Verdict: READY TO BUILD -->
+| Severity | Critic | Finding | Addressed By |
+|----------|--------|---------|-------------|
+| CONCERN | Skeptic | Sync `POPOTO_REDIS_DB.publish()` called directly in async `_push_agent_session()` blocks event loop (~2ms); codebase pattern requires `asyncio.to_thread()` | Builder: wrap publish in `asyncio.to_thread()` |
+| CONCERN | Operator | No liveness monitoring for `_session_notify_listener` task — crash is silent | Builder: add `.add_done_callback()` to log error on task exit |
+| CONCERN | Operator | Shutdown block in `worker/__main__.py` doesn't cancel the new notify task explicitly | Builder: cancel `notify_task` alongside `health_task` in shutdown block |
+| CONCERN | Archaeologist | Subscriber calls `_ensure_worker(chat_id)` but doesn't signal existing idle workers via `_active_events[chat_id].set()` — existing worker stays blocked on `event.wait()` | Builder: after `_ensure_worker()`, also call `event.set()` on existing event |
+| CONCERN | User | Integration test requiring `pending→running` within 10s needs live worker lifecycle management not specified in Task 3 | Builder/test-writer: add worker subprocess setup/teardown in integration test |
+| NIT | Simplifier | msgpack encoding for simple payload adds dependency; `json.dumps()` is sufficient and more debuggable | Builder: use `json.dumps()` instead of msgpack |
+| NIT | Simplifier | 4-agent team orchestration for a Small plan with 5 tasks is over-specified | No action needed (non-binding) |
 
 ---
 
