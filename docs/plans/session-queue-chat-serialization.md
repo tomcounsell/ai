@@ -236,7 +236,31 @@ See plan template for full list.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Status: PASS — Ready to Build**
+
+**Critique date:** 2026-04-07
+
+### Findings
+
+**Root cause diagnosis: Correct.**
+The `_ensure_worker()` code (lines 1704-1711 in `agent_session_queue.py`) confirms the race: `_active_workers.get(chat_id)` returns `None` for both calls when the health check iterates two pending sessions sharing a `chat_id` before either `asyncio.create_task()` registers itself. The cooperative scheduler does not interrupt between synchronous statements, but the health check loop itself calls `_ensure_worker()` twice in separate iterations — each sees the pre-registration state.
+
+**Fix approach: Correct and sufficient.**
+The `_starting_workers: set[str]` guard works because:
+1. `_ensure_worker()` is synchronous (no `await`), so check-and-set is atomic within the event loop.
+2. `_active_workers[chat_id] = task` is set synchronously after `create_task()`, before any yield, so the done callback fires only after the task is live in `_active_workers`.
+3. try/finally on `create_task()` prevents `_starting_workers` leak on failure.
+
+**Additional race path confirmed: `_session_notify_listener`.**
+Line 1453 also calls `_ensure_worker()`. A Redis notification arriving while the health check simultaneously iterates pending sessions would trigger the same race. The `_starting_workers` guard fixes this case transparently — the plan's fix is complete.
+
+**Test gap (minor, implementation detail):**
+`_ensure_worker` is not currently imported in `test_agent_session_queue_race.py`. The new test must add it to the import list. This is a minor implementation detail, not a plan defect.
+
+**Step 5 startup path in `worker/__main__.py`:**
+Confirmed already safe via `started_chats` set (lines 196-201). No change needed there.
+
+**No blockers. Build can proceed.**
 
 ---
 
