@@ -406,6 +406,46 @@ class AgentSession(Model):
         kwargs = cls._normalize_kwargs(kwargs)
         return await super().async_create(**kwargs)
 
+    @classmethod
+    def get_by_id(cls, agent_session_id: str | None) -> "AgentSession | None":
+        """Look up an AgentSession by its raw string id.
+
+        This is the canonical entry point for resolving a session from a raw
+        ``agent_session_id`` string (e.g., from a CLI argument, parent reference,
+        or Redis hash field).
+
+        Popoto's ``query.get()`` does NOT accept a positional string -- it
+        requires ``db_key=`` / ``redis_key=`` / full KeyField kwargs and will
+        raise ``AttributeError: 'str' object has no attribute 'redis_key'`` if
+        you pass a bare string. Use this helper instead.
+
+        Args:
+            agent_session_id: Raw string id of the session, or ``None``.
+
+        Returns:
+            The matching AgentSession, or None if not found / input is empty.
+        """
+        if not isinstance(agent_session_id, str) or not agent_session_id.strip():
+            return None
+        try:
+            results = list(cls.query.filter(id=agent_session_id))
+        except Exception as exc:
+            logger.warning(
+                "AgentSession.get_by_id lookup failed for %s: %s",
+                agent_session_id,
+                exc,
+            )
+            return None
+        if not results:
+            return None
+        if len(results) > 1:
+            logger.warning(
+                "AgentSession.get_by_id found %d sessions for id=%s (expected 1)",
+                len(results),
+                agent_session_id,
+            )
+        return results[0]
+
     # === Deprecated alias chain: parent_chat_session_id -> parent_session_id
     # ===                          -> parent_agent_session_id (canonical)
     #
@@ -627,11 +667,19 @@ class AgentSession(Model):
             pid = current.parent_agent_session_id
             if not pid:
                 break
-            parent = AgentSession.get_by_id(pid)
-            if parent is None:
+            try:
+                parent = AgentSession.get_by_id(pid)
+                if parent is None:
+                    break
+                depth += 1
+                current = parent
+            except Exception as exc:
+                logger.warning(
+                    "AgentSession lookup failed walking parent chain for %s: %s",
+                    pid,
+                    exc,
+                )
                 break
-            depth += 1
-            current = parent
         return depth
 
     # === Derived properties from session_events ===
@@ -1005,23 +1053,20 @@ class AgentSession(Model):
             **kwargs,
         )
 
-    @classmethod
-    def get_by_id(cls, agent_session_id: str | None) -> "AgentSession | None":
-        """Look up a session by its raw string id.
-
-        Use this instead of query.get(string) — Popoto's query.get() requires
-        a key object, not a positional string. Returns None for missing/empty ids.
-        """
-        if not agent_session_id or not agent_session_id.strip():
-            return None
-        results = list(cls.query.filter(id=agent_session_id))
-        return results[0] if results else None
-
     def get_parent_session(self) -> "AgentSession | None":
         """Return the parent session if this is a child session."""
         if not self.parent_agent_session_id:
             return None
-        return AgentSession.get_by_id(self.parent_agent_session_id)
+        try:
+            return AgentSession.get_by_id(self.parent_agent_session_id)
+        except Exception as exc:
+            logger.warning(
+                "Parent session %s lookup failed for session %s: %s",
+                self.parent_agent_session_id,
+                self.id,
+                exc,
+            )
+            return None
 
     def get_parent_chat_session(self) -> "AgentSession | None":
         """Backward-compat wrapper for get_parent_session().
@@ -1273,7 +1318,16 @@ class AgentSession(Model):
         """Return the parent AgentSession if this is a child session."""
         if not self.parent_agent_session_id:
             return None
-        return AgentSession.get_by_id(self.parent_agent_session_id)
+        try:
+            return AgentSession.get_by_id(self.parent_agent_session_id)
+        except Exception as exc:
+            logger.warning(
+                "Parent agent session %s lookup failed for child %s: %s",
+                self.parent_agent_session_id,
+                self.id,
+                exc,
+            )
+            return None
 
     def get_children(self) -> list["AgentSession"]:
         """Return all child AgentSessions linked via parent_agent_session_id."""

@@ -698,7 +698,16 @@ def reorder_agent_session(agent_session_id: str, new_priority: str) -> bool:
         logger.warning(f"[pm-controls] Invalid priority: {new_priority}")
         return False
 
-    session = AgentSession.get_by_id(agent_session_id)
+    try:
+        session = AgentSession.get_by_id(agent_session_id)
+    except Exception as exc:
+        logger.warning(
+            "[pm-controls] Session %s lookup failed for reorder: %s",
+            agent_session_id,
+            exc,
+        )
+        return False
+
     if session is None or session.status != "pending":
         logger.warning(
             f"[pm-controls] Session {agent_session_id} not pending "
@@ -724,7 +733,16 @@ def cancel_agent_session(agent_session_id: str) -> bool:
     Returns:
         True if the session was cancelled, False if not found or not pending.
     """
-    session = AgentSession.get_by_id(agent_session_id)
+    try:
+        session = AgentSession.get_by_id(agent_session_id)
+    except Exception as exc:
+        logger.warning(
+            "[pm-controls] Session %s lookup failed for cancel: %s",
+            agent_session_id,
+            exc,
+        )
+        return False
+
     if session is None or session.status != "pending":
         logger.warning(
             f"[pm-controls] Session {agent_session_id} not pending "
@@ -750,9 +768,14 @@ def retry_agent_session(agent_session_id: str) -> AgentSession | None:
     Returns:
         The new AgentSession if retried, None if not found or not terminal.
     """
-    session = AgentSession.get_by_id(agent_session_id)
-    if session is None:
-        logger.warning(f"[pm-controls] agent_session_id {agent_session_id} not found for retry")
+    try:
+        session = AgentSession.get_by_id(agent_session_id)
+    except Exception as exc:
+        logger.warning(
+            "[pm-controls] agent_session_id %s lookup failed for retry: %s",
+            agent_session_id,
+            exc,
+        )
         return None
 
     if not session:
@@ -3201,7 +3224,16 @@ def _cli_flush_agent_session(agent_session_id: str) -> None:
     """Recover a specific session by ID."""
     import sys
 
-    session = AgentSession.get_by_id(agent_session_id)
+    try:
+        session = AgentSession.get_by_id(agent_session_id)
+    except Exception as exc:
+        logger.warning(
+            "[cli] AgentSession lookup failed for %s: %s",
+            agent_session_id,
+            exc,
+        )
+        session = None
+
     if not session:
         print(f"Session {agent_session_id} not found.")
         sys.exit(1)

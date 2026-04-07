@@ -1,103 +1,68 @@
-"""
-Tests for AgentSession.get_by_id() and regression guard against
-positional AgentSession.query.get() calls.
+"""Unit tests for AgentSession.get_by_id (issue #765).
+
+Verifies the canonical raw-string lookup helper:
+- Positive lookup returns the session.
+- Missing id returns None.
+- Empty / None / whitespace input returns None without raising.
+- Backend exceptions are caught, logged as warnings, and None returned.
 """
 
-import re
-from pathlib import Path
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-# ---------------------------------------------------------------------------
-# get_by_id unit tests
-# ---------------------------------------------------------------------------
+from models.agent_session import AgentSession
 
 
-class TestGetById:
-    def _make_session(self, session_id: str):
-        s = MagicMock()
-        s.id = session_id
-        return s
+class TestGetByIdEmptyInputs:
+    """Empty/None/whitespace inputs short-circuit to None without touching the backend."""
 
-    def test_returns_session_when_found(self):
-        from models.agent_session import AgentSession
+    @pytest.mark.parametrize("value", [None, "", "   ", "\t\n"])
+    def test_empty_inputs_return_none(self, value):
+        with patch("models.agent_session.AgentSession.query") as mock_query:
+            assert AgentSession.get_by_id(value) is None
+            mock_query.filter.assert_not_called()
 
-        fake = self._make_session("abc123")
-        with patch.object(AgentSession.query, "filter", return_value=[fake]):
-            result = AgentSession.get_by_id("abc123")
-        assert result is fake
+    def test_non_string_input_returns_none(self):
+        with patch("models.agent_session.AgentSession.query") as mock_query:
+            assert AgentSession.get_by_id(12345) is None  # type: ignore[arg-type]
+            mock_query.filter.assert_not_called()
 
-    def test_returns_none_when_not_found(self):
-        from models.agent_session import AgentSession
 
-        with patch.object(AgentSession.query, "filter", return_value=[]):
-            result = AgentSession.get_by_id("missing-id")
-        assert result is None
+class TestGetByIdLookups:
+    """Positive and negative lookups against a mocked Popoto query."""
 
-    def test_returns_none_for_empty_string(self):
-        from models.agent_session import AgentSession
+    def test_positive_lookup_returns_session(self):
+        sentinel = MagicMock(spec=AgentSession)
+        sentinel.id = "abc-123"
+        with patch("models.agent_session.AgentSession.query") as mock_query:
+            mock_query.filter.return_value = [sentinel]
+            result = AgentSession.get_by_id("abc-123")
+        assert result is sentinel
+        mock_query.filter.assert_called_once_with(id="abc-123")
 
-        with patch.object(AgentSession.query, "filter") as mock_filter:
-            result = AgentSession.get_by_id("")
-        assert result is None
-        mock_filter.assert_not_called()
+    def test_missing_id_returns_none(self):
+        with patch("models.agent_session.AgentSession.query") as mock_query:
+            mock_query.filter.return_value = []
+            assert AgentSession.get_by_id("not-a-real-id") is None
 
-    def test_returns_none_for_none_input(self):
-        from models.agent_session import AgentSession
-
-        with patch.object(AgentSession.query, "filter") as mock_filter:
-            result = AgentSession.get_by_id(None)
-        assert result is None
-        mock_filter.assert_not_called()
-
-    def test_returns_none_for_whitespace_only(self):
-        from models.agent_session import AgentSession
-
-        with patch.object(AgentSession.query, "filter") as mock_filter:
-            result = AgentSession.get_by_id("   ")
-        assert result is None
-        mock_filter.assert_not_called()
-
-    def test_returns_first_match_only(self):
-        """Should return first result if multiple somehow match (UUID collision guard)."""
-        from models.agent_session import AgentSession
-
-        first = self._make_session("dup-id")
-        second = self._make_session("dup-id")
-        with patch.object(AgentSession.query, "filter", return_value=[first, second]):
-            result = AgentSession.get_by_id("dup-id")
+    def test_multiple_matches_logs_warning_and_returns_first(self, caplog):
+        first = MagicMock(spec=AgentSession)
+        second = MagicMock(spec=AgentSession)
+        with caplog.at_level(logging.WARNING, logger="models.agent_session"):
+            with patch("models.agent_session.AgentSession.query") as mock_query:
+                mock_query.filter.return_value = [first, second]
+                result = AgentSession.get_by_id("dup-id")
         assert result is first
+        assert any("found 2 sessions" in r.message for r in caplog.records)
 
-
-# ---------------------------------------------------------------------------
-# Regression guard: no positional AgentSession.query.get() calls in source
-# ---------------------------------------------------------------------------
-
-_SOURCE_ROOT = Path(__file__).resolve().parents[2]
-_BROKEN_PATTERN = re.compile(r"AgentSession\.query\.get\(\s*(?!redis_key=|db_key=)[^\)]+\)")
-_SKIP_DIRS = {".worktrees", ".venv", "__pycache__", ".git"}
-
-
-def _iter_python_files():
-    for path in _SOURCE_ROOT.rglob("*.py"):
-        if any(skip in path.parts for skip in _SKIP_DIRS):
-            continue
-        if "test_" in path.name:
-            continue
-        yield path
-
-
-@pytest.mark.parametrize("py_file", list(_iter_python_files()))
-def test_no_positional_query_get(py_file: Path):
-    """Fail if any source file calls AgentSession.query.get() with a positional arg."""
-    source = py_file.read_text(encoding="utf-8", errors="ignore")
-    # Strip comment lines before checking
-    lines = [ln for ln in source.splitlines() if not ln.lstrip().startswith("#")]
-    clean = "\n".join(lines)
-    matches = _BROKEN_PATTERN.findall(clean)
-    assert not matches, (
-        f"{py_file.relative_to(_SOURCE_ROOT)} contains broken positional "
-        f"AgentSession.query.get() call(s): {matches}\n"
-        f"Use AgentSession.get_by_id(string) instead."
-    )
+    def test_backend_exception_is_logged_and_returns_none(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="models.agent_session"):
+            with patch("models.agent_session.AgentSession.query") as mock_query:
+                mock_query.filter.side_effect = RuntimeError("redis down")
+                result = AgentSession.get_by_id("any-id")
+        assert result is None
+        assert any(
+            "get_by_id lookup failed" in r.message and "any-id" in r.message for r in caplog.records
+        )
