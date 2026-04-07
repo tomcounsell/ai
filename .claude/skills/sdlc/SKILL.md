@@ -130,7 +130,9 @@ Based on the assessment, invoke exactly ONE sub-skill and return.
 | 1 | No plan exists | `/do-plan {slug}` | Cannot build without a plan |
 | 2 | Plan exists, not yet critiqued | `/do-plan-critique` with plan path | Plan must pass critique before build |
 | 3 | Plan critiqued (NEEDS REVISION) | `/do-plan {slug}` | Revise plan based on critique findings |
-| 4 | Plan critiqued (READY TO BUILD), no branch/PR | `/do-build` with plan path | Critique passed, implement it |
+| 4a | Plan critiqued (READY TO BUILD, zero concerns), no branch/PR | `/do-build` with plan path | No revision needed — critique passed cleanly |
+| 4b | Plan critiqued (READY TO BUILD, concerns present), `revision_applied` not set in plan frontmatter | `/do-plan {slug}` with directive to apply concern findings | Revision pass before build — embed Implementation Notes into plan text |
+| 4c | Plan critiqued (READY TO BUILD, concerns present), `revision_applied: true` in plan frontmatter | `/do-build` with plan path | Revision pass already complete — proceed to build |
 | 5 | Branch exists, no PR | `/do-build` with plan path | Build must create the PR — resume build |
 | 6 | Tests failing | `/do-patch` then `/do-test` | Fix what is broken |
 | 7 | PR exists, no review | `/do-pr-review {pr_number}` | Code is ready for review |
@@ -140,6 +142,10 @@ Based on the assessment, invoke exactly ONE sub-skill and return.
 | 10 | Review APPROVED with zero findings, docs done, AND all display stages show `completed` in stage_states (or stage_states unavailable), ready to merge | Report done | PM delivers to human |
 
 **Row 10 merge gate**: ALL display stages (ISSUE, PLAN, CRITIQUE, BUILD, TEST, REVIEW, DOCS) must show `completed` in stage_states before dispatching Row 10. This prevents stages from being silently skipped when artifacts happen to exist from a different stage's work (e.g., build creating docs does not satisfy the DOCS stage). If stage_states is unavailable, use conversation dispatch history — if DOCS was never dispatched in this session, dispatch it.
+
+**Row 4b/4c is the concern-triggered revision path**: When the critique verdict is "READY TO BUILD (with concerns)", the SDLC router dispatches `/do-plan` with a directive to apply the concern findings — specifically, to embed each concern's Implementation Note into the plan text. This is a plan clarity step, not a defect fix. CONCERNs are not reclassified as blockers; they remain acknowledged risks. After the revision pass, the plan's frontmatter is updated with `revision_applied: true`. The next SDLC invocation then detects this flag and routes to Row 4c (`/do-build`). Detection logic:
+- Row 4b: critique verdict contains "with concerns" AND plan frontmatter does NOT contain `revision_applied: true`
+- Row 4a or 4c: critique verdict contains "no concerns" OR plan frontmatter contains `revision_applied: true`
 
 **Row 8/8b is the patch-review cycle**: A "minimum approve" with unresolved nits or tech debt is NOT sufficient. Every finding from the review — blockers, nits, suggestions, and tech debt — must be patched or explicitly annotated with inline comments explaining why the finding was left in place. After patching, a fresh `/do-pr-review` is mandatory to verify all findings were addressed. This cycle repeats until the review returns zero unresolved findings.
 

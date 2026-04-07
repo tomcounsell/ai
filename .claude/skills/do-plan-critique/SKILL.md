@@ -158,7 +158,13 @@ SEVERITY: BLOCKER | CONCERN | NIT
 LOCATION: Section name or line reference in the plan
 FINDING: What's wrong (1-2 sentences)
 SUGGESTION: How to fix it (1-2 sentences)
+IMPLEMENTATION NOTE: [Required for CONCERN and BLOCKER severity. Exempt for NIT.]
+  The specific guard condition, call signature, or gotcha that makes this finding
+  implementable without re-investigation. If you cannot write this note, the finding
+  is not yet specific enough to ship.
 ```
+
+NITs are exempt from the Implementation Note field. For CONCERN and BLOCKER findings, the note must be concrete: a specific guard condition (e.g., `if event: event.set()`), a call signature, or a "why" explanation that prevents naive application of the fix.
 
 ### Step 4: Aggregate and Deduplicate
 
@@ -168,6 +174,10 @@ After all critics complete:
 2. **Deduplicate**: If two critics flagged the same issue, keep the higher-severity version and note which critics agreed
 3. **Sort by severity**: BLOCKERs first, then CONCERNs, then NITs
 4. **Cross-validate**: If the Skeptic and Simplifier both flagged the same component, elevate to BLOCKER if not already
+5. **Structural Implementation Note check** — for each finding with SEVERITY = CONCERN or BLOCKER:
+   - If IMPLEMENTATION NOTE is missing or empty: downgrade the finding to NEEDS_REVISION and report: "Finding [title] missing Implementation Note — returned to critic for revision"
+   - Re-run that critic with the finding and a directive to add a concrete Implementation Note before proceeding
+   - Only issue the final verdict after all CONCERN/BLOCKER findings have a non-empty Implementation Note
 
 ### Step 5: Report
 
@@ -189,11 +199,17 @@ Output the final report in this format:
 - **Location**: {section reference}
 - **Finding**: {description}
 - **Suggestion**: {how to fix}
+- **Implementation Note**: {the specific guard condition, call signature, or gotcha}
 
 ## Concerns
 
 ### {finding title}
-...
+- **Severity**: CONCERN
+- **Critics**: {which critics flagged this}
+- **Location**: {section reference}
+- **Finding**: {description}
+- **Suggestion**: {how to fix}
+- **Implementation Note**: {the specific guard condition, call signature, or gotcha}
 
 ## Nits
 
@@ -214,7 +230,8 @@ Output the final report in this format:
 ## Verdict
 
 {One of:}
-- **READY TO BUILD** — No blockers. Concerns are acknowledged risks, not plan defects.
+- **READY TO BUILD (no concerns)** — No CONCERN or BLOCKER findings (NITs do not trigger this variant). Proceed directly to build.
+- **READY TO BUILD (with concerns)** — No BLOCKERs, but one or more CONCERN findings exist. A revision pass will embed Implementation Notes before build.
 - **NEEDS REVISION** — {N} blockers must be resolved before build.
 - **MAJOR REWORK** — Fundamental issues identified. Recommend re-planning.
 ```
@@ -225,9 +242,14 @@ The skill returns a structured verdict that the SDLC pipeline can use:
 
 | Verdict | SDLC Action |
 |---------|-------------|
-| READY TO BUILD | Proceed to `/do-build` |
-| NEEDS REVISION | Return to `/do-plan` with findings |
+| READY TO BUILD (no concerns) | Proceed directly to `/do-build` |
+| READY TO BUILD (with concerns) | Trigger revision pass via `/do-plan` before `/do-build` |
+| NEEDS REVISION | Return to `/do-plan` with blocker findings |
 | MAJOR REWORK | Return to issue discussion |
+
+**"READY TO BUILD (with concerns)"** triggers a revision pass. This pass incorporates the Implementation Note from each concern into the plan text. CONCERNs are not reclassified as defects — the revision pass is a plan clarity step, not a rework step. The concern is still acknowledged (not blocking), but its Implementation Note is embedded in the plan so the builder has unambiguous implementation guidance without re-investigation.
+
+Use **"READY TO BUILD (no concerns)"** when there are zero CONCERN or BLOCKER findings (NITs do not block and do not trigger revision).
 
 ## What This Skill Does NOT Do
 
@@ -238,5 +260,6 @@ The skill returns a structured verdict that the SDLC pipeline can use:
 
 ## Version history
 
+- v1.2.0 (2026-04-07): Fix Step 5 Verdict template to show both READY TO BUILD variants so critics output the correct form for SDLC routing
 - v1.1.0 (2026-03-23): Add SOURCE_FILES inline context to prevent critic hallucination (Step 1.5)
 - v1.0.0 (2026-03-21): Initial — war room critique with six parallel critics + structural checks
