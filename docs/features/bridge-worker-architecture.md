@@ -72,7 +72,6 @@ The fast path covers normal operation. The health check catches edge cases: miss
 **Bridge path**: `enqueue_agent_session()` → `_push_agent_session()` publishes notification → worker receives within ~1s.
 
 **CLI path** (`python -m tools.valor_session create`): Same — `_push_agent_session()` publishes to `valor:sessions:new` → worker receives within ~1s. Prior to issue #778, CLI-created sessions relied solely on the health check (worst case: 10 minutes).
-
 ## Redis Communication Contract
 
 The bridge and worker share a single contract: the `AgentSession` Popoto model in Redis.
