@@ -10,7 +10,43 @@ Without stage handoff, each DevSession starts with only the plan document and it
 
 ## How It Works
 
-### On Stage Completion (SubagentStop Hook)
+Two execution paths write stage tracking records: the **dev-session path** (for DevSession Agent tool calls) and the **Skill path** (for PM Skill tool calls). Both write to `AgentSession.stage_states` via `PipelineStateMachine`, enabling the dashboard to show real progress for all session types.
+
+### Skill Tool Path (PM Sessions)
+
+When a PM session invokes `Skill(skill="do-build")` (or any other SDLC skill), the `pre_tool_use` and `post_tool_use` hooks in `agent/hooks/` intercept the call:
+
+**On skill start (`pre_tool_use.py`):**
+1. Detects `tool_name == "Skill"` in the hook input
+2. Looks up the skill name in `_SKILL_TO_STAGE` (e.g., `"do-build"` → `"BUILD"`)
+3. Resolves the bridge session ID via `session_registry.resolve(claude_uuid)`
+4. Calls `_start_pipeline_stage(session_id, stage)` to mark the stage `in_progress`
+5. Silently no-ops for unknown skills (non-SDLC skills like `do-discover-paths`)
+
+**On skill completion (`post_tool_use.py`):**
+1. Detects `tool_name == "Skill"` and checks if the skill is in `_SKILL_TO_STAGE`
+2. Resolves the session ID the same way
+3. Calls `_complete_pipeline_stage(session_id)` which reads `current_stage()` from Redis and calls `complete_stage()`
+4. Avoids storing state between pre and post hooks — reads the in_progress stage from Redis directly
+
+**`_SKILL_TO_STAGE` mapping** (in `agent/hooks/pre_tool_use.py`):
+
+```python
+_SKILL_TO_STAGE = {
+    "do-plan": "PLAN",
+    "do-plan-critique": "CRITIQUE",
+    "do-build": "BUILD",
+    "do-test": "TEST",
+    "do-patch": "PATCH",
+    "do-pr-review": "REVIEW",
+    "do-docs": "DOCS",
+    "do-merge": "MERGE",
+}
+```
+
+All errors are swallowed with `logger.warning` — hooks never crash the PM session.
+
+### On Stage Completion (SubagentStop Hook — Dev-Session Path)
 
 When a DevSession completes, the `subagent_stop_hook` in `agent/hooks/subagent_stop.py`:
 
@@ -147,5 +183,5 @@ Extended with these functions:
 - [Pipeline State Machine](pipeline-state-machine.md) -- Stage tracking that the hook reads from
 - [Observer Agent](observer-agent.md) -- SDLC routing that triggers stage transitions
 - [Skill Context Injection](skill-context-injection.md) -- Environment variable propagation pattern
-- GitHub Issue: [#520](https://github.com/tomcounsell/ai/issues/520) (stage handoff), [#563](https://github.com/tomcounsell/ai/issues/563) (graph wiring)
+- GitHub Issue: [#520](https://github.com/tomcounsell/ai/issues/520) (stage handoff), [#563](https://github.com/tomcounsell/ai/issues/563) (graph wiring), [#782](https://github.com/tomcounsell/ai/issues/782) (Skill tool path)
 - PR: [#523](https://github.com/tomcounsell/ai/pull/523) (stage handoff), [#601](https://github.com/tomcounsell/ai/pull/601) (graph wiring)
