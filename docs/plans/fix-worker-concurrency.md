@@ -286,7 +286,27 @@ No agent integration required — this is a worker-internal change. The agent's 
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique. Leave empty until critique runs. -->
+### Third Pass — NEEDS REVISION (2026-04-07)
+
+**Findings**: 4 total (1 blocker, 2 concerns, 1 nit)
+
+#### Blocker
+
+**`_pop_agent_session_with_fallback()` sync path is NOT covered by the lock in `_pop_agent_session()`**
+
+The plan states the fallback path is "automatically covered" because `_pop_agent_session_with_fallback()` calls `_pop_agent_session()`. This is true for the hot path (line 625). However, the sync fallback branch (lines 629–731) performs an independent `AgentSession.query.filter()` + `transition_status()` entirely outside the lock. Two concurrent sync fallback executions for the same `chat_id` can race identically to the original bug.
+
+Fix: Add the same `setnx worker:pop_lock:{chat_id}` acquisition at the top of the sync fallback branch in `_pop_agent_session_with_fallback()`. Since the two branches are mutually exclusive within a single call, re-entrancy is not an issue.
+
+#### Concerns
+
+1. **`_run_worker()` is in `worker/__main__.py`, not `agent_session_queue.py`** — Task 2 says initialize the semaphore in `_run_worker()` but doesn't clarify the file. Builder needs explicit guidance to initialize in `worker/__main__.py` and set into `agent_session_queue` module before calling `_ensure_worker()`.
+
+2. **Task 5 missing `redis_test_db` fixture reference** — `tests/integration/test_agent_session_queue_race.py` contains the required test infrastructure. Task 5 should reference this file to prevent incompatible test setup.
+
+#### Nit
+
+`MAX_CONCURRENT_SESSIONS=0` minimum-clamp is in Failure Path section but not in Task 2 bullet list.
 
 ---
 
