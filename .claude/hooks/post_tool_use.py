@@ -283,8 +283,9 @@ def _run_memory_recall(hook_input: dict) -> str | None:
         session_id = hook_input.get("session_id", "unknown")
         tool_name = hook_input.get("tool_name", "")
         tool_input = hook_input.get("tool_input", {})
+        cwd = hook_input.get("cwd", "")
 
-        return recall(session_id, tool_name, tool_input)
+        return recall(session_id, tool_name, tool_input, cwd=cwd)
     except Exception:
         return None
 

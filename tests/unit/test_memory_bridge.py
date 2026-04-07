@@ -542,3 +542,127 @@ class TestCleanupSidecar:
         )
         # Should not raise
         cleanup_sidecar("test-session")
+
+
+class TestGetProjectKey:
+    """Test _get_project_key() resolution with cwd parameter."""
+
+    def test_env_var_takes_priority(self, monkeypatch):
+        """VALOR_PROJECT_KEY env var overrides cwd and defaults."""
+        from hook_utils.memory_bridge import _get_project_key
+
+        monkeypatch.setenv("VALOR_PROJECT_KEY", "myproject")
+        result = _get_project_key(cwd="/some/other/path")
+        assert result == "myproject"
+
+    def test_cwd_falls_back_to_dirname(self, monkeypatch):
+        """When no env var or projects.json match, returns cwd basename."""
+        from hook_utils.memory_bridge import _get_project_key
+
+        monkeypatch.delenv("VALOR_PROJECT_KEY", raising=False)
+        # Patch projects.json path to nonexistent to skip that branch
+        import hook_utils.memory_bridge as mb
+
+        monkeypatch.setattr(mb, "_get_project_key", mb._get_project_key)
+
+        # Use a tmp path with no projects.json
+        result = _get_project_key(cwd="/home/user/myrepo")
+        # Without a matching projects.json entry, returns basename
+        assert result == "myrepo"
+
+    def test_no_cwd_returns_default(self, monkeypatch):
+        """Without cwd and no env var, returns DEFAULT_PROJECT_KEY (not 'dm')."""
+        from hook_utils.memory_bridge import _get_project_key
+
+        monkeypatch.delenv("VALOR_PROJECT_KEY", raising=False)
+        result = _get_project_key(cwd=None)
+        # Must not be "dm" -- that value is reserved for Telegram DMs
+        assert result != "dm"
+
+    def test_default_project_key_not_dm(self):
+        """DEFAULT_PROJECT_KEY in config/memory_defaults.py is not 'dm'."""
+        from config.memory_defaults import DEFAULT_PROJECT_KEY
+
+        assert DEFAULT_PROJECT_KEY != "dm", (
+            "DEFAULT_PROJECT_KEY must not be 'dm' -- that value is reserved for Telegram DMs. "
+            "Falling back to 'dm' silently mislabels all hook-created memories."
+        )
+
+
+class TestRecallPassesCwd:
+    """Test that recall() passes cwd to _get_project_key()."""
+
+    def test_recall_uses_cwd_for_project_key(self, tmp_path, monkeypatch):
+        """recall() passes cwd arg through to _get_project_key for project scoping."""
+        from hook_utils.memory_bridge import WINDOW_SIZE, recall
+
+        monkeypatch.setattr(
+            "hook_utils.memory_bridge._get_sidecar_dir",
+            lambda sid: tmp_path / sid,
+        )
+
+        captured_cwd = []
+
+        def mock_get_project_key(cwd=None):
+            captured_cwd.append(cwd)
+            return "valor"
+
+        keywords = ["memory", "recall", "test", "keyword", "project"]
+
+        mock_bloom = MagicMock()
+        mock_bloom.might_exist = MagicMock(return_value=True)
+        mock_memory_cls = MagicMock()
+        mock_memory_cls._meta.fields.get.return_value = mock_bloom
+
+        mock_record = MagicMock()
+        mock_record.memory_id = "rec-1"
+        mock_record.content = "test content"
+
+        with (
+            patch("utils.keyword_extraction.extract_topic_keywords", return_value=keywords),
+            patch("models.memory.Memory", mock_memory_cls),
+            patch("agent.memory_retrieval.retrieve_memories", return_value=[mock_record]),
+            patch("hook_utils.memory_bridge._get_project_key", side_effect=mock_get_project_key),
+            patch("utils.keyword_extraction._apply_category_weights", wraps=lambda r: r),
+        ):
+            for i in range(WINDOW_SIZE - 1):
+                recall("sess", "Read", {"file_path": f"f{i}.py"})
+            recall("sess", "Read", {"file_path": "final.py"}, cwd="/home/user/ai")
+
+        # _get_project_key should have been called with the cwd
+        assert any(c == "/home/user/ai" for c in captured_cwd), (
+            f"Expected _get_project_key to be called with cwd='/home/user/ai', got: {captured_cwd}"
+        )
+
+
+class TestIngestPassesCwd:
+    """Test that ingest() passes cwd to _get_project_key()."""
+
+    def test_ingest_uses_cwd_for_project_key(self):
+        """ingest() passes cwd arg through to _get_project_key."""
+        from hook_utils.memory_bridge import ingest
+
+        long_content = "This is a substantial prompt that tests project key routing via cwd"
+
+        captured_cwd = []
+
+        def mock_get_project_key(cwd=None):
+            captured_cwd.append(cwd)
+            return "valor"
+
+        mock_bloom = MagicMock()
+        mock_bloom.might_exist = MagicMock(return_value=False)
+        mock_memory_cls = MagicMock()
+        mock_memory_cls._meta.fields.get.return_value = mock_bloom
+        mock_memory_cls.safe_save.return_value = MagicMock()
+
+        with (
+            patch("models.memory.Memory", mock_memory_cls),
+            patch("models.memory.SOURCE_HUMAN", "human"),
+            patch("hook_utils.memory_bridge._get_project_key", side_effect=mock_get_project_key),
+        ):
+            ingest(long_content, cwd="/home/user/myproject")
+
+        assert captured_cwd == ["/home/user/myproject"], (
+            f"Expected _get_project_key called with '/home/user/myproject', got {captured_cwd}"
+        )
