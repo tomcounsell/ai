@@ -388,6 +388,7 @@ class TestSigtermExitCode:
         import worker.__main__ as wm
 
         wm._shutdown_via_signal = False
+
         # Simulate what the SIGTERM branch of _signal_handler does
         if signal.SIGTERM:
             wm._shutdown_via_signal = True
@@ -399,6 +400,7 @@ class TestSigtermExitCode:
         import worker.__main__ as wm
 
         wm._shutdown_via_signal = False
+
         # Simulate what the SIGINT branch of _signal_handler does — flag is NOT set
 
         assert wm._shutdown_via_signal is False, (
@@ -429,9 +431,11 @@ class TestSigtermExitCode:
         """scripts/valor-service.sh stop_worker() must use launchctl bootout not unload."""
         source = (Path(__file__).parent.parent.parent / "scripts" / "valor-service.sh").read_text()
 
+        # Find the stop_worker function body
         start = source.find("stop_worker()")
         assert start >= 0, "stop_worker() function not found in valor-service.sh"
 
+        # Find the end of the function (next function definition or end of file)
         next_fn = source.find("\n}", start)
         stop_worker_body = source[start : next_fn + 2] if next_fn >= 0 else source[start:]
 

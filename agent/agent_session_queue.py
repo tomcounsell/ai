@@ -542,7 +542,35 @@ async def _pop_agent_session(chat_id: str) -> AgentSession | None:
         return (prio, _ensure_tz(j.created_at))
 
     eligible.sort(key=sort_key)
-    chosen = eligible[0]
+
+    # Guard: index can drift from actual state (e.g. session completed but still
+    # in the pending index). Iterate past stale zombie sessions; trigger a one-time
+    # rebuild to repair the index. Continue to the next candidate so the zombie
+    # doesn't block legitimate pending sessions behind it.
+    from models.session_lifecycle import transition_status
+
+    rebuilt = False
+    chosen = None
+    for candidate in eligible:
+        if candidate.status in _TERMINAL_STATUSES:
+            logger.warning(
+                f"[chat:{chat_id}] Skipping session {candidate.id} "
+                f"(session {candidate.session_id}): index says pending but actual "
+                f"status={candidate.status!r}. Stale index entry."
+            )
+            if not rebuilt:
+                rebuilt = True
+                try:
+                    AgentSession.rebuild_indexes()
+                    logger.info(f"[chat:{chat_id}] Rebuilt indexes to repair stale entry")
+                except Exception as rebuild_err:
+                    logger.warning(f"[chat:{chat_id}] Index rebuild failed: {rebuild_err}")
+            continue
+        chosen = candidate
+        break
+
+    if chosen is None:
+        return None
 
     # Direct field mutation -- status is an IndexedField, not a KeyField,
     # so save() correctly updates the secondary index.
@@ -550,7 +578,6 @@ async def _pop_agent_session(chat_id: str) -> AgentSession | None:
         f"[chat:{chat_id}] Transitioning session {chosen.id} "
         f"(session {chosen.session_id}) pending->running"
     )
-    from models.session_lifecycle import transition_status
 
     chosen.started_at = datetime.now(tz=UTC)
     transition_status(chosen, "running", reason="worker picked up session")
@@ -642,14 +669,39 @@ async def _pop_agent_session_with_fallback(chat_id: str) -> AgentSession | None:
             return (prio, _ensure_tz(j.created_at))
 
         eligible.sort(key=sort_key)
-        chosen = eligible[0]
+
+        # Guard: same stale-index protection as _pop_agent_session — iterate past
+        # zombie sessions rather than blocking on the first one.
+        from models.session_lifecycle import transition_status
+
+        rebuilt = False
+        chosen = None
+        for candidate in eligible:
+            if candidate.status in _TERMINAL_STATUSES:
+                logger.warning(
+                    f"[chat:{chat_id}] Sync fallback: skipping session {candidate.id} "
+                    f"(session {candidate.session_id}): index says pending but actual "
+                    f"status={candidate.status!r}. Stale index entry."
+                )
+                if not rebuilt:
+                    rebuilt = True
+                    try:
+                        AgentSession.rebuild_indexes()
+                        logger.info(f"[chat:{chat_id}] Rebuilt indexes to repair stale entry")
+                    except Exception as rebuild_err:
+                        logger.warning(f"[chat:{chat_id}] Index rebuild failed: {rebuild_err}")
+                continue
+            chosen = candidate
+            break
+
+        if chosen is None:
+            return None
 
         # Direct field mutation -- status is an IndexedField, not a KeyField.
         logger.info(
             f"[chat:{chat_id}] Sync fallback: transitioning session {chosen.id} "
             f"(session {chosen.session_id}) pending->running"
         )
-        from models.session_lifecycle import transition_status
 
         chosen.started_at = datetime.now(tz=UTC)
         transition_status(chosen, "running", reason="worker picked up session (sync fallback)")
