@@ -8,8 +8,6 @@ import asyncio
 import tempfile
 from pathlib import Path
 
-import pytest
-
 from agent.output_handler import (
     FileOutputHandler,
     LoggingOutputHandler,

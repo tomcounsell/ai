@@ -10,8 +10,6 @@ Covers the contract defined in the plan:
 """
 
 import sys
-from io import StringIO
-from unittest.mock import patch
 
 
 def _get_parse_api_id():
