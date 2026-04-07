@@ -491,6 +491,41 @@ def dependency_status(session: AgentSession) -> dict[str, str]:
     return {}
 
 
+_POP_LOCK_TTL_SECONDS = 5  # Long enough to cover transition_status write; short enough to self-heal
+
+
+def _acquire_pop_lock(chat_id: str) -> bool:
+    """Acquire a Redis SETNX lock for the pop-and-transition block.
+
+    Returns True if the lock was acquired, False if already held.
+    Uses Popoto's underlying Redis client to avoid new dependencies.
+    TTL=5s ensures self-healing if the process crashes while holding the lock.
+    """
+    try:
+        from popoto import Redis
+
+        redis_client = Redis.get_connection()
+        lock_key = f"worker:pop_lock:{chat_id}"
+        # SETNX returns True if key was set (lock acquired), False if already exists
+        acquired = redis_client.set(lock_key, "1", nx=True, ex=_POP_LOCK_TTL_SECONDS)
+        return bool(acquired)
+    except Exception as e:
+        logger.warning(f"[chat:{chat_id}] Pop lock acquisition failed (non-fatal): {e}")
+        # Fail open: allow the pop to proceed without the lock rather than blocking workers
+        return True
+
+
+def _release_pop_lock(chat_id: str) -> None:
+    """Release the Redis pop lock for the given chat_id."""
+    try:
+        from popoto import Redis
+
+        redis_client = Redis.get_connection()
+        redis_client.delete(f"worker:pop_lock:{chat_id}")
+    except Exception as e:
+        logger.warning(f"[chat:{chat_id}] Pop lock release failed (non-fatal): {e}")
+
+
 async def _pop_agent_session(chat_id: str) -> AgentSession | None:
     """
     Pop the highest priority pending session for a chat.
@@ -504,83 +539,93 @@ async def _pop_agent_session(chat_id: str) -> AgentSession | None:
     Status is an IndexedField (not KeyField), so mutating and saving is safe --
     no delete-and-recreate needed for status transitions.
     """
-    pending = await AgentSession.query.async_filter(chat_id=chat_id, status="pending")
-    if not pending:
+    # Acquire pop lock to make the query→transition block atomic across concurrent
+    # workers (e.g., watchdog + manual start). If the lock is held, another worker
+    # is mid-transition for this chat_id — return None and let the caller retry.
+    if not _acquire_pop_lock(chat_id):
+        logger.debug(f"[chat:{chat_id}] Pop lock held by another worker, skipping pop")
         return None
 
-    # Filter out sessions with scheduled_at in the future
-    now = datetime.now(tz=UTC)
+    try:
+        pending = await AgentSession.query.async_filter(chat_id=chat_id, status="pending")
+        if not pending:
+            return None
 
-    def _is_eligible(j):
-        sa = j.scheduled_at
-        if not sa:
+        # Filter out sessions with scheduled_at in the future
+        now = datetime.now(tz=UTC)
+
+        def _is_eligible(j):
+            sa = j.scheduled_at
+            if not sa:
+                return True
+            if isinstance(sa, datetime):
+                if sa.tzinfo is None:
+                    sa = sa.replace(tzinfo=UTC)
+                return sa <= now
+            if isinstance(sa, int | float):
+                return sa <= now.timestamp()
             return True
-        if isinstance(sa, datetime):
-            if sa.tzinfo is None:
-                sa = sa.replace(tzinfo=UTC)
-            return sa <= now
-        if isinstance(sa, int | float):
-            return sa <= now.timestamp()
-        return True
 
-    eligible = [j for j in pending if _is_eligible(j)]
-    if not eligible:
-        return None
+        eligible = [j for j in pending if _is_eligible(j)]
+        if not eligible:
+            return None
 
-    # Sort: highest priority first (4-tier), then oldest first (FIFO)
-    def _ensure_tz(dt):
-        if dt is None:
-            return datetime.min.replace(tzinfo=UTC)
-        if isinstance(dt, int | float):
-            return datetime.fromtimestamp(dt, tz=UTC)
-        if isinstance(dt, datetime) and dt.tzinfo is None:
-            return dt.replace(tzinfo=UTC)
-        return dt
+        # Sort: highest priority first (4-tier), then oldest first (FIFO)
+        def _ensure_tz(dt):
+            if dt is None:
+                return datetime.min.replace(tzinfo=UTC)
+            if isinstance(dt, int | float):
+                return datetime.fromtimestamp(dt, tz=UTC)
+            if isinstance(dt, datetime) and dt.tzinfo is None:
+                return dt.replace(tzinfo=UTC)
+            return dt
 
-    def sort_key(j):
-        prio = PRIORITY_RANK.get(j.priority, 2)  # default to normal
-        return (prio, _ensure_tz(j.created_at))
+        def sort_key(j):
+            prio = PRIORITY_RANK.get(j.priority, 2)  # default to normal
+            return (prio, _ensure_tz(j.created_at))
 
-    eligible.sort(key=sort_key)
+        eligible.sort(key=sort_key)
 
-    # Guard: index can drift from actual state (e.g. session completed but still
-    # in the pending index). Iterate past stale zombie sessions; trigger a one-time
-    # rebuild to repair the index. Continue to the next candidate so the zombie
-    # doesn't block legitimate pending sessions behind it.
-    from models.session_lifecycle import transition_status
+        # Guard: index can drift from actual state (e.g. session completed but still
+        # in the pending index). Iterate past stale zombie sessions; trigger a one-time
+        # rebuild to repair the index. Continue to the next candidate so the zombie
+        # doesn't block legitimate pending sessions behind it.
+        from models.session_lifecycle import transition_status
 
-    rebuilt = False
-    chosen = None
-    for candidate in eligible:
-        if candidate.status in _TERMINAL_STATUSES:
-            logger.warning(
-                f"[chat:{chat_id}] Skipping session {candidate.id} "
-                f"(session {candidate.session_id}): index says pending but actual "
-                f"status={candidate.status!r}. Stale index entry."
-            )
-            if not rebuilt:
-                rebuilt = True
-                try:
-                    AgentSession.rebuild_indexes()
-                    logger.info(f"[chat:{chat_id}] Rebuilt indexes to repair stale entry")
-                except Exception as rebuild_err:
-                    logger.warning(f"[chat:{chat_id}] Index rebuild failed: {rebuild_err}")
-            continue
-        chosen = candidate
-        break
+        rebuilt = False
+        chosen = None
+        for candidate in eligible:
+            if candidate.status in _TERMINAL_STATUSES:
+                logger.warning(
+                    f"[chat:{chat_id}] Skipping session {candidate.id} "
+                    f"(session {candidate.session_id}): index says pending but actual "
+                    f"status={candidate.status!r}. Stale index entry."
+                )
+                if not rebuilt:
+                    rebuilt = True
+                    try:
+                        AgentSession.rebuild_indexes()
+                        logger.info(f"[chat:{chat_id}] Rebuilt indexes to repair stale entry")
+                    except Exception as rebuild_err:
+                        logger.warning(f"[chat:{chat_id}] Index rebuild failed: {rebuild_err}")
+                continue
+            chosen = candidate
+            break
 
-    if chosen is None:
-        return None
+        if chosen is None:
+            return None
 
-    # Direct field mutation -- status is an IndexedField, not a KeyField,
-    # so save() correctly updates the secondary index.
-    logger.info(
-        f"[chat:{chat_id}] Transitioning session {chosen.id} "
-        f"(session {chosen.session_id}) pending->running"
-    )
+        # Direct field mutation -- status is an IndexedField, not a KeyField,
+        # so save() correctly updates the secondary index.
+        logger.info(
+            f"[chat:{chat_id}] Transitioning session {chosen.id} "
+            f"(session {chosen.session_id}) pending->running"
+        )
 
-    chosen.started_at = datetime.now(tz=UTC)
-    transition_status(chosen, "running", reason="worker picked up session")
+        chosen.started_at = datetime.now(tz=UTC)
+        transition_status(chosen, "running", reason="worker picked up session")
+    finally:
+        _release_pop_lock(chat_id)
 
     # Drain any steering messages queued during the pending window (#619).
     # Follow-up messages arriving while the session was pending get pushed to
@@ -630,6 +675,18 @@ async def _pop_agent_session_with_fallback(chat_id: str) -> AgentSession | None:
     # This runs a synchronous Popoto query directly, which blocks the event loop
     # briefly (single Redis SINTER + HGETALL, microseconds). Acceptable tradeoff
     # on the cold drain path for correctness.
+    #
+    # Acquire the pop lock for the sync fallback branch. This branch does its own
+    # independent AgentSession.query.filter() + transition_status() and is NOT
+    # covered by the lock already released inside _pop_agent_session(). This is
+    # NOT re-entrant: _pop_agent_session() acquired + released the lock before
+    # returning None, so we are acquiring a fresh lock here.
+    if not _acquire_pop_lock(chat_id):
+        logger.debug(
+            f"[chat:{chat_id}] Sync fallback: pop lock held by another worker, skipping"
+        )
+        return None
+
     try:
         pending = AgentSession.query.filter(chat_id=chat_id, status="pending")
         if not pending:
@@ -732,6 +789,8 @@ async def _pop_agent_session_with_fallback(chat_id: str) -> AgentSession | None:
     except Exception:
         logger.exception(f"[chat:{chat_id}] Sync fallback query failed, falling through to exit")
         return None
+    finally:
+        _release_pop_lock(chat_id)
 
 
 async def _pending_depth(chat_id: str) -> int:
@@ -1502,6 +1561,12 @@ _active_events: dict[str, asyncio.Event] = {}
 # sharing the same chat_id before either task is live in _active_workers.
 _starting_workers: set[str] = set()
 
+# Global concurrency ceiling: limits total simultaneously executing sessions
+# across all chat_ids. Initialized in _run_worker() before any worker loop
+# starts, so it is always available when _worker_loop() first awaits it.
+# None sentinel means no ceiling (pre-initialization or testing).
+_global_session_semaphore: asyncio.Semaphore | None = None
+
 # Graceful shutdown coordination: when set, worker loops finish their current
 # session and exit instead of waiting for new work.
 _shutdown_requested: bool = False
@@ -1784,8 +1849,27 @@ async def _worker_loop(chat_id: str, event: asyncio.Event) -> None:
                 logger.info(f"[chat:{chat_id}] Shutdown requested, worker exiting")
                 break
 
-            session = await _pop_agent_session(chat_id)
+            # Acquire global concurrency slot BEFORE popping — ensures that
+            # transition_status("running") never occurs without a semaphore slot,
+            # keeping the dashboard running count accurate.
+            semaphore = _global_session_semaphore
+            if semaphore is not None:
+                await semaphore.acquire()
+            _semaphore_acquired = semaphore is not None
+
+            try:
+                session = await _pop_agent_session(chat_id)
+            except BaseException:
+                if _semaphore_acquired:
+                    semaphore.release()
+                raise
+
             if session is None:
+                # No work found — release the semaphore slot before waiting.
+                if _semaphore_acquired:
+                    semaphore.release()
+                    _semaphore_acquired = False
+
                 # Event-based drain: wait for enqueue_agent_session() to signal new work,
                 # or fall back to sync query after timeout.
                 event.clear()
@@ -1796,16 +1880,59 @@ async def _worker_loop(chat_id: str, event: asyncio.Event) -> None:
                     if _shutdown_requested:
                         logger.info(f"[chat:{chat_id}] Woke from wait, shutdown requested")
                         break
-                    session = await _pop_agent_session(chat_id)
+                    # Re-acquire semaphore before retry pop
+                    if semaphore is not None:
+                        await semaphore.acquire()
+                        _semaphore_acquired = True
+                    try:
+                        session = await _pop_agent_session(chat_id)
+                    except BaseException:
+                        if _semaphore_acquired:
+                            semaphore.release()
+                            _semaphore_acquired = False
+                        raise
+                    if session is None:
+                        if _semaphore_acquired:
+                            semaphore.release()
+                            _semaphore_acquired = False
+                        continue
                 else:
                     # Bridge mode: timeout and exit if no work arrives
                     try:
                         await asyncio.wait_for(event.wait(), timeout=DRAIN_TIMEOUT)
                         # Event fired — new work was enqueued
-                        session = await _pop_agent_session(chat_id)
+                        # Re-acquire semaphore before retry pop
+                        if semaphore is not None:
+                            await semaphore.acquire()
+                            _semaphore_acquired = True
+                        try:
+                            session = await _pop_agent_session(chat_id)
+                        except BaseException:
+                            if _semaphore_acquired:
+                                semaphore.release()
+                                _semaphore_acquired = False
+                            raise
+                        if session is None:
+                            if _semaphore_acquired:
+                                semaphore.release()
+                                _semaphore_acquired = False
                     except TimeoutError:
                         # Timeout — use sync fallback to bypass index visibility race
-                        session = await _pop_agent_session_with_fallback(chat_id)
+                        # Re-acquire semaphore before fallback pop
+                        if semaphore is not None:
+                            await semaphore.acquire()
+                            _semaphore_acquired = True
+                        try:
+                            session = await _pop_agent_session_with_fallback(chat_id)
+                        except BaseException:
+                            if _semaphore_acquired:
+                                semaphore.release()
+                                _semaphore_acquired = False
+                            raise
+                        if session is None:
+                            if _semaphore_acquired:
+                                semaphore.release()
+                                _semaphore_acquired = False
 
                 if session is not None:
                     logger.info(
@@ -1816,13 +1943,26 @@ async def _worker_loop(chat_id: str, event: asyncio.Event) -> None:
                     continue
                 else:
                     # Bridge mode: exit-time safety check
-                    session = await _pop_agent_session_with_fallback(chat_id)
+                    # Re-acquire semaphore for final fallback pop
+                    if semaphore is not None:
+                        await semaphore.acquire()
+                        _semaphore_acquired = True
+                    try:
+                        session = await _pop_agent_session_with_fallback(chat_id)
+                    except BaseException:
+                        if _semaphore_acquired:
+                            semaphore.release()
+                            _semaphore_acquired = False
+                        raise
                     if session is not None:
                         logger.warning(
                             f"[chat:{chat_id}] Found pending session at exit time: "
                             f"{session.agent_session_id} — processing instead of exiting"
                         )
                     else:
+                        if _semaphore_acquired:
+                            semaphore.release()
+                            _semaphore_acquired = False
                         logger.info(f"[chat:{chat_id}] Queue empty, worker exiting")
                         if _check_restart_flag():
                             _trigger_restart()
@@ -1936,6 +2076,10 @@ async def _worker_loop(chat_id: str, event: asyncio.Event) -> None:
                             guard_err,
                         )
                         await _complete_agent_session(session, failed=session_failed)
+                # Release the global concurrency slot after session is done
+                if _semaphore_acquired and semaphore is not None:
+                    semaphore.release()
+                    _semaphore_acquired = False
 
             # Clear the event after processing so the next drain wait starts fresh
             event.clear()

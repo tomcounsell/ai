@@ -950,7 +950,7 @@ class AgentSession(Model):
     ) -> "AgentSession":
         """Create an AgentSession for a local Claude Code CLI session."""
         now = datetime.now(tz=UTC)
-        chat_id = kwargs.pop("chat_id", None) or f"local{int(now.timestamp()) % 10000}"
+        chat_id = kwargs.pop("chat_id", None) or session_id
         session = cls(
             session_id=session_id,
             session_type=session_type,
