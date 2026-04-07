@@ -12,15 +12,15 @@ Three layers:
 
 - **Comms layer** — bridges to the channels where work actually happens: Telegram, Email, LinkedIn, etc. Messages come in, replies go out, session context survives across conversations.
 - **Harness layer** — wraps agent harnesses like Claude Code, giving Valor tools, memory, skills, and a full SDLC workflow.
-- **Execution layer** — a standalone worker service runs sessions against the configured harness. Sessions come in three flavors: **PM** (orchestrates work), **Dev** (writes code), and **Teammate** (conversational).
+- **Execution layer** — a standalone worker service runs sessions against the configured harness. Sessions come in three role flavors: **PM** (orchestrates work), **Dev** (writes code), and **Teammate** (conversational).
 
 ## Architecture
 
 <p align="center">
-  <img src="docs/assets/architecture.png" alt="Valor architecture: Comms → Bridge → Worker (ChatSession / DevSession / Teammate) → Agent Harness" width="500">
+  <img src="docs/assets/architecture.svg" alt="Valor architecture: Comms → Bridge → Worker (PM / Dev / Teammate) → Agent Harness" width="560">
 </p>
 
-See [`docs/features/bridge-worker-architecture.md`](docs/features/bridge-worker-architecture.md) for the full design. Source: [`docs/assets/architecture.excalidraw`](docs/assets/architecture.excalidraw).
+See [`docs/features/bridge-worker-architecture.md`](docs/features/bridge-worker-architecture.md) for the full design.
 
 ## The SDLC Pipeline
 
@@ -30,7 +30,7 @@ Valor ships real features through a structured pipeline, each stage a skill the 
 Plan → Critique → Build → Test → Patch → Review → Docs → Merge
 ```
 
-ChatSession (PM persona) steers the pipeline and delegates coding work to DevSession (Dev persona). See [`.claude/skills/sdlc/SKILL.md`](.claude/skills/sdlc/SKILL.md) for the ground truth on stage definitions.
+A PM session steers the pipeline and delegates coding work to a Dev session. See [`.claude/skills/sdlc/SKILL.md`](.claude/skills/sdlc/SKILL.md) for the ground truth on stage definitions.
 
 ## Subsystems
 
