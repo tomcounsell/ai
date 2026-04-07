@@ -282,6 +282,26 @@ All tuning constants are in `config/memory_defaults.py`. Call `apply_defaults()`
 | `DISMISSAL_IMPORTANCE_DECAY` | 0.7 | Importance multiplier on threshold breach |
 | `MIN_IMPORTANCE_FLOOR` | 0.2 | Minimum importance after decay (never drops below this) |
 | `CATEGORY_RECALL_WEIGHTS` | `{correction: 1.5, decision: 1.3, pattern: 1.0, surprise: 1.0, default: 1.0}` | Post-query re-ranking multipliers by category |
+| `DEFAULT_PROJECT_KEY` | `"default"` | Fallback project partition when cwd is unavailable (was `"dm"` before #811) |
+
+## Project Key Partitioning
+
+Memory records carry a `project_key` field that partitions memories by project. Retrieval queries filter by `project_key` so that memories from `~/src/ai` do not cross-contaminate sessions running in a different directory.
+
+**Key values used in practice:**
+
+| Value | Source | Meaning |
+|-------|--------|---------|
+| `"dm"` | Telegram bridge (`bridge/telegram_bridge.py`) | Genuine Telegram DM message |
+| `"valor"` | `~/src/ai` cwd match against `projects.json` | Memory from the main ai project |
+| `"default"` | `DEFAULT_PROJECT_KEY` fallback | Memories created without a resolvable cwd |
+| `<repo-name>` | Basename of unrecognized cwd | Memories from other local repos |
+
+Prior to PR #820, the Claude Code hooks always wrote `project_key="dm"` because the four bridge functions (`recall`, `ingest`, `extract`, `post_merge_extract`) called `_get_project_key()` with no `cwd` argument, falling through to `DEFAULT_PROJECT_KEY`. This caused hook-created memories to appear in Telegram DM retrieval queries and vice versa.
+
+The fix threads `cwd` from `hook_input["cwd"]` through all four functions. `DEFAULT_PROJECT_KEY` was changed from `"dm"` to `"default"` to prevent future silent mislabeling if cwd is ever unavailable.
+
+See [Claude Code Memory — Project Key Resolution](claude-code-memory.md#project-key-resolution) for the cwd threading table and one-time migration instructions.
 
 ## Error Handling
 

@@ -152,6 +152,42 @@ Sidecar files are cleaned up by the Stop hook after extraction. Cross-session co
 | `models/agent_session.py` | AgentSession model; `create_local()` factory for local CLI sessions (accepts `session_type` kwarg, defaults to `"dev"`) |
 | `.claude/settings.json` | Hook registration (UserPromptSubmit entry) |
 
+## Project Key Resolution
+
+Every memory record is partitioned by `project_key` so that memories from one project (e.g. `~/src/ai`) do not surface as thoughts in a different project's sessions (e.g. `~/src/some-other-repo`).
+
+All four public functions in `memory_bridge.py` accept a `cwd` parameter:
+
+| Hook function | Called from | cwd source |
+|---------------|-------------|------------|
+| `recall(session_id, tool_name, tool_input, cwd)` | `post_tool_use.py` | `hook_input["cwd"]` |
+| `ingest(session_id, prompt_text, cwd)` | `user_prompt_submit.py` | `hook_input["cwd"]` |
+| `extract(session_id, cwd)` | `stop.py` | `hook_input["cwd"]` (read once, passed to both calls) |
+| `post_merge_extract(session_id, cwd)` | `stop.py` | same `cwd` read above |
+
+`_get_project_key(cwd)` resolves the key using this priority order:
+
+1. `VALOR_PROJECT_KEY` environment variable (explicit override)
+2. Match `cwd` against `working_directory` entries in `~/Desktop/Valor/projects.json`
+3. Derive from the directory basename (`Path(cwd).name`)
+4. Fall through to `config.memory_defaults.DEFAULT_PROJECT_KEY` (value: `"default"`)
+
+The fallback value `"default"` is a neutral sentinel. It was previously `"dm"`, which caused all hook-created memories to be mislabeled as Telegram DM-sourced. The change to `"default"` prevents silent cross-partition contamination when `cwd` is unavailable.
+
+### One-time Migration
+
+If you have existing Memory records with `project_key="dm"` that were actually created by Claude Code hooks (not Telegram DMs), run the migration script:
+
+```bash
+# Preview -- no writes
+python scripts/migrate_memory_project_key.py --dry-run
+
+# Apply
+python scripts/migrate_memory_project_key.py
+```
+
+The script identifies genuine Telegram DM records by requiring both `source="human"` AND `agent_id="dm"`. All other `"dm"` records are re-keyed to `"valor"` (the key for `~/src/ai`). The migration is idempotent and safe to run while the bridge is running.
+
 ## Configuration
 
 Constants in `memory_bridge.py`:
