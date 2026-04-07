@@ -83,9 +83,9 @@ The steering check in the bridge uses differentiated error handling:
 
 Between session creation and worker pickup (~100ms), a reply could arrive when the session is in `pending` status. The steering check detects this and logs it. The message falls through to the session queue and will be processed normally.
 
-### Race 2: Reply during session delete/recreate in `_pop_agent_session`
+### Race 2: Reply during status transition in `_pop_agent_session`
 
-The `_pop_agent_session()` method briefly deletes and recreates the session (two Redis commands). This window is sub-millisecond. If the steering check hits this window, the message falls through to the session queue -- not lost, just slightly delayed.
+The `_pop_agent_session()` method transitions the session from `pending` to `running` via in-place mutation (`transition_status()`), since `status` is an IndexedField and no longer a KeyField. The window is sub-millisecond. If the steering check hits this window, the message falls through to the session queue -- not lost, just slightly delayed.
 
 ### Race 3: Reply after session completion but before cleanup
 
