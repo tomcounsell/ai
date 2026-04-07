@@ -393,7 +393,7 @@ def cmd_kill(args: argparse.Namespace) -> int:
     _load_env()
     try:
         from models.agent_session import AgentSession
-        from models.session_lifecycle import TERMINAL_STATUSES, transition_status
+        from models.session_lifecycle import TERMINAL_STATUSES, finalize_session
 
         killed = []
         errors = []
@@ -405,7 +405,7 @@ def cmd_kill(args: argparse.Namespace) -> int:
                     sessions = list(AgentSession.query.filter(status=st))
                     for s in sessions:
                         try:
-                            transition_status(s, "killed", reason="valor-session kill --all")
+                            finalize_session(s, "killed", reason="valor-session kill --all")
                             killed.append(s.session_id)
                         except Exception as e:
                             errors.append(f"{s.session_id}: {e}")
@@ -428,7 +428,7 @@ def cmd_kill(args: argparse.Namespace) -> int:
                     print(f"Warning: {msg}")
                 return 0
 
-            transition_status(session, "killed", reason="valor-session kill")
+            finalize_session(session, "killed", reason="valor-session kill")
             killed.append(session_id)
 
         if args.json:
