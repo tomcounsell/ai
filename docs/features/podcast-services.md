@@ -116,7 +116,7 @@ Creates the `p1-brief` artifact from `Episode.description` and initializes an `E
 ```python
 run_perplexity_research(episode_id: int, prompt: str) -> EpisodeArtifact
 ```
-Calls Perplexity Deep Research (sonar-deep-research model). Saves result as `p2-perplexity` artifact with extracted metadata (citations, URLs).
+Calls Perplexity Deep Research (sonar-deep-research model). Saves result as `p2-perplexity` artifact with extracted metadata (citations, URLs). API errors (401, 429, 500) surface as `[FAILED: Perplexity API {status} - {reason}]` in the artifact content with raw error stored in `metadata["error"]`; only a missing `PERPLEXITY_API_KEY` produces `[SKIPPED: PERPLEXITY_API_KEY not configured]`.
 
 ```python
 run_gpt_researcher(episode_id: int, prompt: str) -> EpisodeArtifact
