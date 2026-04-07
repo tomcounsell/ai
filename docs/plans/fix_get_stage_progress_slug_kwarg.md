@@ -62,19 +62,19 @@ No prerequisites — this is a pure code fix with no external dependencies.
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `bridge/summarizer.py:_get_status_emoji()` swallows exceptions from `get_stage_progress()`. After the fix, the checkmark emoji path is exercised by the existing 3 cascade tests — no new exception-handler tests needed.
+- [x] `bridge/summarizer.py:_get_status_emoji()` swallows exceptions from `get_stage_progress()`. After the fix, the checkmark emoji path is exercised by the existing 3 cascade tests — no new exception-handler tests needed.
 
 ### Empty/Invalid Input Handling
-- [ ] `get_stage_progress()` takes no inputs after the fix — N/A.
+- [x] `get_stage_progress()` takes no inputs after the fix — N/A.
 
 ### Error State Rendering
-- [ ] Existing `TestStageProgress` suite already covers stage rendering paths.
+- [x] Existing `TestStageProgress` suite already covers stage rendering paths.
 
 ## Test Impact
 
-- [ ] `tests/integration/test_agent_session_lifecycle.py::TestStageProgress` (5 tests) — UPDATE not required; they already call `session.get_stage_progress()` with no args. They will pass once the TypeError is fixed.
-- [ ] `tests/integration/test_agent_session_lifecycle.py::TestSDLCLifecycle` (1 test) — Same as above.
-- [ ] 3 summarizer cascade tests relying on `_get_status_emoji()` returning the checkmark — will pass once the underlying call stops raising.
+- [x] `tests/integration/test_agent_session_lifecycle.py::TestStageProgress` (5 tests) — UPDATE not required; they already call `session.get_stage_progress()` with no args. They will pass once the TypeError is fixed.
+- [x] `tests/integration/test_agent_session_lifecycle.py::TestSDLCLifecycle` (1 test) — Same as above.
+- [x] 3 summarizer cascade tests relying on `_get_status_emoji()` returning the checkmark — will pass once the underlying call stops raising.
 
 No test files need edits. All 9 failures resolve from the production code fix alone.
 
@@ -113,11 +113,11 @@ No documentation changes needed — this is a bug fix restoring an existing API 
 
 ## Success Criteria
 
-- [ ] `AgentSession.get_stage_progress()` signature takes no arguments beyond `self`.
-- [ ] `models/agent_session.py:1183` calls `sm.get_display_progress()` without kwargs.
-- [ ] `pytest tests/integration/test_agent_session_lifecycle.py` — all 9 previously failing tests pass.
-- [ ] `grep -rn "get_stage_progress(" --include="*.py"` confirms no caller passes `slug=`.
-- [ ] `python -m ruff format .` clean.
+- [x] `AgentSession.get_stage_progress()` signature takes no arguments beyond `self`.
+- [x] `models/agent_session.py:1183` calls `sm.get_display_progress()` without kwargs.
+- [x] `pytest tests/integration/test_agent_session_lifecycle.py` — all 9 previously failing tests pass.
+- [x] `grep -rn "get_stage_progress(" --include="*.py"` confirms no caller passes `slug=`.
+- [x] `python -m ruff format .` clean.
 
 ## Team Orchestration
 
