@@ -108,12 +108,12 @@ Ghost session in running index → `kill --session-id <id>` → `_kill_agent_ses
 
 ## Test Impact
 
-- [ ] `tests/unit/test_agent_session_scheduler_kill.py` — UPDATE: the `new_agent_session_id` key in the kill result dict is removed (no recreate); update assertions that check this key
-- [ ] `tests/unit/test_session_lifecycle_consolidation.py` — UPDATE: may need new test covering lazy-load backfill; review existing tests for `transition_status` to verify they still pass
-- [ ] `tests/unit/test_agent_session_queue_revival_helper.py` — UPDATE if it tests `_kill_agent_session` indirectly
+- [x] `tests/unit/test_agent_session_scheduler_kill.py` — UPDATE: the `new_agent_session_id` key in the kill result dict is removed (no recreate); update assertions that check this key
+- [x] `tests/unit/test_session_lifecycle_consolidation.py` — UPDATE: may need new test covering lazy-load backfill; review existing tests for `transition_status` to verify they still pass
+- [x] `tests/unit/test_agent_session_queue_revival_helper.py` — UPDATE if it tests `_kill_agent_session` indirectly
 
 New test to add:
-- [ ] `tests/unit/test_agent_session_index_corruption.py` — CREATE: verifies that status transition on a lazy-loaded `AgentSession` removes the old index entry (unit test with real Redis or mocked `_saved_field_values`)
+- [x] `tests/unit/test_agent_session_index_corruption.py` — CREATE: verifies that status transition on a lazy-loaded `AgentSession` removes the old index entry (unit test with real Redis or mocked `_saved_field_values`)
 
 ## Rabbit Holes
 
@@ -159,13 +159,13 @@ No new feature docs needed — this is a bug fix with no user-visible API change
 
 ## Success Criteria
 
-- [ ] `transition_status()` correctly removes the old `status` index entry even when called on a lazy-loaded `AgentSession`
-- [ ] `kill --session-id <id>` marks all matching running sessions as killed without creating additional ghost records
-- [ ] Running kill on a ghost session does not increase the number of running sessions in the index
-- [ ] Dashboard running count matches actual active worker processes
-- [ ] Unit test in `tests/unit/test_agent_session_index_corruption.py` verifies that status transition on a lazy-loaded `AgentSession` removes the old index entry
-- [ ] Tests pass (`/do-test`)
-- [ ] Lint clean (`python -m ruff check .`)
+- [x] `transition_status()` correctly removes the old `status` index entry even when called on a lazy-loaded `AgentSession`
+- [x] `kill --session-id <id>` marks all matching running sessions as killed without creating additional ghost records
+- [x] Running kill on a ghost session does not increase the number of running sessions in the index
+- [x] Dashboard running count matches actual active worker processes
+- [x] Unit test in `tests/unit/test_agent_session_index_corruption.py` verifies that status transition on a lazy-loaded `AgentSession` removes the old index entry
+- [x] Tests pass (`/do-test`)
+- [x] Lint clean (`python -m ruff check .`)
 
 ## Team Orchestration
 
