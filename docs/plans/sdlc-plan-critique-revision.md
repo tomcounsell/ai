@@ -145,21 +145,21 @@ No agent integration changes required. The agent reads skill files directly via 
 
 ## Documentation
 
-- [ ] Create `docs/features/sdlc-critique-stage.md` documenting the critique stage, verdict types, and the `READY TO BUILD (with concerns)` → revision → build path
-- [ ] Add an entry to `docs/features/README.md` for `sdlc-critique-stage.md` in the SDLC section
+- [x] Create `docs/features/sdlc-critique-stage.md` documenting the critique stage, verdict types, and the `READY TO BUILD (with concerns)` → revision → build path
+- [x] Add an entry to `docs/features/README.md` for `sdlc-critique-stage.md` in the SDLC section
 
 Note: `docs/features/sdlc-pipeline.md` does not exist — the new file `docs/features/sdlc-critique-stage.md` is the canonical doc for this feature.
 
 ## Success Criteria
 
-- [ ] `do-plan/SKILL.md` includes a Phase 2.6 propagation check step that explicitly cross-references task steps against Technical Approach
-- [ ] `do-plan-critique/SKILL.md` critic finding format includes `IMPLEMENTATION NOTE` field required for CONCERN and BLOCKER severity
-- [ ] `do-plan-critique/SKILL.md` Step 5 report format includes Implementation Note in Blockers and Concerns sections
-- [ ] `sdlc/SKILL.md` dispatch table Row 4 (or equivalent Outcome Contract) distinguishes zero-concern vs. with-concerns `READY TO BUILD` verdicts
-- [ ] `do-plan/PLAN_TEMPLATE.md` `## Critique Results` table includes an Implementation Note column
-- [ ] Tests pass (`/do-test`)
-- [ ] `docs/features/sdlc-critique-stage.md` created with critique stage description and revision path
-- [ ] Documentation updated (`/do-docs`)
+- [x] `do-plan/SKILL.md` includes a Phase 2.6 propagation check step that explicitly cross-references task steps against Technical Approach
+- [x] `do-plan-critique/SKILL.md` critic finding format includes `IMPLEMENTATION NOTE` field required for CONCERN and BLOCKER severity
+- [x] `do-plan-critique/SKILL.md` Step 5 report format includes Implementation Note in Blockers and Concerns sections
+- [x] `sdlc/SKILL.md` dispatch table Row 4 (or equivalent Outcome Contract) distinguishes zero-concern vs. with-concerns `READY TO BUILD` verdicts
+- [x] `do-plan/PLAN_TEMPLATE.md` `## Critique Results` table includes an Implementation Note column
+- [x] Tests pass (`/do-test`)
+- [x] `docs/features/sdlc-critique-stage.md` created with critique stage description and revision path
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
