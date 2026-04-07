@@ -459,7 +459,7 @@ One change the agent will notice: SDLC sessions receive the full pipeline spec i
 
 ## Documentation
 
-- [ ] Create `docs/features/chat-dev-session-architecture.md` describing the PM/Dev session split and lifecycle
+- [ ] Create `docs/features/pm-dev-session-architecture.md` describing the PM/Dev session split and lifecycle
 - [ ] Update `docs/features/observer-agent.md` to reflect deterministic Observer
 - [ ] Update `docs/features/pipeline-graph.md` if Observer integration changes
 - [ ] Update `CLAUDE.md` system architecture diagram
@@ -632,7 +632,7 @@ One change the agent will notice: SDLC sessions receive the full pipeline spec i
 - **Assigned To**: docs-writer
 - **Agent Type**: documentarian
 - **Parallel**: false
-- Create `docs/features/chat-dev-session-architecture.md`
+- Create `docs/features/pm-dev-session-architecture.md`
 - Update or remove `docs/features/observer-agent.md` (Observer absorbed into PM session)
 - Update `CLAUDE.md` architecture diagram
 - Add entry to `docs/features/README.md`

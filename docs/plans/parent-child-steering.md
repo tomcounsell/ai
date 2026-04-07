@@ -152,7 +152,7 @@ No MCP server integration required. The steering tool is a bash-callable script 
 ## Documentation
 
 - [ ] Update `docs/features/steering-queue.md` to document parent-child steering as a new steering path alongside bridge steering
-- [ ] Update `docs/features/chat-dev-session-architecture.md` to document the steering capability in the PM/Dev session relationship section
+- [ ] Update `docs/features/pm-dev-session-architecture.md` to document the steering capability in the PM/Dev session relationship section
 - [ ] Add entry to `docs/features/README.md` index table if not already covered
 
 ## Success Criteria
@@ -227,7 +227,7 @@ Using core tier only: builder, validator, documentarian.
 - **Agent Type**: documentarian
 - **Parallel**: false
 - Update `docs/features/steering-queue.md` with parent-child steering section
-- Update `docs/features/chat-dev-session-architecture.md` with steering capability
+- Update `docs/features/pm-dev-session-architecture.md` with steering capability
 - Update `docs/features/README.md` index if needed
 
 ### 5. Final Validation

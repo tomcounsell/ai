@@ -46,5 +46,5 @@ This creates a paper trail so the next reviewer does not re-flag the same issue.
 
 ## Related
 
-- [Chat/Dev Session Architecture](chat-dev-session-architecture.md) -- how PM session and Dev session interact
+- [Chat/Dev Session Architecture](pm-dev-session-architecture.md) -- how PM session and Dev session interact
 - Issue [#544](https://github.com/tomcounsell/ai/issues/544) -- tracking issue

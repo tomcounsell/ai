@@ -176,5 +176,5 @@ No existing tests affected — this is a greenfield feature adding new files (`a
 ## Documentation
 
 - [ ] Create `docs/features/chatsession-qa-mode.md` describing the Q&A routing architecture, classifier design, and escape hatch
-- [ ] Update `docs/features/chat-dev-session-architecture.md` to document the Q&A fast path within PM session routing
+- [ ] Update `docs/features/pm-dev-session-architecture.md` to document the Q&A fast path within PM session routing
 - [ ] Add entry to `docs/features/README.md` index table for the new feature doc

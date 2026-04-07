@@ -309,10 +309,10 @@ No agent integration required. No MCP server changes, no `.mcp.json` modificatio
 
 ## Documentation
 
-- [ ] Rename `docs/features/chatsession-qa-mode.md` to `docs/features/chatsession-teammate-mode.md` and update all content
+- [ ] Rename `docs/features/chatsession-qa-mode.md` to `docs/features/pm-teammate-mode.md` and update all content
 - [ ] Update `docs/features/standardized-enums.md` to remove ChatMode references, document PersonaType as single source of truth
 - [ ] Update `docs/features/config-driven-chat-mode.md` to reference `resolve_persona()` instead of `resolve_chat_mode()`
-- [ ] Update `docs/features/chat-dev-session-architecture.md` to replace Q&A references with Teammate
+- [ ] Update `docs/features/pm-dev-session-architecture.md` to replace Q&A references with Teammate
 - [ ] Update `docs/features/agent-session-model.md` to remove `qa_mode` property documentation
 - [ ] Update `docs/features/personas.md` to reflect unified vocabulary
 - [ ] Update `docs/features/job-scheduling.md` to remove Q&A references

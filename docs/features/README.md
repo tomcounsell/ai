@@ -25,8 +25,8 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Bridge Workflow Gaps](bridge-workflow-gaps.md) | Auto-continue for status updates, output classification, and session log snapshots | Shipped |
 | [Build Output Verification](build-output-verification.md) | Three-layer verification gates preventing /do-build from silently completing with no code changes | Shipped |
 | [Build Session Reliability](build-session-reliability.md) | Logging propagation, commit-on-exit, worktree isolation, health monitoring | Shipped |
-| [Chat Dev Session Architecture](chat-dev-session-architecture.md) | PM/Dev session split — session type discriminator splitting orchestration from execution | Shipped |
-| [PM session Teammate Mode](chatsession-teammate-mode.md) | Haiku-based intent classifier routing informational queries to direct PM session response without Dev session spawn | Shipped |
+| [Chat Dev Session Architecture](pm-dev-session-architecture.md) | PM/Dev session split — session type discriminator splitting orchestration from execution | Shipped |
+| [PM session Teammate Mode](pm-teammate-mode.md) | Haiku-based intent classifier routing informational queries to direct PM session response without Dev session spawn | Shipped |
 | [Classification](classification.md) | Auto-classification of messages as bug/feature/chore with immutability and reclassify skill | Shipped |
 | [Claude Code Memory](claude-code-memory.md) | Hook-based memory integration for Claude Code CLI sessions: prompt ingestion, tool-call recall with sliding window, deja vu signals, post-session extraction, AgentSession lifecycle tracking, and post-merge learning | Shipped |
 | [Code Impact Finder](code-impact-finder.md) | Semantic search for blast radius analysis during /do-plan | Shipped |

@@ -195,7 +195,7 @@ No agent integration required — this is a model-internal rename and field addi
 
 ### Feature Documentation
 - [x] Update `docs/features/agent-session-model.md` — replace `parent_chat_session_id` references, add `role` field documentation
-- [x] Update `docs/features/chat-dev-session-architecture.md` — update field names in data model section
+- [x] Update `docs/features/pm-dev-session-architecture.md` — update field names in data model section
 - [x] Update `docs/features/redis-models.md` — update field documentation table
 - [x] Update `docs/features/session-isolation.md` — if it references `parent_chat_session_id`
 
@@ -307,7 +307,7 @@ No agent integration required — this is a model-internal rename and field addi
 - **Agent Type**: documentarian
 - **Parallel**: false
 - Update `docs/features/agent-session-model.md`
-- Update `docs/features/chat-dev-session-architecture.md`
+- Update `docs/features/pm-dev-session-architecture.md`
 - Update `docs/features/redis-models.md`
 
 ### 7. Final Validation

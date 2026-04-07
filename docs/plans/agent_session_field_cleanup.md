@@ -206,7 +206,7 @@ No agent integration required — AgentSession is used internally by the bridge,
 - [x] Update `docs/features/job-queue.md` — remove `depends_on`, `scheduling_depth` references
 - [x] Update `docs/features/job-scheduling.md` — `scheduling_depth` removal, `scheduled_at` rename
 - [x] Update `docs/features/session-watchdog.md` — datetime field references
-- [x] Update `docs/features/chat-dev-session-architecture.md` — factory method removal, field renames
+- [x] Update `docs/features/pm-dev-session-architecture.md` — factory method removal, field renames
 
 ### Inline Documentation
 - [x] Docstrings on `SessionEvent` model and all new `@property` accessors

@@ -157,7 +157,7 @@ No agent integration required -- this is a bridge-internal and agent-dispatch ch
 
 - [ ] Create `docs/features/config-driven-chat-mode.md` describing the config schema, mode resolution order, and passive listener behavior
 - [ ] Add entry to `docs/features/README.md` index table
-- [ ] Update `docs/features/chat-dev-session-architecture.md` to reflect config-driven session type selection
+- [ ] Update `docs/features/pm-dev-session-architecture.md` to reflect config-driven session type selection
 - [ ] Update inline docstrings in `bridge/routing.py::should_respond_async()` and `agent/sdk_client.py::get_agent_response_sdk()`
 
 ## Success Criteria
@@ -269,7 +269,7 @@ No agent integration required -- this is a bridge-internal and agent-dispatch ch
 - **Parallel**: false
 - Create `docs/features/config-driven-chat-mode.md`
 - Add entry to `docs/features/README.md` index table
-- Update `docs/features/chat-dev-session-architecture.md`
+- Update `docs/features/pm-dev-session-architecture.md`
 
 ### 7. Final Validation
 - **Task ID**: validate-all

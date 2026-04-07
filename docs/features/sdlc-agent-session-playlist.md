@@ -1,6 +1,6 @@
 # SDLC Job Playlist (Deprecated)
 
-> **Deprecated**: The playlist feature was deprecated in the SDLC Redesign (#459) and all remaining code was removed in #474. Sequential issue processing is now handled by queuing separate PM sessions per chat group. See `docs/features/chat-dev-session-architecture.md` for the current architecture.
+> **Deprecated**: The playlist feature was deprecated in the SDLC Redesign (#459) and all remaining code was removed in #474. Sequential issue processing is now handled by queuing separate PM sessions per chat group. See `docs/features/pm-dev-session-architecture.md` for the current architecture.
 
 ## Historical Context
 

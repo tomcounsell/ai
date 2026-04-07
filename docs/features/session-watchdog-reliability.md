@@ -87,7 +87,7 @@ Observer Error Path
 
 - [Session Watchdog](session-watchdog.md) - Base watchdog implementation
 - [Stall Retry](stall-retry.md) - Retry mechanism for stalled sessions
-- [Chat Dev Session Architecture](chat-dev-session-architecture.md) - Session routing architecture
+- [Chat Dev Session Architecture](pm-dev-session-architecture.md) - Session routing architecture
 - [Bridge Self-Healing](bridge-self-healing.md) - Broader crash recovery system
 - [SDLC Pipeline Integrity](sdlc-pipeline-integrity.md) - SubagentStop stage injection and pipeline state feedback
 - [Session Isolation: Raw-String Session Lookup](session-isolation.md#model-fields) - Canonical `AgentSession.get_by_id()` pattern (issue #765 systemic fix)

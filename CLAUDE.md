@@ -252,7 +252,7 @@ Standalone Worker (python -m worker) → Sole session execution engine
 ```
 See `docs/features/bridge-worker-architecture.md` for the full bridge/worker separation design.
 
-**Session Types** (see `docs/features/chat-dev-session-architecture.md`):
+**Session Types** (see `docs/features/pm-dev-session-architecture.md`):
 - **PM Session** (`session_type="pm"`) - Orchestrates work, PM persona, read-only
 - **Teammate Session** (`session_type="teammate"`) - Conversational, Teammate persona
 - **Dev Session** (`session_type="dev"`) - Does coding work, Dev persona, full permissions
