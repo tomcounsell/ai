@@ -37,7 +37,7 @@ Telegram → Bridge (Telethon)
 8. Run message catchup scan and reconciler on startup
 
 The bridge does **not**:
-- Call `_ensure_worker()`, `_recover_interrupted_agent_sessions_startup()`, `_agent_session_health_loop()`, or `_cleanup_orphaned_claude_processes()`
+- Call `_ensure_worker()`, `_recover_interrupted_agent_sessions_startup()`, `_agent_session_health_loop()`, `_session_notify_listener()`, or `_cleanup_orphaned_claude_processes()`
 - Call `AgentSession.rebuild_indexes()`
 - Poll Redis for orphaned sessions
 - Kill or manage Claude SDK subprocesses
@@ -53,15 +53,10 @@ The worker's startup sequence is deterministic:
 | 3 | `_recover_interrupted_agent_sessions_startup()` | Reset running sessions to pending (orphaned from prior process) |
 | 4 | `_cleanup_orphaned_claude_processes()` | Kill orphaned Claude SDK subprocesses (PPID=1) |
 | 5 | `_ensure_worker(chat_id)` for each pending session | Kick per-chat worker loops for queued sessions |
-| 6 | `_agent_session_health_loop()` | Background task: periodic session health checks, orphan detection |
+| 6 | `_agent_session_health_loop()` | Background task: periodic session health checks, orphan detection (safety net) |
+| 7 | `_session_notify_listener()` | Background task: subscribe to `valor:sessions:new` pub/sub, wake worker on new session (~1s pickup) |
 
 At runtime, the worker processes sessions via `_worker_loop(chat_id)` until the queue is empty, then waits for new enqueue events.
-
-The worker also runs `_session_notify_listener()` as a background task (step 7 below). This listener subscribes to the `valor:sessions:new` Redis pub/sub channel and calls `_ensure_worker(chat_id)` immediately when a new session is published — enabling ~1s pickup latency for CLI-created sessions.
-
-| Step | Function | Purpose |
-|------|----------|---------|
-| 7 | `_session_notify_listener()` | Background task: subscribe to `valor:sessions:new`, wake worker on notification |
 
 ## Session Pickup: Fast Path vs Safety Net
 
@@ -100,7 +95,7 @@ The bridge imports from `agent.agent_session_queue`:
 - `register_callbacks` — register output delivery callbacks
 - `clear_restart_flag` — clear stale update restart flag
 
-The bridge does **not** import execution functions. If you see `_ensure_worker`, `_recover_interrupted_agent_sessions_startup`, `_agent_session_health_loop`, or `_cleanup_orphaned_claude_processes` imported in `bridge/telegram_bridge.py`, that is a regression.
+The bridge does **not** import execution functions. If you see `_ensure_worker`, `_recover_interrupted_agent_sessions_startup`, `_agent_session_health_loop`, `_session_notify_listener`, or `_cleanup_orphaned_claude_processes` imported in `bridge/telegram_bridge.py`, that is a regression.
 
 This boundary is enforced by `tests/unit/test_worker_entry.py::TestImportDecoupling::test_bridge_has_no_execution_function_imports`.
 
