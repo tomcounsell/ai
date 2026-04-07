@@ -94,7 +94,10 @@ def _telethon_client():
     load_dotenv()
     load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")
 
-    api_id = int(os.environ.get("TELEGRAM_API_ID", "0"))
+    try:
+        api_id = int(os.environ.get("TELEGRAM_API_ID", "0"))
+    except ValueError:
+        api_id = 0
     api_hash = os.environ.get("TELEGRAM_API_HASH", "")
 
     if not api_id or not api_hash:

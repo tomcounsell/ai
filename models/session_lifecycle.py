@@ -52,6 +52,14 @@ def finalize_session(
     Idempotent: if the session is already in the target terminal state,
     logs and returns without re-executing side effects.
 
+    Lazy-load safety: Before saving, this function backfills
+    session._saved_field_values["status"] with the current status so that
+    Popoto's IndexedFieldMixin.on_save() guard can call srem() to remove the
+    old index entry. Lazy-loaded sessions (from _create_lazy_model) only have
+    KeyFields pre-populated in _saved_field_values, so without this backfill
+    the old status index entry is never removed and the session appears in both
+    old and new status index sets simultaneously.
+
     Args:
         session: AgentSession instance to finalize.
         status: Terminal status to set (completed, failed, killed, abandoned, cancelled).
@@ -123,6 +131,16 @@ def finalize_session(
                 logger.debug(f"[lifecycle] Parent finalization failed (non-fatal): {e}")
 
     # 5. Set status + completed_at + save
+    # Backfill _saved_field_values["status"] so Popoto's IndexedFieldMixin.on_save()
+    # knows the old status and calls srem() to remove the old index entry. Without
+    # this, lazy-loaded sessions (created via _create_lazy_model) start with an empty
+    # _saved_field_values dict and the guard `if old_value is not None` is never
+    # satisfied, leaving the session stranded in both old and new status index sets.
+    # See: popoto/models/encoding.py _create_lazy_model() — only KeyFields are seeded.
+    # NOTE: _saved_field_values is a Popoto internal. If Popoto is upgraded, verify
+    # this coupling is still valid by checking on_save() in IndexedFieldMixin.
+    if hasattr(session, "_saved_field_values"):
+        session._saved_field_values["status"] = current_status
     session.status = status
     session.completed_at = time.time()
     session.save()
@@ -145,6 +163,14 @@ def transition_status(
     reject_from_terminal=False explicitly.
 
     Idempotent: if the session is already in the target state, logs and returns.
+
+    Lazy-load safety: Before saving, this function backfills
+    session._saved_field_values["status"] with the current status so that
+    Popoto's IndexedFieldMixin.on_save() guard can call srem() to remove the
+    old index entry. Lazy-loaded sessions (from _create_lazy_model) only have
+    KeyFields pre-populated in _saved_field_values, so without this backfill
+    the old status index entry is never removed and the session appears in both
+    old and new status index sets simultaneously.
 
     Args:
         session: AgentSession instance to transition.
@@ -196,6 +222,15 @@ def transition_status(
         logger.debug(f"[lifecycle] Lifecycle log failed (non-fatal): {e}")
 
     # Set status + save
+    # Backfill _saved_field_values["status"] so Popoto's IndexedFieldMixin.on_save()
+    # knows the old status and calls srem() to remove the old index entry. Without
+    # this, lazy-loaded sessions (created via _create_lazy_model) start with an empty
+    # _saved_field_values dict and the guard `if old_value is not None` is never
+    # satisfied, leaving the session stranded in both old and new status index sets.
+    # NOTE: _saved_field_values is a Popoto internal. If Popoto is upgraded, verify
+    # this coupling is still valid by checking on_save() in IndexedFieldMixin.
+    if hasattr(session, "_saved_field_values"):
+        session._saved_field_values["status"] = current_status
     session.status = new_status
     session.save()
 

@@ -15,6 +15,12 @@ from telethon import TelegramClient
 from telethon.tl.functions.messages import SendReactionRequest
 from telethon.tl.types import Message, ReactionCustomEmoji, ReactionEmoji
 
+from agent.constants import (
+    REACTION_COMPLETE,  # noqa: F401
+    REACTION_ERROR,  # noqa: F401
+    REACTION_SUCCESS,  # noqa: F401
+)
+
 logger = logging.getLogger(__name__)
 
 # =============================================================================
@@ -157,11 +163,9 @@ INVALID_REACTIONS = [
 REACTION_RECEIVED = "👀"  # Message acknowledged
 REACTION_PROCESSING = "🤔"  # Default thinking emoji
 
-# These three are re-exported from agent.constants (canonical location).
-# Kept here for backward compatibility with existing imports.
-from agent.constants import REACTION_COMPLETE  # noqa: E402, F401
-from agent.constants import REACTION_ERROR  # noqa: E402, F401
-from agent.constants import REACTION_SUCCESS  # noqa: E402, F401
+# REACTION_COMPLETE, REACTION_ERROR, REACTION_SUCCESS are re-exported from
+# agent.constants (canonical location) — imported at top of file for
+# backward compatibility with existing imports.
 
 
 def filter_tool_logs(response: str) -> str:

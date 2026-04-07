@@ -2072,9 +2072,8 @@ class ReflectionRunner:
         """
         import time as _time
 
-        from models.cyclic_episode import CyclicEpisode
-
         from models.agent_session import AgentSession
+        from models.cyclic_episode import CyclicEpisode
         from scripts.fingerprint_classifier import classify_session
 
         cutoff = _time.time() - 86400  # past 24 hours
@@ -2880,7 +2879,10 @@ class ReflectionRunner:
         try:
             from telethon import TelegramClient  # type: ignore[import]
 
-            api_id = int(os.environ.get("TELEGRAM_API_ID", "0"))
+            try:
+                api_id = int(os.environ.get("TELEGRAM_API_ID", "0"))
+            except ValueError:
+                api_id = 0
             api_hash = os.environ.get("TELEGRAM_API_HASH", "")
 
             if not api_id or not api_hash:

@@ -37,7 +37,7 @@ Telegram → Bridge (Telethon)
 8. Run message catchup scan and reconciler on startup
 
 The bridge does **not**:
-- Call `_ensure_worker()`, `_recover_interrupted_agent_sessions_startup()`, `_agent_session_health_loop()`, or `_cleanup_orphaned_claude_processes()`
+- Call `_ensure_worker()`, `_recover_interrupted_agent_sessions_startup()`, `_agent_session_health_loop()`, `_session_notify_listener()`, or `_cleanup_orphaned_claude_processes()`
 - Call `AgentSession.rebuild_indexes()`
 - Poll Redis for orphaned sessions
 - Kill or manage Claude SDK subprocesses
@@ -53,10 +53,25 @@ The worker's startup sequence is deterministic:
 | 3 | `_recover_interrupted_agent_sessions_startup()` | Reset running sessions to pending (orphaned from prior process) |
 | 4 | `_cleanup_orphaned_claude_processes()` | Kill orphaned Claude SDK subprocesses (PPID=1) |
 | 5 | `_ensure_worker(chat_id)` for each pending session | Kick per-chat worker loops for queued sessions |
-| 6 | `_agent_session_health_loop()` | Background task: periodic session health checks, orphan detection |
+| 6 | `_agent_session_health_loop()` | Background task: periodic session health checks, orphan detection (safety net) |
+| 7 | `_session_notify_listener()` | Background task: subscribe to `valor:sessions:new` pub/sub, wake worker on new session (~1s pickup) |
 
 At runtime, the worker processes sessions via `_worker_loop(chat_id)` until the queue is empty, then waits for new enqueue events.
 
+## Session Pickup: Fast Path vs Safety Net
+
+The worker uses two mechanisms to discover new sessions:
+
+| Mechanism | Latency | How It Works |
+|-----------|---------|-------------|
+| **Redis pub/sub** (fast path) | ~1 second | `_push_agent_session()` publishes `{"chat_id", "session_id"}` to `valor:sessions:new`. `_session_notify_listener()` subscribes and calls `_ensure_worker(chat_id)` immediately. |
+| **Health check loop** (safety net) | Up to 10 minutes | `_agent_session_health_loop()` fires every 300s. Sessions pending longer than 300s trigger `_ensure_worker(chat_id)` recovery. |
+
+The fast path covers normal operation. The health check catches edge cases: missed pub/sub messages (network blip, worker restart during publish), sessions created by paths that bypass `_push_agent_session()`, and sessions orphaned from a prior worker process.
+
+**Bridge path**: `enqueue_agent_session()` → `_push_agent_session()` publishes notification → worker receives within ~1s.
+
+**CLI path** (`python -m tools.valor_session create`): Same — `_push_agent_session()` publishes to `valor:sessions:new` → worker receives within ~1s. Prior to issue #778, CLI-created sessions relied solely on the health check (worst case: 10 minutes).
 ## Redis Communication Contract
 
 The bridge and worker share a single contract: the `AgentSession` Popoto model in Redis.
@@ -82,7 +97,7 @@ The bridge imports from `agent.agent_session_queue` are allowlisted to these fun
 - `register_callbacks` — register output delivery callbacks
 - `clear_restart_flag` — clear stale update restart flag
 
-Any function imported by the bridge that is not on this list is a violation of the boundary. Execution functions (`_ensure_worker`, `_recover_interrupted_agent_sessions_startup`, `_agent_session_health_loop`, `_cleanup_orphaned_claude_processes`) must never appear in bridge imports.
+Any function imported by the bridge that is not on this list is a violation of the boundary. The bridge does **not** import execution functions. If you see `_ensure_worker`, `_recover_interrupted_agent_sessions_startup`, `_agent_session_health_loop`, `_session_notify_listener`, or `_cleanup_orphaned_claude_processes` imported in `bridge/telegram_bridge.py`, that is a regression.
 
 This boundary is enforced by `tests/unit/test_worker_entry.py::TestImportDecoupling::test_bridge_has_no_execution_function_imports`, which uses an allowlist to catch any unauthorized additions.
 
@@ -136,6 +151,20 @@ python -m tools.valor_session kill --id <ID>                # Kill a session
 ./scripts/valor-service.sh worker-restart  # Restart worker only
 ./scripts/valor-service.sh worker-status   # Worker-specific status
 ```
+
+## Worker Exit Code and launchd Restart Behavior
+
+The worker exits with **code 1** when shut down via SIGTERM (e.g., by `./scripts/valor-service.sh worker-restart`). This is intentional.
+
+launchd's `ThrottleInterval` (configured at 10 seconds in `com.valor.worker.plist`) only applies to **non-zero exits**. A zero exit is treated as voluntary success and triggers launchd's internal ~10-minute default throttle, causing the worker to be unavailable for up to 10 minutes after a normal restart.
+
+**How it works:**
+- A module-level flag `_shutdown_via_signal` in `worker/__main__.py` is set to `True` only on SIGTERM.
+- After `asyncio.run(_run_worker(...))` returns, `main()` checks the flag and calls `sys.exit(1)` if it is set.
+- SIGINT (developer Ctrl-C) leaves the flag unset and exits 0 — a voluntary stop during development should not be penalized with a forced restart.
+- `stop_worker()` in `scripts/valor-service.sh` uses `launchctl bootout` (the modern macOS API) to remove the worker from the launchd domain, consistent with `scripts/install_worker.sh`.
+
+**Result:** Worker killed via SIGTERM restarts within 15 seconds (10s `ThrottleInterval` + margin) rather than the ~10-minute default.
 
 ## Deployment Notes
 

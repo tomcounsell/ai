@@ -362,8 +362,36 @@ def _cleanup_session_locks() -> int:
     return killed
 
 
+def _parse_api_id(raw: str | None) -> int:
+    """Defensively parse TELEGRAM_API_ID from env.
+
+    Returns 0 on missing, empty, or invalid input. Logs a warning to stderr
+    when given a non-empty, non-numeric value (logger may not be configured
+    yet at module import time). Never raises.
+    """
+    if raw is None or raw == "":
+        return 0
+    # Strict: reject whitespace-padded values
+    if raw != raw.strip():
+        masked = raw.strip()[:4] + "***" if len(raw.strip()) > 4 else "***"
+        sys.stderr.write(
+            f"WARNING: TELEGRAM_API_ID contains whitespace (got {masked!r}); "
+            "treating as unset. The bridge will exit at runtime with a credentials error.\n"
+        )
+        return 0
+    try:
+        return int(raw)
+    except ValueError:
+        masked = raw[:4] + "***" if len(raw) > 4 else "***"
+        sys.stderr.write(
+            f"WARNING: TELEGRAM_API_ID is not a valid integer (got {masked!r}); "
+            "treating as unset. The bridge will exit at runtime with a credentials error.\n"
+        )
+        return 0
+
+
 # Configuration (environment already loaded at top of file)
-API_ID = int(os.getenv("TELEGRAM_API_ID", "0"))
+API_ID = _parse_api_id(os.getenv("TELEGRAM_API_ID"))
 API_HASH = os.getenv("TELEGRAM_API_HASH", "")
 PHONE = os.getenv("TELEGRAM_PHONE", "")
 PASSWORD = os.getenv("TELEGRAM_PASSWORD", "")
@@ -1132,8 +1160,11 @@ async def main():
                     )
                     return
                 else:
-                    # No running/active session found -- check for pending (race window)
-                    # If within PENDING_MERGE_WINDOW_SECONDS, steer into it (#619)
+                    # No running/active session found -- check for pending.
+                    # For explicit reply-to messages the user's intent is unambiguous:
+                    # they want to add to that specific session regardless of how long
+                    # it has been waiting. Skip the age window check here -- that guard
+                    # only applies to non-reply coalescing (handled below).
                     pending_sessions = AgentSession.query.filter(
                         session_id=session_id, status="pending"
                     )
@@ -1147,38 +1178,26 @@ async def main():
                                 else _ct.replace(tzinfo=UTC).timestamp()
                             )
                         age = time.time() - (_ct or 0)
-                        if age <= PENDING_MERGE_WINDOW_SECONDS:
-                            # Recent pending session: push to steering queue
-                            from agent.steering import ABORT_KEYWORDS
+                        from agent.steering import ABORT_KEYWORDS
 
-                            is_abort = clean_text.strip().lower() in ABORT_KEYWORDS
-                            push_steering_message(
-                                session_id,
-                                clean_text,
-                                sender_name,
-                                is_abort=is_abort,
-                            )
-                            ack_text = (
-                                "Stopping current task." if is_abort else "Adding to current task"
-                            )
-                            from bridge.markdown import send_markdown
+                        is_abort = clean_text.strip().lower() in ABORT_KEYWORDS
+                        push_steering_message(
+                            session_id,
+                            clean_text,
+                            sender_name,
+                            is_abort=is_abort,
+                        )
+                        ack_text = (
+                            "Stopping current task." if is_abort else "Adding to current task"
+                        )
+                        from bridge.markdown import send_markdown
 
-                            await send_markdown(
-                                client, event.chat_id, ack_text, reply_to=message.id
-                            )
-                            logger.info(
-                                f"[{project_name}] Steered message into "
-                                f"pending session {session_id} "
-                                f"(age={age:.1f}s <= {PENDING_MERGE_WINDOW_SECONDS}s)"
-                            )
-                            return
-                        else:
-                            logger.info(
-                                f"[{project_name}] Steering check found session {session_id} "
-                                f"in 'pending' status but too old "
-                                f"(age={age:.1f}s > {PENDING_MERGE_WINDOW_SECONDS}s) "
-                                f"-- message will queue normally"
-                            )
+                        await send_markdown(client, event.chat_id, ack_text, reply_to=message.id)
+                        logger.info(
+                            f"[{project_name}] Steered reply-to into "
+                            f"pending session {session_id} (age={age:.1f}s)"
+                        )
+                        return
             except (ConnectionError, OSError) as e:
                 # Redis/DB connection errors -- log at ERROR with traceback
                 logger.error(

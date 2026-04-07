@@ -548,7 +548,7 @@ stop_worker() {
     echo "Stopping worker (PID: $pid)..."
 
     if is_worker_launchd_loaded; then
-        launchctl unload "$WORKER_PLIST_PATH" 2>/dev/null || true
+        launchctl bootout "gui/$(id -u)/$WORKER_PLIST_NAME" 2>/dev/null || true
         sleep 2
         if ! is_worker_running; then
             echo "Worker stopped (via launchd)"

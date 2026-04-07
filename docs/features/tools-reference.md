@@ -32,9 +32,9 @@ python -m tools.sms_reader.cli recent --limit 5
 Search stored message history from Telegram conversations.
 
 ```python
-from tools.telegram_history import search_messages
+from tools.telegram_history import search_history
 
-results = search_messages(query="deployment", limit=10)
+results = search_history(query="deployment", limit=10)
 ```
 
 ### Memory Search (`tools.memory_search`)
@@ -392,7 +392,7 @@ check Sentry -> identify cause -> create fix -> deploy
 ### Research Workflow
 
 ```
-search web -> summarize -> store in Notion
+search web -> summarize -> store in memory
 ```
 
 ## Google Workspace Tools

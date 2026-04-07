@@ -2,6 +2,14 @@
 
 The bridge includes a multi-layered self-healing system to recover from crashes without manual intervention.
 
+## Import-Time Safety
+
+**Problem**: `TELEGRAM_API_ID` set to a non-numeric value (e.g. the `.env.example` placeholder `12345****`) used to cause a `ValueError` at module import time. This crashed the bridge before any logging or graceful error handling could run, and trapped the watchdog in a restart loop because every restart attempt would also fail during import.
+
+**Solution**: The `_parse_api_id()` helper in `bridge/telegram_bridge.py` wraps the `int()` conversion and returns `0` on any invalid or missing input, logging a warning to stderr. Module import now always succeeds regardless of env contents. The existing runtime credential check (`if not API_ID or not API_HASH`) remains the authoritative "fail loudly and exit" path once the bridge actually tries to connect.
+
+The same defensive `try/except ValueError` pattern was applied to `tools/valor_telegram.py` and `scripts/reflections.py` where lazy `int(os.environ.get(...))` calls existed inside functions.
+
 ## Components
 
 ### 1. Session Lock Cleanup (`bridge/telegram_bridge.py`)

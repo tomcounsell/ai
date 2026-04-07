@@ -28,7 +28,10 @@ env_path = Path(__file__).parent.parent / ".env"
 load_dotenv(env_path)
 load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")
 
-API_ID = int(os.getenv("TELEGRAM_API_ID", "0"))
+try:
+    API_ID = int(os.getenv("TELEGRAM_API_ID") or "0")
+except ValueError:
+    API_ID = 0
 API_HASH = os.getenv("TELEGRAM_API_HASH", "")
 SESSION_NAME = os.getenv("TELEGRAM_SESSION_NAME", "valor_bridge")
 SESSION_PATH = Path(__file__).parent.parent / "data" / SESSION_NAME

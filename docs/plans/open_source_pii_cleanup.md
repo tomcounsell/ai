@@ -80,7 +80,11 @@ No prerequisites — this work modifies existing config loading and install scri
 
 ### Technical Approach
 
-1. **Sentry DSN** — Simple text replacement in `.env.example`. One-line change.
+1. **Sentry DSN** — This is a **live credential**, not just a text-cleanup. Required sequence:
+   a. Rotate/revoke the exposed DSN in the Sentry dashboard (`o4508986235682816` org, project `4511091961888768`).
+   b. Verify the old DSN no longer accepts events (send a test event; confirm rejection).
+   c. Replace `.env.example:69` with placeholder `https://your-key@your-org.ingest.sentry.io/your-project`.
+   d. Git history scrubbing (`git filter-repo`) is **explicitly out of scope** — see No-Gos. The credential will remain in prior commits; rotation is the sole remediation.
 
 2. **VALOR_USERNAMES removal** — In `bridge/routing.py`:
    - Remove the `VALOR_USERNAMES` constant at line 34
@@ -88,12 +92,14 @@ No prerequisites — this work modifies existing config loading and install scri
    - Add a `BOT_USERNAMES` field to `projects.json` `defaults.telegram` for the Telegram bot username(s) that should always trigger responses, separate from conversational mention triggers
    - Fallback: if no config is loaded (e.g., tests), use an empty set so mention detection is inert rather than crashing
 
-3. **Service label prefix** — In `.env.example`, add `SERVICE_LABEL_PREFIX=com.valor`. In `valor-service.sh`, `install_reflections.sh`, `install_autoexperiment.sh`:
-   - Source `.env` at the top (or read the specific var)
-   - Use `${SERVICE_LABEL_PREFIX:-com.valor}` for plist names
-   - Plist template labels also need the `__SERVICE_LABEL__` placeholder, sed-replaced at install time
+3. **Service label prefix** — `SERVICE_LABEL_PREFIX` is an **install-time-only** concern. launchd sees only the `Label` baked into the plist at install time; runtime `.env` changes do not affect a registered service. Scope:
+   - Add `SERVICE_LABEL_PREFIX=com.valor` to `.env.example`.
+   - Install scripts (`install_reflections.sh`, `install_autoexperiment.sh`) explicitly source `.env` from the project root: `set -a; source "$(cd "$(dirname "$0")/.." && pwd)/.env"; set +a` (with graceful fallback to `com.valor` if `.env` is absent).
+   - Install scripts `sed`-replace a new `__SERVICE_LABEL__` placeholder in plist templates with `${SERVICE_LABEL_PREFIX}.reflections` / `${SERVICE_LABEL_PREFIX}.autoexperiment` **and rename the output file** to `${SERVICE_LABEL_PREFIX}.reflections.plist` (etc.) in `~/Library/LaunchAgents/`. This keeps the on-disk filename and internal `Label` in sync (resolves Open Question 2).
+   - `valor-service.sh` sources `.env` the same way, then uses `${SERVICE_LABEL_PREFIX:-com.valor}` **only** to compute the plist filename to pass to `launchctl load/unload`. It does not attempt to re-render plists at runtime.
+   - Template files in the repo remain named `com.valor.reflections.plist` / `com.valor.autoexperiment.plist` as source-of-truth templates; only the installed copy is renamed.
 
-4. **newsyslog.valor.conf** — Rename to `newsyslog.conf.template`, replace hardcoded paths with `__PROJECT_DIR__`, add install step to the setup docs and install scripts.
+4. **newsyslog.valor.conf** — Rename to `config/newsyslog.conf.template`, replace hardcoded paths with `__PROJECT_DIR__`. The sed-replace step is added to **`scripts/install_reflections.sh`** (the script that already installs log-related services), writing the rendered file to `~/Library/Logs/newsyslog.d/` (or documenting manual copy if root is required).
 
 ## Failure Path Test Strategy
 
@@ -110,9 +116,20 @@ No prerequisites — this work modifies existing config loading and install scri
 
 ## Test Impact
 
-- [ ] `tests/e2e/test_message_pipeline.py` — UPDATE: if it references `VALOR_USERNAMES` import or hardcoded mention expectations, update to use config-driven values. (Grep confirmed no direct reference to `VALOR_USERNAMES` but may test mention behavior indirectly.)
+Audit command used: `grep -rn 'com\.valor\|VALOR_USERNAMES\|valorengels\|newsyslog\.valor\|is_message_for_valor\|get_valor_usernames' tests/`
 
-No other existing tests directly reference `VALOR_USERNAMES`, `com.valor`, or the hardcoded paths being changed. The bridge routing tests that exist use config-driven fixtures already.
+- [ ] `tests/unit/test_reflections_scheduling.py` — **UPDATE**: asserts `data["Label"] == "com.valor.reflections"` and reads the plist file by exact filename `com.valor.reflections.plist` (7+ references). After Task 3 the installed filename and Label are derived from `SERVICE_LABEL_PREFIX`. Rewrite assertions to load the source-of-truth template (still `com.valor.reflections.plist` in repo) and validate the placeholder form `__SERVICE_LABEL__` or the rendered form when checking an installed copy. Add a parametric test that runs the install script against a temp `.env` with `SERVICE_LABEL_PREFIX=com.example` and verifies the rendered plist has matching filename and Label.
+- [ ] `tests/e2e/test_message_pipeline.py` — **UPDATE**: calls `is_message_for_valor()` / `get_valor_usernames()`. Ensure every call passes a real project dict (not `None`), and add a regression assertion that with a loaded project the mention detection still resolves `@valor` correctly.
+- [ ] `tests/unit/test_routing.py` — **CREATE**: new file. Tests (a) `get_valor_usernames(project_with_triggers)` returns config-derived set, (b) `get_valor_usernames(None)` returns empty set without crashing, (c) `is_message_for_valor` behavior preserved end-to-end for loaded-config case.
+- [ ] `tests/integration/test_agent_session_lifecycle.py` — **REVIEW**: grep hit on `com.valor` (context unknown; confirm whether assertion or comment). UPDATE only if asserting service label literals.
+- [ ] `tests/integration/test_remote_update.py` — **REVIEW**: grep hit on `com.valor`. UPDATE only if asserting service label literals.
+- [ ] `tests/unit/test_memory_hook.py` — **REVIEW**: grep hit on `valorengels` (likely a fixture username, not PII wiring). UPDATE only if it references removed code paths.
+
+Callsite audit for `is_message_for_valor` / `get_valor_usernames` (production code, excluding worktrees):
+- `bridge/routing.py` (definition)
+- `bridge/telegram_bridge.py` (callers) — verify every call passes a resolved project, not `None`
+- `docs/guides/valor-name-references.md` — doc-only reference
+- `tests/e2e/test_message_pipeline.py` — see above
 
 ## Rabbit Holes
 
@@ -141,6 +158,7 @@ No race conditions identified — all changes are to startup-time config loading
 - Telegram group names in test fixtures — test data, not PII exposure
 - Manifest URL changes — non-functional metadata, deferred to fork authors
 - Social handles (`@valorengels`) in docs/plans — not in Python source
+- **Git history scrubbing of the leaked Sentry DSN** — `git filter-repo` would rewrite every commit and break every open PR, worktree, and clone. Rotation of the credential in Sentry is the sole remediation; the old DSN will remain valid-looking in git history but will reject events after rotation.
 
 ## Update System
 
@@ -198,19 +216,22 @@ No agent integration required — this is a config/install infrastructure change
 
 ## Step by Step Tasks
 
-### 1. Sanitize Sentry DSN in .env.example
+### 1. Rotate + sanitize Sentry DSN
 - **Task ID**: build-sentry-dsn
 - **Depends On**: none
-- **Validates**: `grep -c 'ingest.*sentry' .env.example` returns 0 for real DSNs
-- **Assigned To**: config-builder
+- **Validates**: (a) old DSN rejects events (manual verification logged in PR description); (b) `grep -c '6c263d512a49' .env.example` returns 0
+- **Assigned To**: config-builder (requires human-in-the-loop for Sentry dashboard access)
 - **Agent Type**: builder
 - **Parallel**: true
-- Replace real Sentry DSN in `.env.example:69` with placeholder `https://your-key@your-org.ingest.sentry.io/your-project`
+- **Step 1 (HUMAN REQUIRED)**: Log into Sentry, rotate/revoke the exposed DSN (`o4508986235682816` / project `4511091961888768`). Send a test event with the old DSN key and confirm it is rejected.
+- **Step 2**: Replace real Sentry DSN in `.env.example:69` with placeholder `https://your-key@your-org.ingest.sentry.io/your-project`.
+- **Step 3**: Record in the PR description: "Old Sentry DSN rotated on {YYYY-MM-DD}; test event confirmed rejected."
+- Do NOT attempt `git filter-repo` history scrubbing — see No-Gos.
 
 ### 2. Remove VALOR_USERNAMES and make mention detection config-only
 - **Task ID**: build-username-config
 - **Depends On**: none
-- **Validates**: `tests/unit/test_routing.py` (create), `grep -c VALOR_USERNAMES bridge/routing.py` returns 0
+- **Validates**: create `tests/unit/test_routing.py` and ensure it passes; `grep -c VALOR_USERNAMES bridge/routing.py` returns 0; audit `bridge/telegram_bridge.py` callsites of `is_message_for_valor`/`get_valor_usernames` to ensure none pass `project=None`
 - **Assigned To**: config-builder
 - **Agent Type**: builder
 - **Parallel**: true
@@ -233,6 +254,9 @@ No agent integration required — this is a config/install infrastructure change
 - Update `install_reflections.sh` and `install_autoexperiment.sh` to use `SERVICE_LABEL_PREFIX`
 - Add `__SERVICE_LABEL__` placeholder to plist templates and sed-replace it at install time
 - Update `com.valor.reflections.plist` and `com.valor.autoexperiment.plist` Label fields to use placeholder
+- **Install-time filename rename**: install scripts write rendered plists to `~/Library/LaunchAgents/` using `${SERVICE_LABEL_PREFIX}.reflections.plist` so the on-disk filename matches the internal `Label` (keeps launchctl list/unload sane for forks)
+- `valor-service.sh` sources `.env` via `set -a; source "$(cd "$(dirname "$0")/.." && pwd)/.env"; set +a` with fallback to `com.valor` if absent; uses the prefix only to compute the installed plist filename for `launchctl load/unload`
+- Update `tests/unit/test_reflections_scheduling.py` to validate both template (placeholder) and rendered (substituted) forms; add a parametric test with `SERVICE_LABEL_PREFIX=com.example`
 
 ### 4. Convert newsyslog.valor.conf to template
 - **Task ID**: build-newsyslog-template
@@ -243,7 +267,7 @@ No agent integration required — this is a config/install infrastructure change
 - **Parallel**: true
 - Rename `config/newsyslog.valor.conf` to `config/newsyslog.conf.template`
 - Replace hardcoded `/Users/valorengels/src/ai` paths with `__PROJECT_DIR__`
-- Add install step to setup scripts that sed-replaces the template
+- Add install step to **`scripts/install_reflections.sh`** that sed-replaces `__PROJECT_DIR__` and writes the rendered config (document manual `sudo cp` step if root is required for `/etc/newsyslog.d/`)
 
 ### 5. Validate all changes
 - **Task ID**: validate-all-pii
@@ -301,4 +325,4 @@ No agent integration required — this is a config/install infrastructure change
 
 1. **Bot username field naming**: The plan proposes `bot_usernames` in `projects.json` `defaults.telegram` to hold Telegram bot usernames (e.g., `["valor", "valorengels"]`). Is this the right field name, or should it merge with `mention_triggers`? The distinction is: `mention_triggers` includes casual phrases like "hey valor" while `bot_usernames` are strict Telegram @username handles.
 
-2. **Plist template renaming**: Should the plist files be renamed from `com.valor.*.plist` to use a generic prefix (e.g., `service.*.plist.template`), or keep the `com.valor` in the filename and only parametrize the Label field inside? The current approach parametrizes the Label inside but keeps the template filename recognizable.
+> **Resolved — Plist filename/Label drift** (formerly OQ2): Source-of-truth templates in the repo remain `com.valor.*.plist` for recognizability; install scripts rename the installed copy to `${SERVICE_LABEL_PREFIX}.*.plist` so on-disk filename and internal `Label` stay in sync. See Task 3.

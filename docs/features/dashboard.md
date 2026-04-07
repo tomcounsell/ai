@@ -15,7 +15,7 @@ The sessions table is the primary view, auto-refreshing every 5 seconds via HTMX
 |--------|--------|-------|
 | Project | `project_key` + `projects.json` lookup | Shows project name with metadata popover (repo, chat, stack, machine) |
 | Name | `display_name` property | Fallback chain: `context_summary` > `slug` > truncated `message_text` |
-| Persona | `session_type` / `session_mode` | Developer (blue), Teammate (green), Project Manager (purple). `classification_type` badge shown alongside |
+| Persona | `session_type` / `session_mode` | dev (blue), Teammate (green), PM (purple). `classification_type` badge shown alongside |
 | Status | `status` field | Color-coded badge. Stale sessions (running >10 min without update) show dashed border + "(stale)" label |
 | SDLC Stages | `stage_states` | Dot indicators: completed (green), in-progress (blue), failed (red), ready (yellow) |
 | Started | `started_at` or `created_at` | Formatted timestamp |

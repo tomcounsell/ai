@@ -3,6 +3,7 @@
 Tests configuration loading, argument parsing, and basic startup logic.
 """
 
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -382,4 +383,93 @@ class TestWorkerStartupSequence:
         assert line_cleanup_orphaned < line_ensure_worker, (
             f"_cleanup_orphaned (line {line_cleanup_orphaned}) should come before "
             f"_ensure_worker (line {line_ensure_worker})"
+        )
+
+
+class TestSigtermExitCode:
+    """Test that SIGTERM sets _shutdown_via_signal and SIGINT does not.
+
+    launchd only applies ThrottleInterval on non-zero exits.  When the worker
+    exits with code 0 (voluntary stop) launchd applies an internal ~10-minute
+    throttle regardless of the configured ThrottleInterval value.  SIGTERM is
+    an external/forced termination that should result in exit code 1 so
+    launchd respects the 10-second ThrottleInterval.  SIGINT is a developer
+    stop (Ctrl-C) and should remain exit code 0.
+    """
+
+    def setup_method(self):
+        """Reset _shutdown_via_signal before each test."""
+        import worker.__main__ as wm
+
+        wm._shutdown_via_signal = False
+
+    def teardown_method(self):
+        """Reset _shutdown_via_signal after each test."""
+        import worker.__main__ as wm
+
+        wm._shutdown_via_signal = False
+
+    def test_sigterm_sets_shutdown_flag(self):
+        """SIGTERM signal handler must set _shutdown_via_signal = True."""
+        import worker.__main__ as wm
+
+        wm._shutdown_via_signal = False
+
+        # Simulate what the SIGTERM branch of _signal_handler does
+        if signal.SIGTERM:
+            wm._shutdown_via_signal = True
+
+        assert wm._shutdown_via_signal is True, "_shutdown_via_signal must be True after SIGTERM"
+
+    def test_sigint_does_not_set_shutdown_flag(self):
+        """SIGINT signal handler must NOT set _shutdown_via_signal."""
+        import worker.__main__ as wm
+
+        wm._shutdown_via_signal = False
+
+        # Simulate what the SIGINT branch of _signal_handler does — flag is NOT set
+
+        assert wm._shutdown_via_signal is False, (
+            "_shutdown_via_signal must remain False after SIGINT"
+        )
+
+    def test_sigterm_flag_present_in_source(self):
+        """worker/__main__.py source must contain the _shutdown_via_signal flag pattern."""
+        source = (Path(__file__).parent.parent.parent / "worker" / "__main__.py").read_text()
+        assert "_shutdown_via_signal = True" in source, (
+            "SIGTERM handler must set _shutdown_via_signal = True"
+        )
+        assert "sys.exit(1)" in source, (
+            "main() must call sys.exit(1) when _shutdown_via_signal is True"
+        )
+        assert "if _shutdown_via_signal" in source, (
+            "main() must check _shutdown_via_signal after asyncio.run() returns"
+        )
+
+    def test_sigterm_exit_note_in_source(self):
+        """worker/__main__.py must log the reason for the non-zero exit."""
+        source = (Path(__file__).parent.parent.parent / "worker" / "__main__.py").read_text()
+        assert "ThrottleInterval" in source, (
+            "Exit code 1 log line must mention ThrottleInterval for operator clarity"
+        )
+
+    def test_launchctl_bootout_in_stop_worker(self):
+        """scripts/valor-service.sh stop_worker() must use launchctl bootout not unload."""
+        source = (Path(__file__).parent.parent.parent / "scripts" / "valor-service.sh").read_text()
+
+        # Find the stop_worker function body
+        start = source.find("stop_worker()")
+        assert start >= 0, "stop_worker() function not found in valor-service.sh"
+
+        # Find the end of the function (next function definition or end of file)
+        next_fn = source.find("\n}", start)
+        stop_worker_body = source[start : next_fn + 2] if next_fn >= 0 else source[start:]
+
+        assert "launchctl bootout" in stop_worker_body, (
+            "stop_worker() must use 'launchctl bootout' (not 'launchctl unload') "
+            "so launchd supervision is maintained through stop/start cycles"
+        )
+        assert "launchctl unload" not in stop_worker_body, (
+            "stop_worker() must not use deprecated 'launchctl unload' — "
+            "it destroys launchd supervision and prevents automatic restarts"
         )

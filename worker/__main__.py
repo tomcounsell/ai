@@ -23,6 +23,10 @@ from pathlib import Path
 
 logger = logging.getLogger("worker")
 
+# Set to True when SIGTERM is received; causes main() to exit with code 1
+# so launchd applies ThrottleInterval (10s) instead of the default ~10-minute throttle.
+_shutdown_via_signal = False
+
 
 def _configure_logging() -> None:
     """Set up logging for the standalone worker."""
@@ -118,6 +122,7 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
         _cleanup_orphaned_claude_processes,
         _ensure_worker,
         _recover_interrupted_agent_sessions_startup,
+        _session_notify_listener,
         cleanup_corrupted_agent_sessions,
         register_callbacks,
         request_shutdown,
@@ -204,11 +209,26 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     # Start health monitor as background task
     health_task = asyncio.create_task(_agent_session_health_loop())
 
+    # Start pub/sub listener — delivers ~1s session pickup vs 5-minute health check
+    notify_task = asyncio.create_task(_session_notify_listener(), name="session-notify-listener")
+
+    def _notify_task_done(t: asyncio.Task) -> None:
+        if t.cancelled():
+            return  # Normal shutdown path
+        exc = t.exception()
+        if exc is not None:
+            logger.error("Session notify listener exited unexpectedly: %s", exc)
+
+    notify_task.add_done_callback(_notify_task_done)
+
     # Set up graceful shutdown
     shutdown_event = asyncio.Event()
 
     def _signal_handler(sig, frame):
+        global _shutdown_via_signal
         logger.info(f"Received signal {sig}, shutting down gracefully...")
+        if sig == signal.SIGTERM:
+            _shutdown_via_signal = True
         request_shutdown()  # Signal all worker loops to finish current sessions
         shutdown_event.set()
 
@@ -233,6 +253,13 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     health_task.cancel()
     try:
         await health_task
+    except asyncio.CancelledError:
+        pass
+
+    # Cancel pub/sub listener
+    notify_task.cancel()
+    try:
+        await notify_task
     except asyncio.CancelledError:
         pass
 
@@ -261,6 +288,10 @@ def main() -> None:
         sys.exit(1)
 
     asyncio.run(_run_worker(projects, dry_run=args.dry_run))
+
+    if _shutdown_via_signal:
+        logger.info("Exiting with code 1 (SIGTERM) so launchd respects ThrottleInterval")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

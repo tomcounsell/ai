@@ -42,10 +42,11 @@ When a stuck session is found:
 
 ### Startup Integration
 
-The health check loop starts automatically with the bridge process, alongside the existing session watchdog. Both run at 5-minute intervals but monitor different concerns:
+The health check loop starts automatically with the **worker process** (`python -m worker`), alongside the session notify listener and session watchdog. Both the health loop and notify listener run as background asyncio tasks in the worker:
 
-- **Session watchdog** (`monitoring/session_watchdog.py`): Monitors `AgentSession` objects at the application level
-- **Agent session health monitor** (`agent/agent_session_queue.py`): Monitors `AgentSession` status at the queue level
+- **Session notify listener** (`_session_notify_listener()` in `agent/agent_session_queue.py`): Subscribes to the `valor:sessions:new` Redis pub/sub channel. Calls `_ensure_worker(chat_id)` immediately when a session is published — ~1s pickup latency. This is the fast path for normal operation.
+- **Agent session health monitor** (`_agent_session_health_loop()` in `agent/agent_session_queue.py`): Runs every 5 minutes. Recovers sessions missed by pub/sub (Redis restart, worker not running at publish time, bypass paths). This is the safety net.
+- **Session watchdog** (`monitoring/session_watchdog.py`): Monitors `AgentSession` objects at the application level (separate from queue-level monitoring)
 
 ## CLI Usage
 
