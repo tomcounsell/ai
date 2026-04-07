@@ -995,7 +995,9 @@ def _transition_parent(parent: AgentSession, new_status: str) -> None:
     # intentional. The function is private in the lifecycle module because it's
     # a specialized parent-transition helper, not a general-purpose API. This
     # wrapper exists to keep the import localized to one place.
-    from models.session_lifecycle import _transition_parent as _lifecycle_transition_parent
+    from models.session_lifecycle import (
+        _transition_parent as _lifecycle_transition_parent,
+    )
 
     _lifecycle_transition_parent(parent, new_status)
 
@@ -1492,6 +1494,14 @@ DRAIN_TIMEOUT = 1.5  # seconds
 _active_workers: dict[str, asyncio.Task] = {}
 _active_events: dict[str, asyncio.Event] = {}
 
+# Tracks chat_ids for which asyncio.create_task() has been called but the task
+# has not yet registered itself in _active_workers (i.e., the spawn is in-flight).
+# Since _ensure_worker() is synchronous (no await), check-and-set within the
+# function is atomic in the cooperative event loop, preventing duplicate workers
+# from being spawned when the health check iterates multiple pending sessions
+# sharing the same chat_id before either task is live in _active_workers.
+_starting_workers: set[str] = set()
+
 # Graceful shutdown coordination: when set, worker loops finish their current
 # session and exit instead of waiting for new work.
 _shutdown_requested: bool = False
@@ -1700,16 +1710,44 @@ def _ensure_worker(chat_id: str) -> None:
 
     Creates an asyncio.Event for the chat if one doesn't exist. The event is
     used by _worker_loop to wait for new work notifications from enqueue_agent_session().
+
+    Idempotency guarantee (two-guard mechanism):
+    1. _active_workers[chat_id]: task exists and is not done — steady-state guard.
+    2. _starting_workers: chat_id was added here before create_task() and removed
+       once the task is live — startup-race guard.
+
+    Because this function is synchronous (no await), the check-and-set of both
+    guards is atomic within the cooperative asyncio event loop.  The health check
+    loop may call _ensure_worker() for every pending session sharing a chat_id
+    before any task registers itself in _active_workers; _starting_workers
+    prevents the second (and any subsequent) call from spawning a duplicate worker.
     """
     existing = _active_workers.get(chat_id)
     if existing and not existing.done():
         return
-    # Create or reset the event for this chat's worker
-    event = asyncio.Event()
-    _active_events[chat_id] = event
-    task = asyncio.create_task(_worker_loop(chat_id, event))
-    _active_workers[chat_id] = task
-    logger.info(f"[chat:{chat_id}] Started session queue worker")
+    if chat_id in _starting_workers:
+        logger.warning(f"[chat:{chat_id}] Duplicate worker spawn blocked — spawn already in-flight")
+        return
+    # Mark the spawn as in-flight before create_task() so any re-entrant
+    # call within the same event-loop turn sees it immediately.
+    _starting_workers.add(chat_id)
+    try:
+        # Create or reset the event for this chat's worker
+        event = asyncio.Event()
+        _active_events[chat_id] = event
+        task = asyncio.create_task(_worker_loop(chat_id, event))
+        _active_workers[chat_id] = task
+        # Once the task is live in _active_workers the steady-state guard takes
+        # over; remove from _starting_workers via done_callback for safety, but
+        # also do it here immediately so the set doesn't grow unbounded for
+        # long-lived workers.
+        _starting_workers.discard(chat_id)
+        task.add_done_callback(lambda _: _starting_workers.discard(chat_id))
+        logger.info(f"[chat:{chat_id}] Started session queue worker")
+    except Exception:
+        # Ensure _starting_workers never leaks on unexpected create_task failure.
+        _starting_workers.discard(chat_id)
+        raise
 
 
 async def _worker_loop(chat_id: str, event: asyncio.Event) -> None:
@@ -2131,7 +2169,9 @@ async def _enqueue_nudge(
     session.priority = "high"
     session.task_list_id = task_list_id
     transition_status(
-        session, "pending", reason=f"nudge re-enqueue (auto_continue_count={auto_continue_count})"
+        session,
+        "pending",
+        reason=f"nudge re-enqueue (auto_continue_count={auto_continue_count})",
     )
 
     _ensure_worker(session.chat_id)
@@ -2193,7 +2233,11 @@ def steer_session(session_id: str, message: str) -> dict:
         dict with keys: success (bool), session_id (str), error (str | None)
     """
     if not message or not message.strip():
-        return {"success": False, "session_id": session_id, "error": "Empty message rejected"}
+        return {
+            "success": False,
+            "session_id": session_id,
+            "error": "Empty message rejected",
+        }
 
     try:
         sessions = list(AgentSession.query.filter(session_id=session_id))

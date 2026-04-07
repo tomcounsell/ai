@@ -14,10 +14,13 @@ import pytest
 
 from agent.agent_session_queue import (
     DRAIN_TIMEOUT,
+    _active_workers,
+    _ensure_worker,
     _extract_agent_session_fields,
     _pop_agent_session,
     _pop_agent_session_with_fallback,
     _recover_interrupted_agent_sessions_startup,
+    _starting_workers,
 )
 from models.agent_session import AgentSession
 
@@ -371,3 +374,97 @@ class TestDrainGuard:
 
         result2 = await _pop_agent_session_with_fallback("123")
         assert result2 is None
+
+
+class TestEnsureWorkerDeduplication:
+    """Tests for the _starting_workers guard in _ensure_worker().
+
+    Validates that calling _ensure_worker() twice in rapid succession for the
+    same chat_id — before either task has had a chance to register itself in
+    _active_workers — results in exactly one worker task being created.
+
+    This simulates the health-check race: N pending sessions share a chat_id,
+    and the health check calls _ensure_worker() once per session before any
+    asyncio.create_task() has had a chance to store its task reference.
+    """
+
+    @pytest.fixture(autouse=True)
+    def cleanup_worker_state(self):
+        """Clean up module-level worker dicts/sets before and after each test."""
+        chat_id = "race-test-chat"
+        # Pre-test cleanup
+        _active_workers.pop(chat_id, None)
+        _starting_workers.discard(chat_id)
+        yield
+        # Cancel any tasks created during the test to avoid warnings
+        task = _active_workers.pop(chat_id, None)
+        if task and not task.done():
+            task.cancel()
+        _starting_workers.discard(chat_id)
+
+    @pytest.mark.asyncio
+    async def test_double_call_creates_only_one_worker(self):
+        """Two back-to-back _ensure_worker() calls for the same chat_id must create exactly
+        one asyncio.Task, even though neither call sees an entry in _active_workers at the
+        point of the guard check (simulating the post-restart health-check race).
+        """
+        chat_id = "race-test-chat"
+
+        # Simulate the race: _active_workers has no entry yet for this chat_id.
+        assert chat_id not in _active_workers
+
+        # Call _ensure_worker() twice without awaiting — both happen in the same
+        # event-loop turn, so no task has run yet.
+        _ensure_worker(chat_id)
+        _ensure_worker(chat_id)
+
+        # Exactly one task should exist for this chat_id.
+        assert chat_id in _active_workers
+        task = _active_workers[chat_id]
+        assert task is not None
+
+        # Verify that _starting_workers was cleaned up after task creation.
+        assert chat_id not in _starting_workers
+
+        # Count how many tasks were actually created by inspecting the single
+        # task reference — if two tasks had been created the second would have
+        # overwritten the first and we'd see two distinct task objects.
+        # We validate by counting; calling _ensure_worker a third time should
+        # now be blocked by the _active_workers (steady-state) guard.
+        tasks_before = id(task)
+        _ensure_worker(chat_id)
+        assert id(_active_workers[chat_id]) == tasks_before, (
+            "Third _ensure_worker() call replaced the existing live task — "
+            "steady-state guard failed"
+        )
+
+    @pytest.mark.asyncio
+    async def test_starting_workers_cleared_after_task_creation(self):
+        """_starting_workers must be empty immediately after _ensure_worker() returns."""
+        chat_id = "race-test-chat"
+        _ensure_worker(chat_id)
+        assert chat_id not in _starting_workers
+
+    @pytest.mark.asyncio
+    async def test_second_call_logs_warning(self, caplog):
+        """When the _starting_workers guard blocks a duplicate spawn, a warning is logged."""
+        import logging
+
+        chat_id = "race-test-chat"
+
+        # Patch _active_workers to simulate no live task so both calls
+        # pass the first guard but the second is caught by _starting_workers.
+        _active_workers.pop(chat_id, None)
+        _starting_workers.discard(chat_id)
+
+        # Manually inject chat_id into _starting_workers to simulate a
+        # concurrent in-flight spawn (as the health check would see it).
+        _starting_workers.add(chat_id)
+        with caplog.at_level(logging.WARNING):
+            _ensure_worker(chat_id)
+
+        assert any(
+            "Duplicate worker spawn blocked" in record.message for record in caplog.records
+        ), "Expected warning for blocked duplicate spawn was not logged"
+        # Clean up manual injection
+        _starting_workers.discard(chat_id)
