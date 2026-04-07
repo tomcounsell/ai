@@ -83,7 +83,7 @@ Single Popoto model (`AgentSession`) with discriminator field. Popoto ORM does n
 - `session_type` (KeyField) -- "pm", "teammate", or "dev"
 - `status` (KeyField) -- pending/running/active/dormant/completed/failed
 - `project_key`, `created_at`, `history`, etc.
-- `project_config` (DictField) -- full project dict from `projects.json`, populated at enqueue time. Carries all project properties (name, working_directory, github, mode, telegram, etc.) through the pipeline so downstream code never re-derives from a parallel registry. Empty/None for legacy sessions created before this field existed; the worker falls back to loading from `projects.json` at execution time.
+- `project_config` (DictField) -- full project dict from `projects.json`, populated at enqueue time. Carries all project properties (name, working_directory, github, mode, telegram, etc.) through the pipeline so downstream code never re-derives from a parallel registry. Empty/None for older sessions created before this field existed; the worker falls back to loading from `projects.json` at execution time.
 
 ### PM/Teammate session-specific fields
 - `chat_id`, `message_id`, `sender_name`, `message_text` -- Telegram context
@@ -91,9 +91,9 @@ Single Popoto model (`AgentSession`) with discriminator field. Popoto ORM does n
 
 ### Dev session-specific fields
 - `parent_agent_session_id` (KeyField) -- **canonical** parent link (role-neutral). Set by all session creators (`create_child`, `create_dev`, `enqueue_session`) and read by all hierarchy walkers (`scheduling_depth`, `get_parent_session`, `get_child_sessions`, the zombie health check, the dashboard).
-- `parent_session_id` -- **deprecated** `@property` alias delegating to `parent_agent_session_id`. Kept for one release cycle. New code should use `parent_agent_session_id` directly.
-- `parent_chat_session_id` -- **deprecated** `@property` alias also delegating to `parent_agent_session_id` (the legacy alias chain `parent_chat_session_id -> parent_session_id -> parent_agent_session_id` continues to resolve transparently).
-- `role` (DataField) -- session specialization ("pm", "dev", or null for legacy)
+- `parent_session_id` -- backward-compat `@property` alias delegating to `parent_agent_session_id`. Kept for one release cycle. New code should use `parent_agent_session_id` directly.
+- `parent_chat_session_id` -- backward-compat `@property` alias also delegating to `parent_agent_session_id` (the alias chain `parent_chat_session_id -> parent_session_id -> parent_agent_session_id` continues to resolve transparently).
+- `role` (DataField) -- session specialization ("pm", "dev", or null for unspecialized sessions)
 - `stage_states` -- derived property reading from `session_events`
 - `slug` -- derives branch name, plan path, worktree
 - `issue_url`, `plan_url`, `pr_url` -- SDLC link URLs
@@ -378,7 +378,7 @@ Telegram message
 
 **Cross-repo detection**: `sdk_client.py` uses `project_key != "valor"` to determine whether a session targets a cross-repo project, replacing the previous `project_working_dir != AI_REPO_ROOT` string comparisons.
 
-**Backward compatibility**: Legacy sessions without `project_config` (created before this field existed) fall back to loading from `projects.json` at execution time. This transitional fallback can be removed after one deploy cycle.
+**Backward compatibility**: Older sessions without `project_config` (created before this field existed) fall back to loading from `projects.json` at execution time. This transitional fallback can be removed after one deploy cycle.
 
 **Config consumers**: `bridge/formatting.py` and `tools/agent_session_scheduler.py` load config from `projects.json` directly via `bridge.routing.load_config()` rather than relying on a module-level registry.
 
@@ -386,5 +386,5 @@ Telegram message
 
 - Older AgentSession records in Redis with `session_type="chat"` need migration via `scripts/migrate_session_type_chat_to_pm.py`
 - Float timestamps are auto-converted to datetime via `__setattr__`; run `scripts/migrate_datetime_fields.py` for existing data
-- `_normalize_kwargs()` maps deprecated field names to consolidated equivalents
+- `_normalize_kwargs()` maps old field names to consolidated equivalents
 - Workers auto-adapt: jobs with chat_id use per-chat routing; older jobs fall back to project_key
