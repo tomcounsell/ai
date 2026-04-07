@@ -430,16 +430,32 @@ def run_perplexity_research(
             return None, {}
 
     else:
-        _handle_error_response(response)
-        return None, {}
+        error_data = _handle_error_response(response)
+        return None, error_data
 
 
-def _handle_error_response(response):
-    """Handle non-200 API responses with helpful messages."""
+def _handle_error_response(response) -> dict:
+    """Handle non-200 API responses with helpful messages.
+
+    Returns a dict with ``_error_status``, ``_error_message``, and
+    ``_error_body`` keys so callers can surface the failure details.
+    """
     try:
         error_body = response.json()
     except Exception:
-        error_body = response.text[:500]
+        error_body = {"message": response.text[:500]}
+
+    # Extract a human-readable error type/message from common Perplexity shapes
+    error_message = (
+        (
+            (error_body.get("error") or {}).get("type")
+            or (error_body.get("error") or {}).get("message")
+            or error_body.get("detail")
+            or str(response.status_code)
+        )
+        if isinstance(error_body, dict)
+        else str(response.status_code)
+    )
 
     if response.status_code == 401:
         logger.error(
@@ -459,6 +475,12 @@ def _handle_error_response(response):
             response.status_code,
             error_body,
         )
+
+    return {
+        "_error_status": response.status_code,
+        "_error_message": error_message,
+        "_error_body": error_body,
+    }
 
 
 # ---------------------------------------------------------------------------

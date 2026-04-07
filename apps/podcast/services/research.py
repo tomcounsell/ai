@@ -94,19 +94,40 @@ def run_perplexity_research(episode_id: int, prompt: str) -> EpisodeArtifact:
     )
 
     if content_text is None or content_text == "":
-        logger.warning(
-            "Perplexity research returned no content for episode %s. API response: %s",
-            episode_id,
-            response_data if response_data else "empty",
-        )
+        error_status = response_data.get("_error_status") if response_data else None
+        error_message = response_data.get("_error_message") if response_data else None
+        error_body = response_data.get("_error_body") if response_data else None
+
+        if error_status:
+            logger.warning(
+                "Perplexity research API error %s for episode %s: %s",
+                error_status,
+                episode_id,
+                error_message,
+            )
+            content = f"[FAILED: Perplexity API {error_status} - {error_message}]"
+            description = (
+                f"Perplexity Deep Research (failed - API returned {error_status})."
+            )
+            metadata = {"error": str(error_body or error_message)}
+        else:
+            logger.warning(
+                "Perplexity research returned no content for episode %s. API response: %s",
+                episode_id,
+                response_data if response_data else "empty",
+            )
+            content = "[FAILED: Perplexity API returned empty content]"
+            description = "Perplexity Deep Research (failed - empty content)."
+            metadata = {"error": "API returned no content"}
+
         artifact, _ = EpisodeArtifact.objects.update_or_create(
             episode=episode,
             title="p2-perplexity",
             defaults={
-                "content": "[SKIPPED: Perplexity API returned no content]",
-                "description": "Perplexity Deep Research (skipped - no content returned).",
+                "content": content,
+                "description": description,
                 "workflow_context": "Research Gathering",
-                "metadata": {"skipped": True, "reason": "API returned no content"},
+                "metadata": metadata,
             },
         )
         return artifact
