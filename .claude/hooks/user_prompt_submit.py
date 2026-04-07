@@ -87,7 +87,6 @@ def main():
                 from models.agent_session import AgentSession
 
                 local_session_id = f"local-{session_id}"
-                cwd = hook_input.get("cwd", "")
 
                 # Resolve project key from cwd
                 from hook_utils.memory_bridge import _get_project_key
@@ -111,7 +110,11 @@ def main():
                     status="running",
                     message_text=prompt[:500] if prompt else "",
                     **({"session_type": session_type_override} if session_type_override else {}),
-                    **({"parent_agent_session_id": parent_agent_session_id} if parent_agent_session_id else {}),
+                    **(
+                        {"parent_agent_session_id": parent_agent_session_id}
+                        if parent_agent_session_id
+                        else {}
+                    ),
                 )
 
                 sidecar["agent_session_id"] = agent_session.agent_session_id
