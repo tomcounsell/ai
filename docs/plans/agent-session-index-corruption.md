@@ -5,7 +5,7 @@ appetite: Small
 owner: valor
 created: 2026-04-07
 tracking: https://github.com/tomcounsell/ai/issues/783
-last_comment_id: IC_kwDOEYGa0876K2z8
+last_comment_id: 4197149948
 ---
 
 # AgentSession Status Index Corruption: Ghost Running Sessions
