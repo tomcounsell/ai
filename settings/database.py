@@ -38,6 +38,9 @@ if database_url:
             def __getitem__(self, _item):
                 return None
 
+            def setdefault(self, _key, _default=None):
+                return None
+
         MIGRATION_MODULES = _DisableMigrations()
 else:
     # Fallback to individual database settings
