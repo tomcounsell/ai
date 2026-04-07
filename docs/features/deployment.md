@@ -138,42 +138,8 @@ The Telegram `/update` command remains available as a manual override for immedi
 
 For more details on the update polling mechanism, see [Bridge Self-Healing](bridge-self-healing.md#10-update-polling-comvalorupdate).
 
-## Service Topology
-
-Each machine runs a subset of these four services:
-
-| Service | Plist | Purpose | Required On |
-|---------|-------|---------|-------------|
-| Bridge | `com.valor.bridge` | Telegram I/O + embedded worker | Bridge machines |
-| Worker | `com.valor.worker` | Standalone session processing | Dev workstations |
-| Watchdog | `com.valor.bridge-watchdog` | Health monitoring, crash recovery | Bridge machines |
-| Update | `com.valor.update` | Auto-pull from origin/main | All machines |
-
-**Dev workstations** run Worker + Update. Sessions are processed and output is written to `logs/worker/`.
-
-**Bridge machines** run Bridge + Watchdog + Update. The bridge starts an embedded worker and sends output via Telegram.
-
-Do not run both Bridge and standalone Worker on the same machine for the same project -- they would compete for the same session queue without coordination.
-
-### Worker Installation
-
-```bash
-# Install standalone worker (dev workstations)
-./scripts/install_worker.sh
-
-# Manage the worker
-./scripts/valor-service.sh worker-start
-./scripts/valor-service.sh worker-stop
-./scripts/valor-service.sh worker-restart
-./scripts/valor-service.sh worker-status
-./scripts/valor-service.sh worker-logs
-```
-
-See [Worker Service](worker-service.md) for full details.
-
 ## See Also
 
 - Run `/setup` for full machine configuration
 - See `config/projects.example.json` for template
 - Check `bridge/telegram_bridge.py` for routing logic
-- See [Worker Service](worker-service.md) for standalone worker details

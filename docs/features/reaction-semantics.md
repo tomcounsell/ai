@@ -8,7 +8,7 @@ The bridge uses Telegram emoji reactions as a signaling protocol for message lif
 
 ## Reaction Constants
 
-All constants are canonically defined in `agent/constants.py` (re-exported from `bridge/response.py` for backward compatibility).
+All constants are defined in `bridge/response.py`.
 
 | Constant | Emoji | Meaning |
 |----------|-------|---------|
@@ -92,8 +92,7 @@ Three paths to silent text loss have been identified and guarded:
 
 | File | Role |
 |------|------|
-| `agent/constants.py` | Canonical location for `REACTION_SUCCESS/COMPLETE/ERROR` constants |
-| `bridge/response.py` | Re-exports reaction constants, OutputType enum, MAX_AUTO_CONTINUES, filter_tool_logs |
+| `bridge/response.py` | Reaction constants, OutputType enum, MAX_AUTO_CONTINUES, filter_tool_logs |
 | `agent/agent_session_queue.py` | Reaction selection logic, auto-continue re-enqueue, has_communicated() check |
 | `agent/messenger.py` | BossMessenger with `has_communicated()` tracking, BackgroundTask with internal health watchdog |
 | `agent/agent_session_queue.py` | Nudge loop: output routing decisions via `determine_delivery_action()` |

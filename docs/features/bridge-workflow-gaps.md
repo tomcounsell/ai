@@ -51,7 +51,7 @@ All output routing decisions are made by the nudge loop in `agent/agent_session_
 
 ## Session Log Snapshots
 
-The `agent/session_logs.py` module (canonically; re-exported from `bridge/session_logs.py` for backward compatibility) saves structured JSON snapshots of session state at key lifecycle events. These snapshots provide a full audit trail for debugging and session recovery.
+The `bridge/session_logs.py` module saves structured JSON snapshots of session state at key lifecycle events. These snapshots provide a full audit trail for debugging and session recovery.
 
 ### Directory Structure
 
@@ -93,7 +93,7 @@ The thumbs-up emoji reaction (👍) in Telegram serves as a **human-to-human** c
 |---|---|
 | `agent/agent_session_queue.py` | Nudge loop: output routing decisions (deliver or nudge) |
 | `bridge/pipeline_state.py` | Pipeline state machine for stage tracking |
-| `agent/session_logs.py` | `save_session_snapshot()`, `cleanup_old_snapshots()` (canonical location; re-exported from `bridge/session_logs.py`) |
+| `bridge/session_logs.py` | `save_session_snapshot()`, `cleanup_old_snapshots()` |
 | `agent/agent_session_queue.py` | Observer wiring in `send_to_chat`, hard cap enforcement, `mark_work_done()` |
 | `models/agent_session.py` | `is_sdlc` (property, 2-check: stage_states then classification_type), `has_remaining_stages()`, `has_failed_stage()` (both delegate to PipelineStateMachine), `queued_steering_messages` |
 | `CLAUDE.md` | Auto-continue rules documentation |

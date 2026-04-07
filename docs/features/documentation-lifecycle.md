@@ -42,9 +42,9 @@ After the build agent creates a PR, a validation script checks that promised doc
 - **Flags**: `--dry-run` (report only), `--base-branch` (compare target, defaults to `main`)
 - **Exit codes**: 0 = pass, 1 = missing docs (hard fail), 2 = stale markers found (warning)
 
-### Gate 3: Plan Migration (at Merge)
+### Gate 3: Plan Migration
 
-After the PR is merged, `do-merge` calls `scripts/migrate_completed_plan.py` to validate feature docs and clean up:
+After work ships, `scripts/migrate_completed_plan.py` validates feature docs and cleans up:
 
 - Validates that the feature doc exists under `docs/features/`
 - Checks the feature doc has substantive content (200+ chars excluding frontmatter)
@@ -72,7 +72,7 @@ A slash command (`.claude/commands/do-docs.md`) automates documentation updates 
 | Hook wiring | `.claude/settings.json` (PostToolUse on Write) | Connects validator to file writes |
 | Build validator | `scripts/validate_docs_changed.py` | Gate 2: Verify docs delivered post-build |
 | Build integration | `.claude/skills/do-build/SKILL.md` (Steps 7.5 + 7.6) | Invokes validator then cascade in build flow |
-| Migration validator | `scripts/migrate_completed_plan.py` | Gate 3: Block merge migration without feature doc; called by `do-merge` post-merge |
+| Migration validator | `scripts/migrate_completed_plan.py` | Gate 3: Block migration without feature doc |
 | Cascade command | `.claude/commands/do-docs.md` | Automated doc updates after code changes |
 
 ## Usage

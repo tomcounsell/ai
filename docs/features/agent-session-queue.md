@@ -51,13 +51,9 @@ The worker loop uses an Event-based drain strategy to reliably pick up pending s
 
 The original 100ms sleep relied on `_pop_agent_session()` (which uses `async_filter` via `to_thread()`) finding the session on retry. But the root cause is a thread-pool scheduling race: `async_create` writes the hash and index entries via multiple Redis commands in a thread, and `async_filter` reads the index intersection in a separate thread. The 100ms window was too short, and both calls suffered from the same `to_thread()` race. The sync fallback bypasses this entirely.
 
-## Startup Session Cleanup and Recovery
+## Startup Orphan Recovery
 
-At startup, two cleanup passes run before session processing begins:
-
-1. **Corrupted session cleanup** (`cleanup_corrupted_agent_sessions()`): Detects sessions with invalid IDs (e.g., length 60 instead of expected 32 for uuid4) or sessions whose `.save()` raises `ModelException`. These are deleted directly (with fallback to raw Redis key deletion), then `AgentSession.rebuild_indexes()` clears orphaned index entries. Also runs hourly as the `agent-session-cleanup` reflection and during `/update`.
-
-2. **Interrupted session recovery** (`_recover_interrupted_agent_sessions_startup()`): Resets all running sessions to pending with high priority, since any running session at startup is by definition orphaned from the previous process.
+`_recover_orphaned_sessions()` scans for AgentSession objects in the Redis class set that are not present in any status KeyField index. These orphans result from past index corruption or creation races. They are re-created with status `pending` and priority `high`. Called at bridge startup alongside `_recover_interrupted_sessions()`.
 
 ## Revival Chat Scoping Fix
 

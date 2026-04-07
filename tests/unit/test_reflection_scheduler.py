@@ -503,7 +503,7 @@ class TestRegistryIntegrity:
         with open(registry_path) as f:
             data = yaml.safe_load(f)
         names = {e["name"] for e in data["reflections"]}
-        expected = {"health-check", "agent-session-cleanup", "stale-branch-cleanup"}
+        expected = {"health-check", "orphan-recovery", "stale-branch-cleanup"}
         assert expected.issubset(names), f"Missing reflections: {expected - names}"
 
 

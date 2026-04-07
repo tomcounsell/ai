@@ -32,15 +32,14 @@ The orchestrator will:
 - Verify critical dependency versions
 - Check/pull Ollama summarizer model
 - Verify CLI tools and SDK authentication
-- Install/restart bridge, worker, caffeinate, and reflections services
+- Install/restart bridge, caffeinate, and reflections services
 - Set up global calendar hook and generate config
 - Check MCP server configuration
 
 After running, report the result. If there are warnings or errors, list each one clearly.
 
-The orchestrator automatically cleans up sessions as part of Step 5.5:
-- Corrupted sessions (invalid IDs, unsaveable records) are deleted and indexes rebuilt
-- Running/pending sessions older than 120 min with no live process are transitioned to `killed`
+The orchestrator automatically cleans up stale sessions as part of Step 5.5:
+- Running/pending sessions older than 30 min with no live process are transitioned to `killed`
 - Terminal sessions (killed/abandoned/failed/completed) are preserved for reflections to analyze
 - Reflections handles its own 90-day expiry of old session records
 
@@ -87,7 +86,6 @@ After update, reinstall launchd plists to pick up any template changes:
 ```bash
 cd ~/src/ai
 ./scripts/install_reflections.sh
-./scripts/install_worker.sh
 ```
 
 The install script substitutes `__PROJECT_DIR__` and `__HOME_DIR__` placeholders with the current machine's paths. This ensures plists work on any machine without hardcoded usernames.
@@ -131,21 +129,6 @@ tail -50 ~/src/ai/logs/bridge.error.log
 
 # Check status
 ~/src/ai/scripts/valor-service.sh status
-```
-
-### Worker won't start
-```bash
-# Check logs
-tail -50 ~/src/ai/logs/worker_error.log
-
-# Manual restart
-~/src/ai/scripts/valor-service.sh worker-restart
-
-# Check status
-~/src/ai/scripts/valor-service.sh worker-status
-
-# Reinstall plist
-~/src/ai/scripts/install_worker.sh
 ```
 
 ## Module Details
@@ -207,19 +190,11 @@ config = calendar.generate_calendar_config(project_dir)
 ```python
 from scripts.update import service
 
-# Get bridge status
+# Get status
 status = service.get_service_status(project_dir)
 # status.running, status.pid, status.uptime, status.memory_mb
 
-# Install/restart bridge
+# Install/restart
 service.install_service(project_dir)  # Installs bridge + update cron
 service.restart_service(project_dir)
-
-# Get worker status
-worker = service.get_worker_status(project_dir)
-# worker.running, worker.pid, worker.uptime, worker.memory_mb
-
-# Install/restart worker
-service.install_worker(project_dir)   # Installs standalone worker service
-service.restart_worker(project_dir)
 ```

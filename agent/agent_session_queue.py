@@ -4,17 +4,10 @@ Agent Session Queue - FILO stack with per-project sequential workers.
 Serializes agent work per project working directory so git operations
 never conflict. Agent runs directly in the project's working directory.
 
-This module has no module-level bridge/ imports and can be used by both
-the Telegram bridge (embedded worker) and the standalone worker
-(python -m worker). Output routing uses the OutputHandler protocol
-defined in agent/output_handler.py, with FileOutputHandler as fallback
-when no bridge callbacks are registered.
-
 Architecture:
 - AgentSession: unified popoto Model persisted in Redis
 - Worker loop: one asyncio.Task per project, processes sessions sequentially
 - Revival detection: lightweight git state check, no SDK agent call
-- Output: OutputHandler protocol (Telegram callbacks or file logging)
 """
 
 import asyncio
@@ -34,10 +27,9 @@ from agent.branch_manager import (
     get_plan_context,
     sanitize_branch_name,
 )
-from agent.constants import REACTION_COMPLETE, REACTION_ERROR, REACTION_SUCCESS
-from agent.output_handler import OutputHandler
-from agent.session_logs import save_session_snapshot
 from agent.worktree_manager import WORKTREES_DIR, validate_workspace
+from bridge.response import REACTION_COMPLETE, REACTION_ERROR, REACTION_SUCCESS
+from bridge.session_logs import save_session_snapshot
 from config.enums import ClassificationType, PersonaType, SessionType
 from models.agent_session import AgentSession
 from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
@@ -901,48 +893,11 @@ async def _complete_agent_session(session: AgentSession, *, failed: bool = False
     Delegates all completion side effects (lifecycle log, auto-tag, branch checkpoint,
     parent finalization, status save) to finalize_session() from the lifecycle module.
 
-    Re-reads the session from Redis before finalizing to capture any stage events
-    written during execution (e.g., SDLC pipeline transitions). This prevents the
-    stale in-memory snapshot from overwriting accumulated stage_states when
-    _cleanup_stale_sessions ran and created a new Redis record mid-execution.
-
     Args:
         session: The AgentSession to complete.
         failed: If True, this session failed (used for parent finalization).
     """
     from models.session_lifecycle import finalize_session
-
-    # Re-read from Redis to capture stage events accumulated during execution.
-    # The in-memory object may hold a stale snapshot if _cleanup_stale_sessions
-    # ran during the session's lifetime (it does finalize and re-create the record).
-    # Querying by session_id (not id) finds the current record regardless of id changes.
-    session_id = getattr(session, "session_id", None)
-    if session_id:
-        try:
-            running_records = list(
-                AgentSession.query.filter(session_id=session_id, status="running")
-            )
-            if running_records:
-                if len(running_records) > 1:
-                    # Multiple running records — take most recent by created_at
-                    running_records.sort(
-                        key=lambda r: r.created_at or 0,
-                        reverse=True,
-                    )
-                    logger.warning(
-                        "[lifecycle] Multiple running records for session_id=%s — "
-                        "using most recent (id=%s)",
-                        session_id,
-                        getattr(running_records[0], "id", "?"),
-                    )
-                session = running_records[0]
-        except Exception as exc:
-            logger.warning(
-                "[lifecycle] Redis re-read failed for session_id=%s, falling back to "
-                "in-memory object: %s",
-                session_id,
-                exc,
-            )
 
     status = "failed" if failed else "completed"
     finalize_session(session, status, reason="agent session completed")
@@ -1350,25 +1305,6 @@ DRAIN_TIMEOUT = 1.5  # seconds
 _active_workers: dict[str, asyncio.Task] = {}
 _active_events: dict[str, asyncio.Event] = {}
 
-# Graceful shutdown coordination: when set, worker loops finish their current
-# session and exit instead of waiting for new work.
-_shutdown_requested: bool = False
-
-
-def request_shutdown() -> None:
-    """Signal all worker loops to finish current work and exit.
-
-    Called by the standalone worker's SIGTERM handler. Sets the shutdown flag
-    and wakes all waiting workers so they can check the flag and exit.
-    """
-    global _shutdown_requested
-    _shutdown_requested = True
-    # Wake all waiting workers so they see the flag
-    for event in _active_events.values():
-        event.set()
-    logger.info("Shutdown requested — workers will finish current sessions and exit")
-
-
 # Callbacks registered by the bridge for sending messages and reactions
 SendCallback = Callable[[str, str, int, Any], Awaitable[None]]  # (chat_id, text, reply_to, session)
 ReactionCallback = Callable[[str, int, str | None], Awaitable[None]]
@@ -1381,46 +1317,19 @@ _response_callbacks: dict[str, ResponseCallback] = {}
 
 def register_callbacks(
     project_key: str,
-    send_callback: SendCallback | None = None,
-    reaction_callback: ReactionCallback | None = None,
+    send_callback: SendCallback,
+    reaction_callback: ReactionCallback,
     response_callback: ResponseCallback | None = None,
-    *,
-    handler: OutputHandler | None = None,
 ) -> None:
     """
-    Register output callbacks for a project.
+    Register bridge callbacks for a project.
 
-    Accepts either raw callables (backward compatible with bridge) or an
-    OutputHandler instance (for standalone worker and new platform bridges).
-
-    Args:
-        project_key: Project identifier to register callbacks for.
-        send_callback: Callable (chat_id, text, reply_to_msg_id, session) -> sends output.
-        reaction_callback: Callable (chat_id, msg_id, emoji) -> sets a reaction.
-        response_callback: Callable (event, text, chat_id, msg_id) ->
-            sends response with file handling.
-        handler: An OutputHandler instance. If provided, its send() and react()
-                 methods are wrapped as send_callback and reaction_callback.
+    send_callback(chat_id, text, reply_to_msg_id) -> sends a Telegram message
+    reaction_callback(chat_id, msg_id, emoji) -> sets a reaction on a message
+    response_callback(event, text, chat_id, msg_id) -> sends response with file handling
     """
-    if handler is not None:
-        # Wrap OutputHandler methods as raw callbacks for internal use
-        if send_callback is None:
-            _send_callbacks[project_key] = handler.send
-        else:
-            _send_callbacks[project_key] = send_callback
-
-        if reaction_callback is None:
-            _reaction_callbacks[project_key] = handler.react
-        else:
-            _reaction_callbacks[project_key] = reaction_callback
-    else:
-        if send_callback is None:
-            raise ValueError("Either send_callback or handler must be provided")
-        if reaction_callback is None:
-            raise ValueError("Either reaction_callback or handler must be provided")
-        _send_callbacks[project_key] = send_callback
-        _reaction_callbacks[project_key] = reaction_callback
-
+    _send_callbacks[project_key] = send_callback
+    _reaction_callbacks[project_key] = reaction_callback
     if response_callback:
         _response_callbacks[project_key] = response_callback
 
@@ -1573,14 +1482,7 @@ def _ensure_worker(chat_id: str) -> None:
 async def _worker_loop(chat_id: str, event: asyncio.Event) -> None:
     """
     Process sessions sequentially for one chat.
-
-    In bridge mode (default): runs until queue is empty, then exits
-    (restarted on next enqueue via _ensure_worker).
-
-    In standalone mode (VALOR_WORKER_MODE=standalone): waits indefinitely
-    for new work — never exits on empty queue. This eliminates the 10s
-    launchd restart gap that breaks nudge cycles in multi-turn pipelines.
-
+    Runs until queue is empty, then exits (restarted on next enqueue).
     After each session, checks for a restart flag written by remote-update.sh.
 
     Workers are per-chat_id so different chat groups can run in parallel.
@@ -1591,51 +1493,32 @@ async def _worker_loop(chat_id: str, event: asyncio.Event) -> None:
     2. If the event fires (new work enqueued), pop the next session via _pop_agent_session().
     3. If the timeout expires, use _pop_agent_session_with_fallback() which includes a
        synchronous Popoto query that bypasses the to_thread() index visibility race.
-    4. (Bridge mode only) Before exiting, run a final _pop_agent_session_with_fallback().
+    4. Before exiting, run a final _pop_agent_session_with_fallback() as a safety net.
 
     CancelledError is caught explicitly to ensure proper session completion
     and worker cleanup instead of silent death.
     """
-    standalone = os.environ.get("VALOR_WORKER_MODE") == "standalone"
     try:
         while True:
-            # Check shutdown flag before starting new work
-            if _shutdown_requested:
-                logger.info(f"[chat:{chat_id}] Shutdown requested, worker exiting")
-                break
-
             session = await _pop_agent_session(chat_id)
             if session is None:
                 # Event-based drain: wait for enqueue_agent_session() to signal new work,
                 # or fall back to sync query after timeout.
                 event.clear()
-
-                if standalone:
-                    # Persistent mode: wait indefinitely for new work
-                    await event.wait()
-                    if _shutdown_requested:
-                        logger.info(f"[chat:{chat_id}] Woke from wait, shutdown requested")
-                        break
+                try:
+                    await asyncio.wait_for(event.wait(), timeout=DRAIN_TIMEOUT)
+                    # Event fired — new work was enqueued
                     session = await _pop_agent_session(chat_id)
-                else:
-                    # Bridge mode: timeout and exit if no work arrives
-                    try:
-                        await asyncio.wait_for(event.wait(), timeout=DRAIN_TIMEOUT)
-                        # Event fired — new work was enqueued
-                        session = await _pop_agent_session(chat_id)
-                    except TimeoutError:
-                        # Timeout — use sync fallback to bypass index visibility race
-                        session = await _pop_agent_session_with_fallback(chat_id)
+                except TimeoutError:
+                    # Timeout — use sync fallback to bypass index visibility race
+                    session = await _pop_agent_session_with_fallback(chat_id)
 
                 if session is not None:
                     logger.info(
                         f"[chat:{chat_id}] Drain guard caught session that would have been lost"
                     )
-                elif standalone:
-                    # Persistent mode: event fired but no session found — loop back
-                    continue
                 else:
-                    # Bridge mode: exit-time safety check
+                    # Exit-time safety check: one final sync scan before giving up
                     session = await _pop_agent_session_with_fallback(chat_id)
                     if session is not None:
                         logger.warning(
@@ -1728,8 +1611,10 @@ async def _worker_loop(chat_id: str, event: asyncio.Event) -> None:
                     # deleted by the nudge fallback path, skip completion to avoid
                     # overwriting the nudge's status back to "completed".
                     try:
-                        fresh = AgentSession.get(session.agent_session_id)
-                        if not fresh:
+                        fresh_sessions = list(
+                            AgentSession.query.filter(agent_session_id=session.agent_session_id)
+                        )
+                        if not fresh_sessions:
                             logger.info(
                                 "[chat:%s] Session %s no longer exists in Redis "
                                 "(likely recreated by nudge fallback) — skipping "
@@ -1737,7 +1622,7 @@ async def _worker_loop(chat_id: str, event: asyncio.Event) -> None:
                                 chat_id,
                                 session.agent_session_id,
                             )
-                        elif fresh.status == "pending":
+                        elif fresh_sessions[0].status == "pending":
                             logger.info(
                                 "[chat:%s] Session %s has status 'pending' in Redis "
                                 "(nudge was enqueued) — skipping completion to "
@@ -1759,11 +1644,6 @@ async def _worker_loop(chat_id: str, event: asyncio.Event) -> None:
 
             # Clear the event after processing so the next drain wait starts fresh
             event.clear()
-
-            # Check shutdown flag after each completed session
-            if _shutdown_requested:
-                logger.info(f"[chat:{chat_id}] Shutdown requested after session, exiting")
-                break
 
             # Check restart flag after each completed session
             if _check_restart_flag():
@@ -2112,20 +1992,9 @@ async def _execute_agent_session(session: AgentSession) -> None:
     # Calendar heartbeat at session start
     asyncio.create_task(_calendar_heartbeat(session.project_key, project=session.project_key))
 
-    # Create messenger with bridge callbacks, falling back to file output
+    # Create messenger with bridge callbacks
     send_cb = _send_callbacks.get(session.project_key)
     react_cb = _reaction_callbacks.get(session.project_key)
-
-    if not send_cb:
-        from agent.output_handler import FileOutputHandler
-
-        _fallback = FileOutputHandler()
-        send_cb = _fallback.send
-        react_cb = react_cb or _fallback.react
-        logger.info(
-            f"[{session.project_key}] No bridge callbacks registered, "
-            f"using FileOutputHandler fallback"
-        )
 
     # Explicit state object replaces fragile nonlocal closures (_defer_reaction,
     # _completion_sent, auto_continue_count). State is passed as a mutable object
@@ -2148,6 +2017,9 @@ async def _execute_agent_session(session: AgentSession) -> None:
         - Safety cap of MAX_NUDGE_COUNT nudges → deliver regardless
         """
         nonlocal agent_session  # Re-read from Redis for fresh stage data
+
+        if not send_cb:
+            return
 
         from agent.health_check import is_session_unhealthy
         from agent.sdk_client import get_stop_reason
@@ -2777,104 +2649,13 @@ async def cleanup_stale_branches(working_dir: str, max_age_hours: float = 72) ->
 # and iterate all registered projects, so they don't need a project_key argument.
 
 
-def cleanup_corrupted_agent_sessions() -> int:
-    """Delete AgentSession records with corrupted data that prevent .save().
-
-    Detects sessions where the ID field has an invalid length (e.g., 60 chars
-    instead of the expected 32 for uuid4), or where .save() raises ModelException.
-    These records jam the health check and startup recovery loops with repeated
-    errors because they can't be transitioned or finalized through normal ORM ops.
-
-    After deleting corrupted records, rebuilds AgentSession indexes to clean
-    orphaned $IndexF/$KeyF/$SortF entries pointing to deleted objects.
-
-    Called by the reflection scheduler as the 'agent-session-cleanup' reflection.
-    Also safe to call from startup recovery or the update script.
-
-    Returns the number of corrupted sessions deleted.
-    """
-    from popoto.exceptions import ModelException
-
-    cleaned = 0
-    all_sessions = list(AgentSession.query.all())
-
-    for session in all_sessions:
-        session_id_str = str(getattr(session, "id", "") or "")
-        is_corrupt = False
-
-        # Check 1: ID length validation (uuid4 strategy expects 32 chars)
-        if session_id_str and len(session_id_str) != 32:
-            logger.warning(
-                "[agent-session-cleanup] Corrupted session detected: id=%s "
-                "(length %d, expected 32), session_id=%s",
-                session_id_str[:20],
-                len(session_id_str),
-                getattr(session, "session_id", "?"),
-            )
-            is_corrupt = True
-
-        # Check 2: Try a no-op save to detect other validation failures
-        if not is_corrupt:
-            try:
-                session.save()
-            except (ModelException, Exception) as e:
-                if "invalid" in str(e).lower() or "validation" in str(e).lower():
-                    logger.warning(
-                        "[agent-session-cleanup] Unsaveable session detected: "
-                        "id=%s, session_id=%s, error=%s",
-                        session_id_str[:20],
-                        getattr(session, "session_id", "?"),
-                        e,
-                    )
-                    is_corrupt = True
-
-        if is_corrupt:
-            try:
-                session.delete()
-                cleaned += 1
-            except Exception as del_err:
-                logger.warning(
-                    "[agent-session-cleanup] ORM delete failed for %s, "
-                    "attempting direct Redis cleanup: %s",
-                    session_id_str[:20],
-                    del_err,
-                )
-                # Fallback: direct Redis key deletion
-                try:
-                    import redis as _redis
-
-                    r = _redis.Redis()
-                    pattern = f"*{session_id_str}*"
-                    for key in r.scan_iter(match=pattern):
-                        r.delete(key)
-                    cleaned += 1
-                except Exception as redis_err:
-                    logger.error(
-                        "[agent-session-cleanup] Direct Redis cleanup failed for %s: %s",
-                        session_id_str[:20],
-                        redis_err,
-                    )
-
-    # Rebuild indexes to clean any remaining orphaned references
-    if cleaned > 0:
-        try:
-            AgentSession.rebuild_indexes()
-            logger.info(
-                "[agent-session-cleanup] Rebuilt AgentSession indexes after "
-                "cleaning %d corrupted session(s)",
-                cleaned,
-            )
-        except Exception as idx_err:
-            logger.warning("[agent-session-cleanup] Index rebuild failed: %s", idx_err)
-    else:
-        logger.debug("[agent-session-cleanup] No corrupted sessions found")
-
-    return cleaned
-
-
 def recover_orphaned_agent_sessions_all_projects() -> int:
-    """Backward-compat alias for cleanup_corrupted_agent_sessions."""
-    return cleanup_corrupted_agent_sessions()
+    """No-op: orphan recovery is now handled by the unified _agent_session_health_check.
+
+    Kept for backward compatibility with the reflection scheduler.
+    """
+    logger.debug("[reflection] Orphan recovery delegated to unified health check")
+    return 0
 
 
 async def cleanup_stale_branches_all_projects() -> list[str]:

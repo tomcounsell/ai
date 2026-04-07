@@ -218,34 +218,13 @@ h3 {
     background: var(--green-bg);
 }
 
-/* Status labels — plain colored text, no pill */
-.status-label {
-    font-size: 13px;
-    font-weight: 500;
-}
-
-.status-running { color: #22c55e; }
-.status-pending { color: #eab308; }
-.status-dormant { color: var(--purple); font-size: 11px; }
-.status-active, .status-waiting_for_children { color: #22c55e; }
-.status-completed { color: #6b7280; }
-.status-failed, .status-error, .status-abandoned, .status-killed {
-    color: #f87171;
-    font-size: 11px;
-}
-
-.priority-icon {
-    font-size: 12px;
-    margin-right: 2px;
-}
-
 .duration-label {
     display: inline-block;
     width: 28px;
     text-align: right;
     font-size: 11px;
     color: var(--text-muted);
-    margin-left: 2px;
+    margin-left: 4px;
 }
 
 .badge-ok, .badge-success {
@@ -766,11 +745,6 @@ a:hover {
     display: flex;
     gap: 6px;
     align-items: center;
-}
-.health-label {
-    font-size: 0.75rem;
-    color: var(--text-secondary, #888);
-    margin-right: 2px;
 }
 
 /* Page title (no nav) */

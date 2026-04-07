@@ -58,10 +58,13 @@
     <td class="mono">{{ (s.started_at or s.created_at) | format_timestamp }}</td>
     <td>
         {% if s.status %}
-        {% set terminal = s.status in ('failed', 'error', 'abandoned', 'killed') %}
-        {% if not terminal %}{% if s.priority == 'urgent' %}<span class="priority-icon" style="color:#f97316" title="Urgent">⬆⬆</span>{% elif s.priority == 'high' %}<span class="priority-icon" style="color:#f97316" title="High priority">⬆</span>{% elif s.priority == 'low' %}<span class="priority-icon" style="color:#3b82f6" title="Low priority">⬇</span>{% endif %}{% endif %}<span class="status-label status-{{ s.status }}{% if s.is_stale %} stale{% endif %}" title="{{ s.status }}{% if s.is_stale %} (stale){% endif %}">{% if s.status == 'running' %}▶▶▶{% elif s.status == 'pending' %}⏸{% elif s.status == 'dormant' %}dormant{% elif s.status in ('waiting_for_children', 'active') %}▶{% elif s.status == 'completed' %}☑{% else %}{{ s.status }}{% endif %}{% if s.is_stale %} ·{% endif %}</span><span class="duration-label mono">{{ s.duration | format_duration }}</span>
+        <span class="badge badge-{{ s.status }}{% if s.is_stale %} stale{% endif %}">{{ s.status }}{% if s.is_stale %} (stale){% endif %}</span>
+        <span class="duration-label mono">{{ s.duration | format_duration }}</span>
         {% if s.watchdog_unhealthy %}
         <span class="badge badge-warning" title="{{ s.watchdog_unhealthy }}">!</span>
+        {% endif %}
+        {% if s.priority and s.priority in ('urgent', 'high') %}
+        <span class="badge badge-priority-{{ s.priority }}">{{ s.priority }}</span>
         {% endif %}
         {% else %}
         <span class="text-muted">-</span>

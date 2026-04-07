@@ -11,7 +11,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Agent Session Health Monitor](agent-session-health-monitor.md) | Detects and recovers stuck running sessions in the queue | Shipped |
 | [Agent Session Hierarchy](agent-session-scheduling.md#parent-child-session-hierarchy) | Parent-child session decomposition with completion propagation, progress tracking, and orphan/stuck parent self-healing | Shipped |
 | [Agent Session Model](agent-session-model.md) | Unified lifecycle model with DatetimeFields, SessionEvent log, consolidated DictFields | Shipped |
-| [Agent Session Queue Reliability](agent-session-queue.md) | KeyField index fixes, Event-based drain guard, delete-and-recreate pattern, corrupted session cleanup | Shipped |
+| [Agent Session Queue Reliability](agent-session-queue.md) | KeyField index fixes, Event-based drain guard, delete-and-recreate pattern, orphan recovery | Shipped |
 | [Agent Session Scheduling](agent-session-scheduling.md) | Agent-initiated queue operations: schedule SDLC sessions, deferred execution, 4-tier priority, queue manipulation | Shipped |
 | [Agent-Controlled Delivery Protocol](agent-controlled-delivery.md) | Delivery-choice protocol (SEND/EDIT/REACT/SILENT/CONTINUE) with defense-in-depth filtering to prevent control signal text leaking to users | Shipped |
 | [Agent-Controlled Message Delivery](agent-message-delivery.md) | Stop-hook review gate giving the agent final say over output: SEND/EDIT/REACT/SILENT/CONTINUE delivery choices, classification context, false-stop detection | Shipped |
@@ -68,6 +68,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Personas](personas.md) | Configurable persona system: base + overlay files replacing monolithic SOUL.md for developer, PM, and teammate roles | Shipped |
 | [Pipeline Graph](pipeline-graph.md) | Canonical directed graph for SDLC stage routing with cycle support for test-failure and review-feedback loops | Shipped |
 | [Pipeline State Machine](pipeline-state-machine.md) | Programmatic stage tracking replacing inference-based detection with direct state recording at transition points | Shipped |
+| [SDLC Stage Tracking](sdlc-stage-tracking.md) | Stored-state-only stage completion: artifact inference removed, skill stage markers added, do-merge gate strengthened | Shipped |
 | [Plan Completion Gate](plan-completion-gate.md) | Deterministic validation preventing plan completion and PR merge while checkboxes remain unchecked | Shipped |
 | [Plan Prerequisites Validation](plan-prerequisites.md) | Declare and validate environment requirements before plan execution | Shipped |
 | [PM Channels](pm-channels.md) | Project manager mode routing Telegram groups to work-vault folders with SDLC bypass | Shipped |
@@ -79,7 +80,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Race Condition Analysis](race-condition-analysis.md) | Structured concurrency analysis section in plan template with soft validator for async code | Shipped |
 | [Reaction Semantics](reaction-semantics.md) | Emoji reaction protocol for message delivery feedback and silent loss prevention | Shipped |
 | [Redis Model Relationships](redis-models.md) | Cross-references between Popoto models, project_key on all models, enrichment metadata ownership on TelegramMessage, field type semantics (KeyField vs IndexedField) | Shipped |
-| [Reflections](reflections.md) | Unified reflection scheduler with declarative YAML registry, Redis state tracking, skip-if-running guard; subsumes health check, agent-session-cleanup, branch cleanup, and 16-unit daily maintenance pipeline (including hooks audit and PR review audit) | Shipped |
+| [Reflections](reflections.md) | Unified reflection scheduler with declarative YAML registry, Redis state tracking, skip-if-running guard; subsumes health check, orphan recovery, branch cleanup, and 16-unit daily maintenance pipeline (including hooks audit and PR review audit) | Shipped |
 | [Reflections Dashboard](reflections-dashboard.md) | Web dashboard for monitoring reflection scheduler execution, run history, and ignore patterns at `/reflections/` | Shipped |
 | [Remote Update](remote-update.md) | Telegram command and cron for remote system updates across machines | Shipped |
 | [Review Workflow Screenshots](review-workflow-screenshots.md) | Screenshot capture during review for visual validation | Shipped |
@@ -90,13 +91,12 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [SDLC Observer](sdlc-observer.md) | Web dashboard for real-time SDLC pipeline tracking with stage indicators, event timelines, and artifact links at `/sdlc/` | Shipped |
 | [SDLC Pipeline Integrity](sdlc-pipeline-integrity.md) | Session continuation hardening, deterministic URL construction, merge guard hook, and MERGE pipeline stage | Shipped |
 | [SDLC Stage Handoff](sdlc-stage-handoff.md) | Structured GitHub issue comments for cross-stage context relay -- each stage posts findings on completion and reads prior stage context on start | Shipped |
-| [SDLC Stage Tracking](sdlc-stage-tracking.md) | Stored-state-only stage completion: artifact inference removed, skill stage markers added, do-merge gate strengthened | Shipped |
 | [SDLC-First Routing](sdlc-first-routing.md) | Automatic work request classification (Ollama/Haiku) and orchestrator routing for SDLC vs conversational requests, with cross-repo `gh` resolution via `GH_REPO` env var | Shipped |
 | [Semantic Doc Impact Finder](semantic-doc-impact-finder.md) | Two-stage semantic search (embedding recall + LLM reranking) for finding docs affected by code changes | Shipped |
 | [Semantic Session Routing](semantic-session-routing.md) | Semantic matching of unthreaded messages to active sessions with declared expectations via structured summarizer output | Shipped |
 | [Session Health Check](session-health-check.md) | PostToolUse watchdog hook monitoring agent sessions for stuck loops using a Haiku judge with enriched tool summaries, activity stats, and pattern guidance | Shipped |
 | [Session Isolation](session-isolation.md) | Two-tier task list scoping and git worktrees for parallel session isolation | Shipped |
-| [Session Lifecycle](session-lifecycle.md) | Consolidated lifecycle module (`models/session_lifecycle.py`) with `finalize_session()` and `transition_status()` for all 11 session states, side effect consolidation, zombie loop prevention, stale cleanup via `_active_workers` liveness check, and Redis re-read in `_complete_agent_session` to capture accumulated `stage_states` | Shipped |
+| [Session Lifecycle](session-lifecycle.md) | Consolidated lifecycle module (`models/session_lifecycle.py`) with `finalize_session()` and `transition_status()` for all 11 session states, side effect consolidation, zombie loop prevention | Shipped |
 | [Session Lifecycle Diagnostics](session-lifecycle-diagnostics.md) | Structured LIFECYCLE logging at every state transition with stall detection and CLI status report | Shipped |
 | [Session Management](session-management.md) | Reply-chain root resolution ensuring all replies in a thread map to one canonical session_id | Shipped |
 | [Session Recovery Mechanisms](session-recovery-mechanisms.md) | Catalogue of all 7 recovery mechanisms with terminal status safety audit, guards, race condition analysis, and regression tests | Shipped |
@@ -129,7 +129,6 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [UTC Timestamps](utc-timestamps.md) | All timestamps normalized to tz-aware UTC with `bridge/utc.py` utilities; local conversion only at display boundary | Shipped |
 | [Web Dashboard](web-dashboard.md) | Session table with SDLC stage pills, project metadata popovers, history-based stage inference, and configurable retention via DASHBOARD_RETENTION_HOURS | Shipped |
 | [Web UI](web-ui.md) | Localhost FastAPI web application at port 8500 serving observability dashboards with HTMX interactivity and dark theme | Shipped |
-| [Worker Service](worker-service.md) | Standalone worker process for AgentSession processing without Telegram, OutputHandler protocol, FileOutputHandler fallback, launchd service | Shipped |
 | [Workspace Safety Invariants](workspace-safety-invariants.md) | Pre-launch validation of agent working directories with CWD existence, path containment, and slug sanitization | Shipped |
 | [Worktree SDK Compatibility Experiment](worktree-sdk-compatibility.md) | Experiment results for Claude Agent SDK compatibility with git worktrees | Archived |
 | [xfail Hygiene](xfail-hygiene.md) | Three-layer xfail hygiene system preventing stale test markers after bug fixes land | Shipped |
