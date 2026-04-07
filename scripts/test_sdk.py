@@ -25,7 +25,6 @@ from dotenv import load_dotenv  # noqa: E402
 # Load env
 env_path = project_root / ".env"
 load_dotenv(env_path)
-load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")
 
 # Configure detailed logging
 logging.basicConfig(

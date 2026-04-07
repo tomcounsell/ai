@@ -7,7 +7,7 @@ user-invocable: false
 
 # System Logs
 
-**Location**: `~/src/ai/logs/bridge.events.jsonl`
+**Location**: `/Users/valorengels/src/ai/logs/bridge.events.jsonl`
 
 **IMPORTANT**: Always filter by project to get relevant results.
 
@@ -34,25 +34,25 @@ user-invocable: false
 # ALWAYS filter by project first, then by type or other criteria
 
 # All recent events for a project
-grep '"project": "Valor"' ~/src/ai/logs/bridge.events.jsonl | tail -20 | jq .
+grep '"project": "Valor"' /Users/valorengels/src/ai/logs/bridge.events.jsonl | tail -20 | jq .
 
 # Agent responses for a project
-grep '"project": "Valor"' ~/src/ai/logs/bridge.events.jsonl | grep '"type": "agent_response"' | tail -10 | jq .
+grep '"project": "Valor"' /Users/valorengels/src/ai/logs/bridge.events.jsonl | grep '"type": "agent_response"' | tail -10 | jq .
 
 # Errors for a project
-grep '"project": "Valor"' ~/src/ai/logs/bridge.events.jsonl | grep '"type": "error"' | tail -10 | jq .
+grep '"project": "Valor"' /Users/valorengels/src/ai/logs/bridge.events.jsonl | grep '"type": "error"' | tail -10 | jq .
 
 # Timeouts for a project
-grep '"project": "Valor"' ~/src/ai/logs/bridge.events.jsonl | grep '"type": "agent_timeout"' | tail -10 | jq .
+grep '"project": "Valor"' /Users/valorengels/src/ai/logs/bridge.events.jsonl | grep '"type": "agent_timeout"' | tail -10 | jq .
 
 # Search keyword within a project
-grep '"project": "Valor"' ~/src/ai/logs/bridge.events.jsonl | grep -i "keyword" | tail -10 | jq .
+grep '"project": "Valor"' /Users/valorengels/src/ai/logs/bridge.events.jsonl | grep -i "keyword" | tail -10 | jq .
 ```
 
 ## List Available Projects
 
 ```bash
-grep -o '"project": "[^"]*"' ~/src/ai/logs/bridge.events.jsonl | sort -u
+grep -o '"project": "[^"]*"' /Users/valorengels/src/ai/logs/bridge.events.jsonl | sort -u
 ```
 
 ## If No Results
@@ -61,6 +61,6 @@ If a project filter returns no results, list available projects and report them:
 
 ```bash
 # No results? Check available projects:
-grep -o '"project": "[^"]*"' ~/src/ai/logs/bridge.events.jsonl | sort -u
+grep -o '"project": "[^"]*"' /Users/valorengels/src/ai/logs/bridge.events.jsonl | sort -u
 # Then retry with a valid project name from the list
 ```

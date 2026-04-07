@@ -22,7 +22,6 @@ This isn't optional politeness — it's functional. The `/do-plan` skill reads t
 
 | Sub-file | Load when... |
 |----------|-------------|
-| `RECON.md` | After Step 2, before writing — run the reconnaissance routine |
 | `ISSUE_TEMPLATE.md` | Writing the issue body (use as the structural skeleton) |
 | `CHECKLIST.md` | Before publishing — run every check, fix failures |
 
@@ -60,23 +59,7 @@ gh pr list --state merged --search "KEYWORDS" --limit 5 --json number,title,url
 grep -rl "KEYWORD" docs/features/ docs/plans/ 2>/dev/null | head -5
 ```
 
-### Step 3: Reconnaissance (Explore → Concerns → Fan-out → Synthesize)
-
-Before writing, run the reconnaissance routine to surface unknowns and conflicts. Load `RECON.md` for the full pattern. Summary:
-
-1. **Broad scan** — Spawn an Explore agent (thoroughness: "very thorough") to map the affected area: relevant source files, existing tests, recent PRs, related docs.
-
-2. **Surface concerns** — From the scan results, identify what's unclear, conflicting, stale, already-done, or missing. List each as a discrete question.
-
-3. **Fan-out** — Spawn one Explore agent per concern, all in parallel. Each gets a focused research prompt: investigate one specific question, read the actual code, and return a recommendation.
-
-4. **Synthesize** — Reconcile all findings. Produce:
-   - What's confirmed (safe to include in the issue as-is)
-   - What needs fixing first (pre-requisites the issue should call out)
-   - What the issue should NOT include (already done, aspirational, or wrong assumptions)
-   - Revised scope (narrower or broader than the original request)
-
-This step catches stale assumptions, dead code, existing coverage, and architectural conflicts BEFORE they get baked into the issue. Skip only for trivially simple issues (typo fixes, config changes).
+### Step 3: Write the Issue Body
 
 Load `ISSUE_TEMPLATE.md` and fill it in. Key rules:
 
@@ -90,11 +73,11 @@ Load `ISSUE_TEMPLATE.md` and fill it in. Key rules:
 
 5. **Downstream context** — Explicitly state what happens next: "This issue will be consumed by `/do-plan` to produce a plan document at `docs/plans/{slug}.md`."
 
-### Step 5: Pre-Publish Checklist
+### Step 4: Pre-Publish Checklist
 
 Load `CHECKLIST.md` and verify every item before creating the issue.
 
-### Step 6: Create the Issue
+### Step 5: Create the Issue
 
 ```bash
 TYPE="feature"  # or "bug" or "chore"
@@ -105,7 +88,7 @@ gh issue create \
   --body "$(cat /tmp/issue_body.md)"
 ```
 
-### Step 7: Report
+### Step 6: Report
 
 ```
 Issue created: #{number} — {title}

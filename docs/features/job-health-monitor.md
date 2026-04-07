@@ -4,21 +4,18 @@ Automatically detects and recovers stuck running jobs in the Redis-based job que
 
 ## Overview
 
-The job health monitor runs as a periodic async task alongside the bridge process. Every 5 minutes, it scans all `running` AND `pending` AgentSessions to check:
+The job health monitor runs as a periodic async task alongside the bridge process. Every 5 minutes, it scans all `running` AgentSessions to check:
 
 1. Whether the associated worker coroutine is still alive
 2. Whether the job has exceeded its maximum duration
-3. Whether pending jobs have a worker that can process them
 
-This is the **single unified recovery mechanism** — it replaces six competing recovery functions that previously raced against each other. See [Bridge Resilience](bridge-resilience.md) for the full refactoring context.
-
-When a stuck running job is detected, it is automatically recovered by deleting it and re-creating it as `pending`. When an orphaned pending job is found (no live worker), a worker is started for it.
+When a stuck job is detected, it is automatically recovered by deleting it and re-creating it as `pending`, allowing a new worker to pick it up.
 
 ## How It Works
 
 ### Detection
 
-- **Dead worker detection**: Checks `_active_workers[chat_id]` asyncio Task liveness via `.done()`. If the task has finished (crashed, cancelled, or completed), the job is considered orphaned.
+- **Dead worker detection**: Checks `_active_workers[project_key]` asyncio Task liveness via `.done()`. If the task has finished (crashed, cancelled, or completed), the job is considered orphaned.
 - **Timeout detection**: Compares `started_at` timestamp against the configured max duration for the job type.
 - **Race condition guard**: Jobs must be running for at least 5 minutes (`JOB_HEALTH_MIN_RUNNING`) before they become eligible for recovery. This prevents false positives on jobs that just started processing.
 
@@ -82,15 +79,10 @@ Constants in `agent/job_queue.py`:
 | `JOB_TIMEOUT_BUILD` | 9000 (2.5 hr) | Max runtime for build jobs |
 | `JOB_HEALTH_MIN_RUNNING` | 300 (5 min) | Min runtime before recovery eligible |
 
-## Dependency Health Check
-
-A separate `_dependency_health_check()` runs alongside the job health monitor. It scans pending jobs with `depends_on` set and detects stuck dependency chains -- cases where a dependency has `failed` or `cancelled` status, permanently blocking the dependent job. These are logged as warnings for PM intervention.
-
 ## Related
 
 - [scale-job-queue-with-popoto-and-worktrees.md](scale-job-queue-with-popoto-and-worktrees.md) -- The underlying Redis job queue
 - [session-watchdog.md](session-watchdog.md) -- Session-level health monitoring (complementary layer)
 - [bridge-self-healing.md](bridge-self-healing.md) -- Bridge process-level health monitoring
-- [job-dependency-tracking.md](job-dependency-tracking.md) -- Sibling dependencies and PM queue controls
 - `agent/job_queue.py` -- Implementation source
 - Issue #127 -- Original tracking issue

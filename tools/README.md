@@ -2,10 +2,6 @@
 
 Tools that extend Valor's capabilities. Each tool follows the standard defined in [STANDARD.md](STANDARD.md).
 
-## Naming Convention
-
-All tool directories use `snake_case` naming (e.g., `image_gen`, `knowledge_search`).
-
 ## Available Tools
 
 ### Core Tools (Built-in)
@@ -14,14 +10,13 @@ All tool directories use `snake_case` naming (e.g., `image_gen`, `knowledge_sear
 |------|-------------|--------------|
 | [browser](browser/) | Browser automation for web testing, screenshots, data extraction | None |
 | [image_gen](image_gen/) | AI image generation using OpenRouter | OPENROUTER_API_KEY |
-| [transcribe](transcribe/) | Audio transcription using OpenAI Whisper API | OPENAI_API_KEY |
-| [selfie](selfie/) | AI selfie generation using OpenAI gpt-image-1 | OPENAI_API_KEY |
+| [transcribe](transcribe/) | Audio transcription using Whisper | OPENAI_API_KEY |
 
 ### Search & Research
 
 | Tool | Description | API Required |
 |------|-------------|--------------|
-| [web](web/) | Unified web search and URL fetch with provider fallback | PERPLEXITY_API_KEY |
+| [search](search/) | Web search with Perplexity API | PERPLEXITY_API_KEY |
 | [knowledge_search](knowledge_search/) | Local semantic search with embeddings | OPENROUTER_API_KEY |
 | [link_analysis](link_analysis/) | URL extraction, validation, content analysis | PERPLEXITY_API_KEY* |
 
@@ -58,13 +53,6 @@ All tool directories use `snake_case` naming (e.g., `image_gen`, `knowledge_sear
 | Tool | Description | API Required |
 |------|-------------|--------------|
 | [telegram_history](telegram_history/) | Search chat history with relevance scoring | None |
-| [sms_reader](sms_reader/) | Read SMS messages from macOS Messages database | None |
-
-### Internal Utilities
-
-| Tool | Description | Status |
-|------|-------------|--------|
-| [google_workspace](google_workspace/) | OAuth2 auth utility for Google APIs | Internal |
 
 *Some features work without API key
 
@@ -72,9 +60,9 @@ All tool directories use `snake_case` naming (e.g., `image_gen`, `knowledge_sear
 
 ```python
 # Search the web
-from tools.web import web_search_sync
-result = web_search_sync("Python best practices")
-print(result.answer)
+from tools.search import search
+result = search("Python best practices")
+print(result["summary"])
 
 # Analyze an image
 from tools.image_analysis import analyze_image
@@ -98,7 +86,7 @@ print(f"Pass: {result['pass_fail']}")
 ## Capabilities by Category
 
 ### Information Retrieval
-- **Web Search**: Real-time information via Perplexity/Tavily with provider fallback
+- **Web Search**: Real-time information via Perplexity
 - **Knowledge Search**: Semantic search across local documents
 - **Link Analysis**: Extract and analyze URLs from text
 
@@ -106,7 +94,6 @@ print(f"Pass: {result['pass_fail']}")
 - **Image Analysis**: Describe images, detect objects, extract text (OCR)
 - **Image Tagging**: Categorize images with confidence scores
 - **Image Generation**: Create images from text prompts
-- **Selfie**: Generate AI selfies with scene customization
 
 ### Development Support
 - **Code Execution**: Safe sandbox for running Python, JavaScript, Bash
@@ -120,17 +107,17 @@ print(f"Pass: {result['pass_fail']}")
 
 ### Content Processing
 - **Document Summary**: Summarize documents at various detail levels
-- **Transcription**: Convert audio to text via OpenAI Whisper API
+- **Transcription**: Convert audio to text
 
 ## Configuration
 
-API keys are stored in the shared location `~/src/.env`. Tools automatically load from this file.
+API keys are stored in the shared location `/Users/valorengels/src/.env`. Tools automatically load from this file.
 
 Required keys:
-- `OPENROUTER_API_KEY` - For vision, tagging, embeddings, image generation
+- `OPENROUTER_API_KEY` - For vision, tagging, embeddings
 - `PERPLEXITY_API_KEY` - For web search
 - `ANTHROPIC_API_KEY` - For test judging, documentation, summaries
-- `OPENAI_API_KEY` - For transcription, selfies
+- `OPENAI_API_KEY` - For transcription
 
 ## Running Tests
 
@@ -139,7 +126,7 @@ Required keys:
 pytest tools/ -v
 
 # Specific tool
-pytest tools/web/tests/ -v
+pytest tools/search/tests/ -v
 
 # With coverage
 pytest tools/ --cov=tools --cov-report=html

@@ -7,8 +7,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
-from bridge.utc import utc_now
-
 
 @dataclass
 class Session:
@@ -30,7 +28,7 @@ class Session:
     @property
     def is_active(self) -> bool:
         """Check if session is considered active (activity in last hour)."""
-        return (utc_now() - self.last_activity).total_seconds() < 3600
+        return (datetime.now() - self.last_activity).total_seconds() < 3600
 
     def to_dict(self) -> dict:
         """Convert to dictionary for serialization."""
@@ -81,7 +79,7 @@ class SessionTracker:
             The created Session.
         """
         session_id = f"session_{uuid.uuid4().hex[:12]}"
-        now = utc_now()
+        now = datetime.now()
 
         session = Session(
             session_id=session_id,
@@ -136,7 +134,7 @@ class SessionTracker:
         """
         session = self._sessions.get(session_id)
         if session:
-            session.last_activity = utc_now()
+            session.last_activity = datetime.now()
             session.message_count += 1
             return True
         return False
@@ -180,7 +178,7 @@ class SessionTracker:
         Returns:
             Number of sessions cleaned up.
         """
-        cutoff = utc_now() - timedelta(hours=max_age_hours)
+        cutoff = datetime.now() - timedelta(hours=max_age_hours)
         stale_ids = [
             sid for sid, session in self._sessions.items() if session.last_activity < cutoff
         ]
@@ -207,7 +205,7 @@ class SessionTracker:
             avg_duration = 0.0
             total_messages = 0
 
-        hour_ago = utc_now() - timedelta(hours=1)
+        hour_ago = datetime.now() - timedelta(hours=1)
         sessions_last_hour = sum(1 for s in all_sessions if s.created_at >= hour_ago)
 
         return SessionMetrics(

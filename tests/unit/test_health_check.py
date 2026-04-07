@@ -1,22 +1,17 @@
 """Unit tests for agent/health_check.py watchdog logic."""
 
 import json
-import os
 import tempfile
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from agent.health_check import (
     CHECK_INTERVAL,
-    JUDGE_PROMPT,
-    _extract_gh_commands,
-    _get_session_context,
     _read_recent_activity,
     _summarize_input,
     _tool_counts,
-    _write_activity_stream,
     watchdog_hook,
 )
 
@@ -114,11 +109,6 @@ class TestWatchdogHook:
         yield
         _tool_counts.clear()
 
-    @pytest.fixture(autouse=True)
-    def _no_env_session(self, monkeypatch):
-        """Ensure VALOR_SESSION_ID env var doesn't override test session IDs."""
-        monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
-
     @pytest.mark.asyncio
     async def test_skips_before_interval(self):
         """Hook should return continue=True without calling judge before interval."""
@@ -148,26 +138,20 @@ class TestWatchdogHook:
 
     @pytest.mark.asyncio
     async def test_blocks_on_unhealthy(self):
-        """Hook should inject stop directive and set unhealthy flag when judge says unhealthy."""
+        """Hook should block when judge says unhealthy."""
         transcript = _make_transcript(
             [("Bash", {"command": "git status"}) for _ in range(CHECK_INTERVAL)]
         )
         input_data = {"session_id": "test-3", "transcript_path": str(transcript)}
         _tool_counts["test-3"] = CHECK_INTERVAL - 1
 
-        with (
-            patch("agent.health_check._judge_health", new_callable=AsyncMock) as mock_judge,
-            patch("agent.health_check._set_unhealthy") as mock_set,
-        ):
+        with patch("agent.health_check._judge_health", new_callable=AsyncMock) as mock_judge:
             mock_judge.return_value = {"healthy": False, "reason": "stuck in loop"}
             result = await watchdog_hook(input_data, None, None)
 
-        # PostToolUse can't block, so we inject additionalContext instead
-        hook_output = result.get("hookSpecificOutput", {})
-        assert hook_output.get("hookEventName") == "PostToolUse"
-        assert "STOP" in hook_output.get("additionalContext", "")
-        # Unhealthy flag set on model so nudge loop won't auto-continue
-        mock_set.assert_called_once_with("test-3", "stuck in loop")
+        assert result.get("continue_") is False
+        assert "block" in result.get("decision", "")
+        assert "stuck in loop" in result.get("stopReason", "")
         transcript.unlink()
 
     @pytest.mark.asyncio
@@ -181,151 +165,3 @@ class TestWatchdogHook:
             result = await watchdog_hook(input_data, None, None)
 
         assert result["continue_"] is True
-
-
-class TestActivityStream:
-    """Tests for _write_activity_stream."""
-
-    def test_creates_directory_lazily(self):
-        """Activity stream should create session directory on first write."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            original_cwd = os.getcwd()
-            try:
-                os.chdir(tmpdir)
-                _write_activity_stream("lazy-session", "Bash", "ls", 1)
-                session_dir = Path(tmpdir) / "logs" / "sessions" / "lazy-session"
-                assert session_dir.exists()
-            finally:
-                os.chdir(original_cwd)
-
-    def test_writes_valid_jsonl(self):
-        """Each write should produce a valid JSON line."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            original_cwd = os.getcwd()
-            try:
-                os.chdir(tmpdir)
-                _write_activity_stream("json-session", "Read", "/path/file.py", 5)
-                activity_file = (
-                    Path(tmpdir) / "logs" / "sessions" / "json-session" / "activity.jsonl"
-                )
-                assert activity_file.exists()
-                entry = json.loads(activity_file.read_text().strip())
-                assert entry["tool"] == "Read"
-                assert entry["args"] == "/path/file.py"
-                assert entry["n"] == 5
-                assert "ts" in entry
-            finally:
-                os.chdir(original_cwd)
-
-    def test_appends_multiple_entries(self):
-        """Multiple writes should append to the same file."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            original_cwd = os.getcwd()
-            try:
-                os.chdir(tmpdir)
-                _write_activity_stream("multi-session", "Bash", "cmd1", 1)
-                _write_activity_stream("multi-session", "Read", "file", 2)
-                _write_activity_stream("multi-session", "Grep", "pattern", 3)
-                activity_file = (
-                    Path(tmpdir) / "logs" / "sessions" / "multi-session" / "activity.jsonl"
-                )
-                lines = activity_file.read_text().strip().splitlines()
-                assert len(lines) == 3
-            finally:
-                os.chdir(original_cwd)
-
-
-class TestExtractGhCommands:
-    """Tests for _extract_gh_commands."""
-
-    def test_no_activity_file_returns_empty(self):
-        result = _extract_gh_commands("nonexistent-session")
-        assert result == []
-
-    def test_extracts_gh_from_activity(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            original_cwd = os.getcwd()
-            try:
-                os.chdir(tmpdir)
-                session_dir = Path(tmpdir) / "logs" / "sessions" / "gh-session"
-                session_dir.mkdir(parents=True)
-                entries = [
-                    json.dumps({"tool": "Bash", "args": "gh pr list --state open", "n": 1}),
-                    json.dumps({"tool": "Read", "args": "/some/file", "n": 2}),
-                    json.dumps({"tool": "Bash", "args": "gh issue create --title bug", "n": 3}),
-                ]
-                (session_dir / "activity.jsonl").write_text("\n".join(entries))
-                result = _extract_gh_commands("gh-session")
-                assert len(result) == 2
-                assert "gh pr list" in result[0]
-            finally:
-                os.chdir(original_cwd)
-
-
-class TestGetSessionContext:
-    """Tests for _get_session_context health check enrichment."""
-
-    def test_returns_context_with_session_type(self):
-        mock_session = MagicMock()
-        mock_session.session_type = "dev"
-        mock_session.message_text = "Build the auth module"
-
-        mock_as_cls = MagicMock()
-        mock_as_cls.query.filter.return_value = [mock_session]
-        mock_module = MagicMock()
-        mock_module.AgentSession = mock_as_cls
-
-        with patch.dict("sys.modules", {"models.agent_session": mock_module}):
-            with patch("agent.health_check._extract_gh_commands", return_value=[]):
-                result = _get_session_context("dev-session")
-                assert "dev" in result
-                assert "Build the auth module" in result
-
-    def test_handles_none_fields(self):
-        mock_session = MagicMock()
-        mock_session.session_type = None
-        mock_session.message_text = None
-
-        mock_as_cls = MagicMock()
-        mock_as_cls.query.filter.return_value = [mock_session]
-        mock_module = MagicMock()
-        mock_module.AgentSession = mock_as_cls
-
-        with patch.dict("sys.modules", {"models.agent_session": mock_module}):
-            with patch("agent.health_check._extract_gh_commands", return_value=[]):
-                result = _get_session_context("none-session")
-                assert isinstance(result, str)
-
-    def test_no_session_returns_empty(self):
-        mock_as_cls = MagicMock()
-        mock_as_cls.query.filter.return_value = []
-        mock_module = MagicMock()
-        mock_module.AgentSession = mock_as_cls
-
-        with patch.dict("sys.modules", {"models.agent_session": mock_module}):
-            result = _get_session_context("missing-session")
-            assert result == ""
-
-
-class TestJudgePromptEnrichment:
-    """Tests for enriched JUDGE_PROMPT format."""
-
-    def test_prompt_has_session_context_placeholder(self):
-        assert "{session_context}" in JUDGE_PROMPT
-
-    def test_prompt_formats_with_context(self):
-        formatted = JUDGE_PROMPT.format(
-            count=20,
-            activity="- Bash: ls",
-            session_context="This is a chat session working on: test\n\n",
-        )
-        assert "chat session" in formatted
-        assert "test" in formatted
-
-    def test_prompt_formats_without_context(self):
-        formatted = JUDGE_PROMPT.format(
-            count=20,
-            activity="- Bash: ls",
-            session_context="",
-        )
-        assert "Recent activity" in formatted

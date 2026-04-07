@@ -1,0 +1,54 @@
+{
+  "name": "search",
+  "version": "1.0.0",
+  "description": "Web search using Perplexity API with intelligent result ranking and summarization",
+  "type": "api",
+  "status": "stable",
+
+  "source": {
+    "type": "internal",
+    "package": null,
+    "repository": null,
+    "command": null
+  },
+
+  "capabilities": [
+    "search",
+    "analyze",
+    "generate"
+  ],
+
+  "requires": {
+    "env": ["PERPLEXITY_API_KEY"],
+    "python": ">=3.10"
+  },
+
+  "commands": {
+    "verify": "python -c \"from tools.search import search; print('OK')\"",
+    "test": "pytest tools/search/tests/ -v"
+  },
+
+  "workflows": [
+    {
+      "name": "basic-search",
+      "description": "Simple web search with summary",
+      "steps": [
+        "search('query')"
+      ]
+    },
+    {
+      "name": "factual-search",
+      "description": "Search with citations and sources",
+      "steps": [
+        "search('query', search_type='citations')"
+      ]
+    },
+    {
+      "name": "domain-filtered",
+      "description": "Search within specific domains",
+      "steps": [
+        "search('query', domain_filter=['example.com'])"
+      ]
+    }
+  ]
+}

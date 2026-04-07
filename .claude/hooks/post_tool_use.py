@@ -230,24 +230,6 @@ def update_sdlc_state_for_bash(hook_input: dict) -> None:
         state["code_modified"] = False
         state.pop("modified_on_branch", None)  # Clear stale branch tracking
 
-        # Store merge_detected flag and PR number in agent session sidecar
-        # for post-merge learning extraction in the Stop hook
-        try:
-            from hook_utils.memory_bridge import (
-                load_agent_session_sidecar,
-                save_agent_session_sidecar,
-            )
-
-            as_sidecar = load_agent_session_sidecar(session_id)
-            as_sidecar["merge_detected"] = True
-            # Extract PR number from command (e.g., "gh pr merge 123")
-            pr_match = re.search(r"gh\s+pr\s+merge\s+(\d+)", command)
-            if pr_match:
-                as_sidecar["merged_pr_number"] = pr_match.group(1)
-            save_agent_session_sidecar(session_id, as_sidecar)
-        except Exception:
-            pass  # Non-fatal
-
     try:
         save_sdlc_state(session_id, state)
     except Exception as e:
@@ -271,57 +253,6 @@ def check_file_reminders(hook_input: dict) -> None:
             print(reminder)
 
 
-def _run_memory_recall(hook_input: dict) -> str | None:
-    """Run memory recall and return additionalContext string or None.
-
-    Queries subconscious memory based on accumulated tool calls.
-    Fails silently -- memory errors never block tool execution.
-    """
-    try:
-        from hook_utils.memory_bridge import recall
-
-        session_id = hook_input.get("session_id", "unknown")
-        tool_name = hook_input.get("tool_name", "")
-        tool_input = hook_input.get("tool_input", {})
-
-        return recall(session_id, tool_name, tool_input)
-    except Exception:
-        return None
-
-
-def _update_agent_session(hook_input: dict) -> None:
-    """Update AgentSession last_activity and tool_call_count.
-
-    Reads the agent_session_job_id from the sidecar file and updates
-    the corresponding AgentSession record in Redis. Fails silently.
-    """
-    try:
-        session_id = hook_input.get("session_id", "")
-        if not session_id:
-            return
-
-        from hook_utils.memory_bridge import load_agent_session_sidecar
-
-        sidecar = load_agent_session_sidecar(session_id)
-        job_id = sidecar.get("agent_session_job_id")
-        if not job_id:
-            return
-
-        from models.agent_session import AgentSession
-
-        local_sid = f"local-{session_id}"
-        matches = list(AgentSession.query.filter(session_id=local_sid))
-        if not matches:
-            return
-        agent_session = matches[0]
-
-        agent_session.last_activity = time.time()
-        agent_session.tool_call_count = (agent_session.tool_call_count or 0) + 1
-        agent_session.save()
-    except Exception:
-        pass  # Silent failure -- never block tool execution
-
-
 def main():
     hook_input = read_hook_input()
     if not hook_input:
@@ -333,9 +264,6 @@ def main():
     # Update SDLC session state based on tool type
     update_sdlc_state_for_file_write(hook_input)
     update_sdlc_state_for_bash(hook_input)
-
-    # Update AgentSession lifecycle tracking
-    _update_agent_session(hook_input)
 
     session_id = get_session_id(hook_input)
     session_dir = ensure_session_log_dir(session_id)
@@ -355,13 +283,6 @@ def main():
     }
 
     append_to_log(session_dir, "tool_use.jsonl", entry)
-
-    # Memory recall -- query subconscious memory and inject thoughts
-    additional_context = _run_memory_recall(hook_input)
-    if additional_context:
-        # Output hook response with additionalContext for thought injection
-        response = json.dumps({"additionalContext": additional_context})
-        print(response)
 
 
 if __name__ == "__main__":

@@ -30,7 +30,6 @@ def get_anthropic_api_key() -> str:
     for env_path in [
         Path(__file__).parent.parent / ".env",
         Path.home() / "src" / ".env",
-        Path.home() / "Desktop" / "Valor" / ".env",
     ]:
         if env_path.exists():
             for line in env_path.read_text().splitlines():

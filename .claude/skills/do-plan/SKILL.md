@@ -37,16 +37,6 @@ For cross-project work, the `GH_REPO` environment variable is automatically set 
 
 ## Quick Start Workflow
 
-### Phase 0: Validate Recon (ISSUE → PLAN gate)
-
-Before planning, verify the source issue has reconnaissance evidence:
-
-```bash
-python .claude/hooks/validators/validate_issue_recon.py ISSUE_NUMBER
-```
-
-If this fails, the issue needs a `## Recon Summary` section added via `/do-issue` Step 3 (the reconnaissance routine). Do not proceed with planning until recon is validated — plans built on unverified assumptions produce rework.
-
 ### Phase 1: Flesh Out at High Level
 
 1. **Understand the request** - What's being asked?
@@ -208,6 +198,11 @@ gh issue edit $EXISTING_ISSUE --add-label "plan"
 
 **Only create a NEW issue if** the plan was initiated from scratch (not from an existing issue).
 
+Before creating, check `~/Desktop/Valor/projects.json` for the current project:
+- If `notion` key exists -> create a Notion task (use Notion MCP tools)
+- If only `github` key exists -> create a GitHub issue (use `gh` CLI)
+- If neither -> skip tracking, just use the plan doc
+
 ```bash
 TYPE=$(grep '^type:' docs/plans/{slug}.md | sed 's/type: *//' | tr -d ' ')
 if [ -z "$TYPE" ]; then
@@ -231,17 +226,25 @@ EOF
 
 #### Step 2: Push the plan
 
-**Plans are documentation, not code. ALWAYS commit and push to main first.**
-
 ```bash
-# MANDATORY: switch to main before committing the plan — regardless of current branch
-git stash --include-untracked 2>/dev/null
-git checkout main
-git stash pop 2>/dev/null
-
 git add docs/plans/{slug}.md && git commit -m "Plan: $ISSUE_TITLE"
-git push
+if git push 2>/dev/null; then
+  PLAN_BRANCH="main"
+else
+  # Main is protected — create a branch and PR for the entire SDLC lifecycle
+  PLAN_BRANCH="plan/{slug}"
+  git checkout -b "$PLAN_BRANCH"
+  git push -u origin "$PLAN_BRANCH"
+  # This PR is reused for the full SDLC (plan → build → test → review → merge).
+  # Title MUST match the tracking issue title.
+  # Do NOT reference the tracking issue with closing keywords (Closes, Fixes, Resolves).
+  gh pr create --title "$ISSUE_TITLE" --body "Adds plan document for {slug}. Implementation will follow on this branch." --label "plan"
+  # Switch back to main for subsequent work
+  git checkout main
+fi
 ```
+
+**Protected branch handling:** If pushing directly to main fails (common with protected branches), the skill automatically creates a `plan/{slug}` branch and opens a PR. This PR is reused for the entire SDLC — do-build pushes implementation commits to the same branch rather than creating a new PR. The PR title matches the tracking issue title.
 
 **CRITICAL: Plan PRs must NOT close the tracking issue.** The tracking issue stays open until the *implementation* PR merges with `Closes #N`. Never use closing keywords (Closes, Fixes, Resolves) when referencing the tracking issue in the plan PR body.
 
@@ -264,6 +267,8 @@ else
 $(gh issue view $ISSUE_NUM --json body -q .body)"
 fi
 ```
+
+For Notion tasks, use MCP tools to create a page with Title, Status, Type, and link to the plan document.
 
 After linking or creating: update the plan's `tracking:` field and commit.
 
@@ -297,11 +302,34 @@ fi
 
 **If no tracking issue or no comments**: Skip this step.
 
-### Phase 3: Enumerate Questions
+### Phase 2.8: RFC Review
 
-Plan critique is handled separately by `/do-plan-critique` (war room). This phase focuses only on surfacing questions that need human input before the critique step.
+After the plan is drafted, spawn specialist critic agents to review it for structural flaws.
 
-1. **Enumerate questions** - List all questions needing supervisor input
+1. **Select critics** based on plan characteristics:
+   - All plans: `code-reviewer` (always included)
+   - Async/concurrent work: `async-specialist`
+   - External API integration: `api-integration-specialist`
+   - Security-sensitive changes: `security-reviewer`
+   - Data model changes: `data-architect`
+2. **Dispatch critics in parallel** - Each critic receives the full plan document and returns structured feedback:
+   ```
+   - BLOCKER: [must change before build — architectural flaw, missing error path, etc.]
+   - CONCERN: [worth reconsidering — tradeoff the plan didn't acknowledge]
+   - QUESTION: [ambiguity the plan doesn't address]
+   ```
+3. **Aggregate feedback**:
+   - BLOCKERs: Incorporate into the plan immediately (update Solution, add Risks, etc.)
+   - CONCERNs: Add to the `## RFC Feedback` section for the human to weigh in on
+   - QUESTIONs: Merge into Open Questions
+
+**Skip if:** Small appetite plans — the overhead of RFC review exceeds the value for small changes.
+
+### Phase 3: Critique and Enumerate Questions
+
+1. **Review assumptions** - What did I assume that might be wrong?
+2. **Identify gaps** - What's unclear or risky?
+3. **Enumerate questions** - List all questions needing supervisor input
 4. **Add questions to plan** - Append to "Open Questions" section
 5. **Pre-send checklist**:
    - [ ] Plan committed AND pushed (to `main` or `plan/{slug}` branch if main is protected)
@@ -312,7 +340,7 @@ Plan critique is handled separately by `/do-plan-critique` (war room). This phas
 ```
 Plan draft created: docs/plans/{slug}.md
 
-Tracking: {GitHub issue URL}
+Tracking: {GitHub issue URL or Notion page URL}
 
 I've made the following key assumptions:
 - [Assumption 1]
@@ -327,14 +355,18 @@ After receiving answers:
 
 1. **Update plan** - Incorporate feedback, remove Open Questions section
 2. **Mark as finalized** - Update frontmatter: `status: Ready`
-3. **Invite discussion**:
+3. **Suggest implementation prompt**:
 
 ```
 Plan finalized: docs/plans/{slug}.md
 
-Tracking: {GitHub issue URL}
+When you're ready to implement, use this prompt:
 
-I think I'm done, but I'm supposed to ask — does anything feel off? Missed edge cases, wrong assumptions, anything that doesn't sit right? Now is the cheapest time to catch it.
+---
+Implement the plan in docs/plans/{slug}.md
+
+Follow the solution approach, stay within the appetite, and avoid the identified rabbit holes. Check off success criteria as you complete them.
+---
 ```
 
 ## Output Location
@@ -345,7 +377,7 @@ Use snake_case for slugs: `async_meeting_reschedule.md`, `dark_mode_toggle.md`, 
 
 ## Branch Workflow
 
-**MANDATORY: Plans are committed on `main`.** Before committing, switch to `main` regardless of current branch. Plans are documentation, not code — they do not belong on feature branches.
+**Plans are pushed to main when possible.** If the main branch is protected (push rejected), the skill automatically creates a `plan/{slug}` branch and opens a PR for the plan document.
 
 When the plan is *executed* (via `/do-build`), the build skill creates a feature branch, does the work there, and opens a PR.
 
@@ -367,6 +399,6 @@ Status and classification are tracked in the plan document's YAML frontmatter.
 Update status as work progresses. Keep all tracking in the plan document itself.
 
 **Tracking issue lifecycle:**
-- When plan status changes to `Ready` or `In Progress`, update the GitHub issue status accordingly
+- When plan status changes to `Ready` or `In Progress`, update the GitHub issue / Notion task status accordingly
 - Issues are closed automatically when the **implementation PR** merges (via `Closes #N` in the do-build PR body) — do NOT close issues manually
 - **Plan PRs (on protected branches) must NEVER close the tracking issue** — only the implementation PR should

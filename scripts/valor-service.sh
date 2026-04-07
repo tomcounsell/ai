@@ -129,17 +129,9 @@ start_bridge() {
         cat "$PROJECT_DIR/data/upgrade-pending"
     fi
 
-    # Rotate oversized log files before starting.
-    # All launchd-managed logs (StandardOutPath/StandardErrorPath) are rotated here
-    # because launchd holds file descriptors open — newsyslog alone cannot reliably
-    # rotate actively-written files. This runs on every service start/restart.
+    # Rotate oversized log files before starting
     rotate_log "$LOG_DIR/bridge.error.log"
     rotate_log "$LOG_DIR/bridge.log"
-    rotate_log "$LOG_DIR/issue_poller_error.log"
-    rotate_log "$LOG_DIR/issue_poller.log"
-    rotate_log "$LOG_DIR/watchdog.log"
-    rotate_log "$LOG_DIR/reflections.log"
-    rotate_log "$LOG_DIR/reflections_error.log"
 
     echo "Starting Valor bridge..."
 
@@ -230,23 +222,17 @@ restart_bridge() {
         if is_running; then
             local pid=$(get_pid)
             echo "Bridge restarted (PID: $pid)"
+            return 0
         else
             echo "Restart failed. Check logs: $LOG_DIR/bridge.error.log"
             return 1
         fi
-    else
-        # Fallback: manual stop/start
-        stop_bridge
-        sleep 1
-        start_bridge
     fi
 
-    # Also restart the watchdog so it picks up new code
-    if [ -f "$WATCHDOG_PLIST_PATH" ]; then
-        echo "Restarting bridge watchdog..."
-        launchctl kickstart -k "gui/$(id -u)/$WATCHDOG_PLIST_NAME" 2>/dev/null || true
-        echo "Watchdog restarted"
-    fi
+    # Fallback: manual stop/start
+    stop_bridge
+    sleep 1
+    start_bridge
 }
 
 status_bridge() {
@@ -344,9 +330,9 @@ EOF
     echo "Bridge service installed and started"
     echo "Bridge will auto-start on boot"
 
-    # Install update polling (runs remote-update.sh every 30 minutes)
+    # Install update cron (runs remote-update.sh every 12 hours)
     echo ""
-    echo "Installing update polling..."
+    echo "Installing update cron..."
     cat > "$UPDATE_PLIST_PATH" << UPDATEEOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -368,8 +354,17 @@ EOF
         <key>HOME</key>
         <string>${HOME}</string>
     </dict>
-    <key>StartInterval</key>
-    <integer>1800</integer>
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Hour</key>
+            <integer>6</integer>
+        </dict>
+        <dict>
+            <key>Hour</key>
+            <integer>18</integer>
+        </dict>
+    </array>
     <key>StandardOutPath</key>
     <string>${LOG_DIR}/update.log</string>
     <key>StandardErrorPath</key>
@@ -378,7 +373,7 @@ EOF
 </plist>
 UPDATEEOF
     launchctl load "$UPDATE_PLIST_PATH"
-    echo "Update polling installed (runs every 30 minutes)"
+    echo "Update cron installed (runs at 06:00 and 18:00)"
 
     # Install bridge watchdog (runs every 60 seconds)
     echo ""
@@ -415,23 +410,6 @@ UPDATEEOF
 WATCHDOGEOF
     launchctl load "$WATCHDOG_PLIST_PATH"
     echo "Bridge watchdog installed (runs every 60 seconds)"
-
-    # Install newsyslog config for launchd-managed log rotation.
-    # newsyslog is built into macOS and runs hourly — it provides a safety net
-    # for log files that grow between service restarts. The rotate_log function
-    # in start_bridge() handles rotation on each restart; newsyslog catches
-    # files that grow large during long-running service uptime.
-    echo ""
-    echo "Installing newsyslog log rotation config..."
-    NEWSYSLOG_SRC="$PROJECT_DIR/config/newsyslog.valor.conf"
-    NEWSYSLOG_DST="/etc/newsyslog.d/valor.conf"
-    if [ -f "$NEWSYSLOG_SRC" ]; then
-        # Update paths in the config to match this machine's project directory
-        sed "s|/Users/valorengels/src/ai|${PROJECT_DIR}|g" "$NEWSYSLOG_SRC" | sudo tee "$NEWSYSLOG_DST" > /dev/null
-        echo "newsyslog config installed at $NEWSYSLOG_DST"
-    else
-        echo "WARNING: newsyslog config not found at $NEWSYSLOG_SRC"
-    fi
 
     sleep 2
     status_bridge

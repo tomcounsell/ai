@@ -6,7 +6,7 @@ Guidance for Claude Code when working with this repository.
 
 ## Google Workspace CLI (`gws`)
 
-Available at `~/src/node_modules/.bin/gws`. Pre-authenticated.
+Available at `/Users/valorengels/src/node_modules/.bin/gws`. Pre-authenticated.
 
 Usage: `gws <service> <resource> [sub-resource] <method> [flags]`
 
@@ -73,7 +73,6 @@ Replace `CHAT_NAME` with the group name (e.g. `PM: PsyOptimal`, `Dev: Valor`). T
 | `pytest tests/integration/` | Run integration tests only |
 | `pytest -m sdlc` | Run tests for a specific feature (see `tests/README.md`) |
 | `python -m ruff format . && python -m ruff check .` | Format and lint |
-| `python -m ui.app` | Start web UI server on localhost:8500 |
 | `python scripts/reflections.py` | Run reflections maintenance manually |
 | `python scripts/reflections.py --dry-run` | Test reflections without side effects |
 | `python scripts/reflections.py --ignore "pattern"` | Silence a bug pattern for 14 days |
@@ -86,20 +85,6 @@ Replace `CHAT_NAME` with the group name (e.g. `PM: PsyOptimal`, `Dev: Valor`). T
 | `python scripts/autoexperiment.py --target summarizer --dry-run` | Dry-run autoexperiment on summarizer |
 | `python scripts/autoexperiment.py --list-targets` | List autoexperiment targets |
 | `./scripts/install_autoexperiment.sh` | Install autoexperiment nightly schedule |
-| `python -m tools.job_scheduler status` | Show queue status (pending, running, killed counts) |
-| `python -m tools.job_scheduler list --status killed,abandoned` | List sessions filtered by status |
-| `python -m tools.job_scheduler kill --job-id <ID>` | Kill a running or pending job by ID |
-| `python -m tools.job_scheduler kill --session-id <ID>` | Kill a job by session ID |
-| `python -m tools.job_scheduler kill --all` | Kill all running and pending jobs |
-| `python -m tools.job_scheduler cleanup --age 30 --dry-run` | Preview stale session cleanup |
-| `python -m tools.job_scheduler cleanup --age 30` | Delete stale killed/abandoned/failed sessions |
-| `python -m tools.memory_search search "query"` | Search memories by query |
-| `python -m tools.memory_search search "query" --category correction` | Search filtered by category |
-| `python -m tools.memory_search search "query" --tag redis` | Search filtered by tag |
-| `python -m tools.memory_search save "content"` | Save a new memory |
-| `python -m tools.memory_search inspect --id <ID>` | Inspect a specific memory |
-| `python -m tools.memory_search inspect --stats` | Show memory statistics |
-| `python -m tools.memory_search forget --id <ID> --confirm` | Delete a memory |
 
 ## Development Principles
 
@@ -140,10 +125,9 @@ Replace `CHAT_NAME` with the group name (e.g. `PM: PsyOptimal`, `Dev: Valor`). T
 - Do NOT parallelize sequential/dependent work
 - Always aggregate results before reporting
 
-### 9. SDLC PIPELINE
-- ChatSession (PM persona) orchestrates; DevSession (Dev persona) executes
-- Bridge uses nudge loop for output routing (no SDLC awareness in bridge)
+### 9. SDLC IS OBSERVER-STEERED
 - `/sdlc` is a **single-stage router**: it assesses state, invokes ONE sub-skill, and returns
+- The **Observer Agent** handles pipeline progression by re-invoking `/sdlc` after each stage completes
 - NEVER write code, run tests, or create plans directly -- always delegate through sub-skills
 - See `.claude/skills/sdlc/SKILL.md` for the ground truth on pipeline stages
 
@@ -163,9 +147,9 @@ The standard flow from conversation to shipped feature:
 - If it's a real piece of work: create a GitHub issue
 
 ### Phase 2: SDLC (triggered by work request)
-- ChatSession steers the pipeline, invoking `/sdlc` skills as needed
+- The Observer Agent steers the pipeline by invoking `/sdlc` one stage at a time
 - `/sdlc` assesses current state, invokes ONE sub-skill, and returns
-- Stages: Plan -> Critique -> Build -> Test -> Patch -> Review -> Patch -> Docs -> Merge
+- Stages: Plan -> Build -> Test -> Patch -> Review -> Patch -> Docs -> Merge
 - See `.claude/skills/sdlc/SKILL.md` for the ground truth on stage definitions
 
 ### Phase 3: Review & Merge
@@ -177,9 +161,8 @@ The standard flow from conversation to shipped feature:
 - If there is no question -- just a status update -- the summarizer auto-sends "continue"
 - Status updates without questions or signs of completion are NOT stopping points
 - The agent keeps working until the phase is complete or it's genuinely blocked
-- **SDLC jobs**: ChatSession steers pipeline progression between stages
-- **ChatSession** orchestrates DevSession work; all messages route through ChatSession
-- Auto-continue caps are set to 50 as safety backstops (ChatSession manages actual routing)
+- **SDLC jobs**: The Observer Agent steers pipeline progression by re-invoking `/sdlc` after each stage
+- **Non-SDLC jobs** use classifier-based routing with `MAX_AUTO_CONTINUES = 3`
 - The auto-continue counter resets when the human sends a new message
 
 ### Session Continuity
@@ -190,33 +173,14 @@ The standard flow from conversation to shipped feature:
 ## System Architecture
 
 ```
-Telegram → Python Bridge (Telethon) → ChatSession (read-only, PM persona)
-              (bridge/telegram_bridge.py)     → Nudge loop (bridge has no SDLC awareness)
-                                              → Spawns DevSession (full permissions, Dev persona)
-                                                    → Claude Agent SDK → Claude API
-                                                        (agent/sdk_client.py)
+Telegram → Python Bridge (Telethon) → Claude Agent SDK → Claude API
+              (bridge/telegram_bridge.py)    (agent/sdk_client.py)
 ```
-
-**Session Types** (see `docs/features/chat-dev-session-architecture.md`):
-- **ChatSession** (`session_type="chat"`) - Orchestrates work, PM persona, read-only
-- **DevSession** (`session_type="dev"`) - Does coding work, Dev persona, full permissions
-- **Nudge loop** - Bridge output routing (deliver or nudge, no SDLC awareness)
-
-**Subconscious Memory** (see `docs/features/subconscious-memory.md`):
-- Human Telegram messages are saved as Memory records on receipt (importance=6.0)
-- PostToolUse hook checks ExistenceFilter bloom and injects `<thought>` blocks via additionalContext
-- Post-session Haiku extraction saves categorized observations (corrections/decisions at 4.0, patterns/surprises at 1.0)
-- Intentional saves via `python -m tools.memory_search save "content"` for project-level learnings (7.0-8.0)
-- Post-merge learning extraction distills PR takeaways into memories (importance=7.0)
-- Outcome detection (bigram overlap) feeds ObservationProtocol to strengthen/weaken memories, plus dismissal tracking with importance decay
-- Multi-query decomposition splits large keyword sets into clusters for broader retrieval coverage
-- **Claude Code hooks** extend memory to CLI sessions via `.claude/hooks/hook_utils/memory_bridge.py` (see `docs/features/claude-code-memory.md`): UserPromptSubmit ingests prompts, PostToolUse recalls with file-based sliding window, Stop extracts observations
-- All memory operations fail silently -- memory system never crashes the agent or hooks
 
 **Key Directories:**
 - `.claude/commands/` - Slash command skills
-- `.claude/agents/` - Subagent definitions (including `dev-session`)
-- `bridge/` - Telegram integration, nudge loop
+- `.claude/agents/` - Subagent definitions
+- `bridge/` - Telegram integration
 - `tools/` - Local Python tools
 - `config/` - Configuration files
 
@@ -271,7 +235,7 @@ See `docs/features/session-isolation.md` for the full technical design.
 
 - **Bridge Issues**: `./scripts/valor-service.sh restart`
 - **Telegram Auth**: `python scripts/telegram_login.py`
-- **SDK Issues**: Check SDK configuration in `.env`
+- **SDK Issues**: Check `USE_CLAUDE_SDK=true` in `.env`
 
 ### Self-Healing System
 
@@ -370,22 +334,6 @@ No existing tests affected — this is a greenfield feature with no prior test c
 | `config/SOUL.md` | Valor persona and philosophy |
 | `docs/features/README.md` | Feature index — look up how things work |
 | `tests/README.md` | Test suite index — feature markers, blind spots, contribution guide |
-
-## GitHub Issue Labels
-
-Use these labels consistently when creating or editing issues:
-
-| Label | When to use |
-|-------|-------------|
-| `bug` | Something is broken or not working as expected |
-| `reflections` | Related to the reflections maintenance system (`scripts/reflections.py`) |
-| `memory` | Related to the subconscious memory system (memory search, bloom filter, recall/extract) |
-| `skills` | Related to skills (`/do-*` commands), tools (MCP/Python), or the SDLC pipeline |
-| `dashboard` | Related to the web UI dashboard (`ui/`) |
-| `bridge` | Related to the Telegram bridge (`bridge/`) |
-| `testing` | Related to the test suite (`tests/`) |
-
-Do NOT use a `feature` label — it adds no signal.
 
 ## Business Context
 

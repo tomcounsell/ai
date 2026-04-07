@@ -70,9 +70,9 @@ def get_dirty_files(project_dir: Path, limit: int = 5) -> list[str]:
 
 def stash_changes(project_dir: Path) -> bool:
     """Stash uncommitted changes. Returns True if stash was created."""
-    from bridge.utc import utc_now
+    import datetime
 
-    timestamp = utc_now().strftime("%Y%m%d-%H%M%S")
+    timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     msg = f"remote-update auto-stash {timestamp}"
 
     result = run_cmd(

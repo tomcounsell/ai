@@ -1,20 +1,20 @@
 """AgentSession model - unified lifecycle tracking for agent work.
 
-Single Popoto model with session_type discriminator ("chat" or "dev").
-Popoto does not support model inheritance, so ChatSession and DevSession
-are distinguished by the session_type field with factory methods and
-derived properties providing type-specific behavior.
+Merges RedisJob (queue) and SessionLog (transcript) into a single model
+that tracks a unit of work from enqueue through completion.
 
-ChatSession (session_type="chat"): Read-only Agent SDK session, PM persona.
-  Owns the Telegram conversation, orchestrates work, spawns DevSessions.
-DevSession (session_type="dev"): Full-permission Agent SDK session, Dev persona.
-  Does the actual coding work, runs SDLC pipeline stages.
+Queue-phase fields: priority, message_text, auto_continue_count, etc.
+Session-phase fields: turn_count, tool_call_count, log_path, summary, tags
+New fields: history (lifecycle events), issue_url, plan_url, pr_url
+
+Cross-references TelegramMessage via trigger_message_id. Message metadata
+(media, URLs, classification) lives on TelegramMessage; this model references
+it for enrichment during job execution.
 
 Status lifecycle:
   pending -> running -> active -> dormant -> completed | failed | waiting_for_children
 """
 
-import json as _json
 import logging
 import time
 
@@ -32,28 +32,21 @@ logger = logging.getLogger(__name__)
 
 MSG_MAX_CHARS = 20_000
 HISTORY_MAX_ENTRIES = 20
-STEERING_QUEUE_MAX = 10  # Max buffered steering messages per session
 
 # SDLC stages in pipeline order
-SDLC_STAGES = ["ISSUE", "PLAN", "CRITIQUE", "BUILD", "TEST", "REVIEW", "DOCS", "MERGE"]
-
-# Valid session types
-SESSION_TYPE_CHAT = "chat"
-SESSION_TYPE_DEV = "dev"
+SDLC_STAGES = ["ISSUE", "PLAN", "BUILD", "TEST", "REVIEW", "DOCS", "MERGE"]
 
 
 class AgentSession(Model):
-    """Unified model for all Agent SDK sessions, discriminated by session_type.
+    """Unified model tracking agent work from enqueue through completion.
 
-    Single Popoto model with a session_type discriminator ("chat" or "dev").
-    Factory methods create_chat() and create_dev() enforce field contracts.
+    Replaces both RedisJob (agent/job_queue.py) and SessionLog
+    (models/session_log.py). All fields from both models are carried
+    forward, plus new history and link tracking fields.
 
-    ChatSession (session_type="chat"):
-        Read-only Agent SDK session, PM persona. Owns the Telegram
-        conversation, orchestrates work, spawns DevSessions.
-    DevSession (session_type="dev"):
-        Full-permission Agent SDK session, Dev persona. Does the actual
-        coding work, runs SDLC pipeline stages.
+    References TelegramMessage via trigger_message_id for message
+    metadata (media, URLs, classification). The job worker resolves
+    this reference to get enrichment parameters.
 
     Status values:
         pending  - Queued, waiting for worker
@@ -68,7 +61,9 @@ class AgentSession(Model):
     # === Identity ===
     job_id = AutoKeyField()
     session_id = Field()  # Telegram-derived session identifier (e.g., tg_project_chatid_msgid)
-    session_type = KeyField(null=True)  # "chat" or "dev" — discriminator
+    claude_code_session_id = Field(
+        null=True
+    )  # Claude Code's session identifier (renamed from session_id overlap)
     project_key = KeyField()
     status = KeyField(default="pending")
 
@@ -82,31 +77,41 @@ class AgentSession(Model):
     sender_name = Field(null=True)
     sender_id = Field(type=int, null=True)
     chat_id = KeyField(null=True)
-    telegram_message_id = Field(type=int, null=True)
+    message_id = Field(type=int, null=True)
     chat_title = Field(null=True)
     revival_context = Field(null=True, max_length=MSG_MAX_CHARS)
+    workflow_id = Field(null=True)
     work_item_slug = Field(null=True)
     task_list_id = Field(null=True)
-    classification_type = Field(null=True)  # Actively used by is_sdlc, session_tags, job_scheduler
+    # === Message metadata (deprecated - now lives on TelegramMessage) ===
+    # These fields are retained for backward compatibility during migration.
+    # New code should read from TelegramMessage via trigger_message_id.
+    has_media = Field(type=bool, default=False)
+    media_type = Field(null=True)
+    youtube_urls = Field(null=True)
+    non_youtube_urls = Field(null=True)
+    reply_to_msg_id = Field(type=int, null=True)
+    chat_id_for_enrichment = Field(null=True)
+    classification_type = Field(null=True)
     auto_continue_count = Field(type=int, default=0)
     started_at = Field(type=float, null=True)  # Cannot be SortedField because it starts as None
 
     # === Cross-reference to TelegramMessage ===
-    telegram_message_key = Field(
+    trigger_message_id = Field(
         null=True
-    )  # msg_id of the TelegramMessage that triggered this session (Popoto key)
+    )  # msg_id of the TelegramMessage that triggered this session
 
     # === Session fields (from SessionLog) ===
     last_activity = Field(type=float, null=True)
     completed_at = Field(type=float, null=True)
-
+    last_transition_at = Field(type=float, null=True)  # Deprecated: derive from history instead
     turn_count = IntField(default=0)
     tool_call_count = IntField(default=0)
     log_path = Field(null=True, max_length=1000)
     summary = Field(null=True, max_length=50_000)
     branch_name = Field(null=True)
     tags = ListField(null=True)
-    classification_confidence = Field(type=float, null=True)  # Paired with classification_type
+    classification_confidence = Field(type=float, null=True)
 
     # === New fields ===
     history = ListField(null=True)  # Append-only lifecycle events
@@ -132,53 +137,19 @@ class AgentSession(Model):
     retry_count = Field(type=int, default=0)  # Stall retry attempt count
     last_stall_reason = Field(null=True)  # Diagnostic context from last stall
 
-    # === Watchdog fields ===
-    watchdog_unhealthy = Field(null=True)  # Reason string when flagged unhealthy, None when healthy
-
-    # === Q&A mode flag ===
-    # Set to True when intent classifier routes to Q&A mode. Separate from
-    # classification_type (which holds the bridge's original classification
-    # like "question", "bug", etc.) to avoid dual-purposing that field.
-    qa_mode = Field(type=bool, null=True)
-
     # === Semantic routing fields ===
     context_summary = Field(null=True, max_length=200)  # What this session is about
     expectations = Field(null=True, max_length=500)  # What the agent needs from the human
 
-    # === Steering fields ===
+    # === Observer fields ===
     # Buffered human replies during active pipelines
     queued_steering_messages = ListField(null=True)
-
-    # === ChatSession delivery field ===
-    result_text = Field(null=True, max_length=MSG_MAX_CHARS)  # What was delivered to Telegram
-
-    # === PM self-messaging ===
-    # Telegram message IDs sent by the PM via send_telegram tool during this session.
-    # Populated by the bridge relay after each successful Telethon send.
-    # When non-empty, the summarizer is bypassed (PM authored its own messages).
-    pm_sent_message_ids = ListField(null=True)
-
-    # === DevSession fields (null when session_type="chat") ===
-    parent_chat_session_id = KeyField(null=True)  # Logical FK -> ChatSession
-    slug = Field(null=True)  # Derives branch, plan path, worktree
-    artifacts = Field(null=True)  # JSON: {issue_url, plan_url, pr_url, ...}
 
     # === Job hierarchy fields ===
     # Links child jobs to their parent for job decomposition (issue #359).
     # When set, this job is a child of the referenced parent job.
     # Parent tracks aggregate progress via get_children() / get_completion_progress().
     parent_job_id = KeyField(null=True)
-
-    # === Job dependency fields ===
-    # stable_job_id: UUID set once at creation, never changes on delete-and-recreate.
-    # job_id (AutoKeyField) changes on status transitions; stable_job_id does not.
-    # This is the dependency reference key. Nullable for pre-existing jobs.
-    stable_job_id = KeyField(null=True)
-    # depends_on: list of stable_job_id values this job must wait for.
-    # Only jobs whose dependencies are all in terminal state become eligible.
-    depends_on = ListField(null=True)
-    # commit_sha: HEAD commit SHA recorded at pause for checkpoint/restore.
-    commit_sha = Field(null=True)
 
     # === Compatibility ===
 
@@ -196,236 +167,6 @@ class AgentSession(Model):
     def sender(self) -> str | None:
         """Alias for sender_name (SessionLog used 'sender')."""
         return self.sender_name
-
-    # === Session type helpers ===
-
-    @property
-    def is_chat(self) -> bool:
-        """Whether this is a ChatSession (PM persona, read-only)."""
-        return self.session_type == SESSION_TYPE_CHAT
-
-    @property
-    def is_dev(self) -> bool:
-        """Whether this is a DevSession (Dev persona, full permissions)."""
-        return self.session_type == SESSION_TYPE_DEV
-
-    @property
-    def current_stage(self) -> str | None:
-        """Return the first SDLC stage with status 'in_progress', or None."""
-        stages = self._get_stage_states_dict()
-        if not stages:
-            return None
-        for stage in SDLC_STAGES:
-            if stages.get(stage) == "in_progress":
-                return stage
-        return None
-
-    @property
-    def derived_branch_name(self) -> str | None:
-        """Derive branch name from slug if available."""
-        s = self.slug or self.work_item_slug
-        return f"session/{s}" if s else self.branch_name
-
-    @property
-    def plan_path(self) -> str | None:
-        """Derive plan path from slug if available."""
-        s = self.slug or self.work_item_slug
-        return f"docs/plans/{s}.md" if s else None
-
-    def _get_stage_states_dict(self) -> dict | None:
-        """Parse stage_states into a dict, or None."""
-        raw = self.stage_states
-        if not raw:
-            return None
-        if isinstance(raw, dict):
-            return raw
-        if isinstance(raw, str):
-            try:
-                parsed = _json.loads(raw)
-                if isinstance(parsed, dict):
-                    return parsed
-            except (_json.JSONDecodeError, TypeError):
-                pass
-        return None
-
-    # === Factory methods ===
-
-    @classmethod
-    def create_chat(
-        cls,
-        *,
-        session_id: str,
-        project_key: str,
-        working_dir: str,
-        chat_id: str,
-        telegram_message_id: int,
-        message_text: str,
-        sender_name: str | None = None,
-        sender_id: int | None = None,
-        chat_title: str | None = None,
-        telegram_message_key: str | None = None,
-        **kwargs,
-    ) -> "AgentSession":
-        """Create a ChatSession (PM persona, read-only orchestrator).
-
-        ChatSessions are created by the bridge handler when a message arrives.
-        They own the Telegram conversation and orchestrate DevSessions.
-
-        Wired into bridge handler via enqueue_job(session_type=...).
-        """
-        session = cls(
-            session_id=session_id,
-            session_type=SESSION_TYPE_CHAT,
-            project_key=project_key,
-            working_dir=working_dir,
-            chat_id=chat_id,
-            telegram_message_id=telegram_message_id,
-            message_text=message_text,
-            sender_name=sender_name,
-            sender_id=sender_id,
-            chat_title=chat_title,
-            telegram_message_key=telegram_message_key,
-            created_at=time.time(),
-            **kwargs,
-        )
-        session.save()
-        return session
-
-    @classmethod
-    def create_local(
-        cls,
-        *,
-        session_id: str,
-        project_key: str,
-        working_dir: str,
-        **kwargs,
-    ) -> "AgentSession":
-        """Create an AgentSession for a local Claude Code CLI session.
-
-        Local sessions have no parent ChatSession, no Telegram context,
-        and no triggering message. They are created by Claude Code hooks
-        (UserPromptSubmit) to provide dashboard observability for CLI work.
-
-        The session_id should use the format ``local-{claude_session_id}``
-        to avoid collisions with Telegram-originated session IDs.
-
-        Args:
-            session_id: Unique session identifier (format: local-{uuid}).
-            project_key: Project partition key for Redis queries.
-            working_dir: Absolute path to the working directory.
-            **kwargs: Additional AgentSession fields to set.
-        """
-        now = time.time()
-        session = cls(
-            session_id=session_id,
-            session_type=SESSION_TYPE_DEV,
-            project_key=project_key,
-            working_dir=working_dir,
-            created_at=now,
-            started_at=now,
-            last_activity=now,
-            **kwargs,
-        )
-        session.save()
-        return session
-
-    @classmethod
-    def create_dev(
-        cls,
-        *,
-        session_id: str,
-        project_key: str,
-        working_dir: str,
-        parent_chat_session_id: str,
-        message_text: str,
-        slug: str | None = None,
-        stage_states: dict | None = None,
-        **kwargs,
-    ) -> "AgentSession":
-        """Create a DevSession (Dev persona, full permissions).
-
-        DevSessions are created exclusively by ChatSessions during orchestration.
-        They do the actual coding work and run SDLC pipeline stages.
-
-        Wired into bridge handler via enqueue_job(session_type=...).
-        """
-        stages_json = _json.dumps(stage_states) if isinstance(stage_states, dict) else stage_states
-        session = cls(
-            session_id=session_id,
-            session_type=SESSION_TYPE_DEV,
-            project_key=project_key,
-            working_dir=working_dir,
-            parent_chat_session_id=parent_chat_session_id,
-            message_text=message_text,
-            slug=slug,
-            stage_states=stages_json,
-            created_at=time.time(),
-            **kwargs,
-        )
-        session.save()
-        return session
-
-    def get_parent_chat_session(self) -> "AgentSession | None":
-        """Return the parent ChatSession if this is a DevSession.
-
-        Returns None if parent_chat_session_id is not set or parent not found.
-        """
-        if not self.parent_chat_session_id:
-            return None
-        try:
-            return AgentSession.query.get(self.parent_chat_session_id)
-        except Exception:
-            logger.warning(
-                f"Parent chat session {self.parent_chat_session_id} not found "
-                f"for dev session {self.job_id}"
-            )
-            return None
-
-    def get_dev_sessions(self) -> list["AgentSession"]:
-        """Return all DevSessions spawned by this ChatSession.
-
-        Returns an empty list if no DevSessions exist or this is not a ChatSession.
-        """
-        if not self.is_chat:
-            return []
-        try:
-            return list(AgentSession.query.filter(parent_chat_session_id=self.job_id))
-        except Exception as e:
-            logger.warning(f"Failed to query dev sessions for chat {self.job_id}: {e}")
-            return []
-
-    # === PM self-messaging helpers ===
-
-    def record_pm_message(self, msg_id: int) -> None:
-        """Record a Telegram message ID sent by the PM via the send_telegram tool.
-
-        Called by the bridge relay after successfully sending a PM-authored message.
-        The list is checked by the summarizer bypass to skip rewriting PM output.
-
-        Args:
-            msg_id: The Telegram message ID returned by Telethon after send.
-        """
-        current = self.pm_sent_message_ids
-        if not isinstance(current, list):
-            current = []
-        current.append(msg_id)
-        self.pm_sent_message_ids = current
-        try:
-            self.save()
-        except Exception as e:
-            logger.warning(
-                f"record_pm_message save failed for session {self.session_id} "
-                f"(msg_id={msg_id}): {e}"
-            )
-
-    def has_pm_messages(self) -> bool:
-        """Check whether the PM sent any self-authored messages during this session.
-
-        Returns True if pm_sent_message_ids is a non-empty list.
-        Used by the summarizer bypass in bridge/response.py.
-        """
-        ids = self.pm_sent_message_ids
-        return isinstance(ids, list) and len(ids) > 0
 
     # === History helpers ===
 
@@ -511,8 +252,8 @@ class AgentSession(Model):
         old_status = self.status or "none"
         now = time.time()
 
-        # Calculate duration from session start
-        prev_time = self.started_at or self.created_at
+        # Calculate duration in previous state
+        prev_time = self.last_transition_at or self.started_at or self.created_at
         duration = now - prev_time if prev_time else 0
 
         # Structured log entry
@@ -521,6 +262,9 @@ class AgentSession(Model):
             f"job_id={self.job_id} project={self.project_key} "
             f"duration_in_prev_state={duration:.1f}s" + (f' context="{context}"' if context else "")
         )
+
+        # Update fields
+        self.last_transition_at = now
 
         # Append to history
         self.append_history(
@@ -540,15 +284,26 @@ class AgentSession(Model):
         return links
 
     def get_stage_progress(self) -> dict[str, str]:
-        """Return SDLC stage completion status via PipelineStateMachine.
+        """Parse history entries to determine SDLC stage completion status.
 
         Returns:
-            Dict mapping stage name to status string.
+            Dict mapping stage name to status: 'completed', 'in_progress', 'failed', or 'pending'
         """
-        from bridge.pipeline_state import PipelineStateMachine
-
-        sm = PipelineStateMachine(self)
-        return sm.get_display_progress()
+        progress = {stage: "pending" for stage in SDLC_STAGES}
+        for entry in self._get_history_list():
+            if not isinstance(entry, str) or "[stage]" not in entry.lower():
+                continue
+            entry_upper = entry.upper()
+            for stage in SDLC_STAGES:
+                if stage in entry_upper:
+                    if "FAILED" in entry_upper or "ERROR" in entry_upper:
+                        progress[stage] = "failed"
+                    elif "COMPLETED" in entry_upper or "☑" in entry:
+                        progress[stage] = "completed"
+                    elif "IN_PROGRESS" in entry_upper or "▶" in entry:
+                        progress[stage] = "in_progress"
+        logger.debug(f"get_stage_progress() on session {self.session_id}: {progress}")
+        return progress
 
     # === Stage-aware auto-continue helpers ===
 
@@ -556,16 +311,36 @@ class AgentSession(Model):
     def is_sdlc(self) -> bool:
         """Whether this session is an SDLC pipeline job.
 
-        Two checks:
-        1. stage_states has any non-pending/non-ready stage
-        2. classification_type == "sdlc" for freshly-classified sessions
-        """
-        # Primary: check stage_states for any active/completed/failed stage
-        stages = self._get_stage_states_dict()
-        if stages and any(v not in ("pending", "ready") for v in stages.values()):
-            return True
+        Derives SDLC status from observable state (single source of truth)
+        rather than a stored classification flag. Checks in priority order:
 
-        # Secondary: classification_type for freshly-classified sessions
+        1. stage_states — if any stage is in_progress/completed/failed
+        2. History [stage] entries — legacy fallback
+        3. classification_type == "sdlc" — tertiary for fresh sessions
+        """
+        # Primary: check stage_states for any non-pending stage
+        if self.stage_states:
+            try:
+                import json
+
+                states = (
+                    json.loads(self.stage_states)
+                    if isinstance(self.stage_states, str)
+                    else self.stage_states
+                )
+                if isinstance(states, dict) and any(
+                    v not in ("pending", "ready") for v in states.values()
+                ):
+                    return True
+            except (json.JSONDecodeError, TypeError, AttributeError):
+                pass
+
+        # Secondary: check for [stage] entries in history
+        for entry in self._get_history_list():
+            if isinstance(entry, str) and "[stage]" in entry.lower():
+                return True
+
+        # Tertiary: classification_type for freshly-classified sessions
         if self.classification_type == "sdlc":
             return True
 
@@ -574,7 +349,9 @@ class AgentSession(Model):
     def has_remaining_stages(self) -> bool:
         """Check if any SDLC stages are not yet completed.
 
-        Uses PipelineStateMachine to determine remaining stages.
+        Uses the pipeline graph to determine remaining stages rather than
+        a flat check. Finds the last completed/failed stage and calls
+        get_next_stage() to see if a non-terminal next stage exists.
 
         Returns True if pipeline progression should continue.
         Returns False when the pipeline is complete (MERGE reached or
@@ -583,31 +360,68 @@ class AgentSession(Model):
         Used by stage-aware auto-continue to decide whether to keep
         going (stages remain) or consult the classifier (all done).
         """
-        from bridge.pipeline_state import PipelineStateMachine
+        from bridge.pipeline_graph import get_next_stage
 
-        sm = PipelineStateMachine(self)
-        return sm.has_remaining_stages()
+        progress = self.get_stage_progress()
+
+        # Find the last completed or failed stage in pipeline order
+        last_completed = None
+        last_outcome = "success"
+        for stage in SDLC_STAGES:
+            status = progress.get(stage, "pending")
+            if status == "completed":
+                last_completed = stage
+                last_outcome = "success"
+            elif status == "failed":
+                last_completed = stage
+                last_outcome = "fail"
+
+        # If no stage has completed, there are definitely remaining stages
+        if last_completed is None:
+            return True
+
+        # Use the graph to check if a next stage exists
+        next_info = get_next_stage(last_completed, last_outcome)
+        if next_info is None:
+            # No transition from current stage — pipeline is complete (MERGE terminal)
+            return False
+
+        # Walk the graph forward from the last completed stage.
+        # If every reachable stage is already completed, the pipeline is done.
+        current = last_completed
+        outcome = last_outcome
+        while True:
+            next_info = get_next_stage(current, outcome)
+            if next_info is None:
+                # Reached terminal (MERGE) — no remaining stages
+                return False
+            next_stage = next_info[0]
+            next_status = progress.get(next_stage, "pending")
+            if next_status != "completed":
+                # Found a stage that still needs work
+                return True
+            # This stage is done, keep walking
+            current = next_stage
+            outcome = "success"
 
     def has_failed_stage(self) -> bool:
         """Check if any SDLC stage has failed.
 
-        Uses PipelineStateMachine to check stage_states. Failed stages
-        are a hard stop signal -- the output should be delivered to the
-        user immediately rather than auto-continued.
+        Returns True if a [stage] history entry contains FAILED or
+        ERROR for any stage. Failed stages are a hard stop signal --
+        the output should be delivered to the user immediately rather
+        than auto-continued.
         """
-        from bridge.pipeline_state import PipelineStateMachine
-
-        sm = PipelineStateMachine(self)
-        return sm.has_failed_stage()
+        progress = self.get_stage_progress()
+        return any(status == "failed" for status in progress.values())
 
     # === Queued steering message helpers ===
 
     def push_steering_message(self, text: str) -> None:
-        """Buffer a human reply for the ChatSession to read during active pipelines.
+        """Buffer a human reply for the Observer to read during active pipelines.
 
-        The bridge intake classifier populates this when a human replies
-        while the pipeline is running. The ChatSession reads and clears it.
-        Bounded at STEERING_QUEUE_MAX entries; oldest dropped on overflow.
+        The bridge intake classifier (#320) populates this when a human replies
+        while the pipeline is running. The Observer reads and clears it.
 
         Args:
             text: The human's message text to buffer.
@@ -616,13 +430,6 @@ class AgentSession(Model):
         if not isinstance(current, list):
             current = []
         current.append(text)
-        if len(current) > STEERING_QUEUE_MAX:
-            dropped = len(current) - STEERING_QUEUE_MAX
-            logger.warning(
-                f"Steering queue overflow for session {self.session_id}: "
-                f"dropping {dropped} oldest message(s)"
-            )
-            current = current[-STEERING_QUEUE_MAX:]
         self.queued_steering_messages = current
         try:
             self.save()
@@ -633,7 +440,7 @@ class AgentSession(Model):
         """Pop all buffered steering messages, clearing the queue.
 
         Returns the list of buffered message texts and resets the field to empty.
-        The ChatSession calls this to incorporate human replies into its orchestration.
+        The Observer calls this to incorporate human replies into its decision.
 
         Returns:
             List of message text strings, or empty list if none buffered.

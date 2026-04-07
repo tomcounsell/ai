@@ -14,7 +14,6 @@ from popoto import (
     Field,
     IntField,
     KeyField,
-    ListField,
     Model,
 )
 
@@ -34,8 +33,6 @@ class Reflection(Model):
         last_status: Result of last run: 'success', 'error', 'skipped', or 'running'
         last_error: Error message from last failed run (None if last run succeeded)
         last_duration: Duration of last run in seconds
-        run_history: Append-only list of recent run dicts (capped at 200).
-            Each dict: {timestamp, status, duration, error, log_path}
     """
 
     reflection_id = AutoKeyField()
@@ -46,20 +43,6 @@ class Reflection(Model):
     last_status = Field(default="pending")  # pending | running | success | error | skipped
     last_error = Field(null=True, max_length=1000)
     last_duration = Field(type=float, null=True)
-    run_history = ListField(default=[])  # List of run dicts, capped at 200
-
-    _RUN_HISTORY_CAP = 200
-
-    def _normalize_run_history(self) -> None:
-        """Ensure run_history is a plain list before saving.
-
-        Popoto's ListField can deserialize as a ListField descriptor object
-        instead of a plain list when loading from Redis. This normalization
-        prevents ModelException on save() due to 'ListField object is not
-        iterable' validation errors.
-        """
-        if not isinstance(self.run_history, list):
-            self.run_history = []
 
     @classmethod
     def get_or_create(cls, name: str) -> "Reflection":
@@ -75,22 +58,16 @@ class Reflection(Model):
             last_status="pending",
             last_error=None,
             last_duration=None,
-            run_history=[],
         )
 
     def mark_started(self) -> None:
         """Mark this reflection as currently running."""
         self.last_status = "running"
         self.last_run = time.time()
-        self._normalize_run_history()
         self.save()
 
     def mark_completed(self, duration: float, error: str | None = None) -> None:
         """Mark this reflection as completed (success or error).
-
-        Internally appends a run record to run_history (capped at 200 entries).
-        The method signature is unchanged -- existing callers in
-        agent/reflection_scheduler.py require no modifications.
 
         Args:
             duration: How long the run took in seconds
@@ -98,35 +75,18 @@ class Reflection(Model):
         """
         self.last_duration = duration
         self.run_count = (self.run_count or 0) + 1
-        status = "error" if error else "success"
         if error:
             self.last_status = "error"
             self.last_error = error[:1000] if error else None
         else:
             self.last_status = "success"
             self.last_error = None
-
-        # Append to run_history (capped at RUN_HISTORY_CAP)
-        run_record = {
-            "timestamp": time.time(),
-            "status": status,
-            "duration": duration,
-            "error": error[:500] if error else None,
-        }
-        self._normalize_run_history()
-        history = self.run_history
-        history.append(run_record)
-        if len(history) > self._RUN_HISTORY_CAP:
-            history = history[-self._RUN_HISTORY_CAP :]
-        self.run_history = history
-
         self.save()
 
     def mark_skipped(self, reason: str = "already running") -> None:
         """Mark this reflection as skipped (e.g., already running)."""
         self.last_status = "skipped"
         self.last_error = reason
-        self._normalize_run_history()
         self.save()
 
     @classmethod

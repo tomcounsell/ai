@@ -6,7 +6,7 @@ Structured output format for Telegram delivery of agent work summaries. Every re
 
 1. **SDLC: always summarize (even empty responses). Non-SDLC: summarize if >= 200 chars.** SDLC sessions always go through Haiku (stage lines + link footers needed). Even empty SDK responses render SDLC stage progress if session data is available. Non-SDLC short responses (< 200 chars) pass through raw -- this preserves programmatic skill output like `/update` that's already formatted.
 2. **SDLC template rendering**: Stage progress lines and link footers are rendered in Python code, not by the LLM. The LLM only generates bullet summaries and questions.
-3. **Question extraction (anti-fabrication)**: The LLM can surface questions using a `---` separator and `>> ` prefix, but ONLY questions that are **verbatim present** in the raw agent output. Declarative statements and plans must never be reframed as questions. The `expectations` field is set only when explicit questions exist. Legacy `? ` prefix is accepted and normalized to `>> ` by `_normalize_question_prefix()`.
+3. **Question extraction (anti-fabrication)**: The LLM can surface questions using a `---` separator and `? ` prefix, but ONLY questions that are **verbatim present** in the raw agent output. Declarative statements and plans must never be reframed as questions. The `expectations` field is set only when explicit questions exist.
 
 ## Output Format
 
@@ -26,8 +26,8 @@ ISSUE 273 → PLAN → ▶ BUILD → TEST → REVIEW → DOCS
 • Replaced upgrade flow with plan picker UI
 • Running test suite...
 
->> Should we use modal or inline picker?
->> 2 nits found in review — skip or patch?
+? Should we use modal or inline picker?
+? 2 nits found in review — skip or patch?
 Issue #273
 ```
 
@@ -37,29 +37,19 @@ Issue #273
 • Summary bullet 1
 • Summary bullet 2
 
->> Question needing input
+? Question needing input
 ```
 
 Simple emoji + bullets format, no stage line or link footer. Still summarized via Haiku. No message echo -- Telegram's reply-to feature provides context about what the response is answering.
-
-### Q&A Mode (Prose)
-```
-The bridge connects Telegram to Claude via Telethon. See bridge/telegram_bridge.py
-for the main entry point. The nudge loop in agent/job_queue.py handles delivery
-routing based on stop_reason classification.
-```
-
-When `qa_mode=True` on the session, `_compose_structured_summary()` bypasses all structured formatting — no emoji prefix, no bullet parsing, no template. The LLM summary (already in conversational prose via `qa_mode=True` context in the prompt) is returned directly. The processing reaction is cleared instead of setting a completion emoji.
 
 ## Emoji Vocabulary
 
 | Emoji | Meaning |
 |-------|---------|
-| ✅ | Milestone completion (merged PR, closed issue) |
+| ✅ | Completed |
 | ⏳ | In progress |
 | ❌ | Failed |
 | ⚠️ | External blocker |
-| _(empty)_ | Routine completion (no emoji prefix) |
 
 ## Stage Progress Format
 
@@ -92,10 +82,10 @@ No checkbox icons are used. The ISSUE stage label includes the issue number when
 
 ## Implementation
 
-- `bridge/summarizer.py`: `summarize_response()` (always-summarize entry point), `_strip_process_narration()` (pre-summarization cleanup), `_compose_structured_summary()` (template renderer), `_parse_summary_and_questions()` (question extractor), `_normalize_question_prefix()` (legacy `?` to `>>` conversion), `_render_stage_progress()`, `_render_link_footer()`, `_linkify_references()` (auto-link PR/Issue refs)
-- `bridge/response.py`: Always calls summarizer for non-empty text, passes `AgentSession` via `session=` kwarg. `_truncate_at_sentence_boundary()` ensures clean truncation at Telegram's 4096-char limit.
+- `bridge/summarizer.py`: `summarize_response()` (always-summarize entry point), `_strip_process_narration()` (pre-summarization cleanup), `_compose_structured_summary()` (template renderer), `_parse_summary_and_questions()` (question extractor), `_render_stage_progress()`, `_render_link_footer()`, `_linkify_references()` (auto-link PR/Issue refs)
+- `bridge/response.py`: Always calls summarizer for non-empty text, passes `AgentSession` via `session=` kwarg
 - `bridge/telegram_bridge.py`: `_send` callback accepts and forwards `session` parameter
-- `agent/job_queue.py`: `SendCallback` type includes session parameter, `send_to_chat()` uses `classify_nudge_action()` for routing decisions and passes `agent_session`
+- `agent/job_queue.py`: `SendCallback` type includes session parameter, `send_to_chat()` passes `agent_session`
 - `bridge/markdown.py`: `send_markdown()` with plain-text fallback
 
 ## Session Freshness
@@ -144,7 +134,7 @@ The stripping runs inside `summarize_response()` before the text is passed to `_
 
 ## Anti-Fabrication Rules (Issue #280)
 
-The summarizer must NEVER fabricate questions that are not verbatim in the raw agent output. This was added after Haiku reframed declarative statements ("I will add sdlc to classifier categories") as questions (">> Should classifier be updated to output 'sdlc'?"), causing false-dormant sessions.
+The summarizer must NEVER fabricate questions that are not verbatim in the raw agent output. This was added after Haiku reframed declarative statements ("I will add sdlc to classifier categories") as questions ("? Should classifier be updated to output 'sdlc'?"), causing false-dormant sessions.
 
 **Rules enforced in `SUMMARIZER_SYSTEM_PROMPT`:**
 
@@ -164,10 +154,9 @@ The `expectations` field description explicitly states it should only be set whe
 
 1. **Simple completions**: "Done ✅" (still summarized for consistency)
 2. **Conversational**: Prose, preserving tone
-3. **Questions**: Preserved exactly, surfaced after bullets via `---` separator with `>> ` prefix
+3. **Questions**: Preserved exactly, surfaced after bullets via `---` separator
 4. **SDLC work**: Emoji + stage line + bullets + questions + link footer (no message echo)
 5. **Status updates**: 2-4 bullet points
-6. **Q&A sessions** (`qa_mode=True`): Conversational prose — no bullets, no emoji prefix, no structured template. Bypasses `_compose_structured_summary()` formatting entirely.
 
 ## Telegram Markdown
 
@@ -178,4 +167,3 @@ Basic `md` parse mode (not MarkdownV2). Supports bold, inline code, and `[text](
 - [AgentSession Model](agent-session-model.md) - Unified lifecycle model with stage progress helpers
 - [Bridge Response Improvements](bridge-response-improvements.md) - Response pipeline
 - [Bridge Workflow Gaps](bridge-workflow-gaps.md) - Output classification and auto-continue
-- [PM Voice Refinement](pm-voice-refinement.md) - Naturalized SDLC language, crash pool, sentence truncation, milestone-selective emoji

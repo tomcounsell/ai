@@ -38,6 +38,8 @@ from claude_agent_sdk import (
 
 from agent.agent_definitions import get_agent_definitions
 from agent.hooks import build_hooks_config
+from agent.workflow_state import WorkflowState
+from agent.workflow_types import WorkflowStateData
 from agent.worktree_manager import WORKTREES_DIR, validate_workspace
 from utils.github_patterns import ISSUE_NUMBER_RE as _ISSUE_NUMBER_RE
 from utils.github_patterns import PR_NUMBER_RE as _PR_NUMBER_RE
@@ -69,49 +71,6 @@ _last_activity_timestamps: dict[str, float] = {}
 # are considered stalled. Active sessions producing tool calls/logs are never
 # interrupted regardless of total runtime.
 SDK_INACTIVITY_TIMEOUT_SECONDS = int(os.environ.get("SDK_INACTIVITY_TIMEOUT_SECONDS", 300))
-
-
-class CircuitOpenError(RuntimeError):
-    """Raised when the Anthropic circuit breaker is open.
-
-    The worker loop catches this specifically to leave the job as pending
-    (instead of marking it failed) so the health check can retry when
-    the circuit closes.
-    """
-
-    pass
-
-
-# === Anthropic Circuit Breaker ===
-# Protects against sustained Anthropic API failures. When open, queries fail fast
-# instead of accumulating timeouts. Registered with DependencyHealth for diagnostics.
-_anthropic_circuit = None  # Lazy-initialized to avoid import cycles
-
-
-def _get_anthropic_circuit():
-    """Get or create the Anthropic circuit breaker (lazy singleton)."""
-    global _anthropic_circuit
-    if _anthropic_circuit is None:
-        from bridge.resilience import CircuitBreaker
-
-        _anthropic_circuit = CircuitBreaker(
-            name="anthropic",
-            failure_threshold=5,
-            failure_window=60.0,
-            half_open_interval=30.0,
-            on_open=lambda: logger.warning(
-                "Anthropic circuit OPEN — queries will fail fast until recovery"
-            ),
-            on_close=lambda: logger.info("Anthropic circuit CLOSED — service recovered"),
-        )
-        # Register with global health tracker
-        try:
-            from bridge.health import get_health
-
-            get_health().register("anthropic", _anthropic_circuit)
-        except Exception:
-            pass  # Non-fatal
-    return _anthropic_circuit
 
 
 def get_stop_reason(session_id: str) -> str | None:
@@ -269,8 +228,8 @@ def _extract_sdlc_env_vars(session_id: str, gh_repo: str | None = None) -> dict[
         if isinstance(branch, str) and branch:
             env["SDLC_PR_BRANCH"] = branch
 
-        # Work item slug (new DevSessions use session.slug, legacy uses work_item_slug)
-        slug = getattr(session, "slug", None) or getattr(session, "work_item_slug", None)
+        # Work item slug
+        slug = getattr(session, "work_item_slug", None)
         if isinstance(slug, str) and slug:
             env["SDLC_SLUG"] = slug
 
@@ -285,25 +244,16 @@ def _extract_sdlc_env_vars(session_id: str, gh_repo: str | None = None) -> dict[
             else:
                 env["SDLC_PLAN_PATH"] = plan_url
 
-        # Issue URL -> SDLC_ISSUE_NUMBER and SDLC_TRACKING_ISSUE
+        # Issue URL -> SDLC_ISSUE_NUMBER
         issue_url = getattr(session, "issue_url", None)
         if isinstance(issue_url, str) and issue_url:
             issue_match = _ISSUE_NUMBER_RE.search(issue_url)
             if issue_match:
-                issue_num = issue_match.group(1)
-                env["SDLC_ISSUE_NUMBER"] = issue_num
-                env["SDLC_TRACKING_ISSUE"] = issue_num
+                env["SDLC_ISSUE_NUMBER"] = issue_match.group(1)
 
         # Repo (complement GH_REPO, don't replace it)
         if gh_repo:
             env["SDLC_REPO"] = gh_repo
-
-        # PM self-messaging: inject TELEGRAM_REPLY_TO from the session's
-        # telegram_message_id so tools/send_telegram.py can reply to the
-        # original human message (issue #497).
-        tg_msg_id = getattr(session, "telegram_message_id", None)
-        if tg_msg_id is not None:
-            env["TELEGRAM_REPLY_TO"] = str(tg_msg_id)
 
         if env:
             logger.info(
@@ -350,14 +300,14 @@ PERSONAS_OVERLAY_DIR = Path.home() / "Desktop" / "Valor" / "personas"
 PRINCIPAL_PATH = Path(__file__).parent.parent / "config" / "PRINCIPAL.md"
 
 # Worker safety rails injected into every agent session.
-# ChatSession is the sole pipeline controller —
+# The Observer Agent (bridge/observer.py) is the sole pipeline controller —
 # it steers the worker one stage at a time via coaching messages.
 # This constant provides only the safety rails the worker needs; it does NOT
 # contain pipeline orchestration or /sdlc invocation instructions.
 WORKER_RULES = """\
 ## Worker Safety Rails
 
-Execute the task given to you. The ChatSession controls pipeline progression — \
+Execute the task given to you. The Observer Agent controls pipeline progression — \
 you do not need to manage stages or orchestrate the pipeline yourself.
 
 ### Hard rules:
@@ -449,7 +399,7 @@ def load_principal_context(condensed: bool = True) -> str:
 
     Provides strategic context for decision-making: mission, goals, project
     priorities, and operating assumptions. Used by workers (condensed) and
-    the ChatSession (full) to ground autonomous decisions.
+    the Observer (full) to ground autonomous decisions.
 
     Args:
         condensed: If True, return only Mission + Goals + Projects sections
@@ -576,7 +526,7 @@ def load_system_prompt() -> str:
         ---
         [Work Completion Criteria — from CLAUDE.md]
 
-    ChatSession handles pipeline orchestration via nudge loop.
+    The Observer Agent (bridge/observer.py) handles pipeline orchestration.
     The worker only receives safety rails — no pipeline stages or /sdlc references.
     """
     try:
@@ -822,6 +772,7 @@ class ValorAgent:
         working_dir: str | Path | None = None,
         system_prompt: str | None = None,
         permission_mode: str = "bypassPermissions",
+        workflow_id: str | None = None,
         task_list_id: str | None = None,
         chat_id: str | None = None,
         project_key: str | None = None,
@@ -829,7 +780,6 @@ class ValorAgent:
         job_id: str | None = None,
         gh_repo: str | None = None,
         target_repo: str | None = None,
-        session_type: str | None = None,
     ):
         """
         Initialize ValorAgent.
@@ -838,6 +788,7 @@ class ValorAgent:
             working_dir: Working directory for the agent. Defaults to ai/ repo root.
             system_prompt: Custom system prompt. Defaults to SOUL.md contents.
             permission_mode: Permission mode for tool use. Default: "bypassPermissions".
+            workflow_id: Optional workflow ID for multi-phase workflow tracking.
             task_list_id: Optional task list ID to scope sub-agent Task storage
                 via CLAUDE_CODE_TASK_LIST_ID environment variable.
             chat_id: Optional chat ID for routing context injection.
@@ -850,8 +801,6 @@ class ValorAgent:
             target_repo: Absolute path to the target project's repo root. For
                 cross-repo SDLC builds this differs from working_dir (the
                 orchestrator). Defaults to working_dir when not specified.
-            session_type: Session type ("chat" for PM, None for dev). Injected as
-                SESSION_TYPE env var so hooks can enforce write restrictions.
         """
         default_dir = Path(__file__).parent.parent
         allowed_root = Path.home() / "src"
@@ -860,6 +809,7 @@ class ValorAgent:
         self.working_dir = validate_workspace(raw_path, allowed_root, is_worktree=is_wt)
         self.system_prompt = system_prompt or load_system_prompt()
         self.permission_mode = permission_mode
+        self.workflow_id = workflow_id
         self.task_list_id = task_list_id
         self.chat_id = chat_id
         self.project_key = project_key
@@ -867,7 +817,96 @@ class ValorAgent:
         self.job_id = job_id
         self.gh_repo = gh_repo or None  # Normalize empty string to None
         self.target_repo = target_repo
-        self.session_type = session_type
+        self.workflow_state: WorkflowState | None = None
+
+        # Load workflow state if workflow_id provided
+        if self.workflow_id:
+            try:
+                self.workflow_state = WorkflowState.load(self.workflow_id)
+                phase = self.workflow_state.data.phase if self.workflow_state.data else None
+                logger.info(f"Loaded workflow state: {self.workflow_id} (phase={phase})")
+            except FileNotFoundError:
+                logger.warning(
+                    f"Workflow ID {self.workflow_id} provided but no state file found. "
+                    "Continuing without workflow state."
+                )
+            except Exception as e:
+                logger.error(f"Failed to load workflow state for {self.workflow_id}: {e}")
+                # Continue without workflow state rather than failing initialization
+
+    def _build_workflow_context(self) -> str:
+        """Build workflow context string for system prompt.
+
+        Returns:
+            Formatted workflow context including ID, phase, status, and plan file.
+        """
+        if not self.workflow_state or not self.workflow_state.data:
+            return ""
+
+        data = self.workflow_state.data
+        context_parts = [
+            "---",
+            "WORKFLOW CONTEXT:",
+            f"- Workflow ID: {data.workflow_id}",
+            f"- Plan: {data.plan_file}",
+        ]
+
+        if data.phase:
+            context_parts.append(f"- Current Phase: {data.phase}")
+        if data.status:
+            context_parts.append(f"- Status: {data.status}")
+        if data.branch_name:
+            context_parts.append(f"- Branch: {data.branch_name}")
+        if data.tracking_url:
+            context_parts.append(f"- Tracking: {data.tracking_url}")
+
+        context_parts.append("---")
+        return "\n".join(context_parts)
+
+    def update_workflow_state(
+        self, phase: str | None = None, status: str | None = None, **kwargs
+    ) -> None:
+        """Update workflow state and persist to disk.
+
+        Args:
+            phase: Optional workflow phase to update
+            status: Optional workflow status to update
+            **kwargs: Additional state fields to update
+
+        Raises:
+            ValueError: If no workflow_state is loaded
+        """
+        if not self.workflow_state:
+            raise ValueError(
+                "Cannot update workflow state - no workflow_id provided at initialization"
+            )
+
+        # Build update dict
+        update_dict = {}
+        if phase is not None:
+            update_dict["phase"] = phase
+        if status is not None:
+            update_dict["status"] = status
+        update_dict.update(kwargs)
+
+        # Update and save
+        self.workflow_state.update(**update_dict)
+        self.workflow_state.save()
+        logger.info(
+            f"Updated workflow state: {self.workflow_id} "
+            f"(phase={self.workflow_state.data.phase if self.workflow_state.data else None}, "
+            f"status={self.workflow_state.data.status if self.workflow_state.data else None})"
+        )
+
+    def get_workflow_data(self) -> WorkflowStateData | None:
+        """Get current workflow state data.
+
+        Returns:
+            WorkflowStateData if workflow state is loaded, None otherwise
+        """
+        if self.workflow_state:
+            return self.workflow_state.data
+        return None
 
     def _create_options(self, session_id: str | None = None) -> ClaudeAgentOptions:
         """Create ClaudeAgentOptions configured for Valor with full permissions.
@@ -913,25 +952,6 @@ class ValorAgent:
             env["GH_REPO"] = self.gh_repo
         if self.target_repo:
             env["SDLC_TARGET_REPO"] = str(self.target_repo)
-        if self.session_type:
-            env["SESSION_TYPE"] = self.session_type
-
-        # PM sessions: inject Telegram context so ChatSession can send its
-        # own messages via tools/send_telegram.py (issue #497).
-        # chat_id comes from the project config; reply_to is resolved from
-        # the AgentSession's telegram_message_id in _extract_sdlc_env_vars below.
-        if self.session_type == "chat" and self.chat_id:
-            env["TELEGRAM_CHAT_ID"] = str(self.chat_id)
-
-        # PM sessions: inject Sentry auth token so sentry-cli works without
-        # manual export. Token is stored in ~/Desktop/Valor/.env (iCloud-synced).
-        if self.session_type == "chat":
-            sentry_env = Path.home() / "Desktop" / "Valor" / ".env"
-            if sentry_env.exists():
-                for line in sentry_env.read_text().splitlines():
-                    if line.startswith("SENTRY_PERSONAL_TOKEN="):
-                        env["SENTRY_AUTH_TOKEN"] = line.split("=", 1)[1]
-                        break
 
         # SDLC context injection: pre-resolve session fields as env vars so
         # skills can reference $SDLC_PR_NUMBER etc. instead of guessing (issue #420).
@@ -940,7 +960,12 @@ class ValorAgent:
             sdlc_env = _extract_sdlc_env_vars(session_id, self.gh_repo)
             env.update(sdlc_env)
 
+        # Build system prompt with workflow context if workflow_id is present
         system_prompt = self.system_prompt
+        if self.workflow_id and self.workflow_state and self.workflow_state.data:
+            workflow_context = self._build_workflow_context()
+            system_prompt += f"\n\n{workflow_context}"
+            logger.debug(f"Including workflow context in system prompt: {self.workflow_id}")
 
         # Only continue a conversation if we have evidence of a prior session.
         # Without this check, fresh sessions set continue_conversation=True which
@@ -985,18 +1010,6 @@ class ValorAgent:
         options = self._create_options(session_id)
         response_parts: list[str] = []
         retries = 0
-
-        # Circuit breaker check: fail fast if Anthropic is down
-        circuit = _get_anthropic_circuit()
-        if not circuit.allows_request():
-            logger.warning(
-                "[SDK-circuit] Anthropic circuit is OPEN — failing fast for session %s",
-                session_id,
-            )
-            raise CircuitOpenError(
-                "Anthropic service unavailable (circuit breaker open). "
-                "Job will remain pending and retry when service recovers."
-            )
 
         # Bug 2 fix (issue #374): Reset watchdog tool counts at query start
         # so continuation sessions don't inherit inflated counts from prior runs.
@@ -1051,7 +1064,7 @@ class ValorAgent:
                                 # so continuation sessions resume the correct transcript.
                                 if msg.session_id and session_id:
                                     _store_claude_session_uuid(session_id, msg.session_id)
-                                # Capture stop_reason for nudge loop routing decisions
+                                # Capture stop_reason for Observer routing decisions
                                 if msg.stop_reason and session_id:
                                     _session_stop_reasons[session_id] = msg.stop_reason
                                     logger.info(
@@ -1109,23 +1122,9 @@ class ValorAgent:
                 session_id,
                 query_timeout,
             )
-            asyncio.ensure_future(circuit.record_failure(TimeoutError("query timeout")))
-            raise
-
-        except asyncio.CancelledError:
-            elapsed = time.time() - init_start
-            logger.warning(
-                "[SDK-cancelled] Query cancelled after %.0fs for session %s",
-                elapsed,
-                session_id,
-            )
-            # CancelledError is not an API failure — don't record against circuit
             raise
 
         except Exception as e:
-            # Record failure for circuit breaker
-            asyncio.ensure_future(circuit.record_failure(e))
-
             error_str = str(e)
             init_elapsed = time.time() - init_start
 
@@ -1187,11 +1186,6 @@ class ValorAgent:
             else:
                 logger.error(f"SDK query failed after {init_elapsed:.2f}s: {e}")
             raise
-
-        else:
-            # Query succeeded — record success for circuit breaker
-            asyncio.ensure_future(circuit.record_success())
-
         finally:
             # Always unregister client from registry
             if session_id:
@@ -1200,7 +1194,7 @@ class ValorAgent:
                 clear_session_activity(session_id)
                 # Note: _session_stop_reasons is NOT cleaned here — it's consumed
                 # by get_stop_reason() in job_queue after query returns. The pop()
-                # in get_stop_reason() handles cleanup. If the nudge loop never runs
+                # in get_stop_reason() handles cleanup. If the Observer never runs
                 # (crash), entries are tiny (session_id -> str) and cleared on restart.
                 logger.debug(f"Unregistered active client for session {session_id}")
 
@@ -1325,33 +1319,26 @@ async def get_agent_response_sdk(
     project: dict | None,
     chat_id: str | None = None,
     sender_id: int | None = None,
+    workflow_id: str | None = None,
     task_list_id: str | None = None,
     correlation_id: str | None = None,
     job_id: str | None = None,
 ) -> str:
-    """Get agent response using Claude Agent SDK.
+    """
+    Get agent response using Claude Agent SDK.
 
-    Orchestrates a complete agent session from message receipt to response.
-    Uses config-driven chat mode resolution (resolve_chat_mode from
-    bridge.routing) to determine session behavior for ChatSessions:
-
-    - "qa" mode: bypasses the Haiku intent classifier, sets qa_mode=True
-      directly on the session, reducing latency and API cost for DMs and
-      groups with "teammate" persona.
-    - "pm"/"dev" mode: bypasses the classifier, uses the config-determined
-      mode without reclassification.
-    - None (unconfigured): falls through to the existing Haiku intent
-      classifier for Q&A vs work routing.
+    This function matches the signature of the existing get_agent_response()
+    in telegram_bridge.py to enable seamless switching via feature flag.
 
     Args:
         message: The message to process
         session_id: Session ID for conversation continuity
         sender_name: Name of the sender (for logging)
-        chat_title: Chat title (for logging and mode resolution)
-        project: Project configuration dict (contains telegram.groups with
-            optional persona fields for config-driven mode)
+        chat_title: Chat title (for logging)
+        project: Project configuration dict
         chat_id: Chat ID (unused, for compatibility)
         sender_id: Telegram user ID (for permission checking)
+        workflow_id: Optional 8-char workflow identifier for tracked work
         task_list_id: Optional task list ID to scope sub-agent Task storage
         correlation_id: Optional end-to-end tracing ID from the bridge
         job_id: Optional job ID for child job spawning (issue #359)
@@ -1387,40 +1374,33 @@ async def get_agent_response_sdk(
         working_dir = project_working_dir
         logger.info(f"[{request_id}] PM mode: cwd={working_dir}, skipping SDLC classification")
     else:
-        # Dev mode: use classification from bridge (no re-classification).
-        # The bridge handler already classified via routing.py and stored
-        # classification_type on the AgentSession. Read it from session if
-        # available, otherwise fall back to a simple heuristic.
-        classification = None
-        if session_id:
-            try:
-                from models.agent_session import AgentSession
+        # Dev mode: classify and route as before
+        from bridge.routing import classify_work_request
 
-                sessions = list(AgentSession.query.filter(session_id=session_id))
-                active = [s for s in sessions if s.status in ("running", "active", "pending")]
-                candidates = active if active else sessions
-                if candidates:
-                    candidates.sort(key=lambda s: s.created_at or 0, reverse=True)
-                    classification = candidates[0].classification_type
-            except Exception as e:
-                logger.debug(f"[{request_id}] Could not read classification from session: {e}")
+        classification = classify_work_request(message)
+        # If message references an issue number, mark ISSUE stage complete.
+        # This is the single source of truth for is_sdlc — stage_states.
+        if classification == "sdlc" and session_id:
+            import re as _issue_re
 
-        if not classification:
-            # Fallback: check for PR/issue references before defaulting to question.
-            # The async classifier can lose the race with job pickup, so this
-            # fast-path catches messages like "Complete PR 478" that must be SDLC.
-            import re as _re_cls
+            if _issue_re.search(r"(?:issue|#)\s*(\d+)", message, _issue_re.IGNORECASE):
+                try:
+                    from bridge.pipeline_state import PipelineState
+                    from models.agent_session import AgentSession
 
-            if _re_cls.search(
-                r"(?:issue|pr|pull request)\s+#?\d+", message.lower()
-            ) or _re_cls.match(r"^#\d+$", message.strip().lower()):
-                classification = "sdlc"
-                logger.info(
-                    f"[{request_id}] Fast-path SDLC classification (PR/issue reference in message)"
-                )
-            else:
-                classification = "question"
-
+                    sessions = list(AgentSession.query.filter(session_id=session_id))
+                    if sessions:
+                        ps = PipelineState(sessions[0])
+                        issue_state = ps.states.get("ISSUE", "pending")
+                        if issue_state in ("pending", "ready"):
+                            ps.start_stage("ISSUE")
+                            ps.complete_stage("ISSUE")
+                            logger.info(
+                                f"[{request_id}] Marked ISSUE stage complete "
+                                f"(issue reference in message)"
+                            )
+                except Exception as e:
+                    logger.debug(f"ISSUE stage upsert failed (non-fatal): {e}")
         if classification == "sdlc" and project_working_dir != AI_REPO_ROOT:
             working_dir = AI_REPO_ROOT
             logger.info(
@@ -1443,6 +1423,8 @@ async def get_agent_response_sdk(
     enriched_message += f"\n\nFROM: {sender_name}"
     if chat_title:
         enriched_message += f" in {chat_title}"
+    if workflow_id:
+        enriched_message += f"\nWORKFLOW_ID: {workflow_id}"
     enriched_message += f"\nSESSION_ID: {session_id}"
     if task_list_id:
         enriched_message += f"\nTASK_SCOPE: {task_list_id}"
@@ -1452,21 +1434,7 @@ async def get_agent_response_sdk(
         "work initiated in this specific session. Do not include work, PRs, or "
         "requests from other sessions, other senders, or prior conversation threads."
     )
-    # For SDLC-routed requests, inject target repo context (never for PM mode).
-    # ChatSession (session_type="chat") gets full pipeline instructions.
-    # All sessions are ChatSessions — orchestrate via dev-session subagent
-    _session_type = None
-    if session_id:
-        try:
-            from models.agent_session import AgentSession as _AgentSession
-
-            _sessions = list(_AgentSession.query.filter(session_id=session_id))
-            if _sessions:
-                _session_type = getattr(_sessions[0], "session_type", None)
-        except Exception:
-            pass
-
-    # Cross-repo SDLC: inject target repo context
+    # For SDLC-routed requests, inject target repo context (never for PM mode)
     if project_mode != "pm" and classification == "sdlc" and project_working_dir != AI_REPO_ROOT:
         github_config = project.get("github", {}) if project else {}
         github_org = github_config.get("org", "")
@@ -1476,145 +1444,23 @@ async def get_agent_response_sdk(
         )
         if github_org and github_repo:
             enriched_message += f"\nGITHUB: {github_org}/{github_repo}"
-
-    # ChatSession routing: classify intent and choose Q&A or PM dispatch path.
-    # Q&A mode answers informational queries directly without spawning DevSession.
-    _qa_mode = False
-    if _session_type == "chat":
-        # Config-driven mode bypass: skip classifier when mode is already known
-        from bridge.routing import resolve_chat_mode as _resolve_mode
-
-        _config_mode = _resolve_mode(project, chat_title, is_dm=(chat_title is None))
-
-        if _config_mode == "qa":
-            # DMs and Q&A-persona groups: skip classifier, go straight to Q&A
-            _qa_mode = True
-            logger.info(
-                f"[{request_id}] Config-driven Q&A mode "
-                f"(mode={_config_mode!r}, is_dm={chat_title is None})"
-            )
-            # Record synthetic classification metric for observability
-            try:
-                from agent.qa_metrics import record_classification
-
-                record_classification("qa", 1.0)
-                logger.debug(
-                    f"[{request_id}] Recorded synthetic qa classification (config-determined)"
-                )
-            except Exception:
-                pass  # Best-effort metrics
-            # Update session qa_mode flag
-            if session_id:
-                try:
-                    from models.agent_session import AgentSession as _QASession
-
-                    for _s in _QASession.query.filter(session_id=session_id):
-                        if _s.status in ("running", "active", "pending"):
-                            _s.qa_mode = True
-                            _s.save()
-                            break
-                except Exception:
-                    pass  # Best-effort
-        elif _config_mode in ("pm", "dev"):
-            # PM/Dev persona groups: skip classifier, use PM dispatch (not Q&A)
-            logger.info(f"[{request_id}] Config-driven {_config_mode} mode, skipping classifier")
-        else:
-            # Unconfigured: fall through to intent classifier
-            try:
-                from agent.intent_classifier import classify_intent
-                from agent.qa_metrics import record_classification
-
-                _intent_result = await classify_intent(message)
-                record_classification(_intent_result.intent, _intent_result.confidence)
-                logger.info(
-                    f"[{request_id}] Intent: {_intent_result.intent} "
-                    f"(conf={_intent_result.confidence:.2f}): {_intent_result.reasoning}"
-                )
-
-                if _intent_result.is_qa:
-                    _qa_mode = True
-                    logger.info(f"[{request_id}] Routing to Q&A mode (direct response)")
-                    # Update session classification_type so nudge loop uses reduced cap
-                    if session_id:
-                        try:
-                            from models.agent_session import AgentSession as _QASession
-
-                            for _s in _QASession.query.filter(session_id=session_id):
-                                if _s.status in ("running", "active", "pending"):
-                                    _s.qa_mode = True
-                                    _s.save()
-                                    break
-                        except Exception:
-                            pass  # Best-effort
-            except Exception as e:
-                logger.warning(
-                    f"[{request_id}] Intent classification failed, defaulting to PM dispatch: {e}"
-                )
-
-        if _qa_mode:
-            # Q&A mode: inject Q&A instructions instead of PM dispatch
-            from agent.qa_handler import build_qa_instructions
-
-            enriched_message += build_qa_instructions()
-        else:
-            # PM dispatch: orchestrate SDLC work stage-by-stage
-            enriched_message += (
-                "\n\nYou are the PM. Orchestrate SDLC work stage-by-stage:\n"
-                "1. **Assess the current stage** — use read-only Bash commands "
-                "(gh issue view, gh pr view, gh pr list, grep) to determine "
-                "where work stands. You can run Bash for reads freely.\n"
-                "1.5. **Gather prior stage context** — if a tracking issue exists, "
-                "fetch the last few comments with "
-                "`gh api repos/{owner}/{repo}/issues/{number}/comments` and look for "
-                "comments containing `<!-- sdlc-stage-comment -->`. Include a summary "
-                "of prior stage findings in the DevSession prompt so the next stage "
-                "has full context from previous stages.\n"
-                "2. **Spawn one dev-session for the next stage** — use the Agent tool "
-                "to dispatch exactly one stage at a time:\n"
-                '   Agent(subagent_type="dev-session", description="<stage>: <short desc>", '
-                'prompt="Stage: <PLAN|BUILD|TEST|PATCH|REVIEW|DOCS>\\n'
-                "Issue: <URL>\\nPR: <URL if exists>\\n"
-                "Current state: <what's already done>\\n"
-                'Acceptance criteria: <what done looks like>")\n'
-                "3. **Verify the result** — check that the stage completed successfully "
-                "before progressing to the next one.\n"
-                "4. **Repeat** — assess, spawn, verify until the pipeline is complete "
-                "or you need human input.\n\n"
-                "For trivial or docs-only work, use your judgment on whether the full "
-                "pipeline is warranted.\n"
-                "Use the Agent tool for all coding work — slash commands like /do-build "
-                "and /do-test are the dev-session's internal tools.\n\n"
-                "**Communicating with the stakeholder:**\n"
-                "You can send Telegram messages directly using:\n"
-                '  `python tools/send_telegram.py "Your message here"`\n'
-                "This sends your message immediately to the chat. Use it for:\n"
-                "- Status updates and progress reports\n"
-                "- Questions that need human input\n"
-                "- Final delivery summaries\n"
-                "Write in business terms — never expose SDLC stage names, "
-                "pipeline internals, or implementation details. "
-                "Speak like a project manager updating a stakeholder.\n"
-                "If you don't call this tool, your return text will be "
-                "automatically summarized and sent (fallback behavior)."
-            )
+        enriched_message += "\nInvoke /sdlc immediately."
     enriched_message += f"\nMESSAGE: {message}"
 
     # Log prompt summary before sending to agent
+    has_workflow = bool(workflow_id)
     has_worker_rules = project_mode != "pm"
     logger.info(
         f"[{request_id}] Sending to agent: {len(enriched_message)} chars, "
-        f"classification={classification}, "
+        f"classification={classification}, has_workflow={has_workflow}, "
         f"task_list={task_list_id or 'none'}, mode={project_mode}"
     )
     wr_label = "yes" if has_worker_rules else "no (pm mode)"
     is_dm = chat_title is None
-    # ChatSession always uses PM persona; otherwise resolve from config
-    if _session_type == "chat":
-        persona = "project-manager"
-    else:
-        persona = _resolve_persona(project, chat_title, is_dm=is_dm)
+    persona = _resolve_persona(project, chat_title, is_dm=is_dm)
     logger.info(
         f"[{request_id}] Context: persona={persona}, worker_rules={wr_label}, "
+        f"workflow_context={'yes' if has_workflow else 'no'}, "
         f"session_id={session_id}"
     )
 
@@ -1626,17 +1472,9 @@ async def get_agent_response_sdk(
 
         logger.info(f"[{request_id}] Resolved persona: {persona}")
 
-        # Build system prompt based on persona and project mode.
-        # ChatSession (session_type="chat") uses PM persona with read-only permissions.
+        # Build system prompt based on persona and project mode
         custom_system_prompt = None
-        _permission_mode = "bypassPermissions"  # Default: full permissions
-
-        if _session_type == "chat":
-            # ChatSession: PM persona, full permissions but hook-restricted.
-            # Can write to docs/ and use gh CLI. Code writes blocked by pre_tool_use hook.
-            custom_system_prompt = load_pm_system_prompt(working_dir)
-            logger.info(f"[{request_id}] ChatSession mode: PM persona, bypassPermissions")
-        elif project_mode == "pm":
+        if project_mode == "pm":
             # PM mode: use PM system prompt (no WORKER_RULES, loads work-vault CLAUDE.md)
             custom_system_prompt = load_pm_system_prompt(working_dir)
         elif persona == "teammate":
@@ -1669,7 +1507,7 @@ async def get_agent_response_sdk(
         agent = ValorAgent(
             working_dir=working_dir,
             system_prompt=custom_system_prompt,
-            permission_mode=_permission_mode,
+            workflow_id=workflow_id,
             task_list_id=task_list_id,
             chat_id=chat_id,
             project_key=_project_key,
@@ -1677,21 +1515,11 @@ async def get_agent_response_sdk(
             job_id=job_id,
             gh_repo=_gh_repo,
             target_repo=project_working_dir,
-            session_type=_session_type,
         )
         response = await agent.query(enriched_message, session_id=session_id)
 
         elapsed = time.time() - start_time
         logger.info(f"[{request_id}] SDK responded in {elapsed:.1f}s ({len(response)} chars)")
-
-        # Record response time metric for Q&A observability
-        if _session_type == "chat":
-            try:
-                from agent.qa_metrics import record_response_time
-
-                record_response_time("qa" if _qa_mode else "work", elapsed)
-            except Exception:
-                pass  # Best-effort metrics
 
         return response
 

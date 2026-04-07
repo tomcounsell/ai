@@ -8,7 +8,7 @@ from pathlib import Path
 
 from telethon import TelegramClient
 from telethon.tl.functions.messages import SendReactionRequest
-from telethon.tl.types import Message, ReactionEmoji
+from telethon.tl.types import ReactionEmoji
 
 logger = logging.getLogger(__name__)
 
@@ -331,42 +331,6 @@ def clean_message(text: str, project: dict | None) -> str:
     return result.strip()
 
 
-def _truncate_at_sentence_boundary(text: str, limit: int = 4096) -> str:
-    """Truncate text at a sentence boundary within the character limit.
-
-    Finds the last sentence-ending punctuation (. ! ?) followed by whitespace
-    or end-of-string within the limit. Falls back to raw truncation with
-    ellipsis if no sentence boundary is found within the last 500 characters.
-
-    Args:
-        text: The text to truncate.
-        limit: Maximum character count (default: Telegram's 4096 limit).
-
-    Returns:
-        Truncated text ending at a complete sentence, or '...' fallback.
-    """
-    if not text or len(text) <= limit:
-        return text or ""
-
-    # Reserve space for potential ellipsis
-    search_text = text[: limit - 3]
-
-    # Look for sentence boundaries in the last 500 chars
-    search_start = max(0, len(search_text) - 500)
-    search_window = search_text[search_start:]
-
-    # Match . or ! or ? followed by whitespace or end
-    matches = list(re.finditer(r"[.!?](?:\s|$)", search_window))
-
-    if matches:
-        last_match = matches[-1]
-        cut_pos = search_start + last_match.start() + 1
-        return text[:cut_pos].rstrip()
-
-    # No sentence boundary found -- fall back to raw truncation
-    return text[: limit - 3] + "..."
-
-
 async def send_response_with_files(
     client: TelegramClient,
     event,
@@ -374,7 +338,7 @@ async def send_response_with_files(
     chat_id: int | None = None,
     reply_to: int | None = None,
     session=None,
-) -> Message | None:
+) -> bool:
     """
     Send response to Telegram, handling both files and text.
 
@@ -384,8 +348,7 @@ async def send_response_with_files(
     4. Send remaining text (if any) with Markdown formatting
 
     Can be called with event (handler context) or chat_id+reply_to (queue context).
-    Returns the sent Message object if text was sent, None if nothing was sent.
-    Callers that only need a truthy/falsy check can still use `if sent:`.
+    Returns True if any content was sent, False otherwise.
 
     Args:
         session: Optional AgentSession for summarizer context enrichment.
@@ -396,7 +359,7 @@ async def send_response_with_files(
 
     if not _chat_id:
         logger.error("send_response_with_files: no chat_id available")
-        return None
+        return False
 
     # Filter out tool logs before processing
     original_response = response
@@ -411,7 +374,7 @@ async def send_response_with_files(
             )
             response = "Done."
         else:
-            return None
+            return False
 
     text, files = extract_files_from_response(response)
 
@@ -430,35 +393,8 @@ async def send_response_with_files(
         except Exception:
             pass  # Fall back to existing session object
 
-    # PM self-messaging bypass: if the PM already sent messages via the
-    # send_telegram tool during this session (or its parent ChatSession in
-    # SDLC flows), skip the summarizer entirely. The PM authored its own
-    # messages — the summarizer would be redundant.
-    # Only set emoji reaction (handled by the caller). See issue #497, #571.
-    # NOTE: We still send any extracted files (<<FILE:>> markers) before
-    # returning, so file attachments are not lost on PM self-message sessions.
-    pm_bypass = session and hasattr(session, "has_pm_messages") and session.has_pm_messages()
-    pm_bypass_source = "session"
-    if not pm_bypass and session and hasattr(session, "get_parent_chat_session"):
-        parent = session.get_parent_chat_session()
-        if parent and hasattr(parent, "has_pm_messages") and parent.has_pm_messages():
-            pm_bypass = True
-            pm_bypass_source = "parent"
-    if pm_bypass:
-        # Log pm_sent_message_ids from the source that triggered the bypass
-        if pm_bypass_source == "parent" and hasattr(session, "get_parent_chat_session"):
-            _parent = session.get_parent_chat_session()
-            _bypass_ids = getattr(_parent, "pm_sent_message_ids", []) if _parent else []
-        else:
-            _bypass_ids = getattr(session, "pm_sent_message_ids", [])
-        logger.info(
-            f"Skipping summarizer: PM self-messaged during {pm_bypass_source} "
-            f"{getattr(session, 'session_id', 'unknown')} "
-            f"(pm_sent_message_ids={_bypass_ids})"
-        )
-
     is_sdlc = session and hasattr(session, "is_sdlc") and session.is_sdlc
-    should_summarize = not pm_bypass and text and (is_sdlc or len(text) >= 200)
+    should_summarize = text and (is_sdlc or len(text) >= 200)
     if should_summarize:
         try:
             from bridge.summarizer import summarize_response
@@ -549,26 +485,20 @@ async def send_response_with_files(
             logger.error(f"Failed to send file {file_path}: {e}")
             await client.send_message(_chat_id, f"Failed to send file: {file_path.name}")
 
-    # PM bypass (dual-personality guard): files have been sent above,
-    # skip text/summarizer output. This prevents sending both PM
-    # self-messages AND a summarized version of the same content.
-    # Guard coverage: pm_bypass blocks summarization AND text sending.
-    # Return a sentinel truthy value (True casts to int 1 which is truthy) since
-    # PM self-messages aren't tracked via the text send path.
-    if pm_bypass:
-        return True  # type: ignore[return-value]  # PM already delivered it
+    # Track if we sent anything
+    sent_content = bool(files)
 
     # Send text if there's meaningful content
-    sent_msg = None
     if text and not text.isspace():
-        # Sentence-aware truncation at Telegram's 4096-char limit
+        # Safety truncation at Telegram's limit (summarizer handles graceful shortening)
         if len(text) > 4096:
-            text = _truncate_at_sentence_boundary(text, limit=4096)
+            text = text[:4093] + "..."
         try:
             # Use markdown parse mode with plain-text fallback
             from bridge.markdown import send_markdown
 
-            sent_msg = await send_markdown(client, _chat_id, text, reply_to=_reply_to)
+            await send_markdown(client, _chat_id, text, reply_to=_reply_to)
+            sent_content = True
         except Exception as e:
             logger.error(f"Failed to send text message to chat {_chat_id} ({len(text)} chars): {e}")
             # Persist to dead-letter queue for later retry
@@ -583,13 +513,7 @@ async def send_response_with_files(
             except Exception as dl_err:
                 logger.error(f"Dead-letter persist also failed: {dl_err}")
 
-    # Return the sent Message object if text was sent; fall back to truthy if
-    # only files were sent (no message_id available from file sends).
-    if sent_msg is not None:
-        return sent_msg
-    if files:
-        return True  # type: ignore[return-value]  # files were sent, no text Message object
-    return None
+    return sent_content
 
 
 def get_processing_emoji(message: str) -> str:

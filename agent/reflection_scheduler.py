@@ -17,7 +17,6 @@ import asyncio
 import importlib
 import inspect
 import logging
-import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,13 +25,6 @@ from typing import Any
 import yaml
 
 from models.reflection import Reflection
-
-# Memory warning threshold in bytes (100MB)
-MEMORY_DELTA_WARNING_BYTES = 100 * 1024 * 1024
-
-# Default timeouts in seconds
-DEFAULT_FUNCTION_TIMEOUT = 1800  # 30 minutes
-DEFAULT_AGENT_TIMEOUT = 3600  # 1 hour
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +47,6 @@ class ReflectionEntry:
     callable: str | None = None  # dotted Python path for function type
     command: str | None = None  # shell command for agent type
     enabled: bool = True
-    timeout: int | None = None  # per-reflection timeout in seconds (None = use default)
 
     def validate(self) -> list[str]:
         """Validate this entry, returning a list of error messages."""
@@ -72,21 +63,7 @@ class ReflectionEntry:
             errors.append("callable is required for execution_type: function")
         if self.execution_type == "agent" and not self.command:
             errors.append("command is required for execution_type: agent")
-        if self.timeout is not None and self.timeout <= 0:
-            errors.append(f"timeout must be positive, got {self.timeout}")
         return errors
-
-    def effective_timeout(self) -> int:
-        """Return the effective timeout for this reflection.
-
-        Uses the explicit timeout if set, otherwise falls back to
-        type-based defaults (30 min for function, 60 min for agent).
-        """
-        if self.timeout is not None:
-            return self.timeout
-        if self.execution_type == "agent":
-            return DEFAULT_AGENT_TIMEOUT
-        return DEFAULT_FUNCTION_TIMEOUT
 
 
 def load_registry(path: Path | None = None) -> list[ReflectionEntry]:
@@ -122,7 +99,6 @@ def load_registry(path: Path | None = None) -> list[ReflectionEntry]:
             continue
 
         try:
-            raw_timeout = raw.get("timeout")
             entry = ReflectionEntry(
                 name=raw.get("name", ""),
                 description=raw.get("description", ""),
@@ -132,7 +108,6 @@ def load_registry(path: Path | None = None) -> list[ReflectionEntry]:
                 callable=raw.get("callable"),
                 command=raw.get("command"),
                 enabled=raw.get("enabled", True),
-                timeout=int(raw_timeout) if raw_timeout is not None else None,
             )
         except (TypeError, ValueError) as e:
             logger.warning("Skipping malformed registry entry %s: %s", raw.get("name", "?"), e)
@@ -228,21 +203,8 @@ async def execute_function_reflection(entry: ReflectionEntry) -> None:
         await loop.run_in_executor(None, func)
 
 
-def _get_memory_rss() -> int | None:
-    """Return current process RSS in bytes, or None if psutil unavailable."""
-    try:
-        import psutil
-
-        return psutil.Process(os.getpid()).memory_info().rss
-    except Exception:
-        return None
-
-
 async def run_reflection(entry: ReflectionEntry, state: Reflection) -> None:
     """Execute a single reflection and update its state.
-
-    Includes memory instrumentation (before/after RSS snapshots) and
-    timeout enforcement via asyncio.wait_for().
 
     Args:
         entry: The registry entry describing the reflection
@@ -251,34 +213,14 @@ async def run_reflection(entry: ReflectionEntry, state: Reflection) -> None:
     logger.info("[reflection] Starting: %s (%s)", entry.name, entry.execution_type)
     state.mark_started()
 
-    # Memory snapshot before execution
-    mem_before = _get_memory_rss()
-    if mem_before is not None:
-        logger.info(
-            "[reflection] Memory before %s: %.1fMB",
-            entry.name,
-            mem_before / (1024 * 1024),
-        )
-
-    timeout = entry.effective_timeout()
     start_time = time.time()
     try:
         if entry.execution_type == "function":
-            # Wrap in asyncio.wait_for for timeout enforcement
-            # Note: for sync callables in run_in_executor, wait_for raises
-            # TimeoutError but cannot cancel the thread (detection-only).
-            # For async callables, cancellation works correctly.
-            await asyncio.wait_for(
-                execute_function_reflection(entry),
-                timeout=timeout,
-            )
+            await execute_function_reflection(entry)
         else:
             # Agent-type reflections are enqueued to the job queue
             # instead of executed directly
-            await asyncio.wait_for(
-                _enqueue_agent_reflection(entry),
-                timeout=timeout,
-            )
+            await _enqueue_agent_reflection(entry)
 
         duration = time.time() - start_time
         state.mark_completed(duration)
@@ -286,16 +228,6 @@ async def run_reflection(entry: ReflectionEntry, state: Reflection) -> None:
             "[reflection] Completed: %s (%.1fs)",
             entry.name,
             duration,
-        )
-    except TimeoutError:
-        duration = time.time() - start_time
-        error_msg = f"TimeoutError: reflection '{entry.name}' exceeded {timeout}s timeout"
-        state.mark_completed(duration, error=error_msg)
-        logger.error(
-            "[reflection] Timeout: %s after %.1fs (limit: %ds)",
-            entry.name,
-            duration,
-            timeout,
         )
     except Exception as e:
         duration = time.time() - start_time
@@ -308,26 +240,6 @@ async def run_reflection(entry: ReflectionEntry, state: Reflection) -> None:
             error_msg,
             exc_info=True,
         )
-    finally:
-        # Memory snapshot after execution
-        mem_after = _get_memory_rss()
-        if mem_before is not None and mem_after is not None:
-            delta = mem_after - mem_before
-            delta_mb = delta / (1024 * 1024)
-            logger.info(
-                "[reflection] Memory after %s: %.1fMB (delta: %+.1fMB)",
-                entry.name,
-                mem_after / (1024 * 1024),
-                delta_mb,
-            )
-            if delta > MEMORY_DELTA_WARNING_BYTES:
-                logger.warning(
-                    "[reflection] HIGH MEMORY DELTA for %s: %+.1fMB (before=%.1fMB, after=%.1fMB)",
-                    entry.name,
-                    delta_mb,
-                    mem_before / (1024 * 1024),
-                    mem_after / (1024 * 1024),
-                )
 
 
 async def _enqueue_agent_reflection(entry: ReflectionEntry) -> None:

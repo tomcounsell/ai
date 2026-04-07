@@ -46,6 +46,7 @@ def _make_fake_session(
     started_at=None,
     last_activity=None,
     project_key="test",
+    last_transition_at=None,
     history=None,
 ):
     """Create a mock AgentSession for report testing."""
@@ -58,6 +59,7 @@ def _make_fake_session(
     mock.started_at = started_at or now - 200
     mock.last_activity = last_activity or now - 10
     mock.project_key = project_key
+    mock.last_transition_at = last_transition_at
     mock._get_history_list.return_value = history or []
     return mock
 
@@ -119,6 +121,7 @@ class TestGetSessionReport:
             status="pending",
             created_at=now - 600,  # 10 min, over 5 min threshold
             started_at=None,
+            last_transition_at=None,
         )
         stalled.started_at = None
         healthy = _make_fake_session(
@@ -126,6 +129,7 @@ class TestGetSessionReport:
             status="active",
             last_activity=now - 10,
             started_at=now - 60,
+            last_transition_at=None,
         )
         mock_query = MagicMock()
         mock_query.all.return_value = [stalled, healthy]
@@ -158,6 +162,7 @@ class TestGetSessionReport:
             status="pending",
             created_at=now - 600,
             started_at=None,
+            last_transition_at=None,
         )
         stalled.started_at = None
         mock_query = MagicMock()

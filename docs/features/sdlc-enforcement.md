@@ -266,7 +266,7 @@ MERGE is a formal pipeline stage routed after DOCS completes. See [SDLC Pipeline
 - [do-patch Skill](do-patch-skill.md) — repair loop invoked on test failure or review blockers
 - `.claude/hooks/validators/validate_commit_message.py` — commit message validation (blocks co-author trailers and empty messages)
 - `.claude/hooks/validators/validate_merge_guard.py` — merge guard hook (blocks `gh pr merge`)
-- `agent/build_pipeline.py` — build pipeline state read/write module
+- `agent/pipeline_state.py` — pipeline state read/write module
 - `.claude/hooks/validators/validate_sdlc_on_stop.py` — stop hook source
 - `agent/sdk_client.py` — `SDLC_WORKFLOW` constant, `load_system_prompt()`, `_check_no_direct_main_push()`
 - `agent/hooks/stop.py` — SDK stop hook that fires `_check_no_direct_main_push()`

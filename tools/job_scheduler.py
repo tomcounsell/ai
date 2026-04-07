@@ -13,16 +13,14 @@ Usage:
     python -m tools.job_scheduler bump --job-id <job_id>
     python -m tools.job_scheduler pop --project valor
     python -m tools.job_scheduler cancel --job-id <job_id>
-    python -m tools.job_scheduler list --status killed,abandoned
-    python -m tools.job_scheduler cleanup --age 30 --dry-run
-    python -m tools.job_scheduler cleanup --age 30
+    python -m tools.job_scheduler playlist --issues 440 445 397
+    python -m tools.job_scheduler playlist-status
 """
 
 import argparse
 import json
 import logging
 import os
-import signal
 import subprocess
 import sys
 import time
@@ -127,7 +125,7 @@ def _get_parent_session(parent_job_id: str):
 # Persona restrictions: which personas can perform which actions
 # teammate cannot schedule SDLC jobs; all other actions are unrestricted
 PERSONA_RESTRICTED_ACTIONS = {
-    "teammate": {"schedule"},
+    "teammate": {"schedule", "playlist"},
 }
 
 
@@ -137,7 +135,7 @@ def _check_persona_permission(action_type: str) -> dict | None:
     Reads persona from PERSONA env var (default: "developer" — permissive).
 
     Args:
-        action_type: The action being attempted (e.g., "schedule").
+        action_type: The action being attempted (e.g., "schedule", "playlist").
 
     Returns:
         None if allowed, or a dict with error details if blocked.
@@ -157,6 +155,217 @@ def _check_persona_permission(action_type: str) -> dict | None:
             "action": action_type,
         }
     return None
+
+
+# --- Playlist operations (Redis list) ---
+
+PLAYLIST_KEY_PREFIX = "playlist:"
+PLAYLIST_RETRIES_KEY_PREFIX = "playlist_retries:"
+
+
+def _get_redis():
+    """Get the popoto Redis connection."""
+    from popoto.redis_db import POPOTO_REDIS_DB
+
+    return POPOTO_REDIS_DB
+
+
+def _playlist_key(project_key: str) -> str:
+    """Redis key for a project's playlist."""
+    return f"{PLAYLIST_KEY_PREFIX}{project_key}"
+
+
+def _retries_key(project_key: str) -> str:
+    """Redis key for tracking playlist retry counts."""
+    return f"{PLAYLIST_RETRIES_KEY_PREFIX}{project_key}"
+
+
+def playlist_push(project_key: str, issue_numbers: list[int]) -> int:
+    """Append issue numbers to the end of the playlist.
+
+    Args:
+        project_key: The project key for scoping.
+        issue_numbers: List of issue numbers to append.
+
+    Returns:
+        The new length of the playlist.
+    """
+    r = _get_redis()
+    key = _playlist_key(project_key)
+    for num in issue_numbers:
+        r.rpush(key, str(num))
+    return r.llen(key)
+
+
+def playlist_pop(project_key: str) -> int | None:
+    """Pop the next issue number from the front of the playlist.
+
+    Args:
+        project_key: The project key for scoping.
+
+    Returns:
+        The issue number, or None if the playlist is empty.
+    """
+    r = _get_redis()
+    key = _playlist_key(project_key)
+    value = r.lpop(key)
+    if value is None:
+        return None
+    return int(value)
+
+
+def playlist_status(project_key: str) -> list[int]:
+    """Get all issue numbers in the playlist (in order).
+
+    Args:
+        project_key: The project key for scoping.
+
+    Returns:
+        List of issue numbers in playlist order.
+    """
+    r = _get_redis()
+    key = _playlist_key(project_key)
+    items = r.lrange(key, 0, -1)
+    return [int(item) for item in items]
+
+
+def playlist_requeue(project_key: str, issue_number: int) -> bool:
+    """Requeue a failed issue to the end of the playlist (max 1 retry).
+
+    Args:
+        project_key: The project key for scoping.
+        issue_number: The issue number to requeue.
+
+    Returns:
+        True if requeued, False if max retries exceeded.
+    """
+    r = _get_redis()
+    retries_key = _retries_key(project_key)
+
+    # Check retry count
+    current_retries = r.hget(retries_key, str(issue_number))
+    if current_retries is not None and int(current_retries) >= 1:
+        return False
+
+    # Increment retry count and requeue
+    r.hincrby(retries_key, str(issue_number), 1)
+    r.rpush(_playlist_key(project_key), str(issue_number))
+    return True
+
+
+def playlist_clear(project_key: str) -> None:
+    """Clear the playlist and retry counts for a project."""
+    r = _get_redis()
+    r.delete(_playlist_key(project_key))
+    r.delete(_retries_key(project_key))
+
+
+def cmd_playlist(args: argparse.Namespace) -> int:
+    """Enqueue multiple issues for sequential SDLC processing."""
+    # Persona gate
+    perm = _check_persona_permission("playlist")
+    if perm:
+        _output(perm)
+        return 1
+
+    ctx = _get_env_context()
+    project_key = args.project or ctx["project_key"]
+
+    if not args.issues:
+        _output({"status": "error", "message": "No issues provided. Use --issues 440 445 397"})
+        return 1
+
+    # Validate all issue numbers
+    valid_issues = []
+    skipped_issues = []
+    for issue_num in args.issues:
+        if issue_num <= 0:
+            skipped_issues.append({"issue": issue_num, "reason": "invalid issue number"})
+            continue
+
+        issue = _validate_issue(issue_num)
+        if issue is None:
+            skipped_issues.append({"issue": issue_num, "reason": "not found or not accessible"})
+            continue
+        if issue.get("state") == "closed":
+            skipped_issues.append({"issue": issue_num, "reason": "issue is closed"})
+            continue
+
+        valid_issues.append({"number": issue_num, "title": issue.get("title", f"#{issue_num}")})
+
+    if not valid_issues:
+        _output(
+            {
+                "status": "error",
+                "message": "No valid issues to enqueue.",
+                "skipped": skipped_issues,
+            }
+        )
+        return 1
+
+    # Add valid issues to playlist
+    issue_numbers = [v["number"] for v in valid_issues]
+    new_length = playlist_push(project_key, issue_numbers)
+
+    # Schedule the first issue immediately (if nothing is currently running)
+    first_issue = issue_numbers[0]
+
+    # Build a synthetic args namespace for cmd_schedule
+    schedule_args = argparse.Namespace(
+        issue=first_issue,
+        priority=args.priority or "normal",
+        project=project_key,
+        after=None,
+        parent_job=None,
+    )
+
+    # Pop the first issue from playlist since we're scheduling it now
+    playlist_pop(project_key)
+
+    # Schedule the first issue
+    schedule_result = cmd_schedule(schedule_args)
+
+    result = {
+        "status": "playlist_created",
+        "project": project_key,
+        "enqueued": valid_issues,
+        "playlist_remaining": playlist_status(project_key),
+        "playlist_length": new_length - 1,  # minus the one we just scheduled
+        "first_scheduled": first_issue,
+        "schedule_exit_code": schedule_result,
+    }
+
+    if skipped_issues:
+        result["skipped"] = skipped_issues
+
+    _output(result)
+    return 0
+
+
+def cmd_playlist_status(args: argparse.Namespace) -> int:
+    """Show the current playlist status for a project."""
+    ctx = _get_env_context()
+    project_key = args.project or ctx["project_key"]
+
+    issues = playlist_status(project_key)
+
+    r = _get_redis()
+    retries_key = _retries_key(project_key)
+    retries = {}
+    if r.exists(retries_key):
+        raw = r.hgetall(retries_key)
+        retries = {k.decode() if isinstance(k, bytes) else k: int(v) for k, v in raw.items()}
+
+    _output(
+        {
+            "status": "ok",
+            "project": project_key,
+            "playlist": issues,
+            "playlist_length": len(issues),
+            "retry_counts": retries,
+        }
+    )
+    return 0
 
 
 def cmd_schedule(args: argparse.Namespace) -> int:
@@ -247,9 +456,6 @@ def cmd_schedule(args: argparse.Namespace) -> int:
     session_id = f"scheduled-{args.issue}-{uuid.uuid4().hex[:8]}"
     priority = args.priority or "normal"
 
-    # Session type: explicit flag > default (chat for issue-based work)
-    session_type = getattr(args, "session_type", None) or "chat"
-
     # Parent job inheritance
     parent_job_id = getattr(args, "parent_job", None)
     parent_session = None
@@ -306,9 +512,8 @@ def cmd_schedule(args: argparse.Namespace) -> int:
             message_text=message_text,
             sender_name="System (Scheduled)",
             chat_id=inherited_chat_id,
-            telegram_message_id=int(ctx["message_id"]) if ctx["message_id"] else 0,
+            message_id=int(ctx["message_id"]) if ctx["message_id"] else 0,
             classification_type=inherited_classification_type,
-            session_type=session_type,
             scheduled_after=scheduled_after,
             scheduling_depth=depth + 1,
             issue_url=issue_url,
@@ -417,7 +622,6 @@ def cmd_status(args: argparse.Namespace) -> int:
         waiting = list(
             AgentSession.query.filter(project_key=project_key, status="waiting_for_children")
         )
-        killed = list(AgentSession.query.filter(project_key=project_key, status="killed"))
 
         # Sort pending by priority then FIFO
         from agent.job_queue import PRIORITY_RANK
@@ -433,7 +637,6 @@ def cmd_status(args: argparse.Namespace) -> int:
             "pending_count": len(pending),
             "running_count": len(running),
             "waiting_for_children_count": len(waiting),
-            "killed_count": len(killed),
             "recent_completed_count": len(completed),
             "pending_jobs": [_format_job_info(j) for j in root_pending],
             "running_jobs": [_format_job_info(j) for j in running],
@@ -446,10 +649,6 @@ def cmd_status(args: argparse.Namespace) -> int:
         # Show child jobs separately if any are pending
         if child_pending:
             result["child_pending_jobs"] = [_format_job_info(j) for j in child_pending]
-
-        # Show killed jobs
-        if killed:
-            result["killed_jobs"] = [_format_job_info(j) for j in killed]
 
         _output(result)
         return 0
@@ -510,7 +709,7 @@ def cmd_push(args: argparse.Namespace) -> int:
             message_text=args.message,
             sender_name="System (Push)",
             chat_id=ctx["chat_id"],
-            telegram_message_id=int(ctx["message_id"]) if ctx["message_id"] else 0,
+            message_id=int(ctx["message_id"]) if ctx["message_id"] else 0,
             scheduling_depth=depth + 1,
             correlation_id=f"push-{uuid.uuid4().hex[:12]}",
         )
@@ -695,298 +894,6 @@ def cmd_cancel(args: argparse.Namespace) -> int:
         return 1
 
 
-def _find_process_by_session_id(session_id: str) -> int | None:
-    """Find a running process by matching session_id in its command-line args.
-
-    Uses pgrep -f to find processes whose arguments contain the session_id.
-    Returns the PID if found, None otherwise.
-    """
-    if not session_id:
-        return None
-    try:
-        result = subprocess.run(
-            ["pgrep", "-f", session_id],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode != 0 or not result.stdout.strip():
-            return None
-        # pgrep may return multiple PIDs; take the first non-self PID
-        my_pid = os.getpid()
-        for line in result.stdout.strip().split("\n"):
-            pid = int(line.strip())
-            if pid != my_pid:
-                return pid
-    except Exception:
-        pass
-    return None
-
-
-def _kill_process(pid: int) -> dict:
-    """Kill a process with SIGTERM -> wait 3s -> SIGKILL sequence.
-
-    Returns a dict with kill result details.
-    """
-    try:
-        os.kill(pid, signal.SIGTERM)
-        logger.info(f"Sent SIGTERM to PID {pid}")
-    except ProcessLookupError:
-        return {"pid": pid, "action": "already_dead"}
-    except PermissionError:
-        return {"pid": pid, "action": "permission_denied"}
-
-    # Wait up to 3s for graceful termination
-    for _ in range(6):
-        time.sleep(0.5)
-        try:
-            os.kill(pid, 0)  # Check if still alive
-        except ProcessLookupError:
-            return {"pid": pid, "action": "terminated_sigterm"}
-
-    # Still alive after 3s -- SIGKILL
-    try:
-        os.kill(pid, signal.SIGKILL)
-        logger.info(f"Sent SIGKILL to PID {pid}")
-        return {"pid": pid, "action": "terminated_sigkill"}
-    except ProcessLookupError:
-        return {"pid": pid, "action": "terminated_sigterm"}
-    except PermissionError:
-        return {"pid": pid, "action": "permission_denied"}
-
-
-def _kill_job(job, *, skip_process_kill: bool = False) -> dict:
-    """Kill a single job: terminate its subprocess and set status to killed.
-
-    Args:
-        job: AgentSession instance to kill.
-        skip_process_kill: If True, skip process termination (for pending jobs).
-
-    Returns a dict with kill result details.
-    """
-    from agent.job_queue import _extract_job_fields
-    from models.agent_session import AgentSession
-
-    result = {
-        "job_id": job.job_id,
-        "session_id": job.session_id,
-        "previous_status": job.status,
-    }
-
-    # Kill subprocess if running
-    process_result = None
-    if not skip_process_kill and job.status == "running":
-        pid = _find_process_by_session_id(job.session_id)
-        if pid:
-            process_result = _kill_process(pid)
-            result["process"] = process_result
-        else:
-            result["process"] = {"pid": None, "action": "no_process_found"}
-
-    # Set status to killed using delete-and-recreate (Popoto pattern)
-    fields = _extract_job_fields(job)
-    job.delete()
-    fields["status"] = "killed"
-    fields["completed_at"] = time.time()
-    new_job = AgentSession.create(**fields)
-    result["new_job_id"] = new_job.job_id
-    result["status"] = "killed"
-
-    logger.info(
-        f"Killed job {result['job_id']} (session={result['session_id']}, "
-        f"previous_status={result['previous_status']})"
-    )
-
-    return result
-
-
-def cmd_kill(args: argparse.Namespace) -> int:
-    """Kill running or pending jobs by job_id, session_id, or all."""
-    from models.agent_session import AgentSession
-
-    try:
-        targets = []
-
-        if getattr(args, "all", False):
-            # Kill all running + pending jobs
-            for status in ("running", "pending"):
-                targets.extend(list(AgentSession.query.filter(status=status)))
-            if not targets:
-                _output({"status": "ok", "message": "No running or pending jobs to kill."})
-                return 0
-
-        elif args.job_id:
-            if not args.job_id.strip():
-                _output({"status": "error", "message": "--job-id cannot be empty."})
-                return 1
-            # Search across all statuses
-            for status in ("running", "pending", "completed", "failed", "waiting_for_children"):
-                for job in AgentSession.query.filter(status=status):
-                    if job.job_id == args.job_id:
-                        targets.append(job)
-                        break
-                if targets:
-                    break
-
-            if not targets:
-                # Retry once after 1s (race condition during job transition)
-                time.sleep(1)
-                for status in ("running", "pending", "completed", "failed", "waiting_for_children"):
-                    for job in AgentSession.query.filter(status=status):
-                        if job.job_id == args.job_id:
-                            targets.append(job)
-                            break
-                    if targets:
-                        break
-
-            if not targets:
-                _output({"status": "error", "message": f"Job {args.job_id} not found."})
-                return 1
-
-        elif args.session_id:
-            if not args.session_id.strip():
-                _output({"status": "error", "message": "--session-id cannot be empty."})
-                return 1
-            for status in ("running", "pending", "completed", "failed", "waiting_for_children"):
-                for job in AgentSession.query.filter(status=status):
-                    if job.session_id == args.session_id:
-                        targets.append(job)
-                        break
-                if targets:
-                    break
-
-            if not targets:
-                _output({"status": "error", "message": f"Session {args.session_id} not found."})
-                return 1
-        else:
-            _output(
-                {
-                    "status": "error",
-                    "message": "One of --job-id, --session-id, or --all is required.",
-                }
-            )
-            return 1
-
-        # Kill all targets
-        results = []
-        for job in targets:
-            skip_process = job.status != "running"
-            kill_result = _kill_job(job, skip_process_kill=skip_process)
-            results.append(kill_result)
-
-        _output(
-            {
-                "status": "killed",
-                "count": len(results),
-                "jobs": results,
-            }
-        )
-        return 0
-
-    except Exception as e:
-        _output({"status": "error", "message": f"Failed to kill job(s): {e}"})
-        return 1
-
-
-def cmd_list(args: argparse.Namespace) -> int:
-    """List sessions filtered by status."""
-    from models.agent_session import AgentSession
-
-    project_key = args.project or _get_env_context()["project_key"]
-    statuses = [s.strip() for s in args.status.split(",")]
-
-    try:
-        sessions = []
-        for status in statuses:
-            sessions.extend(list(AgentSession.query.filter(project_key=project_key, status=status)))
-
-        # Sort by created_at descending (newest first)
-        sessions.sort(key=lambda s: s.created_at or 0, reverse=True)
-
-        # Apply limit
-        if args.limit:
-            sessions = sessions[: args.limit]
-
-        items = []
-        for s in sessions:
-            item = {
-                "session_id": s.session_id,
-                "status": s.status,
-                "project_key": s.project_key,
-            }
-            if s.created_at:
-                age_min = int((time.time() - s.created_at) / 60)
-                item["created_at"] = datetime.fromtimestamp(s.created_at, tz=UTC).isoformat()
-                item["age_minutes"] = age_min
-            if s.message_text:
-                item["message_preview"] = (s.message_text or "")[:80]
-            items.append(item)
-
-        _output({"status": "ok", "count": len(items), "sessions": items})
-        return 0
-
-    except Exception as e:
-        _output({"status": "error", "message": f"Failed to list sessions: {e}"})
-        return 1
-
-
-def cmd_cleanup(args: argparse.Namespace) -> int:
-    """Delete stale sessions older than --age minutes in terminal statuses."""
-    from models.agent_session import AgentSession
-
-    project_key = args.project
-    terminal_statuses = ["killed", "abandoned", "failed"]
-    age_threshold = args.age * 60  # convert to seconds
-    now = time.time()
-
-    try:
-        targets = []
-        for status in terminal_statuses:
-            if project_key:
-                sessions = list(AgentSession.query.filter(project_key=project_key, status=status))
-            else:
-                sessions = list(AgentSession.query.filter(status=status))
-            for s in sessions:
-                age_sec = (now - float(s.created_at)) if s.created_at else 0
-                if age_sec > age_threshold:
-                    targets.append(s)
-
-        if not targets:
-            _output({"status": "ok", "message": "No stale sessions to clean up.", "deleted": 0})
-            return 0
-
-        if args.dry_run:
-            items = []
-            for s in targets:
-                age_min = int((now - float(s.created_at or 0)) / 60)
-                items.append(
-                    {
-                        "session_id": s.session_id,
-                        "status": s.status,
-                        "project_key": s.project_key,
-                        "age_minutes": age_min,
-                    }
-                )
-            _output({"status": "dry_run", "would_delete": len(items), "sessions": items})
-            return 0
-
-        for s in targets:
-            s.delete()
-
-        _output(
-            {
-                "status": "ok",
-                "deleted": len(targets),
-                "message": f"Deleted {len(targets)} stale session(s).",
-            }
-        )
-        return 0
-
-    except Exception as e:
-        _output({"status": "error", "message": f"Failed to clean up sessions: {e}"})
-        return 1
-
-
 def main():
     parser = argparse.ArgumentParser(
         prog="job_scheduler",
@@ -1000,12 +907,6 @@ def main():
     sched.add_argument("--priority", choices=["urgent", "high", "normal", "low"], default="normal")
     sched.add_argument("--project", help="Project key (default: from env or 'valor')")
     sched.add_argument("--after", help="Defer execution until this ISO 8601 datetime")
-    sched.add_argument(
-        "--session-type",
-        choices=["chat", "dev"],
-        help="Session type: chat (PM orchestrates) or dev (direct execution). "
-        "Default: chat for issue/PR work, dev for hotfixes.",
-    )
     sched.add_argument(
         "--parent-job",
         help="Parent job ID — creates this as a child job inheriting parent fields",
@@ -1037,35 +938,21 @@ def main():
     cancel = subparsers.add_parser("cancel", help="Cancel a specific pending job")
     cancel.add_argument("--job-id", required=True, help="Job ID to cancel")
 
-    # kill
-    kill = subparsers.add_parser("kill", help="Kill running or pending jobs")
-    kill_group = kill.add_mutually_exclusive_group(required=True)
-    kill_group.add_argument("--job-id", help="Kill a specific job by job ID")
-    kill_group.add_argument("--session-id", help="Kill a job by session ID")
-    kill_group.add_argument("--all", action="store_true", help="Kill all running and pending jobs")
+    # playlist
+    pl = subparsers.add_parser(
+        "playlist", help="Enqueue multiple issues for sequential SDLC processing"
+    )
+    pl.add_argument(
+        "--issues", type=int, nargs="+", required=True, help="Issue numbers to enqueue"
+    )
+    pl.add_argument(
+        "--priority", choices=["urgent", "high", "normal", "low"], default="normal"
+    )
+    pl.add_argument("--project", help="Project key")
 
-    # list
-    lst = subparsers.add_parser("list", help="List sessions filtered by status")
-    lst.add_argument(
-        "--status",
-        required=True,
-        help="Comma-separated statuses to filter (e.g. killed,abandoned,failed)",
-    )
-    lst.add_argument("--project", help="Project key (default: from env or 'valor')")
-    lst.add_argument("--limit", type=int, help="Max number of sessions to return")
-
-    # cleanup
-    clean = subparsers.add_parser("cleanup", help="Delete stale sessions in terminal statuses")
-    clean.add_argument(
-        "--age",
-        type=int,
-        default=30,
-        help="Delete sessions older than this many minutes (default: 30)",
-    )
-    clean.add_argument("--project", help="Scope to a specific project (default: all projects)")
-    clean.add_argument(
-        "--dry-run", action="store_true", help="Show what would be deleted without deleting"
-    )
+    # playlist-status
+    pls = subparsers.add_parser("playlist-status", help="Show current playlist status")
+    pls.add_argument("--project", help="Project key")
 
     args = parser.parse_args()
 
@@ -1081,9 +968,8 @@ def main():
         "pop": cmd_pop,
         "cancel": cmd_cancel,
         "children": cmd_children,
-        "kill": cmd_kill,
-        "list": cmd_list,
-        "cleanup": cmd_cleanup,
+        "playlist": cmd_playlist,
+        "playlist-status": cmd_playlist_status,
     }
 
     return commands[args.command](args)

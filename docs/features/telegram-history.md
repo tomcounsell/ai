@@ -26,7 +26,7 @@ All data is stored in **Redis** via Popoto ORM models. SQLite was removed as of 
 **`TelegramMessage`** (`models/telegram.py`) - Source of truth for all Telegram messages
 - `msg_id` - Auto-generated key
 - `chat_id` - Telegram chat ID (KeyField, used for filtering)
-- `message_id` - Telegram message ID (KeyField(null=True), enables O(1) indexed filter for reverse lookup)
+- `message_id` - Telegram message ID
 - `direction` - "in" or "out" (KeyField)
 - `sender` - Message sender name (KeyField)
 - `content` - Full message content (up to 50,000 chars, no truncation)

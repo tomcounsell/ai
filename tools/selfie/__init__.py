@@ -7,15 +7,13 @@ Valor's appearance is defined canonically from his profile photo.
 
 import base64
 import os
+from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
 from openai import OpenAI
 
-from bridge.utc import utc_now
-
 load_dotenv()
-load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")
 
 # Canonical appearance description derived from Valor's profile photo
 VALOR_APPEARANCE = (
@@ -101,7 +99,7 @@ def take_selfie(
         output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    timestamp = utc_now().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = output_dir / f"valor_selfie_{scene_label}_{timestamp}.png"
 
     if hasattr(image_data, "b64_json") and image_data.b64_json:

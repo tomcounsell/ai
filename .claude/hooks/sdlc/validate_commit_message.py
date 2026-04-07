@@ -61,20 +61,7 @@ def main():
         if branch != "main":
             allow()
 
-        # Only block code commits to main for repos with branch protection (popoto)
-        try:
-            repo_root = subprocess.check_output(
-                ["git", "rev-parse", "--show-toplevel"],
-                stderr=subprocess.DEVNULL,
-                text=True,
-            ).strip()
-            repo_name = os.path.basename(repo_root)
-            if repo_name != "popoto":
-                allow()
-        except Exception:
-            pass
-
-        # Popoto: block if staged files include code extensions
+        # On main branch — block if staged files include code extensions
         try:
             result = subprocess.run(
                 ["git", "diff", "--cached", "--name-only"],

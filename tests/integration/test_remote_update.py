@@ -335,20 +335,17 @@ class TestServiceManager:
         source = Path(self.SERVICE_SCRIPT).read_text()
         # install_service should reference both bridge and update plists
         assert "UPDATE_PLIST_PATH" in source
-        assert "StartInterval" in source
+        assert "StartCalendarInterval" in source
 
     def test_uninstall_removes_both_plists(self):
         source = Path(self.SERVICE_SCRIPT).read_text()
         # uninstall should handle update plist
         assert source.count("UPDATE_PLIST_PATH") >= 2  # defined + used in uninstall
 
-    def test_update_polling_interval_1800(self):
-        """Update plist should use StartInterval of 1800 (30 minutes)."""
+    def test_cron_schedule_06_and_18(self):
         source = Path(self.SERVICE_SCRIPT).read_text()
-        assert "<key>StartInterval</key>" in source
-        assert "<integer>1800</integer>" in source
-        # Should NOT use the old calendar-based schedule
-        assert "StartCalendarInterval" not in source
+        assert "<integer>6</integer>" in source
+        assert "<integer>18</integer>" in source
 
 
 # =============================================================================

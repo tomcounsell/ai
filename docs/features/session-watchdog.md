@@ -114,12 +114,7 @@ asyncio.create_task(watchdog_loop(telegram_client=client))
 
 Runs for the lifetime of the bridge process. No separate service or process management needed. The existing update system restarts the bridge, which automatically restarts the watchdog.
 
-**Relationship to PostToolUse health check**: The PostToolUse health check (`agent/health_check.py`) fires every 20 tool calls and uses a two-pronged kill mechanism when it detects an unhealthy session:
-
-1. **`watchdog_unhealthy` flag**: Sets a reason string on the AgentSession model in Redis. The nudge loop in `agent/job_queue.py` checks this flag via `is_session_unhealthy()` before auto-continuing. When flagged, the nudge loop delivers output to Telegram instead of sending "Keep working", breaking the auto-continue cycle.
-2. **`additionalContext` injection**: Returns a PostToolUse hook result with `additionalContext` telling Claude to stop immediately and summarize what blocked it.
-
-The session watchdog is complementary — it catches sessions that go *silent* (no tool calls happening), which the PostToolUse hook cannot detect.
+**Relationship to PostToolUse health check**: The existing health check fires every 20 tool calls and can kill sessions. The watchdog is complementary — it catches sessions that go *silent* (no tool calls happening), which the PostToolUse hook cannot detect.
 
 **Stall detection**: The watchdog also runs `check_stalled_sessions()` each cycle, which flags sessions stuck in transitional states (pending >5min, running >45min, active with no recent activity). For active sessions, stall detection is activity-based: the watchdog checks both the Redis `last_activity` field and in-memory timestamps from `sdk_client.get_session_last_activity()`, using whichever is more recent. Sessions producing tool calls or log output are never interrupted regardless of total runtime. See [Session Watchdog Reliability](session-watchdog-reliability.md) for the activity-based detection system and [Session Lifecycle Diagnostics](session-lifecycle-diagnostics.md) for logging details.
 
@@ -129,11 +124,7 @@ The session watchdog is complementary — it catches sessions that go *silent* (
 |------|---------|
 | `monitoring/session_watchdog.py` | Watchdog implementation (all detection + alerting) |
 | `monitoring/__init__.py` | Module exports |
-| `agent/health_check.py` | PostToolUse health check with watchdog_unhealthy flag and additionalContext injection |
-| `agent/job_queue.py` | Nudge loop checks `is_session_unhealthy()` before auto-continuing |
-| `models/agent_session.py` | `watchdog_unhealthy` field on AgentSession |
 | `bridge/telegram_bridge.py` | Integration point (launches watchdog task) |
 | `tests/unit/test_session_watchdog.py` | 30 unit tests |
-| `tests/unit/test_health_check.py` | 30 unit tests for PostToolUse health check |
 | `tests/unit/test_transcript_liveness.py` | 12 unit tests for transcript mtime check |
 | `docs/plans/session-watchdog.md` | Original plan document |

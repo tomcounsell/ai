@@ -8,14 +8,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-
-@pytest.fixture(autouse=True)
-def _mock_load_local_projects():
-    """Mock load_local_projects so tests don't require projects.json on disk."""
-    with patch("scripts.reflections.load_local_projects", return_value=[]):
-        yield
-
-
 # --- LLM Reflection Tests (Step 8) ---
 
 
@@ -115,7 +107,25 @@ class TestLLMReflection:
         assert result == []
 
 
-# --- Step 3 (now task_management) Task Cleanup ---
+# --- Step 3 Sentry Check ---
+
+
+class TestSentryCheck:
+    """Tests for Sentry check step."""
+
+    @pytest.mark.asyncio
+    async def test_sentry_skips_gracefully(self, tmp_path):
+        """Sentry check logs skip message and continues."""
+        from scripts.reflections import ReflectionRunner
+
+        runner = ReflectionRunner()
+        runner.state.findings = {}
+        await runner.step_check_sentry()
+        assert "sentry" in runner.state.findings
+        assert any("skipped" in f.lower() for f in runner.state.findings["sentry"])
+
+
+# --- Step 4 Task Cleanup ---
 
 
 class TestTaskCleanup:
@@ -217,12 +227,11 @@ class TestStepAuditDocs:
     """Tests for step_audit_docs registration and delegation to DocsAuditor."""
 
     def test_step_audit_docs_is_registered(self):
-        """step_audit_docs is registered with key 'documentation_audit' in runner.steps."""
+        """step_audit_docs is registered as step 5 in runner.steps."""
         from scripts.reflections import ReflectionRunner
 
         runner = ReflectionRunner()
-        step_keys = {s[0]: s[1] for s in runner.steps}
-        assert step_keys.get("documentation_audit") == "Audit Documentation"
+        assert (5, "Audit Documentation", runner.step_audit_docs) in runner.steps
 
     @pytest.mark.asyncio
     @patch("scripts.reflections.asyncio.to_thread")
@@ -504,27 +513,26 @@ class TestAutoFixStep:
         assert progress.get("candidates") == 0
 
     @pytest.mark.asyncio
-    async def test_auto_fix_step_in_session_intelligence_pipeline(self):
-        """step_auto_fix_bugs is part of the session_intelligence pipeline."""
+    async def test_auto_fix_step_registered_as_step_8(self):
+        """step_auto_fix_bugs is registered as step 8."""
         from scripts.reflections import ReflectionRunner
 
         runner = ReflectionRunner()
-        step_keys = {s[0]: s[1] for s in runner.steps}
-        # auto_fix_bugs is now internal to session_intelligence
-        assert "session_intelligence" in step_keys
-        assert step_keys["session_intelligence"] == "Session Intelligence"
+        step_nums = [s[0] for s in runner.steps]
+        step_names = {s[0]: s[1] for s in runner.steps}
+        assert 8 in step_nums
+        assert step_names[8] == "File Bug Issues"
 
     @pytest.mark.asyncio
-    async def test_pipeline_steps_registered_correctly(self):
-        """The three pipeline steps are registered with correct keys."""
+    async def test_steps_renumbered_correctly(self):
+        """Produce Daily Report is step 9, GitHub Issue Creation is 10."""
         from scripts.reflections import ReflectionRunner
 
         runner = ReflectionRunner()
-        step_keys = {s[0]: s[1] for s in runner.steps}
-        assert step_keys.get("session_intelligence") == "Session Intelligence"
-        assert step_keys.get("behavioral_learning") == "Behavioral Learning"
-        assert step_keys.get("daily_report_and_notify") == "Daily Report & Notify"
-        assert step_keys.get("branch_plan_cleanup") == "Branch and Plan Cleanup"
+        step_names = {s[0]: s[1] for s in runner.steps}
+        assert step_names.get(9) == "Produce Daily Report"
+        assert step_names.get(10) == "GitHub Issue Creation"
+        assert step_names.get(14) == "Branch and Plan Cleanup"
 
     @pytest.mark.asyncio
     async def test_auto_fix_skips_duplicate_github_work(self, monkeypatch):

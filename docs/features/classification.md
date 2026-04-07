@@ -19,10 +19,6 @@ The work type result is stored in a mutable dict and passed to `enqueue_job()` a
 
 If classification fails, the field stays `null` and the user specifies the type manually during planning.
 
-### Synchronous Fast-Path for PR/Issue References
-
-Messages containing PR or issue references (e.g., "Complete PR 478", "fix issue #463", "#471") are always SDLC work. A synchronous regex check runs **before** `enqueue_job()` to set `classification_result["type"] = "sdlc"` immediately, bypassing the async classifier race condition. This fast-path uses the same regex as `classify_work_request()` in `bridge/routing.py`. A matching fallback exists in `agent/sdk_client.py` for belt-and-suspenders defense.
-
 ### Classification Inheritance on Reply-to-Resume
 
 When a user resumes a session by replying to a previous message (`is_reply_to_valor`), the async classifier may not have completed before `enqueue_job()` is called, leaving `classification_type` as `None`. To prevent this race condition, the bridge inherits the classification from the original session:
@@ -79,7 +75,6 @@ Telegram message
   -> classify_and_update_reaction() [asyncio.create_task]
      -> classify_request_async(clean_text)  [Haiku API]
      -> store in classification_result dict
-  -> synchronous fast-path: PR/issue regex → set "sdlc" immediately
   -> if reply-to-resume and classification_result empty:
      -> inherit classification_type from existing AgentSession
   -> enqueue_job(classification_type=...)

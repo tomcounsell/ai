@@ -31,7 +31,7 @@ def _create_test_job(**overrides) -> AgentSession:
         "message_text": "test message",
         "sender_name": "Test",
         "chat_id": "123",
-        "telegram_message_id": 1,
+        "message_id": 1,
     }
     defaults.update(overrides)
     return AgentSession.create(**defaults)
@@ -54,7 +54,7 @@ class TestStartedAtField:
         """When _pop_job transitions a job to running, started_at should be set."""
         _create_test_job()
         before = time.time()
-        job = await _pop_job("123")
+        job = await _pop_job("test")
         after = time.time()
 
         assert job is not None
@@ -113,31 +113,7 @@ class TestGetJobTimeout:
 
 
 class TestJobHealthCheck:
-    """Tests for _job_health_check().
-
-    Note: _job_health_check uses `job.chat_id or project_key` as the worker key.
-    Default chat_id in _create_test_job is "123", so workers must be keyed by "123".
-    Recovery calls _ensure_worker which spawns real asyncio tasks, so cleanup must
-    cancel all workers after each test.
-    """
-
-    # The default chat_id used by _create_test_job
-    WORKER_KEY = "123"
-
-    @pytest.fixture(autouse=True)
-    def _cleanup_workers(self):
-        """Clean up _active_workers after each test to prevent cross-test pollution."""
-        yield
-        # Cancel any worker tasks spawned by _ensure_worker during recovery.
-        # The event loop may already be closed by the time teardown runs,
-        # so silently ignore RuntimeError from cancel().
-        for key in list(_active_workers.keys()):
-            task = _active_workers.pop(key, None)
-            if task and not task.done():
-                try:
-                    task.cancel()
-                except RuntimeError:
-                    pass
+    """Tests for _job_health_check()."""
 
     @pytest.mark.asyncio
     async def test_recovers_job_with_dead_worker(self):
@@ -152,20 +128,22 @@ class TestJobHealthCheck:
         )
 
         # Set up a dead worker (asyncio Task that's already done)
-        # Workers are keyed by chat_id (default "123"), not project_key
         done_task = asyncio.Future()
         done_task.set_result(None)
-        _active_workers[self.WORKER_KEY] = done_task
+        _active_workers["test"] = done_task
 
-        await _job_health_check()
+        try:
+            await _job_health_check()
 
-        # The running job should be gone, replaced by a pending one
-        running = AgentSession.query.filter(project_key="test", status="running")
-        assert len(running) == 0
+            # The running job should be gone, replaced by a pending one
+            running = AgentSession.query.filter(project_key="test", status="running")
+            assert len(running) == 0
 
-        pending = AgentSession.query.filter(project_key="test", status="pending")
-        assert len(pending) == 1
-        assert pending[0].session_id == "dead_worker_session"
+            pending = AgentSession.query.filter(project_key="test", status="pending")
+            assert len(pending) == 1
+            assert pending[0].session_id == "dead_worker_session"
+        finally:
+            _active_workers.pop("test", None)
 
     @pytest.mark.asyncio
     async def test_recovers_job_with_no_worker(self):
@@ -178,8 +156,8 @@ class TestJobHealthCheck:
             session_id="orphan_session",
         )
 
-        # Ensure no worker exists for this chat_id
-        _active_workers.pop(self.WORKER_KEY, None)
+        # Ensure no worker exists for this project
+        _active_workers.pop("test", None)
 
         await _job_health_check()
 
@@ -201,19 +179,22 @@ class TestJobHealthCheck:
             session_id="alive_session",
         )
 
-        # Set up a live worker keyed by chat_id
+        # Set up a live worker
         live_task = asyncio.Future()
-        _active_workers[self.WORKER_KEY] = live_task
+        _active_workers["test"] = live_task
 
-        await _job_health_check()
+        try:
+            await _job_health_check()
 
-        # The job should still be running
-        running = AgentSession.query.filter(project_key="test", status="running")
-        assert len(running) == 1
-        assert running[0].session_id == "alive_session"
+            # The job should still be running
+            running = AgentSession.query.filter(project_key="test", status="running")
+            assert len(running) == 1
+            assert running[0].session_id == "alive_session"
 
-        pending = AgentSession.query.filter(project_key="test", status="pending")
-        assert len(pending) == 0
+            pending = AgentSession.query.filter(project_key="test", status="pending")
+            assert len(pending) == 0
+        finally:
+            _active_workers.pop("test", None)
 
     @pytest.mark.asyncio
     async def test_recovers_timed_out_job_with_alive_worker(self):
@@ -228,16 +209,19 @@ class TestJobHealthCheck:
 
         # Worker is alive but job has exceeded timeout
         live_task = asyncio.Future()
-        _active_workers[self.WORKER_KEY] = live_task
+        _active_workers["test"] = live_task
 
-        await _job_health_check()
+        try:
+            await _job_health_check()
 
-        running = AgentSession.query.filter(project_key="test", status="running")
-        assert len(running) == 0
+            running = AgentSession.query.filter(project_key="test", status="running")
+            assert len(running) == 0
 
-        pending = AgentSession.query.filter(project_key="test", status="pending")
-        assert len(pending) == 1
-        assert pending[0].session_id == "timeout_session"
+            pending = AgentSession.query.filter(project_key="test", status="pending")
+            assert len(pending) == 1
+            assert pending[0].session_id == "timeout_session"
+        finally:
+            _active_workers.pop("test", None)
 
     @pytest.mark.asyncio
     async def test_skips_recently_started_job_with_dead_worker(self):
@@ -250,17 +234,20 @@ class TestJobHealthCheck:
             session_id="recent_session",
         )
 
-        # Worker is dead, keyed by chat_id
+        # Worker is dead
         done_task = asyncio.Future()
         done_task.set_result(None)
-        _active_workers[self.WORKER_KEY] = done_task
+        _active_workers["test"] = done_task
 
-        await _job_health_check()
+        try:
+            await _job_health_check()
 
-        # Should NOT be recovered due to race condition guard
-        running = AgentSession.query.filter(project_key="test", status="running")
-        assert len(running) == 1
-        assert running[0].session_id == "recent_session"
+            # Should NOT be recovered due to race condition guard
+            running = AgentSession.query.filter(project_key="test", status="running")
+            assert len(running) == 1
+            assert running[0].session_id == "recent_session"
+        finally:
+            _active_workers.pop("test", None)
 
     @pytest.mark.asyncio
     async def test_handles_job_without_started_at(self):
@@ -274,8 +261,8 @@ class TestJobHealthCheck:
         )
         # started_at defaults to None
 
-        # Worker is dead — ensure no worker at chat_id key
-        _active_workers.pop(self.WORKER_KEY, None)
+        # Worker is dead
+        _active_workers.pop("test", None)
 
         await _job_health_check()
 

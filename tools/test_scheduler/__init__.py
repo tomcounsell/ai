@@ -9,10 +9,9 @@ import subprocess
 import threading
 import time
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
-
-from bridge.utc import utc_iso
 
 # In-memory job storage (for simplicity)
 _jobs: dict[str, dict] = {}
@@ -91,7 +90,7 @@ def _run_test_job(job_id: str, tests: list[dict], timeout_minutes: int):
     """
     with _lock:
         _jobs[job_id]["status"] = "running"
-        _jobs[job_id]["started_at"] = utc_iso()
+        _jobs[job_id]["started_at"] = datetime.now().isoformat()
 
     results = []
     timeout_seconds = timeout_minutes * 60
@@ -144,7 +143,7 @@ def _run_test_job(job_id: str, tests: list[dict], timeout_minutes: int):
     # Update job status
     with _lock:
         _jobs[job_id]["status"] = "completed"
-        _jobs[job_id]["completed_at"] = utc_iso()
+        _jobs[job_id]["completed_at"] = datetime.now().isoformat()
         _jobs[job_id]["results"] = results
         _jobs[job_id]["summary"] = {
             "total": len(results),
@@ -198,7 +197,7 @@ def schedule_tests(
     job = {
         "job_id": job_id,
         "status": "scheduled",
-        "created_at": utc_iso(),
+        "created_at": datetime.now().isoformat(),
         "specification": test_specification,
         "tests": tests,
         "notification_chat_id": notification_chat_id,
@@ -304,7 +303,7 @@ def cancel_job(job_id: str) -> dict:
             return {"error": "Cannot cancel completed job"}
 
         job["status"] = "cancelled"
-        job["cancelled_at"] = utc_iso()
+        job["cancelled_at"] = datetime.now().isoformat()
 
     return {
         "job_id": job_id,

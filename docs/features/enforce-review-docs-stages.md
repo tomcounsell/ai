@@ -8,9 +8,19 @@ The pipeline graph defined correct edges (TEST -> REVIEW -> DOCS -> MERGE), but 
 
 ## Solution
 
-### Hard Delivery Gates
+### Hard Delivery Gates in Observer (`bridge/observer.py`)
 
-> **Note**: The Observer Agent (`bridge/observer.py`) was removed as part of the ChatSession/DevSession architecture redesign. Mandatory gate enforcement is now handled by ChatSession orchestration and the nudge loop in `agent/job_queue.py`. The gate check functions in `agent/goal_gates.py` remain the source of truth for deterministic stage validation.
+The `_check_mandatory_gates()` method runs REVIEW and DOCS goal gate checks before any deliver-to-Telegram decision. Gate results are cached per `Observer.run()` invocation to avoid redundant API calls.
+
+Three enforcement points:
+
+1. **Typed outcome success path** (line ~580): When a typed outcome reports success and `has_remaining_stages()` returns False, gates are checked before delivering.
+2. **Deterministic SDLC guard bypass** (line ~722): When the guard is bypassed (e.g., `needs_human=True`), gates are checked before falling through to the LLM Observer.
+3. **LLM Observer deliver decision** (line ~836): After the LLM decides to deliver, gates override to steer if unsatisfied.
+
+### Cycle Safety
+
+If the same gate-forced steering happens 3+ times (tracked via `_gate_steering_count` in session history), the Observer delivers with a warning instead of looping indefinitely.
 
 ### State Machine Stage Transitions (`bridge/pipeline_state.py`)
 
@@ -27,8 +37,9 @@ The `/do-docs` skill now updates the plan document's `status:` frontmatter to "C
 ## Related
 
 - [Pipeline Graph](pipeline-graph.md) — defines the stage transition edges
+- [Observer Agent](observer-agent.md) — routing decisions and deterministic guards
 - [Goal Gates](goal-gates.md) — deterministic gate check functions
-- [Chat Dev Session Architecture](chat-dev-session-architecture.md) — ChatSession/DevSession routing model that replaced the Observer
+- [Typed Skill Outcomes](typed-skill-outcomes.md) — how skills report completion
 
 ## Tracking
 

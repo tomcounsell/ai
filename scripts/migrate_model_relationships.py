@@ -8,7 +8,7 @@ relationships refactor (issue #295):
    ReflectionRun by deriving it from chat_id using ~/Desktop/Valor/projects.json.
 2. Copies media/URL/classification fields from AgentSession to the
    corresponding TelegramMessage (matched by chat_id + message_id).
-3. Sets telegram_message_key on AgentSession and agent_session_id on
+3. Sets trigger_message_id on AgentSession and agent_session_id on
    TelegramMessage for cross-referencing.
 
 Usage:
@@ -163,19 +163,19 @@ def backfill_enrichment_metadata(dry_run: bool, max_age_days: int) -> dict[str, 
         if not has_enrichment and not session.classification_type:
             continue
 
-        # Skip if already has telegram_message_key
-        if session.telegram_message_key:
+        # Skip if already has trigger_message_id
+        if session.trigger_message_id:
             continue
 
-        # Find matching TelegramMessage by chat_id + telegram_message_id
-        if not session.chat_id or not session.telegram_message_id:
+        # Find matching TelegramMessage by chat_id + message_id
+        if not session.chat_id or not session.message_id:
             stats["no_match"] += 1
             continue
 
         matching = list(
             TelegramMessage.query.filter(
                 chat_id=str(session.chat_id),
-                message_id=session.telegram_message_id,
+                message_id=session.message_id,
             )
         )
         if not matching:
@@ -205,7 +205,7 @@ def backfill_enrichment_metadata(dry_run: bool, max_age_days: int) -> dict[str, 
             tm.agent_session_id = session.job_id
             tm.save()
 
-            session.telegram_message_key = tm.msg_id
+            session.trigger_message_id = tm.msg_id
             session.save()
 
         stats["enrichment_copied"] += 1

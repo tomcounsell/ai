@@ -14,6 +14,7 @@ Every message journey through the system now carries a shared `correlation_id` -
    - `bridge/telegram_bridge.py` generates the ID and passes it to `enqueue_job()`
    - `agent/job_queue.py` stores it in the AgentSession via `_push_job()` and reads it back in `_execute_job()` for use as a log prefix
    - `agent/sdk_client.py` receives it via `get_agent_response_sdk()` and uses it as the log prefix (replacing the internally-generated `request_id`)
+   - `bridge/observer.py` reads it from the AgentSession and uses it in all observer log lines
    - `bridge/session_transcript.py` includes it in the transcript file header
    - `bridge/session_logs.py` receives it via `extra_context` in snapshot metadata
 
@@ -44,7 +45,7 @@ grep -r "abc123def456" logs/sessions/*/
 | `bridge/telegram_bridge.py` | Generate correlation_id at message receipt |
 | `agent/job_queue.py` | Added parameter to `enqueue_job()`, `_push_job()`, `Job.correlation_id` property, `_JOB_FIELDS` entry; use as log prefix in `_execute_job()` |
 | `agent/sdk_client.py` | Added parameter to `get_agent_response_sdk()`; use as log prefix with local fallback |
-| `agent/job_queue.py` | Used as log prefix in nudge loop and routing |
+| `bridge/observer.py` | Read from session, use in all observer log lines |
 | `bridge/session_transcript.py` | Added parameter to `start_transcript()`; include in header when provided |
 
 ## Design Decisions

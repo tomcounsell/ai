@@ -38,7 +38,7 @@ Durable infrastructure knowledge that survives plan archival. Unlike plan docume
 - **Template sections**: Current State, New Requirements, Rules & Constraints, Rollback Plan
 - **Relationship to plan sections**: INFRA docs are about state and constraints; plan sections (Update System, Agent Integration) are about propagation and exposure
 
-See `docs/guides/infra-docs.md` for the full template and conventions.
+See `docs/infra/README.md` for the full template and conventions.
 
 ## Task Validation Fields
 

@@ -2,11 +2,10 @@
 
 import asyncio
 import importlib.util
+from datetime import datetime
 from pathlib import Path
 
 import pytest
-
-from bridge.utc import utc_now
 
 # Direct import of messenger module to avoid sdk_client dependency
 messenger_path = Path(__file__).parent.parent.parent / "agent" / "messenger.py"
@@ -283,7 +282,7 @@ class TestIntegration:
 
         async def mock_send(msg: str):
             sent_messages.append(msg)
-            message_times.append(utc_now())
+            message_times.append(datetime.now())
 
         messenger = BossMessenger(
             _send_callback=mock_send,

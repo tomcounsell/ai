@@ -197,10 +197,6 @@ tests/
 | Level | File | Tests | Description |
 |-------|------|------:|-------------|
 | unit | `test_model_relationships.py` | 30 | Redis model relationships |
-| unit | `test_memory_model.py` | 151 | Memory model (decay, confidence, write filter, bloom) |
-| unit | `test_memory_hook.py` | 135 | PostToolUse thought injection, sliding window |
-| unit | `test_memory_extraction.py` | 107 | Post-session Haiku extraction, outcome detection |
-| unit | `test_memory_ingestion.py` | 89 | Telegram message memory ingestion |
 | integration | `test_redis_models.py` | 30 | Popoto model CRUD |
 
 ### `monitoring` — Observability
@@ -301,7 +297,7 @@ Source modules with no test coverage. Priority targets for new tests.
 | Priority | Module | Lines | Risk |
 |----------|--------|------:|------|
 | Critical | `bridge/telegram_bridge.py` | 1,655 | Main entry point |
-| Critical | `agent/hooks/` | ~150 | DevSession lifecycle hooks |
+| Critical | `bridge/agents.py` | 601 | Agent routing |
 | Critical | `bridge/context.py` | 557 | Context building |
 | Critical | `bridge/response.py` | 579 | Response formatting |
 | Critical | `config/loader.py` | 432 | Config initialization |

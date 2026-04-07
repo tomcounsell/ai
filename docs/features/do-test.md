@@ -71,20 +71,6 @@ The execution strategy adapts based on the target:
 
 This adaptive approach maximizes throughput for large suites while keeping small-suite and single-target runs simple and fast.
 
-## Flaky Filter (Step 0.5)
-
-When tests fail on a feature branch, the pipeline retries only the failing tests once before dispatching to baseline verification. Tests that pass on retry are classified as `FLAKY` — reported but non-blocking. Tests that still fail proceed to baseline verification. If all failures are flaky, baseline verification is skipped entirely.
-
-This catches common intermittent failures (timing-dependent, LLM non-determinism, resource contention) without requiring additional dependencies like `pytest-rerunfailures`.
-
-See [Test Reliability: Flaky Filter](test-reliability-flaky-filter.md) for full details.
-
-## Baseline Verification
-
-When tests fail consistently (not flaky), the skill dispatches the `baseline-verifier` subagent to classify failures as regressions vs pre-existing by running the failing tests against `main`. The verifier uses `--junitxml` for deterministic parsing — no LLM interpretation of console output.
-
-See [Test Baseline Verification](test-baseline-verification.md) for classification rules and pipeline impact.
-
 ## Result Format
 
 After all runners complete, the skill presents a structured summary:
@@ -100,23 +86,16 @@ After all runners complete, the skill presents a structured summary:
 | lint (ruff) | PASS | - | - | - | 0.5s |
 | lint (ruff format) | PASS | - | - | - | 0.3s |
 
-### Flaky Tests (non-blocking)
+### Failures
 
-| Test | Verdict |
-|------|---------|
-| unit::test_timing.py::test_race | FLAKY |
-
-### Failures (verified against main)
-
-| Test | Branch | Main | Verdict |
-|------|--------|------|---------|
-| integration::test_api_auth.py::test_expired_token | FAIL | PASS | **Regression** |
+**integration::test_api_auth.py::test_expired_token**
+AssertionError: Expected 401, got 200
+  File "tests/integration/test_api_auth.py", line 45
 ```
 
 **Final verdict:**
 - All suites pass: `ALL TESTS PASSED`
 - Any suite fails: `TESTS FAILED` with failure details prominently displayed
-- Flaky tests reported but do not affect the verdict
 
 ## Integration with /do-build
 
@@ -141,8 +120,6 @@ The `-p no:postgresql` flag prevents the `pytest-postgresql` plugin (installed a
 | `--no-lint` flag | Provides escape hatch for fast iteration when only test results matter |
 | CWD-relative execution | No worktree detection logic needed; works correctly whether invoked directly or via `/do-build` |
 | Smart dispatch | Direct for small suites (<50 files) or `--direct`; parallel with sonnet agents + 2-min timeout fallback for large suites |
-| Flaky filter | Single retry on branch before baseline dispatch catches intermittent failures without extra dependencies |
-| Deterministic baseline | junitxml parsing replaces LLM text interpretation for reliable classification |
 | `--changed` branch awareness | On `main`, compares last commit; on feature branches, compares against `main` |
 | Silent skip for missing dirs | Repositories with partial test directory structures work without configuration |
 | `-v --tb=short` pytest flags | Verbose test names for clarity with concise tracebacks for debugging |
@@ -156,7 +133,5 @@ The `-p no:postgresql` flag prevents the `pytest-postgresql` plugin (installed a
 
 ## Related
 
-- [Test Reliability: Flaky Filter](test-reliability-flaky-filter.md) -- Flaky filter and deterministic baseline parsing
-- [Test Baseline Verification](test-baseline-verification.md) -- Classification of failures as regressions vs pre-existing
 - [Build Session Reliability](build-session-reliability.md) -- Build workflow that invokes do-test
 - [Documentation Lifecycle](documentation-lifecycle.md) -- Another enforcement pattern in the build pipeline

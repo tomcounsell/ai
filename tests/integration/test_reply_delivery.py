@@ -241,7 +241,7 @@ class TestAutoContineCountPersistence:
             message_text="continue",
             sender_name="System",
             chat_id="chat_ac_123",
-            telegram_message_id=456,
+            message_id=456,
             auto_continue_count=2,
         )
         assert job.auto_continue_count == 2
@@ -261,7 +261,7 @@ class TestAutoContineCountPersistence:
             message_text="hello",
             sender_name="Tom",
             chat_id="chat_ac_default",
-            telegram_message_id=457,
+            message_id=457,
         )
         assert job.auto_continue_count == 0
         await job.async_delete()

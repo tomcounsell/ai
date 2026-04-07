@@ -854,11 +854,114 @@ def _parse_classification_response(raw: str) -> ClassificationResult | None:
     return result
 
 
+def _render_stage_progress(session) -> str | None:
+    """Render SDLC stage progress line from session state.
+
+    Uses PipelineStateMachine when stage_states is available, falls back
+    to legacy get_stage_progress() for sessions without state machine data.
+
+    Returns two lines like:
+        ISSUE 243 → ☑ PLAN → ▶ BUILD
+        ☐ TEST → ☐ REVIEW → ☐ DOCS
+    Returns None if no stage data is available.
+    """
+    if not session:
+        return None
+
+    # Use state machine when stage_states is available (must be a str or dict)
+    stage_states = getattr(session, "stage_states", None)
+    if stage_states and isinstance(stage_states, str | dict):
+        try:
+            from bridge.pipeline_state import PipelineStateMachine
+
+            sm = PipelineStateMachine(session)
+            progress = sm.get_display_progress()
+        except Exception:
+            progress = session.get_stage_progress()
+    else:
+        progress = session.get_stage_progress()
+
+    # Only render if at least one stage has progressed beyond pending/ready
+    if all(v in ("pending", "ready") for v in progress.values()):
+        return None
+
+    from models.agent_session import SDLC_STAGES
+
+    # Extract issue number from session links for the ISSUE stage label
+    issue_number = None
+    links = session.get_links() if hasattr(session, "get_links") else {}
+    if links and "issue" in links:
+        match = re.search(r"/issues/(\d+)", links["issue"])
+        if match:
+            issue_number = match.group(1)
+
+    parts = []
+    for stage in SDLC_STAGES:
+        status = progress.get(stage, "pending")
+        # Build the label — ISSUE stage gets the issue number appended
+        if stage == "ISSUE" and issue_number:
+            label = f"ISSUE {issue_number}"
+        else:
+            label = stage
+
+        if stage == "ISSUE":
+            # ISSUE has no checkbox — just label (with optional number)
+            if status == "in_progress":
+                parts.append(f"▶ {label}")
+            else:
+                parts.append(label)
+        elif status == "completed":
+            parts.append(f"☑ {label}")
+        elif status == "in_progress":
+            parts.append(f"▶ {label}")
+        elif status == "failed":
+            parts.append(f"✗ {label}")
+        else:
+            # pending or ready
+            parts.append(f"☐ {label}")
+
+    line1 = " → ".join(parts[:3])
+    line2 = " → ".join(parts[3:])
+    return f"{line1}\n{line2}"
+
+
+def _render_link_footer(session) -> str | None:
+    """Render link footer from session's tracked links.
+
+    Returns a line like: Issue #168 | PR #176
+    with markdown links. Plan links are excluded — only issue and PR links
+    are rendered. Returns None if no links exist.
+    """
+    if not session:
+        return None
+
+    links = session.get_links()
+    if not links:
+        return None
+
+    parts = []
+    for kind, url in links.items():
+        if kind == "issue":
+            # Extract issue number from URL
+            match = re.search(r"/issues/(\d+)", url)
+            label = f"Issue #{match.group(1)}" if match else "Issue"
+            parts.append(f"[{label}]({url})")
+        elif kind == "pr":
+            match = re.search(r"/pull/(\d+)", url)
+            label = f"PR #{match.group(1)}" if match else "PR"
+            parts.append(f"[{label}]({url})")
+        # Plan links are intentionally excluded
+
+    return " | ".join(parts) if parts else None
+
+
 def _linkify_references(text: str, session) -> str:
     """Convert plain PR #N and Issue #N references to markdown links.
 
-    Delegates to bridge.formatting.linkify_references_from_session for the
-    actual implementation. This wrapper preserves the existing call signature.
+    Uses the session's project_key to look up the GitHub org/repo
+    from the registered project config. If no project config is found
+    or the text already contains markdown links for a reference, it
+    is left unchanged.
 
     Args:
         text: The summary text potentially containing PR #N or Issue #N
@@ -867,51 +970,63 @@ def _linkify_references(text: str, session) -> str:
     Returns:
         Text with plain references converted to markdown links.
     """
-    from bridge.formatting import linkify_references_from_session
+    if not session or not text:
+        return text
 
-    return linkify_references_from_session(text, session)
+    # Get project_key from session
+    project_key = getattr(session, "project_key", None)
+    if not project_key or not str(project_key).strip():
+        return text
+
+    # Look up GitHub org/repo from registered project config
+    from agent.job_queue import get_project_config
+
+    config = get_project_config(str(project_key))
+    github_config = config.get("github", {})
+    org = github_config.get("org")
+    repo = github_config.get("repo")
+
+    if not org or not repo:
+        return text
+
+    base_url = f"https://github.com/{org}/{repo}"
+
+    # Replace PR #N -> [PR #N](url/pull/N)
+    # Negative lookbehind for [ ensures we don't double-link already-linked refs
+    text = re.sub(
+        r"(?<!\[)PR #(\d+)(?!\])",
+        lambda m: f"[PR #{m.group(1)}]({base_url}/pull/{m.group(1)})",
+        text,
+    )
+
+    # Replace Issue #N -> [Issue #N](url/issues/N)
+    text = re.sub(
+        r"(?<!\[)Issue #(\d+)(?!\])",
+        lambda m: f"[Issue #{m.group(1)}]({base_url}/issues/{m.group(1)})",
+        text,
+    )
+
+    return text
 
 
 def _get_status_emoji(session, is_completion: bool = True) -> str:
-    """Get the status emoji prefix for milestone-selective display.
+    """Get the status emoji prefix based on completion flag and session state.
 
-    Milestone-selective: completion emoji is reserved for true milestones
-    (merged PR, closed issue, failed session). Routine completions get
-    no emoji prefix. In-progress work gets the hourglass.
-
-    Args:
-        session: AgentSession or mock with .status and .get_links().
-        is_completion: Whether the output is classified as completion.
-
-    Returns:
-        Emoji string or empty string for routine completions.
+    The is_completion flag takes priority for running/active sessions because
+    the session status hasn't been updated yet when the summary is composed.
+    Only hard terminal states (completed, failed) override the flag.
     """
     if not session:
-        # No session context — fall back to simple logic
         return "✅" if is_completion else "⏳"
 
     status = session.status
     if status in ("failed",):
         return "❌"
-
-    # Check for milestone events: merged PR or closed issue
-    is_milestone = False
-    if hasattr(session, "get_links"):
-        try:
-            links = session.get_links()
-            # PR link on completed session suggests merge milestone
-            if links.get("pr") and status in ("completed",):
-                is_milestone = True
-        except Exception:
-            pass
-
-    if status in ("completed",):
-        return "✅" if is_milestone else ""
-
-    # Running/active/pending — in-progress or routine completion
-    if is_completion:
-        return ""  # Routine completion, no emoji
-    return "⏳"
+    elif status in ("completed",):
+        return "✅"
+    else:
+        # For running/active/pending — trust the is_completion flag
+        return "✅" if is_completion else "⏳"
 
 
 def _build_summary_prompt(
@@ -957,9 +1072,6 @@ def _build_summary_prompt(
             if history:
                 recent = history[-5:]  # Last 5 entries
                 context_parts.append("Recent history: " + " | ".join(str(e) for e in recent))
-        # Signal Q&A mode so the LLM uses prose format
-        if getattr(session, "qa_mode", False):
-            context_parts.append("qa_mode=True (use conversational prose, no bullets or emoji)")
         if context_parts:
             context_section = "\n\nSession context:\n" + "\n".join(context_parts) + "\n"
 
@@ -1020,7 +1132,7 @@ FORMAT RULES for the **response** field (adaptive based on content type):
 
    If the output contains EXPLICIT questions directed at the human (sentences that literally \
    end with "?" and ask the human to decide or provide input), list them AFTER the bullets, \
-   separated by "---" on its own line. Prefix each with ">> ":
+   separated by "---" on its own line. Prefix each with "? ":
 
    NEVER fabricate questions. NEVER reframe declarative statements as questions. \
    If the agent says "I will do X", that is NOT a question — it is a plan. \
@@ -1030,8 +1142,8 @@ FORMAT RULES for the **response** field (adaptive based on content type):
    • Built auth token rotation with retry
    • 12 tests passing
    ---
-   >> Should we use exponential backoff or fixed intervals?
-   >> 2 nits found in review — skip or patch?
+   ? Should we use exponential backoff or fixed intervals?
+   ? 2 nits found in review — skip or patch?
 
    WRONG — do NOT do this:
    Raw: "I will add sdlc to classifier categories"
@@ -1044,10 +1156,6 @@ FORMAT RULES for the **response** field (adaptive based on content type):
    If there are no explicit questions in the raw output, do NOT include the "---" separator.
 
 5. STATUS UPDATES / WORK WITH CONTEXT: 2-4 bullet points starting with "• "
-
-6. Q&A SESSIONS (when session context indicates qa_mode=True):
-   Respond in conversational prose — no bullets, no status emoji prefix, no structured template.
-   Write as a knowledgeable teammate answering a question. Cite sources naturally in prose.
 
 GENERAL RULES:
 - NEVER include the agent's plan, approach, or strategy. The PM wants RESULTS, not plans.
@@ -1068,38 +1176,7 @@ Examples of what to OMIT: "Analyzed the codebase", "Read through the plan", \
 "Investigated the issue", "Here's my approach", "I'll tackle this by", \
 "My plan is to", "Step 1: ...", "The strategy is". \
 These are process noise — the PM only cares about WHAT was \
-accomplished, not THAT you read files or analyzed code or what you plan to do next.
-
-SDLC STAGE NATURALIZATION:
-- Translate raw SDLC stage labels to natural language equivalents: \
-PLAN → planning, BUILD → building, TEST → testing, REVIEW → reviewing, \
-DOCS → documenting, MERGE → merging. Never emit the raw uppercase labels \
-(PLAN, BUILD, TEST, REVIEW, DOCS, MERGE) in the response field. \
-The term "SDLC" itself is acceptable as a process reference.
-
-QUESTION PREFIX:
-- When listing explicit questions after the "---" separator, prefix each with \
-">> " instead of "? ". The ">>" prefix is visually distinct in Telegram.
-
-LINK FORMATTING:
-- Use short-form references only in bullet text (PR #N, issue #N). \
-Never include full URLs in bullets — link rendering is handled separately by \
-the _linkify_references post-processor.
-
-DEVELOPER INTERNALS SUPPRESSION:
-- Do not include line counts, file counts, addition/deletion counts, or exact test \
-pass/fail numbers. Use outcome language instead: "shipped and tested", "all tests \
-passing", "reviewed and approved". The PM cares about outcomes, not metrics.
-- Never include root-cause explanations or describe HOW a fix works internally. \
-Do not mention internal method, function, or class names (e.g., _internal_method, \
-SomeModel, InternalClass). Do not reference deserialization/serialization logic, \
-architectural component names, or code line numbers.
-- Describe WHAT was fixed and the user-visible outcome, not the internal mechanism. \
-Good: "Fixed the data migration bug that caused fields to be empty on save." \
-Bad: "Root cause was lazy deserialization not populating the key tracking fields. \
-Fix: eagerly decode only certain field values during internal model creation."
-- If the original text contains internal code references, translate them into \
-stakeholder-friendly language describing the feature or behavior affected."""
+accomplished, not THAT you read files or analyzed code or what you plan to do next."""
 
 # Blocker flag logic explained:
 # The ⚠️ flag is meant to alert the PM only when human intervention is truly required.
@@ -1261,53 +1338,27 @@ async def _summarize_with_openrouter(prompt: str) -> StructuredSummary | None:
         return None
 
 
-def _normalize_question_prefix(text: str) -> str:
-    """Normalize legacy '? ' question prefix to '>> ' for visual distinction.
-
-    Accepts both '? ' and '>> ' prefixes. Lines starting with '? ' are
-    converted to '>> '. Lines already using '>> ' are left unchanged.
-    """
-    lines = text.split("\n")
-    normalized = []
-    for line in lines:
-        stripped = line.lstrip()
-        if stripped.startswith("? "):
-            normalized.append(line.replace("? ", ">> ", 1))
-        else:
-            normalized.append(line)
-    return "\n".join(normalized)
-
-
-def _parse_summary_and_questions(
-    summary_text: str,
-) -> tuple[str, str | None]:
+def _parse_summary_and_questions(summary_text: str) -> tuple[str, str | None]:
     """Parse LLM summary output into bullets and optional questions.
 
-    The LLM may produce (using >> prefix, or legacy ? prefix):
-        * Bullet 1
-        * Bullet 2
+    The LLM may produce:
+        • Bullet 1
+        • Bullet 2
         ---
-        >> Question 1
-        >> Question 2
+        ? Question 1
+        ? Question 2
 
-    Returns (bullets, questions) where questions is None if no
-    --- separator found. The >> prefix is the canonical format;
-    ? prefix is accepted for backward compatibility and normalized
-    to >> on output.
+    Returns (bullets, questions) where questions is None if no --- separator found.
     """
     if "\n---\n" in summary_text:
         bullets, questions = summary_text.split("\n---\n", 1)
         questions = questions.strip()
         if questions:
-            questions = _normalize_question_prefix(questions)
             return bullets.strip(), questions
         return bullets.strip(), None
     # Also handle --- at the very start (edge case)
     if summary_text.strip().startswith("---"):
-        raw = summary_text.strip().lstrip("-").strip()
-        if raw:
-            return "", _normalize_question_prefix(raw)
-        return "", None
+        return "", summary_text.strip().lstrip("-").strip() or None
     return summary_text, None
 
 
@@ -1321,7 +1372,7 @@ def _compose_structured_summary(summary_text: str, session=None, is_completion: 
         • Bullet point 1
         • Bullet point 2
 
-        >> Question needing input
+        ? Question needing input
 
     SDLC:
         ⏳
@@ -1329,7 +1380,7 @@ def _compose_structured_summary(summary_text: str, session=None, is_completion: 
         • Bullet point 1
         • Bullet point 2
 
-        >> Question needing input
+        ? Question needing input
         Issue #243 | PR #250
     """
     # Re-read session from Redis to pick up stage data written during execution.
@@ -1346,11 +1397,6 @@ def _compose_structured_summary(summary_text: str, session=None, is_completion: 
         except Exception as e:
             logger.debug(f"Could not refresh session for summary: {e}")
 
-    # Q&A bypass: return prose directly without emoji prefix, bullet parsing,
-    # or structured template. The LLM summary is already in conversational form.
-    if session and getattr(session, "qa_mode", False):
-        return summary_text.strip()
-
     # Parse questions from LLM output
     bullets, questions = _parse_summary_and_questions(summary_text)
 
@@ -1358,8 +1404,18 @@ def _compose_structured_summary(summary_text: str, session=None, is_completion: 
 
     # Status emoji prefix (no message echo — Telegram reply-to provides context)
     emoji = _get_status_emoji(session, is_completion)
-    if emoji:
-        parts.append(emoji)
+    parts.append(emoji)
+
+    # Stage progress line — mandatory for SDLC, optional for others
+    stage_line = _render_stage_progress(session)
+    if stage_line:
+        parts.append(stage_line)
+        logger.info(
+            f"Rendered stage progress for session "
+            f"{session.session_id if session else 'N/A'}: {stage_line}"
+        )
+    elif session and hasattr(session, "is_sdlc") and session.is_sdlc:
+        logger.warning(f"SDLC session {session.session_id} has no stage progress to render")
 
     # Summary text (bullets or prose)
     parts.append(bullets.strip())
@@ -1368,6 +1424,11 @@ def _compose_structured_summary(summary_text: str, session=None, is_completion: 
     if questions:
         parts.append("")  # blank line separator
         parts.append(questions)
+
+    # Link footer — mandatory for SDLC jobs
+    link_footer = _render_link_footer(session)
+    if link_footer:
+        parts.append(link_footer)
 
     # Linkify PR #N and Issue #N references
     result = "\n".join(parts)
@@ -1447,7 +1508,7 @@ async def summarize_response(
         if not expectations:
             open_questions = _extract_open_questions(raw_response)
             if open_questions:
-                expectations = "\n".join(f">> {q}" for q in open_questions)
+                expectations = "\n".join(f"? {q}" for q in open_questions)
                 logger.info(
                     f"Extracted {len(open_questions)} open questions from ## Open Questions section"
                 )

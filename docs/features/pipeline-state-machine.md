@@ -11,46 +11,12 @@ The previous system inferred pipeline stage status by parsing agent transcripts 
 
 ## Solution
 
-Stage status is set programmatically at the points where transitions actually happen:
-- `start_stage()` in the PreToolUse hook when the PM dispatches a dev-session for an SDLC stage
-- `complete_stage()` in the SubagentStop hook when the dev-session returns successfully
+Stage status is now set programmatically at the points where transitions actually happen:
+- `start_stage()` when the Observer steers to a new stage
+- `complete_stage()` when the job returns successfully
 - `fail_stage()` when the job fails
 
 State is persisted as a JSON dict on `AgentSession.stage_states` -- one Redis field, no history parsing.
-
-## Production Lifecycle
-
-The state machine is wired into the Claude Agent SDK hook system. This is the end-to-end flow for a single SDLC stage:
-
-1. **PM dispatches dev-session**: The ChatSession (PM persona) uses the Agent tool with `type="dev-session"` and a prompt containing the stage assignment (e.g., "Stage: BUILD").
-
-2. **PreToolUse hook fires** (`agent/hooks/pre_tool_use.py`):
-   - `_maybe_register_dev_session()` detects `tool_name == "Agent"` with `type == "dev-session"`
-   - `_extract_stage_from_prompt()` parses the stage name from the prompt text using pattern matching against known SDLC stage names
-   - `_start_pipeline_stage()` loads the parent ChatSession from Redis, creates a `PipelineStateMachine`, and calls `start_stage()` -- marking the stage as `in_progress`
-   - Failures are caught and logged but never block the Agent tool call
-
-3. **Dev-session executes**: The subagent runs the assigned stage work (e.g., `/do-build`, `/do-test`).
-
-4. **SubagentStop hook fires** (`agent/hooks/subagent_stop.py`):
-   - `_record_stage_on_parent()` loads the parent session, creates a `PipelineStateMachine`, and calls `current_stage()` to find the `in_progress` stage
-   - Calls `complete_stage()` on the found stage, marking it as `completed` and the next stage as `ready`
-   - Injects the updated `stage_states` back to the PM via the hook return value
-
-5. **PM sees updated state**: The ChatSession receives the pipeline state injection and can route to the next stage.
-
-### Stage Extraction
-
-The `_extract_stage_from_prompt()` function extracts the SDLC stage from the dev-session prompt using two strategies:
-
-1. **Structured pattern** (preferred): Matches patterns like `Stage: BUILD`, `Stage to execute -- PLAN`, `Stage to execute: TEST`
-2. **Keyword fallback**: If the word "stage" appears in the prompt, scans for any known SDLC stage name (ISSUE, PLAN, CRITIQUE, BUILD, TEST, PATCH, REVIEW, DOCS, MERGE)
-
-If no stage can be extracted, the hook logs a debug message and skips `start_stage()` -- the dev-session still runs, but stage tracking is not activated.
-
-### Error Handling
-
-Both the PreToolUse and SubagentStop hooks wrap all state machine operations in try/except blocks. A failure in `start_stage()` or `complete_stage()` is logged as a warning but never prevents the Agent tool from proceeding. This ensures the pipeline state machine is strictly additive -- it enhances observability without introducing new failure modes.
 
 ## API
 
@@ -71,10 +37,6 @@ sm.has_remaining_stages()     # True if pipeline not complete
 sm.has_failed_stage()         # True if any stage failed
 sm.get_display_progress()     # {stage: status} for DISPLAY_STAGES
 sm.classify_outcome(stage, stop_reason, output_tail)  # "success"/"fail"/"ambiguous"
-
-# Convenience: start + complete in one shot (for atomic stage completions)
-from bridge.pipeline_state import record_stage_completion
-record_stage_completion(session, "BUILD")
 ```
 
 ## Stage Statuses
@@ -106,9 +68,7 @@ Falls back to `"ambiguous"` for the Observer LLM to handle.
 
 ## Integration Points
 
-- **PreToolUse hook** (`agent/hooks/pre_tool_use.py`): Calls `start_stage()` when the PM dispatches a dev-session, marking the stage as `in_progress`
-- **SubagentStop hook** (`agent/hooks/subagent_stop.py`): Calls `complete_stage()` when the dev-session returns, marking the stage as `completed`
-- **ChatSession**: Uses state machine for stage queries and outcome classification
+- **Observer** (`bridge/observer.py`): Creates a state machine per run, uses it for stage queries and outcome classification
 - **Job Queue** (`agent/job_queue.py`): Creates state machine in `send_to_chat()`, applies transitions from Observer decisions
 - **Summarizer** (`bridge/summarizer.py`): Reads `get_display_progress()` for Telegram stage rendering
 
@@ -122,10 +82,7 @@ Falls back to `"ambiguous"` for the Observer LLM to handle.
 
 | File | Purpose |
 |------|---------|
-| `bridge/pipeline_state.py` | PipelineStateMachine class + `record_stage_completion()` helper |
+| `bridge/pipeline_state.py` | PipelineStateMachine class |
 | `bridge/pipeline_graph.py` | Transition table (PIPELINE_EDGES, DISPLAY_STAGES) |
 | `models/agent_session.py` | `stage_states` field on AgentSession |
-| `agent/hooks/pre_tool_use.py` | `start_stage()` wiring via `_extract_stage_from_prompt()` and `_start_pipeline_stage()` |
-| `agent/hooks/subagent_stop.py` | `complete_stage()` wiring via `_record_stage_on_parent()` |
-| `tests/unit/test_pipeline_state_machine.py` | State machine unit tests |
-| `tests/unit/test_pre_tool_use_start_stage.py` | Stage extraction and start_stage wiring tests |
+| `tests/unit/test_pipeline_state_machine.py` | 49 unit tests |

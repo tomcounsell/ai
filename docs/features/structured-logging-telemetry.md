@@ -86,24 +86,49 @@ redis-cli HGETALL telemetry:daily:2026-03-10
 
 ### Python API
 
-**Note:** The `monitoring/telemetry.py` module was removed as part of issue #488 (SDLC stage consolidation). The Observer was removed in SDLC Redesign Phase 2, making the telemetry module orphaned. Redis telemetry keys listed above may still exist in Redis but are no longer written to or read by any code.
+```python
+from monitoring.telemetry import get_summary, check_observer_health
+
+# Full telemetry snapshot
+summary = get_summary()
+# Returns: {"decisions": {...}, "pipeline": {...}, "tool_usage": {...}, "recent_interjections": [...]}
+
+# Health check with error rate thresholds
+health = check_observer_health()
+# Returns: {"status": "ok|degraded|unhealthy|unknown", "error_rate": float, "total_decisions": int, "violations": [...]}
+```
+
+## Health Check Integration
+
+The `HealthChecker.check_observer_telemetry()` method integrates telemetry into the system health check. It maps telemetry health status to the standard `HealthStatus` enum:
+
+| Telemetry Status | Health Status | Threshold |
+|-----------------|---------------|-----------|
+| ok | HEALTHY | error_rate <= 10% |
+| degraded | DEGRADED | error_rate > 10% |
+| unhealthy | UNHEALTHY | error_rate > 25% |
+| unknown | UNKNOWN | Redis unavailable |
+
+The observer telemetry check is included in `get_overall_health()` alongside database, Telegram, disk space, and API key checks.
 
 ## Design Decisions
 
 - **Best-effort telemetry**: All Redis writes are wrapped in try/except. Telemetry failures never break the Observer or pipeline.
 - **Daily rollup with TTL**: Daily keys expire after 7 days to prevent unbounded Redis key growth.
 - **Event list capping**: Interjection events are capped at 100 entries via LTRIM.
-- **Inline imports**: Modules use inline imports to avoid circular imports and keep imports lightweight.
+- **Inline imports**: Stage detector uses inline `from monitoring.telemetry import ...` to avoid circular imports and keep the import lightweight.
 - **No external services**: Telemetry stays in Redis + logs. No Datadog, Grafana, or other external dependencies.
 
 ## Files
 
 | File | Role |
 |------|------|
-| `agent/job_queue.py` | Calls record_decision for nudge loop routing |
+| `monitoring/telemetry.py` | Core telemetry module: record functions, get_summary, check_observer_health |
+| `bridge/observer.py` | Calls record_decision, record_interjection, record_tool_use |
 | `bridge/pipeline_state.py` | State machine logs stage transitions |
 | `models/agent_session.py` | Structured LINK logging in set_link() |
-| `monitoring/health.py` | Health checks (observer telemetry check removed) |
+| `monitoring/health.py` | check_observer_telemetry() integrated into overall health |
+| `tests/test_telemetry.py` | Unit tests for all telemetry functions and integrations |
 
 ## Related
 

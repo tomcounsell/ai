@@ -309,11 +309,7 @@ class TestFullChainIntegration:
     """Integration: hook fires -> session resolved -> stage written -> summarizer renders."""
 
     def test_hook_to_summarizer_chain(self, redis_test_db):
-        """Full chain: session renders summary text via _compose_structured_summary.
-
-        Stage progress lines and link footers were removed in #488 (SDLC stage
-        consolidation). The structured summary now renders emoji + summary text.
-        """
+        """Full chain: session with stage data renders correctly in summarizer."""
         from bridge.summarizer import _compose_structured_summary
 
         # 1. Create session with stage history (as hooks would write)
@@ -346,8 +342,13 @@ class TestFullChainIntegration:
             is_completion=True,
         )
 
-        # 3. Verify summary text is rendered (stage progress and link footer
-        #    no longer rendered — removed in #488)
+        # 3. Verify all components rendered
+        assert "209" in result
+        assert "ISSUE" in result
+        assert "☑ DOCS" in result
+        assert "☑ PLAN" in result
+        assert "Issue #209" in result
+        assert "PR #210" in result
         assert "Fixed connectivity gaps" in result
 
     # test_task_list_id_enables_hook_lookup and

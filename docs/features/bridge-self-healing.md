@@ -17,7 +17,7 @@ The bridge includes a multi-layered self-healing system to recover from crashes 
 3. Clears orphaned lock/journal files
 4. Adds jitter to prevent thundering herd on restart
 
-**Retry Logic**: General connection retry with exponential backoff and jitter (2s to 256s cap, 8 attempts max). Covers all Telethon errors, not just SQLite locks. See [Bridge Resilience](bridge-resilience.md) for details.
+**Retry Logic**: Exponential backoff with cleanup between attempts (2s, 5s, 10s).
 
 ### 2. Crash Tracker (`monitoring/crash_tracker.py`)
 
@@ -69,7 +69,7 @@ The `--check-only` output includes zombie count, PIDs, memory usage, and active 
 
 | Level | Condition | Action |
 |-------|-----------|--------|
-| 1 | Process not running | Log crash event via `crash_tracker.log_crash("bridge_dead_on_watchdog_check")` + simple restart (launchd) |
+| 1 | Process not running | Simple restart (launchd) |
 | 2 | Process running but logs stale | Kill stale + kill zombies + restart |
 | 3 | Lock files present | Kill stale + kill zombies + clear locks + restart |
 | 4 | Crash pattern detected | Kill stale + kill zombies + revert HEAD + restart (if enabled) |
@@ -94,18 +94,11 @@ Zombie cleanup is integrated into recovery levels 2+ to free memory before resta
 
 This is distinct from the loop-level crash guard (which marks sessions as `failed`). The `_safe_abandon_session()` helper handles the common case of race conditions during the abandon flow itself.
 
-### 5. Log Rotation
+### 5. Log Rotation (`scripts/valor-service.sh`)
 
-Log rotation uses a dual-mechanism approach: Python-managed rotation for application logs, and shell rotation + newsyslog for launchd-managed stderr/stdout logs.
+**Problem**: `bridge.error.log` is stderr redirected by launchd, so Python's `RotatingFileHandler` cannot manage it. The file grows unbounded.
 
-**Python-managed logs** (auto-rotate on write via `RotatingFileHandler`, 10MB max, 5 backups):
-- `bridge.log` — configured in `bridge/telegram_bridge.py`
-- `issue_poller.log` — configured in `scripts/issue_poller.py`
-
-**Shell-rotated logs** (`rotate_log()` in `valor-service.sh`, runs at bridge startup, 10MB max, 3 backups):
-- `bridge.error.log`, `issue_poller_error.log`, `watchdog.log`, `reflections.log`, `reflections_error.log`
-
-**newsyslog safety net** (`config/newsyslog.valor.conf`, installed to `/etc/newsyslog.d/valor.conf`): Covers all 5 launchd-managed logs with hourly checks, 10MB max, 5 bzip2-compressed backups. Uses the `N` flag (no signal) because launchd holds file descriptors open. Acts as a backup if the bridge doesn't restart for extended periods.
+**Solution**: The `rotate_log()` function in `valor-service.sh` runs at bridge startup and rotates any log file exceeding 10MB. It keeps 3 backup copies (`.1`, `.2`, `.3`) using a shift pattern. Both `bridge.log` and `bridge.error.log` are rotated.
 
 ### 6. Startup Redis Key Cleanup (`bridge/telegram_bridge.py`)
 
@@ -132,62 +125,9 @@ The watchdog is installed alongside the bridge:
 ./scripts/valor-service.sh install
 # Installs:
 # - com.valor.bridge (main bridge, with log rotation on startup)
-# - com.valor.update (polls every 30 minutes)
+# - com.valor.update (cron at 06:00/18:00)
 # - com.valor.bridge-watchdog (every 60s)
 ```
-
-### 10. Flood-Backoff Persistence (`bridge/telegram_bridge.py`)
-
-**Problem**: When the bridge hits a Telegram `FloodWaitError` with a long duration, launchd restarts compound the problem. Each restart triggers a new connection attempt, which increments Telegram's flood counter, escalating the wait from seconds to hours.
-
-**Solution**: On `FloodWaitError`, the bridge writes a `data/flood-backoff` JSON file containing the expiry timestamp. On startup, before attempting to connect, the bridge checks this file and sleeps until the flood period clears. This makes launchd restarts harmless.
-
-**File format** (`data/flood-backoff`):
-```json
-{"expiry_ts": 1711382400.0, "seconds": 300}
-```
-
-**Safety guards**:
-- Expired entries are ignored and the file is deleted
-- Stale files (older than 24 hours based on mtime) are ignored and deleted
-- Corrupt or empty files are treated as "no backoff"
-- The file is deleted on successful connect
-- All writes use atomic temp-file + `os.replace` to prevent corruption
-
-### 11. Dynamic Catchup Lookback (`bridge/catchup.py`)
-
-**Problem**: The fixed 60-minute `CATCHUP_LOOKBACK_MINUTES` means that after a multi-hour outage, messages older than 60 minutes are silently missed forever.
-
-**Solution**: The bridge persists a `data/last_connected` ISO 8601 timestamp file. On startup, catchup reads this timestamp and uses it to compute the lookback window dynamically instead of using the fixed 60-minute default. The lookback is capped at 24 hours to avoid scanning excessive history.
-
-**Timestamp updates**:
-- Written on successful Telegram connect
-- Updated every 5 minutes via the heartbeat loop
-- Written on graceful shutdown (SIGTERM/SIGINT)
-
-**Fallback**: If the file is missing or invalid, the default 60-minute lookback is used. Redis dedup (`is_duplicate_message`) prevents double-processing even if the window overlaps with already-handled messages.
-
-### 12. Update Polling (`com.valor.update`)
-
-**Problem**: Code pushes to main could take up to 12 hours to propagate to all machines, since the update plist only ran at 6 AM and 6 PM.
-
-**Solution**: The `com.valor.update` launchd plist uses `StartInterval` of 1800 seconds (30 minutes) to poll for updates frequently. Each invocation runs `scripts/remote-update.sh`, which:
-1. Acquires a lock (`data/update.lock`) to prevent concurrent runs
-2. Runs `git fetch` + `git pull` via `scripts/update/run.py --cron`
-3. If new commits arrived: syncs dependencies (if dep files changed), writes `data/restart-requested`
-4. The bridge job queue detects the restart flag and triggers a graceful restart after in-flight jobs complete
-
-**Verify polling is active**:
-```bash
-launchctl list | grep com.valor.update
-```
-
-**Check update logs**:
-```bash
-tail -f logs/update.log
-```
-
-**Manual override**: The Telegram `/update` command continues to work for immediate updates.
 
 ## Recovery Lock
 
@@ -234,8 +174,6 @@ rm data/auto-revert-enabled
 | `scripts/auto-revert.sh` | Git revert and restart |
 | `data/recovery-in-progress` | Recovery lock file |
 | `data/auto-revert-enabled` | Auto-revert enable flag |
-| `data/flood-backoff` | Flood-backoff expiry (JSON) |
-| `data/last_connected` | Last-connected timestamp (ISO 8601) |
 | `logs/watchdog.log` | Watchdog output |
 
 ## Design Principles
@@ -245,7 +183,7 @@ rm data/auto-revert-enabled
 - **No monitoring dashboards** - Telegram alerts only
 - **No configuration** - Hardcoded 60s watchdog, sensible defaults
 - **No external services** - Self-contained recovery
-- **Minimal file-based state** - Flood-backoff and last-connected use simple files in `data/` for cross-restart persistence; all other state in Redis
+- **Single persistence layer** - All state in Redis (no SQLite, no flat files)
 
 ## Related
 

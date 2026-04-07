@@ -9,7 +9,7 @@ All operational log lines use a consistent prefix tag enclosed in brackets. Filt
 | Tag | Source File | What It Logs |
 |-----|------------|--------------|
 | `[routing]` | `bridge/routing.py`, `bridge/telegram_bridge.py` | Classification result (sdlc/question/passthrough), session continuity decision, semantic routing match/miss |
-| `[nudge]` | `agent/job_queue.py` | Nudge loop routing decisions (deliver or nudge) with reason |
+| `[observer]` | `bridge/observer.py` | Session context summary, each tool-use iteration (tool name + result preview), final decision (steer/deliver) with reason |
 | `[enrichment]` | `bridge/enrichment.py` | Single summary line after all enrichment steps: media, youtube, links, reply chain counts, result length, failed steps |
 | `[prompt-summary]` | `agent/sdk_client.py` | Message length, classification, workflow presence, task list ID, session context sections |
 
@@ -34,8 +34,10 @@ INFO [routing] Semantic routing: no_match
 INFO [enrichment] Summary: media=no, youtube=0, links=0, reply_chain=0 messages, result_length=342
 INFO [prompt-summary] Sending to agent: 1205 chars, classification=sdlc, has_workflow=False, task_list=thread-12345-67890
 INFO [prompt-summary] Context: soul=yes, sdlc_workflow=yes, workflow_context=no, session_id=tg_ai_12345_67890
-INFO [nudge] Session tg_ai_12345_67890: is_sdlc=True, auto_continue=0/50, remaining_stages=True
-INFO [nudge] Decision: nudge (reason: stages remaining, no question detected)
+INFO [observer] Session tg_ai_12345_67890: is_sdlc=True, auto_continue=0/10, remaining_stages=True
+INFO [observer] Iteration 1/5: tool=read_session, result={"session_id": "tg_ai_12345_67890", "is_sdlc": true, "classi
+INFO [observer] Iteration 2/5: tool=enqueue_continuation, result={"status": "ok", "action": "enqueue_continuation", "
+INFO [observer] Decision: steer (reason: Good progress on the plan. Continue with /do-build.)
 ```
 
 ## Design Decisions
@@ -50,7 +52,7 @@ INFO [nudge] Decision: nudge (reason: stages remaining, no question detected)
 
 | File | Changes |
 |------|---------|
-| `agent/job_queue.py` | Nudge loop routing decision logging |
+| `bridge/observer.py` | Session context log at run start, iteration logging in tool-use loop, decision logging with reason |
 | `bridge/routing.py` | Classification result logging for all paths (fast-path slash commands, acknowledgments, issue refs, LLM classification) |
 | `bridge/telegram_bridge.py` | Session ID logging upgraded from DEBUG to INFO with `[routing]` prefix, semantic routing match/miss logging |
 | `bridge/enrichment.py` | Failed step tracking, single `[enrichment]` summary line at end with all step counts |

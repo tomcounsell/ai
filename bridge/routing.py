@@ -177,72 +177,6 @@ def is_team_chat(chat_title: str | None) -> bool:
 
 
 # =============================================================================
-# Config-Driven Chat Mode Resolution
-# =============================================================================
-
-# Mapping from persona field values in projects.json to mode strings.
-PERSONA_TO_MODE = {
-    "teammate": "qa",
-    "project-manager": "pm",
-    "developer": "dev",
-}
-
-
-def resolve_chat_mode(
-    project: dict | None,
-    chat_title: str | None,
-    is_dm: bool = False,
-) -> str | None:
-    """Resolve the effective chat mode from config, title prefix, or DM status.
-
-    Resolution order:
-    1. DMs -> always "qa"
-    2. Group persona field in projects.json -> map to mode
-    3. Title prefix "Dev:" -> "dev", "PM:" -> "pm"
-    4. None (unconfigured -- fall through to existing classifier behavior)
-
-    Args:
-        project: Project configuration dict from projects.json, or None.
-        chat_title: Telegram chat/group title, or None for DMs.
-        is_dm: Whether this is a direct message.
-
-    Returns:
-        "qa", "pm", "dev", or None (unconfigured).
-    """
-    # DMs are always Q&A
-    if is_dm:
-        return "qa"
-
-    # Look up persona from group config in projects.json
-    if project and chat_title:
-        telegram_config = project.get("telegram", {})
-        groups = telegram_config.get("groups", {})
-        if isinstance(groups, dict):
-            for group_name, group_config in groups.items():
-                if group_name.lower() in chat_title.lower():
-                    if isinstance(group_config, dict):
-                        persona = group_config.get("persona", "")
-                        mode = PERSONA_TO_MODE.get(persona)
-                        if mode:
-                            logger.debug(
-                                f"resolve_chat_mode: persona={persona!r} -> mode={mode!r} "
-                                f"for {chat_title!r}"
-                            )
-                            return mode
-                    break  # Found matching group but no valid persona
-
-    # Title prefix fallback
-    if chat_title:
-        if chat_title.startswith("Dev:"):
-            return "dev"
-        if chat_title.startswith("PM:"):
-            return "pm"
-
-    # Unconfigured -- caller should fall through to existing behavior
-    return None
-
-
-# =============================================================================
 # User Permissions
 # =============================================================================
 
@@ -459,20 +393,21 @@ def classify_work_request(message: str) -> str:
             logger.info(f"[routing] Classified as passthrough (slash command): {text[:120]}")
             return "passthrough"
 
-    # Fast path: any message containing an issue or PR reference → SDLC
-    # This takes priority over acknowledgment matching because "continue issue 463"
-    # is SDLC work, not a bare "continue" passthrough.
-    if re.search(r"(?:issue|pr|pull request)\s+#?\d+", text_lower) or re.match(
-        r"^#\d+$", text_lower
-    ):
-        logger.info(f"[routing] Classified as sdlc (issue/PR reference): {text[:120]}")
-        return "sdlc"
-
     # Fast path: short acknowledgments / continuation commands
     first_word = text_lower.split()[0] if text_lower.split() else ""
     if first_word in _PASSTHROUGH_EXACT or text_lower.rstrip("!.,") in _PASSTHROUGH_EXACT:
         logger.info(f"[routing] Classified as passthrough (acknowledgment): {text[:120]}")
         return "passthrough"
+
+    # Fast path: bare "#N" → question (Telegram eats # as hashtag, too ambiguous for SDLC)
+    if re.match(r"^#\d+$", text_lower):
+        logger.info(f"[routing] Classified as question (bare hash reference): {text[:120]}")
+        return "question"
+
+    # Fast path: issue/PR references like "issue 123", "pr 363", "pull request 363"
+    if re.match(r"^(?:issue|pr|pull request)\s+#?\d+$", text_lower):
+        logger.info(f"[routing] Classified as sdlc (issue/PR reference): {text[:120]}")
+        return "sdlc"
 
     # Use Ollama for nuanced classification with Haiku fallback
     try:
@@ -518,12 +453,10 @@ def _classify_work_request_llm(text: str) -> str:
 
     prompt = (
         'Classify this message. Reply with ONLY one word: "sdlc" or "question".\n\n'
-        '- "sdlc" = work request that could result in code changes or a PR:\n'
-        "  fix bug, add feature, implement, refactor, investigate issue,\n"
-        "  create/update codebase, deploy, resolve problem, continue/resume work\n"
-        '- "question" = purely asking for info, explanation, opinion,\n'
+        '- "sdlc" = work request: fix bug, add feature, implement, refactor,\n'
+        "  investigate issue, create/update codebase, deploy, resolve problem\n"
+        '- "question" = asking for info, explanation, opinion, status check,\n'
         "  how does X work, what is Y, conversational/social\n\n"
-        "If in doubt, classify as sdlc.\n\n"
         f"{principal_hint}"
         f"Message: {text[:300]}\n\n"
         "Classification:"
@@ -713,26 +646,16 @@ async def should_respond_async(
     sender_username: str | None = None,
     sender_id: int | None = None,
 ) -> tuple[bool, bool]:
-    """Async response decision with full context.
+    """
+    Async response decision with full context.
 
     Returns (should_respond, is_reply_to_valor) tuple.
 
-    Uses config-driven chat mode resolution (resolve_chat_mode) as the first
-    routing gate. When a group resolves to "qa" mode (via "teammate" persona in
-    projects.json), the group becomes a passive listener: messages are stored
-    but the agent only responds on @mention or reply-to-Valor. This skips
-    Ollama classification entirely for those groups, reducing latency and
-    preventing unwanted responses in observation-only channels.
-
-    Decision logic after mode resolution:
-    - Reply to Valor -> always respond (continue session, checked before mode)
-    - Q&A mode group -> @mention only (passive listener)
-    - Team chat (no Dev:/PM: prefix) -> @mention only
-    - respond_to_all -> always respond
-    - respond_to_unaddressed -> Ollama classifies need
-    - @valor -> always respond
-    - @someoneelse -> always ignore
-    - Unaddressed -> Ollama classifies if it needs work
+    Decision logic for groups with respond_to_unaddressed:
+    - Case 1: Unaddressed message → Ollama classifies if it needs work
+    - Case 2: Reply to Valor → Always respond (continue session)
+    - Case 3: @valor → Always respond
+    - Case 4: @someoneelse → Always ignore
     """
     message = event.message
 
@@ -765,18 +688,6 @@ async def should_respond_async(
                 return True, True
         except Exception as e:
             logger.debug(f"Could not check replied message: {e}")
-
-    # Config-driven Q&A groups: passive listener (mention/reply only, skip Ollama)
-    chat_mode = resolve_chat_mode(project, chat_title, is_dm=False)
-    if chat_mode == "qa":
-        mentions = telegram_config.get("mention_triggers", DEFAULT_MENTIONS)
-        text_lower = text.lower()
-        if any(mention.lower() in text_lower for mention in mentions):
-            logger.debug("Q&A-mode group: @mention detected - responding")
-            return True, False
-        # Completely silent -- no response, no reaction
-        logger.debug(f"Q&A-mode group: silent storage for {chat_title!r}")
-        return False, False
 
     # Team chats (no Dev:/PM: prefix) are mention-only
     if is_team_chat(chat_title):

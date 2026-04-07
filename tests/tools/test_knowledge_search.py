@@ -22,11 +22,10 @@ class TestIndexDocument:
         assert result.get("chunks_indexed", 0) > 0
 
     def test_index_nonexistent_file(self, tmp_path):
-        """Test indexing a non-existent file returns an error."""
+        """Test indexing a non-existent file."""
         result = index_document("/nonexistent/path/file.txt", db_path=tmp_path / "test.db")
         assert "error" in result
-        # May fail with "not found" or missing API key — either is a correct error
-        assert result["error"]
+        assert "not found" in result["error"].lower()
 
     def test_index_missing_api_key(self, temp_markdown_file, tmp_path):
         """Test indexing without API key."""
@@ -47,6 +46,7 @@ class TestSearchKnowledge:
         """Test that empty query returns error."""
         result = search_knowledge("", db_path=tmp_path / "test.db")
         assert "error" in result
+        assert "empty" in result["error"].lower()
 
     def test_keyword_search(self, temp_markdown_file, tmp_path, openrouter_api_key):
         """Test keyword search."""

@@ -43,18 +43,41 @@ After running, report the result. If there are warnings or errors, list each one
 After the orchestrator completes, audit Redis for stale or abandoned sessions/jobs. An `/update` implies a soft reset — anything stuck should be surfaced.
 
 ```bash
-# Preview stale sessions (killed/abandoned/failed older than 30 min)
-cd ~/src/ai && python -m tools.job_scheduler cleanup --age 30 --dry-run
+cd ~/src/ai && .venv/bin/python -c "
+import time
+from models.agent_session import AgentSession
 
-# List any non-terminal sessions that might be stuck
-python -m tools.job_scheduler list --status running,pending
+now = time.time()
+STALE_THRESHOLD = 30 * 60  # 30 minutes
+
+sessions = AgentSession.objects.all()
+stale = []
+for s in sessions:
+    status = getattr(s, 'status', None) or 'unknown'
+    if status in ('completed', 'delivered'):
+        continue
+    sid = getattr(s, 'session_id', None) or 'unknown'
+    last = getattr(s, 'last_activity', None) or getattr(s, 'created_at', None)
+    age_sec = (now - float(last)) if last else 0
+    project = getattr(s, 'project_key', None) or ''
+    if age_sec > STALE_THRESHOLD:
+        stale.append((sid, status, project, int(age_sec / 60)))
+
+if not stale:
+    print('No stale sessions found.')
+else:
+    print(f'Found {len(stale)} stale session(s):')
+    for sid, status, project, age_min in stale:
+        print(f'  {status:12s} | {project:12s} | {sid[:50]} | {age_min}m old')
+    print()
+    print('To clean up, set status to abandoned:')
+    print('  python -c \"from models.agent_session import AgentSession; s = AgentSession.objects.get(session_id=\\\"SESSION_ID\\\"); s.status = \\\"abandoned\\\"; s.save()\"')
+"
 ```
 
 Report findings:
 - **Clean**: "No stale sessions or jobs"
-- **Stale found**: Show the dry-run output and ask whether to clean up. If approved: `python -m tools.job_scheduler cleanup --age 30`
-
-**Important**: Never change session status via `s.status = ...; s.save()` — Popoto's KeyField creates a new record and orphans the old one. Use `s.delete()` for cleanup, or use the `cleanup` command which does this correctly.
+- **Stale found**: List each with session ID, status, project, and age. Ask whether to mark them as abandoned.
 
 ### Auto-Bump Critical Dependencies
 

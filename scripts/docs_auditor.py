@@ -19,11 +19,9 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
-
-from bridge.utc import utc_now
 
 # Ensure project root is importable
 _project_root = str(Path(__file__).parent.parent)
@@ -299,11 +297,9 @@ class DocsAuditor:
         "CLAUDE.md",
     ]
 
-    def __init__(self, repo_root: Path, dry_run: bool = False, max_api_calls: int = 50) -> None:
+    def __init__(self, repo_root: Path, dry_run: bool = False) -> None:
         self.repo_root = repo_root.resolve()
         self.dry_run = dry_run
-        self.max_api_calls = max_api_calls
-        self._api_call_count = 0
         self._client: Any = None  # lazy-init anthropic client
 
     # ------------------------------------------------------------------
@@ -527,23 +523,9 @@ class DocsAuditor:
             logger.info("No documentation files found to audit")
             return summary
 
-        logger.info(
-            "Auditing %d documentation files (API call cap: %d)",
-            len(docs),
-            self.max_api_calls,
-        )
+        logger.info("Auditing %d documentation files", len(docs))
 
         for path in docs:
-            # Check API call cap before processing next file
-            if self._api_call_count >= self.max_api_calls:
-                logger.warning(
-                    "API call cap reached (%d/%d). Stopping audit with %d files remaining.",
-                    self._api_call_count,
-                    self.max_api_calls,
-                    len(docs) - len(summary.verdicts),
-                )
-                break
-
             try:
                 verdict = self.analyze_doc(path)
                 summary.verdicts[str(path)] = verdict
@@ -640,7 +622,6 @@ CORRECTIONS:
 
         try:
             client = self._get_client()
-            self._api_call_count += 1
             response = client.messages.create(
                 model=model,
                 max_tokens=1024,
@@ -942,10 +923,7 @@ CORRECTIONS:
             return False
         try:
             last_dt = datetime.fromisoformat(last_audit)
-            # Handle legacy naive datetime strings by assuming UTC
-            if last_dt.tzinfo is None:
-                last_dt = last_dt.replace(tzinfo=UTC)
-            cutoff = utc_now() - timedelta(days=self.AUDIT_FREQUENCY_DAYS)
+            cutoff = datetime.now() - timedelta(days=self.AUDIT_FREQUENCY_DAYS)
             return last_dt > cutoff
         except ValueError:
             return False
@@ -972,7 +950,7 @@ CORRECTIONS:
             from models.reflections import ReflectionRun
 
             state = self._load_state()
-            state["last_audit_date"] = utc_now().isoformat()
+            state["last_audit_date"] = datetime.now().isoformat()
             # Delete existing singleton and recreate with updated state
             existing = ReflectionRun.query.filter(date="__docs_audit_meta__")
             for run in existing:

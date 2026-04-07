@@ -16,7 +16,8 @@ class TestReflectionRunModel:
 
         run = ReflectionRun.create(
             date="2026-02-25",
-            completed_steps=["legacy_code_scan", "log_review"],
+            current_step=3,
+            completed_steps=[1, 2],
             daily_report=["Done step 1", "Done step 2"],
             findings={"legacy": ["found TODO"]},
             session_analysis={},
@@ -27,11 +28,12 @@ class TestReflectionRunModel:
             dry_run=False,
         )
         assert run.date == "2026-02-25"
+        assert run.current_step == 3
 
         # Query back
         results = ReflectionRun.query.filter(date="2026-02-25")
         assert len(results) == 1
-        assert results[0].completed_steps == ["legacy_code_scan", "log_review"]
+        assert results[0].completed_steps == [1, 2]
 
     def test_load_or_create_new(self):
         """load_or_create creates a new run if none exists."""
@@ -39,6 +41,7 @@ class TestReflectionRunModel:
 
         run = ReflectionRun.load_or_create("2026-03-01")
         assert run.date == "2026-03-01"
+        assert run.current_step == 1
         assert run.completed_steps == []
 
     def test_load_or_create_existing(self):
@@ -47,12 +50,8 @@ class TestReflectionRunModel:
 
         ReflectionRun.create(
             date="2026-03-02",
-            completed_steps=[
-                "legacy_code_scan",
-                "log_review",
-                "task_management",
-                "documentation_audit",
-            ],
+            current_step=5,
+            completed_steps=[1, 2, 3, 4],
             daily_report=[],
             findings={},
             session_analysis={},
@@ -64,32 +63,22 @@ class TestReflectionRunModel:
         )
 
         run = ReflectionRun.load_or_create("2026-03-02")
-        assert run.completed_steps == [
-            "legacy_code_scan",
-            "log_review",
-            "task_management",
-            "documentation_audit",
-        ]
+        assert run.current_step == 5
+        assert run.completed_steps == [1, 2, 3, 4]
 
     def test_save_checkpoint(self):
         """save_checkpoint persists updated state."""
         from models.reflections import ReflectionRun
 
         run = ReflectionRun.load_or_create("2026-03-03")
-        run.completed_steps = [
-            "legacy_code_scan",
-            "log_review",
-            "task_management",
-            "documentation_audit",
-            "skills_audit",
-            "redis_ttl_cleanup",
-        ]
+        run.current_step = 7
+        run.completed_steps = [1, 2, 3, 4, 5, 6]
         run.save_checkpoint()
 
         # Query back to verify
         results = ReflectionRun.query.filter(date="2026-03-03")
         assert len(results) == 1
-        assert len(results[0].completed_steps) == 6
+        assert results[0].current_step == 7
 
     def test_cleanup_expired(self):
         """cleanup_expired removes old runs."""
@@ -98,6 +87,7 @@ class TestReflectionRunModel:
         # Create old run
         ReflectionRun.create(
             date="2025-01-01",
+            current_step=1,
             completed_steps=[],
             daily_report=[],
             findings={},
@@ -111,6 +101,7 @@ class TestReflectionRunModel:
         # Create recent run
         ReflectionRun.create(
             date="2026-02-25",
+            current_step=1,
             completed_steps=[],
             daily_report=[],
             findings={},
@@ -212,7 +203,7 @@ class TestAnalyzeSessionsFromRedis:
             tool_call_count=20,  # High ratio = thrashing
         )
 
-        today = __import__("bridge.utc", fromlist=["utc_now"]).utc_now().strftime("%Y-%m-%d")
+        today = __import__("datetime").datetime.now().strftime("%Y-%m-%d")
         result = analyze_sessions_from_redis(today)
         assert result["sessions_analyzed"] == 1
         assert len(result["thrash_sessions"]) == 1
@@ -234,7 +225,7 @@ class TestAnalyzeSessionsFromRedis:
             summary="Crashed during build step",
         )
 
-        today = __import__("bridge.utc", fromlist=["utc_now"]).utc_now().strftime("%Y-%m-%d")
+        today = __import__("datetime").datetime.now().strftime("%Y-%m-%d")
         result = analyze_sessions_from_redis(today)
         assert len(result.get("error_patterns", [])) >= 1
 
@@ -289,79 +280,25 @@ class TestReflectionsStateSave:
         ReflectionRun.load_or_create("2026-02-25")
 
         state = ReflectionsState(date="2026-02-25")
-        state.completed_steps = [
-            "legacy_code_scan",
-            "log_review",
-            "task_management",
-            "documentation_audit",
-        ]
+        state.current_step = 5
+        state.completed_steps = [1, 2, 3, 4]
         state.save()
 
         runs = ReflectionRun.query.filter(date="2026-02-25")
         assert len(runs) == 1
-        assert runs[0].completed_steps == [
-            "legacy_code_scan",
-            "log_review",
-            "task_management",
-            "documentation_audit",
-        ]
-
-
-class TestLegacyIntegerMigration:
-    """Test that legacy integer completed_steps are handled gracefully."""
-
-    @pytest.fixture(autouse=True)
-    def _ensure_projects_config(self, tmp_path, monkeypatch):
-        """Create minimal projects.json so ReflectionRunner can initialize."""
-        config_file = tmp_path / "projects.json"
-        config_file.write_text('{"projects": {}}')
-        monkeypatch.setenv("PROJECTS_CONFIG_PATH", str(config_file))
-
-    def test_integer_completed_steps_reset_to_empty(self):
-        """If completed_steps contains integers (legacy), _load_state resets to []."""
-        from models.reflections import ReflectionRun
-        from scripts.reflections import ReflectionRunner
-
-        # Simulate a legacy run with integer completed_steps
-        today = __import__("bridge.utc", fromlist=["utc_now"]).utc_now().strftime("%Y-%m-%d")
-        existing = ReflectionRun.query.filter(date=today)
-        for r in existing:
-            r.delete()
-        ReflectionRun.create(
-            date=today,
-            completed_steps=[1, 2, 3],  # legacy integer format
-            daily_report=[],
-            findings={},
-            session_analysis={},
-            reflections=[],
-            auto_fix_attempts=[],
-            step_progress={},
-            started_at=time.time(),
-            dry_run=False,
-        )
-
-        runner = ReflectionRunner()
-        # Legacy integers must be reset to empty — no crash, safe re-run
-        assert runner.state.completed_steps == []
+        assert runs[0].current_step == 5
 
 
 class TestRedisDataQuality:
     """Tests for step 14: Redis data quality checks."""
 
-    @pytest.fixture(autouse=True)
-    def _ensure_projects_config(self, tmp_path, monkeypatch):
-        """Create minimal projects.json so ReflectionRunner can initialize."""
-        config_file = tmp_path / "projects.json"
-        config_file.write_text('{"projects": {}}')
-        monkeypatch.setenv("PROJECTS_CONFIG_PATH", str(config_file))
-
-    def test_step_registered_as_redis_data_quality(self):
-        """step_redis_data_quality is registered with key 'redis_data_quality'."""
+    def test_step_registered_as_step_13(self):
+        """step_redis_data_quality is registered as step 13."""
         from scripts.reflections import ReflectionRunner
 
         runner = ReflectionRunner()
-        step_keys = {s[0]: s[1] for s in runner.steps}
-        assert step_keys.get("redis_data_quality") == "Redis Data Quality"
+        step_names = {s[0]: s[1] for s in runner.steps}
+        assert step_names.get(13) == "Redis Data Quality"
 
     @pytest.mark.asyncio
     async def test_detects_unsummarized_links(self):

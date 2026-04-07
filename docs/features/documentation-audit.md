@@ -59,7 +59,7 @@ The auditor extracts and verifies six categories of references (`scripts/docs_au
 | Category | Examples |
 |----------|---------|
 | File paths | `bridge/telegram_bridge.py`, `~/Desktop/Valor/projects.json` |
-| Environment variables | `ANTHROPIC_API_KEY`, `TELEGRAM_BOT_TOKEN` |
+| Environment variables | `USE_CLAUDE_SDK`, `TELEGRAM_BOT_TOKEN` |
 | Python imports | `from agent.sdk_client import ...`, `import telethon` |
 | Class and function names | `DocsAuditor`, `TelegramBridge`, `handle_new_message` |
 | CLI commands | `pytest`, `ruff`, `valor-service.sh` |
@@ -105,7 +105,7 @@ Exempt from renaming: `README.md`, `CHANGELOG.md`, `LICENSE.md`, `CONTRIBUTING.m
 ```python
 from scripts.docs_auditor import DocsAuditor
 
-auditor = DocsAuditor(repo_root=Path("."), dry_run=False, max_api_calls=50)
+auditor = DocsAuditor(repo_root=Path("."), dry_run=False)
 summary = auditor.run()
 ```
 

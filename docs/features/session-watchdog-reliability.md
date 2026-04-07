@@ -16,7 +16,6 @@ Hardened reliability fixes for the session watchdog, SDK stall detection, and ob
 - `_recover_stalled_pending()` handles None and empty project_key gracefully
 - Orphan push-* sessions stuck >1 hour with no history are automatically abandoned and the user is notified
 - Guard: if session status changed since stall detection, skip recovery (prevents double-processing)
-- **query.filter fix**: `_recover_stalled_pending()` uses `AgentSession.query.filter(session_id=...)` instead of `query.get()` because `session_id` is a `Field` (not a `KeyField`). Using `query.get()` on a non-key field silently returns no results, causing stalled pending sessions to be skipped instead of recovered. (Commit `7e503655`)
 
 ### 2. Activity-Based Stall Detection (agent/sdk_client.py)
 
@@ -87,6 +86,5 @@ Observer Error Path
 
 - [Session Watchdog](session-watchdog.md) - Base watchdog implementation
 - [Stall Retry](stall-retry.md) - Retry mechanism for stalled sessions
-- [Chat Dev Session Architecture](chat-dev-session-architecture.md) - Session routing architecture
+- [Observer Agent](observer-agent.md) - Observer routing logic
 - [Bridge Self-Healing](bridge-self-healing.md) - Broader crash recovery system
-- [SDLC Pipeline Integrity](sdlc-pipeline-integrity.md) - SubagentStop stage injection and pipeline state feedback

@@ -1,11 +1,8 @@
 ---
 tracking: https://github.com/tomcounsell/ai/issues/15
-status: Superseded
 ---
 
 # Plan: Hooks System + Session Logging
-
-> **Note**: This was an early plan document. The hooks system was implemented with a different structure than proposed here. See [Session Transcripts](session-transcripts.md) for the current implementation and [SDK Modernization](sdk-modernization.md) for the expanded hooks architecture.
 
 ## Overview
 

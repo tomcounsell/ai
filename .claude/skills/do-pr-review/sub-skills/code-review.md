@@ -68,29 +68,6 @@ For each requirement/acceptance criterion in the plan:
 3. Check that edge cases mentioned in the plan are handled
 4. Verify any "No-Gos" from the plan are respected
 
-#### 4b. Plan Checkbox Validation
-
-Walk each unchecked `- [ ]` item in the following plan sections:
-- **Acceptance Criteria** / **Success Criteria** -- severity: BLOCKER if unaddressed
-- **Test Impact** -- severity: WARNING if unaddressed
-- **Documentation** -- severity: WARNING if unaddressed
-- **Update System** -- severity: WARNING if unaddressed
-
-For each unchecked item:
-1. Assess whether the PR diff addresses it (even if the checkbox is not checked in the plan)
-2. If addressed by the diff: silently pass (do not report)
-3. If NOT addressed by the diff: report with the appropriate severity
-
-Report format for unaddressed items:
-```
-**Unaddressed plan item** (BLOCKER|WARNING):
-  Section: [section name]
-  Item: [checkbox text]
-  Assessment: [why the diff does not address this]
-```
-
-Only report items that are genuinely unaddressed. False positives are worse than missed items.
-
 ### 5. Run Verification Checks (if plan has ## Verification table)
 
 ```bash

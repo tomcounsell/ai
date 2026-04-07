@@ -1,4 +1,4 @@
-"""Tests for agent/build_pipeline.py (renamed from agent/pipeline_state.py).
+"""Tests for agent/pipeline_state.py.
 
 Tests cover: load/exists with missing files, initialize schema,
 save/load round-trips, advance_stage transitions, patch_iterations
@@ -9,7 +9,7 @@ import json
 
 import pytest
 
-import agent.build_pipeline as ps
+import agent.pipeline_state as ps
 
 
 @pytest.fixture(autouse=True)
@@ -152,22 +152,6 @@ def test_advance_stage_raises_for_unknown_stage():
     ps.initialize("bad-stage", "session/bad-stage", ".worktrees/bad-stage")
     with pytest.raises(ValueError, match="Unknown stage"):
         ps.advance_stage("bad-stage", "nonexistent-stage")
-
-
-def test_advance_stage_critique_is_valid():
-    """critique is a valid stage that can be advanced to."""
-    ps.initialize("crit", "session/crit", ".worktrees/crit")
-    state = ps.advance_stage("crit", "critique")
-    assert state["stage"] == "critique"
-    assert "plan" in state["completed_stages"]
-
-
-def test_critique_in_stages_list():
-    """critique must be present in the STAGES list."""
-    assert "critique" in ps.STAGES
-    # critique should come after plan and before branch
-    assert ps.STAGES.index("critique") > ps.STAGES.index("plan")
-    assert ps.STAGES.index("critique") < ps.STAGES.index("branch")
 
 
 # ---------------------------------------------------------------------------

@@ -4,21 +4,17 @@ Unified Redis model tracking agent work from enqueue through completion. Replace
 
 ## Status Lifecycle
 
-`pending` -> `running` -> `active` -> `dormant` -> `completed` | `failed` | `cancelled`
-
-The `cancelled` status is a terminal state set explicitly by the PM via `cancel_job()`. Like `failed`, cancelled jobs block any sibling jobs that depend on them.
+`pending` -> `running` -> `active` -> `dormant` -> `completed` | `failed`
 
 ## Key Fields
 
 **Queue-phase:** `job_id`, `project_key`, `status`, `priority`, `message_text`, `sender_name`, `chat_id`, `message_id`, `auto_continue_count`, `started_at`
 
-**Session-phase:** `turn_count`, `tool_call_count`, `log_path`, `summary`, `branch_name`, `tags`, `classification_type`, `qa_mode`
+**Session-phase:** `turn_count`, `tool_call_count`, `log_path`, `summary`, `branch_name`, `tags`, `classification_type`
 
 **Semantic routing:** `context_summary` (what the session is about), `expectations` (what the agent needs from the human)
 
-**Lifecycle:** `history` (ListField, append-only lifecycle events), `issue_url`, `plan_url`, `pr_url`
-
-**Job dependencies:** `stable_job_id` (UUID, immutable across delete-and-recreate), `depends_on` (list of stable_job_id values), `commit_sha` (HEAD commit for checkpoint/restore)
+**New:** `history` (ListField, append-only lifecycle events), `issue_url`, `plan_url`, `pr_url`
 
 ## History Tracking
 
@@ -29,18 +25,15 @@ The `cancelled` status is a terminal state set explicitly by the PM via `cancel_
 
 ## SDLC Stage Tracking
 
-Pipeline stage state is stored in the `stage_states` JSON field on AgentSession, managed by the `PipelineStateMachine` in `bridge/pipeline_state.py`. This is the single field for stage state -- the legacy `sdlc_stages` field was removed in PR #490 and all stage tracking is consolidated here. The state machine provides:
+Pipeline stage state is stored in the `stage_states` JSON field on AgentSession, managed by the `PipelineStateMachine` in `bridge/pipeline_state.py`. The state machine provides:
 
 | Method | Returns | Purpose |
 |---|---|---|
 | `PipelineStateMachine.has_remaining_stages()` | `bool` | `True` if pipeline graph has a non-terminal next stage from the last completed stage |
 | `PipelineStateMachine.has_failed_stage()` | `bool` | `True` if any stage has `FAILED` or `ERROR` status |
 | `PipelineStateMachine.get_display_progress()` | `dict` | Maps stage names to status (`completed`, `in_progress`, `pending`, `failed`) |
-| `record_stage_completion(session, stage)` | `None` | Convenience helper that starts and completes a stage atomically |
 
-`is_sdlc` (property) returns `True` if either (1) `stage_states` contains any non-pending/non-ready stage, or (2) `classification_type == "sdlc"` for freshly-classified sessions.
-
-`_get_stage_states_dict()` parses the `stage_states` JSON field into a dict. It handles `None`, `dict`, and JSON string inputs.
+`is_sdlc` (property) returns `True` if `classification_type == "sdlc"`.
 
 These are used by the [stage-aware auto-continue](bridge-workflow-gaps.md#stage-aware-path-sdlc-jobs) routing in `agent/job_queue.py`.
 
@@ -48,9 +41,18 @@ These are used by the [stage-aware auto-continue](bridge-workflow-gaps.md#stage-
 
 `set_link(kind, url)` stores issue, plan, and PR URLs as each SDLC stage completes. `get_links()` returns all tracked links.
 
-## Stage Tracking
+## CLI Tool
 
-Stage transitions are managed by the `PipelineStateMachine` in `bridge/pipeline_state.py`. Stage status is set programmatically at transition points (`start_stage()`, `complete_stage()`, `fail_stage()`) rather than via a CLI tool.
+`tools/session_progress.py` updates stage progress and links from Bash:
+
+```bash
+python -m tools.session_progress --session-id $ID --stage BUILD --status completed
+python -m tools.session_progress --session-id $ID --pr-url https://github.com/.../pull/42
+```
+
+### SDLC Skill Wiring
+
+Each SDLC skill calls `session_progress.py` to record stage transitions. The SESSION_ID is extracted from the `SESSION_ID: xxx` line injected by `sdk_client.py` into enriched messages.
 
 | Skill | Stage | Transitions | Links Set |
 |-------|-------|-------------|-----------|
@@ -60,6 +62,8 @@ Stage transitions are managed by the `PipelineStateMachine` in `bridge/pipeline_
 | `/do-test` | TEST | `in_progress` → `completed` or `failed` | — |
 | `/do-pr-review` | REVIEW | `in_progress` → `completed` | — |
 | `/do-docs` | DOCS | `in_progress` → `completed` | — |
+
+All calls use `2>/dev/null || true` for fire-and-forget behavior — stage tracking failures never block pipeline work.
 
 ### Session Lookup Chain
 
@@ -136,4 +140,3 @@ Fields preserved: all queue-phase fields, session-phase fields, semantic routing
 - [Session Transcripts](session-transcripts.md) - Transcript file logging
 - [Session Tagging](session-tagging.md) - Auto-tagging system
 - [Summarizer Format](summarizer-format.md) - Bullet-point summaries
-- [Job Dependency Tracking](job-dependency-tracking.md) - Sibling dependencies, branch mapping, checkpoint/restore

@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 #
 # Detection works two ways (OR logic):
 #   1. Message text contains the skill's trigger pattern (e.g. "/do-build")
-#   2. AgentSession.current_stage matches the skill's phase name
+#   2. WorkflowState.phase matches the skill's phase name
 #
 # To add a future skill:
 #   1. Add an entry to SKILL_DETECTORS with its trigger and phase
@@ -338,7 +338,7 @@ def _detect_active_skill(message_text: str | None) -> dict | None:
 def detect_skill_from_phase(phase: str | None) -> dict | None:
     """Detect active skill from workflow phase name.
 
-    Called when session phase is available. Maps phase names back to
+    Called when WorkflowState is available. Maps phase names back to
     skill metadata for coaching purposes.
 
     Args:

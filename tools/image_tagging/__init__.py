@@ -296,12 +296,11 @@ def batch_tag_images(
     }
 
 
-def main():
-    """CLI entry point for image tagging."""
+if __name__ == "__main__":
     import sys
 
     if len(sys.argv) < 2:
-        print("Usage: valor-image-tagging 'path/to/image.jpg'")
+        print("Usage: python -m tools.image_tagging 'path/to/image.jpg'")
         sys.exit(1)
 
     image_path = sys.argv[1]
@@ -318,7 +317,3 @@ def main():
         print(f"\nTags ({result['tag_count']}):")
         for tag in result["tags"]:
             print(f"  - {tag['tag']} ({tag['category']}) [{tag['confidence']:.2f}]")
-
-
-if __name__ == "__main__":
-    main()

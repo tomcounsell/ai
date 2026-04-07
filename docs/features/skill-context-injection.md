@@ -34,7 +34,9 @@ Skills are static Markdown templates with placeholder variables like `{pr_number
 
 ### Part 2: Observer Coaching Enrichment
 
-The coaching message enrichment provides redundancy — SDLC context variables are available via both env vars and coaching message text.
+`bridge/observer.py` includes a `sdlc_context` dict in the `read_session` tool response. This gives the Observer concrete values to include in coaching messages, providing redundancy — variables are available via both env vars and coaching message text.
+
+**Implementation:** `_build_sdlc_context()` in `bridge/observer.py`, called from `_handle_read_session()`.
 
 The Observer system prompt instructs it to append resolved variables to coaching messages:
 ```
@@ -79,7 +81,7 @@ Observer (read_session)
 | File | Role |
 |------|------|
 | `agent/sdk_client.py` | `_extract_sdlc_env_vars()` — env var injection |
-| `agent/sdk_client.py` | SDLC context enrichment in coaching messages |
+| `bridge/observer.py` | `_build_sdlc_context()` — coaching message enrichment |
 | `.claude/skills/do-pr-review/SKILL.md` | Updated to use `$SDLC_*` with fallback |
 | `.claude/skills/do-pr-review/sub-skills/` | 4 focused sub-skill files + README |
 | `tests/unit/test_sdlc_env_vars.py` | 10 unit tests |

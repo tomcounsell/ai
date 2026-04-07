@@ -43,14 +43,12 @@ class TestIsSdlcJobClassificationType:
         )
         assert session.is_sdlc is False
 
-    def test_stage_states_triggers_sdlc(self):
-        """stage_states with active stages should trigger SDLC."""
-        import json
-
+    def test_stage_history_still_works(self):
+        """Legacy path: [stage] entries in history should still trigger SDLC."""
         session = AgentSession(
             session_id="test_legacy_246",
             project_key="test",
-            stage_states=json.dumps({"PLAN": "in_progress"}),
+            history=["[stage] PLAN in_progress"],
         )
         assert session.is_sdlc is True
 
@@ -64,12 +62,11 @@ class TestIsSdlcJobClassificationType:
         )
         assert session.is_sdlc is True
 
-    def test_sdlc_mode_via_classification_type(self):
-        """classification_type='sdlc' should make is_sdlc return True."""
+    def test_sdlc_mode_activated_entry(self):
+        """The SDLC_MODE activated entry should make is_sdlc return True."""
         session = AgentSession(
             session_id="test_activated_246",
             project_key="test",
-            classification_type="sdlc",
-            history=["[user] SDLC issue 246"],
+            history=["[user] SDLC issue 246", "[stage] SDLC_MODE activated"],
         )
         assert session.is_sdlc is True

@@ -4,11 +4,11 @@ Tests cover:
 - Initialization (default, from JSON, from dict, from None)
 - start_stage() ordering enforcement
 - complete_stage() transitions and next-stage marking
-- fail_stage() and PATCH/CRITIQUE cycle handling
+- fail_stage() and PATCH cycle handling
 - get_display_progress() excludes PATCH
 - current_stage() and next_stage() queries
 - has_remaining_stages() and has_failed_stage()
-- classify_outcome() two-tier classification (including CRITIQUE)
+- classify_outcome() two-tier classification
 - Edge cases: double-complete, invalid stages, cycle re-entry
 """
 
@@ -40,10 +40,8 @@ class TestInitialization:
         sm = PipelineStateMachine(session)
         assert sm.states["ISSUE"] == "ready"
         assert sm.states["PLAN"] == "pending"
-        assert sm.states["CRITIQUE"] == "pending"
         assert sm.states["MERGE"] == "pending"
         assert sm.patch_cycle_count == 0
-        assert sm.critique_cycle_count == 0
 
     def test_from_json_string(self):
         """Loads state from JSON string on session."""
@@ -82,20 +80,12 @@ class TestInitialization:
         sm = PipelineStateMachine(session)
         assert sm.patch_cycle_count == 2
 
-    def test_preserves_critique_cycle_count(self):
-        """Loads _critique_cycle_count from state."""
-        states = {"ISSUE": "completed", "_critique_cycle_count": 1}
-        session = _make_session(stage_states=json.dumps(states))
-        sm = PipelineStateMachine(session)
-        assert sm.critique_cycle_count == 1
-
     def test_missing_stages_get_defaults(self):
         """Stages not in the loaded state get pending."""
         states = {"ISSUE": "completed"}
         session = _make_session(stage_states=json.dumps(states))
         sm = PipelineStateMachine(session)
         assert sm.states["MERGE"] == "pending"
-        assert sm.states["CRITIQUE"] == "pending"
 
 
 class TestStartStage:
@@ -124,37 +114,13 @@ class TestStartStage:
         sm.start_stage("PLAN")
         assert sm.states["PLAN"] == "in_progress"
 
-    def test_start_critique_requires_plan_completed(self):
-        """CRITIQUE requires PLAN to be completed."""
+    def test_start_build_requires_plan_completed(self):
+        """BUILD requires PLAN to be completed."""
         states = {"ISSUE": "completed", "PLAN": "in_progress"}
-        session = _make_session(stage_states=json.dumps(states))
-        sm = PipelineStateMachine(session)
-        with pytest.raises(ValueError, match="Cannot start CRITIQUE"):
-            sm.start_stage("CRITIQUE")
-
-    def test_start_critique_after_plan_completed(self):
-        """CRITIQUE can start when PLAN is completed."""
-        states = {"ISSUE": "completed", "PLAN": "completed"}
-        session = _make_session(stage_states=json.dumps(states))
-        sm = PipelineStateMachine(session)
-        sm.start_stage("CRITIQUE")
-        assert sm.states["CRITIQUE"] == "in_progress"
-
-    def test_start_build_requires_critique_completed(self):
-        """BUILD requires CRITIQUE to be completed (not PLAN directly)."""
-        states = {"ISSUE": "completed", "PLAN": "completed", "CRITIQUE": "pending"}
         session = _make_session(stage_states=json.dumps(states))
         sm = PipelineStateMachine(session)
         with pytest.raises(ValueError, match="Cannot start BUILD"):
             sm.start_stage("BUILD")
-
-    def test_start_build_after_critique_completed(self):
-        """BUILD can start when CRITIQUE is completed."""
-        states = {"ISSUE": "completed", "PLAN": "completed", "CRITIQUE": "completed"}
-        session = _make_session(stage_states=json.dumps(states))
-        sm = PipelineStateMachine(session)
-        sm.start_stage("BUILD")
-        assert sm.states["BUILD"] == "in_progress"
 
     def test_start_invalid_stage(self):
         """Invalid stage name raises ValueError."""
@@ -183,7 +149,6 @@ class TestStartStage:
         states = {
             "ISSUE": "completed",
             "PLAN": "completed",
-            "CRITIQUE": "completed",
             "BUILD": "completed",
             "TEST": "failed",
         }
@@ -197,7 +162,6 @@ class TestStartStage:
         states = {
             "ISSUE": "completed",
             "PLAN": "completed",
-            "CRITIQUE": "completed",
             "BUILD": "completed",
             "TEST": "pending",
         }
@@ -211,7 +175,6 @@ class TestStartStage:
         states = {
             "ISSUE": "completed",
             "PLAN": "completed",
-            "CRITIQUE": "completed",
             "BUILD": "completed",
             "TEST": "failed",
             "PATCH": "completed",
@@ -220,18 +183,6 @@ class TestStartStage:
         sm = PipelineStateMachine(session)
         sm.start_stage("TEST")
         assert sm.states["TEST"] == "in_progress"
-
-    def test_plan_restart_after_critique_failure(self):
-        """PLAN can restart after CRITIQUE fails (revision cycle)."""
-        states = {
-            "ISSUE": "completed",
-            "PLAN": "completed",
-            "CRITIQUE": "failed",
-        }
-        session = _make_session(stage_states=json.dumps(states))
-        sm = PipelineStateMachine(session)
-        sm.start_stage("PLAN")
-        assert sm.states["PLAN"] == "in_progress"
 
 
 class TestCompleteStage:
@@ -245,29 +196,13 @@ class TestCompleteStage:
         sm.complete_stage("ISSUE")
         assert sm.states["ISSUE"] == "completed"
 
-    def test_complete_issue_marks_plan_ready(self):
-        """Completing ISSUE marks PLAN as ready."""
+    def test_complete_marks_next_stage_ready(self):
+        """Completing a stage marks the next stage as ready."""
         states = {"ISSUE": "in_progress"}
         session = _make_session(stage_states=json.dumps(states))
         sm = PipelineStateMachine(session)
         sm.complete_stage("ISSUE")
         assert sm.states["PLAN"] == "ready"
-
-    def test_complete_plan_marks_critique_ready(self):
-        """Completing PLAN marks CRITIQUE as ready (not BUILD)."""
-        states = {"ISSUE": "completed", "PLAN": "in_progress"}
-        session = _make_session(stage_states=json.dumps(states))
-        sm = PipelineStateMachine(session)
-        sm.complete_stage("PLAN")
-        assert sm.states["CRITIQUE"] == "ready"
-
-    def test_complete_critique_marks_build_ready(self):
-        """Completing CRITIQUE marks BUILD as ready."""
-        states = {"ISSUE": "completed", "PLAN": "completed", "CRITIQUE": "in_progress"}
-        session = _make_session(stage_states=json.dumps(states))
-        sm = PipelineStateMachine(session)
-        sm.complete_stage("CRITIQUE")
-        assert sm.states["BUILD"] == "ready"
 
     def test_double_complete_is_noop(self):
         """Completing an already completed stage is a no-op."""
@@ -331,22 +266,6 @@ class TestFailStage:
         sm.fail_stage("TEST")
         assert sm.states["PATCH"] == "ready"
 
-    def test_fail_critique_marks_plan_ready(self):
-        """Failing CRITIQUE marks PLAN as ready (revision cycle)."""
-        states = {"ISSUE": "completed", "PLAN": "completed", "CRITIQUE": "in_progress"}
-        session = _make_session(stage_states=json.dumps(states))
-        sm = PipelineStateMachine(session)
-        sm.fail_stage("CRITIQUE")
-        assert sm.states["PLAN"] == "ready"
-
-    def test_fail_critique_increments_critique_cycle_count(self):
-        """Failing CRITIQUE increments the critique cycle counter."""
-        states = {"CRITIQUE": "in_progress"}
-        session = _make_session(stage_states=json.dumps(states))
-        sm = PipelineStateMachine(session)
-        sm.fail_stage("CRITIQUE")
-        assert sm.critique_cycle_count == 1
-
     def test_fail_completed_is_noop(self):
         """Failing an already completed stage is a no-op."""
         states = {"TEST": "completed"}
@@ -375,13 +294,6 @@ class TestDisplayProgress:
         assert "ISSUE" in progress
         assert "MERGE" in progress
 
-    def test_includes_critique(self):
-        """CRITIQUE is included in display progress."""
-        session = _make_session()
-        sm = PipelineStateMachine(session)
-        progress = sm.get_display_progress()
-        assert "CRITIQUE" in progress
-
     def test_returns_all_display_stages(self):
         """Returns exactly DISPLAY_STAGES."""
         session = _make_session()
@@ -390,7 +302,6 @@ class TestDisplayProgress:
         assert list(progress.keys()) == [
             "ISSUE",
             "PLAN",
-            "CRITIQUE",
             "BUILD",
             "TEST",
             "REVIEW",
@@ -403,7 +314,6 @@ class TestDisplayProgress:
         states = {
             "ISSUE": "completed",
             "PLAN": "completed",
-            "CRITIQUE": "completed",
             "BUILD": "in_progress",
         }
         session = _make_session(stage_states=json.dumps(states))
@@ -411,7 +321,6 @@ class TestDisplayProgress:
         progress = sm.get_display_progress()
         assert progress["ISSUE"] == "completed"
         assert progress["PLAN"] == "completed"
-        assert progress["CRITIQUE"] == "completed"
         assert progress["BUILD"] == "in_progress"
         assert progress["TEST"] == "pending"
 
@@ -448,7 +357,7 @@ class TestCurrentAndNextStage:
         sm = PipelineStateMachine(session)
         result = sm.next_stage("success")
         assert result is not None
-        assert result[0] == "CRITIQUE"
+        assert result[0] == "BUILD"
 
     def test_next_stage_from_last_completed(self):
         """next_stage finds last completed when nothing in_progress."""
@@ -457,7 +366,7 @@ class TestCurrentAndNextStage:
         sm = PipelineStateMachine(session)
         result = sm.next_stage("success")
         assert result is not None
-        assert result[0] == "CRITIQUE"
+        assert result[0] == "BUILD"
 
     def test_next_stage_nothing_started(self):
         """next_stage returns ISSUE when nothing started."""
@@ -481,17 +390,7 @@ class TestHasRemainingStages:
     def test_false_when_merge_completed(self):
         """Returns False when MERGE is completed."""
         states = {
-            s: "completed"
-            for s in [
-                "ISSUE",
-                "PLAN",
-                "CRITIQUE",
-                "BUILD",
-                "TEST",
-                "REVIEW",
-                "DOCS",
-                "MERGE",
-            ]
+            s: "completed" for s in ["ISSUE", "PLAN", "BUILD", "TEST", "REVIEW", "DOCS", "MERGE"]
         }
         session = _make_session(stage_states=json.dumps(states))
         sm = PipelineStateMachine(session)
@@ -572,42 +471,18 @@ class TestClassifyOutcome:
         result = sm.classify_outcome("ISSUE", None, "issue created #42")
         assert result == "success"
 
-    def test_critique_ready_to_build_is_success(self):
-        """CRITIQUE with 'ready to build' pattern is success."""
-        session = _make_session()
-        sm = PipelineStateMachine(session)
-        result = sm.classify_outcome("CRITIQUE", "end_turn", "Verdict: READY TO BUILD")
-        assert result == "success"
-
-    def test_critique_needs_revision_is_fail(self):
-        """CRITIQUE with 'needs revision' pattern is fail."""
-        session = _make_session()
-        sm = PipelineStateMachine(session)
-        result = sm.classify_outcome(
-            "CRITIQUE", "end_turn", "Verdict: NEEDS REVISION - 2 blockers found"
-        )
-        assert result == "fail"
-
-    def test_critique_major_rework_is_ambiguous(self):
-        """CRITIQUE with 'major rework' pattern is ambiguous (escalate to human)."""
-        session = _make_session()
-        sm = PipelineStateMachine(session)
-        result = sm.classify_outcome("CRITIQUE", "end_turn", "Verdict: MAJOR REWORK required")
-        assert result == "ambiguous"
-
 
 class TestToDict:
     """Test serialization."""
 
     def test_to_dict_includes_all_fields(self):
-        """to_dict includes states, cycle counts, current, and remaining."""
+        """to_dict includes states, cycle count, current, and remaining."""
         states = {"ISSUE": "in_progress"}
         session = _make_session(stage_states=json.dumps(states))
         sm = PipelineStateMachine(session)
         d = sm.to_dict()
         assert "states" in d
         assert "patch_cycle_count" in d
-        assert "critique_cycle_count" in d
         assert "current_stage" in d
         assert "has_remaining" in d
         assert d["current_stage"] == "ISSUE"

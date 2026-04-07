@@ -23,7 +23,7 @@ The system uses the Claude Agent SDK as its agent backend, providing Claude Code
 
 ```bash
 # 1. Clone and enter directory
-cd ~/src/ai
+cd /Users/valorengels/src/ai
 
 # 2. Install dependencies
 pip install -e .
@@ -41,7 +41,7 @@ cp .env.example .env
 ### 1. Install Python Dependencies
 
 ```bash
-cd ~/src/ai
+cd /Users/valorengels/src/ai
 pip install -e .
 ```
 
@@ -70,6 +70,9 @@ TELEGRAM_API_ID=12345678
 TELEGRAM_API_HASH=your_api_hash_here
 TELEGRAM_PHONE=+1234567890
 TELEGRAM_PASSWORD=your_2fa_password  # if enabled
+
+# Agent Backend (recommended: true)
+USE_CLAUDE_SDK=true
 
 # Bridge Configuration
 TELEGRAM_SESSION_NAME=valor_bridge
@@ -219,18 +222,18 @@ Or manually create `~/Library/LaunchAgents/com.valor.bridge.plist`:
     <key>ProgramArguments</key>
     <array>
         <string>/usr/bin/python3</string>
-        <string>$HOME/src/ai/bridge/telegram_bridge.py</string>
+        <string>/Users/valorengels/src/ai/bridge/telegram_bridge.py</string>
     </array>
     <key>WorkingDirectory</key>
-    <string>$HOME/src/ai</string>
+    <string>/Users/valorengels/src/ai</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>$HOME/src/ai/logs/bridge.log</string>
+    <string>/Users/valorengels/src/ai/logs/bridge.log</string>
     <key>StandardErrorPath</key>
-    <string>$HOME/src/ai/logs/bridge.error.log</string>
+    <string>/Users/valorengels/src/ai/logs/bridge.error.log</string>
 </dict>
 </plist>
 ```

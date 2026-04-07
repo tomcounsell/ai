@@ -20,7 +20,7 @@ This allows multiple machines to run Valor, each monitoring different groups.
   "projects": {
     "myproject": {
       "name": "MyProject",
-      "working_directory": "~/src/myproject",
+      "working_directory": "/Users/valorengels/src/myproject",
       "telegram": {
         "groups": ["Dev: MyProject"]
       },
@@ -32,7 +32,7 @@ This allows multiple machines to run Valor, each monitoring different groups.
     }
   },
   "defaults": {
-    "working_directory": "~/src/ai",
+    "working_directory": "/Users/valorengels/src/ai",
     "telegram": {
       "respond_to_all": true,
       "respond_to_mentions": true,
@@ -109,34 +109,6 @@ Multiple machines can monitor different groups, or one machine can monitor all.
 ### Session isolation issues
 1. Sessions are scoped by project - `tg_{project}_{chat_id}`
 2. Different projects in same chat create separate sessions
-
-## Update Polling
-
-Every machine automatically polls for updates from `origin/main` every 30 minutes via the `com.valor.update` launchd plist. This ensures code changes propagate to all machines without relying on Telegram message delivery.
-
-**How it works:**
-1. `com.valor.update` fires every 1800 seconds (30 minutes) via `StartInterval`
-2. Runs `scripts/remote-update.sh`, which calls the update orchestrator (`scripts/update/run.py --cron`)
-3. If new commits are detected: pulls changes, syncs dependencies (if dep files changed), writes `data/restart-requested`
-4. The bridge job queue detects the restart flag and triggers a graceful restart after in-flight jobs complete
-
-**Verify polling is active:**
-```bash
-# Check the update plist is loaded
-launchctl list | grep com.valor.update
-
-# View recent update activity
-tail -20 logs/update.log
-```
-
-**Install or reinstall:**
-```bash
-./scripts/valor-service.sh install
-```
-
-The Telegram `/update` command remains available as a manual override for immediate updates on the receiving machine.
-
-For more details on the update polling mechanism, see [Bridge Self-Healing](bridge-self-healing.md#10-update-polling-comvalorupdate).
 
 ## See Also
 

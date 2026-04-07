@@ -66,7 +66,7 @@ REFERENCE TYPES TO EXTRACT:
 - CLI commands (e.g., "./scripts/start_bridge.sh", "valor-telegram", "python scripts/reflections.py")
 - Environment variables (e.g., "ANTHROPIC_API_KEY", "TELEGRAM_API_ID")
 - Package/module names (e.g., "telethon", "anthropic", "claude-agent-sdk")
-- Config file keys (e.g., "SENTRY_DSN", "ACTIVE_PROJECTS")
+- Config file keys (e.g., "USE_CLAUDE_SDK", "SENTRY_DSN")
 - Script names in scripts/ directory
 
 VERIFICATION STEPS (use Glob, Grep, Read, Bash tools):
@@ -235,30 +235,50 @@ List each relocated file:
 
 ---
 
-## Step 7: Create Branch, Commit, and Open PR
+## Step 6.5: Threshold Router — Decide Commit Strategy
 
-**If 0 changes** (all verdicts were KEEP): Skip this step entirely. Report "No changes needed — all docs are accurate." and proceed to the Output Report.
+Before committing, count how many files were actually changed (UPDATE + DELETE + RELOCATED). This count determines the commit strategy.
 
-### 7.1: Create a branch and commit
+**If 0 changes** (all verdicts were KEEP): Skip the commit entirely. Report "No changes needed — all docs are accurate." and proceed to the Output Report.
+
+**If <=5 changes**: Use the **Hotfix Path** (Step 7A below). Commit directly with a concise message listing each changed file.
+
+**If >5 changes**: Use the **Report Path** (Step 7B below). Create a GitHub issue with the full audit report, then commit with a short summary referencing the issue.
+
+---
+
+## Step 7A: Hotfix Path (<=5 changes)
+
+Stage all changes and commit with a concise message listing only files that were actually modified:
 
 ```bash
-git checkout -b docs-audit-$(date +%Y%m%d)
 git add -A docs/ CLAUDE.md
 git commit -m "$(cat <<'EOF'
 Docs audit: fix {N} documentation issues
 
-Updated: {U} | Deleted: {D} | Relocated: {R} | Kept: {K}
+Changes:
+{for each CHANGED file only: "- {VERDICT} {path}: {one-line rationale}"}
+
+Kept: {K} | Updated: {U} | Deleted: {D} | Relocated: {R}
 EOF
 )"
 ```
 
-### 7.2: Push and open a PR
+**IMPORTANT**: The commit message must list ONLY files where changes were actually made (UPDATE, DELETE, RELOCATED). Never include KEEP verdicts or files that weren't modified. The message should be short — one line per changed file.
 
-Push the branch and create a PR. The PR body contains the full audit report — this is where the detail lives.
+---
+
+## Step 7B: Report Path (>5 changes)
+
+### 7B.1: Create GitHub Issue with Full Report
+
+Before committing, create a GitHub issue containing the complete audit report.
+Note: For cross-repo work, the `GH_REPO` env var is set automatically by sdk_client.py.
 
 ```bash
-git push -u origin HEAD
-gh pr create --title "Docs audit: fix {N} documentation issues" --body "$(cat <<'EOF'
+gh issue create \
+  --title "Docs audit: {N} issues found across documentation" \
+  --body "$(cat <<'EOF'
 ## Documentation Audit Report
 
 **Scanned**: {total} files
@@ -272,34 +292,47 @@ gh pr create --title "Docs audit: fix {N} documentation issues" --body "$(cat <<
 
 ### Files Kept (no changes needed)
 
-<details>
-<summary>{K} files unchanged</summary>
-
 {for each KEEP file: "- `{path}`"}
-
-</details>
 EOF
 )"
 ```
 
-### 7.3: Return to main
+**Before creating a new issue**, first check for an existing open docs audit issue:
+```bash
+gh issue list --search "Docs audit" --state open --limit 1
+```
+If one exists, append to it as a comment instead of creating a new issue.
+
+### 7B.2: Commit with Issue Reference
 
 ```bash
-git checkout main
+git add -A docs/ CLAUDE.md
+git commit -m "$(cat <<'EOF'
+Docs audit: fix {N} documentation issues
+
+See #{issue_number} for full audit report.
+
+Summary: Updated {U} | Deleted {D} | Relocated {R} | Kept {K}
+EOF
+)"
 ```
 
-### Commit Message Rules
+**IMPORTANT**: The commit message must NOT contain the full per-file audit report. Only reference the issue number and include summary counts. If the GitHub issue creation fails, fall back to the Hotfix Path (Step 7A) format — list only actually changed files inline.
+
+---
+
+### Commit Message Rules (applies to both paths)
 
 1. **Never list KEEP verdicts** in commit messages — they represent no change
-2. **Never dump the full audit report** into a commit message — the PR body has it
+2. **Never dump the full audit report** into a commit message
 3. **Only reference files that were actually modified** in the working tree
-4. **Keep commit messages under 50 lines**
+4. **Keep commit messages under 50 lines** — use the GitHub issue for details
 
 ---
 
 ## Output Report
 
-After opening the PR, print the final audit report:
+After committing, print the final audit report:
 
 ```
 ## Documentation Audit Complete
@@ -323,8 +356,8 @@ After opening the PR, print the final audit report:
 #### Relocated
 - `docs/architecture/system-overview.md` → `docs/features/system-overview.md`
 
-### PR
-{PR URL}
+### Committed
+{commit SHA}
 ```
 
 ---

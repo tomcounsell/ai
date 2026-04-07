@@ -16,8 +16,6 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from bridge.utc import utc_now
-
 logger = logging.getLogger(__name__)
 
 
@@ -69,7 +67,7 @@ class BossMessenger:
 
             record = MessageRecord(
                 content=message[:200],  # Truncate for record
-                timestamp=utc_now(),
+                timestamp=datetime.now(),
                 message_type=message_type,
             )
             self.messages_sent.append(record)
@@ -132,7 +130,7 @@ class BackgroundTask:
             coro: The async work to perform (should return a string result)
             send_result: Whether to automatically send the result when done
         """
-        self._started_at = utc_now()
+        self._started_at = datetime.now()
 
         # Start the main work
         self._task = asyncio.create_task(self._run_work(coro, send_result))
@@ -146,25 +144,14 @@ class BackgroundTask:
         """Execute the work and handle completion."""
         try:
             self._result = await coro
-            self._completed_at = utc_now()
+            self._completed_at = datetime.now()
 
             if send_result and self._result:
                 await self.messenger.send(self._result, message_type="result")
 
-            # Post-session memory extraction (non-fatal, async)
-            try:
-                from agent.memory_extraction import run_post_session_extraction
-
-                await run_post_session_extraction(
-                    session_id=self.messenger.session_id,
-                    response_text=str(self._result or ""),
-                )
-            except Exception as mem_err:
-                logger.debug(f"[{self.messenger.session_id}] Memory extraction skipped: {mem_err}")
-
         except Exception as e:
             self._error = e
-            self._completed_at = utc_now()
+            self._completed_at = datetime.now()
             logger.error(f"[{self.messenger.session_id}] Background task failed: {e}")
 
             # Send error notification
@@ -178,26 +165,22 @@ class BackgroundTask:
 
     async def _watchdog(self) -> None:
         """
-        Internal health check watchdog with periodic heartbeat.
+        Internal health check watchdog.
 
-        Emits a heartbeat log every 60s while the SDK subprocess is running.
-        This provides continuous liveness visibility instead of a single
-        check at acknowledgment_timeout. Does not send any message to chat.
+        Waits for acknowledgment_timeout seconds, then logs if the task
+        is still running without having communicated. Does not send any
+        message to chat -- the hourglass reaction already signals progress.
         """
-        heartbeat_interval = 60  # seconds
-        elapsed = 0
         try:
-            while self._task and not self._task.done():
-                await asyncio.sleep(heartbeat_interval)
-                elapsed += heartbeat_interval
-                if self._task and not self._task.done():
-                    communicated = self.messenger.has_communicated()
-                    logger.info(
-                        "[%s] SDK heartbeat: running %ds, communicated=%s",
-                        self.messenger.session_id,
-                        elapsed,
-                        communicated,
-                    )
+            await asyncio.sleep(self.acknowledgment_timeout)
+
+            # Log health check if still running and silent
+            if self._task and not self._task.done() and not self.messenger.has_communicated():
+                logger.info(
+                    f"[{self.messenger.session_id}] Task running "
+                    f"{self.acknowledgment_timeout}s without output (health check)"
+                )
+
         except asyncio.CancelledError:
             # Normal cancellation when task completes
             pass

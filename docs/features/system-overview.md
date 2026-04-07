@@ -25,7 +25,7 @@ The architecture represents a **living codebase** where users interact directly 
 │                       Python Bridge Layer                            │
 │                   (bridge/telegram_bridge.py)                        │
 │                                                                      │
-│  • Message routing via chat_title prefix (Dev: → DevSession)         │
+│  • Message routing via USE_CLAUDE_SDK flag                           │
 │  • Session management per chat                                       │
 │  • Multi-project support                                             │
 └───────────────────────────────┬─────────────────────────────────────┘
@@ -122,7 +122,7 @@ Domain-Specific Tools & MCP Servers
 - **Security**: Granular permissions per subagent/tool
 - **Flexibility**: Multiple execution paths (Claude Code + Gemini CLI)
 
-See [Chat Dev Session Architecture](chat-dev-session-architecture.md) for the current session architecture.
+See [Subagent System Design](subagent-mcp-system.md) for details.
 
 ## Design Principles
 
@@ -180,28 +180,45 @@ See [Chat Dev Session Architecture](chat-dev-session-architecture.md) for the cu
 
 ## Technology Stack
 
+### Core Framework
+- **FastAPI** (v0.104.0+): Async web framework
+  - **Why**: Production-ready, high performance, built-in OpenAPI docs
+  - **Benefits**: Type safety, dependency injection, async support
+
 ### AI Integration
-- **Claude Agent SDK**: Agent backend for orchestrating Claude Code sessions
-  - **Why**: Native Python integration with Claude Code's tool ecosystem
-  - **Benefits**: Same tools as Claude Code, programmatic session management
+- **PydanticAI** (v0.0.13+): Type-safe agent framework
+  - **Why**: Structured outputs, tool integration, testing support
+  - **Benefits**: Context management, validation, clean architecture
 
 - **Anthropic Claude**: Primary AI reasoning engine
   - **Why**: Advanced reasoning, code understanding, long context
   - **Benefits**: High quality outputs, reliable performance
 
 ### External Services
-- **Telegram** (Telethon, user account): Primary user interface
+- **Telegram Bot API**: Primary user interface
   - **Why**: Rich features, global availability, no custom app
   - **Benefits**: Media support, reactions, persistent history
+
+- **OpenAI API**: Vision and image generation
+  - **Why**: Best-in-class vision (GPT-4o) and image generation (DALL-E 3)
+  - **Benefits**: High quality outputs, reliable service
 
 - **Perplexity API**: Web search integration
   - **Why**: AI-synthesized search results
   - **Benefits**: Current information, concise summaries
 
+- **Notion API**: Project management
+  - **Why**: Flexible database, team adoption
+  - **Benefits**: Real-time updates, rich data models
+
 ### Infrastructure
-- **Redis** (Popoto ORM): Primary data store for all session, job, and message state
-  - **Why**: Fast, atomic operations, real-time querying via Popoto Django-like syntax
-  - **Benefits**: No SQL, crash-safe, supports sorted sets for priority queues
+- **SQLite with WAL Mode**: Primary database
+  - **Why**: Zero configuration, excellent concurrency
+  - **Benefits**: ACID compliance, embedded, atomic deployments
+
+- **Huey**: Task queue system
+  - **Why**: Lightweight, SQLite-backed, simple
+  - **Benefits**: No Redis dependency, reliable execution
 
 - **MCP (Model Context Protocol)**: Tool standardization
   - **Why**: Future-proof LLM tool standard
@@ -213,7 +230,7 @@ See [Chat Dev Session Architecture](chat-dev-session-architecture.md) for the cu
   - **Benefits**: Reproducible builds, dependency resolution
 
 - **Ollama**: Local LLM inference
-  - **Why**: Privacy-preserving intent classification and image description
+  - **Why**: Privacy-preserving intent recognition
   - **Benefits**: No API costs, fast inference
 
 ## Performance Characteristics

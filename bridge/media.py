@@ -5,6 +5,7 @@ import logging
 import os
 from pathlib import Path
 
+import httpx
 from telethon import TelegramClient
 from telethon.tl.types import (
     DocumentAttributeAudio,
@@ -292,26 +293,35 @@ async def download_media(client: TelegramClient, message, prefix: str = "media")
 
 async def transcribe_voice(filepath: Path) -> str | None:
     """
-    Transcribe voice/audio file using tools.transcribe module.
+    Transcribe voice/audio file using OpenAI Whisper API.
 
-    Uses SuperWhisper as primary backend (local, free) with OpenAI Whisper API
-    as fallback. Returns transcription text, or None if transcription failed.
+    Returns transcription text, or None if transcription failed.
     """
+    api_key = os.getenv("OPENAI_API_KEY", "")
+    if not api_key:
+        logger.warning("No OPENAI_API_KEY for voice transcription")
+        return None
+
     try:
-        from tools.transcribe import transcribe
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            with open(filepath, "rb") as f:
+                files = {"file": (filepath.name, f, "audio/ogg")}
+                data = {"model": "whisper-1"}
+                headers = {"Authorization": f"Bearer {api_key}"}
 
-        # Run the synchronous transcribe() in a thread executor to avoid blocking
-        result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: transcribe(str(filepath)),
-        )
+                response = await client.post(
+                    "https://api.openai.com/v1/audio/transcriptions",
+                    files=files,
+                    data=data,
+                    headers=headers,
+                )
 
-        if "error" in result:
-            logger.error(f"Transcription error: {result['error']}")
-            return None
-
-        text = result.get("text", "").strip()
-        return text if text else None
+                if response.status_code == 200:
+                    result = response.json()
+                    return result.get("text", "").strip()
+                else:
+                    logger.error(f"Whisper API error: {response.status_code} - {response.text}")
+                    return None
 
     except Exception as e:
         logger.error(f"Voice transcription failed: {e}")

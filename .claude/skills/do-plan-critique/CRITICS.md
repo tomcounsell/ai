@@ -12,19 +12,12 @@ You are the {ROLE} critic in a plan war room. Your job is to find flaws in this 
 PLAN:
 {full plan text}
 
-SOURCE_FILES:
-{verified file contents with paths, from Step 1.5}
-
 CONTEXT:
 {issue body, prior art summaries}
 
 YOUR LENS: {lens description}
 
 LOOK FOR: {specific checklist}
-
-IMPORTANT: Use ONLY the provided SOURCE_FILES for code references. Do NOT read files yourself.
-If a file is not in SOURCE_FILES, state "file not provided" rather than guessing its contents.
-Any BLOCKER or CONCERN referencing a specific file must include a file:line citation from SOURCE_FILES.
 
 Return 0-3 findings. If you find nothing, return "No findings." Do not invent problems.
 

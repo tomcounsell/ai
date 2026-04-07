@@ -11,7 +11,7 @@ import os
 import subprocess
 import sys
 
-from utils.github_patterns import construct_canonical_url as _construct_canonical_url
+from bridge.observer import _construct_canonical_url
 
 
 class TestCanonicalUrlConstruction:
@@ -210,7 +210,7 @@ class TestMergeStageTracking:
         assert "MERGE" in STAGE_TO_SKILL
         assert STAGE_TO_SKILL["MERGE"] == "/do-merge"
 
-    def test_merge_in_stage_constants(self):
+    def test_merge_in_sdlc_stages(self):
         from models.agent_session import SDLC_STAGES
 
         assert "MERGE" in SDLC_STAGES

@@ -2,26 +2,26 @@
 """
 Reflections - Autonomous Daily Maintenance System
 
-A long-running process that performs daily self-directed maintenance tasks.
-14 units: 11 independent items + 3 merged pipelines.
-
-Independent units:
-1. legacy_code_scan — Clean Up Stale Code
-2. log_review           — Review Previous Day's Logs
-3. task_management      — Clean Up Task Management
-4. documentation_audit  — Audit Documentation
-5. skills_audit         — Skills Audit
-6. redis_ttl_cleanup    — Redis TTL Cleanup
-7. redis_data_quality   — Redis Data Quality
-8. branch_plan_cleanup  — Branch and Plan Cleanup
-9. feature_docs_audit   — Feature Docs Audit
-10. principal_staleness — Principal Context Staleness
-11. disk_space_check    — Disk Space Check
-
-Merged pipelines (sub-steps run internally, one checkpoint per pipeline):
-12. session_intelligence    — Session Analysis + LLM Reflection + Bug Filing
-13. behavioral_learning     — Episode Cycle-Close + Pattern Crystallization
-14. daily_report_and_notify — Daily Report + GitHub Issues + Telegram (must be last)
+A long-running process that performs daily self-directed maintenance tasks:
+1. Clean up legacy code
+2. Review previous day's logs (per-project, with structured error extraction)
+3. Check error logs via Sentry (skips gracefully if MCP unavailable)
+4. Clean up task management (per-project, via gh CLI)
+5. Update documentation
+6. Session analysis (thrash ratio, user corrections) - Redis-backed via AgentSession
+7. LLM reflection (Claude Haiku categorization)
+8. File GitHub issues for high-confidence code bugs
+9. Produce daily report (local markdown)
+10. GitHub issue creation (per-project, via reflections_report module)
+11. Skills audit (validate all SKILL.md files against template standards)
+12. Redis TTL cleanup (all models including reflections models)
+13. Redis data quality checks (unsummarized links, dead channels)
+14. Branch and plan cleanup (stale branches, orphaned/completed/duplicate plans)
+15. Feature docs audit (stale refs, README.md accuracy, plan-masquerading-as-feature)
+16. Episode cycle-close (CyclicEpisode records from completed SDLC sessions)
+17. Pattern crystallization (ProceduralPatterns from episode clusters)
+18. Principal context staleness (PRINCIPAL.md age check)
+19. Disk space check (project volume free space, finding if <10GB)
 
 All persistence is Redis-backed via Popoto models (see models/ directory).
 State: ReflectionRun | Ignore patterns: ReflectionIgnore
@@ -39,11 +39,9 @@ import re
 import shutil
 import subprocess
 import sys
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
-
-from bridge.utc import utc_now
 
 # Ensure project root is in sys.path for standalone execution
 _project_root = str(Path(__file__).parent.parent)
@@ -177,13 +175,10 @@ def load_local_projects() -> list[dict]:
             "PROJECTS_CONFIG_PATH",
             str(Path.home() / "Desktop" / "Valor" / "projects.json"),
         )
-    ).expanduser()
+    )
     if not config_path.exists():
         # Legacy fallback
         config_path = AI_ROOT / "config" / "projects.json"
-    if not config_path.exists():
-        logger.warning(f"Project config not found at {config_path}, returning empty")
-        return []
     data = json.loads(config_path.read_text())
     projects = []
     for slug, cfg in data.get("projects", {}).items():
@@ -483,41 +478,37 @@ class ReflectionRunner:
         self.state = self._load_state()
         self.projects = load_local_projects()
         self.steps = [
-            ("legacy_code_scan", "Clean Up Stale Code", self.step_clean_legacy),
-            ("log_review", "Review Previous Day's Logs", self.step_review_logs),
-            ("task_management", "Clean Up Task Management", self.step_clean_tasks),
-            ("documentation_audit", "Audit Documentation", self.step_audit_docs),
-            ("skills_audit", "Skills Audit", self.step_skills_audit),
-            ("redis_ttl_cleanup", "Redis TTL Cleanup", self.step_redis_cleanup),
-            ("redis_data_quality", "Redis Data Quality", self.step_redis_data_quality),
-            ("branch_plan_cleanup", "Branch and Plan Cleanup", self.step_branch_plan_cleanup),
-            ("feature_docs_audit", "Feature Docs Audit", self.step_feature_docs_audit),
-            ("principal_staleness", "Principal Context Staleness", self.step_principal_staleness),
-            ("disk_space_check", "Disk Space Check", self.step_disk_space_check),
-            ("session_intelligence", "Session Intelligence", self.step_session_intelligence),
-            ("behavioral_learning", "Behavioral Learning", self.step_behavioral_learning),
-            ("daily_report_and_notify", "Daily Report & Notify", self.step_daily_report_and_notify),
+            (1, "Clean Up Legacy Code", self.step_clean_legacy),
+            (2, "Review Previous Day's Logs", self.step_review_logs),
+            (3, "Check Error Logs (Sentry)", self.step_check_sentry),
+            (4, "Clean Up Task Management", self.step_clean_tasks),
+            (5, "Audit Documentation", self.step_audit_docs),
+            (6, "Session Analysis", self.step_session_analysis),
+            (7, "LLM Reflection", self.step_llm_reflection),
+            (8, "File Bug Issues", self.step_auto_fix_bugs),
+            (9, "Produce Daily Report", self.step_produce_report),
+            (10, "GitHub Issue Creation", self.step_create_github_issue),
+            (11, "Skills Audit", self.step_skills_audit),
+            (12, "Redis TTL Cleanup", self.step_redis_cleanup),
+            (13, "Redis Data Quality", self.step_redis_data_quality),
+            (14, "Branch and Plan Cleanup", self.step_branch_plan_cleanup),
+            (15, "Feature Docs Audit", self.step_feature_docs_audit),
+            (16, "Episode Cycle-Close", self.step_episode_cycle_close),
+            (17, "Pattern Crystallization", self.step_pattern_crystallization),
+            (18, "Principal Context Staleness", self.step_principal_staleness),
+            (19, "Disk Space Check", self.step_disk_space_check),
         ]
 
     def _load_state(self) -> ReflectionsState:
-        """Load state from Redis ReflectionRun model.
-
-        If completed_steps contains integers (legacy format from before string keys),
-        treat the run as stale and reset to an empty list. This safely re-runs any
-        steps that already ran on that day — all steps are idempotent.
-        """
-        today = utc_now().strftime("%Y-%m-%d")
+        """Load state from Redis ReflectionRun model."""
+        today = datetime.now().strftime("%Y-%m-%d")
         from models.reflections import ReflectionRun
 
         run = ReflectionRun.load_or_create(today)
-        raw_completed = run.completed_steps or []
-        # Migrate: if any element is an integer, the data is in legacy format — reset
-        if raw_completed and any(isinstance(s, int) for s in raw_completed):
-            logger.info("Legacy integer completed_steps detected — resetting to empty list")
-            raw_completed = []
-
+        # Wrap in ReflectionsState for API compatibility
         state = ReflectionsState(
-            completed_steps=raw_completed,
+            current_step=run.current_step or 1,
+            completed_steps=run.completed_steps or [],
             daily_report=run.daily_report or [],
             date=run.date or today,
             findings=run.findings or {},
@@ -531,86 +522,36 @@ class ReflectionRunner:
     async def run(self) -> None:
         """Run all reflections steps."""
         logger.info(f"Starting Reflections for {self.state.date}")
-        logger.info(f"Completed so far: {self.state.completed_steps}")
+        logger.info(f"Resuming from step {self.state.current_step}")
 
         REFLECTIONS_DIR.mkdir(parents=True, exist_ok=True)
 
-        for step_key, step_name, step_func in self.steps:
-            if step_key in self.state.completed_steps:
-                logger.info(f"Step {step_key} ({step_name}) already completed, skipping")
+        for step_num, step_name, step_func in self.steps:
+            if step_num in self.state.completed_steps:
+                logger.info(f"Step {step_num} ({step_name}) already completed, skipping")
                 continue
 
-            logger.info(f"Starting step {step_key}: {step_name}")
-            self.state.step_started_at = utc_now().isoformat()
+            if step_num < self.state.current_step:
+                continue
+
+            logger.info(f"Starting step {step_num}: {step_name}")
+            self.state.current_step = step_num
+            self.state.step_started_at = datetime.now().isoformat()
             self.state.save()
 
             try:
-                # Pre-flight: validate prerequisites before running step
-                if not self._preflight_check(step_key, step_name):
-                    continue
                 await step_func()
-                self.state.completed_steps.append(step_key)
+                self.state.completed_steps.append(step_num)
                 self.state.daily_report.append(f"Completed: {step_name}")
                 self.state.save()
-                logger.info(f"Completed step {step_key}: {step_name}")
+                logger.info(f"Completed step {step_num}: {step_name}")
             except Exception as e:
-                # Single-line warning, not a full traceback
-                logger.warning(
-                    "Step %s (%s) failed: %s: %s",
-                    step_key,
-                    step_name,
-                    type(e).__name__,
-                    str(e)[:200],
-                )
-                self.state.daily_report.append(f"Failed: {step_name} - {str(e)[:200]}")
+                logger.error(f"Step {step_num} failed: {e}")
+                self.state.daily_report.append(f"Failed: {step_name} - {str(e)}")
                 self.state.save()
                 continue
 
         logger.info("Reflections completed successfully")
-
-    def _preflight_check(self, step_key: str, step_name: str) -> bool:
-        """Validate prerequisites before running a reflection step.
-
-        Checks that required external dependencies (Redis, git, gh CLI) are
-        available. Returns False with a single warning log line if a
-        prerequisite is missing, instead of letting the step crash with
-        a traceback.
-        """
-        # All steps use Redis for state
-        try:
-            from popoto.redis_db import POPOTO_REDIS_DB
-
-            POPOTO_REDIS_DB.ping()
-        except Exception:
-            logger.warning("Step %s (%s) skipped: Redis unavailable", step_key, step_name)
-            self.state.daily_report.append(f"Skipped: {step_name} - Redis unavailable")
-            try:
-                self.state.save()
-            except Exception:
-                logger.debug("Could not save state after Redis-down detection (expected)")
-            return False
-
-        # Steps that need gh CLI (bug filing, issue creation, issue list/view)
-        # task_management and branch_plan_cleanup also call gh CLI but fail soft via try/except
-        gh_steps = {
-            "session_intelligence",
-            "daily_report_and_notify",
-            "task_management",
-            "branch_plan_cleanup",
-        }
-        if step_key in gh_steps:
-            try:
-                import shutil
-
-                if not shutil.which("gh"):
-                    logger.warning("Step %s (%s) skipped: gh CLI not found", step_key, step_name)
-                    self.state.daily_report.append(f"Skipped: {step_name} - gh CLI not found")
-                    self.state.save()
-                    return False
-            except Exception:
-                pass
-
-        return True
 
     async def step_clean_legacy(self) -> None:
         """Step 1: Clean up legacy code (ai-repo specific)."""
@@ -673,7 +614,7 @@ class ReflectionRunner:
         """
         total_files_analyzed = 0
         total_findings = 0
-        yesterday = (utc_now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
         for project in self.projects:
             slug = project["slug"]
@@ -705,8 +646,8 @@ class ReflectionRunner:
                     continue
 
                 try:
-                    mtime = datetime.fromtimestamp(log_file.stat().st_mtime, tz=UTC)
-                    if mtime < utc_now() - timedelta(days=7):
+                    mtime = datetime.fromtimestamp(log_file.stat().st_mtime)
+                    if mtime < datetime.now() - timedelta(days=7):
                         findings.append(f"Log file {log_file.name} is older than 7 days")
 
                     size_mb = log_file.stat().st_size / (1024 * 1024)
@@ -746,6 +687,19 @@ class ReflectionRunner:
             "files_analyzed": total_files_analyzed,
             "findings": total_findings,
         }
+
+    async def step_check_sentry(self) -> None:
+        """Step 3: Check error logs via Sentry.
+
+        Sentry integration requires MCP server which is not available
+        in standalone script mode. Skips gracefully with a log message.
+        """
+        self.state.add_finding(
+            "sentry",
+            "Sentry check skipped - MCP not available in standalone mode",
+        )
+        logger.info("Sentry check skipped - MCP not available in standalone mode")
+        self.state.step_progress["check_sentry"] = {"skipped": True}
 
     async def step_clean_tasks(self) -> None:
         """Step 4: Clean up task management per project via gh CLI.
@@ -943,7 +897,7 @@ class ReflectionRunner:
 
         report_lines.append("")
         report_lines.append("---")
-        report_lines.append(f"*Generated at {utc_now().isoformat()}*")
+        report_lines.append(f"*Generated at {datetime.now().isoformat()}*")
 
         # Write report
         report_content = "\n".join(report_lines)
@@ -963,7 +917,7 @@ class ReflectionRunner:
         Tries Redis-backed analysis via AgentSession/BridgeEvent first,
         falls back to file-based analysis.
         """
-        yesterday = (utc_now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
         # Try Redis-backed analysis first
         analysis = analyze_sessions_from_redis(yesterday)
@@ -2056,8 +2010,8 @@ class ReflectionRunner:
             self.state.step_progress["principal_staleness"] = {"status": "missing"}
             return
 
-        mod_time = datetime.fromtimestamp(principal_path.stat().st_mtime, tz=UTC)
-        age_days = (utc_now() - mod_time).days
+        mod_time = datetime.fromtimestamp(principal_path.stat().st_mtime)
+        age_days = (datetime.now() - mod_time).days
         staleness_threshold = 90
 
         if age_days > staleness_threshold:
@@ -2120,38 +2074,6 @@ class ReflectionRunner:
         self.state.step_progress["disk_space_check"] = {
             "findings": len(findings),
         }
-
-    async def step_session_intelligence(self) -> None:
-        """Pipeline: Session Analysis → LLM Reflection → Bug Filing.
-
-        Runs the three tightly-coupled session intelligence steps in sequence.
-        A single checkpoint is written after all three complete. Do NOT add
-        inner try/except here — let the outer runner catch failures so partial
-        pipeline failures are visible.
-        """
-        await self.step_session_analysis()
-        await self.step_llm_reflection()
-        await self.step_auto_fix_bugs()
-
-    async def step_behavioral_learning(self) -> None:
-        """Pipeline: Episode Cycle-Close → Pattern Crystallization.
-
-        Runs the two episode learning steps in sequence.
-        A single checkpoint is written after both complete. Do NOT add
-        inner try/except here — let the outer runner catch failures.
-        """
-        await self.step_episode_cycle_close()
-        await self.step_pattern_crystallization()
-
-    async def step_daily_report_and_notify(self) -> None:
-        """Pipeline: Daily Report → GitHub Issues → Telegram Notification.
-
-        Must run last. Aggregates all findings into a report, opens GitHub
-        issues, and posts a summary to Telegram. Do NOT add inner try/except
-        here — let the outer runner catch failures.
-        """
-        await self.step_produce_report()
-        await self.step_create_github_issue()
 
     async def step_post_to_telegram(self, project: dict, issue_url: str = "") -> None:
         """Post reflections summary to project's Telegram chat.
@@ -2217,11 +2139,12 @@ from dataclasses import dataclass, field  # noqa: E402
 class ReflectionsState:
     """Persisted state for resumability via Redis ReflectionRun model."""
 
+    current_step: int = 1
     step_started_at: str | None = None
     step_progress: dict[str, Any] = field(default_factory=dict)
-    completed_steps: list[str] = field(default_factory=list)
+    completed_steps: list[int] = field(default_factory=list)
     daily_report: list[str] = field(default_factory=list)
-    date: str = field(default_factory=lambda: utc_now().strftime("%Y-%m-%d"))
+    date: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d"))
     findings: dict[str, list[str]] = field(default_factory=dict)
     session_analysis: dict[str, Any] = field(default_factory=dict)
     reflections: list[dict[str, str]] = field(default_factory=list)
@@ -2241,6 +2164,7 @@ class ReflectionsState:
 
         ReflectionRun.create(
             date=self.date,
+            current_step=self.current_step,
             completed_steps=self.completed_steps,
             daily_report=self.daily_report,
             findings=self.findings,

@@ -100,7 +100,7 @@ After pushing and creating the PR, return to the repo root and clean up the work
 
 ```bash
 # Return to repo root BEFORE cleanup (prevents CWD death)
-cd ~/src/ai
+cd /Users/valorengels/src/ai
 
 python -c "
 from pathlib import Path
@@ -120,7 +120,7 @@ After the PR is merged (auto-merge for eligible PRs, or human-initiated via `gh 
 
 ```bash
 # Return to repo root BEFORE cleanup
-cd ~/src/ai
+cd /Users/valorengels/src/ai
 
 python scripts/post_merge_cleanup.py {slug}
 ```

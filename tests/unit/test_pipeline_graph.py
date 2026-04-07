@@ -2,7 +2,6 @@
 
 from bridge.pipeline_graph import (
     DISPLAY_STAGES,
-    MAX_CRITIQUE_CYCLES,
     MAX_PATCH_CYCLES,
     PIPELINE_EDGES,
     STAGE_TO_SKILL,
@@ -11,18 +10,14 @@ from bridge.pipeline_graph import (
 
 
 class TestHappyPath:
-    """Verify the happy path: ISSUE -> PLAN -> CRITIQUE -> BUILD -> ... -> MERGE."""
+    """Verify the happy path: ISSUE -> PLAN -> BUILD -> TEST -> REVIEW -> DOCS."""
 
     def test_issue_to_plan(self):
         result = get_next_stage("ISSUE", "success")
         assert result == ("PLAN", "/do-plan")
 
-    def test_plan_to_critique(self):
+    def test_plan_to_build(self):
         result = get_next_stage("PLAN", "success")
-        assert result == ("CRITIQUE", "/do-plan-critique")
-
-    def test_critique_to_build(self):
-        result = get_next_stage("CRITIQUE", "success")
         assert result == ("BUILD", "/do-build")
 
     def test_build_to_test(self):
@@ -51,8 +46,7 @@ class TestHappyPath:
         """Walk the entire happy path and verify each transition."""
         expected_path = [
             ("ISSUE", "PLAN", "/do-plan"),
-            ("PLAN", "CRITIQUE", "/do-plan-critique"),
-            ("CRITIQUE", "BUILD", "/do-build"),
+            ("PLAN", "BUILD", "/do-build"),
             ("BUILD", "TEST", "/do-test"),
             ("TEST", "REVIEW", "/do-pr-review"),
             ("REVIEW", "DOCS", "/do-docs"),
@@ -67,7 +61,7 @@ class TestHappyPath:
 
 
 class TestFailureCycles:
-    """Verify cycle support for test failures, review feedback, and critique revision."""
+    """Verify cycle support for test failures and review feedback."""
 
     def test_test_failure_routes_to_patch(self):
         result = get_next_stage("TEST", "fail")
@@ -85,22 +79,6 @@ class TestFailureCycles:
         """Even a failed patch routes to TEST for re-verification."""
         result = get_next_stage("PATCH", "fail")
         assert result == ("TEST", "/do-test")
-
-    def test_critique_failure_routes_to_plan(self):
-        """CRITIQUE fail routes back to PLAN for revision."""
-        result = get_next_stage("CRITIQUE", "fail")
-        assert result == ("PLAN", "/do-plan")
-
-    def test_critique_fail_plan_critique_cycle(self):
-        """Simulate: CRITIQUE fails -> PLAN -> CRITIQUE (revision cycle)."""
-        step1 = get_next_stage("CRITIQUE", "fail", critique_cycle_count=0)
-        assert step1 == ("PLAN", "/do-plan")
-
-        step2 = get_next_stage("PLAN", "success")
-        assert step2 == ("CRITIQUE", "/do-plan-critique")
-
-        step3 = get_next_stage("CRITIQUE", "success")
-        assert step3 == ("BUILD", "/do-build")
 
     def test_test_fail_patch_test_cycle(self):
         """Simulate: TEST fails -> PATCH -> TEST (cycle)."""
@@ -129,7 +107,7 @@ class TestFailureCycles:
 
 
 class TestMaxCycleLimit:
-    """Verify max cycle counters prevent infinite loops."""
+    """Verify max cycle counter prevents infinite loops."""
 
     def test_patch_within_limit(self):
         result = get_next_stage("PATCH", "success", cycle_count=MAX_PATCH_CYCLES - 1)
@@ -146,22 +124,6 @@ class TestMaxCycleLimit:
     def test_max_patch_cycles_is_3(self):
         """Verify the default limit matches the plan specification."""
         assert MAX_PATCH_CYCLES == 3
-
-    def test_critique_within_limit(self):
-        result = get_next_stage("CRITIQUE", "fail", critique_cycle_count=MAX_CRITIQUE_CYCLES - 1)
-        assert result == ("PLAN", "/do-plan")
-
-    def test_critique_at_limit_returns_none(self):
-        result = get_next_stage("CRITIQUE", "fail", critique_cycle_count=MAX_CRITIQUE_CYCLES)
-        assert result is None
-
-    def test_critique_over_limit_returns_none(self):
-        result = get_next_stage("CRITIQUE", "fail", critique_cycle_count=MAX_CRITIQUE_CYCLES + 1)
-        assert result is None
-
-    def test_max_critique_cycles_is_2(self):
-        """Verify the default limit matches the plan specification."""
-        assert MAX_CRITIQUE_CYCLES == 2
 
 
 class TestEdgeCases:
@@ -196,22 +158,10 @@ class TestExports:
         assert "PATCH" not in DISPLAY_STAGES
 
     def test_display_stages_order(self):
-        assert DISPLAY_STAGES == [
-            "ISSUE",
-            "PLAN",
-            "CRITIQUE",
-            "BUILD",
-            "TEST",
-            "REVIEW",
-            "DOCS",
-            "MERGE",
-        ]
+        assert DISPLAY_STAGES == ["ISSUE", "PLAN", "BUILD", "TEST", "REVIEW", "DOCS", "MERGE"]
 
     def test_display_stages_includes_merge(self):
         assert "MERGE" in DISPLAY_STAGES
-
-    def test_display_stages_includes_critique(self):
-        assert "CRITIQUE" in DISPLAY_STAGES
 
     def test_stage_to_skill_has_all_stages(self):
         """All stages in edges should have a skill mapping."""
@@ -233,7 +183,6 @@ class TestExports:
         """Verify specific skill command mappings."""
         assert STAGE_TO_SKILL["ISSUE"] == "/do-issue"
         assert STAGE_TO_SKILL["PLAN"] == "/do-plan"
-        assert STAGE_TO_SKILL["CRITIQUE"] == "/do-plan-critique"
         assert STAGE_TO_SKILL["BUILD"] == "/do-build"
         assert STAGE_TO_SKILL["TEST"] == "/do-test"
         assert STAGE_TO_SKILL["PATCH"] == "/do-patch"

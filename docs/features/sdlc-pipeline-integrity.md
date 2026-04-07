@@ -62,21 +62,6 @@ ISSUE -> PLAN -> BUILD -> TEST -> REVIEW -> DOCS -> MERGE
 
 MERGE is the terminal stage, gated by human authorization.
 
-### D. SubagentStop Stage State Injection
-
-**File**: `agent/hooks/subagent_stop.py`
-
-When a dev-session subagent completes, the SubagentStop hook now injects the current SDLC pipeline state back into the PM (ChatSession) context. This prevents the PM from fabricating stage completion claims (e.g., claiming "review passed" without running `/do-pr-review`).
-
-The hook:
-1. Detects `agent_type == "dev-session"` completions
-2. Reads `stage_states` from the AgentSession in Redis (the legacy `sdlc_stages` field was removed in PR #490)
-3. Returns `{"reason": "Pipeline state: {dict}"}` so the PM sees which stages are actually complete vs still pending
-
-This creates a feedback loop: the PM dispatches a dev-session to run a stage, the dev-session updates `stage_states` during execution, and the SubagentStop hook feeds the updated state back to the PM before it decides the next action.
-
-**Related commit**: `c7e5a55d` (simplified from initial `9829690d`)
-
 ## Known Tech Debt
 
 ### `r.keys()` in `_diagnose_missing_session` (agent/job_queue.py:1271)
@@ -105,10 +90,10 @@ while True:
 
 - 28 new tests in `tests/unit/test_pipeline_integrity.py`
 - Updated existing tests in `test_pipeline_graph.py`, `test_observer.py`, `test_summarizer.py`
-- 30 tests in `tests/unit/test_health_check.py` covering watchdog unhealthy flag and stage injection
+- All 1752 unit tests pass
 
 ## Tracking
 
 - Issue: #417
 - PR: #419
-- Related: #400 (session metadata loss), #409 (merge guard), #489 (stage injection + watchdog kill)
+- Related: #400 (session metadata loss), #409 (merge guard)

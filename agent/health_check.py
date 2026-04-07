@@ -2,13 +2,7 @@
 
 Registers as a PostToolUse hook that fires every CHECK_INTERVAL tool calls.
 Reads the recent transcript and asks Haiku whether the agent is making
-meaningful progress or is stuck in a loop.
-
-Kill mechanism: PostToolUse hooks cannot stop CLI execution (continue_: False
-is ignored). Instead, the watchdog sets watchdog_unhealthy on the AgentSession
-model. The nudge loop in job_queue.py checks this field before auto-continuing.
-When flagged unhealthy, the nudge loop delivers output to Telegram instead of
-sending "Keep working".
+meaningful progress or is stuck in a loop. Returns a block decision if unhealthy.
 """
 
 from __future__ import annotations
@@ -35,52 +29,6 @@ CHECK_INTERVAL = 20
 _tool_counts: dict[str, int] = {}
 
 
-def _set_unhealthy(session_id: str, reason: str) -> None:
-    """Flag a session as unhealthy on the AgentSession model."""
-    try:
-        from models.agent_session import AgentSession
-
-        sessions = AgentSession.query.filter(session_id=session_id)
-        if sessions:
-            sessions[0].watchdog_unhealthy = reason
-            sessions[0].save()
-            logger.info(f"[health_check] Set unhealthy flag for {session_id}")
-    except Exception as e:
-        logger.error(f"[health_check] Failed to set unhealthy flag: {e}")
-
-
-def is_session_unhealthy(session_id: str) -> str | None:
-    """Check if a session has been flagged unhealthy by the watchdog.
-
-    Called by the nudge loop in job_queue.py before auto-continuing.
-
-    Returns:
-        The reason string if unhealthy, None if healthy.
-    """
-    try:
-        from models.agent_session import AgentSession
-
-        sessions = AgentSession.query.filter(session_id=session_id)
-        if sessions:
-            return sessions[0].watchdog_unhealthy
-        return None
-    except Exception:
-        return None
-
-
-def clear_unhealthy(session_id: str) -> None:
-    """Clear the unhealthy flag (e.g., when a session is manually restarted)."""
-    try:
-        from models.agent_session import AgentSession
-
-        sessions = AgentSession.query.filter(session_id=session_id)
-        if sessions:
-            sessions[0].watchdog_unhealthy = None
-            sessions[0].save()
-    except Exception:
-        pass
-
-
 def reset_session_count(session_id: str) -> None:
     """Reset the tool call counter for a session.
 
@@ -103,105 +51,12 @@ activity log below, determine if the agent is:
 2. Stuck in a repetitive loop (same tools, same patterns, similar errors)
 3. Exploring without converging (unbounded research with no clear deliverable)
 
-{session_context}\
 Recent activity (last {count} tool calls):
 {activity}
 
 Respond with ONLY a JSON object, no other text:
 {{"healthy": true/false, "reason": "brief explanation"}}\
 """
-
-
-def _write_activity_stream(
-    session_id: str, tool_name: str, key_args: str, tool_call_count: int
-) -> None:
-    """Append one JSONL line to the activity stream for this session.
-
-    Writes to logs/sessions/{session_id}/activity.jsonl. Creates the
-    directory lazily on first write. Zero API calls, zero cost.
-
-    Designed as a feed that SubconsciousMemory can consume later.
-
-    Args:
-        session_id: The bridge session ID.
-        tool_name: Name of the tool that was called.
-        key_args: Brief summary of the tool's input.
-        tool_call_count: Current tool call count for this session.
-    """
-    import time
-
-    try:
-        session_dir = Path("logs/sessions") / session_id
-        session_dir.mkdir(parents=True, exist_ok=True)
-        activity_file = session_dir / "activity.jsonl"
-
-        entry = json.dumps(
-            {
-                "ts": time.time(),
-                "tool": tool_name,
-                "args": key_args,
-                "n": tool_call_count,
-            }
-        )
-        with open(activity_file, "a") as f:
-            f.write(entry + "\n")
-    except Exception:
-        pass  # Never block agent on activity logging
-
-
-def _get_session_context(session_id: str) -> str:
-    """Build session context preamble for the health check judge prompt.
-
-    Reads session_type and message_text from AgentSession. Extracts gh CLI
-    commands from recent tool calls for PM session context.
-
-    Returns an empty string if no context is available.
-    """
-    try:
-        from models.agent_session import AgentSession
-
-        sessions = AgentSession.query.filter(session_id=session_id)
-        if not sessions:
-            return ""
-
-        s = sessions[0]
-        session_type = s.session_type or "unknown"
-        message_text = (s.message_text or "")[:200]
-
-        context = f"This is a {session_type} session working on: {message_text}\n\n"
-
-        # Extract gh CLI commands from activity stream for additional context
-        gh_commands = _extract_gh_commands(session_id)
-        if gh_commands:
-            context += f"Recent GitHub CLI commands: {', '.join(gh_commands[:5])}\n\n"
-
-        return context
-    except Exception:
-        return ""
-
-
-def _extract_gh_commands(session_id: str) -> list[str]:
-    """Extract gh CLI commands from the activity stream.
-
-    Reads the activity JSONL file and finds Bash tool calls containing 'gh '.
-    Returns a list of command summaries (high-signal for PM sessions).
-    """
-    try:
-        activity_file = Path("logs/sessions") / session_id / "activity.jsonl"
-        if not activity_file.exists():
-            return []
-
-        commands = []
-        for line in activity_file.read_text().strip().splitlines()[-20:]:
-            try:
-                entry = json.loads(line)
-                if entry.get("tool") == "Bash" and "gh " in entry.get("args", ""):
-                    commands.append(entry["args"][:80])
-            except json.JSONDecodeError:
-                continue
-        return commands
-    except Exception:
-        return []
 
 
 def _get_api_key() -> str:
@@ -270,13 +125,8 @@ def _summarize_input(tool_name: str, tool_input: dict[str, Any]) -> str:
     return text[:100] + ("..." if len(text) > 100 else "")
 
 
-async def _judge_health(activity: str, session_context: str = "") -> dict[str, Any]:
-    """Ask Haiku to judge whether the agent is healthy.
-
-    Args:
-        activity: Formatted tool call activity summary.
-        session_context: Optional session context preamble (session_type + task).
-    """
+async def _judge_health(activity: str) -> dict[str, Any]:
+    """Ask Haiku to judge whether the agent is healthy."""
     import anthropic
 
     api_key = _get_api_key()
@@ -284,11 +134,7 @@ async def _judge_health(activity: str, session_context: str = "") -> dict[str, A
         logger.warning("Health check: no API key available, skipping")
         return {"healthy": True, "reason": "no API key for health check"}
 
-    prompt = JUDGE_PROMPT.format(
-        count=CHECK_INTERVAL,
-        activity=activity,
-        session_context=session_context,
-    )
+    prompt = JUDGE_PROMPT.format(count=CHECK_INTERVAL, activity=activity)
 
     client = anthropic.AsyncAnthropic(api_key=api_key)
     response = await client.messages.create(
@@ -347,17 +193,10 @@ async def _handle_steering(session_id: str) -> dict[str, Any] | None:
         if msg.get("is_abort"):
             sender = msg.get("sender", "supervisor")
             logger.warning(f"[steering] ABORT from {sender} for session {session_id}")
-            # PostToolUse can't enforce continue_: False, but inject a strong
-            # stop directive via additionalContext so Claude sees it.
             return {
-                "hookSpecificOutput": {
-                    "hookEventName": "PostToolUse",
-                    "additionalContext": (
-                        f"ABORT from {sender}: {msg.get('text', 'stop')}. "
-                        "You MUST stop immediately. Output a brief summary of "
-                        "what you found and end your turn. No more tool calls."
-                    ),
-                },
+                "decision": "block",
+                "continue_": False,
+                "stopReason": f"Aborted by {sender}: {msg.get('text', 'stop')}",
             }
 
     # Combine all steering messages into one injection
@@ -418,16 +257,23 @@ async def watchdog_hook(
     session_id = valor_session_id or input_data.get("session_id", "unknown")
     transcript_path = input_data.get("transcript_path", "")
 
+    # === STEERING CHECK (every tool call) ===
+    try:
+        steering_result = await _handle_steering(session_id)
+        if steering_result is not None:
+            # Steering took action — return its result
+            # (either abort or continue with injected message)
+            if not steering_result.get("continue_", True):
+                return steering_result
+            # If steering injected a message but wants to continue,
+            # still do the rest of the hook (tracking, health check)
+    except Exception as e:
+        logger.error(f"[steering] Error in steering check: {e}")
+        # Never block due to steering bug
+
     # Increment counter
     _tool_counts[session_id] = _tool_counts.get(session_id, 0) + 1
     count = _tool_counts[session_id]
-
-    # === ACTIVITY STREAM (every tool call) ===
-    # Extract tool name and summarize input for the activity log
-    tool_name = input_data.get("tool_name", "unknown")
-    tool_input = input_data.get("tool_input", {})
-    key_args = _summarize_input(tool_name, tool_input) if isinstance(tool_input, dict) else ""
-    _write_activity_stream(session_id, tool_name, key_args, count)
 
     # Update session tracking in Redis (best-effort, every call)
     try:
@@ -444,84 +290,27 @@ async def watchdog_hook(
     except Exception:
         pass  # Non-fatal: don't let tracking break the agent
 
-    # === MEMORY INJECTION (every tool call, internally rate-limited) ===
-    # Computed before steering so both can be combined if needed
-    memory_context = None
-    try:
-        from agent.memory_hook import check_and_inject
-
-        memory_context = check_and_inject(session_id, tool_name, tool_input)
-    except Exception as e:
-        logger.debug(f"[memory_hook] Import or call failed (non-fatal): {e}")
-
-    # === STEERING CHECK (every tool call) ===
-    try:
-        steering_result = await _handle_steering(session_id)
-        if steering_result is not None:
-            # Combine memory_context with steering result if both exist
-            if memory_context and steering_result.get("continue_"):
-                steering_result = {
-                    "hookSpecificOutput": {
-                        "hookEventName": "PostToolUse",
-                        "additionalContext": memory_context,
-                    },
-                }
-            return steering_result
-    except Exception as e:
-        logger.error(f"[steering] Error in steering check: {e}")
-        # Never block due to steering bug
-
     if count % CHECK_INTERVAL != 0:
-        if memory_context:
-            return {
-                "hookSpecificOutput": {
-                    "hookEventName": "PostToolUse",
-                    "additionalContext": memory_context,
-                },
-            }
         return {"continue_": True}
 
     logger.info(f"[health_check] Running health check at tool call #{count} (session={session_id})")
 
     try:
         activity = _read_recent_activity(transcript_path)
-        # Enrich with session context for more accurate health verdicts
-        session_context = _get_session_context(session_id)
-        result = await _judge_health(activity, session_context=session_context)
+        result = await _judge_health(activity)
 
         healthy = result.get("healthy", True)
         reason = result.get("reason", "no reason given")
 
-        # Log gh commands alongside verdict for PM session visibility
-        gh_cmds = _extract_gh_commands(session_id)
-        gh_info = f" gh_commands={gh_cmds}" if gh_cmds else ""
-
         if healthy:
-            logger.info(f"[health_check] Healthy at #{count}: {reason}{gh_info}")
-            if memory_context:
-                return {
-                    "hookSpecificOutput": {
-                        "hookEventName": "PostToolUse",
-                        "additionalContext": memory_context,
-                    },
-                }
+            logger.info(f"[health_check] Healthy at #{count}: {reason}")
             return {"continue_": True}
         else:
-            logger.warning(f"[health_check] UNHEALTHY at #{count}: {reason}{gh_info}")
-            # Two-pronged kill:
-            # 1. Set flag on AgentSession so nudge loop won't auto-continue
-            # 2. Inject additionalContext telling Claude to stop immediately
-            _set_unhealthy(session_id, reason)
+            logger.warning(f"[health_check] UNHEALTHY at #{count}: {reason}")
             return {
-                "hookSpecificOutput": {
-                    "hookEventName": "PostToolUse",
-                    "additionalContext": (
-                        "WATCHDOG ALERT: You have been flagged as stuck in a "
-                        "repetitive loop. STOP what you are doing. Output a brief "
-                        "summary of what you found and what blocked you, then end "
-                        "your turn. Do NOT make any more tool calls."
-                    ),
-                },
+                "decision": "block",
+                "continue_": False,
+                "stopReason": f"Watchdog: {reason}",
             }
 
     except Exception as e:

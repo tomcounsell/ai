@@ -637,89 +637,6 @@ def verify_models(project_dir: Path) -> list[str]:
     return errors
 
 
-def check_telegram_session(project_dir: Path) -> ToolCheck:
-    """Check if the Telegram session file exists and is authorized.
-
-    Uses Telethon to connect (without sending auth codes) and verify
-    the session is valid. If not, instructs the user to run telegram_login.py.
-    """
-    python_path = project_dir / ".venv" / "bin" / "python"
-    if not python_path.exists():
-        return ToolCheck(name="telegram_session", available=False, error="No .venv/bin/python")
-
-    # Find session file
-    data_dir = project_dir / "data"
-    session_files = list(data_dir.glob("*.session"))
-    if not session_files:
-        return ToolCheck(
-            name="telegram_session",
-            available=False,
-            error="No session file in data/. Run: python scripts/telegram_login.py",
-        )
-
-    # Check authorization using Telethon (connect-only, no SendCodeRequest).
-    # Outputs one of: authorized, unauthorized, flood:NNN, error:MESSAGE
-    check_script = (
-        "import asyncio, os, sys; "
-        "sys.path.insert(0, '.'); "
-        "from dotenv import load_dotenv; load_dotenv(); "
-        "from telethon import TelegramClient; "
-        "from telethon.errors import FloodWaitError; "
-        "session = list(__import__('pathlib').Path('data').glob('*.session'))[0]; "
-        "client = TelegramClient(str(session).replace('.session',''), "
-        "int(os.getenv('TELEGRAM_API_ID',0)), os.getenv('TELEGRAM_API_HASH','')); "
-        "async def check(): "
-        "  try: "
-        "    await client.connect(); "
-        "    ok = await client.is_user_authorized(); "
-        "    await client.disconnect(); "
-        "    print('authorized' if ok else 'unauthorized'); "
-        "  except FloodWaitError as e: "
-        "    print(f'flood:{e.seconds}'); "
-        "  except Exception as e: "
-        "    print(f'error:{type(e).__name__}: {e}'[:200]); "
-        "asyncio.run(check())"
-    )
-
-    def _check_auth(cwd: Path) -> str:
-        """Run the auth check script. Returns status string."""
-        try:
-            r = run_cmd([str(python_path), "-c", check_script], cwd=cwd, timeout=15)
-            return r.stdout.strip() or "error:no output"
-        except subprocess.TimeoutExpired:
-            return "error:timeout"
-        except Exception as e:
-            return f"error:{e}"
-
-    auth_status = _check_auth(project_dir)
-
-    if auth_status == "authorized":
-        return ToolCheck(name="telegram_session", available=True, version="authorized")
-    elif auth_status.startswith("flood:"):
-        seconds = auth_status.split(":", 1)[1]
-        return ToolCheck(
-            name="telegram_session",
-            available=True,
-            version="flood-wait",
-            error=f"Telegram rate-limited ({seconds}s wait). Bridge will retry.",
-        )
-    elif auth_status == "unauthorized":
-        return ToolCheck(
-            name="telegram_session",
-            available=False,
-            error="Session expired/invalid. Run: python scripts/telegram_login.py",
-        )
-    else:
-        # Connection error, timeout, etc. — session file exists, don't block on it
-        detail = auth_status.replace("error:", "", 1)
-        return ToolCheck(
-            name="telegram_session",
-            available=True,
-            version="unknown",
-            error=f"Could not verify session ({detail}). Bridge will retry on startup.",
-        )
-
-
 def verify_environment(project_dir: Path, check_ollama_model: bool = True) -> VerificationResult:
     """Run all environment verification checks."""
     result = VerificationResult()
@@ -728,7 +645,6 @@ def verify_environment(project_dir: Path, check_ollama_model: bool = True) -> Ve
     result.python_deps = check_python_deps(project_dir)
     result.dev_tools = check_dev_tools(project_dir)
     result.valor_tools = check_valor_tools(project_dir)
-    result.valor_tools.append(check_telegram_session(project_dir))
 
     if check_ollama_model:
         ollama_model = os.getenv("OLLAMA_SUMMARIZER_MODEL", "qwen3:1.7b")

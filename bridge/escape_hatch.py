@@ -8,8 +8,7 @@ not bypassed.
 """
 
 import logging
-
-from bridge.utc import utc_iso
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +69,7 @@ def request_human_input(
 
     # Log the request for audit purposes
     _pending_request = {
-        "timestamp": utc_iso(),
+        "timestamp": datetime.now().isoformat(),
         "reason": reason,
         "options": options,
         "formatted_message": formatted_message,

@@ -1,7 +1,6 @@
 """Tests for bridge.summarizer — response summarization and classification."""
 
-import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -16,28 +15,12 @@ from bridge.summarizer import (
     _linkify_references,
     _parse_classification_response,
     _parse_summary_and_questions,
+    _render_link_footer,
+    _render_stage_progress,
     classify_output,
     extract_artifacts,
     summarize_response,
 )
-from models.agent_session import SDLC_STAGES
-
-
-def _mock_session_with_stages(stage_dict, links=None):
-    """Create a MagicMock session with proper stage_states for PipelineStateMachine."""
-    session = MagicMock()
-    # Build full stage_states from partial dict
-    all_stages = {stage: "pending" for stage in SDLC_STAGES}
-    all_stages.update(stage_dict)
-    session.stage_states = json.dumps(all_stages)
-    session.session_id = "mock-session"
-    session.get_links = MagicMock(return_value=links or {})
-    # Provide issue/plan/pr URL fields for get_links fallback
-    session.issue_url = (links or {}).get("issue")
-    session.plan_url = (links or {}).get("plan")
-    session.pr_url = (links or {}).get("pr")
-    session.qa_mode = False  # Default: not a Q&A session
-    return session
 
 
 class TestExtractArtifacts:
@@ -1027,25 +1010,18 @@ class TestParseSummaryAndQuestions:
         assert questions is None
 
     def test_bullets_and_questions(self):
-        text = "• Built the feature\n• Pushed to main\n---\n>> Should I merge?"
-        bullets, questions = _parse_summary_and_questions(text)
-        assert bullets == "• Built the feature\n• Pushed to main"
-        assert questions == ">> Should I merge?"
-
-    def test_bullets_and_questions_legacy_prefix(self):
-        """Legacy ? prefix is normalized to >> prefix."""
         text = "• Built the feature\n• Pushed to main\n---\n? Should I merge?"
         bullets, questions = _parse_summary_and_questions(text)
         assert bullets == "• Built the feature\n• Pushed to main"
-        assert questions == ">> Should I merge?"
+        assert questions == "? Should I merge?"
 
     def test_multiple_questions(self):
-        text = "• Done\n---\n>> Q1\n>> Q2\n>> Q3"
+        text = "• Done\n---\n? Q1\n? Q2\n? Q3"
         bullets, questions = _parse_summary_and_questions(text)
         assert bullets == "• Done"
-        assert ">> Q1" in questions
-        assert ">> Q2" in questions
-        assert ">> Q3" in questions
+        assert "? Q1" in questions
+        assert "? Q2" in questions
+        assert "? Q3" in questions
 
     def test_empty_questions_section(self):
         text = "• Done\n---\n"
@@ -1077,45 +1053,13 @@ class TestComposeStructuredSummary:
         assert "• Shipped it" in result
 
     def test_questions_appended(self):
-        result = _compose_structured_summary("• Done\n---\n>> Should I merge?", session=None)
-        assert ">> Should I merge?" in result
+        result = _compose_structured_summary("• Done\n---\n? Should I merge?", session=None)
+        assert "? Should I merge?" in result
         assert "• Done" in result
 
     def test_not_completion_uses_pending_emoji(self):
         result = _compose_structured_summary("• Working on it", session=None, is_completion=False)
         assert "⏳" in result
-
-    def test_qa_mode_returns_prose_without_emoji(self):
-        """Q&A sessions bypass structured formatting — return prose directly."""
-        from unittest.mock import MagicMock
-
-        session = MagicMock()
-        session.qa_mode = True
-        session.session_id = None  # Skip Redis refresh
-
-        result = _compose_structured_summary(
-            "The bridge uses Telethon for Telegram integration. See bridge/telegram_bridge.py.",
-            session=session,
-        )
-        # No emoji prefix
-        assert not result.startswith("✅")
-        assert not result.startswith("⏳")
-        assert not result.startswith("❌")
-        # Prose preserved as-is
-        assert "bridge uses Telethon" in result
-
-    def test_qa_mode_false_still_gets_structured(self):
-        """Non-Q&A sessions with qa_mode=False still get structured formatting."""
-        from unittest.mock import MagicMock
-
-        session = MagicMock()
-        session.qa_mode = False
-        session.session_id = None
-        session.status = "completed"
-
-        result = _compose_structured_summary("• Built it", session=session)
-        assert "✅" in result
-        assert "• Built it" in result
 
 
 class TestNoMessageEcho:
@@ -1138,14 +1082,12 @@ class TestNoMessageEcho:
         session.message_text = "continue"
         session.status = "running"
         session.is_sdlc = True
-        session.qa_mode = False
 
         result = _compose_structured_summary(
             "• Built the bypass\n• Tests passing", session=session, is_completion=True
         )
         first_line = result.split("\n")[0]
-        # First line is emoji or content (no emoji for routine completions)
-        assert first_line.strip() in ("✅", "⏳", "❌", "") or first_line.startswith("•")
+        assert first_line.strip() in ("✅", "⏳", "❌")
         assert "continue" not in first_line
 
     def test_no_echo_on_regular_session(self):
@@ -1156,31 +1098,28 @@ class TestNoMessageEcho:
         session._get_history_list.return_value = ["[user] What time is it?"]
         session.message_text = "What time is it?"
         session.status = "completed"
-        session.qa_mode = False
-        session.get_links.return_value = {}
 
         result = _compose_structured_summary("It's 3pm UTC+7", session=session, is_completion=True)
-        assert "What time is it?" not in result
+        first_line = result.split("\n")[0]
+        assert first_line.strip() in ("✅", "⏳", "❌")
+        assert "What time is it?" not in first_line
 
 
 class TestGetStatusEmojiRegression:
-    """Regression tests for _get_status_emoji — issue #192.
+    """Regression tests for _get_status_emoji — issue #192."""
 
-    Updated for milestone-selective behavior (issue #540).
-    """
-
-    def test_running_session_with_completion_returns_empty(self):
-        """Routine completion with running session returns empty."""
+    def test_running_session_with_completion_flag_returns_checkmark(self):
+        """Regression: is_completion=True must return ✅ even when session is running."""
         from unittest.mock import MagicMock
 
         session = MagicMock()
         session.status = "running"
 
         result = _get_status_emoji(session, is_completion=True)
-        assert result == ""
+        assert result == "✅"
 
-    def test_running_session_without_completion_returns_pending(self):
-        """is_completion=False with running session returns hourglass."""
+    def test_running_session_without_completion_flag_returns_pending(self):
+        """is_completion=False with running session returns ⏳."""
         from unittest.mock import MagicMock
 
         session = MagicMock()
@@ -1199,27 +1138,15 @@ class TestGetStatusEmojiRegression:
         assert _get_status_emoji(session, is_completion=True) == "❌"
         assert _get_status_emoji(session, is_completion=False) == "❌"
 
-    def test_completed_without_pr_returns_empty(self):
-        """Completed session without PR is routine (no emoji)."""
+    def test_completed_session_always_returns_checkmark(self):
+        """Completed status always returns ✅."""
         from unittest.mock import MagicMock
 
         session = MagicMock()
         session.status = "completed"
-        session.get_links.return_value = {}
-
-        assert _get_status_emoji(session, is_completion=True) == ""
-
-    def test_completed_with_pr_returns_checkmark(self):
-        """Completed session with PR is milestone (checkmark)."""
-        from unittest.mock import MagicMock
-
-        session = MagicMock()
-        session.status = "completed"
-        session.get_links.return_value = {
-            "pr": "https://github.com/org/repo/pull/42",
-        }
 
         assert _get_status_emoji(session, is_completion=True) == "✅"
+        assert _get_status_emoji(session, is_completion=False) == "✅"
 
     def test_no_session_uses_completion_flag(self):
         """No session defers to is_completion flag."""
@@ -1227,75 +1154,260 @@ class TestGetStatusEmojiRegression:
         assert _get_status_emoji(None, is_completion=False) == "⏳"
 
 
-class TestComposeStructuredSummaryWithSession:
-    """Tests for _compose_structured_summary with session context."""
+class TestRenderStageProgress:
+    """Tests for _render_stage_progress."""
 
-    def test_sdlc_session_renders_summary(self):
-        """Full SDLC session gets emoji prefix and summary bullets."""
-        links = {
+    def test_no_session_returns_none(self):
+        assert _render_stage_progress(None) is None
+
+    def test_all_pending_returns_none(self):
+        """No stage progress means nothing to render."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session.get_stage_progress.return_value = {
+            "ISSUE": "pending",
+            "PLAN": "pending",
+            "BUILD": "pending",
+            "TEST": "pending",
+            "REVIEW": "pending",
+            "DOCS": "pending",
+        }
+        assert _render_stage_progress(session) is None
+
+    def test_mixed_progress_renders_correctly(self):
+        """Completed, in-progress, and pending stages render with checkboxes."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session.get_stage_progress.return_value = {
+            "ISSUE": "completed",
+            "PLAN": "completed",
+            "BUILD": "in_progress",
+            "TEST": "pending",
+            "REVIEW": "pending",
+            "DOCS": "pending",
+        }
+        session.get_links.return_value = {}
+        result = _render_stage_progress(session)
+        # ISSUE has no checkbox
+        assert "☑ ISSUE" not in result
+        assert "☐ ISSUE" not in result
+        # Completed stages show ☑
+        assert "☑ PLAN" in result
+        # In-progress shows ▶ prefix
+        assert "▶ BUILD" in result
+        # Pending stages show ☐
+        assert "☐ TEST" in result
+        # Stages joined with arrows
+        assert "→" in result
+
+    def test_all_completed(self):
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session.get_stage_progress.return_value = {
+            "ISSUE": "completed",
+            "PLAN": "completed",
+            "BUILD": "completed",
+            "TEST": "completed",
+            "REVIEW": "completed",
+            "DOCS": "completed",
+            "MERGE": "completed",
+        }
+        session.get_links.return_value = {}
+        result = _render_stage_progress(session)
+        assert result is not None
+        assert "☐" not in result  # No pending stages
+        assert "▶" not in result  # No in-progress stages
+        assert "☑ PLAN" in result
+        assert "☑ DOCS" in result
+        assert "☑ MERGE" in result
+
+    def test_issue_number_embedded_in_label(self):
+        """ISSUE stage shows the issue number when available in session links."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session.get_stage_progress.return_value = {
+            "ISSUE": "completed",
+            "PLAN": "completed",
+            "BUILD": "in_progress",
+            "TEST": "pending",
+            "REVIEW": "pending",
+            "DOCS": "pending",
+        }
+        session.get_links.return_value = {"issue": "https://github.com/org/repo/issues/243"}
+        result = _render_stage_progress(session)
+        assert "ISSUE 243" in result
+        assert "☑ PLAN" in result
+        assert "▶ BUILD" in result
+        assert "☐ TEST" in result
+
+    def test_no_issue_number_without_links(self):
+        """ISSUE stage shows plain 'ISSUE' when no issue link exists."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session.get_stage_progress.return_value = {
+            "ISSUE": "completed",
+            "PLAN": "in_progress",
+            "BUILD": "pending",
+            "TEST": "pending",
+            "REVIEW": "pending",
+            "DOCS": "pending",
+        }
+        session.get_links.return_value = {}
+        result = _render_stage_progress(session)
+        # Should start with plain "ISSUE" not "ISSUE None" or similar
+        assert result.startswith("ISSUE →")
+        assert "▶ PLAN" in result
+
+
+class TestRenderLinkFooter:
+    """Tests for _render_link_footer."""
+
+    def test_no_session_returns_none(self):
+        assert _render_link_footer(None) is None
+
+    def test_no_links_returns_none(self):
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session.get_links.return_value = {}
+        assert _render_link_footer(session) is None
+
+    def test_issue_link_extracts_number(self):
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session.get_links.return_value = {"issue": "https://github.com/org/repo/issues/190"}
+        result = _render_link_footer(session)
+        assert "Issue #190" in result
+        assert "https://github.com/org/repo/issues/190" in result
+
+    def test_pr_link_extracts_number(self):
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session.get_links.return_value = {"pr": "https://github.com/org/repo/pull/191"}
+        result = _render_link_footer(session)
+        assert "PR #191" in result
+
+    def test_multiple_links_joined_with_pipe(self):
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session.get_links.return_value = {
             "issue": "https://github.com/org/repo/issues/190",
             "pr": "https://github.com/org/repo/pull/191",
         }
-        session = _mock_session_with_stages(
-            {"ISSUE": "completed", "PLAN": "completed", "BUILD": "in_progress"},
-            links=links,
-        )
+        result = _render_link_footer(session)
+        assert " | " in result
+        assert "Issue #190" in result
+        assert "PR #191" in result
+
+    def test_plan_link_excluded(self):
+        """Plan links are intentionally excluded from the footer."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session.get_links.return_value = {
+            "issue": "https://github.com/org/repo/issues/190",
+            "plan": "https://github.com/org/repo/blob/main/docs/plans/foo.md",
+            "pr": "https://github.com/org/repo/pull/191",
+        }
+        result = _render_link_footer(session)
+        assert "Plan" not in result
+        assert "Issue #190" in result
+        assert "PR #191" in result
+
+    def test_plan_only_returns_none(self):
+        """Session with only a plan link returns None (no visible links)."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session.get_links.return_value = {"plan": "https://example.com/plan.md"}
+        result = _render_link_footer(session)
+        assert result is None
+
+
+class TestComposeStructuredSummaryWithSession:
+    """Tests for _compose_structured_summary with session context."""
+
+    def test_sdlc_session_with_stage_progress_and_links(self):
+        """Full SDLC session gets stage line, link footer, and original request label."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
         session._get_history_list.return_value = [
             "[user] /sdlc 190",
+            "[stage] ISSUE completed",
+            "[stage] PLAN completed",
+            "[stage] BUILD in_progress",
         ]
         session.message_text = "continue"
         session.status = "running"
+        session.get_stage_progress.return_value = {
+            "ISSUE": "completed",
+            "PLAN": "completed",
+            "BUILD": "in_progress",
+            "TEST": "pending",
+            "REVIEW": "pending",
+            "DOCS": "pending",
+        }
+        session.get_links.return_value = {
+            "issue": "https://github.com/org/repo/issues/190",
+            "pr": "https://github.com/org/repo/pull/191",
+        }
 
         result = _compose_structured_summary(
-            "\u2022 Implemented the bypass\n\u2022 135 tests passing",
+            "• Implemented the bypass\n• 135 tests passing",
             session=session,
             is_completion=True,
         )
 
-        # First line is emoji or content (no emoji for routine completions)
+        # First line is emoji only (no message echo)
         first_line = result.split("\n")[0]
-        assert first_line.strip() in ("\u2705", "\u23f3", "\u274c", "") or first_line.startswith(
-            "\u2022"
-        )
+        assert first_line.strip() in ("✅", "⏳", "❌")
         assert "continue" not in first_line
+        # Stage progress line with checkboxes (ISSUE has none)
+        assert "ISSUE 190" in result
+        assert "☑ PLAN" in result
+        assert "▶ BUILD" in result
+        assert "☐ TEST" in result
         # Bullets present
-        assert "\u2022 Implemented the bypass" in result
+        assert "• Implemented the bypass" in result
+        # Link footer present (no plan link)
+        assert "Issue #190" in result
+        assert "PR #191" in result
+        assert "Plan" not in result
 
     def test_non_sdlc_session_no_stage_line(self):
         """Non-SDLC session skips stage progress line."""
-        session = _mock_session_with_stages({})  # All pending
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
         session._get_history_list.return_value = ["[user] What time is it?"]
         session.message_text = "What time is it?"
         session.status = "running"
+        session.get_stage_progress.return_value = {
+            "ISSUE": "pending",
+            "PLAN": "pending",
+            "BUILD": "pending",
+            "TEST": "pending",
+            "REVIEW": "pending",
+            "DOCS": "pending",
+        }
+        session.get_links.return_value = {}
 
         result = _compose_structured_summary("It's 3pm UTC+7", session=session, is_completion=True)
 
         # No stage-related content for non-SDLC
         assert "ISSUE" not in result
         assert "BUILD" not in result
-        # First line is emoji or content (no emoji for routine completions)
-        first_line = result.split("\n")[0].strip()
-        assert first_line in ("\u2705", "\u23f3", "\u274c", "") or len(first_line) > 0
-
-    def test_qa_mode_session_returns_prose(self):
-        """Q&A session bypasses all structured formatting."""
-        session = _mock_session_with_stages({})
-        session.qa_mode = True
-        session.session_id = None  # Skip Redis refresh
-        session.message_text = "How does the bridge work?"
-        session.status = "completed"
-
-        result = _compose_structured_summary(
-            "The bridge connects Telegram to Claude via Telethon. "
-            "See bridge/telegram_bridge.py for the main entry point.",
-            session=session,
-        )
-
-        # No structured formatting — pure prose
-        assert not result.startswith("\u2705")
-        assert not result.startswith("\u23f3")
-        assert "\u2022" not in result  # No bullet points
-        assert "bridge connects Telegram" in result
+        # No echo of user message (Telegram reply-to provides context)
+        assert result.split("\n")[0].strip() in ("✅", "⏳", "❌")
 
 
 class TestSummarizationBypass:
@@ -1434,7 +1546,7 @@ class TestQuestionFabricationPrevention:
 
         assert result.expectations is not None
         assert "exponential backoff" in result.expectations
-        assert ">> Should we use exponential backoff or fixed intervals?" in result.text
+        assert "? Should we use exponential backoff or fixed intervals?" in result.text
 
     @pytest.mark.asyncio
     async def test_mixed_declarative_and_questions(self):
@@ -1464,7 +1576,7 @@ class TestQuestionFabricationPrevention:
         assert "retry" in result.text.lower()
         # Only one question line
         lines = result.text.split("\n")
-        question_lines = [line for line in lines if line.strip().startswith(">>")]
+        question_lines = [line for line in lines if line.strip().startswith("?")]
         assert len(question_lines) == 1
         assert "throttling" in question_lines[0]
 
@@ -1601,11 +1713,9 @@ class TestQuestionFabricationIntegration:
         assert result.expectations is None, (
             f"Haiku fabricated expectations from declarative output: {result.expectations}"
         )
-        # No question prefix lines should appear (>> or legacy ?)
+        # No ? prefix lines should appear
         lines = result.text.split("\n")
-        question_lines = [
-            line for line in lines if line.strip().startswith(">>") or line.strip().startswith("?")
-        ]
+        question_lines = [line for line in lines if line.strip().startswith("?")]
         assert len(question_lines) == 0, f"Haiku fabricated question lines: {question_lines}"
 
     @pytest.mark.asyncio
@@ -1664,16 +1774,30 @@ class TestErrorStateRendering:
 
     def test_failed_session_renders_error_emoji(self):
         """Failed session should render with X emoji."""
-        session = _mock_session_with_stages(
-            {"ISSUE": "completed", "PLAN": "completed", "BUILD": "failed"},
-            links={"issue": "https://github.com/org/repo/issues/200"},
-        )
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
         session._get_history_list.return_value = [
             "[user] /sdlc 200",
+            "[stage] ISSUE completed",
+            "[stage] PLAN completed",
+            "[stage] BUILD failed",
         ]
         session.message_text = "continue"
         session.status = "failed"
         session.is_sdlc = True
+        session.session_id = "test-error-rendering"
+        session.get_stage_progress.return_value = {
+            "ISSUE": "completed",
+            "PLAN": "completed",
+            "BUILD": "failed",
+            "TEST": "pending",
+            "REVIEW": "pending",
+            "DOCS": "pending",
+        }
+        session.get_links.return_value = {
+            "issue": "https://github.com/org/repo/issues/200",
+        }
 
         result = _compose_structured_summary(
             "• Build failed: pytest returned exit code 1\n• 3 tests failing",
@@ -1686,13 +1810,23 @@ class TestErrorStateRendering:
         assert first_line.strip() == "❌"
 
     def test_failed_session_with_completion_flag_still_shows_error(self):
-        """Failed status overrides is_completion=True -- error emoji takes priority."""
-        session = _mock_session_with_stages(
-            {"ISSUE": "completed", "PLAN": "completed", "BUILD": "completed", "TEST": "failed"},
-        )
+        """Failed status overrides is_completion=True — error emoji takes priority."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
         session._get_history_list.return_value = ["[user] test"]
         session.message_text = "test"
         session.status = "failed"
+        session.session_id = "test-error-override"
+        session.get_stage_progress.return_value = {
+            "ISSUE": "completed",
+            "PLAN": "completed",
+            "BUILD": "completed",
+            "TEST": "failed",
+            "REVIEW": "pending",
+            "DOCS": "pending",
+        }
+        session.get_links.return_value = {}
 
         result = _compose_structured_summary(
             "• Tests failed",
@@ -1706,16 +1840,30 @@ class TestErrorStateRendering:
     def test_failed_stage_shows_in_progress(self):
         """Failed stage progress should render the failure point visibly.
 
-        The stage progress renderer shows failed stages with a cross mark.
-        This test ensures the stage line is present for failed sessions.
+        Note: The stage progress renderer does not currently distinguish
+        'failed' from 'in_progress' — both render as '▶'. This test
+        documents the current behavior and ensures the stage line is
+        present for failed sessions.
         """
-        session = _mock_session_with_stages(
-            {"ISSUE": "completed", "PLAN": "completed", "BUILD": "failed"},
-        )
-        session._get_history_list.return_value = []
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session._get_history_list.return_value = [
+            "[stage] BUILD failed",
+        ]
         session.message_text = "continue"
         session.status = "failed"
+        session.session_id = "test-failed-stage"
         session.is_sdlc = True
+        session.get_stage_progress.return_value = {
+            "ISSUE": "completed",
+            "PLAN": "completed",
+            "BUILD": "failed",
+            "TEST": "pending",
+            "REVIEW": "pending",
+            "DOCS": "pending",
+        }
+        session.get_links.return_value = {}
 
         result = _compose_structured_summary(
             "• Build failed at test stage",
@@ -1723,15 +1871,29 @@ class TestErrorStateRendering:
             is_completion=False,
         )
 
-        # Error content should be present (stage progress removed)
-        assert "Build failed" in result
+        # Stage progress should be present
+        assert "PLAN" in result
+        assert "BUILD" in result
+        assert "TEST" in result
 
     def test_error_message_propagated_to_output(self):
         """Error messages in the summary text should reach the rendered output."""
-        session = _mock_session_with_stages({})  # All pending
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
         session._get_history_list.return_value = []
         session.message_text = "continue"
         session.status = "failed"
+        session.session_id = "test-error-message"
+        session.get_stage_progress.return_value = {
+            "ISSUE": "pending",
+            "PLAN": "pending",
+            "BUILD": "pending",
+            "TEST": "pending",
+            "REVIEW": "pending",
+            "DOCS": "pending",
+        }
+        session.get_links.return_value = {}
 
         error_text = "Error: ModuleNotFoundError: No module named 'foo'"
         result = _compose_structured_summary(
@@ -1745,14 +1907,27 @@ class TestErrorStateRendering:
 
     def test_failed_session_with_link_footer(self):
         """Failed session should still render link footer with issue reference."""
-        session = _mock_session_with_stages(
-            {"ISSUE": "completed", "PLAN": "completed", "BUILD": "failed"},
-            links={"issue": "https://github.com/org/repo/issues/200"},
-        )
-        session._get_history_list.return_value = []
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session._get_history_list.return_value = [
+            "[stage] BUILD failed",
+        ]
         session.message_text = "continue"
         session.status = "failed"
+        session.session_id = "test-failed-links"
         session.is_sdlc = True
+        session.get_stage_progress.return_value = {
+            "ISSUE": "completed",
+            "PLAN": "completed",
+            "BUILD": "failed",
+            "TEST": "pending",
+            "REVIEW": "pending",
+            "DOCS": "pending",
+        }
+        session.get_links.return_value = {
+            "issue": "https://github.com/org/repo/issues/200",
+        }
 
         result = _compose_structured_summary(
             "• Build failed: 3 tests failing",
@@ -1760,9 +1935,10 @@ class TestErrorStateRendering:
             is_completion=False,
         )
 
-        # Error emoji and content present (link footer removed)
+        # Error emoji
         assert "❌" in result
-        assert "Build failed" in result
+        # Link footer still renders
+        assert "Issue #200" in result
 
     def test_get_status_emoji_failed_overrides_everything(self):
         """_get_status_emoji with failed status always returns error emoji."""
@@ -1774,6 +1950,28 @@ class TestErrorStateRendering:
         # Even with is_completion=True, failed status wins
         assert _get_status_emoji(session, is_completion=True) == "❌"
         assert _get_status_emoji(session, is_completion=False) == "❌"
+
+    def test_render_stage_progress_with_failed_stage(self):
+        """Stage progress rendering with a failed stage should not crash."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session.get_stage_progress.return_value = {
+            "ISSUE": "completed",
+            "PLAN": "completed",
+            "BUILD": "failed",
+            "TEST": "pending",
+            "REVIEW": "pending",
+            "DOCS": "pending",
+        }
+        session.get_links.return_value = {}
+
+        result = _render_stage_progress(session)
+        assert result is not None
+        # Should have completed stages
+        assert "☑ PLAN" in result
+        # Pending stages still show
+        assert "☐ TEST" in result
 
 
 class TestLinkifyReferences:
@@ -1870,342 +2068,3 @@ class TestLinkifyReferences:
         session.project_key = "   "
         result = _linkify_references("PR #323", session)
         assert result == "PR #323"
-
-
-class TestSummarizerBypass:
-    """Tests for PM self-messaging summarizer bypass (issue #497).
-
-    When the PM sends messages via tools/send_telegram.py during a session,
-    the summarizer should be skipped entirely in send_response_with_files.
-    """
-
-    @pytest.mark.asyncio
-    async def test_bypass_when_pm_has_messages(self):
-        """send_response_with_files should return True without summarizing
-        when pm_sent_message_ids is non-empty."""
-        from bridge.response import send_response_with_files
-
-        mock_client = MagicMock()
-        mock_session = MagicMock()
-        mock_session.has_pm_messages.return_value = True
-        mock_session.pm_sent_message_ids = [42, 43]
-        mock_session.session_id = "test-session"
-
-        result = await send_response_with_files(
-            mock_client,
-            None,
-            "Some agent output",
-            chat_id=12345,
-            reply_to=67890,
-            session=mock_session,
-        )
-
-        assert result is True
-
-    @pytest.mark.asyncio
-    async def test_no_bypass_when_no_pm_messages(self):
-        """send_response_with_files should proceed normally when
-        pm_sent_message_ids is empty."""
-        from bridge.response import send_response_with_files
-
-        mock_client = MagicMock()
-        mock_session = MagicMock()
-        mock_session.has_pm_messages.return_value = False
-        mock_session.pm_sent_message_ids = []
-        mock_session.session_id = "test-session"
-        mock_session.is_sdlc = False
-        # Ensure parent lookup also returns no PM messages
-        mock_session.get_parent_chat_session.return_value = None
-
-        # Mock send_markdown to avoid Telethon calls
-        with patch("bridge.markdown.send_markdown", new_callable=AsyncMock) as mock_send:
-            mock_send.return_value = MagicMock()
-            result = await send_response_with_files(
-                mock_client,
-                None,
-                "Short",
-                chat_id=12345,
-                reply_to=67890,
-                session=mock_session,
-            )
-
-        # Should have tried to send the text (not bypassed)
-        assert mock_send.called or result is True
-
-
-class TestSummarizerBypassParentSession:
-    """Tests for PM bypass guard with parent ChatSession lookup (issue #571).
-
-    In SDLC flows, the DevSession (child) is passed to send_response_with_files,
-    but PM messages are recorded on the parent ChatSession. The guard must check
-    the parent session when the child has no PM messages.
-    """
-
-    @pytest.mark.asyncio
-    async def test_bypass_when_parent_has_pm_messages(self):
-        """DevSession with parent ChatSession that has PM messages -> bypass fires."""
-        from bridge.response import send_response_with_files
-
-        mock_client = MagicMock()
-        mock_parent = MagicMock()
-        mock_parent.has_pm_messages.return_value = True
-        mock_parent.pm_sent_message_ids = [100, 101]
-
-        mock_session = MagicMock()
-        mock_session.has_pm_messages.return_value = False
-        mock_session.pm_sent_message_ids = []
-        mock_session.session_id = "dev-session-1"
-        mock_session.get_parent_chat_session.return_value = mock_parent
-
-        result = await send_response_with_files(
-            mock_client,
-            None,
-            "DevSession agent output",
-            chat_id=12345,
-            reply_to=67890,
-            session=mock_session,
-        )
-
-        assert result is True
-
-    @pytest.mark.asyncio
-    async def test_no_bypass_when_parent_is_dangling(self):
-        """DevSession with dangling parent_chat_session_id -> bypass does not fire."""
-        from bridge.response import send_response_with_files
-
-        mock_client = MagicMock()
-        mock_session = MagicMock()
-        mock_session.has_pm_messages.return_value = False
-        mock_session.pm_sent_message_ids = []
-        mock_session.session_id = "dev-session-2"
-        mock_session.get_parent_chat_session.return_value = None
-        mock_session.is_sdlc = False
-
-        with patch("bridge.markdown.send_markdown", new_callable=AsyncMock) as mock_send:
-            mock_send.return_value = MagicMock()
-            result = await send_response_with_files(
-                mock_client,
-                None,
-                "Short",
-                chat_id=12345,
-                reply_to=67890,
-                session=mock_session,
-            )
-
-        assert mock_send.called or result is True
-
-    @pytest.mark.asyncio
-    async def test_no_bypass_when_no_parent(self):
-        """Session without parent_chat_session_id -> no parent lookup, no bypass."""
-        from bridge.response import send_response_with_files
-
-        mock_client = MagicMock()
-        mock_session = MagicMock()
-        mock_session.has_pm_messages.return_value = False
-        mock_session.pm_sent_message_ids = []
-        mock_session.session_id = "chat-session-1"
-        mock_session.is_sdlc = False
-        # Remove get_parent_chat_session to simulate a plain session
-        del mock_session.get_parent_chat_session
-
-        with patch("bridge.markdown.send_markdown", new_callable=AsyncMock) as mock_send:
-            mock_send.return_value = MagicMock()
-            result = await send_response_with_files(
-                mock_client,
-                None,
-                "Short",
-                chat_id=12345,
-                reply_to=67890,
-                session=mock_session,
-            )
-
-        assert mock_send.called or result is True
-
-
-class TestSummarizerInternalsSuppressionPrompt:
-    """Tests that SUMMARIZER_SYSTEM_PROMPT bans implementation details (issue #571)."""
-
-    def test_prompt_contains_internals_suppression_section(self):
-        """The prompt should have DEVELOPER INTERNALS SUPPRESSION, not just metrics."""
-        from bridge.summarizer import SUMMARIZER_SYSTEM_PROMPT
-
-        assert "DEVELOPER INTERNALS SUPPRESSION" in SUMMARIZER_SYSTEM_PROMPT
-
-    def test_prompt_bans_root_cause_explanations(self):
-        """The prompt should explicitly prohibit root-cause explanations."""
-        from bridge.summarizer import SUMMARIZER_SYSTEM_PROMPT
-
-        assert "root-cause" in SUMMARIZER_SYSTEM_PROMPT.lower()
-
-    def test_prompt_bans_internal_method_names(self):
-        """The prompt should prohibit internal method/function/class names."""
-        from bridge.summarizer import SUMMARIZER_SYSTEM_PROMPT
-
-        assert "method" in SUMMARIZER_SYSTEM_PROMPT.lower()
-        assert "function" in SUMMARIZER_SYSTEM_PROMPT.lower()
-        assert "class name" in SUMMARIZER_SYSTEM_PROMPT.lower()
-
-
-class TestNormalizeQuestionPrefix:
-    """Tests for _normalize_question_prefix."""
-
-    def test_legacy_prefix_normalized(self):
-        from bridge.summarizer import _normalize_question_prefix
-
-        result = _normalize_question_prefix("? Should I merge?")
-        assert result == ">> Should I merge?"
-
-    def test_new_prefix_unchanged(self):
-        from bridge.summarizer import _normalize_question_prefix
-
-        result = _normalize_question_prefix(">> Should I merge?")
-        assert result == ">> Should I merge?"
-
-    def test_mixed_prefixes(self):
-        from bridge.summarizer import _normalize_question_prefix
-
-        text = "? First question\n>> Second question\n? Third"
-        result = _normalize_question_prefix(text)
-        assert ">> First question" in result
-        assert ">> Second question" in result
-        assert ">> Third" in result
-        assert "? " not in result
-
-    def test_non_question_lines_unchanged(self):
-        from bridge.summarizer import _normalize_question_prefix
-
-        result = _normalize_question_prefix("Normal text here")
-        assert result == "Normal text here"
-
-
-class TestCrashMessagePool:
-    """Tests for the crash message pool in sdk_client.py."""
-
-    def test_pool_has_minimum_variants(self):
-        from agent.sdk_client import CRASH_MESSAGE_POOL
-
-        assert len(CRASH_MESSAGE_POOL) >= 4
-
-    def test_get_crash_message_returns_string(self):
-        from agent.sdk_client import _get_crash_message
-
-        msg = _get_crash_message()
-        assert isinstance(msg, str)
-        assert len(msg) > 10
-
-    def test_no_consecutive_repeats(self):
-        """Crash messages should not repeat consecutively."""
-        import agent.sdk_client as mod
-        from agent.sdk_client import _get_crash_message
-
-        mod._last_crash_message = None
-
-        messages = [_get_crash_message() for _ in range(20)]
-        for i in range(1, len(messages)):
-            assert messages[i] != messages[i - 1], f"Consecutive repeat at index {i}: {messages[i]}"
-
-    def test_first_call_no_previous(self):
-        """First call with no previous message should work."""
-        import agent.sdk_client as mod
-        from agent.sdk_client import _get_crash_message
-
-        mod._last_crash_message = None
-        msg = _get_crash_message()
-        assert msg in mod.CRASH_MESSAGE_POOL
-
-    def test_all_variants_include_next_step(self):
-        """Each crash message includes next-step language."""
-        from agent.sdk_client import CRASH_MESSAGE_POOL
-
-        next_step_words = [
-            "retry",
-            "try again",
-            "re-trigger",
-            "re-send",
-            "check back",
-        ]
-        for msg in CRASH_MESSAGE_POOL:
-            has_next = any(w in msg.lower() for w in next_step_words)
-            assert has_next, f"Missing next-step language: {msg}"
-
-
-class TestSentenceAwareTruncation:
-    """Tests for _truncate_at_sentence_boundary in response.py."""
-
-    def test_short_text_unchanged(self):
-        from bridge.response import _truncate_at_sentence_boundary
-
-        text = "Short text."
-        assert _truncate_at_sentence_boundary(text) == text
-
-    def test_truncates_at_sentence_boundary(self):
-        from bridge.response import _truncate_at_sentence_boundary
-
-        sentences = "First sentence. Second sentence. Third. "
-        text = sentences * 50
-        result = _truncate_at_sentence_boundary(text, limit=100)
-        assert len(result) <= 100
-        assert result.endswith(".")
-
-    def test_fallback_to_ellipsis(self):
-        from bridge.response import _truncate_at_sentence_boundary
-
-        text = "a" * 5000
-        result = _truncate_at_sentence_boundary(text, limit=4096)
-        assert len(result) <= 4096
-        assert result.endswith("...")
-
-    def test_empty_text(self):
-        from bridge.response import _truncate_at_sentence_boundary
-
-        assert _truncate_at_sentence_boundary("") == ""
-        assert _truncate_at_sentence_boundary(None) == ""
-
-    def test_exact_limit_unchanged(self):
-        from bridge.response import _truncate_at_sentence_boundary
-
-        text = "x" * 4096
-        result = _truncate_at_sentence_boundary(text, limit=4096)
-        assert result == text
-
-    def test_preserves_exclamation_boundary(self):
-        from bridge.response import _truncate_at_sentence_boundary
-
-        text = "Done! " * 800 + "Extra text over limit"
-        result = _truncate_at_sentence_boundary(text, limit=4096)
-        assert result.rstrip().endswith("!")
-
-    def test_question_mark_boundary(self):
-        from bridge.response import _truncate_at_sentence_boundary
-
-        text = "Is it working? " * 300 + "Extra text"
-        result = _truncate_at_sentence_boundary(text, limit=4096)
-        assert result.rstrip().endswith("?")
-
-
-class TestSummarizerPromptUpdates:
-    """Tests for new SUMMARIZER_SYSTEM_PROMPT content (#540)."""
-
-    def test_prompt_contains_sdlc_naturalization(self):
-        from bridge.summarizer import SUMMARIZER_SYSTEM_PROMPT
-
-        assert "planning" in SUMMARIZER_SYSTEM_PROMPT
-        assert "building" in SUMMARIZER_SYSTEM_PROMPT
-        assert "testing" in SUMMARIZER_SYSTEM_PROMPT
-
-    def test_prompt_contains_question_prefix_instruction(self):
-        from bridge.summarizer import SUMMARIZER_SYSTEM_PROMPT
-
-        assert ">> " in SUMMARIZER_SYSTEM_PROMPT
-
-    def test_prompt_contains_link_format_instruction(self):
-        from bridge.summarizer import SUMMARIZER_SYSTEM_PROMPT
-
-        prompt_lower = SUMMARIZER_SYSTEM_PROMPT.lower()
-        assert "short-form references" in prompt_lower
-
-    def test_prompt_contains_metrics_suppression(self):
-        from bridge.summarizer import SUMMARIZER_SYSTEM_PROMPT
-
-        prompt_lower = SUMMARIZER_SYSTEM_PROMPT.lower()
-        assert "line counts" in prompt_lower

@@ -24,7 +24,6 @@ async def scan_for_missed_messages(
     should_respond_fn,
     enqueue_job_fn,
     find_project_fn,
-    lookback_override: timedelta | None = None,
 ) -> int:
     """
     Scan monitored groups for messages that may have been missed.
@@ -36,24 +35,12 @@ async def scan_for_missed_messages(
         should_respond_fn: Async function to check if we should respond
         enqueue_job_fn: Async function to enqueue a job
         find_project_fn: Function to find project config for a chat
-        lookback_override: If provided, use this timedelta instead of
-            CATCHUP_LOOKBACK_MINUTES. Capped at 24 hours.
 
     Returns:
         Number of messages queued for processing
     """
     queued = 0
-    if lookback_override is not None:
-        # Cap at 24 hours to prevent scanning excessive history
-        max_lookback = timedelta(hours=24)
-        effective_lookback = min(lookback_override, max_lookback)
-        cutoff = datetime.now(UTC) - effective_lookback
-        logger.info(
-            "[catchup] Using dynamic lookback: %s (capped at 24h)",
-            effective_lookback,
-        )
-    else:
-        cutoff = datetime.now(UTC) - timedelta(minutes=CATCHUP_LOOKBACK_MINUTES)
+    cutoff = datetime.now(UTC) - timedelta(minutes=CATCHUP_LOOKBACK_MINUTES)
 
     logger.info(
         f"[catchup] Scanning {len(monitored_groups)} groups for messages since {cutoff.isoformat()}"
@@ -192,10 +179,11 @@ async def scan_for_missed_messages(
                     message_text=text,
                     sender_name=sender_name,
                     chat_id=str(dialog.entity.id),
-                    telegram_message_id=message.id,
+                    message_id=message.id,
                     chat_title=chat_title,
                     priority="low",  # Lower priority than real-time messages
                     sender_id=sender_id,
+                    workflow_id=None,
                 )
 
                 # Record in Redis dedup to prevent re-enqueue on next scan

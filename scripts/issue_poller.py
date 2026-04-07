@@ -6,7 +6,7 @@ Polls GitHub issues across configured projects, detects new ones,
 checks for duplicates, and auto-creates draft plans via /do-plan.
 
 Entry point: Run on a 5-minute cron schedule via launchd.
-State: Popoto SeenIssue model for seen-tracking, raw Redis for distributed lock.
+State: Redis-backed seen-issue tracker and lock.
 
 See docs/features/issue-poller.md for full documentation.
 """
@@ -15,8 +15,6 @@ from __future__ import annotations
 
 import json
 import logging
-import logging.handlers
-import os
 import subprocess
 import sys
 import time
@@ -27,14 +25,17 @@ _project_root = str(Path(__file__).parent.parent)
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
-from popoto.redis_db import POPOTO_REDIS_DB  # noqa: E402
+try:
+    import redis
+except ImportError:
+    redis = None  # type: ignore[assignment]
 
-from models.seen_issue import SeenIssue  # noqa: E402
 from scripts.issue_dedup import compare_issues  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-# Redis key patterns (lock and failure counter stay as raw Redis for atomicity)
+# Redis key patterns
+SEEN_KEY_PREFIX = "issue_poller:seen"
 LOCK_KEY = "issue_poller:lock"
 LOCK_TTL = 300  # 5 minutes
 FAILURE_COUNT_KEY = "issue_poller:consecutive_failures"
@@ -43,38 +44,41 @@ FAILURE_COUNT_KEY = "issue_poller:consecutive_failures"
 AGENT_D_SIGNATURE = "_Auto-posted by /do-docs cascade_"
 
 
-def get_redis_client():
-    """Get the shared Popoto Redis connection, raising if unavailable."""
-    POPOTO_REDIS_DB.ping()
-    return POPOTO_REDIS_DB
+def get_redis_client() -> redis.Redis:
+    """Get a Redis client, raising if unavailable."""
+    if redis is None:
+        raise RuntimeError("redis package not installed")
+    client = redis.Redis()
+    client.ping()
+    return client
 
 
-def acquire_lock(r) -> bool:
+def acquire_lock(r: redis.Redis) -> bool:
     """Acquire a distributed lock to prevent concurrent executions.
-
-    Uses raw Redis SET NX EX for atomicity. The lock stays as raw Redis
-    because Popoto's save() cannot do atomic SET NX EX.
 
     Returns True if lock acquired, False if another instance is running.
     """
     return bool(r.set(LOCK_KEY, "1", nx=True, ex=LOCK_TTL))
 
 
-def release_lock(r) -> None:
+def release_lock(r: redis.Redis) -> None:
     """Release the distributed lock."""
     r.delete(LOCK_KEY)
 
 
-def mark_seen(org: str, repo: str, issue_number: int) -> None:
+def seen_key(org: str, repo: str) -> str:
+    """Redis key for the seen-issue set for a given repo."""
+    return f"{SEEN_KEY_PREFIX}:{org}/{repo}"
+
+
+def mark_seen(r: redis.Redis, org: str, repo: str, issue_number: int) -> None:
     """Mark an issue as seen (processed)."""
-    record = SeenIssue.get_or_create(org, repo)
-    record.mark(issue_number)
+    r.sadd(seen_key(org, repo), str(issue_number))
 
 
-def is_seen(org: str, repo: str, issue_number: int) -> bool:
+def is_seen(r: redis.Redis, org: str, repo: str, issue_number: int) -> bool:
     """Check if an issue has already been processed."""
-    record = SeenIssue.get_or_create(org, repo)
-    return record.is_seen(issue_number)
+    return bool(r.sismember(seen_key(org, repo), str(issue_number)))
 
 
 def load_projects(config_path: Path | None = None) -> list[dict]:
@@ -181,9 +185,9 @@ def get_latest_comment_id(org: str, repo: str, issue_number: int) -> str | None:
         return None
 
 
-def filter_new_issues(org: str, repo: str, issues: list[dict]) -> list[dict]:
+def filter_new_issues(r: redis.Redis, org: str, repo: str, issues: list[dict]) -> list[dict]:
     """Filter out already-seen issues."""
-    return [issue for issue in issues if not is_seen(org, repo, issue["number"])]
+    return [issue for issue in issues if not is_seen(r, org, repo, issue["number"])]
 
 
 def has_sufficient_context(issue: dict) -> bool:
@@ -276,31 +280,11 @@ def dispatch_plan_creation(
     repo: str,
     issue_number: int,
     last_comment_id: str | None = None,
-    working_directory: str | None = None,
 ) -> bool:
     """Dispatch plan creation via claude -p subprocess.
 
     Invokes the /do-plan skill to create a draft plan for the issue.
-    For foreign repos, sets GH_REPO and SDLC_TARGET_REPO env vars so the
-    spawned agent targets the correct repository instead of the ai repo.
     """
-    # Resolve cwd: use working_directory if valid, else fall back to _project_root
-    if working_directory and Path(working_directory).exists():
-        cwd = working_directory
-    else:
-        if working_directory and not Path(working_directory).exists():
-            logger.warning(
-                f"working_directory {working_directory!r} does not exist, "
-                f"falling back to _project_root"
-            )
-        cwd = _project_root
-
-    # Build subprocess env: inject cross-repo vars for foreign repos
-    env = os.environ.copy()
-    if cwd != _project_root:
-        env["GH_REPO"] = f"{org}/{repo}"
-        env["SDLC_TARGET_REPO"] = cwd
-
     prompt = (
         f"Create a plan for issue #{issue_number} in {org}/{repo}. "
         f"Use /do-plan to create a draft plan."
@@ -309,7 +293,7 @@ def dispatch_plan_creation(
         prompt += f" Initialize last_comment_id in the plan frontmatter to {last_comment_id}."
 
     try:
-        logger.info(f"Dispatching plan creation for {org}/{repo}#{issue_number} in {cwd}")
+        logger.info(f"Dispatching plan creation for {org}/{repo}#{issue_number}")
         result = subprocess.run(
             [
                 "claude",
@@ -321,8 +305,7 @@ def dispatch_plan_creation(
             capture_output=True,
             text=True,
             timeout=300,  # 5 minute timeout for plan creation
-            cwd=cwd,
-            env=env,
+            cwd=_project_root,
         )
         if result.returncode != 0:
             logger.warning(
@@ -363,12 +346,12 @@ def send_telegram_notification(message: str, groups: list[str] | None = None) ->
 
 
 def process_issue(
+    r: redis.Redis,
     org: str,
     repo: str,
     issue: dict,
     all_open_issues: list[dict],
     telegram_groups: list[str],
-    working_directory: str | None = None,
 ) -> str:
     """Process a single new issue.
 
@@ -383,7 +366,7 @@ def process_issue(
     # Check if a plan already exists (race condition prevention)
     if check_existing_plan(org, repo, number):
         logger.info(f"Plan already exists for {org}/{repo}#{number}, marking as seen")
-        mark_seen(org, repo, number)
+        mark_seen(r, org, repo, number)
         return "skipped"
 
     # Check for sufficient context
@@ -402,7 +385,7 @@ def process_issue(
             f"Issue {org}/{repo}#{number} needs review (insufficient context): {title}",
             telegram_groups,
         )
-        mark_seen(org, repo, number)
+        mark_seen(r, org, repo, number)
         return "needs-review"
 
     # Run dedup check against other open issues
@@ -438,21 +421,21 @@ def process_issue(
             f"({score:.0%}): {title}",
             telegram_groups,
         )
-        mark_seen(org, repo, number)
+        mark_seen(r, org, repo, number)
         return "duplicate"
 
     # Get latest comment ID for plan frontmatter
     last_comment_id = get_latest_comment_id(org, repo, number)
 
     # Dispatch plan creation
-    success = dispatch_plan_creation(org, repo, number, last_comment_id, working_directory)
+    success = dispatch_plan_creation(org, repo, number, last_comment_id)
     if success:
         apply_label(org, repo, number, "auto-planned")
         send_telegram_notification(
             f"Auto-planned: {org}/{repo}#{number}: {title}",
             telegram_groups,
         )
-        mark_seen(org, repo, number)
+        mark_seen(r, org, repo, number)
 
         # Note related issues in plan if any
         if dedup_result and dedup_result.get("classification") == "related":
@@ -466,6 +449,7 @@ def process_issue(
 
 
 def poll_project(
+    r: redis.Redis,
     project: dict,
 ) -> dict:
     """Poll a single project for new issues.
@@ -475,7 +459,6 @@ def poll_project(
     org = project["org"]
     repo = project["repo"]
     telegram_groups = project.get("telegram_groups", [])
-    working_directory = project.get("working_directory") or None
 
     logger.info(f"Polling {org}/{repo}...")
 
@@ -484,7 +467,7 @@ def poll_project(
         logger.info(f"No open issues found for {org}/{repo}")
         return {"total": 0, "new": 0, "planned": 0, "duplicate": 0, "error": 0}
 
-    new_issues = filter_new_issues(org, repo, issues)
+    new_issues = filter_new_issues(r, org, repo, issues)
     logger.info(f"Found {len(new_issues)} new issues in {org}/{repo}")
 
     results = {
@@ -498,7 +481,7 @@ def poll_project(
     }
 
     for issue in new_issues:
-        status = process_issue(org, repo, issue, issues, telegram_groups, working_directory)
+        status = process_issue(r, org, repo, issue, issues, telegram_groups)
         results[status] = results.get(status, 0) + 1
 
     return results
@@ -531,7 +514,7 @@ def run_polling_cycle() -> dict:
         for project in projects:
             key = f"{project['org']}/{project['repo']}"
             try:
-                summary[key] = poll_project(project)
+                summary[key] = poll_project(r, project)
             except Exception as e:
                 logger.error(f"Error polling {key}: {e}")
                 summary[key] = {"error": str(e)}
@@ -564,11 +547,7 @@ def setup_logging() -> None:
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         handlers=[
-            logging.handlers.RotatingFileHandler(
-                log_dir / "issue_poller.log",
-                maxBytes=10 * 1024 * 1024,  # 10MB
-                backupCount=5,
-            ),
+            logging.FileHandler(log_dir / "issue_poller.log"),
             logging.StreamHandler(),
         ],
     )

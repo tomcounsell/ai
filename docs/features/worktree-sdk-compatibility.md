@@ -56,7 +56,7 @@ cd .worktrees/test-exp1 && claude --print "say the word hello"
 ```bash
 git worktree add .worktrees/test-exp2 -b session/test-exp2
 rm -rf .worktrees/test-exp2/.claude
-ln -s ~/src/ai/.claude .worktrees/test-exp2/.claude
+ln -s /Users/valorengels/src/ai/.claude .worktrees/test-exp2/.claude
 cd .worktrees/test-exp2 && claude --print "say the word hello"
 ```
 

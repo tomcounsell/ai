@@ -1,0 +1,43 @@
+{
+  "name": "image-gen",
+  "version": "1.0.0",
+  "description": "AI image generation via OpenRouter API (Gemini, DALL-E, Flux, etc.)",
+  "type": "library",
+  "status": "stable",
+
+  "source": {
+    "type": "internal",
+    "repository": "https://github.com/tomcounsell/ai"
+  },
+
+  "capabilities": [
+    "generate"
+  ],
+
+  "requires": {
+    "env": ["OPENROUTER_API_KEY"],
+    "python": ">=3.10"
+  },
+
+  "config": {
+    "default_model": "google/gemini-2.0-flash-exp:free",
+    "models": [
+      "google/gemini-2.0-flash-exp:free",
+      "openai/dall-e-3",
+      "black-forest-labs/flux-schnell"
+    ],
+    "aspect_ratios": ["1:1", "16:9", "9:16", "4:3", "3:4"]
+  },
+
+  "workflows": [
+    {
+      "name": "basic-generation",
+      "description": "Generate an image from a text prompt",
+      "steps": [
+        "from tools.image_gen import generate_image",
+        "result = generate_image('a cat in space')",
+        "# Returns: {'path': 'output.png', 'prompt': '...'}"
+      ]
+    }
+  ]
+}

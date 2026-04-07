@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from scripts.issue_dedup import (
     DUPLICATE_THRESHOLD,
@@ -13,8 +13,6 @@ from scripts.issue_dedup import (
 )
 from scripts.issue_poller import (
     AGENT_D_SIGNATURE,
-    _project_root,
-    dispatch_plan_creation,
     filter_new_issues,
     has_sufficient_context,
     load_projects,
@@ -157,34 +155,34 @@ class TestHasSufficientContext:
 class TestFilterNewIssues:
     """Test seen-issue filtering."""
 
-    @patch("scripts.issue_poller.is_seen")
-    def test_filters_seen_issues(self, mock_is_seen):
-        mock_is_seen.side_effect = lambda org, repo, num: num == 1
+    def test_filters_seen_issues(self):
+        r = MagicMock()
+        r.sismember.side_effect = lambda key, num: num == "1"
 
         issues = [
             {"number": 1, "title": "Old"},
             {"number": 2, "title": "New"},
             {"number": 3, "title": "Also New"},
         ]
-        result = filter_new_issues("org", "repo", issues)
+        result = filter_new_issues(r, "org", "repo", issues)
         assert len(result) == 2
         assert result[0]["number"] == 2
         assert result[1]["number"] == 3
 
-    @patch("scripts.issue_poller.is_seen")
-    def test_all_seen(self, mock_is_seen):
-        mock_is_seen.return_value = True
+    def test_all_seen(self):
+        r = MagicMock()
+        r.sismember.return_value = True
 
         issues = [{"number": 1}, {"number": 2}]
-        result = filter_new_issues("org", "repo", issues)
+        result = filter_new_issues(r, "org", "repo", issues)
         assert len(result) == 0
 
-    @patch("scripts.issue_poller.is_seen")
-    def test_none_seen(self, mock_is_seen):
-        mock_is_seen.return_value = False
+    def test_none_seen(self):
+        r = MagicMock()
+        r.sismember.return_value = False
 
         issues = [{"number": 1}, {"number": 2}]
-        result = filter_new_issues("org", "repo", issues)
+        result = filter_new_issues(r, "org", "repo", issues)
         assert len(result) == 2
 
 
@@ -219,7 +217,6 @@ class TestLoadProjects:
 class TestProcessIssue:
     """Test the main issue processing logic."""
 
-    @patch("scripts.issue_poller.mark_seen")
     @patch("scripts.issue_poller.dispatch_plan_creation")
     @patch("scripts.issue_poller.apply_label")
     @patch("scripts.issue_poller.send_telegram_notification")
@@ -234,14 +231,15 @@ class TestProcessIssue:
         mock_notify,
         mock_label,
         mock_dispatch,
-        mock_mark_seen,
     ):
+        r = MagicMock()
         mock_existing.return_value = False
         mock_compare.return_value = None  # unique
         mock_comment_id.return_value = "12345"
         mock_dispatch.return_value = True
 
         result = process_issue(
+            r,
             "org",
             "repo",
             {
@@ -251,45 +249,37 @@ class TestProcessIssue:
             },
             [],
             [],
-            working_directory=None,
         )
         assert result == "planned"
-        mock_dispatch.assert_called_once_with("org", "repo", 1, "12345", None)
-        mock_mark_seen.assert_called_with("org", "repo", 1)
+        mock_dispatch.assert_called_once()
+        r.sadd.assert_called()
 
-    @patch("scripts.issue_poller.mark_seen")
     @patch("scripts.issue_poller.add_comment")
     @patch("scripts.issue_poller.apply_label")
     @patch("scripts.issue_poller.send_telegram_notification")
     @patch("scripts.issue_poller.check_existing_plan")
-    def test_flags_insufficient_context(
-        self, mock_existing, mock_notify, mock_label, mock_comment, mock_mark_seen
-    ):
+    def test_flags_insufficient_context(self, mock_existing, mock_notify, mock_label, mock_comment):
+        r = MagicMock()
         mock_existing.return_value = False
 
         result = process_issue(
+            r,
             "org",
             "repo",
             {"number": 1, "title": "Bug", "body": "Fix it"},
             [],
             [],
-            working_directory=None,
         )
         assert result == "needs-review"
         mock_label.assert_called_with("org", "repo", 1, "needs-review")
 
-    @patch("scripts.issue_poller.mark_seen")
     @patch("scripts.issue_poller.check_existing_plan")
-    def test_skips_existing_plan(self, mock_existing, mock_mark_seen):
+    def test_skips_existing_plan(self, mock_existing):
+        r = MagicMock()
         mock_existing.return_value = True
 
         result = process_issue(
-            "org",
-            "repo",
-            {"number": 1, "title": "Test", "body": "Test body text"},
-            [],
-            [],
-            working_directory=None,
+            r, "org", "repo", {"number": 1, "title": "Test", "body": "Test body text"}, [], []
         )
         assert result == "skipped"
 
@@ -300,64 +290,3 @@ class TestAgentDFiltering:
     def test_agent_d_signature_constant(self):
         """Verify the Agent D signature matches expected format."""
         assert "_Auto-posted by /do-docs cascade_" in AGENT_D_SIGNATURE
-
-
-class TestDispatchPlanCreation:
-    """Test cross-repo dispatch behavior in dispatch_plan_creation()."""
-
-    @patch("scripts.issue_poller.subprocess.run")
-    def test_dispatch_uses_target_working_directory(self, mock_run, tmp_path):
-        """subprocess.run is called with cwd=working_directory for foreign repos."""
-        mock_run.return_value.returncode = 0
-        foreign_dir = str(tmp_path)
-
-        dispatch_plan_creation("myorg", "myrepo", 42, working_directory=foreign_dir)
-
-        call_kwargs = mock_run.call_args[1]
-        assert call_kwargs["cwd"] == foreign_dir
-
-    @patch("scripts.issue_poller.subprocess.run")
-    def test_dispatch_injects_gh_repo_env_for_foreign_repo(self, mock_run, tmp_path):
-        """GH_REPO env var is set to org/repo for foreign repos."""
-        mock_run.return_value.returncode = 0
-        foreign_dir = str(tmp_path)
-
-        dispatch_plan_creation("myorg", "myrepo", 42, working_directory=foreign_dir)
-
-        call_kwargs = mock_run.call_args[1]
-        assert call_kwargs["env"]["GH_REPO"] == "myorg/myrepo"
-
-    @patch("scripts.issue_poller.subprocess.run")
-    def test_dispatch_injects_sdlc_target_repo_for_foreign_repo(self, mock_run, tmp_path):
-        """SDLC_TARGET_REPO env var is set to working_directory for foreign repos."""
-        mock_run.return_value.returncode = 0
-        foreign_dir = str(tmp_path)
-
-        dispatch_plan_creation("myorg", "myrepo", 42, working_directory=foreign_dir)
-
-        call_kwargs = mock_run.call_args[1]
-        assert call_kwargs["env"]["SDLC_TARGET_REPO"] == foreign_dir
-
-    @patch("scripts.issue_poller.subprocess.run")
-    def test_dispatch_no_cross_repo_env_for_ai_repo(self, mock_run):
-        """GH_REPO and SDLC_TARGET_REPO are NOT injected when working_directory is _project_root."""
-        mock_run.return_value.returncode = 0
-
-        dispatch_plan_creation("tomcounsell", "ai", 10, working_directory=_project_root)
-
-        call_kwargs = mock_run.call_args[1]
-        assert "GH_REPO" not in call_kwargs["env"]
-        assert "SDLC_TARGET_REPO" not in call_kwargs["env"]
-        assert call_kwargs["cwd"] == _project_root
-
-    @patch("scripts.issue_poller.subprocess.run")
-    def test_dispatch_falls_back_to_project_root_when_working_dir_empty(self, mock_run):
-        """Empty working_directory falls back to _project_root with no cross-repo env vars."""
-        mock_run.return_value.returncode = 0
-
-        dispatch_plan_creation("myorg", "myrepo", 5, working_directory=None)
-
-        call_kwargs = mock_run.call_args[1]
-        assert call_kwargs["cwd"] == _project_root
-        assert "GH_REPO" not in call_kwargs["env"]
-        assert "SDLC_TARGET_REPO" not in call_kwargs["env"]

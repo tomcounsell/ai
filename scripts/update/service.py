@@ -202,52 +202,6 @@ def get_caffeinate_status() -> CaffeinateStatus:
     return CaffeinateStatus(installed=installed, running=running)
 
 
-def get_webui_pid() -> int | None:
-    """Get PID of running web UI process (ui.app on port 8500)."""
-    try:
-        result = run_cmd(["lsof", "-ti", ":8500"])
-        if result.returncode == 0 and result.stdout.strip():
-            return int(result.stdout.strip().split()[0])
-    except Exception:
-        pass
-    return None
-
-
-def is_webui_running() -> bool:
-    """Check if web UI is running."""
-    return get_webui_pid() is not None
-
-
-def restart_webui(project_dir: Path) -> bool:
-    """Restart the web UI server. Returns True if successfully started."""
-    import time
-
-    # Kill existing process
-    pid = get_webui_pid()
-    if pid:
-        try:
-            run_cmd(["kill", "-9", str(pid)])
-            time.sleep(1)
-        except Exception:
-            pass
-
-    # Start new process
-    try:
-        venv_python = project_dir / ".venv" / "bin" / "python"
-        subprocess.Popen(
-            [str(venv_python), "-m", "ui.app"],
-            cwd=project_dir,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        # Wait briefly and verify
-        time.sleep(2)
-        return is_webui_running()
-    except Exception:
-        return False
-
-
 def install_caffeinate() -> bool:
     """Install caffeinate service. Returns True if successful."""
     plist_path = Path.home() / "Library" / "LaunchAgents" / "com.valor.caffeinate.plist"

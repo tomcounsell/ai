@@ -129,4 +129,5 @@ class TestSessionIsolation:
 # === Fix 3: Non-SDLC auto-continue guard ===
 # Removed: TestNonSDLCAutoContinueGuard — tested _is_planning_language
 # which was part of the old classifier→coach→routing chain.
-# The nudge loop now handles all routing decisions. See issue #309.
+# The Observer Agent now handles all routing decisions.
+# See issue #309 and bridge/observer.py.

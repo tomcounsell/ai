@@ -24,10 +24,8 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
-
-from bridge.utc import utc_iso, utc_now
 
 # Add project root to path
 PROJECT_DIR = Path(__file__).parent.parent
@@ -58,10 +56,8 @@ WATCHDOG_INTERVAL = 60  # Check every 60 seconds (hardcoded per plan)
 ZOMBIE_THRESHOLD_SECONDS = 7200  # 2 hours - processes older than this are zombies
 SOFT_INSTANCE_LIMIT = 5  # Warn when more than this many active claude processes
 
-# Process name patterns to scan for zombies (CLI invocations only)
-# NOTE: "claude" alone matches Claude Desktop app processes (false positives).
-# We match specific CLI patterns instead.
-ZOMBIE_PROCESS_PATTERNS = ("claude --", "pyright")
+# Process name patterns to scan for zombies
+ZOMBIE_PROCESS_PATTERNS = ("claude", "pyright")
 
 
 @dataclass
@@ -285,12 +281,6 @@ def check_bridge_health() -> HealthStatus:
     if not running:
         issues.append("Bridge process not running")
         recovery_level = max(recovery_level, 1)
-        # Record the crash event so crash_tracker has a record of bridge deaths
-        # detected by the watchdog (e.g., SIGKILL, OOM kills leave no traceback)
-        try:
-            log_crash("bridge_dead_on_watchdog_check")
-        except Exception as e:
-            logger.debug(f"Failed to log crash event: {e}")
 
     # Check 2: Logs fresh (only if process is "running")
     logs_fresh = are_logs_fresh()
@@ -324,20 +314,10 @@ def check_bridge_health() -> HealthStatus:
     active_claude_count = len(active)
 
     if zombie_count > 0:
-        if running and logs_fresh:
-            # Bridge is healthy — just kill zombies directly, don't restart
-            killed = kill_zombie_processes(zombies)
-            issues.append(
-                f"{zombie_count} zombie process(es) cleaned up "
-                f"({killed} killed, memory freed: {zombie_memory_mb}MB)"
-            )
-            # Do NOT escalate — bridge is fine, zombies are handled
-        else:
-            issues.append(
-                f"{zombie_count} zombie process(es) detected "
-                f"(PIDs: {zombie_pids}, memory: {zombie_memory_mb}MB)"
-            )
-            recovery_level = max(recovery_level, 2)
+        issues.append(
+            f"{zombie_count} zombie process(es) detected "
+            f"(PIDs: {zombie_pids}, memory: {zombie_memory_mb}MB)"
+        )
 
     if active_claude_count > SOFT_INSTANCE_LIMIT:
         logger.warning(
@@ -449,8 +429,6 @@ from dotenv import load_dotenv
 import os
 
 load_dotenv("{PROJECT_DIR}/.env")
-from pathlib import Path as _P
-load_dotenv(_P.home() / "Desktop" / "Valor" / ".env")
 
 async def send():
     client = TelegramClient(
@@ -488,10 +466,6 @@ def _kill_detected_zombies() -> int:
 
 def execute_recovery(level: int, issues: list[str]) -> bool:
     """Execute recovery at the specified escalation level."""
-    if level == 0:
-        logger.warning(f"Recovery called with level 0 (no action needed): {issues}")
-        return True
-
     logger.info(f"Executing recovery level {level}")
 
     # Create recovery lock
@@ -500,7 +474,7 @@ def execute_recovery(level: int, issues: list[str]) -> bool:
         json.dumps(
             {
                 "level": level,
-                "started": utc_iso(),
+                "started": datetime.now().isoformat(),
                 "issues": issues,
             }
         )
@@ -576,10 +550,7 @@ def run_health_check() -> bool:
         try:
             lock_data = json.loads(RECOVERY_LOCK.read_text())
             lock_time = datetime.fromisoformat(lock_data.get("started", ""))
-            # Ensure lock_time is tz-aware for comparison (legacy files may be naive)
-            if lock_time.tzinfo is None:
-                lock_time = lock_time.replace(tzinfo=UTC)
-            age = (utc_now() - lock_time).total_seconds()
+            age = (datetime.now() - lock_time).total_seconds()
             if age < 300:  # 5 minute recovery timeout
                 logger.info("Recovery in progress, skipping check")
                 return True

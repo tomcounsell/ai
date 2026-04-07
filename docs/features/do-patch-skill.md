@@ -61,16 +61,6 @@ Capped at **3 patch→test→review iterations**. After 3 cycles, emits a struct
    - Review blocker context → advance to `document`
 7. If fail: retry up to caller's iteration cap, then report stuck with details
 
-## Annotate Rather Than Skip
-
-When a review finding is genuinely not worth fixing (e.g., a style nit in older code, a suggestion that contradicts the plan), the builder adds an inline code comment instead of silently skipping:
-
-```python
-# NOTE: [finding summary] -- left as-is because [rationale]
-```
-
-This creates a paper trail so the next reviewer does not re-flag the same issue. The finding is "addressed" (annotated), not "skipped." See [PM SDLC Decision Rules](pm-sdlc-decision-rules.md) for how the PM interprets these outcomes.
-
 ## What /do-patch Never Does
 
 - Never creates a PR
@@ -83,17 +73,16 @@ This creates a paper trail so the next reviewer does not re-flag the same issue.
 
 When `/do-patch` fixes a test failure:
 ```bash
-python -c "from agent.build_pipeline import advance_stage; advance_stage('{slug}', 'review')"
+python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}', 'review')"
 ```
 
 When `/do-patch` fixes review blockers:
 ```bash
-python -c "from agent.build_pipeline import advance_stage; advance_stage('{slug}', 'document')"
+python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}', 'document')"
 ```
 
 ## Related
 
-- [PM SDLC Decision Rules](pm-sdlc-decision-rules.md) — how the PM interprets review outcomes and routes to PATCH
 - [Trace & Verify Protocol](trace-and-verify.md) — root cause analysis methodology used in Step 2
 - [SDLC Enforcement](sdlc-enforcement.md) — the quality gate system this skill operates within
 - `.claude/skills/do-patch/SKILL.md` — full skill definition

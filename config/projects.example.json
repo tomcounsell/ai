@@ -37,6 +37,7 @@
       "description": "Description of the project",
       "working_directory": "~/src/my-project",
       "machine": "Machine Name",
+      "auto_merge": false,
       "telegram": {
         "groups": {
           "Dev: My Project": {"chat_id": -1234567890, "persona": "developer"},

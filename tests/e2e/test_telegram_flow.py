@@ -51,8 +51,7 @@ class TestTelegramE2EFlow:
     @pytest.mark.asyncio
     async def test_bridge_service_running(self, bridge_running):
         """Verify the bridge service is operational."""
-        if not bridge_running:
-            pytest.skip("Bridge service not running on this machine")
+        assert bridge_running, "Bridge service must be running for E2E tests"
 
     @pytest.mark.asyncio
     async def test_simple_text_response(self, bridge_running, test_chat_id):
@@ -130,8 +129,6 @@ class TestBridgeIntegration:
             return TelegramBridge
         except ImportError:
             pytest.skip("Bridge module not available")
-        except ValueError:
-            pytest.skip("Bridge module requires valid Telegram credentials (TELEGRAM_API_ID)")
 
     def test_bridge_module_exists(self):
         """Verify bridge module can be imported."""

@@ -4,7 +4,7 @@ type: [bug | feature | chore]  # May be pre-populated from auto-classification
 appetite: [Small | Medium | Large]
 owner: [Name]
 created: [YYYY-MM-DD]
-tracking: [GitHub Issue URL - added automatically]
+tracking: [GitHub Issue URL or Notion page URL - added automatically]
 last_comment_id: [Latest issue comment ID incorporated into this plan - updated automatically]
 ---
 
@@ -374,9 +374,19 @@ Supported expectations: "exit code N", "output > N", "output contains X".]
 | No stale xfails | `grep -rn 'xfail' tests/ \| grep -v '# open bug'` | exit code 1 |
 | [Feature-specific check] | `[command]` | [expected] |
 
-## Critique Results
+## RFC Feedback
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- CONDITIONAL: Only include if Phase 2.8 RFC review was conducted.
+     Delete this section for Small appetite plans (RFC is skipped).
+     BLOCKERs have already been incorporated into the plan.
+     CONCERNs below are for the human reviewer to weigh in on. -->
+
+[Structured feedback from specialist critic agents. BLOCKERs were already addressed
+in the plan. CONCERNs below need human judgment.]
+
+| Severity | Critic | Feedback | Plan Response |
+|----------|--------|----------|---------------|
+| CONCERN | [agent-type] | [The concern raised] | [How/whether it was addressed] |
 | CONCERN | [agent-type] | [The concern raised] | [How/whether it was addressed] |
 
 ---

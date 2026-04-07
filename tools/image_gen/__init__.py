@@ -7,12 +7,12 @@ Uses Gemini 3 Pro via OpenRouter for native image generation.
 
 import base64
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
 import requests
 
-from bridge.utc import utc_now
 from config.models import IMAGE_ASPECT_RATIOS, MODEL_IMAGE_GEN
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -125,7 +125,7 @@ def generate_image(
             else:
                 output_dir = Path(output_dir)
             output_dir.mkdir(exist_ok=True)
-            timestamp = utc_now().strftime("%Y%m%d_%H%M%S")
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
             for i, url in enumerate(image_urls, 1):
                 if url.startswith("data:"):

@@ -15,9 +15,8 @@ Transcript file format (one entry per line):
 
 import logging
 import time
+from datetime import datetime
 from pathlib import Path
-
-from bridge.utc import utc_iso
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +37,7 @@ def _transcript_path(session_id: str) -> Path:
 
 def _now_iso() -> str:
     """Return current time as ISO 8601 string."""
-    return utc_iso()
+    return datetime.now().isoformat()
 
 
 def start_transcript(
@@ -80,6 +79,7 @@ def start_transcript(
             s = existing[0]
             s.log_path = log_path
             s.last_activity = now
+            s.last_transition_at = now
             if sender:
                 s.sender_name = sender
             if branch_name:
@@ -109,6 +109,7 @@ def start_transcript(
                 created_at=now,
                 started_at=now,
                 last_activity=now,
+                last_transition_at=now,
                 turn_count=0,
                 tool_call_count=0,
                 log_path=log_path,
@@ -289,7 +290,7 @@ def complete_transcript(
 
             # status is a KeyField — delete and recreate if changed
             if s.status != status:
-                # Re-read after lifecycle log (it saved history)
+                # Re-read after lifecycle log (it saved history/last_transition_at)
                 sessions = list(AgentSession.query.filter(session_id=session_id))
                 s = sessions[0] if sessions else s
 

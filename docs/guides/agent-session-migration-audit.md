@@ -19,7 +19,8 @@ No broken code found. The refactor is functionally complete. All stale imports r
 6. **Session tags** (`tools/session_tags.py`) — Correct queries
 7. **Session watchdog** (`monitoring/session_watchdog.py`) — Correct queries
 8. **SDLC hooks** (`.claude/hooks/sdlc/`) — Correct AgentSession queries for context detection
-9. **Backward-compat shims** — `SessionLog = AgentSession` in `models/session_log.py`, `RedisJob = AgentSession` in `agent/job_queue.py` — both work correctly
+9. **Bridge agents** (`bridge/agents.py`) — Correct job queue info queries
+10. **Backward-compat shims** — `SessionLog = AgentSession` in `models/session_log.py`, `RedisJob = AgentSession` in `agent/job_queue.py` — both work correctly
 11. **New helper methods** — `is_sdlc` (property), `has_remaining_stages()`, `has_failed_stage()`, `get_stage_progress()` all called correctly from job_queue.py, summarizer.py, and fully tested
 12. **Test suites** — `test_agent_session_lifecycle.py` (comprehensive lifecycle coverage), `test_stage_aware_auto_continue.py` (32 tests, all decision matrix paths)
 

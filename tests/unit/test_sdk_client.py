@@ -55,76 +55,20 @@ def test_valor_agent_custom_permission_mode():
     assert agent.permission_mode == "default"
 
 
-def _sdk_available():
-    """Check if the real Claude Agent SDK binary is usable (not just importable)."""
-    import shutil
-
-    if not os.getenv("ANTHROPIC_API_KEY"):
-        return False
-    if not shutil.which("claude"):
-        return False
-    try:
-        import claude_agent_sdk
-
-        # If it's a MagicMock (from conftest), not the real SDK
-        if not hasattr(claude_agent_sdk, "create_session"):
-            return False
-    except ImportError:
-        return False
-    return True
-
-
 @pytest.mark.asyncio
-@pytest.mark.skipif(not _sdk_available(), reason="Claude Agent SDK binary not available")
+@pytest.mark.skipif(not os.getenv("ANTHROPIC_API_KEY"), reason="ANTHROPIC_API_KEY not set")
 async def test_sdk_query_simple():
-    """Test a simple SDK query (requires API key and claude CLI)."""
+    """Test a simple SDK query (requires API key)."""
     agent = ValorAgent()
     response = await agent.query("What is 2 + 2? Reply with just the number.")
     assert response is not None
     assert "4" in response
 
 
-class TestTelegramEnvInjection:
-    """Tests for TELEGRAM_CHAT_ID and TELEGRAM_REPLY_TO env var injection (issue #497)."""
-
-    def test_chat_session_injects_telegram_chat_id(self):
-        """ChatSession should inject TELEGRAM_CHAT_ID from chat_id."""
-        agent = ValorAgent(
-            chat_id="12345",
-            session_type="chat",
-        )
-        options = agent._create_options(session_id=None)
-        assert options.env.get("TELEGRAM_CHAT_ID") == "12345"
-
-    def test_non_chat_session_no_telegram_chat_id(self):
-        """Non-chat sessions should not inject TELEGRAM_CHAT_ID."""
-        agent = ValorAgent(
-            chat_id="12345",
-            session_type=None,
-        )
-        options = agent._create_options(session_id=None)
-        assert "TELEGRAM_CHAT_ID" not in options.env
-
-    def test_chat_session_without_chat_id_no_injection(self):
-        """ChatSession without chat_id should not inject TELEGRAM_CHAT_ID."""
-        agent = ValorAgent(
-            chat_id=None,
-            session_type="chat",
-        )
-        options = agent._create_options(session_id=None)
-        assert "TELEGRAM_CHAT_ID" not in options.env
-
-    def test_session_type_injected(self):
-        """SESSION_TYPE env var should be set for chat sessions."""
-        agent = ValorAgent(session_type="chat")
-        options = agent._create_options(session_id=None)
-        assert options.env.get("SESSION_TYPE") == "chat"
-
-
 @pytest.mark.asyncio
-@pytest.mark.skipif(not _sdk_available(), reason="Claude Agent SDK binary not available")
+@pytest.mark.skipif(not os.getenv("ANTHROPIC_API_KEY"), reason="ANTHROPIC_API_KEY not set")
 async def test_get_agent_response_sdk():
-    """Test the bridge-compatible function (requires API key and claude CLI)."""
+    """Test the bridge-compatible function (requires API key)."""
     from agent.sdk_client import get_agent_response_sdk
 
     response = await get_agent_response_sdk(

@@ -24,7 +24,8 @@ The `AgentSession.log_lifecycle_transition()` method is called at every status c
 
 Each call:
 1. Emits a structured INFO log: `LIFECYCLE session=X transition=old→new job_id=Y project=Z duration_in_prev_state=Ns context="..."`
-2. Appends a `[lifecycle]` entry to the session's history list (duration is derived from history timestamps)
+2. Updates `last_transition_at` timestamp on the session
+3. Appends a `[lifecycle]` entry to the session's history list
 
 ### Log Format
 
@@ -89,7 +90,7 @@ Constants in `monitoring/session_watchdog.py`:
 
 | File | Purpose |
 |------|---------|
-| `models/agent_session.py` | `log_lifecycle_transition()` method (duration derived from history entries) |
+| `models/agent_session.py` | `log_lifecycle_transition()` method, `last_transition_at` field |
 | `bridge/session_transcript.py` | Lifecycle calls in start/complete |
 | `agent/job_queue.py` | Lifecycle calls in push/pop |
 | `monitoring/session_watchdog.py` | Stall detection (`check_stalled_sessions()`) |

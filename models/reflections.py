@@ -13,6 +13,7 @@ from popoto import (
     AutoKeyField,
     DictField,
     Field,
+    IntField,
     KeyField,
     ListField,
     Model,
@@ -31,6 +32,7 @@ class ReflectionRun(Model):
 
     date = UniqueKeyField()  # YYYY-MM-DD, one run per day
     project_key = KeyField(null=True)
+    current_step = IntField(default=1)
     completed_steps = ListField(null=True)
     daily_report = ListField(null=True)
     findings = DictField(null=True)  # {category: [finding_strings]}
@@ -49,6 +51,7 @@ class ReflectionRun(Model):
             return existing[0]
         return cls.create(
             date=date,
+            current_step=1,
             completed_steps=[],
             daily_report=[],
             findings={},
@@ -65,6 +68,7 @@ class ReflectionRun(Model):
         data = {
             "date": self.date,
             "project_key": self.project_key,
+            "current_step": self.current_step,
             "completed_steps": self.completed_steps or [],
             "daily_report": self.daily_report or [],
             "findings": self.findings or {},

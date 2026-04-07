@@ -3,7 +3,7 @@
 Tests the model changes introduced by the popoto model relationships branch:
 1. TelegramMessage enrichment fields (classification, media, URLs, reply)
 2. Enrichment fallback logic (TelegramMessage vs AgentSession fields)
-3. Back-reference setting (agent_session_id <-> telegram_message_key)
+3. Back-reference setting (agent_session_id <-> trigger_message_id)
 4. project_key presence across all Popoto models
 5. Migration script dry-run mode and basic logic
 6. AgentSession.id property alias
@@ -27,10 +27,15 @@ def _make_mock_agent_session(**overrides):
         "project_key": "test-project",
         "status": "pending",
         "chat_id": "12345",
-        "telegram_message_id": 100,
+        "message_id": 100,
         "message_text": "hello",
+        "has_media": False,
+        "media_type": None,
+        "youtube_urls": None,
+        "non_youtube_urls": None,
+        "reply_to_msg_id": None,
         "classification_type": None,
-        "telegram_message_key": None,
+        "trigger_message_id": None,
     }
     defaults.update(overrides)
     mock = MagicMock()
@@ -114,32 +119,46 @@ class TestTelegramMessageEnrichmentFields:
 # ===================================================================
 
 
-class TestEnrichmentFromTelegramMessage:
-    """Test that enrichment reads exclusively from TelegramMessage."""
+class TestEnrichmentFallbackLogic:
+    """Test the fallback pattern: TelegramMessage fields override AgentSession fields."""
 
-    def test_no_enrichment_without_trigger_message(self):
-        """When telegram_message_key is None, enrichment defaults are all empty."""
-        session = _make_mock_agent_session(telegram_message_key=None)
+    def test_fallback_uses_session_fields_when_no_trigger(self):
+        """When trigger_message_id is None, enrichment uses AgentSession fields."""
+        session = _make_mock_agent_session(
+            has_media=True,
+            media_type="photo",
+            youtube_urls='[["https://youtu.be/abc", "abc"]]',
+            non_youtube_urls=None,
+            reply_to_msg_id=42,
+            trigger_message_id=None,
+        )
 
-        # Simulate the enrichment logic from job_queue.py
-        enrich_has_media = False
-        enrich_media_type = None
-        enrich_youtube_urls = None
-        enrich_non_youtube_urls = None
-        enrich_reply_to_msg_id = None
+        # Simulate the fallback logic from job_queue.py:1409-1438
+        enrich_has_media = session.has_media
+        enrich_media_type = session.media_type
+        enrich_youtube_urls = session.youtube_urls
+        enrich_non_youtube_urls = session.non_youtube_urls
+        enrich_reply_to_msg_id = session.reply_to_msg_id
 
-        if session.telegram_message_key:
-            pytest.fail("Should not enter telegram_message_key branch when it is None")
+        if session.trigger_message_id:
+            pytest.fail("Should not enter trigger_message_id branch when it is None")
 
-        assert enrich_has_media is False
-        assert enrich_media_type is None
-        assert enrich_youtube_urls is None
+        assert enrich_has_media is True
+        assert enrich_media_type == "photo"
+        assert enrich_youtube_urls == '[["https://youtu.be/abc", "abc"]]'
         assert enrich_non_youtube_urls is None
-        assert enrich_reply_to_msg_id is None
+        assert enrich_reply_to_msg_id == 42
 
-    def test_enrichment_reads_from_telegram_message(self):
-        """When telegram_message_key is set and TM found, TM fields are used."""
-        session = _make_mock_agent_session(telegram_message_key="tm-001")
+    def test_trigger_message_overrides_session_fields(self):
+        """When trigger_message_id is set and TM found, TM fields take precedence."""
+        session = _make_mock_agent_session(
+            has_media=False,
+            media_type=None,
+            youtube_urls=None,
+            non_youtube_urls=None,
+            reply_to_msg_id=None,
+            trigger_message_id="tm-001",
+        )
         tm = MagicMock()
         tm.has_media = True
         tm.media_type = "video"
@@ -147,22 +166,19 @@ class TestEnrichmentFromTelegramMessage:
         tm.non_youtube_urls = '["https://docs.python.org"]'
         tm.reply_to_msg_id = 77
 
-        # Simulate enrichment logic from job_queue.py
-        enrich_has_media = False
-        enrich_media_type = None
-        enrich_youtube_urls = None
-        enrich_non_youtube_urls = None
-        enrich_reply_to_msg_id = None
+        # Simulate override logic from job_queue.py
+        enrich_has_media = session.has_media
+        enrich_media_type = session.media_type
+        enrich_youtube_urls = session.youtube_urls
+        enrich_non_youtube_urls = session.non_youtube_urls
+        enrich_reply_to_msg_id = session.reply_to_msg_id
 
-        if session.telegram_message_key:
-            # Simulated TelegramMessage lookup
-            trigger_msgs = [tm]
-            if trigger_msgs:
-                enrich_has_media = bool(tm.has_media)
-                enrich_media_type = tm.media_type
-                enrich_youtube_urls = tm.youtube_urls
-                enrich_non_youtube_urls = tm.non_youtube_urls
-                enrich_reply_to_msg_id = tm.reply_to_msg_id
+        if session.trigger_message_id:
+            enrich_has_media = bool(tm.has_media)
+            enrich_media_type = tm.media_type
+            enrich_youtube_urls = tm.youtube_urls
+            enrich_non_youtube_urls = tm.non_youtube_urls
+            enrich_reply_to_msg_id = tm.reply_to_msg_id
 
         assert enrich_has_media is True
         assert enrich_media_type == "video"
@@ -170,20 +186,30 @@ class TestEnrichmentFromTelegramMessage:
         assert enrich_non_youtube_urls == '["https://docs.python.org"]'
         assert enrich_reply_to_msg_id == 77
 
-    def test_no_enrichment_when_trigger_not_found(self):
-        """When telegram_message_key is set but TM lookup returns empty, no enrichment."""
-        session = _make_mock_agent_session(telegram_message_key="tm-missing")
+    def test_fallback_when_trigger_not_found(self):
+        """When trigger_message_id is set but TM lookup returns empty, keep session fields."""
+        session = _make_mock_agent_session(
+            has_media=True,
+            media_type="document",
+            non_youtube_urls='["https://example.com"]',
+            reply_to_msg_id=99,
+            trigger_message_id="tm-missing",
+        )
 
-        enrich_has_media = False
-        enrich_media_type = None
+        enrich_has_media = session.has_media
+        enrich_media_type = session.media_type
+        enrich_non_youtube_urls = session.non_youtube_urls
+        enrich_reply_to_msg_id = session.reply_to_msg_id
 
-        if session.telegram_message_key:
+        if session.trigger_message_id:
             trigger_msgs = []  # Lookup returns empty
             if trigger_msgs:
                 pytest.fail("Should not enter this branch for empty lookup")
 
-        assert enrich_has_media is False
-        assert enrich_media_type is None
+        assert enrich_has_media is True
+        assert enrich_media_type == "document"
+        assert enrich_non_youtube_urls == '["https://example.com"]'
+        assert enrich_reply_to_msg_id == 99
 
 
 # ===================================================================
@@ -194,11 +220,11 @@ class TestEnrichmentFromTelegramMessage:
 class TestBackReferenceSetting:
     """Test cross-references between AgentSession and TelegramMessage."""
 
-    def test_telegram_message_key_on_agent_session(self):
-        """AgentSession should have telegram_message_key in field registry."""
+    def test_trigger_message_id_on_agent_session(self):
+        """AgentSession should have trigger_message_id in field registry."""
         from models.agent_session import AgentSession
 
-        assert "telegram_message_key" in AgentSession._meta.field_names
+        assert "trigger_message_id" in AgentSession._meta.field_names
 
     def test_agent_session_id_on_telegram_message(self):
         """TelegramMessage should have agent_session_id in field registry."""
@@ -207,16 +233,16 @@ class TestBackReferenceSetting:
         assert "agent_session_id" in TelegramMessage._meta.field_names
 
     def test_agent_session_id_set_on_telegram_message(self):
-        """When a job has telegram_message_key, agent_session_id should be set on TM."""
+        """When a job has trigger_message_id, agent_session_id should be set on TM."""
         tm = MagicMock()
         tm.agent_session_id = None
         tm.save = MagicMock()
 
         # Simulate job_queue.py:1461-1471
-        telegram_message_key = "tm-001"
+        trigger_message_id = "tm-001"
         job_id = "job-abc"
 
-        if telegram_message_key:
+        if trigger_message_id:
             trigger_msgs = [tm]
             if trigger_msgs and not trigger_msgs[0].agent_session_id:
                 trigger_msgs[0].agent_session_id = job_id
@@ -231,7 +257,7 @@ class TestBackReferenceSetting:
         tm.agent_session_id = "job-existing"
         tm.save = MagicMock()
 
-        if True:  # telegram_message_key is set
+        if True:  # trigger_message_id is set
             trigger_msgs = [tm]
             if trigger_msgs and not trigger_msgs[0].agent_session_id:
                 trigger_msgs[0].agent_session_id = "job-new"
@@ -241,14 +267,14 @@ class TestBackReferenceSetting:
         tm.save.assert_not_called()
 
     def test_no_back_reference_when_no_trigger(self):
-        """No back-reference logic when telegram_message_key is None."""
+        """No back-reference logic when trigger_message_id is None."""
         tm = MagicMock()
         tm.agent_session_id = None
         tm.save = MagicMock()
 
-        telegram_message_key = None
+        trigger_message_id = None
 
-        if telegram_message_key:
+        if trigger_message_id:
             pytest.fail("Should not attempt back-reference")
 
         assert tm.agent_session_id is None
@@ -434,7 +460,7 @@ class TestMigrationScript:
         mock_session.youtube_urls = None
         mock_session.non_youtube_urls = None
         mock_session.classification_type = None
-        mock_session.telegram_message_key = None
+        mock_session.trigger_message_id = None
 
         with (
             patch("models.agent_session.AgentSession") as mock_as,
@@ -505,23 +531,8 @@ class TestAgentSessionIdAlias:
 # ===================================================================
 
 
-class TestAgentSessionFieldPresence:
-    """Verify AgentSession has expected fields and enrichment fields were removed."""
-
-    @pytest.mark.parametrize(
-        "field_name",
-        [
-            "classification_type",
-            "telegram_message_id",
-        ],
-    )
-    def test_retained_fields_present(self, field_name):
-        """AgentSession should retain classification and message fields."""
-        from models.agent_session import AgentSession
-
-        assert field_name in AgentSession._meta.field_names, (
-            f"AgentSession.{field_name} should exist"
-        )
+class TestDeprecatedFieldsOnAgentSession:
+    """Verify deprecated fields still exist on AgentSession during migration period."""
 
     @pytest.mark.parametrize(
         "field_name",
@@ -531,22 +542,23 @@ class TestAgentSessionFieldPresence:
             "youtube_urls",
             "non_youtube_urls",
             "reply_to_msg_id",
-            "chat_id_for_enrichment",
+            "classification_type",
+            "message_id",
         ],
     )
-    def test_enrichment_fields_removed(self, field_name):
-        """Enrichment fields should no longer exist on AgentSession (moved to TelegramMessage)."""
+    def test_deprecated_enrichment_fields_present(self, field_name):
+        """AgentSession should retain enrichment fields for backward compat."""
         from models.agent_session import AgentSession
 
-        assert field_name not in AgentSession._meta.field_names, (
-            f"AgentSession.{field_name} should have been removed (now on TelegramMessage)"
+        assert field_name in AgentSession._meta.field_names, (
+            f"AgentSession.{field_name} should still exist for migration compatibility"
         )
 
-    def test_claude_code_session_id_removed(self):
-        """claude_code_session_id was removed as a dead field (never read)."""
+    def test_claude_code_session_id_field_exists(self):
+        """AgentSession should have the renamed claude_code_session_id field."""
         from models.agent_session import AgentSession
 
-        assert "claude_code_session_id" not in AgentSession._meta.field_names
+        assert "claude_code_session_id" in AgentSession._meta.field_names
 
     def test_sender_property_exists(self):
         """AgentSession should have a sender property aliasing sender_name."""
