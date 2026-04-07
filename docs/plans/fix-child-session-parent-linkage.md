@@ -62,6 +62,7 @@ Fixed flow:
 - **Interface changes**: `create_local()` signature unchanged (uses `**kwargs`). `sdk_client.py._create_options()` gains one conditional env injection. `user_prompt_submit.py` gains one env var read.
 - **Coupling**: Reduces coupling by eliminating the need for `pre_tool_use.py` to pre-create child records. The child is now self-registering with parent context.
 - **Reversibility**: Easy — removing the env var injection reverts to the current state.
+- **No infinite parent chains**: PM sessions are spawned by the worker directly (not via Claude Code CLI), so `user_prompt_submit.py` does not fire for PM sessions — only for child Dev/Teammate subprocesses. There is no risk of a PM session accidentally reading `VALOR_PARENT_SESSION_ID` and creating a nested parent chain.
 
 ## Appetite
 
@@ -144,6 +145,7 @@ No user-visible output. Failures are silent (existing behavior). The only observ
 - [ ] `tests/integration/test_parent_child_round_trip.py::TestSuccessRoundTrip::test_pretooluse_creates_child_and_starts_stage` — UPDATE: PreToolUse no longer creates a `dev-*` child record; test verifies stage starts but should not assert on `AgentSession.query.filter(parent_agent_session_id=...)` returning a dev-* record
 - [ ] New test: `tests/unit/test_dev_session_registration.py::TestCreateLocalFactory::test_accepts_parent_session_id_from_env` — CREATE: verify that when `VALOR_PARENT_SESSION_ID` is set, `create_local()` stores it as `parent_agent_session_id`
 - [ ] New test: `tests/integration/test_parent_child_round_trip.py::TestEnvVarLinkage` — CREATE: end-to-end test simulating child subprocess env var → `local-*` record with parent link
+- [ ] New test: `tests/integration/test_parent_child_round_trip.py::TestSubagentStopCompletion::test_completion_query_uses_agent_session_id_uuid` — CREATE: verify `subagent_stop.py` two-lookup pattern resolves bridge ID → `agent_session_id` UUID → correct `local-*` child record
 
 ## Rabbit Holes
 
@@ -159,7 +161,7 @@ No user-visible output. Failures are silent (existing behavior). The only observ
 
 ### Risk 2: `subagent_stop.py` parent ID mismatch (bridge ID vs agent_session_id)
 **Impact:** `subagent_stop.py` queries `parent_agent_session_id=bridge_session_id` which won't match `parent_agent_session_id=agent_session_id_uuid` set by the env var approach. Completion tracking breaks.
-**Mitigation:** Fix `subagent_stop.py` to look up the parent's `agent_session_id` from the bridge session ID before querying. This is part of this fix scope.
+**Mitigation:** Fix `subagent_stop.py` to use the two-lookup pattern (resolve bridge ID → look up AgentSession → query children by `agent_session_id` UUID). This is **in scope** — see Task 1 step 4.
 
 ### Risk 3: Existing tests expect `dev-*` records to be created by PreToolUse
 **Impact:** Test failures after removing `create_child()` from `pre_tool_use.py`.
@@ -176,7 +178,6 @@ No user-visible output. Failures are silent (existing behavior). The only observ
 
 ## No-Gos (Out of Scope)
 
-- Fixing the `subagent_stop.py` bridge-session-ID vs agent-session-ID mismatch beyond what's needed for this fix (tracked as a follow-up)
 - Propagating parent linkage to Task tool sub-agents (different mechanism, separate concern)
 - Retroactively linking existing orphaned `local-*` records (one-time data migration not worth the complexity)
 - Changing how `session_registry.py` works (it solves the parent-process hook problem; this fix solves the child-process self-registration problem)
@@ -238,11 +239,11 @@ See plan template for full list.
 - **Validates**: `tests/unit/test_dev_session_registration.py`, `tests/integration/test_parent_child_round_trip.py`
 - **Assigned To**: linkage-builder
 - **Agent Type**: builder
-- **Parallel**: true
+- **Parallel**: false
 - In `sdk_client.py._create_options()`: inject `VALOR_PARENT_SESSION_ID = self.agent_session_id` when `self.session_type in (SessionType.PM, SessionType.TEAMMATE)` and `self.agent_session_id` is set
 - In `user_prompt_submit.py`: read `VALOR_PARENT_SESSION_ID` from env; pass as `parent_agent_session_id` kwarg to `create_local()` when present
 - In `pre_tool_use.py._maybe_register_dev_session()`: remove `AgentSession.create_child()` call; keep `start_stage()` call; rename function to `_maybe_start_pipeline_stage()` or similar
-- In `subagent_stop.py`: ensure the child session query looks up the parent `AgentSession` by bridge session ID first, then queries children by `parent_agent_session_id` using the `agent_session_id` UUID (not the bridge ID)
+- In `subagent_stop.py` (mandatory): apply the two-lookup pattern — resolve bridge session ID from Claude UUID → look up parent `AgentSession` record to get `agent_session_id` UUID → filter children by that UUID. This is required because `session_registry.resolve()` returns a bridge ID (`tg_valor_...`) but `parent_agent_session_id` on `local-*` records stores the `agent_session_id` UUID (`agt_xxx`); without this fix the completion query returns zero results.
 
 ### 2. Update and write tests
 - **Task ID**: build-tests
