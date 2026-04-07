@@ -56,8 +56,8 @@ class TestJinja2Filters:
     def test_format_duration_seconds(self):
         from ui.app import _filter_format_duration
 
-        assert _filter_format_duration(5.2) == "5s"
-        assert _filter_format_duration(59.9) == "60s"
+        assert _filter_format_duration(5.2) == "<1m"
+        assert _filter_format_duration(59.9) == "<1m"
 
     def test_format_duration_minutes(self):
         from ui.app import _filter_format_duration
