@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -188,8 +188,8 @@ Creating the in-repo file activates the fallback path. No changes to `.mcp.json`
 
 ## Documentation
 
-- [ ] Update `docs/features/sdlc-critique-stage.md` to note that CRITIQUE gate is enforced in both the PM persona (`config/personas/project-manager.md`) and `agent/sdk_client.py` line 1611 (stage list injection), not just the SDLC skill dispatch table
-- [ ] No new `docs/features/` file needed — this is a bug fix to existing behavior, not a new feature
+- [x] Update `docs/features/sdlc-critique-stage.md` to note that CRITIQUE gate is enforced in both the PM persona (`config/personas/project-manager.md`) and `agent/sdk_client.py` line 1611 (stage list injection), not just the SDLC skill dispatch table
+- [x] No new `docs/features/` file needed — this is a bug fix to existing behavior, not a new feature
 
 ## Success Criteria
 
