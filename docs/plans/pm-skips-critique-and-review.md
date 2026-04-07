@@ -38,9 +38,9 @@ PM dispatches every mandatory stage: PLAN → CRITIQUE → BUILD → TEST → RE
 ## Architectural Impact
 
 - **New file**: `config/personas/project-manager.md` — in-repo fallback overlay. Loaded by `load_persona_prompt("project-manager")` when the private `~/Desktop/Valor/personas/project-manager.md` is missing.
-- **No Python changes**: Fix is entirely in persona text. The loading machinery in `sdk_client.py` already handles the fallback path.
-- **No coupling changes**: Additive — a missing file now has content rather than triggering the SOUL.md fallback.
-- **Reversibility**: Easy — editing a text file. No migration needed.
+- **Python change (required)**: `agent/sdk_client.py` line 1611 hardcodes the stage list as `<PLAN|BUILD|TEST|PATCH|REVIEW|DOCS>` in the PM injection string. CRITIQUE is structurally absent from this Python string — no persona text can override it. Fix: change line 1611 to `<PLAN|CRITIQUE|BUILD|TEST|PATCH|REVIEW|DOCS>`.
+- **No coupling changes**: Additive — a missing file now has content rather than triggering the SOUL.md fallback. The Python change is a single string edit.
+- **Reversibility**: Easy — editing a text file and one Python string. No migration needed.
 
 ## Appetite
 
@@ -64,6 +64,7 @@ No prerequisites — this work has no external dependencies. All changes are tex
 - **REVIEW gate rule**: Hard prohibition in PM persona: after TEST passes, the ONLY valid next stage is REVIEW. No path from TEST to DOCS exists. A PR with passing tests but no reviews has NOT completed REVIEW. The PM must verify `gh pr view {number} --json reviews` returns at least one entry before advancing.
 - **Artifact verification checklist**: After each dev-session completes, the PM must confirm the artifact before marking the stage done and advancing. Artifact gates are already partially in the persona — this plan formalizes them as blocking checks.
 - **In-repo fallback file**: Create `config/personas/project-manager.md` so the persona system always loads PM-specific rules, even when the private `~/Desktop/Valor/personas/` directory does not exist.
+- **`agent/sdk_client.py` line 1611 fix**: The PM injection string hardcodes the allowed stage list as `<PLAN|BUILD|TEST|PATCH|REVIEW|DOCS>`, structurally omitting CRITIQUE. This Python string must be updated to `<PLAN|CRITIQUE|BUILD|TEST|PATCH|REVIEW|DOCS>` so the injected dispatch block matches the required pipeline order. No persona text can override a Python-injected constraint.
 
 ### Flow
 
@@ -165,7 +166,6 @@ No race conditions identified — this is a synchronous text-file change with no
 ## No-Gos (Out of Scope)
 
 - Automated test that runs a live PM session and verifies CRITIQUE + REVIEW are dispatched
-- Modifying `agent/sdk_client.py` PM injection logic
 - Modifying `bridge/pipeline_graph.py`
 - Reconciling the private `~/Desktop/Valor/personas/project-manager.md` with the in-repo version (that is a manual step for the owner)
 - Adding enforcement for other pipeline stages (BUILD, TEST, DOCS) — those are not empirically skipped
@@ -188,8 +188,7 @@ Creating the in-repo file activates the fallback path. No changes to `.mcp.json`
 
 ## Documentation
 
-- [ ] Create `config/personas/project-manager.md` with hard gate rules for CRITIQUE and REVIEW
-- [ ] Update `docs/features/sdlc-critique-stage.md` to note that CRITIQUE is enforced in the PM persona (not just the SDLC skill dispatch table)
+- [ ] Update `docs/features/sdlc-critique-stage.md` to note that CRITIQUE gate is enforced in both the PM persona (`config/personas/project-manager.md`) and `agent/sdk_client.py` line 1611 (stage list injection), not just the SDLC skill dispatch table
 - [ ] No new `docs/features/` file needed — this is a bug fix to existing behavior, not a new feature
 
 ## Success Criteria
@@ -257,7 +256,7 @@ builder, validator
 - **Task ID**: update-docs
 - **Depends On**: validate-persona
 - **Assigned To**: persona-builder
-- **Agent Type**: documentarian
+- **Agent Type**: builder
 - **Parallel**: false
 - Read `docs/features/sdlc-critique-stage.md`
 - Add a note that the CRITIQUE gate is also enforced in the PM persona file at `config/personas/project-manager.md`
@@ -286,8 +285,15 @@ builder, validator
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
-| CONCERN | [agent-type] | [The concern raised] | [How/whether it was addressed] |
+<!-- Populated by /do-plan-critique (war room). -->
+| Severity | Critic | Finding | Status |
+|----------|--------|---------|--------|
+| BLOCKER | Skeptic/Archaeologist | `sdk_client.py` line 1611 hardcodes stage list as `PLAN\|BUILD\|TEST\|PATCH\|REVIEW\|DOCS` — CRITIQUE is structurally absent. `grep "CRITIQUE" agent/sdk_client.py` returns zero results. Persona file cannot override Python-injected dispatch block. Fix requires adding CRITIQUE to line 1611 AND the persona file. | Resolved — added sdk_client.py line 1611 change to Solution section; removed No-Go blocking it |
+| BLOCKER | Simplifier/Skeptic | `## Documentation` section lists `config/personas/project-manager.md` as a docs task — that's the primary deliverable, not a docs artifact. Conflates deliverable with docs gate. | Resolved — Documentation section now references `docs/features/sdlc-critique-stage.md` as the docs deliverable |
+| CONCERN | Operator/Skeptic | Private overlay shadow risk mitigation is a post-merge manual step with no verification. History (PR #487) shows this exact gap recurs. | Partially mitigated — add verification command or startup log warning |
+| CONCERN | User/Skeptic | Success criteria 4–7 require a live PM session. Plan's own Rabbit Holes section rules out the test. These criteria are unverifiable. | Unresolved — scope down criteria or add lightweight mock integration test |
+| CONCERN | Operator/Adversary | `sdlc_stage_query` returns `{}` (confirmed on dev machine). If empty in prod, gate rule "start from beginning" causes every message to re-run all stages from ISSUE. | Unresolved — strengthen fallback: check for plan artifact directly |
+| NIT | Simplifier | Task 3 `Agent Type` was invalid — not in Available Agent Types (only `builder`, `validator` listed). | Resolved — changed to `builder` |
 
 ---
 
