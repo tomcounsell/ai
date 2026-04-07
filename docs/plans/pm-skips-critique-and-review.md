@@ -120,7 +120,8 @@ Before dispatching DOCS:
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- No exception handlers exist in the scope of this work — this is a pure text file change with no Python code.
+- `agent/sdk_client.py` line 1611: single string edit, no exception path introduced.
+- `load_persona_prompt()`: the new warning log is advisory only — it does not raise, does not change return value, and cannot crash the caller.
 
 ### Empty/Invalid Input Handling
 - The persona rules must handle the case where `python -m tools.sdlc_stage_query` returns `{}` (empty): in that case, the PM must assume no stages are complete and start from the beginning.
@@ -136,11 +137,10 @@ No existing tests directly test the PM persona file content. The acceptance crit
 - `tests/unit/test_stop_hook_sdlc_warning.py` — No change needed. Tests the stop hook SDLC warning logic, not PM persona content.
 - `tests/unit/test_pipeline_graph.py` (if exists) — No change needed. Tests routing graph edges, not persona behavior.
 
-No existing tests affected — this change adds a new text file (`config/personas/project-manager.md`) and does not modify any Python code, existing tests, or behavior of existing interfaces.
+The two Python edits (sdk_client.py line 1611 string change and load_persona_prompt warning) are additive and do not alter any existing public interfaces, return values, or behavior observable by current tests.
 
 ## Rabbit Holes
 
-- **Adding Python enforcement in `sdk_client.py`**: The PM injection in `sdk_client.py` (lines 1597-1644) could theoretically add hard gate checks before spawning dev-sessions. This is out of scope — the problem is persona rules, not code. Adding Python checks would create a maintenance split between code enforcement and persona guidance.
 - **Modifying `bridge/pipeline_graph.py` or `PipelineStateMachine`**: The pipeline graph already correctly defines the stage order. The issue is the PM ignoring it, not a bug in the graph.
 - **Creating a test that runs a full PM session**: Too expensive and fragile for a persona text change. Behavioral correctness is verified by human review after the fix is deployed.
 - **Syncing private and in-repo persona files**: The `~/Desktop/Valor/personas/project-manager.md` private file may have additional content (style, tone, business context). Do not merge or reconcile the two files — the in-repo file is a fallback for pipeline rules only.
@@ -224,9 +224,34 @@ builder, validator
 
 ## Step by Step Tasks
 
-### 1. Create in-repo PM persona file
-- **Task ID**: build-persona-file
+### 1. Fix sdk_client.py stage list injection
+- **Task ID**: fix-sdk-stage-list
 - **Depends On**: none
+- **Validates**: `grep "CRITIQUE" agent/sdk_client.py` returns a match at line 1611
+- **Assigned To**: persona-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- Edit `agent/sdk_client.py` line 1611: change the string `<PLAN|BUILD|TEST|PATCH|REVIEW|DOCS>` to `<PLAN|CRITIQUE|BUILD|TEST|PATCH|REVIEW|DOCS>`
+- This is the Python-injected dispatch block that the PM receives; no persona text can override it
+
+### 2. Add overlay observability warning in load_persona_prompt()
+- **Task ID**: fix-overlay-shadow-warning
+- **Depends On**: fix-sdk-stage-list
+- **Validates**: `grep "CRITIQUE" agent/sdk_client.py` shows the warning log in `load_persona_prompt()`
+- **Assigned To**: persona-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- In `agent/sdk_client.py`, inside `load_persona_prompt()`, after the line `overlay_content = overlay_path.read_text()`, add:
+  ```python
+  if "CRITIQUE" not in overlay_content:
+      logger.warning(f"PM persona overlay '{overlay_path}' is missing CRITIQUE gate rules — pipeline integrity may be compromised")
+  ```
+- Only run this check when the loaded overlay is for the `project-manager` persona (guard with `if persona == "project-manager"`)
+- This makes the private overlay shadow observable in logs rather than silent
+
+### 3. Create in-repo PM persona file
+- **Task ID**: build-persona-file
+- **Depends On**: fix-overlay-shadow-warning
 - **Validates**: `config/personas/project-manager.md` exists with CRITIQUE gate, REVIEW gate, and artifact verification table
 - **Assigned To**: persona-builder
 - **Agent Type**: builder
@@ -239,7 +264,7 @@ builder, validator
   - SDLC stage sequence reference (matches `bridge/pipeline_graph.py` happy path)
   - Guidance on when to escalate to human vs continue autonomously
 
-### 2. Validate persona content
+### 4. Validate persona content
 - **Task ID**: validate-persona
 - **Depends On**: build-persona-file
 - **Assigned To**: persona-validator
@@ -252,7 +277,7 @@ builder, validator
 - Verify file contains `python -m tools.sdlc_stage_query` (the stage state check command)
 - Report pass/fail with exact line numbers for each check
 
-### 3. Update sdlc-critique-stage.md
+### 5. Update sdlc-critique-stage.md
 - **Task ID**: update-docs
 - **Depends On**: validate-persona
 - **Assigned To**: persona-builder
@@ -261,7 +286,7 @@ builder, validator
 - Read `docs/features/sdlc-critique-stage.md`
 - Add a note that the CRITIQUE gate is also enforced in the PM persona file at `config/personas/project-manager.md`
 
-### 4. Final validation
+### 6. Final validation
 - **Task ID**: validate-all
 - **Depends On**: update-docs
 - **Assigned To**: persona-validator
@@ -276,6 +301,8 @@ builder, validator
 
 | Check | Command | Expected |
 |-------|---------|----------|
+| sdk_client.py stage list includes CRITIQUE | `grep "CRITIQUE" agent/sdk_client.py` | at least one match at line 1611 |
+| overlay warning present | `grep -c "CRITIQUE gate rules" agent/sdk_client.py` | output >= 1 |
 | Persona file exists | `test -f config/personas/project-manager.md` | exit code 0 |
 | CRITIQUE gate present | `grep -c "CRITIQUE" config/personas/project-manager.md` | output > 2 |
 | REVIEW gate present | `grep -c "REVIEW" config/personas/project-manager.md` | output > 2 |
@@ -294,6 +321,8 @@ builder, validator
 | CONCERN | User/Skeptic | Success criteria 4–7 require a live PM session. Plan's own Rabbit Holes section rules out the test. These criteria are unverifiable. | Unresolved — scope down criteria or add lightweight mock integration test |
 | CONCERN | Operator/Adversary | `sdlc_stage_query` returns `{}` (confirmed on dev machine). If empty in prod, gate rule "start from beginning" causes every message to re-run all stages from ISSUE. | Unresolved — strengthen fallback: check for plan artifact directly |
 | NIT | Simplifier | Task 3 `Agent Type` was invalid — not in Available Agent Types (only `builder`, `validator` listed). | Resolved — changed to `builder` |
+| BLOCKER | Archaeologist/Skeptic | Plan mentions editing `agent/sdk_client.py` line 1611 in Architectural Impact and Solution sections but none of the 4 step-by-step tasks actually included editing that file. The Rabbit Holes section explicitly said "not modifying sdk_client.py" — a direct contradiction. Plan was talk without action. | Resolved — added Task 1 (fix-sdk-stage-list) to explicitly edit line 1611; removed conflicting Rabbit Holes entry |
+| BLOCKER | Operator/Skeptic | Private overlay at `~/Desktop/Valor/personas/project-manager.md` takes unconditional precedence over in-repo file (sdk_client.py lines ~502-507). If production overlay exists without new gate rules, in-repo changes are silently ignored — no log, no alert. | Resolved — added Task 2 (fix-overlay-shadow-warning) to add `logger.warning()` in `load_persona_prompt()` when project-manager overlay is missing CRITIQUE gate rules |
 
 ---
 
