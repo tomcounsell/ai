@@ -15,9 +15,9 @@ last_comment_id: none
 The system has no centralized way to configure chat behavior per-group. Mode selection is split across two mechanisms: chat title prefix (`Dev:` vs everything else) determines session type in `telegram_bridge.py:1419-1428`, and a Haiku-based intent classifier in `agent/intent_classifier.py` determines Q&A vs work routing at runtime. This creates three concrete problems:
 
 **Current behavior:**
-- DMs are routed through the intent classifier and can trigger full Dev session work pipelines, even though DMs should only be Q&A conversations.
+- DMs are routed through the intent classifier and can trigger full DevSession work pipelines, even though DMs should only be Q&A conversations.
 - Group session type is determined solely by chat title prefix (`Dev:` -> dev, everything else -> chat). There is no way to configure a group as Q&A-only in `projects.json`.
-- The intent classifier runs on every PM session message, adding latency (~200-400ms Haiku call) and occasional misclassification for groups where the mode is known in advance.
+- The intent classifier runs on every ChatSession message, adding latency (~200-400ms Haiku call) and occasional misclassification for groups where the mode is known in advance.
 - Team chats (no `Dev:`/`PM:` prefix) use Ollama to classify unaddressed messages, but there is no "passive listener" mode where Valor silently stores memories and only responds when @tagged or replied-to.
 
 **Desired outcome:**
@@ -29,9 +29,9 @@ The system has no centralized way to configure chat behavior per-group. Mode sel
 
 ## Prior Art
 
-- **PR #529**: "Add PM session Q&A mode with intent classifier" -- Merged 2026-03-26. Introduced `intent_classifier.py`, `qa_handler.py`, and `qa_metrics.py`. Foundation that this issue builds on. Successful but uses runtime classification for all messages.
-- **Issue #499**: "PM session Q&A mode: direct responses without Dev session for non-work queries" -- Closed 2026-03-26. The tracking issue for PR #529.
-- **Issue #541**: "Dynamic PM persona: conversational Q&A mode vs structured work mode" -- Closed 2026-03-26. Added Q&A-specific prose formatting in the summarizer. Confirmed Q&A as a routing decision within PM session.
+- **PR #529**: "Add ChatSession Q&A mode with intent classifier" -- Merged 2026-03-26. Introduced `intent_classifier.py`, `qa_handler.py`, and `qa_metrics.py`. Foundation that this issue builds on. Successful but uses runtime classification for all messages.
+- **Issue #499**: "ChatSession Q&A mode: direct responses without DevSession for non-work queries" -- Closed 2026-03-26. The tracking issue for PR #529.
+- **Issue #541**: "Dynamic PM persona: conversational Q&A mode vs structured work mode" -- Closed 2026-03-26. Added Q&A-specific prose formatting in the summarizer. Confirmed Q&A as a routing decision within ChatSession.
 
 ## Data Flow
 
@@ -43,7 +43,7 @@ Current message routing path and where changes are needed:
 4. **Session type**: Title prefix check at `telegram_bridge.py:1419-1428` sets `_session_type` -- **CHANGE**: Read persona from config, derive session type
 5. **Job enqueue**: `enqueue_job()` at line 1430 with `session_type` -- no changes needed
 6. **Agent dispatch**: `agent/sdk_client.py::get_agent_response_sdk()` picks up the job
-7. **Intent classification**: `classify_intent()` called at line 1480 for PM sessions -- **CHANGE**: Skip when mode is config-determined (DM or persona field)
+7. **Intent classification**: `classify_intent()` called at line 1480 for ChatSessions -- **CHANGE**: Skip when mode is config-determined (DM or persona field)
 8. **Q&A injection**: `build_qa_instructions()` injected at line 1511 when `_qa_mode=True` -- no changes needed
 9. **Response delivery**: Nudge loop delivers response via bridge -- no changes needed
 
@@ -116,7 +116,7 @@ No prerequisites -- this work uses existing config infrastructure (`projects.jso
 
 ## Rabbit Holes
 
-- **Adding a third session type ("qa")**: Q&A is currently a boolean flag (`qa_mode`) within PM session, not a session type. Introducing a third session type would require changes throughout the job queue, session model, and agent dispatch. Keep Q&A as a routing decision within PM session.
+- **Adding a third session type ("qa")**: Q&A is currently a boolean flag (`qa_mode`) within ChatSession, not a session type. Introducing a third session type would require changes throughout the job queue, session model, and agent dispatch. Keep Q&A as a routing decision within ChatSession.
 - **Refactoring the entire routing pipeline**: The current `should_respond_async()` has accumulated complexity (Ollama classification, team chat detection, respond_to_all flags). Tempting to rewrite but out of scope -- only add the persona-aware branch.
 - **Per-user mode overrides**: Individual users having different modes within the same group. Interesting but a separate concern. All DM users now get uniform qa_only access (the per-user `get_user_permissions()` function was removed in PR #595).
 - **Removing the intent classifier entirely**: Even with config-driven mode, the classifier is still valuable for unconfigured groups. Do not remove it.
@@ -137,7 +137,7 @@ No race conditions identified -- all changes are in the synchronous request proc
 
 ## No-Gos (Out of Scope)
 
-- No new session types -- use existing `qa_mode` boolean within PM session
+- No new session types -- use existing `qa_mode` boolean within ChatSession
 - No changes to the intent classifier's classification logic or threshold
 - No changes to the Q&A handler's instruction generation
 - No per-user mode overrides within groups

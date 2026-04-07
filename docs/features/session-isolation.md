@@ -29,7 +29,6 @@ The env var is set in `ValorAgent._create_options()` and passed through `get_age
 ### Model Fields
 
 - `AgentSession.slug` -- Redis model field storing the active slug for a session. Set when `/do-plan {slug}` runs.
-- **Looking up an AgentSession by id** -- Use `AgentSession.get_by_id(agent_session_id)` for any raw-string lookup. Popoto's `AgentSession.query.get()` requires a key kwarg (`db_key=` / `redis_key=`) and raises `AttributeError` on bare strings, which historically got swallowed by silent `except` blocks (issue #765). The `get_by_id` helper handles None/empty/whitespace input, logs warnings on backend failures, and is the canonical entry point for CLI args, parent references, and Redis hash fields.
 - `AgentSession.project_config` -- DictField carrying the full project dict from `projects.json`. Populated at enqueue time so downstream code (queue worker, SDK client, formatting) can read project properties without re-deriving from config files or parallel registries. See [Chat Dev Session Architecture](chat-dev-session-architecture.md#project-config-propagation) for the propagation flow.
 - `Job.slug` -- Propagated from the session to each session for task list routing.
 - `Job.task_list_id` -- The computed task list ID (either slug or thread-derived).
@@ -134,7 +133,7 @@ The `claude_session_uuid` field is included in `_AGENT_SESSION_FIELDS` so it is 
 
 ### Hook Session Registry (Issue #597)
 
-Hooks fired by the Claude Agent SDK execute in the **parent bridge process**, not inside the Claude Code subprocess. The `VALOR_SESSION_ID` env var (injected into the subprocess at `sdk_client.py`) is invisible to hooks because they run in a different process context. This caused all hook-side session lookups to fall back to Claude Code's internal UUID, breaking activity logging, Redis session tracking, heartbeat enrichment, and Dev session registration.
+Hooks fired by the Claude Agent SDK execute in the **parent bridge process**, not inside the Claude Code subprocess. The `VALOR_SESSION_ID` env var (injected into the subprocess at `sdk_client.py`) is invisible to hooks because they run in a different process context. This caused all hook-side session lookups to fall back to Claude Code's internal UUID, breaking activity logging, Redis session tracking, heartbeat enrichment, and DevSession registration.
 
 The fix is a **module-level registry** (`agent/hooks/session_registry.py`) that maps Claude Code UUIDs to bridge session IDs within the parent process. The registry uses a two-phase registration pattern:
 
@@ -149,7 +148,7 @@ The registry also tracks per-session tool activity (tool count and last 3 tool n
 
 **Hook call sites using the registry**:
 - `agent/health_check.py` -- watchdog tool count tracking
-- `agent/hooks/pre_tool_use.py` -- Dev session registration
+- `agent/hooks/pre_tool_use.py` -- DevSession registration
 - `agent/hooks/subagent_stop.py` -- completion tracking (two call sites)
 
 Note: The `VALOR_SESSION_ID` env var injection in `sdk_client.py` is retained for code running inside the Claude Code subprocess (shell scripts, Python tools via Bash). The registry is only for parent-process hook resolution.

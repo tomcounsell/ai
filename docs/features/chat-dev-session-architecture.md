@@ -1,16 +1,16 @@
-# PM/Teammate/Dev session Architecture
+# PM/Teammate/DevSession Architecture
 
 ## Overview
 
 The AgentSession model uses a **session_type discriminator** (`SessionType` enum from `config/enums.py`) to distinguish between three session roles:
 
-- **PM Session** (`session_type=SessionType.PM`): Read-only Agent SDK session with PM persona. Owns the Telegram conversation, orchestrates work, and spawns Dev sessions.
-- **Teammate Session** (`session_type=SessionType.TEAMMATE`): Conversational Agent SDK session with Teammate persona. Handles informational queries directly without spawning Dev sessions.
-- **Dev session** (`session_type=SessionType.DEV`): Full-permission Agent SDK session with Dev persona. Executes a single assigned SDLC stage and reports the result back to the PM.
+- **PM Session** (`session_type=SessionType.PM`): Read-only Agent SDK session with PM persona. Owns the Telegram conversation, orchestrates work, and spawns DevSessions.
+- **Teammate Session** (`session_type=SessionType.TEAMMATE`): Conversational Agent SDK session with Teammate persona. Handles informational queries directly without spawning DevSessions.
+- **DevSession** (`session_type=SessionType.DEV`): Full-permission Agent SDK session with Dev persona. Executes a single assigned SDLC stage and reports the result back to the PM.
 
 Session types, persona identifiers, and classification types are defined as `StrEnum` members in `config/enums.py`. See [Standardized Enums](standardized-enums.md) for the full enum reference.
 
-This replaces the previous architecture where a single undifferentiated AgentSession handled both orchestration and execution. The PM session now orchestrates the pipeline stage-by-stage, spawning one Dev session per stage.
+This replaces the previous architecture where a single undifferentiated AgentSession handled both orchestration and execution. The PM session now orchestrates the pipeline stage-by-stage, spawning one DevSession per stage.
 
 ## Routing
 
@@ -22,9 +22,9 @@ Messages are routed to session types via **config-driven persona resolution** (`
 
 Session type derivation from resolved persona:
 
-- **Developer persona** -> `session_type="dev"` (Dev session, full permissions, dev persona). The classifier is skipped.
+- **Developer persona** -> `session_type="dev"` (DevSession, full permissions, dev persona). The classifier is skipped.
 - **Teammate persona** -> `session_type="teammate"` (Teammate session, conversational). Handles informational queries directly.
-- **PM, or unconfigured** -> `session_type="pm"` (PM session, PM persona). This includes SDLC work. The PM session decides whether to spawn a Dev session.
+- **PM, or unconfigured** -> `session_type="pm"` (PM session, PM persona). This includes SDLC work. The PM session decides whether to spawn a DevSession.
 
 There are exactly three session types: `pm`, `teammate`, and `dev`. The previous `chat` session type has been renamed to `pm` and `teammate` has been promoted from a secondary `session_mode` flag to a first-class session type. See [Config-Driven Chat Mode](config-driven-chat-mode.md) for the config schema and resolution order.
 
@@ -39,7 +39,7 @@ resolve_persona(project, chat_title, is_dm)
     |  2. Title prefix fallback (Dev:/PM:)
     |  3. DMs -> always "teammate"
     |
-    |-- Developer -> Dev session (session_type="dev")
+    |-- Developer -> DevSession (session_type="dev")
     |       |-- Full permissions, Dev persona
     |       |-- Direct execution
     |
@@ -62,7 +62,7 @@ resolve_persona(project, chat_title, is_dm)
                     |
                     v
                 PM assesses current stage
-                    |-- Spawns one Dev session per stage
+                    |-- Spawns one DevSession per stage
                     |-- Verifies result before progressing
                     |-- Repeats until pipeline complete
                     |
@@ -89,7 +89,7 @@ Single Popoto model (`AgentSession`) with discriminator field. Popoto ORM does n
 - `chat_id`, `message_id`, `sender_name`, `message_text` -- Telegram context
 - `result_text` -- what was delivered to Telegram
 
-### Dev session-specific fields
+### DevSession-specific fields
 - `parent_agent_session_id` (KeyField) -- **canonical** parent link (role-neutral). Set by all session creators (`create_child`, `create_dev`, `enqueue_session`) and read by all hierarchy walkers (`scheduling_depth`, `get_parent_session`, `get_child_sessions`, the zombie health check, the dashboard).
 - `parent_session_id` -- **deprecated** `@property` alias delegating to `parent_agent_session_id`. Kept for one release cycle. New code should use `parent_agent_session_id` directly.
 - `parent_chat_session_id` -- **deprecated** `@property` alias also delegating to `parent_agent_session_id` (the legacy alias chain `parent_chat_session_id -> parent_session_id -> parent_agent_session_id` continues to resolve transparently).
@@ -102,7 +102,7 @@ Single Popoto model (`AgentSession`) with discriminator field. Popoto ORM does n
 Sessions are created via factory methods:
 - `AgentSession.create_pm(...)` -- creates a PM session
 - `AgentSession.create_teammate(...)` -- creates a Teammate session
-- `AgentSession.create_dev(...)` -- creates a Dev session (wrapper for `create_child(role="dev")`)
+- `AgentSession.create_dev(...)` -- creates a DevSession (wrapper for `create_child(role="dev")`)
 - `AgentSession.create_child(role=..., ...)` -- generic child session creation
 
 Or directly via `AgentSession.create(session_type="pm", ...)`.
@@ -152,15 +152,15 @@ Human replies during active pipelines are buffered as steering messages on the P
 
 ## Stage-by-Stage Orchestration
 
-The PM session orchestrates SDLC work by spawning one Dev session per pipeline stage, rather than delegating the entire pipeline to a single Dev session.
+The PM session orchestrates SDLC work by spawning one DevSession per pipeline stage, rather than delegating the entire pipeline to a single DevSession.
 
 ### Flow
 
 1. **PM assesses current stage** -- uses read-only Bash commands (gh, grep) to check what exists (issue, plan, PR, test status, review state)
-2. **PM spawns one Dev session** -- dispatches a single-stage assignment with the Agent tool, including stage name, issue/PR URLs, current state, and acceptance criteria
-3. **Dev session executes the assigned stage** -- runs the appropriate skill (/do-plan, /do-build, /do-test, etc.) and reports the result
+2. **PM spawns one DevSession** -- dispatches a single-stage assignment with the Agent tool, including stage name, issue/PR URLs, current state, and acceptance criteria
+3. **DevSession executes the assigned stage** -- runs the appropriate skill (/do-plan, /do-build, /do-test, etc.) and reports the result
 4. **PM verifies the result** -- checks that the stage completed successfully
-5. **PM repeats** -- assesses the next stage, spawns another Dev session, until the pipeline is complete or human input is needed
+5. **PM repeats** -- assesses the next stage, spawns another DevSession, until the pipeline is complete or human input is needed
 
 ### Why Stage-by-Stage
 
@@ -171,16 +171,16 @@ The PM session orchestrates SDLC work by spawning one Dev session per pipeline s
 
 ### Completion Warning
 
-The stop hook (`.claude/hooks/stop.py`) includes a warning for SDLC-classified sessions that complete without any stage progress. This catches cases where the Dev session bypasses the pipeline. The warning is logged to stderr and is non-fatal.
+The stop hook (`.claude/hooks/stop.py`) includes a warning for SDLC-classified sessions that complete without any stage progress. This catches cases where the DevSession bypasses the pipeline. The warning is logged to stderr and is non-fatal.
 
 ## Hook-Driven Lifecycle
 
-The parent-child session lifecycle is driven by two SDK hooks: **PreToolUse** and **SubagentStop**. These hooks automatically register child Dev sessions in Redis, start pipeline stages, and record stage outcomes when the child completes.
+The parent-child session lifecycle is driven by two SDK hooks: **PreToolUse** and **SubagentStop**. These hooks automatically register child DevSessions in Redis, start pipeline stages, and record stage outcomes when the child completes.
 
 ### Spawn-Execute-Return Flow
 
 ```
-PM (PM session) calls Agent tool with type="dev-session"
+PM (ChatSession) calls Agent tool with type="dev-session"
     |
     v
 PreToolUse hook fires (agent/hooks/pre_tool_use.py)
@@ -192,7 +192,7 @@ PreToolUse hook fires (agent/hooks/pre_tool_use.py)
     |       -> marks stage as "in_progress" in parent's stage_states
     |
     v
-Dev session executes assigned work
+DevSession executes assigned work
     |-- Runs the appropriate skill (/do-build, /do-test, etc.)
     |-- Commits code, runs tests, produces output
     |
@@ -200,7 +200,7 @@ Dev session executes assigned work
 SubagentStop hook fires (agent/hooks/subagent_stop.py)
     |-- Detects agent_type == "dev-session"
     |-- session_registry.resolve(claude_uuid) -> bridge session_id
-    |-- Marks Dev session status = "completed" in Redis
+    |-- Marks DevSession status = "completed" in Redis
     |-- _extract_output_tail(input_data) -> last ~500 chars
     |-- PipelineStateMachine(parent).classify_outcome(stage, ..., output_tail)
     |       |
@@ -216,9 +216,8 @@ Hook returns {"reason": "Pipeline state: {stage_states}"}
 
 | Component | File | Role |
 |-----------|------|------|
-| `pre_tool_use_hook()` | `agent/hooks/pre_tool_use.py` | Registers Dev session, starts pipeline stage (both dev-session and Skill paths) |
-| `post_tool_use_hook()` | `agent/hooks/post_tool_use.py` | Completes pipeline stage for Skill path; always runs watchdog health check |
-| `subagent_stop_hook()` | `agent/hooks/subagent_stop.py` | Completes Dev session, classifies outcome, records stage result (dev-session path) |
+| `pre_tool_use_hook()` | `agent/hooks/pre_tool_use.py` | Registers DevSession, starts pipeline stage |
+| `subagent_stop_hook()` | `agent/hooks/subagent_stop.py` | Completes DevSession, classifies outcome, records stage result |
 | `session_registry` | `agent/hooks/session_registry.py` | Maps Claude Code UUIDs to bridge session IDs (see [Session Isolation](session-isolation.md)) |
 | `PipelineStateMachine` | `bridge/pipeline_state.py` | Manages stage_states on the parent AgentSession |
 | `_extract_stage_from_prompt()` | `agent/hooks/pre_tool_use.py` | Parses "Stage: BUILD" patterns from dev-session prompts |
@@ -230,18 +229,18 @@ The PreToolUse hook extracts the SDLC stage name from the dev-session prompt usi
 
 ### Outcome Classification
 
-When a Dev session completes, the SubagentStop hook extracts the last ~500 characters of output (from the agent transcript file or fallback summary) and passes them to `PipelineStateMachine.classify_outcome()`. Classification uses three tiers: Tier 0 parses structured `<!-- OUTCOME {...} -->` contracts emitted by skills, Tier 1 checks SDK stop_reason, and Tier 2 falls back to text pattern matching. The outcome determines whether the stage is marked as completed or failed on the parent session:
+When a DevSession completes, the SubagentStop hook extracts the last ~500 characters of output (from the agent transcript file or fallback summary) and passes them to `PipelineStateMachine.classify_outcome()`. Classification uses three tiers: Tier 0 parses structured `<!-- OUTCOME {...} -->` contracts emitted by skills, Tier 1 checks SDK stop_reason, and Tier 2 falls back to text pattern matching. The outcome determines whether the stage is marked as completed or failed on the parent session:
 
 - **success** or **ambiguous** -> `complete_stage()` (safe default for ambiguous)
 - **fail** or **partial** -> `fail_stage()`
 
 ### Error Handling
 
-Both hooks wrap all operations in try/except blocks. Failures are logged as warnings but never raised -- the hooks must not crash the Agent tool or block the PM from continuing. If stage extraction fails (e.g., empty prompt), the hook skips the `start_stage()` call gracefully. If the session registry has no mapping (e.g., running outside the bridge), the hook skips Dev session registration entirely.
+Both hooks wrap all operations in try/except blocks. Failures are logged as warnings but never raised -- the hooks must not crash the Agent tool or block the PM from continuing. If stage extraction fails (e.g., empty prompt), the hook skips the `start_stage()` call gracefully. If the session registry has no mapping (e.g., running outside the bridge), the hook skips DevSession registration entirely.
 
 ## Parent-Child Steering
 
-The PM session can push steering messages to its running child Dev sessions, enabling mid-execution course correction without waiting for the Dev session to complete.
+The PM session can push steering messages to its running child DevSessions, enabling mid-execution course correction without waiting for the DevSession to complete.
 
 ### Mechanism
 

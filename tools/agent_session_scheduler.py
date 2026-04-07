@@ -144,9 +144,8 @@ def _get_parent_session(parent_id: str):
     try:
         from models.agent_session import AgentSession
 
-        return AgentSession.get_by_id(parent_id)
-    except Exception as exc:
-        logger.warning("Parent AgentSession lookup failed for %s: %s", parent_id, exc)
+        return AgentSession.query.get(parent_id)
+    except Exception:
         return None
 
 
@@ -656,7 +655,7 @@ def cmd_children(args: argparse.Namespace) -> int:
     from models.agent_session import AgentSession
 
     try:
-        parent = AgentSession.get_by_id(args.agent_session_id)
+        parent = AgentSession.query.get(args.agent_session_id)
         if parent is None:
             _output({"status": "error", "message": f"Session {args.agent_session_id} not found."})
             return 1
@@ -796,19 +795,14 @@ def _kill_process(pid: int) -> dict:
 def _kill_agent_session(target, *, skip_process_kill: bool = False) -> dict:
     """Kill a single session: terminate its subprocess and set status to killed.
 
-    Uses finalize_session() for in-place status mutation rather than the old
-    delete-and-recreate pattern. The delete-and-recreate pattern was unsafe:
-    nullable KeyField values that were never set on the source object caused
-    Popoto to stringify the field descriptor object into the key, producing a
-    corrupted hash key that could never be resolved or deleted via ORM calls.
-
     Args:
         target: AgentSession instance to kill.
         skip_process_kill: If True, skip process termination (for pending sessions).
 
     Returns a dict with kill result details.
     """
-    from models.session_lifecycle import finalize_session
+    from agent.agent_session_queue import _extract_agent_session_fields
+    from models.agent_session import AgentSession
 
     result = {
         "agent_session_id": target.agent_session_id,
@@ -826,11 +820,13 @@ def _kill_agent_session(target, *, skip_process_kill: bool = False) -> dict:
         else:
             result["process"] = {"pid": None, "action": "no_process_found"}
 
-    # Set status to killed using in-place mutation via finalize_session().
-    # skip_auto_tag and skip_checkpoint are set because the CLI kill context
-    # may not have a git repo or session tags config available; all side
-    # effects in finalize_session() are already wrapped in try/except anyway.
-    finalize_session(target, "killed", reason="CLI kill", skip_auto_tag=True, skip_checkpoint=True)
+    # Set status to killed using delete-and-recreate (Popoto pattern)
+    fields = _extract_agent_session_fields(target)
+    target.delete()
+    fields["status"] = "killed"
+    fields["completed_at"] = datetime.now(tz=UTC)
+    new_session = AgentSession.create(**fields)
+    result["new_agent_session_id"] = new_session.agent_session_id
     result["status"] = "killed"
 
     logger.info(

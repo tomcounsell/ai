@@ -56,10 +56,10 @@
 ### 3.1 Required Hook Types
 | Hook | Purpose | Our Usage |
 |------|---------|-----------|
-| **PreToolUse** | Intercept before any tool executes | Block sensitive file writes, enforce PM read-only, register Dev sessions |
+| **PreToolUse** | Intercept before any tool executes | Block sensitive file writes, enforce PM read-only, register DevSessions |
 | **PostToolUse** | Execute after any tool completes | Watchdog health checks, stall detection, memory injection |
 | **Stop** | Execute when agent signals completion | SDLC branch enforcement, delivery review gate, session logging |
-| **SubagentStop** | Execute when a spawned sub-agent completes | Dev session registration, pipeline stage progression, GitHub issue comments |
+| **SubagentStop** | Execute when a spawned sub-agent completes | DevSession registration, pipeline stage progression, GitHub issue comments |
 | **PreCompact** | Execute before context window compaction | Logging, context preservation |
 
 ### 3.2 Hook Capabilities
@@ -203,7 +203,7 @@ These are the specific SDK interfaces our code depends on. A replacement must ei
 | Criterion | Weight | Notes |
 |-----------|--------|-------|
 | Hook system parity | **Critical** | Without hooks, we lose SDLC enforcement, security, and orchestration |
-| Sub-agent spawning | **Critical** | PM→Dev session architecture depends on this |
+| Sub-agent spawning | **Critical** | PM→DevSession architecture depends on this |
 | Conversation continuation | **Critical** | Session continuity across nudge loops |
 | Streaming responses | **Critical** | Real-time activity detection and stall monitoring |
 | MCP server support | **High** | 6+ MCP integrations currently active |

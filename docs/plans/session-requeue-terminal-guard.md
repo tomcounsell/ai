@@ -217,7 +217,7 @@ No update system changes required — this is a bridge-internal bug fix with no 
 
 ## Agent Integration
 
-No agent integration required — this is a bridge-internal change to the intake path. The agent (PM/Dev session) is not involved in session routing. No MCP server changes, no `.mcp.json` changes.
+No agent integration required — this is a bridge-internal change to the intake path. The agent (ChatSession/DevSession) is not involved in session routing. No MCP server changes, no `.mcp.json` changes.
 
 ## Documentation
 

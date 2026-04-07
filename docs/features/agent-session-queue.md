@@ -66,8 +66,7 @@ At startup, two cleanup passes run before session processing begins. These are c
 The following execution functions are called exclusively from `worker/__main__.py`:
 - `_ensure_worker(chat_id)` — spawns per-chat worker loops
 - `_recover_interrupted_agent_sessions_startup()` — startup session recovery
-- `_agent_session_health_loop()` — background health monitor (safety net: every 5 min)
-- `_session_notify_listener()` — pub/sub subscriber for immediate session pickup (~1s latency)
+- `_agent_session_health_loop()` — background health monitor
 - `_cleanup_orphaned_claude_processes()` — kill orphaned SDK subprocesses
 - `AgentSession.rebuild_indexes()` — repair Redis index entries
 

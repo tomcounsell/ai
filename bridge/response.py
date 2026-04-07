@@ -15,12 +15,6 @@ from telethon import TelegramClient
 from telethon.tl.functions.messages import SendReactionRequest
 from telethon.tl.types import Message, ReactionCustomEmoji, ReactionEmoji
 
-from agent.constants import (
-    REACTION_COMPLETE,  # noqa: F401
-    REACTION_ERROR,  # noqa: F401
-    REACTION_SUCCESS,  # noqa: F401
-)
-
 logger = logging.getLogger(__name__)
 
 # =============================================================================
@@ -163,9 +157,11 @@ INVALID_REACTIONS = [
 REACTION_RECEIVED = "👀"  # Message acknowledged
 REACTION_PROCESSING = "🤔"  # Default thinking emoji
 
-# REACTION_COMPLETE, REACTION_ERROR, REACTION_SUCCESS are re-exported from
-# agent.constants (canonical location) — imported at top of file for
-# backward compatibility with existing imports.
+# These three are re-exported from agent.constants (canonical location).
+# Kept here for backward compatibility with existing imports.
+from agent.constants import REACTION_COMPLETE  # noqa: E402, F401
+from agent.constants import REACTION_ERROR  # noqa: E402, F401
+from agent.constants import REACTION_SUCCESS  # noqa: E402, F401
 
 
 def filter_tool_logs(response: str) -> str:
@@ -505,7 +501,7 @@ async def send_response_with_files(
         # Unknown delivery_action → fall through to normal summarizer path
 
     # PM self-messaging bypass: if the PM already sent messages via the
-    # send_telegram tool during this session (or its parent PM session in
+    # send_telegram tool during this session (or its parent ChatSession in
     # SDLC flows), skip the summarizer entirely. The PM authored its own
     # messages — the summarizer would be redundant.
     # Only set emoji reaction (handled by the caller). See issue #497, #571.

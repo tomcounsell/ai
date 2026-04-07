@@ -17,6 +17,9 @@ import os
 from typing import Any
 
 from config.memory_defaults import (
+    NOVEL_TERRITORY_KEYWORD_THRESHOLD,
+)
+from config.memory_defaults import (
     INJECTION_BUFFER_SIZE as BUFFER_SIZE,
 )
 from config.memory_defaults import (
@@ -24,9 +27,6 @@ from config.memory_defaults import (
 )
 from config.memory_defaults import (
     MAX_THOUGHTS_PER_INJECTION as MAX_THOUGHTS,
-)
-from config.memory_defaults import (
-    NOVEL_TERRITORY_KEYWORD_THRESHOLD,
 )
 
 # Re-export keyword utilities from lightweight module (no agent deps).

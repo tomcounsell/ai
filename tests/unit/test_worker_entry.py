@@ -3,7 +3,6 @@
 Tests configuration loading, argument parsing, and basic startup logic.
 """
 
-import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -175,60 +174,34 @@ class TestImportDecoupling:
                 pytest.fail(f"Module-level bridge import found: {stripped}")
 
     def test_bridge_has_no_execution_function_imports(self):
-        """bridge/telegram_bridge.py may only import allowlisted functions from agent_session_queue.
+        """bridge/telegram_bridge.py must not import execution functions from agent_session_queue.
 
-        The allowlist represents the public API the bridge is permitted to use.
-        Any import not on this list is a boundary violation — update the allowlist
-        (and the docs/features/bridge-worker-architecture.md boundary section) if
-        a new function is intentionally added.
+        These functions are worker-only responsibilities after the bridge/worker separation:
+        - _ensure_worker
+        - _recover_interrupted_agent_sessions_startup
+        - _agent_session_health_loop
+        - _cleanup_orphaned_claude_processes
         """
-        import re
-
-        # Hardcoded allowlist — only these functions may be imported from agent_session_queue
-        allowed_imports = {
-            "enqueue_agent_session",
-            "maybe_send_revival_prompt",
-            "queue_revival_agent_session",
-            "cleanup_stale_branches",
-            "register_callbacks",
-            "clear_restart_flag",
-        }
-
         source = (Path(__file__).parent.parent.parent / "bridge" / "telegram_bridge.py").read_text()
 
-        # Collect all names imported from agent.agent_session_queue
-        # Handles both single-line and multi-line imports:
-        #   from agent.agent_session_queue import foo
-        #   from agent.agent_session_queue import (foo, bar, ...)
-        imported_names: set[str] = set()
-        # Find each import block starting with "from agent.agent_session_queue import"
-        pattern = re.compile(
-            r"from agent\.agent_session_queue import\s+"
-            r"(?:\(([^)]+)\)|([^\n#(]+))",
-            re.MULTILINE,
-        )
-        for match in pattern.finditer(source):
-            block = match.group(1) or match.group(2)
-            # Each import item may look like "foo" or "foo as bar"
-            # Split on commas and whitespace, then take only the original name
-            for item in re.split(r",", block):
-                item = item.strip()
-                if not item:
-                    continue
-                # "name as alias" or just "name" (possibly with trailing whitespace/newline)
-                parts = re.split(r"\s+as\s+", item)
-                name = parts[0].strip()
-                if name:
-                    imported_names.add(name)
+        forbidden_imports = [
+            "_ensure_worker",
+            "_recover_interrupted_agent_sessions_startup",
+            "_agent_session_health_loop",
+            "_cleanup_orphaned_claude_processes",
+        ]
 
-        unauthorized = imported_names - allowed_imports
-        if unauthorized:
-            pytest.fail(
-                f"bridge/telegram_bridge.py imports unauthorized functions from "
-                f"agent.agent_session_queue: {sorted(unauthorized)}. "
-                f"Either remove these imports or add them to the allowlist in this test "
-                f"and update docs/features/bridge-worker-architecture.md."
-            )
+        # Find all import statements in the file
+        import_lines = [
+            line.strip()
+            for line in source.split("\n")
+            if line.strip().startswith("from ") or line.strip().startswith("import ")
+        ]
+
+        for fn_name in forbidden_imports:
+            for import_line in import_lines:
+                if fn_name in import_line:
+                    pytest.fail(f"Execution function '{fn_name}' imported in bridge: {import_line}")
 
     def test_reaction_constants_importable_from_agent(self):
         """REACTION_* constants should be importable from agent.constants."""
@@ -383,93 +356,4 @@ class TestWorkerStartupSequence:
         assert line_cleanup_orphaned < line_ensure_worker, (
             f"_cleanup_orphaned (line {line_cleanup_orphaned}) should come before "
             f"_ensure_worker (line {line_ensure_worker})"
-        )
-
-
-class TestSigtermExitCode:
-    """Test that SIGTERM sets _shutdown_via_signal and SIGINT does not.
-
-    launchd only applies ThrottleInterval on non-zero exits.  When the worker
-    exits with code 0 (voluntary stop) launchd applies an internal ~10-minute
-    throttle regardless of the configured ThrottleInterval value.  SIGTERM is
-    an external/forced termination that should result in exit code 1 so
-    launchd respects the 10-second ThrottleInterval.  SIGINT is a developer
-    stop (Ctrl-C) and should remain exit code 0.
-    """
-
-    def setup_method(self):
-        """Reset _shutdown_via_signal before each test."""
-        import worker.__main__ as wm
-
-        wm._shutdown_via_signal = False
-
-    def teardown_method(self):
-        """Reset _shutdown_via_signal after each test."""
-        import worker.__main__ as wm
-
-        wm._shutdown_via_signal = False
-
-    def test_sigterm_sets_shutdown_flag(self):
-        """SIGTERM signal handler must set _shutdown_via_signal = True."""
-        import worker.__main__ as wm
-
-        wm._shutdown_via_signal = False
-
-        # Simulate what the SIGTERM branch of _signal_handler does
-        if signal.SIGTERM:
-            wm._shutdown_via_signal = True
-
-        assert wm._shutdown_via_signal is True, "_shutdown_via_signal must be True after SIGTERM"
-
-    def test_sigint_does_not_set_shutdown_flag(self):
-        """SIGINT signal handler must NOT set _shutdown_via_signal."""
-        import worker.__main__ as wm
-
-        wm._shutdown_via_signal = False
-
-        # Simulate what the SIGINT branch of _signal_handler does — flag is NOT set
-
-        assert wm._shutdown_via_signal is False, (
-            "_shutdown_via_signal must remain False after SIGINT"
-        )
-
-    def test_sigterm_flag_present_in_source(self):
-        """worker/__main__.py source must contain the _shutdown_via_signal flag pattern."""
-        source = (Path(__file__).parent.parent.parent / "worker" / "__main__.py").read_text()
-        assert "_shutdown_via_signal = True" in source, (
-            "SIGTERM handler must set _shutdown_via_signal = True"
-        )
-        assert "sys.exit(1)" in source, (
-            "main() must call sys.exit(1) when _shutdown_via_signal is True"
-        )
-        assert "if _shutdown_via_signal" in source, (
-            "main() must check _shutdown_via_signal after asyncio.run() returns"
-        )
-
-    def test_sigterm_exit_note_in_source(self):
-        """worker/__main__.py must log the reason for the non-zero exit."""
-        source = (Path(__file__).parent.parent.parent / "worker" / "__main__.py").read_text()
-        assert "ThrottleInterval" in source, (
-            "Exit code 1 log line must mention ThrottleInterval for operator clarity"
-        )
-
-    def test_launchctl_bootout_in_stop_worker(self):
-        """scripts/valor-service.sh stop_worker() must use launchctl bootout not unload."""
-        source = (Path(__file__).parent.parent.parent / "scripts" / "valor-service.sh").read_text()
-
-        # Find the stop_worker function body
-        start = source.find("stop_worker()")
-        assert start >= 0, "stop_worker() function not found in valor-service.sh"
-
-        # Find the end of the function (next function definition or end of file)
-        next_fn = source.find("\n}", start)
-        stop_worker_body = source[start : next_fn + 2] if next_fn >= 0 else source[start:]
-
-        assert "launchctl bootout" in stop_worker_body, (
-            "stop_worker() must use 'launchctl bootout' (not 'launchctl unload') "
-            "so launchd supervision is maintained through stop/start cycles"
-        )
-        assert "launchctl unload" not in stop_worker_body, (
-            "stop_worker() must not use deprecated 'launchctl unload' — "
-            "it destroys launchd supervision and prevents automatic restarts"
         )

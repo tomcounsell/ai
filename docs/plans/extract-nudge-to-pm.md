@@ -203,7 +203,7 @@ valor-session kill --all                  # Kill all running
 - Modifying `bridge/summarizer.py` `nudge_feedback` — separate concept
 - Restructuring `_execute_agent_session()` beyond extracting nudge decision logic
 - Moving the `send_to_chat()` call site to post-execution (critique blocker)
-- Changing Dev session output routing (uses `subagent_stop.py` hook)
+- Changing DevSession output routing (uses `subagent_stop.py` hook)
 - Modifying the OutputHandler protocol
 - Building a web UI for session management (CLI only for now)
 

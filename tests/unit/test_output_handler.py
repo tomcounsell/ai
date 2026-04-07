@@ -8,6 +8,8 @@ import asyncio
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from agent.output_handler import (
     FileOutputHandler,
     LoggingOutputHandler,
@@ -56,7 +58,7 @@ class TestFileOutputHandler:
         """Handler should create the log directory if it doesn't exist."""
         with tempfile.TemporaryDirectory() as tmp:
             log_dir = Path(tmp) / "worker_logs"
-            FileOutputHandler(log_dir=log_dir)
+            handler = FileOutputHandler(log_dir=log_dir)
             assert log_dir.exists()
 
     def test_send_writes_to_file(self):
@@ -128,7 +130,9 @@ class TestFileOutputHandler:
                 session_id = "multi-test"
 
             for msg in ["First", "Second", "Third"]:
-                asyncio.run(handler.send("chat-1", msg, 1, FakeSession()))
+                asyncio.run(
+                    handler.send("chat-1", msg, 1, FakeSession())
+                )
 
             log_file = log_dir / "multi-test.log"
             content = log_file.read_text()

@@ -20,7 +20,7 @@ import json
 import logging
 import os
 import time
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -30,21 +30,12 @@ from models.agent_session import AgentSession
 
 
 def _to_timestamp(val) -> float | None:
-    """Convert a datetime or float to a Unix timestamp.
-
-    Naive datetimes are assumed to represent UTC (matching how Popoto
-    SortedField stores them). This prevents local-time interpretation
-    on machines running in non-UTC timezones, which would otherwise
-    inflate durations by the UTC offset and trigger false LIFECYCLE_STALL
-    events for newly-created sessions.
-    """
+    """Convert a datetime or float to a Unix timestamp."""
     if val is None:
         return None
     if isinstance(val, datetime):
-        if val.tzinfo is None:
-            val = val.replace(tzinfo=UTC)
         return val.timestamp()
-    if isinstance(val, int | float):
+    if isinstance(val, (int, float)):
         return float(val)
     return None
 
@@ -198,8 +189,7 @@ async def check_all_sessions() -> None:
                 # actionable bug reports instead of "empty error summary" issues.
                 session.summary = f"Watchdog: {type(e).__name__}: {e}"[:500]
                 finalize_session(
-                    session,
-                    "failed",
+                    session, "failed",
                     reason=f"watchdog: stale session ({type(e).__name__})",
                     skip_auto_tag=True,
                     skip_checkpoint=True,
@@ -595,8 +585,7 @@ def _safe_abandon_session(session: AgentSession, reason: str) -> bool:
         from models.session_lifecycle import finalize_session
 
         finalize_session(
-            session,
-            "abandoned",
+            session, "abandoned",
             reason=reason,
             skip_auto_tag=True,
             skip_checkpoint=True,

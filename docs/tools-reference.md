@@ -198,11 +198,9 @@ python -m tools.valor_session status --id <SESSION_ID>
 # Inject a steering message into a running session
 python -m tools.valor_session steer --id <SESSION_ID> --message "Stop after critique"
 
-# Create a new session (project_key derived from cwd via projects.json)
+# Create a new session
 python -m tools.valor_session create --role pm --message "Plan issue #735"
 python -m tools.valor_session create --role dev --message "Fix the bug" --parent <PARENT_ID>
-# Explicit project key override (useful in scripts/CI where cwd may not match)
-python -m tools.valor_session create --role pm --message "..." --project-key valor
 
 # Kill sessions
 python -m tools.valor_session kill --id <SESSION_ID>
@@ -211,8 +209,6 @@ python -m tools.valor_session kill --all
 # JSON output for scripting
 python -m tools.valor_session status --id <SESSION_ID> --json
 ```
-
-**Project key resolution (`create` subcommand):** The `project_key` is derived automatically by matching the current working directory against the `working_directory` field of each project in `~/Desktop/Valor/projects.json`. The most-specific match (longest path prefix) wins. Falls back to `"valor"` with a stderr warning if no match is found. Use `--project-key` to override explicitly (useful in scripts or CI where cwd may not match any project).
 
 See `docs/features/session-steering.md` for full documentation.
 

@@ -1,7 +1,7 @@
 # Integration Audit Report: Summarizer
 
 **Date:** 2026-04-03
-**Auditor:** Dev session (automated via `/do-integration-audit summarizer`)
+**Auditor:** DevSession (automated via `/do-integration-audit summarizer`)
 **Target:** `bridge/summarizer.py` (1,481 lines) and its integration surfaces
 **Issue:** #676
 

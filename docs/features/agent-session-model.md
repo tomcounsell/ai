@@ -84,16 +84,6 @@ Stage transitions are managed by the `PipelineStateMachine` in `bridge/pipeline_
 | `/do-pr-review` | REVIEW | `in_progress` -> `completed` | — |
 | `/do-docs` | DOCS | `in_progress` -> `completed` | — |
 
-### Raw-String Session Lookup
-
-To look up an `AgentSession` from a raw string id (CLI arg, parent reference, Redis hash field), always use the canonical classmethod:
-
-```python
-session = AgentSession.get_by_id(agent_session_id)
-```
-
-**Why not `query.get(string)`?** Popoto's `query.get()` requires a key object (`db_key=` / `redis_key=` kwargs), not a positional string. Passing a bare string raises `AttributeError: 'str' object has no attribute 'redis_key'`. Historically these errors were swallowed by silent `except` blocks, causing lookups to silently return `None` even when the session existed (issue #765). The `get_by_id` helper handles `None`/empty/whitespace input gracefully and logs `WARNING`-level messages on backend failures — surfacing regressions instead of hiding them.
-
 ### Session Lookup Chain
 
 `_find_session()` resolves an AgentSession using a three-tier lookup:

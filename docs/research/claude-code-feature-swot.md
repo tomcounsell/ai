@@ -176,7 +176,7 @@ validation = spawn_agent(
 **Architecture:**
 ```
 Telegram Message
-    → PM session (PM persona, read-only)
+    → ChatSession (PM persona, read-only)
         → /sdlc (single-stage router)
             → Assesses current state
             → Invokes ONE sub-skill:
@@ -187,8 +187,8 @@ Telegram Message
                 /do-pr-review → Code review
                 /do-docs    → Documentation sync
                 /do-merge   → Merge gate
-            → Returns to PM session
-        → PM session decides next stage
+            → Returns to ChatSession
+        → ChatSession decides next stage
 ```
 
 **Code example — SDLC state assessment:**
@@ -229,7 +229,7 @@ python -m tools.job_scheduler playlist --issues 440 445 397
 
 | | Analysis |
 |---|---------|
-| **Strengths** | Full lifecycle automation. PM/Dev session separation prevents scope creep. Job queue enables batch processing. Auto-continue keeps work flowing. |
+| **Strengths** | Full lifecycle automation. ChatSession/DevSession separation prevents scope creep. Job queue enables batch processing. Auto-continue keeps work flowing. |
 | **Weaknesses** | Sequential execution only — one issue at a time. Pipeline is rigid (can't skip stages easily). Patch loops can stall on flaky tests. |
 | **Opportunities** | **Parallel SDLC** — multiple issues in separate worktrees simultaneously. **Stage skipping** — allow fast-tracking for trivial changes. **Pipeline analytics** — track bottleneck stages, average time per stage. |
 | **Threats** | Worktree parallel execution risks shared resource conflicts (Redis, ports). Long pipelines consume significant compute. Failed merges can block the queue. |
@@ -599,13 +599,13 @@ doc_content = WebFetch(
                     └──────────┬──────────────────┘
                                │
                     ┌──────────▼──────────────────┐
-                    │      PM session (PM)        │
+                    │      ChatSession (PM)        │
                     │   read-only orchestrator     │
                     │   nudge loop for routing     │
                     └──────────┬──────────────────┘
                                │
                     ┌──────────▼──────────────────┐
-                    │     Dev session (Dev)         │
+                    │     DevSession (Dev)         │
                     │   full-permission executor   │
                     └──────────┬──────────────────┘
                                │
@@ -629,14 +629,14 @@ doc_content = WebFetch(
                     └──────────┬──────────────────┘
                                │
                     ┌──────────▼──────────────────┐
-                    │      PM session (PM)        │
+                    │      ChatSession (PM)        │
                     │  + pipeline analytics        │
                     └──────────┬──────────────────┘
                                │
               ┌────────────────┼────────────────┐
               │                │                │
      ┌────────▼───────┐ ┌─────▼──────┐ ┌───────▼──────┐
-     │  Dev session 1  │ │ Dev session 2│ │ Dev session 3 │
+     │  DevSession 1  │ │ DevSession 2│ │ DevSession 3 │
      │  worktree/a    │ │ worktree/b  │ │ worktree/c   │
      └────────┬───────┘ └─────┬──────┘ └───────┬──────┘
               │               │                │

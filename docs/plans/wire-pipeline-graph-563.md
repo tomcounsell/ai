@@ -41,15 +41,15 @@ The SDLC pipeline has a graph-based routing system (`PIPELINE_EDGES` in `bridge/
 
 The current (broken) flow when a dev-session completes:
 
-1. **Entry point**: Dev session finishes execution, SDK fires `subagent_stop` hook
+1. **Entry point**: DevSession finishes execution, SDK fires `subagent_stop` hook
 2. **`subagent_stop_hook()`** (`agent/hooks/subagent_stop.py`): Calls `_register_dev_session_completion()` which calls `_record_stage_on_parent()`
-3. **`_record_stage_on_parent()`**: Loads parent PM session, creates `PipelineStateMachine`, finds `current_stage()`, **always calls `complete_stage()`** regardless of actual outcome
+3. **`_record_stage_on_parent()`**: Loads parent ChatSession, creates `PipelineStateMachine`, finds `current_stage()`, **always calls `complete_stage()`** regardless of actual outcome
 4. **Coach** (`bridge/coach.py` [deleted by PR #661; now `bridge/session_coaching.py`]): On next auto-continue, `_build_sdlc_stage_coaching()` scans `DISPLAY_STAGES` linearly for the first "pending" stage, ignoring graph edges
 5. **Dashboard** (`ui/data/sdlc.py`): If `stage_states` is empty, falls back to `_infer_stages_from_history()` heuristic
 
 The correct flow after this fix:
 
-1. **Entry point**: Same -- Dev session finishes, SDK fires `subagent_stop` hook
+1. **Entry point**: Same -- DevSession finishes, SDK fires `subagent_stop` hook
 2. **`subagent_stop_hook()`**: Calls `_register_dev_session_completion()` with stop_reason and output_tail
 3. **`_record_stage_on_parent()`**: Loads parent, creates `PipelineStateMachine`, calls `classify_outcome(stage, stop_reason, output_tail)` to get "success"/"fail"/"ambiguous", then routes to `complete_stage()` or `fail_stage()` accordingly
 4. **Coach**: `_build_sdlc_stage_coaching()` uses `sm.next_stage(outcome)` to determine the next stage from the graph, respecting failure edges and cycle counts
@@ -89,9 +89,9 @@ No prerequisites -- this work has no external dependencies. The Popoto KeyField 
 
 ### Flow
 
-**Dev session completes** -> classify_outcome(stage, stop_reason, output_tail) -> **success**: complete_stage() -> next_stage(success) -> **Coach sends next skill**
+**DevSession completes** -> classify_outcome(stage, stop_reason, output_tail) -> **success**: complete_stage() -> next_stage(success) -> **Coach sends next skill**
 
-**Dev session completes** -> classify_outcome(stage, stop_reason, output_tail) -> **fail**: fail_stage() -> next_stage(fail) -> **Coach sends PATCH skill**
+**DevSession completes** -> classify_outcome(stage, stop_reason, output_tail) -> **fail**: fail_stage() -> next_stage(fail) -> **Coach sends PATCH skill**
 
 **classify_outcome returns ambiguous** -> default to "success" (do not crash or escalate)
 
@@ -124,15 +124,15 @@ No prerequisites -- this work has no external dependencies. The Popoto KeyField 
 
 ## Test Impact
 
-- [ ] `tests/unit/test_subagent_stop_hook.py::TestRegisterDev sessionCompletion` -- UPDATE: `_record_stage_on_parent()` gains new parameters; tests must pass stop_reason and output_tail
-- [ ] `tests/unit/test_subagent_stop_hook.py::TestSubagentStopHookDev session` -- UPDATE: mock the new `classify_outcome` call path
+- [ ] `tests/unit/test_subagent_stop_hook.py::TestRegisterDevSessionCompletion` -- UPDATE: `_record_stage_on_parent()` gains new parameters; tests must pass stop_reason and output_tail
+- [ ] `tests/unit/test_subagent_stop_hook.py::TestSubagentStopHookDevSession` -- UPDATE: mock the new `classify_outcome` call path
 - [ ] `tests/unit/test_coach.py::TestSdlcStageCoaching` -- UPDATE: `_build_sdlc_stage_coaching()` changes from linear scan to graph-based; test inputs may need stage_states dict instead of simple progress dict
 - [ ] `tests/unit/test_pipeline_state_machine.py` -- UPDATE: add tests for Pydantic validation at write boundaries
 - [ ] `tests/unit/test_pipeline_state.py` -- UPDATE: verify `classify_outcome` integration tests still pass with new wiring
 
 ## Rabbit Holes
 
-- **Making the `/sdlc` skill call Python graph APIs**: The skill is a Markdown prompt read by PM session, not Python code. Graph enforcement happens in hooks and coach, not in the skill.
+- **Making the `/sdlc` skill call Python graph APIs**: The skill is a Markdown prompt read by ChatSession, not Python code. Graph enforcement happens in hooks and coach, not in the skill.
 - **Rewriting classify_outcome() with LLM classification**: The deterministic pattern-matching approach is sufficient and predictable. LLM classification would add latency and non-determinism.
 - **Changing the stage_states JSON format**: Must remain backward-compatible with existing Redis data. The Pydantic model validates but does not change the serialization format.
 - **Adding UI for PATCH stage visualization**: PATCH is intentionally a routing-only stage excluded from DISPLAY_STAGES. Dashboard changes beyond removing the inference fallback are out of scope.
@@ -158,7 +158,7 @@ No prerequisites -- this work has no external dependencies. The Popoto KeyField 
 **Trigger:** Coach reads stage_states, subagent_stop writes completion, coach overwrites with stale state
 **Data prerequisite:** stage_states must reflect the latest completion before the coach reads it
 **State prerequisite:** subagent_stop must finish before coach evaluates next stage
-**Mitigation:** The existing architecture prevents this -- subagent_stop fires synchronously within the SDK hook before control returns to the PM session, which then triggers the coach. These are sequential, not concurrent.
+**Mitigation:** The existing architecture prevents this -- subagent_stop fires synchronously within the SDK hook before control returns to the ChatSession, which then triggers the coach. These are sequential, not concurrent.
 
 ## No-Gos (Out of Scope)
 
@@ -257,7 +257,7 @@ No agent integration required -- this is a bridge-internal change. The modificat
 - **Agent Type**: builder
 - **Parallel**: true
 - **CRITIQUE FIX (concern):** Initialization must happen as a post-classification read-modify-write (not a parameter to `create_chat()`), since SDLC classification happens after session creation in the bridge flow. The builder must identify the exact call site where `classification_type` is set to "sdlc" and add the stage_states write there.
-- Initialize stage_states on the PM session with ISSUE=ready, all others=pending
+- Initialize stage_states on the ChatSession with ISSUE=ready, all others=pending
 - Use `PipelineStateMachine` constructor to generate the initial state dict, then serialize and set on session
 - Ensure non-SDLC sessions are not affected (only initialize when classification_type is "sdlc")
 

@@ -5,7 +5,6 @@ Session management CLI for AgentSession — create, steer, monitor, and kill ses
 Usage:
     valor-session create --role pm --chat-id 123 --message "Plan issue #735"
     valor-session create --role dev --message "Fix the bug" --parent abc123
-    valor-session create --role pm --message "..." --project-key valor
     valor-session steer --id abc123 --message "Stop after critique stage"
     valor-session status --id abc123
     valor-session list
@@ -13,16 +12,6 @@ Usage:
     valor-session list --role pm
     valor-session kill --id abc123
     valor-session kill --all
-
-Project Key Resolution (for `create` subcommand):
-    The project_key is derived automatically from the current working directory by
-    matching against the working_directory field of each project in projects.json.
-    The most-specific match (longest path prefix) wins.
-
-    If no match is found, "valor" is used as the fallback and a warning is printed
-    to stderr so it doesn't pollute --json output.
-
-    Use --project-key to override resolution explicitly (useful in scripts/CI).
 
 This tool is the external interface for session steering. It writes to
 AgentSession.queued_steering_messages (via steer_session()) and manages
@@ -52,64 +41,6 @@ def _load_env() -> None:
         pass
 
 
-def resolve_project_key(cwd: str) -> str:
-    """Derive the project_key from cwd by matching against projects.json.
-
-    Loads projects.json via bridge.routing.load_config(), iterates the projects
-    dict, and returns the key whose working_directory equals or is a parent of
-    cwd. When multiple projects match (overlapping paths), the most specific
-    match (longest working_directory path) wins.
-
-    Falls back to "valor" and prints a warning to stderr if no match is found
-    or if projects.json is unavailable.
-
-    Args:
-        cwd: The current working directory to match against project paths.
-
-    Returns:
-        The matching project key, or "valor" if no match is found.
-    """
-    try:
-        from bridge.routing import load_config
-
-        config = load_config()
-    except Exception as e:
-        print(
-            f"Warning: could not load projects.json ({e}), using project_key='valor'",
-            file=sys.stderr,
-        )
-        return "valor"
-
-    cwd_path = Path(cwd).resolve()
-    best_key: str | None = None
-    best_len: int = -1
-
-    projects = config.get("projects", {})
-    for key, project in projects.items():
-        wd = project.get("working_directory", "")
-        if not wd:
-            continue
-        try:
-            wd_path = Path(wd).resolve()
-            if cwd_path == wd_path or cwd_path.is_relative_to(wd_path):
-                wd_len = len(str(wd_path))
-                if wd_len > best_len:
-                    best_len = wd_len
-                    best_key = key
-        except Exception:
-            continue
-
-    if best_key is not None:
-        return best_key
-
-    print(
-        f"Warning: current directory {cwd!r} does not match any project in projects.json, "
-        "using project_key='valor'",
-        file=sys.stderr,
-    )
-    return "valor"
-
-
 def _format_ts(ts: str | float | None) -> str:
     """Format a timestamp for display."""
     if ts is None:
@@ -125,15 +56,10 @@ def _format_ts(ts: str | float | None) -> str:
 
 
 def cmd_create(args: argparse.Namespace) -> int:
-    """Create a new AgentSession and enqueue it.
-
-    project_key is resolved from the current working directory via projects.json
-    unless --project-key is provided explicitly.
-    """
+    """Create a new AgentSession and enqueue it."""
     _load_env()
     try:
         import asyncio
-        import os
 
         from agent.agent_session_queue import _push_agent_session
         from bridge.utc import utc_now
@@ -151,16 +77,9 @@ def cmd_create(args: argparse.Namespace) -> int:
 
         session_type = role  # pm, dev, teammate
 
-        # Resolve project_key: explicit flag takes priority, else derive from cwd
-        explicit_key = getattr(args, "project_key", None)
-        if explicit_key:
-            project_key = explicit_key
-        else:
-            project_key = resolve_project_key(os.getcwd())
-
         async def _create():
             await _push_agent_session(
-                project_key=project_key,
+                project_key="ai",
                 session_id=session_id,
                 working_dir=working_dir,
                 message_text=message,
@@ -175,16 +94,10 @@ def cmd_create(args: argparse.Namespace) -> int:
         result = asyncio.run(_create())
 
         if args.json:
-            print(
-                json.dumps(
-                    {"session_id": result, "status": "created", "project_key": project_key},
-                    indent=2,
-                )
-            )
+            print(json.dumps({"session_id": result, "status": "created"}, indent=2))
         else:
             print(f"Created session: {result}")
-            print(f"  Role:        {role}")
-            print(f"  Project key: {project_key}")
+            print(f"  Role:    {role}")
             print(f"  Message: {message[:80]}")
             print(f"  Chat ID: {chat_id}")
         return 0
@@ -476,14 +389,6 @@ def main() -> int:
     create_parser.add_argument("--chat-id", help="Telegram chat ID (default: 0)")
     create_parser.add_argument("--parent", help="Parent AgentSession ID (for child sessions)")
     create_parser.add_argument("--working-dir", help="Working directory for the session")
-    create_parser.add_argument(
-        "--project-key",
-        help=(
-            "Explicit project key (overrides automatic cwd-based resolution). "
-            "If omitted, the key is derived from the current working directory "
-            "by matching against projects.json."
-        ),
-    )
     create_parser.add_argument("--json", action="store_true", help="Output JSON")
 
     # steer subcommand

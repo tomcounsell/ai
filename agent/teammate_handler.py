@@ -1,9 +1,9 @@
-"""Teammate handler for PM session direct responses.
+"""Teammate handler for ChatSession direct responses.
 
 When the intent classifier identifies a message as an informational query,
 this module provides Teammate-specific instructions that replace the PM dispatch
-block. The PM session answers directly using read-only tools without
-spawning a Dev session.
+block. The ChatSession answers directly using read-only tools without
+spawning a DevSession.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ TEAMMATE_MAX_NUDGE_COUNT = 10
 def build_teammate_instructions() -> str:
     """Build Teammate-specific instructions to replace PM dispatch block.
 
-    These instructions guide the PM session to answer directly and briefly,
+    These instructions guide the ChatSession to answer directly and briefly,
     with honest self-identity and no forced engagement patterns.
 
     Returns:
@@ -27,7 +27,7 @@ def build_teammate_instructions() -> str:
     """
     return (
         "\n\nYou are answering an informational query directly. "
-        "Do NOT spawn a Dev session or use the Agent tool.\n\n"
+        "Do NOT spawn a DevSession or use the Agent tool.\n\n"
         "RESEARCH FIRST — before answering, gather evidence:\n"
         "1. Search source code with Grep/Glob to find relevant files and implementations\n"
         '2. Query the memory system: `python -m tools.memory_search search "relevant query"`\n'

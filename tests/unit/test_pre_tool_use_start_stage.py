@@ -1,17 +1,14 @@
 """Unit tests for pipeline stage wiring in agent/hooks/pre_tool_use.py.
 
 Tests _extract_stage_from_prompt(), _start_pipeline_stage(), and the
-integration of start_stage() into _maybe_register_dev_session() and
-_handle_skill_tool_start().
+integration of start_stage() into _maybe_register_dev_session().
 """
 
 import logging
 from unittest.mock import MagicMock, patch
 
 from agent.hooks.pre_tool_use import (
-    _SKILL_TO_STAGE,
     _extract_stage_from_prompt,
-    _handle_skill_tool_start,
     _maybe_register_dev_session,
     _start_pipeline_stage,
 )
@@ -281,83 +278,3 @@ class TestMaybeRegisterDevSessionStartStage:
             _maybe_register_dev_session(tool_input)
 
         mock_start.assert_not_called()
-
-
-class TestSkillToolStartStage:
-    """Test _handle_skill_tool_start: maps Skill tool calls to pipeline stage starts."""
-
-    def test_known_skill_triggers_start_stage(self):
-        """A known SDLC skill calls _start_pipeline_stage with the mapped stage."""
-        tool_input = {"skill": "do-build"}
-
-        with (
-            patch("agent.hooks.session_registry.resolve", return_value="session-abc"),
-            patch("agent.hooks.pre_tool_use._start_pipeline_stage") as mock_start,
-        ):
-            _handle_skill_tool_start(tool_input, claude_uuid="uuid-1")
-
-        mock_start.assert_called_once_with("session-abc", "BUILD")
-
-    def test_all_mapped_skills_trigger_correct_stage(self):
-        """Every entry in _SKILL_TO_STAGE maps to the correct stage."""
-        for skill_name, expected_stage in _SKILL_TO_STAGE.items():
-            with (
-                patch("agent.hooks.session_registry.resolve", return_value="session-xyz"),
-                patch("agent.hooks.pre_tool_use._start_pipeline_stage") as mock_start,
-            ):
-                _handle_skill_tool_start({"skill": skill_name}, claude_uuid="uuid-2")
-            mock_start.assert_called_once_with("session-xyz", expected_stage)
-
-    def test_unknown_skill_name_is_ignored(self):
-        """A skill not in _SKILL_TO_STAGE silently no-ops."""
-        tool_input = {"skill": "do-discover-paths"}
-
-        with (
-            patch("agent.hooks.session_registry.resolve", return_value="session-def"),
-            patch("agent.hooks.pre_tool_use._start_pipeline_stage") as mock_start,
-        ):
-            _handle_skill_tool_start(tool_input, claude_uuid="uuid-3")
-
-        mock_start.assert_not_called()
-
-    def test_missing_skill_key_is_ignored(self, caplog):
-        """Empty skill name silently no-ops."""
-        tool_input = {}
-
-        with (
-            patch("agent.hooks.session_registry.resolve", return_value="session-ghi"),
-            patch("agent.hooks.pre_tool_use._start_pipeline_stage") as mock_start,
-            caplog.at_level(logging.DEBUG),
-        ):
-            _handle_skill_tool_start(tool_input, claude_uuid="uuid-4")
-
-        mock_start.assert_not_called()
-        assert "empty skill name" in caplog.text
-
-    def test_no_session_id_skips_gracefully(self, caplog):
-        """When session registry returns None, _start_pipeline_stage is not called."""
-        tool_input = {"skill": "do-build"}
-
-        with (
-            patch("agent.hooks.session_registry.resolve", return_value=None),
-            patch("agent.hooks.pre_tool_use._start_pipeline_stage") as mock_start,
-            caplog.at_level(logging.DEBUG),
-        ):
-            _handle_skill_tool_start(tool_input, claude_uuid="uuid-5")
-
-        mock_start.assert_not_called()
-        assert "No session ID resolved" in caplog.text
-
-    def test_skill_to_stage_mapping_is_complete(self):
-        """Verify all expected SDLC skills are present in _SKILL_TO_STAGE."""
-        expected_skills = {
-            "do-plan",
-            "do-plan-critique",
-            "do-build",
-            "do-test",
-            "do-patch",
-            "do-pr-review",
-            "do-docs",
-            "do-merge",
-        }
-        assert expected_skills == set(_SKILL_TO_STAGE.keys())

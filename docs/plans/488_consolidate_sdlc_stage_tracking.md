@@ -42,7 +42,7 @@ Retire `sdlc_stages` field, consolidate to `stage_states` only, and wire Pipelin
 - [x] Simplify `_get_sdlc_stages_dict()` to read only `stage_states` (remove fallback to `sdlc_stages`)
 - [x] Simplify `is_sdlc` property: check only `stage_states` content and `classification_type == "sdlc"` (remove 4-tier cascade to 2 checks)
 - [x] Add a `record_stage_completion(session, stage)` helper function in `bridge/pipeline_state.py` that calls `start_stage()` then `complete_stage()` in one shot (for skills that complete atomically)
-- [x] Wire stage recording into each SDLC skill's completion path: update `.claude/skills/sdlc/SKILL.md` to instruct Dev session agents to call `PipelineStateMachine.complete_stage()` at the end of each stage
+- [x] Wire stage recording into each SDLC skill's completion path: update `.claude/skills/sdlc/SKILL.md` to instruct DevSession agents to call `PipelineStateMachine.complete_stage()` at the end of each stage
 - [x] Update `AgentSession.has_remaining_stages()` and `has_failed_stage()` to use `stage_states` via PipelineStateMachine instead of history parsing
 - [x] Remove `get_stage_progress()` history-parsing method — refactored to delegate to PipelineStateMachine.get_display_progress() (history parsing logic removed, method kept as thin public API wrapper)
 - [x] Update `/do-merge` gate check to read `stage_states` via PipelineStateMachine — `.claude/commands/do-merge.md` already uses PipelineStateMachine
@@ -107,7 +107,7 @@ None -- all changes are internal refactoring with no external dependencies.
 - [ ] `tests/integration/test_stage_aware_auto_continue.py` -- UPDATE: use stage_states instead of history-based get_stage_progress()
 - [ ] `tests/integration/test_lifecycle_transition.py` -- UPDATE: adjust for last_transition_at removal, duration derived from history
 - [ ] `tests/e2e/test_session_lifecycle.py` -- UPDATE: remove references to deprecated fields
-- [ ] `tests/e2e/test_session_spawning.py` -- UPDATE: remove sdlc_stages from Dev session creation assertions
+- [ ] `tests/e2e/test_session_spawning.py` -- UPDATE: remove sdlc_stages from DevSession creation assertions
 
 ## Rabbit Holes
 
@@ -142,7 +142,7 @@ No update system changes required -- this is an internal refactoring of models a
 No new MCP server exposure needed. The changes are internal to the bridge and model layer:
 - PipelineStateMachine is already importable by agent code via `bridge.pipeline_state`
 - The cruft auditor is a new subagent spec (markdown file) dispatched by the existing `/do-pr-review` skill -- no MCP wiring needed
-- The stage recording calls happen inside Dev session agent context which already has full filesystem access
+- The stage recording calls happen inside DevSession agent context which already has full filesystem access
 
 ## Success Criteria
 

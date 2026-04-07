@@ -471,17 +471,8 @@ uninstall_service() {
         echo "Bridge watchdog was not installed"
     fi
 
-    if [ -f "$WORKER_PLIST_PATH" ]; then
-        launchctl unload "$WORKER_PLIST_PATH" 2>/dev/null || true
-        rm -f "$WORKER_PLIST_PATH"
-        echo "Worker service uninstalled"
-    else
-        echo "Worker service was not installed"
-    fi
-
-    # Also stop any running processes
+    # Also stop any running process
     stop_bridge
-    stop_worker
 }
 
 tail_logs() {
@@ -548,7 +539,7 @@ stop_worker() {
     echo "Stopping worker (PID: $pid)..."
 
     if is_worker_launchd_loaded; then
-        launchctl bootout "gui/$(id -u)/$WORKER_PLIST_NAME" 2>/dev/null || true
+        launchctl unload "$WORKER_PLIST_PATH" 2>/dev/null || true
         sleep 2
         if ! is_worker_running; then
             echo "Worker stopped (via launchd)"
@@ -630,7 +621,6 @@ case "${1:-}" in
         ;;
     restart)
         restart_bridge
-        restart_worker
         ;;
     status)
         status_bridge

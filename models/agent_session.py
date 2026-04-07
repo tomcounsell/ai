@@ -3,16 +3,16 @@
 Single Popoto model with session_type discriminator ("pm", "teammate", or "dev")
 and an optional role field for flexible specialization within each session type.
 
-Popoto does not support model inheritance, so PM and Dev sessions are
-distinguished by the session_type field with factory methods and derived
-properties providing type-specific behavior.
+Popoto does not support model inheritance, so ChatSession and DevSession
+are distinguished by the session_type field with factory methods and
+derived properties providing type-specific behavior.
 
 Session types (permission model):
   PM session (session_type="pm"): Read-only Agent SDK session, PM persona.
     Owns the Telegram conversation, orchestrates work, spawns child sessions.
   Teammate session (session_type="teammate"): Read-only session, Teammate persona.
     Participates in group conversations without orchestration authority.
-  Dev session (session_type="dev"): Full-permission Agent SDK session, Dev persona.
+  DevSession (session_type="dev"): Full-permission Agent SDK session, Dev persona.
     Does the actual coding work, runs SDLC pipeline stages.
 
 Roles (specialization within a session type):
@@ -78,7 +78,7 @@ class AgentSession(Model):
         Teammate session (session_type="teammate"):
             Read-only session, Teammate persona. Participates in group
             conversations without orchestration authority.
-        Dev session (session_type="dev"):
+        DevSession (session_type="dev"):
             Full-permission Agent SDK session, Dev persona. Does the actual
             coding work, runs SDLC pipeline stages.
 
@@ -190,7 +190,7 @@ class AgentSession(Model):
     # === Steering fields ===
     queued_steering_messages = ListField(null=True)
 
-    # === PM session delivery fields ===
+    # === ChatSession delivery fields ===
     # Stop-hook review gate: agent's final delivery decision.
     # Set by the stop hook after the agent reviews its draft output.
     # "send" = deliver delivery_text; "react" = emoji only; "silent" = nothing.
@@ -207,7 +207,7 @@ class AgentSession(Model):
     # project properties. Populated at enqueue time; empty dict for legacy sessions.
     project_config = DictField(null=True)
 
-    # === Dev session fields (null when session_type="pm" or "teammate") ===
+    # === DevSession fields (null when session_type="pm" or "teammate") ===
     # Note: parent_session_id is now a deprecated @property alias for
     # parent_agent_session_id. See the alias block below.
     slug = Field(null=True)  # Derives branch, plan path, worktree
@@ -405,46 +405,6 @@ class AgentSession(Model):
         """Create an AgentSession asynchronously with backward-compatible field name support."""
         kwargs = cls._normalize_kwargs(kwargs)
         return await super().async_create(**kwargs)
-
-    @classmethod
-    def get_by_id(cls, agent_session_id: str | None) -> "AgentSession | None":
-        """Look up an AgentSession by its raw string id.
-
-        This is the canonical entry point for resolving a session from a raw
-        ``agent_session_id`` string (e.g., from a CLI argument, parent reference,
-        or Redis hash field).
-
-        Popoto's ``query.get()`` does NOT accept a positional string -- it
-        requires ``db_key=`` / ``redis_key=`` / full KeyField kwargs and will
-        raise ``AttributeError: 'str' object has no attribute 'redis_key'`` if
-        you pass a bare string. Use this helper instead.
-
-        Args:
-            agent_session_id: Raw string id of the session, or ``None``.
-
-        Returns:
-            The matching AgentSession, or None if not found / input is empty.
-        """
-        if not isinstance(agent_session_id, str) or not agent_session_id.strip():
-            return None
-        try:
-            results = list(cls.query.filter(id=agent_session_id))
-        except Exception as exc:
-            logger.warning(
-                "AgentSession.get_by_id lookup failed for %s: %s",
-                agent_session_id,
-                exc,
-            )
-            return None
-        if not results:
-            return None
-        if len(results) > 1:
-            logger.warning(
-                "AgentSession.get_by_id found %d sessions for id=%s (expected 1)",
-                len(results),
-                agent_session_id,
-            )
-        return results[0]
 
     # === Deprecated alias chain: parent_chat_session_id -> parent_session_id
     # ===                          -> parent_agent_session_id (canonical)
@@ -668,17 +628,12 @@ class AgentSession(Model):
             if not pid:
                 break
             try:
-                parent = AgentSession.get_by_id(pid)
+                parent = AgentSession.query.get(pid)
                 if parent is None:
                     break
                 depth += 1
                 current = parent
-            except Exception as exc:
-                logger.warning(
-                    "AgentSession lookup failed walking parent chain for %s: %s",
-                    pid,
-                    exc,
-                )
+            except Exception:
                 break
         return depth
 
@@ -788,7 +743,7 @@ class AgentSession(Model):
 
     @property
     def is_dev(self) -> bool:
-        """Whether this is a Dev session (Dev persona, full permissions)."""
+        """Whether this is a DevSession (Dev persona, full permissions)."""
         return self.session_type == SESSION_TYPE_DEV
 
     @property
@@ -1029,7 +984,7 @@ class AgentSession(Model):
         stage_states: dict | None = None,
         **kwargs,
     ) -> "AgentSession":
-        """Create a Dev session (backward-compat wrapper for create_child(role='dev')).
+        """Create a DevSession (backward-compat wrapper for create_child(role='dev')).
 
         Deprecated: Use create_child(role="dev", ...) instead.
         """
@@ -1058,13 +1013,10 @@ class AgentSession(Model):
         if not self.parent_agent_session_id:
             return None
         try:
-            return AgentSession.get_by_id(self.parent_agent_session_id)
-        except Exception as exc:
+            return AgentSession.query.get(self.parent_agent_session_id)
+        except Exception:
             logger.warning(
-                "Parent session %s lookup failed for session %s: %s",
-                self.parent_agent_session_id,
-                self.id,
-                exc,
+                f"Parent session {self.parent_agent_session_id} not found for session {self.id}"
             )
             return None
 
@@ -1281,7 +1233,7 @@ class AgentSession(Model):
     # === Queued steering message helpers ===
 
     def push_steering_message(self, text: str) -> None:
-        """Buffer a human reply for the PM session."""
+        """Buffer a human reply for the ChatSession."""
         current = self.queued_steering_messages
         if not isinstance(current, list):
             current = []
@@ -1319,13 +1271,11 @@ class AgentSession(Model):
         if not self.parent_agent_session_id:
             return None
         try:
-            return AgentSession.get_by_id(self.parent_agent_session_id)
-        except Exception as exc:
+            parent = AgentSession.query.get(self.parent_agent_session_id)
+            return parent
+        except Exception:
             logger.warning(
-                "Parent agent session %s lookup failed for child %s: %s",
-                self.parent_agent_session_id,
-                self.id,
-                exc,
+                f"Parent agent session {self.parent_agent_session_id} not found for child {self.id}"
             )
             return None
 

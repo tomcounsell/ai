@@ -660,15 +660,12 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     except Exception as e:
         log(f"WARN: Corrupted session cleanup failed: {e}", v)
 
-    # TODO: stale session cleanup disabled — kills healthy sessions because
-    # _active_workers registry is empty when update runs out-of-process.
-    # See: https://github.com/tomcounsell/ai/issues (stale cleanup issue)
-    # try:
-    #     stale_killed = _cleanup_stale_sessions(project_dir)
-    #     if stale_killed > 0:
-    #         log(f"Cleaned up {stale_killed} stale session(s)", v)
-    # except Exception as e:
-    #     log(f"WARN: Session cleanup failed: {e}", v)
+    try:
+        stale_killed = _cleanup_stale_sessions(project_dir)
+        if stale_killed > 0:
+            log(f"Cleaned up {stale_killed} stale session(s)", v)
+    except Exception as e:
+        log(f"WARN: Session cleanup failed: {e}", v)
 
     # Step 6: Environment verification
     if config.do_verify:

@@ -19,7 +19,6 @@ Architecture:
 """
 
 import asyncio
-import json
 import logging
 import os
 import signal
@@ -131,7 +130,7 @@ _AGENT_SESSION_FIELDS = [
     "claude_session_uuid",
     # Session hierarchy fields — must be preserved across delete-and-recreate
     "parent_agent_session_id",
-    # === Session role/type fields ===
+    # === ChatSession/DevSession fields ===
     "session_type",
     # parent_session_id removed: it is now a deprecated @property alias for
     # parent_agent_session_id (already preserved above).
@@ -289,19 +288,6 @@ async def _push_agent_session(
         await asyncio.to_thread(_log_lifecycle)
     except Exception as e:
         logger.warning(f"Failed to log lifecycle transition for session {session_id}: {e}")
-
-    # Publish notification so the standalone worker picks up immediately (~1s latency)
-    # instead of waiting for the 5-minute health check. Fire-and-forget: publish
-    # failure is logged as a warning and never raises. If the worker is not running
-    # or Redis pub/sub drops the message, the health check is the safety net.
-    try:
-        from popoto.redis_db import POPOTO_REDIS_DB
-
-        payload = json.dumps({"chat_id": chat_id, "session_id": session_id})
-        await asyncio.to_thread(POPOTO_REDIS_DB.publish, "valor:sessions:new", payload)
-        logger.debug(f"Published session notification for chat_id={chat_id}")
-    except Exception as e:
-        logger.warning(f"Failed to publish session notification for {session_id}: {e}")
 
     return await AgentSession.query.async_count(chat_id=chat_id, status="pending")
 
@@ -542,35 +528,7 @@ async def _pop_agent_session(chat_id: str) -> AgentSession | None:
         return (prio, _ensure_tz(j.created_at))
 
     eligible.sort(key=sort_key)
-
-    # Guard: index can drift from actual state (e.g. session completed but still
-    # in the pending index). Iterate past stale zombie sessions; trigger a one-time
-    # rebuild to repair the index. Continue to the next candidate so the zombie
-    # doesn't block legitimate pending sessions behind it.
-    from models.session_lifecycle import transition_status
-
-    rebuilt = False
-    chosen = None
-    for candidate in eligible:
-        if candidate.status in _TERMINAL_STATUSES:
-            logger.warning(
-                f"[chat:{chat_id}] Skipping session {candidate.id} "
-                f"(session {candidate.session_id}): index says pending but actual "
-                f"status={candidate.status!r}. Stale index entry."
-            )
-            if not rebuilt:
-                rebuilt = True
-                try:
-                    AgentSession.rebuild_indexes()
-                    logger.info(f"[chat:{chat_id}] Rebuilt indexes to repair stale entry")
-                except Exception as rebuild_err:
-                    logger.warning(f"[chat:{chat_id}] Index rebuild failed: {rebuild_err}")
-            continue
-        chosen = candidate
-        break
-
-    if chosen is None:
-        return None
+    chosen = eligible[0]
 
     # Direct field mutation -- status is an IndexedField, not a KeyField,
     # so save() correctly updates the secondary index.
@@ -578,6 +536,7 @@ async def _pop_agent_session(chat_id: str) -> AgentSession | None:
         f"[chat:{chat_id}] Transitioning session {chosen.id} "
         f"(session {chosen.session_id}) pending->running"
     )
+    from models.session_lifecycle import transition_status
 
     chosen.started_at = datetime.now(tz=UTC)
     transition_status(chosen, "running", reason="worker picked up session")
@@ -669,39 +628,14 @@ async def _pop_agent_session_with_fallback(chat_id: str) -> AgentSession | None:
             return (prio, _ensure_tz(j.created_at))
 
         eligible.sort(key=sort_key)
-
-        # Guard: same stale-index protection as _pop_agent_session — iterate past
-        # zombie sessions rather than blocking on the first one.
-        from models.session_lifecycle import transition_status
-
-        rebuilt = False
-        chosen = None
-        for candidate in eligible:
-            if candidate.status in _TERMINAL_STATUSES:
-                logger.warning(
-                    f"[chat:{chat_id}] Sync fallback: skipping session {candidate.id} "
-                    f"(session {candidate.session_id}): index says pending but actual "
-                    f"status={candidate.status!r}. Stale index entry."
-                )
-                if not rebuilt:
-                    rebuilt = True
-                    try:
-                        AgentSession.rebuild_indexes()
-                        logger.info(f"[chat:{chat_id}] Rebuilt indexes to repair stale entry")
-                    except Exception as rebuild_err:
-                        logger.warning(f"[chat:{chat_id}] Index rebuild failed: {rebuild_err}")
-                continue
-            chosen = candidate
-            break
-
-        if chosen is None:
-            return None
+        chosen = eligible[0]
 
         # Direct field mutation -- status is an IndexedField, not a KeyField.
         logger.info(
             f"[chat:{chat_id}] Sync fallback: transitioning session {chosen.id} "
             f"(session {chosen.session_id}) pending->running"
         )
+        from models.session_lifecycle import transition_status
 
         chosen.started_at = datetime.now(tz=UTC)
         transition_status(chosen, "running", reason="worker picked up session (sync fallback)")
@@ -765,13 +699,9 @@ def reorder_agent_session(agent_session_id: str, new_priority: str) -> bool:
         return False
 
     try:
-        session = AgentSession.get_by_id(agent_session_id)
-    except Exception as exc:
-        logger.warning(
-            "[pm-controls] Session %s lookup failed for reorder: %s",
-            agent_session_id,
-            exc,
-        )
+        session = AgentSession.query.get(agent_session_id)
+    except Exception:
+        logger.warning(f"[pm-controls] Session {agent_session_id} not found for reorder")
         return False
 
     if session is None or session.status != "pending":
@@ -800,13 +730,9 @@ def cancel_agent_session(agent_session_id: str) -> bool:
         True if the session was cancelled, False if not found or not pending.
     """
     try:
-        session = AgentSession.get_by_id(agent_session_id)
-    except Exception as exc:
-        logger.warning(
-            "[pm-controls] Session %s lookup failed for cancel: %s",
-            agent_session_id,
-            exc,
-        )
+        session = AgentSession.query.get(agent_session_id)
+    except Exception:
+        logger.warning(f"[pm-controls] Session {agent_session_id} not found for cancel")
         return False
 
     if session is None or session.status != "pending":
@@ -835,13 +761,9 @@ def retry_agent_session(agent_session_id: str) -> AgentSession | None:
         The new AgentSession if retried, None if not found or not terminal.
     """
     try:
-        session = AgentSession.get_by_id(agent_session_id)
-    except Exception as exc:
-        logger.warning(
-            "[pm-controls] agent_session_id %s lookup failed for retry: %s",
-            agent_session_id,
-            exc,
-        )
+        session = AgentSession.query.get(agent_session_id)
+    except Exception:
+        logger.warning(f"[pm-controls] agent_session_id {agent_session_id} not found for retry")
         return None
 
     if not session:
@@ -915,7 +837,7 @@ def get_queue_status(chat_id: str) -> dict:
 async def get_active_session_for_chat(chat_id: str) -> AgentSession | None:
     """Find the active AgentSession for a given Telegram chat_id.
 
-    Used for routing steering messages to the correct PM session.
+    Used for routing steering messages to the correct ChatSession.
     Returns the most recent running AgentSession for this chat.
     """
     sessions = await asyncio.to_thread(
@@ -1392,79 +1314,6 @@ async def _agent_session_health_loop() -> None:
         except Exception as e:
             logger.error("[session-health] Error in health check: %s", e, exc_info=True)
         await asyncio.sleep(AGENT_SESSION_HEALTH_CHECK_INTERVAL)
-
-
-async def _session_notify_listener() -> None:
-    """Subscribe to valor:sessions:new and wake the worker on new sessions.
-
-    Fire-and-forget coroutine started by the standalone worker alongside the
-    health monitor. Reconnects automatically on transient Redis errors.
-
-    Uses a queue to bridge the blocking pubsub.listen() thread and the asyncio
-    event loop: the background thread puts chat_ids onto the queue, and the
-    coroutine awaits them and calls _ensure_worker / sets the event.
-    """
-    while True:
-        notify_queue: asyncio.Queue = asyncio.Queue()
-        loop = asyncio.get_running_loop()
-
-        def _listen_in_thread() -> None:
-            """Blocking loop that drains pubsub and forwards chat_ids to the queue."""
-            try:
-                from popoto.redis_db import POPOTO_REDIS_DB
-
-                pubsub = POPOTO_REDIS_DB.pubsub()
-                pubsub.subscribe("valor:sessions:new")
-                logger.info("Session notify listener subscribed to valor:sessions:new")
-                for message in pubsub.listen():
-                    if message["type"] != "message":
-                        continue
-                    try:
-                        data = json.loads(message["data"])
-                        chat_id = data.get("chat_id")
-                        session_id = data.get("session_id")
-                        if chat_id is not None:
-                            logger.info(
-                                "Received session notify: chat_id=%s session_id=%s",
-                                chat_id,
-                                session_id,
-                            )
-                            loop.call_soon_threadsafe(notify_queue.put_nowait, chat_id)
-                    except json.JSONDecodeError as e:
-                        logger.warning("Session notify: bad JSON payload: %s", e)
-                    except Exception as e:
-                        logger.warning("Session notify: error processing message: %s", e)
-            except Exception as e:
-                logger.warning("Session notify listener thread error: %s", e)
-            finally:
-                # Signal the coroutine side to restart
-                loop.call_soon_threadsafe(notify_queue.put_nowait, None)
-
-        try:
-            # Run the blocking pubsub loop in a thread; process results here
-            listener_future = asyncio.to_thread(_listen_in_thread)
-            task = asyncio.create_task(listener_future)
-
-            while True:
-                chat_id = await notify_queue.get()
-                if chat_id is None:
-                    # Thread exited (error path); restart after delay
-                    break
-                _ensure_worker(chat_id)
-                event = _active_events.get(chat_id)
-                if event is not None:
-                    event.set()
-
-            task.cancel()
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
-
-        except Exception as e:
-            logger.warning("Session notify listener error: %s. Retrying in 5s...", e)
-
-        await asyncio.sleep(5)
 
 
 # === CLI Helpers ===
@@ -2374,7 +2223,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
 
         Simple nudge model: the bridge has ONE response to any non-completion:
         "Keep working -- only stop when you need human input or you're done."
-        The PM session owns all SDLC intelligence. The bridge just nudges.
+        ChatSession owns all SDLC intelligence. The bridge just nudges.
 
         Completion detection:
         - stop_reason == "end_turn" AND output is non-empty → deliver
@@ -2948,22 +2797,6 @@ def record_revival_cooldown(chat_id: str) -> None:
     _save_cooldowns(cooldowns)
 
 
-def maybe_send_revival_prompt(project_key: str, working_dir: str, chat_id: str) -> dict | None:
-    """
-    Check whether a revival prompt should be sent for this chat.
-
-    Combines check_revival (git state inspection) with cooldown recording.
-    Returns revival_info dict if a revival is warranted, None otherwise.
-    The caller is responsible for actually sending the Telegram message.
-    """
-    if not project_key or not working_dir:
-        return None
-    revival_info = check_revival(project_key, working_dir, chat_id)
-    if revival_info:
-        record_revival_cooldown(chat_id)
-    return revival_info
-
-
 async def queue_revival_agent_session(
     revival_info: dict,
     chat_id: str,
@@ -3380,13 +3213,8 @@ def _cli_flush_agent_session(agent_session_id: str) -> None:
     import sys
 
     try:
-        session = AgentSession.get_by_id(agent_session_id)
-    except Exception as exc:
-        logger.warning(
-            "[cli] AgentSession lookup failed for %s: %s",
-            agent_session_id,
-            exc,
-        )
+        session = AgentSession.query.get(agent_session_id)
+    except Exception:
         session = None
 
     if not session:

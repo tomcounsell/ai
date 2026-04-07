@@ -43,7 +43,7 @@ class TestAgentSessionHierarchyHelpers:
         from models.agent_session import AgentSession
 
         parent = self._make_session(agent_session_id="parent-1")
-        mock_query.filter.return_value = [parent]
+        mock_query.get.return_value = parent
 
         child = AgentSession()
         child.parent_agent_session_id = "parent-1"
@@ -51,7 +51,7 @@ class TestAgentSessionHierarchyHelpers:
 
         result = child.get_parent()
         assert result is not None
-        mock_query.filter.assert_called_once_with(id="parent-1")
+        mock_query.get.assert_called_once_with("parent-1")
 
     @patch("models.agent_session.AgentSession.query")
     def test_get_parent_returns_none_when_no_parent(self, mock_query):
@@ -64,7 +64,7 @@ class TestAgentSessionHierarchyHelpers:
 
         result = child.get_parent()
         assert result is None
-        mock_query.filter.assert_not_called()
+        mock_query.get.assert_not_called()
 
     @patch("models.agent_session.AgentSession.query")
     def test_get_children_returns_children(self, mock_query):
@@ -205,7 +205,7 @@ class TestFinalizeParent:
             self._make_session(agent_session_id="c1", status="completed"),
             self._make_session(agent_session_id="c2", status="completed"),
         ]
-        mock_model.get_by_id.return_value = parent
+        mock_model.query.get.return_value = parent
         mock_model.query.filter.return_value = children
 
         _finalize_parent_sync("p1")
@@ -226,7 +226,7 @@ class TestFinalizeParent:
             self._make_session(agent_session_id="c1", status="completed"),
             self._make_session(agent_session_id="c2", status="failed"),
         ]
-        mock_model.get_by_id.return_value = parent
+        mock_model.query.get.return_value = parent
         mock_model.query.filter.return_value = children
 
         _finalize_parent_sync("p1")
@@ -247,7 +247,7 @@ class TestFinalizeParent:
             self._make_session(agent_session_id="c1", status="completed"),
             self._make_session(agent_session_id="c2", status="running"),
         ]
-        mock_model.get_by_id.return_value = parent
+        mock_model.query.get.return_value = parent
         mock_model.query.filter.return_value = children
 
         _finalize_parent_sync("p1")
@@ -274,7 +274,7 @@ class TestFinalizeParent:
             self._make_session(agent_session_id="c1", status="completed"),
             self._make_session(agent_session_id="c2", status="running"),
         ]
-        mock_model.get_by_id.return_value = parent
+        mock_model.query.get.return_value = parent
         mock_model.query.filter.return_value = children
 
         # With completing_child_id, c2's status is overridden to "completed"
@@ -300,7 +300,7 @@ class TestFinalizeParent:
             self._make_session(agent_session_id="c1", status="completed"),
             self._make_session(agent_session_id="c2", status="running"),
         ]
-        mock_model.get_by_id.return_value = parent
+        mock_model.query.get.return_value = parent
         mock_model.query.filter.return_value = children
 
         _finalize_parent_sync(
@@ -321,7 +321,7 @@ class TestFinalizeParent:
             agent_session_id="p1",
             status="completed",
         )
-        mock_model.get_by_id.return_value = parent
+        mock_model.query.get.return_value = parent
 
         _finalize_parent_sync("p1")
 
@@ -333,7 +333,7 @@ class TestFinalizeParent:
         """_finalize_parent_sync handles missing parent gracefully."""
         from models.session_lifecycle import _finalize_parent_sync
 
-        mock_model.get_by_id.return_value = None
+        mock_model.query.get.return_value = None
 
         _finalize_parent_sync("nonexistent")
 
@@ -349,7 +349,7 @@ class TestFinalizeParent:
             agent_session_id="p1",
             status="waiting_for_children",
         )
-        mock_model.get_by_id.return_value = parent
+        mock_model.query.get.return_value = parent
         mock_model.query.filter.return_value = []
 
         _finalize_parent_sync("p1")

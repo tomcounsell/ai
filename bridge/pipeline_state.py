@@ -12,7 +12,7 @@ The state machine wraps pipeline_graph.py and manages stage statuses:
 - failed: stage finished with failure
 
 State is persisted as a JSON dict on AgentSession.stage_states.
-Each PM session run creates a fresh state machine from the session.
+Each ChatSession run creates a fresh state machine from the session.
 
 Usage:
     from bridge.pipeline_state import PipelineStateMachine

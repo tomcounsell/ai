@@ -71,10 +71,9 @@ Worker loop
 `tools/valor_session.py` — session management tool modeled after `valor-telegram`.
 
 ```bash
-# Create a new session (project_key derived from cwd via projects.json)
+# Create a new session
 valor-session create --role pm --message "Plan issue #735"
 valor-session create --role dev --message "Fix the bug" --parent abc123
-valor-session create --role pm --message "..." --project-key valor  # explicit override
 
 # Steer a running session
 valor-session steer --id abc123 --message "Stop after critique stage"

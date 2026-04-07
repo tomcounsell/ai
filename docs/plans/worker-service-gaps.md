@@ -1,6 +1,6 @@
 ---
 slug: worker-service-gaps
-status: docs_complete
+status: Ready
 type: bug
 appetite: Small
 tracking: https://github.com/tomcounsell/ai/issues/755

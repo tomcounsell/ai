@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Push steering messages from a PM session to its child Dev sessions.
+"""Push steering messages from a ChatSession to its child DevSessions.
 
 Usage:
     python scripts/steer_child.py --session-id ID --message "focus on tests" --parent-id PID
@@ -27,19 +27,16 @@ def _resolve_parent_id(args_parent_id: str | None) -> str | None:
 
 
 def _list_children(parent_id: str) -> int:
-    """List active child Dev sessions for a parent PM session.
+    """List active child DevSessions for a parent ChatSession.
 
     Returns exit code (0 on success, 1 on error).
     """
     from models.agent_session import AgentSession
 
     try:
-        parent = AgentSession.get_by_id(parent_id)
-    except Exception as exc:
-        print(
-            f"Error: parent session '{parent_id}' lookup failed: {exc}",
-            file=sys.stderr,
-        )
+        parent = AgentSession.query.get(parent_id)
+    except Exception:
+        print(f"Error: parent session '{parent_id}' not found", file=sys.stderr)
         return 1
 
     if parent is None:
@@ -50,10 +47,10 @@ def _list_children(parent_id: str) -> int:
     running = [c for c in children if c.status == "running"]
 
     if not running:
-        print("No active child Dev sessions found.")
+        print("No active child DevSessions found.")
         return 0
 
-    print(f"Active child Dev sessions for {parent_id}:")
+    print(f"Active child DevSessions for {parent_id}:")
     for child in running:
         slug_info = f" slug={child.slug}" if child.slug else ""
         stage_info = f" stage={child.current_stage}" if child.current_stage else ""
@@ -63,7 +60,7 @@ def _list_children(parent_id: str) -> int:
 
 
 def _steer_child(session_id: str, message: str, parent_id: str, abort: bool) -> int:
-    """Push a steering message to a child Dev session.
+    """Push a steering message to a child DevSession.
 
     Returns exit code (0 on success, 1 on error).
     """
@@ -78,21 +75,17 @@ def _steer_child(session_id: str, message: str, parent_id: str, abort: bool) -> 
 
     # Look up the target child session
     try:
-        child = AgentSession.get_by_id(session_id)
-    except Exception as exc:
-        print(
-            f"Warning: child session '{session_id}' lookup failed: {exc}",
-            file=sys.stderr,
-        )
+        child = AgentSession.query.get(session_id)
+    except Exception:
         child = None
 
     if child is None:
         print(f"Error: session '{session_id}' not found", file=sys.stderr)
         return 1
 
-    # Validate it is a Dev session
+    # Validate it is a DevSession
     if not child.is_dev:
-        print(f"Error: session '{session_id}' is not a Dev session", file=sys.stderr)
+        print(f"Error: session '{session_id}' is not a DevSession", file=sys.stderr)
         return 1
 
     # Validate parent-child relationship
@@ -115,7 +108,7 @@ def _steer_child(session_id: str, message: str, parent_id: str, abort: bool) -> 
     push_steering_message(
         session_id=session_id,
         text=message,
-        sender="pm",
+        sender="ChatSession",
         is_abort=abort,
     )
 
@@ -128,11 +121,11 @@ def _steer_child(session_id: str, message: str, parent_id: str, abort: bool) -> 
 def main(argv: list[str] | None = None) -> int:
     """Entry point for the steer_child CLI."""
     parser = argparse.ArgumentParser(
-        description="Push steering messages from a PM session to its child Dev sessions."
+        description="Push steering messages from ChatSession to child DevSessions."
     )
     parser.add_argument(
         "--session-id",
-        help="Target child Dev session ID to steer.",
+        help="Target child DevSession ID to steer.",
     )
     parser.add_argument(
         "--message",
@@ -140,7 +133,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--parent-id",
-        help="Parent PM session ID (defaults to VALOR_SESSION_ID env var).",
+        help="Parent ChatSession ID (defaults to VALOR_SESSION_ID env var).",
     )
     parser.add_argument(
         "--abort",
@@ -151,7 +144,7 @@ def main(argv: list[str] | None = None) -> int:
         "--list",
         action="store_true",
         dest="list_children",
-        help="List active child Dev sessions instead of steering.",
+        help="List active child DevSessions instead of steering.",
     )
 
     args = parser.parse_args(argv)

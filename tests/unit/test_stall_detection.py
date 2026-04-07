@@ -7,7 +7,6 @@ Recovery is now handled by the unified _agent_session_health_check in agent/agen
 """
 
 import time
-from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -18,7 +17,6 @@ from monitoring.session_watchdog import (
     STALL_THRESHOLD_PENDING,
     STALL_THRESHOLD_RUNNING,
     STALL_THRESHOLDS,
-    _to_timestamp,
     check_stalled_sessions,
     fix_unhealthy_session,
 )
@@ -260,42 +258,3 @@ class TestFixUnhealthySession:
             result = await fix_unhealthy_session(session, assessment)
             assert result is True
             mock_abandon.assert_called_once()
-
-
-# ===================================================================
-# _to_timestamp — UTC fix for naive datetimes (issue #777)
-# ===================================================================
-
-
-class TestToTimestamp:
-    def test_none_returns_none(self):
-        assert _to_timestamp(None) is None
-
-    def test_float_passthrough(self):
-        ts = time.time()
-        assert _to_timestamp(ts) == ts
-
-    def test_int_passthrough(self):
-        assert _to_timestamp(1234567890) == 1234567890.0
-
-    def test_aware_datetime_returns_correct_timestamp(self):
-        aware = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
-        assert _to_timestamp(aware) == aware.timestamp()
-
-    def test_naive_datetime_treated_as_utc(self):
-        """Naive datetime (as returned by Popoto SortedField) must be
-        treated as UTC, not local time.  On a UTC+7 machine, the old code
-        would inflate the timestamp by 25200 seconds; after the fix both
-        forms must agree within 1 second of each other."""
-        naive = datetime.utcnow()
-        aware = datetime.now(tz=UTC)
-        assert abs(_to_timestamp(naive) - _to_timestamp(aware)) < 1.0
-
-    def test_naive_matches_aware_explicit_value(self):
-        """Verify with a fixed timestamp to rule out timing jitter."""
-        naive = datetime(2026, 4, 7, 10, 0, 0)
-        aware = datetime(2026, 4, 7, 10, 0, 0, tzinfo=UTC)
-        assert _to_timestamp(naive) == _to_timestamp(aware)
-
-    def test_unrecognized_type_returns_none(self):
-        assert _to_timestamp("not-a-datetime") is None

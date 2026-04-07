@@ -72,16 +72,13 @@ Standalone mode is set automatically by `python -m worker`. In this mode, nudge 
 
 ### Graceful Shutdown
 
-On SIGTERM (e.g., `./scripts/valor-service.sh worker-restart` or `/update` restart):
+On SIGTERM (e.g., `launchctl kickstart -k` or `/update` restart):
 
 1. `request_shutdown()` sets a flag and wakes all waiting workers
 2. Workers finish their current session (no mid-session kills)
 3. `_run_worker()` awaits all active worker loops with a 60s timeout
 4. If timeout expires, remaining tasks are cancelled (triggers cleanup)
 5. Sessions that were pending but not started remain as "pending" in Redis for next startup
-6. `main()` calls `sys.exit(1)` — signals launchd to apply `ThrottleInterval` (10s) rather than the default ~10-minute throttle
-
-SIGINT (developer Ctrl-C) exits with code 0 — a voluntary developer stop should not trigger a forced restart. Only SIGTERM sets the `_shutdown_via_signal` flag that causes the non-zero exit.
 
 ## CLI Usage
 

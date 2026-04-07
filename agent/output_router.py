@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 MAX_NUDGE_COUNT = 50
 
 # Default nudge message sent to the agent for all session types.
-# The PM session owns SDLC intelligence; the bridge just keeps the agent working.
+# ChatSession owns SDLC intelligence; the bridge just keeps the agent working.
 NUDGE_MESSAGE = "Keep working — only stop when you need human input or you're done."
 
 

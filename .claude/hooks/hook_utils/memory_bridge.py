@@ -249,8 +249,8 @@ def recall(
         # Multi-query decomposition -- cluster keywords and retrieve via BM25+RRF
         import time
 
-        from agent.memory_retrieval import retrieve_memories
         from utils.keyword_extraction import _cluster_keywords
+        from agent.memory_retrieval import retrieve_memories
 
         project_key = _get_project_key()
 

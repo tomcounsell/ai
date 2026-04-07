@@ -66,7 +66,7 @@ MERGE is the terminal stage, gated by human authorization.
 
 **File**: `agent/hooks/subagent_stop.py`
 
-When a dev-session subagent completes, the SubagentStop hook now injects the current SDLC pipeline state back into the PM (PM session) context. This prevents the PM from fabricating stage completion claims (e.g., claiming "review passed" without running `/do-pr-review`).
+When a dev-session subagent completes, the SubagentStop hook now injects the current SDLC pipeline state back into the PM (ChatSession) context. This prevents the PM from fabricating stage completion claims (e.g., claiming "review passed" without running `/do-pr-review`).
 
 The hook:
 1. Detects `agent_type == "dev-session"` completions

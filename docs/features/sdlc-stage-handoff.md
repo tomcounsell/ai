@@ -6,49 +6,13 @@ SDLC stages post structured comments to the tracking GitHub issue on completion 
 
 ## Problem
 
-Without stage handoff, each Dev session starts with only the plan document and its task prompt. Discoveries, decisions, and blockers from prior stages are lost between sessions. The Test stage does not know that Build hit a tricky edge case; the Review stage cannot see what Test already validated.
+Without stage handoff, each DevSession starts with only the plan document and its task prompt. Discoveries, decisions, and blockers from prior stages are lost between sessions. The Test stage does not know that Build hit a tricky edge case; the Review stage cannot see what Test already validated.
 
 ## How It Works
 
-Two execution paths write stage tracking records: the **dev-session path** (for DevSession Agent tool calls) and the **Skill path** (for PM Skill tool calls). Both write to `AgentSession.stage_states` via `PipelineStateMachine`, enabling the dashboard to show real progress for all session types.
+### On Stage Completion (SubagentStop Hook)
 
-### Skill Tool Path (PM Sessions)
-
-When a PM session invokes `Skill(skill="do-build")` (or any other SDLC skill), the `pre_tool_use` and `post_tool_use` hooks in `agent/hooks/` intercept the call:
-
-**On skill start (`pre_tool_use.py`):**
-1. Detects `tool_name == "Skill"` in the hook input
-2. Looks up the skill name in `_SKILL_TO_STAGE` (e.g., `"do-build"` → `"BUILD"`)
-3. Resolves the bridge session ID via `session_registry.resolve(claude_uuid)`
-4. Calls `_start_pipeline_stage(session_id, stage)` to mark the stage `in_progress`
-5. Silently no-ops for unknown skills (non-SDLC skills like `do-discover-paths`)
-
-**On skill completion (`post_tool_use.py`):**
-1. Detects `tool_name == "Skill"` and checks if the skill is in `_SKILL_TO_STAGE`
-2. Resolves the session ID the same way
-3. Calls `_complete_pipeline_stage(session_id)` which reads `current_stage()` from Redis and calls `complete_stage()`
-4. Avoids storing state between pre and post hooks — reads the in_progress stage from Redis directly
-
-**`_SKILL_TO_STAGE` mapping** (in `agent/hooks/pre_tool_use.py`):
-
-```python
-_SKILL_TO_STAGE = {
-    "do-plan": "PLAN",
-    "do-plan-critique": "CRITIQUE",
-    "do-build": "BUILD",
-    "do-test": "TEST",
-    "do-patch": "PATCH",
-    "do-pr-review": "REVIEW",
-    "do-docs": "DOCS",
-    "do-merge": "MERGE",
-}
-```
-
-All errors are swallowed with `logger.warning` — hooks never crash the PM session.
-
-### On Stage Completion (SubagentStop Hook — Dev-Session Path)
-
-When a Dev session completes, the `subagent_stop_hook` in `agent/hooks/subagent_stop.py`:
+When a DevSession completes, the `subagent_stop_hook` in `agent/hooks/subagent_stop.py`:
 
 1. Resolves the tracking issue number from `SDLC_TRACKING_ISSUE` env var, `SDLC_ISSUE_NUMBER` env var, or plan frontmatter (`tracking:` field)
 2. Extracts the current stage name from the PipelineStateMachine stage states
@@ -58,13 +22,13 @@ When a Dev session completes, the `subagent_stop_hook` in `agent/hooks/subagent_
 6. Calls `post_stage_comment()` from `utils/issue_comments.py` to post a structured markdown comment
 7. All of this is wrapped in try/except -- classification and comment posting never crash the hook
 
-### On Stage Start (PM session Prompt Enrichment)
+### On Stage Start (ChatSession Prompt Enrichment)
 
-The PM session PM instructions in `agent/sdk_client.py` include a step to gather prior stage context before spawning a Dev session:
+The ChatSession PM instructions in `agent/sdk_client.py` include a step to gather prior stage context before spawning a DevSession:
 
-1. PM session fetches issue comments via `gh api repos/{owner}/{repo}/issues/{number}/comments`
+1. ChatSession fetches issue comments via `gh api repos/{owner}/{repo}/issues/{number}/comments`
 2. Filters for comments matching the structured stage format (identified by `<!-- sdlc-stage-comment -->` marker)
-3. Appends a "Prior stage findings" section to the Dev session prompt
+3. Appends a "Prior stage findings" section to the DevSession prompt
 4. Limited to the last 5 stage comments to prevent context bloat
 
 ### Comment Format
@@ -97,7 +61,7 @@ As of PR #601, every dev-session completion triggers outcome classification befo
 ### Classification Flow
 
 ```
-Dev session completes
+DevSession completes
   -> _extract_output_tail(input_data)    # last ~500 chars from transcript
   -> sm.classify_outcome(stage, stop_reason, output_tail)
       |
@@ -151,7 +115,7 @@ Extended with these functions:
 
 - `_resolve_tracking_issue()` -- Resolves the tracking issue number from environment variables (`SDLC_TRACKING_ISSUE`, `SDLC_ISSUE_NUMBER`) or by parsing plan frontmatter. Returns int or None.
 - `_extract_output_tail(input_data, max_chars=500)` -- Reads the last ~500 chars from the agent transcript file for outcome classification. Falls back to `_extract_outcome_summary()` if the transcript is unavailable.
-- `_record_stage_on_parent(parent_session_id, stop_reason, output_tail)` -- Loads the parent PM session, calls `classify_outcome()` on its PipelineStateMachine, and routes to `complete_stage()` or `fail_stage()` based on the result. Errors default to `complete_stage()`.
+- `_record_stage_on_parent(parent_session_id, stop_reason, output_tail)` -- Loads the parent ChatSession, calls `classify_outcome()` on its PipelineStateMachine, and routes to `complete_stage()` or `fail_stage()` based on the result. Errors default to `complete_stage()`.
 - `_post_stage_comment_on_completion(input_data, current_stage)` -- Called after `_register_dev_session_completion()`. Posts the stage comment, wrapped in try/except so failures are non-fatal.
 
 ### `agent/sdk_client.py`
@@ -183,5 +147,5 @@ Extended with these functions:
 - [Pipeline State Machine](pipeline-state-machine.md) -- Stage tracking that the hook reads from
 - [Observer Agent](observer-agent.md) -- SDLC routing that triggers stage transitions
 - [Skill Context Injection](skill-context-injection.md) -- Environment variable propagation pattern
-- GitHub Issue: [#520](https://github.com/tomcounsell/ai/issues/520) (stage handoff), [#563](https://github.com/tomcounsell/ai/issues/563) (graph wiring), [#782](https://github.com/tomcounsell/ai/issues/782) (Skill tool path)
+- GitHub Issue: [#520](https://github.com/tomcounsell/ai/issues/520) (stage handoff), [#563](https://github.com/tomcounsell/ai/issues/563) (graph wiring)
 - PR: [#523](https://github.com/tomcounsell/ai/pull/523) (stage handoff), [#601](https://github.com/tomcounsell/ai/pull/601) (graph wiring)

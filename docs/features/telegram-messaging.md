@@ -106,13 +106,13 @@ Both `valor-telegram send` and `tools/send_telegram.py` route through the Redis 
 
 | Tool | Context | Session ID prefix | File Support |
 |------|---------|------------------|--------------|
-| `valor-telegram send` | Dev session / CLI | `cli-{unix_timestamp}` | `--file`, `--image`, `--audio`, `--reply-to` |
-| `python tools/send_telegram.py` | PM session (PM) | Session UUID | `--file` (repeatable, max 10 for albums; auto-detects media type) |
+| `valor-telegram send` | DevSession / CLI | `cli-{unix_timestamp}` | `--file`, `--image`, `--audio`, `--reply-to` |
+| `python tools/send_telegram.py` | ChatSession (PM) | Session UUID | `--file` (repeatable, max 10 for albums; auto-detects media type) |
 
 See [PM Telegram Tool](pm-telegram-tool.md) for details on the PM send path.
 
 ## Related
 
 - [Telegram History](telegram-history.md) — underlying Redis/Popoto storage
-- [PM Telegram Tool](pm-telegram-tool.md) — PM session self-messaging with file attachments and multi-file albums
+- [PM Telegram Tool](pm-telegram-tool.md) — ChatSession self-messaging with file attachments and multi-file albums
 - `config/SOUL.md` — agent persona references to this tool

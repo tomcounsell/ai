@@ -11,16 +11,10 @@ The previous system inferred pipeline stage status by parsing agent transcripts 
 
 ## Solution
 
-Stage status is set programmatically at the points where transitions actually happen. Two paths write stage records:
-
-**Dev-session path** (when PM uses the Agent tool to spawn a DevSession):
+Stage status is set programmatically at the points where transitions actually happen:
 - `start_stage()` in the PreToolUse hook when the PM dispatches a dev-session for an SDLC stage
 - `complete_stage()` in the SubagentStop hook when the dev-session returns successfully
 - `fail_stage()` when the session fails
-
-**Skill path** (when PM uses the Skill tool directly, e.g., `Skill(skill="do-build")`):
-- `start_stage()` in the PreToolUse hook via `_handle_skill_tool_start()`, mapped by `_SKILL_TO_STAGE` dict
-- `complete_stage()` in the PostToolUse hook via `_complete_pipeline_stage()`, reading the current in_progress stage from Redis
 
 State is persisted as a JSON dict on `AgentSession.stage_states` -- one Redis field, no history parsing.
 
@@ -28,12 +22,12 @@ State is persisted as a JSON dict on `AgentSession.stage_states` -- one Redis fi
 
 The state machine is wired into the Claude Agent SDK hook system. This is the end-to-end flow for a single SDLC stage:
 
-1. **PM dispatches dev-session**: The PM session (PM persona) uses the Agent tool with `type="dev-session"` and a prompt containing the stage assignment (e.g., "Stage: BUILD").
+1. **PM dispatches dev-session**: The ChatSession (PM persona) uses the Agent tool with `type="dev-session"` and a prompt containing the stage assignment (e.g., "Stage: BUILD").
 
 2. **PreToolUse hook fires** (`agent/hooks/pre_tool_use.py`):
    - `_maybe_register_dev_session()` detects `tool_name == "Agent"` with `type == "dev-session"`
    - `_extract_stage_from_prompt()` parses the stage name from the prompt text using pattern matching against known SDLC stage names
-   - `_start_pipeline_stage()` loads the parent PM session from Redis, creates a `PipelineStateMachine`, and calls `start_stage()` -- marking the stage as `in_progress`
+   - `_start_pipeline_stage()` loads the parent ChatSession from Redis, creates a `PipelineStateMachine`, and calls `start_stage()` -- marking the stage as `in_progress`
    - Failures are caught and logged but never block the Agent tool call
 
 3. **Dev-session executes**: The subagent runs the assigned stage work (e.g., `/do-build`, `/do-test`).
@@ -43,7 +37,7 @@ The state machine is wired into the Claude Agent SDK hook system. This is the en
    - Calls `complete_stage()` on the found stage, marking it as `completed` and the next stage as `ready`
    - Injects the updated `stage_states` back to the PM via the hook return value
 
-5. **PM sees updated state**: The PM session receives the pipeline state injection and can route to the next stage.
+5. **PM sees updated state**: The ChatSession receives the pipeline state injection and can route to the next stage.
 
 ### Stage Extraction
 
@@ -167,10 +161,9 @@ When stage_states is unavailable (cold start), the merge gate emits an explicit 
 
 - **SDLC Router** (`.claude/skills/sdlc/SKILL.md`): Reads `stage_states` via `tools/sdlc_stage_query.py` CLI tool as primary routing signal
 - **Stage Query Tool** (`tools/sdlc_stage_query.py`): CLI interface for reading `stage_states` from a PM session by session ID or issue number
-- **PreToolUse hook** (`agent/hooks/pre_tool_use.py`): Calls `start_stage()` for both the dev-session path (Agent tool dispatch) and the Skill path (`_handle_skill_tool_start()` with `_SKILL_TO_STAGE` mapping), marking the stage as `in_progress`
-- **PostToolUse hook** (`agent/hooks/post_tool_use.py`): Calls `complete_stage()` when a mapped SDLC Skill tool finishes (Skill path)
-- **SubagentStop hook** (`agent/hooks/subagent_stop.py`): Calls `complete_stage()` when the dev-session returns, marking the stage as `completed` (dev-session path)
-- **PM session**: Uses state machine for stage queries and outcome classification
+- **PreToolUse hook** (`agent/hooks/pre_tool_use.py`): Calls `start_stage()` when the PM dispatches a dev-session, marking the stage as `in_progress`
+- **SubagentStop hook** (`agent/hooks/subagent_stop.py`): Calls `complete_stage()` when the dev-session returns, marking the stage as `completed`
+- **ChatSession**: Uses state machine for stage queries and outcome classification
 - **Job Queue** (`agent/agent_session_queue.py`): Creates state machine in `send_to_chat()`, applies transitions from Observer decisions
 - **AgentSession** (`models/agent_session.py`): `get_stage_progress()` convenience wrapper around `get_display_progress()`
 - **Merge Gate** (`.claude/commands/do-merge.md`): Reads `get_display_progress()` for pre-merge pipeline validation
@@ -191,9 +184,8 @@ When stage_states is unavailable (cold start), the merge gate emits an explicit 
 | `models/agent_session.py` | `stage_states` field on AgentSession |
 | `tools/sdlc_stage_query.py` | CLI tool for reading stage_states (used by SDLC router) |
 | `.claude/skills/sdlc/SKILL.md` | SDLC router skill (reads stage_states in Step 2.0) |
-| `agent/hooks/pre_tool_use.py` | `start_stage()` wiring — dev-session path via `_extract_stage_from_prompt()`, Skill path via `_handle_skill_tool_start()` + `_SKILL_TO_STAGE` |
-| `agent/hooks/post_tool_use.py` | `complete_stage()` wiring for Skill path via `_complete_pipeline_stage()` |
-| `agent/hooks/subagent_stop.py` | `complete_stage()` wiring for dev-session path via `_record_stage_on_parent()` |
+| `agent/hooks/pre_tool_use.py` | `start_stage()` wiring via `_extract_stage_from_prompt()` and `_start_pipeline_stage()` |
+| `agent/hooks/subagent_stop.py` | `complete_stage()` wiring via `_record_stage_on_parent()` |
 | `tests/unit/test_pipeline_state_machine.py` | State machine unit tests |
 | `tests/unit/test_sdlc_stage_query.py` | Stage query CLI tool unit tests |
 | `tests/unit/test_pre_tool_use_start_stage.py` | Stage extraction and start_stage wiring tests |

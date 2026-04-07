@@ -172,21 +172,15 @@ def scan_staged_files(repo_root: str) -> list[dict]:
     for relpath in staged_files:
         if not relpath or should_skip_file(relpath):
             continue
-        # Get staged content (not working tree content).
-        # Read as bytes and decode with replacement so binary files (e.g. PNGs)
-        # don't crash the scanner; regex patterns only match text anyway.
+        # Get staged content (not working tree content)
         result = subprocess.run(
             ["git", "show", f":{relpath}"],
             capture_output=True,
+            text=True,
             cwd=repo_root,
         )
         if result.returncode == 0:
-            try:
-                content = result.stdout.decode("utf-8")
-            except UnicodeDecodeError:
-                # Binary file — skip secret scanning
-                continue
-            findings = scan_content(content, relpath)
+            findings = scan_content(result.stdout, relpath)
             all_findings.extend(findings)
     return all_findings
 

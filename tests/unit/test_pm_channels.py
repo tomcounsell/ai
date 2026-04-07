@@ -11,6 +11,8 @@ Covers:
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -278,25 +280,15 @@ class TestPmConfigValidation:
 
     @pytest.fixture
     def config(self):
-        # Hardcoded, well-formed config dict. Unit tests must be deterministic
-        # and environment-independent — they assert structural rules, not the
-        # contents of any machine's live projects.json.
-        return {
-            "personas": {
-                "project-manager": {"description": "PM persona"},
-                "developer": {"description": "Developer persona"},
-            },
-            "projects": {
-                "valor": {
-                    "telegram": {
-                        "groups": {
-                            "PM: Valor": {"persona": "project-manager"},
-                            "Dev: Valor": {"persona": "developer"},
-                        }
-                    }
-                }
-            },
-        }
+        # projects.json now lives in ~/Desktop/Valor/ (iCloud-synced, private)
+        config_path = Path.home() / "Desktop" / "Valor" / "projects.json"
+        if not config_path.exists():
+            # Legacy fallback
+            config_path = Path(__file__).parent.parent.parent / "config" / "projects.json"
+        if not config_path.exists():
+            pytest.skip("projects.json not found (machine-specific config)")
+        with open(config_path) as f:
+            return json.load(f)
 
     def test_pm_persona_groups_exist(self, config):
         """At least one group with project-manager persona should exist."""

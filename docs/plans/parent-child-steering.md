@@ -8,35 +8,35 @@ tracking: https://github.com/tomcounsell/ai/issues/491
 last_comment_id:
 ---
 
-# PM session Steering: Parent-to-Child Dev session Steering
+# ChatSession Steering: Parent-to-Child DevSession Steering
 
 ## Problem
 
-When a PM session (PM persona) spawns a Dev session via the Agent tool, it loses the ability to influence that session until it completes. The only way to steer a running Dev session today is via a Telegram reply message, which routes through the bridge. The PM session -- the orchestrator that spawned the work -- has no mechanism to inject steering messages into its children.
+When a ChatSession (PM persona) spawns a DevSession via the Agent tool, it loses the ability to influence that session until it completes. The only way to steer a running DevSession today is via a Telegram reply message, which routes through the bridge. The ChatSession -- the orchestrator that spawned the work -- has no mechanism to inject steering messages into its children.
 
 **Current behavior:**
-PM session spawns a Dev session for a BUILD stage. Mid-execution, the PM realizes the dev should skip docs and focus on tests. There is no mechanism to communicate this -- the PM must wait for the Dev session to complete and then re-dispatch, wasting compute.
+ChatSession spawns a DevSession for a BUILD stage. Mid-execution, the PM realizes the dev should skip docs and focus on tests. There is no mechanism to communicate this -- the PM must wait for the DevSession to complete and then re-dispatch, wasting compute.
 
 **Desired outcome:**
-PM session can push steering messages to any active child Dev session at any time. This is explicit and opt-in -- the PM decides when and what to steer. The message appears in the child's context at the next tool call via the existing watchdog/steering infrastructure.
+ChatSession can push steering messages to any active child DevSession at any time. This is explicit and opt-in -- the PM decides when and what to steer. The message appears in the child's context at the next tool call via the existing watchdog/steering infrastructure.
 
 ## Prior Art
 
-- **Issue #292 / PR #308**: Fixed reply-to steering reaching running agents. Established the bridge-to-steering-queue routing pattern. Directly relevant -- this work extends the same push mechanism to a new caller (PM session instead of bridge).
+- **Issue #292 / PR #308**: Fixed reply-to steering reaching running agents. Established the bridge-to-steering-queue routing pattern. Directly relevant -- this work extends the same push mechanism to a new caller (ChatSession instead of bridge).
 - **Issue #329 / PR #349**: Context fidelity modes for sub-agent steering. Added fidelity levels to steering payloads. Relevant -- the new tool should respect existing fidelity conventions.
 - **Issue #318 / PR #366**: Route unthreaded messages into active sessions via expectations + queued_steering_messages. Extended steering routing beyond reply-to threads.
-- **Issue #459 / PR #464**: SDLC Redesign introducing PM/Dev session split. Created the parent-child relationship (`parent_chat_session_id`) that this feature relies on.
+- **Issue #459 / PR #464**: SDLC Redesign introducing ChatSession/DevSession split. Created the parent-child relationship (`parent_chat_session_id`) that this feature relies on.
 - **Issue #23**: Original adoption of steering concepts from pi-mono. Foundation for the entire steering queue architecture.
 
 ## Data Flow
 
-1. **Entry point**: PM session (running in Agent SDK) decides to steer a child Dev session
-2. **Tool invocation**: PM session calls a bash script (`scripts/steer_child.py`) with the child session ID and message text
+1. **Entry point**: ChatSession (running in Agent SDK) decides to steer a child DevSession
+2. **Tool invocation**: ChatSession calls a bash script (`scripts/steer_child.py`) with the child session ID and message text
 3. **Validation**: Script validates the target is an active child of the calling session by checking `parent_chat_session_id` in AgentSession model
-4. **Push**: Script calls `push_steering_message(child_session_id, text, sender="PM session")` writing to Redis key `steering:{child_session_id}`
-5. **Consumption**: On the child Dev session's next tool call, the watchdog hook (`_handle_steering` in `health_check.py`) pops the message from Redis
-6. **Injection**: Watchdog calls `client.interrupt()` + `client.query()` on the child's SDK client to inject the steering message into the Dev session's context
-7. **Output**: Dev session sees the steering message and adjusts its behavior accordingly
+4. **Push**: Script calls `push_steering_message(child_session_id, text, sender="ChatSession")` writing to Redis key `steering:{child_session_id}`
+5. **Consumption**: On the child DevSession's next tool call, the watchdog hook (`_handle_steering` in `health_check.py`) pops the message from Redis
+6. **Injection**: Watchdog calls `client.interrupt()` + `client.query()` on the child's SDK client to inject the steering message into the DevSession's context
+7. **Output**: DevSession sees the steering message and adjusts its behavior accordingly
 
 ## Architectural Impact
 
@@ -66,26 +66,26 @@ No prerequisites -- this work has no external dependencies. All required infrast
 
 ### Key Elements
 
-- **`scripts/steer_child.py`**: A callable Python script that PM session invokes via bash to push steering messages to child Dev sessions
+- **`scripts/steer_child.py`**: A callable Python script that ChatSession invokes via bash to push steering messages to child DevSessions
 - **Parent-child validation**: Ensures the target session is an active child of the calling session, preventing cross-session steering
 - **Abort support**: The script accepts an `--abort` flag to send hard-stop signals to children
 
 ### Flow
 
-**PM session decides to steer** -> Calls `python scripts/steer_child.py --session-id <child_id> --message "focus on tests"` -> Script validates parent-child relationship -> `push_steering_message()` writes to Redis -> Child's watchdog picks up on next tool call -> Dev session adjusts behavior
+**ChatSession decides to steer** -> Calls `python scripts/steer_child.py --session-id <child_id> --message "focus on tests"` -> Script validates parent-child relationship -> `push_steering_message()` writes to Redis -> Child's watchdog picks up on next tool call -> DevSession adjusts behavior
 
 ### Technical Approach
 
-- **Bash-callable script** (not MCP tool): PM session already has bash access via the Agent tool. A script is zero-overhead -- no MCP server registration, no context pollution from tool descriptions, and trivially testable. The PM session can call it like any other bash command.
-- **Validation via `parent_chat_session_id`**: The script takes the calling session's ID (from environment variable `CLAUDE_SESSION_ID` or explicit argument) and verifies the target is a child by checking `AgentSession.parent_chat_session_id == caller_id`. This prevents a PM session from steering arbitrary sessions.
+- **Bash-callable script** (not MCP tool): ChatSession already has bash access via the Agent tool. A script is zero-overhead -- no MCP server registration, no context pollution from tool descriptions, and trivially testable. The ChatSession can call it like any other bash command.
+- **Validation via `parent_chat_session_id`**: The script takes the calling session's ID (from environment variable `CLAUDE_SESSION_ID` or explicit argument) and verifies the target is a child by checking `AgentSession.parent_chat_session_id == caller_id`. This prevents a ChatSession from steering arbitrary sessions.
 - **Abort support via `--abort` flag**: Maps directly to `push_steering_message(..., is_abort=True)`. The existing watchdog abort handling in `_handle_steering` takes care of the rest.
-- **Session discovery via `--list` flag**: PM session can list its active children before steering, using `AgentSession.get_dev_sessions()` filtered to `status="running"`.
+- **Session discovery via `--list` flag**: ChatSession can list its active children before steering, using `AgentSession.get_dev_sessions()` filtered to `status="running"`.
 
 The script needs the parent session ID to validate ownership. Two options:
 1. Pass it explicitly via `--parent-id` argument
-2. Read it from `CLAUDE_SESSION_ID` environment variable (already set by `sdk_client.py` for Dev sessions)
+2. Read it from `CLAUDE_SESSION_ID` environment variable (already set by `sdk_client.py` for DevSessions)
 
-Option 1 is more explicit and reliable. The PM session knows its own session ID and can pass it.
+Option 1 is more explicit and reliable. The ChatSession knows its own session ID and can pass it.
 
 ## Failure Path Test Strategy
 
@@ -109,16 +109,16 @@ No existing tests affected -- this is a greenfield feature adding a new script a
 
 ## Rabbit Holes
 
-- **MCP server approach**: Building an MCP tool server for this is overengineered. PM session has bash access; a script is simpler, cheaper in context, and equally capable
+- **MCP server approach**: Building an MCP tool server for this is overengineered. ChatSession has bash access; a script is simpler, cheaper in context, and equally capable
 - **Automatic fan-out**: Broadcasting steering to all children sounds useful but violates the explicit-action principle. Defer to a separate issue if ever needed
-- **Bidirectional communication**: Dev session steering back to PM session is a different pattern (result reporting). Do not conflate
+- **Bidirectional communication**: DevSession steering back to ChatSession is a different pattern (result reporting). Do not conflate
 - **target_agent field enforcement**: The `target_agent` field in steering payloads is stored but not filtered. Enforcing it is a separate concern (#329 addressed fidelity modes)
 
 ## Risks
 
-### Risk 1: Parent session ID availability in PM session context
-**Impact:** If the PM session doesn't know its own session ID, it cannot pass `--parent-id` for validation
-**Mitigation:** PM session's session ID is available via `CLAUDE_SESSION_ID` env var (set by `sdk_client.py`). Verify this is set for PM sessions, not just Dev sessions. If not, add it.
+### Risk 1: Parent session ID availability in ChatSession context
+**Impact:** If the ChatSession doesn't know its own session ID, it cannot pass `--parent-id` for validation
+**Mitigation:** ChatSession's session ID is available via `CLAUDE_SESSION_ID` env var (set by `sdk_client.py`). Verify this is set for ChatSessions, not just DevSessions. If not, add it.
 
 ### Risk 2: Child session completes between steering push and consumption
 **Impact:** Steering message sits in Redis queue unconsumed
@@ -128,8 +128,8 @@ No existing tests affected -- this is a greenfield feature adding a new script a
 
 ### Race 1: Steering pushed after child session ends but before queue cleanup
 **Location:** `agent/steering.py` push vs. job completion cleanup in `agent/job_queue.py`
-**Trigger:** PM session pushes steering message at the exact moment a Dev session completes
-**Data prerequisite:** Dev session must be in `status="running"` for steering to be meaningful
+**Trigger:** ChatSession pushes steering message at the exact moment a DevSession completes
+**Data prerequisite:** DevSession must be in `status="running"` for steering to be meaningful
 **State prerequisite:** The steering queue must be checked before it is cleared on completion
 **Mitigation:** The script validates `status="running"` before pushing. If the session ends between validation and push, the message sits in the queue until `clear_steering_queue` runs on completion. No data loss, no corruption -- the message is simply never consumed (which is correct behavior since the session ended).
 
@@ -137,9 +137,9 @@ No existing tests affected -- this is a greenfield feature adding a new script a
 
 - Automatic steering fan-out to all children (always explicit, per-child)
 - MCP server registration for this tool (bash script is sufficient)
-- Bidirectional Dev session-to-PM session communication
+- Bidirectional DevSession-to-ChatSession communication
 - Enforcement of `target_agent` field filtering in the watchdog
-- UI/Telegram integration for parent-child steering (this is PM session-internal)
+- UI/Telegram integration for parent-child steering (this is ChatSession-internal)
 
 ## Update System
 
@@ -147,22 +147,22 @@ No update system changes required -- this feature adds a new script (`scripts/st
 
 ## Agent Integration
 
-No MCP server integration required. The steering tool is a bash-callable script that PM session invokes directly via its existing bash tool access. The bridge does not need changes -- it already has its own steering path for Telegram reply messages. This feature is purely a new caller (PM session) using existing infrastructure (`push_steering_message`).
+No MCP server integration required. The steering tool is a bash-callable script that ChatSession invokes directly via its existing bash tool access. The bridge does not need changes -- it already has its own steering path for Telegram reply messages. This feature is purely a new caller (ChatSession) using existing infrastructure (`push_steering_message`).
 
 ## Documentation
 
 - [ ] Update `docs/features/steering-queue.md` to document parent-child steering as a new steering path alongside bridge steering
-- [ ] Update `docs/features/chat-dev-session-architecture.md` to document the steering capability in the PM/Dev session relationship section
+- [ ] Update `docs/features/chat-dev-session-architecture.md` to document the steering capability in the ChatSession/DevSession relationship section
 - [ ] Add entry to `docs/features/README.md` index table if not already covered
 
 ## Success Criteria
 
-- [ ] PM session can push a steering message to a running child Dev session via `python scripts/steer_child.py`
+- [ ] ChatSession can push a steering message to a running child DevSession via `python scripts/steer_child.py`
 - [ ] The steering message appears in the child's context at the next tool call (existing watchdog behavior)
 - [ ] Invalid targets (non-existent sessions, non-children) are rejected with clear error and non-zero exit code
 - [ ] Abort steering is supported via `--abort` flag
-- [ ] `--list` flag shows active child Dev sessions
-- [ ] No automatic fan-out -- steering is always an explicit PM session action
+- [ ] `--list` flag shows active child DevSessions
+- [ ] No automatic fan-out -- steering is always an explicit ChatSession action
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 
@@ -207,7 +207,7 @@ Using core tier only: builder, validator, documentarian.
 - **Assigned To**: steering-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Check that `sdk_client.py` sets `CLAUDE_SESSION_ID` for PM session processes (not just Dev sessions)
+- Check that `sdk_client.py` sets `CLAUDE_SESSION_ID` for ChatSession processes (not just DevSessions)
 - If missing, add it to the environment setup in `_build_env()`
 
 ### 3. Validate implementation
@@ -217,7 +217,7 @@ Using core tier only: builder, validator, documentarian.
 - **Agent Type**: validator
 - **Parallel**: false
 - Verify script exits 0 on valid steering, non-zero on all error paths
-- Verify `--list` output format is usable by PM session
+- Verify `--list` output format is usable by ChatSession
 - Run full test suite to confirm no regressions
 
 ### 4. Documentation

@@ -10,7 +10,7 @@ The reflections dashboard at `/reflections/` provides visibility into all regist
 
 ### Overview (`/reflections/`)
 - Grid of all registered reflections with live status from Redis
-- Each row shows: status dot (green/red/off), name + description, and a timing column with priority icon, last run timestamp, arrow to next due timestamp, and duration between them
+- Each row shows: name, description, status badge, last run time, duration, run count, interval, next due
 - Failed runs display error messages inline
 - Auto-refreshes via HTMX every 10 seconds
 - Links to run history for reflections with historical data

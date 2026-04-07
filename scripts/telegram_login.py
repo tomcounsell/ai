@@ -28,10 +28,7 @@ from telethon import TelegramClient
 load_dotenv(Path(__file__).parent.parent / ".env")
 load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")
 
-try:
-    API_ID = int(os.getenv("TELEGRAM_API_ID") or "0")
-except ValueError:
-    API_ID = 0
+API_ID = int(os.getenv("TELEGRAM_API_ID", "0"))
 API_HASH = os.getenv("TELEGRAM_API_HASH", "")
 PHONE = os.getenv("TELEGRAM_PHONE", "")
 PASSWORD = os.getenv("TELEGRAM_PASSWORD", "")

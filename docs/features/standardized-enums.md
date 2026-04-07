@@ -16,7 +16,7 @@ Discriminator for AgentSession: pm, teammate, or dev.
 |--------|-------|-------|
 | `SessionType.PM` | `"pm"` | PM session -- PM persona, orchestration, read-only |
 | `SessionType.TEAMMATE` | `"teammate"` | Teammate session -- conversational, informational queries |
-| `SessionType.DEV` | `"dev"` | Dev session -- Dev persona, full permissions |
+| `SessionType.DEV` | `"dev"` | DevSession -- Dev persona, full permissions |
 
 ### PersonaType
 
@@ -65,7 +65,7 @@ if persona == PersonaType.TEAMMATE:
 
 ## Dashboard Changes
 
-The sessions table column previously labeled "Type" is now "Persona" with display values: "dev", "PM", "Teammate". The `_resolve_session_type()` function was renamed to `_resolve_persona_display()` in `ui/data/sdlc.py`. Both the SDLC and sessions tables use matching badge colors (blue for dev, purple for PM, green for Teammate).
+The sessions table column previously labeled "Type" is now "Persona" with display values: "Developer", "PM", "Teammate". The `_resolve_session_type()` function was renamed to `_resolve_persona_display()` in `ui/data/sdlc.py`. Both the SDLC and sessions tables use matching badge colors (blue for Developer, purple for PM, green for Teammate).
 
 ## Files Modified
 

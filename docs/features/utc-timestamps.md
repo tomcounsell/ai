@@ -61,7 +61,7 @@ The principle: **store UTC, display local -- never the reverse**.
 - The deprecated `datetime.utcnow()` (which returns naive datetimes) has been eliminated.
 - `time.time()` calls are unchanged -- epoch timestamps are timezone-neutral.
 - Telethon message timestamps were already UTC and are unchanged.
-- Popoto/Redis model timestamps (`created_at`/`updated_at`) are managed by the ORM and are out of scope for construction-site normalization. However, `SortedField` deserialization returns naive datetimes — code that calls `.timestamp()` on values read from `SortedField` must treat them as UTC. `_to_timestamp()` in `monitoring/session_watchdog.py` handles this with a `val.tzinfo is None` guard (issue #777).
+- Popoto/Redis model timestamps (`created_at`/`updated_at`) are managed by the ORM and are out of scope.
 
 ## Related
 
