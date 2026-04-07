@@ -144,16 +144,16 @@ Each machine runs a subset of these four services:
 
 | Service | Plist | Purpose | Required On |
 |---------|-------|---------|-------------|
-| Bridge | `com.valor.bridge` | Telegram I/O only (no embedded worker) | Bridge machines |
-| Worker | `com.valor.worker` | Standalone session processing | All machines |
+| Bridge | `com.valor.bridge` | Telegram I/O + embedded worker | Bridge machines |
+| Worker | `com.valor.worker` | Standalone session processing | Dev workstations |
 | Watchdog | `com.valor.bridge-watchdog` | Health monitoring, crash recovery | Bridge machines |
 | Update | `com.valor.update` | Auto-pull from origin/main | All machines |
 
 **Dev workstations** run Worker + Update. Sessions are processed and output is written to `logs/worker/`.
 
-**Bridge machines** run Bridge + Worker + Watchdog + Update. The bridge handles Telegram I/O only; the standalone worker processes sessions and sends output via Telegram callbacks registered at startup.
+**Bridge machines** run Bridge + Watchdog + Update. The bridge starts an embedded worker and sends output via Telegram.
 
-Both Bridge and Worker must run on bridge machines. The bridge is I/O only and does not process sessions on its own.
+Do not run both Bridge and standalone Worker on the same machine for the same project -- they would compete for the same session queue without coordination.
 
 ### Worker Installation
 

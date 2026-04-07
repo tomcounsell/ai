@@ -1,5 +1,5 @@
 ---
-status: docs_complete
+status: Ready
 type: chore
 appetite: Small
 owner: Valor
@@ -134,10 +134,8 @@ No agent integration required — this is a dashboard-internal change. No MCP se
 
 ## Documentation
 
-- [x] Grep `docs/` for references to `SDLC_STAGES` in `ui/data/sdlc.py` — only references are in plan documents, no feature docs to update
-- [x] Inline docstring updates on `_session_to_pipeline()` to document the routing through `PipelineStateMachine` (done in the implementation commit)
-
-No documentation changes needed — this is a purely internal refactor of the dashboard data layer. No new feature docs required; the existing `docs/features/` directory has no page for this module, and the change is fully described by inline docstrings.
+- [ ] Grep `docs/` for references to `SDLC_STAGES` in `ui/data/sdlc.py` and update if found (note: `docs/features/sdlc-pipeline-graph.md` does not exist)
+- [ ] Inline docstring updates on `_session_to_pipeline()` to document the routing through `PipelineStateMachine`
 
 ## Success Criteria
 

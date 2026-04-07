@@ -108,11 +108,11 @@ Log rotation uses a dual-mechanism approach: Python-managed rotation for applica
 
 **newsyslog safety net** (`config/newsyslog.valor.conf`, installed to `/etc/newsyslog.d/valor.conf`): Covers all 5 launchd-managed logs with hourly checks, 10MB max, 5 bzip2-compressed backups. Uses the `N` flag (no signal) because launchd holds file descriptors open. Acts as a backup if the bridge doesn't restart for extended periods.
 
-### 6. Startup Redis Key Cleanup (`worker/__main__.py`)
+### 6. Startup Redis Key Cleanup (`bridge/telegram_bridge.py`)
 
 **Problem**: Stale Redis entries with non-standard 60-character `agent_session_id` keys (from historical data or crashes) trigger popoto validation errors on every query scan, generating thousands of error log entries.
 
-**Solution**: On worker startup, `AgentSession.rebuild_indexes()` (SCAN-based, production-safe) purges Redis set entries that point to missing or invalid objects. This is the first step in the worker's startup sequence. The bridge does not call `rebuild_indexes()` — index management is the worker's exclusive responsibility. See [Popoto Index Hygiene](popoto-index-hygiene.md) for the daily automated cleanup reflection that supplements this startup check.
+**Solution**: On bridge startup, before recovering interrupted/orphaned sessions, the bridge calls `AgentSession.rebuild_indexes()` (SCAN-based, production-safe) to purge Redis set entries that point to missing or invalid objects. This is a one-time cleanup that prevents the validation errors from recurring. See [Popoto Index Hygiene](popoto-index-hygiene.md) for the daily automated cleanup reflection that supplements this startup check.
 
 ### 7. Agent Session Cleanup (`agent/agent_session_queue.py`)
 

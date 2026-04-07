@@ -182,36 +182,6 @@ python -m tools.agent_session_scheduler cleanup --age 30              # Delete
 
 See `docs/features/agent-session-scheduling.md` for full documentation.
 
-### Session Steering CLI (`tools.valor_session`)
-
-Create, steer, monitor, and kill `AgentSession` records. The primary external interface for session steering — any process can write messages to a running session's inbox.
-
-```bash
-# List all sessions
-python -m tools.valor_session list
-python -m tools.valor_session list --status running
-python -m tools.valor_session list --role pm
-
-# Inspect a session
-python -m tools.valor_session status --id <SESSION_ID>
-
-# Inject a steering message into a running session
-python -m tools.valor_session steer --id <SESSION_ID> --message "Stop after critique"
-
-# Create a new session
-python -m tools.valor_session create --role pm --message "Plan issue #735"
-python -m tools.valor_session create --role dev --message "Fix the bug" --parent <PARENT_ID>
-
-# Kill sessions
-python -m tools.valor_session kill --id <SESSION_ID>
-python -m tools.valor_session kill --all
-
-# JSON output for scripting
-python -m tools.valor_session status --id <SESSION_ID> --json
-```
-
-See `docs/features/session-steering.md` for full documentation.
-
 ### SDLC Stage Query (`tools.sdlc_stage_query`)
 
 Query SDLC pipeline `stage_states` from a PM session. Used by the SDLC router skill as the primary signal for routing decisions (which sub-skill to dispatch next). Returns JSON mapping stage names to statuses.

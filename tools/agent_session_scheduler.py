@@ -564,10 +564,8 @@ def cmd_push(args: argparse.Namespace) -> int:
 
 
 def cmd_bump(args: argparse.Namespace) -> int:
-    """Bump a pending session's priority and reset created_at for FIFO ordering."""
+    """Bump a pending session to top of queue (set priority=urgent, reset created_at)."""
     from models.agent_session import AgentSession
-
-    new_priority = getattr(args, "priority", None) or "urgent"
 
     try:
         # Find by agent_session_id across all projects
@@ -592,7 +590,7 @@ def cmd_bump(args: argparse.Namespace) -> int:
 
         fields = _extract_agent_session_fields(target)
         target.delete()
-        fields["priority"] = new_priority
+        fields["priority"] = "urgent"
         fields["created_at"] = datetime.now(tz=UTC)
         new_session = AgentSession.create(**fields)
 
@@ -601,7 +599,7 @@ def cmd_bump(args: argparse.Namespace) -> int:
                 "status": "bumped",
                 "agent_session_id": new_session.agent_session_id,
                 "session_id": new_session.session_id,
-                "new_priority": new_priority,
+                "new_priority": "urgent",
             }
         )
         return 0
@@ -928,61 +926,31 @@ def cmd_kill(args: argparse.Namespace) -> int:
 
 
 def cmd_list(args: argparse.Namespace) -> int:
-    """List sessions filtered by status, with optional sort and FIFO position."""
+    """List sessions filtered by status."""
     from models.agent_session import AgentSession
 
     project_key = args.project or _get_env_context()["project_key"]
     statuses = [s.strip() for s in args.status.split(",")]
-    sort_by = getattr(args, "sort", "fifo")
 
     try:
         sessions = []
         for status in statuses:
             sessions.extend(list(AgentSession.query.filter(project_key=project_key, status=status)))
 
-        # Sort based on --sort flag
-        if sort_by == "priority":
-            from agent.agent_session_queue import PRIORITY_RANK
-
-            sessions.sort(
-                key=lambda s: (PRIORITY_RANK.get(s.priority, 2), _to_ts(s.created_at) or 0)
-            )
-        elif sort_by == "status":
-            sessions.sort(key=lambda s: (s.status, _to_ts(s.created_at) or 0))
-        else:
-            # Default: fifo (priority-then-created_at, newest-first for display)
-            sessions.sort(key=lambda s: _to_ts(s.created_at) or 0, reverse=True)
+        # Sort by created_at descending (newest first)
+        sessions.sort(key=lambda s: _to_ts(s.created_at) or 0, reverse=True)
 
         # Apply limit
         if args.limit:
             sessions = sessions[: args.limit]
-
-        # Build FIFO position index (rank within priority band for pending sessions)
-        # Only computed when sort=priority or sort=fifo
-        fifo_positions: dict[str, int] = {}
-        if sort_by in ("priority", "fifo"):
-            from agent.agent_session_queue import PRIORITY_RANK
-
-            priority_counters: dict[str, int] = {}
-            pending_sorted = sorted(
-                [s for s in sessions if s.status == "pending"],
-                key=lambda s: (PRIORITY_RANK.get(s.priority, 2), _to_ts(s.created_at) or 0),
-            )
-            for s in pending_sorted:
-                band = s.priority or "normal"
-                priority_counters[band] = priority_counters.get(band, 0) + 1
-                fifo_positions[s.agent_session_id] = priority_counters[band]
 
         items = []
         for s in sessions:
             item = {
                 "session_id": s.session_id,
                 "status": s.status,
-                "priority": s.priority or "normal",
                 "project_key": s.project_key,
             }
-            if s.agent_session_id in fifo_positions:
-                item["fifo_position"] = fifo_positions[s.agent_session_id]
             if s.created_at:
                 age_min = int((time.time() - _to_ts(s.created_at)) / 60)
                 item["created_at"] = _to_iso(s.created_at)
@@ -1096,14 +1064,8 @@ def main():
     push.add_argument("--project", help="Project key")
 
     # bump
-    bump = subparsers.add_parser("bump", help="Bump pending session priority and reset FIFO order")
+    bump = subparsers.add_parser("bump", help="Bump pending session to top of queue")
     bump.add_argument("--agent-session-id", required=True, help="Session ID to bump")
-    bump.add_argument(
-        "--priority",
-        choices=["urgent", "high", "normal", "low"],
-        default="urgent",
-        help="Priority to set (default: urgent)",
-    )
 
     # pop
     pop = subparsers.add_parser("pop", help="Remove next pending session without executing")
@@ -1131,12 +1093,6 @@ def main():
     )
     lst.add_argument("--project", help="Project key (default: from env or 'valor')")
     lst.add_argument("--limit", type=int, help="Max number of sessions to return")
-    lst.add_argument(
-        "--sort",
-        choices=["priority", "fifo", "status"],
-        default="fifo",
-        help="Sort order: priority (by tier+FIFO), fifo (creation order), status (default: fifo)",
-    )
 
     # cleanup
     clean = subparsers.add_parser("cleanup", help="Delete stale sessions in terminal statuses")

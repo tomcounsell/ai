@@ -88,15 +88,12 @@ officecli close report.docx   # Save and release
 
 ## Reading Telegram Messages
 
-Use `valor-telegram` to read messages from any chat. It checks Redis first, then falls back to the Telegram API automatically. Sending routes through the Redis relay (requires bridge to be running).
+Use `valor-telegram` to read messages from any chat. It checks Redis first, then falls back to the Telegram API automatically.
 
 ```bash
 valor-telegram read --chat "Dev: Valor" --limit 10
 valor-telegram read --chat "Tom" --search "deployment"
 valor-telegram read --chat "Dev: Valor" --since "1 hour ago"
-valor-telegram send --chat "Dev: Valor" "Hello world"
-valor-telegram send --chat "Forum Group" --reply-to 123 "Message to topic"
-valor-telegram send --chat "Tom" --file ./screenshot.png "Caption"
 ```
 
 ## Quick Commands
@@ -134,12 +131,6 @@ valor-telegram send --chat "Tom" --file ./screenshot.png "Caption"
 | `python -m tools.agent_session_scheduler kill --all` | Kill all running and pending sessions |
 | `python -m tools.agent_session_scheduler cleanup --age 30 --dry-run` | Preview stale session cleanup |
 | `python -m tools.agent_session_scheduler cleanup --age 30` | Delete stale killed/abandoned/failed sessions |
-| `python -m tools.valor_session list` | List all sessions |
-| `python -m tools.valor_session status --id <ID>` | Show session status and pending steering messages |
-| `python -m tools.valor_session steer --id <ID> --message "..."` | Inject a steering message into a running session |
-| `python -m tools.valor_session kill --id <ID>` | Kill a session |
-| `python -m tools.valor_session kill --all` | Kill all running sessions |
-| `python -m tools.valor_session create --role pm --message "..."` | Create and enqueue a new session |
 | `python -m tools.memory_search search "query"` | Search memories by query |
 | `python -m tools.memory_search search "query" --category correction` | Search filtered by category |
 | `python -m tools.memory_search search "query" --tag redis` | Search filtered by tag |
@@ -237,27 +228,23 @@ The standard flow from conversation to shipped feature:
 ## System Architecture
 
 ```
-Telegram → Python Bridge (Telethon) → Enqueues AgentSession to Redis (I/O only)
+Telegram → Python Bridge (Telethon) → ChatSession (read-only, PM persona)
               (bridge/telegram_bridge.py)     → Nudge loop (bridge has no SDLC awareness)
-                                              → Registers output callbacks for delivery
+                                              → Spawns DevSession (full permissions, Dev persona)
+                                                    → Claude Agent SDK → Claude API
+                                                        (agent/sdk_client.py)
 
-Standalone Worker (python -m worker) → Sole session execution engine
-              (worker/__main__.py)         → Startup: index rebuild → recovery → orphan cleanup
-                                           → Spawns ChatSession (PM persona, read-only)
-                                               → Spawns DevSession (Dev persona, full permissions)
-                                                   → Claude Agent SDK → Claude API
-                                                       (agent/sdk_client.py)
+Standalone Worker (python -m worker) → Same session execution engine
+              (worker/__main__.py)         → Processes AgentSession records from Redis
                                            → Uses OutputHandler protocol (agent/output_handler.py)
                                            → FileOutputHandler fallback when no bridge callbacks
 ```
-See `docs/features/bridge-worker-architecture.md` for the full bridge/worker separation design.
 
 **Session Types** (see `docs/features/chat-dev-session-architecture.md`):
 - **PM Session** (`session_type="pm"`) - Orchestrates work, PM persona, read-only
 - **Teammate Session** (`session_type="teammate"`) - Conversational, Teammate persona
 - **DevSession** (`session_type="dev"`) - Does coding work, Dev persona, full permissions
 - **Nudge loop** - Bridge output routing (deliver or nudge, no SDLC awareness)
-- **Session Steering** (see `docs/features/session-steering.md`): `AgentSession.queued_steering_messages` is the steering inbox — any process writes messages, worker injects at turn boundary. `agent/output_router.py` contains routing decision logic extracted from executor. Use `valor-session steer --id <id> --message "..."` to steer externally.
 
 **Subconscious Memory** (see `docs/features/subconscious-memory.md`):
 - Human Telegram messages are saved as Memory records on receipt (importance=6.0)
@@ -275,7 +262,7 @@ See `docs/features/bridge-worker-architecture.md` for the full bridge/worker sep
 - `.claude/agents/` - Subagent definitions (including `dev-session`)
 - `bridge/` - Telegram integration, nudge loop
 - `worker/` - Standalone worker service (`python -m worker`)
-- `agent/` - Session queue, SDK client, output router (`output_router.py`), output handler protocol, constants
+- `agent/` - Session queue, SDK client, output handler protocol, constants
 - `tools/` - Local Python tools
 - `config/` - Configuration files
 

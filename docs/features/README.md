@@ -18,7 +18,6 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Autoexperiment](autoexperiment.md) | Autonomous overnight prompt optimization using ultra-cheap LLMs via OpenRouter | Shipped |
 | [Bridge Message Query](bridge-message-query.md) | CLI tool to fetch Telegram message history via file-based IPC with running bridge | Shipped |
 | [Bridge Module Architecture](bridge-module-architecture.md) | Sub-module organization of the Telegram bridge for maintainability | Shipped |
-| [Bridge/Worker Architecture](bridge-worker-architecture.md) | Bridge/worker process separation: bridge as pure I/O adapter, worker as sole session executor, Redis contract, operator CLI | Shipped |
 | [Bridge Resilience](bridge-resilience.md) | Circuit breaker, unified recovery loop, degraded mode, structured logging | Shipped |
 | [Bridge Response Improvements](bridge-response-improvements.md) | Enhancements to how the Telegram bridge formats and delivers responses | Shipped |
 | [Bridge Self-Healing](bridge-self-healing.md) | Automatic crash recovery with session lock cleanup, watchdog, escalation, flood-backoff persistence, and dynamic catchup lookback | Shipped |
@@ -97,7 +96,6 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Semantic Session Routing](semantic-session-routing.md) | Semantic matching of unthreaded messages to active sessions with declared expectations via structured summarizer output | Shipped |
 | [Session Health Check](session-health-check.md) | PostToolUse watchdog hook monitoring agent sessions for stuck loops using a Haiku judge with enriched tool summaries, activity stats, and pattern guidance | Shipped |
 | [Session Isolation](session-isolation.md) | Two-tier task list scoping and git worktrees for parallel session isolation | Shipped |
-| [Session Steering](session-steering.md) | Externalized steering via `AgentSession.queued_steering_messages` — any process can steer a running session; worker injects messages at turn boundaries; `valor-session` CLI for create/steer/status/list/kill | Shipped |
 | [Session Lifecycle](session-lifecycle.md) | Consolidated lifecycle module (`models/session_lifecycle.py`) with `finalize_session()` and `transition_status()` for all 11 session states, side effect consolidation, zombie loop prevention, stale cleanup via `_active_workers` liveness check, and Redis re-read in `_complete_agent_session` to capture accumulated `stage_states` | Shipped |
 | [Session Lifecycle Diagnostics](session-lifecycle-diagnostics.md) | Structured LIFECYCLE logging at every state transition with stall detection and CLI status report | Shipped |
 | [Session Management](session-management.md) | Reply-chain root resolution ensuring all replies in a thread map to one canonical session_id | Shipped |

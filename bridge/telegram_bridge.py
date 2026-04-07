@@ -362,6 +362,90 @@ def _cleanup_session_locks() -> int:
     return killed
 
 
+def _cleanup_orphaned_claude_processes() -> int:
+    """Kill orphaned Claude Code CLI subprocesses from prior bridge runs.
+
+    On bridge restart, SDK subprocesses from the old bridge may still be alive
+    because the Python bridge only cancels asyncio tasks (not OS processes).
+    These zombies block new workers via _ensure_worker's .done() check and
+    consume resources.
+
+    Finds all 'claude' processes whose parent is PID 1 (orphaned) or whose
+    parent is the current bridge process (leftover from prior exec), then
+    kills them with SIGTERM/SIGKILL.
+
+    Returns the number of processes killed.
+    """
+    logger = logging.getLogger(__name__)
+    killed = 0
+    current_pid = os.getpid()
+
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "claude_agent_sdk/_bundled/claude"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return 0
+
+        pids = result.stdout.strip().split("\n")
+        for pid_str in pids:
+            try:
+                pid = int(pid_str.strip())
+                if pid == current_pid:
+                    continue
+
+                # Check parent PID — if PPID is 1 (orphaned) or our PID
+                # (child of current bridge from a prior run), it's stale
+                ppid_result = subprocess.run(
+                    ["ps", "-o", "ppid=", "-p", str(pid)],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                if ppid_result.returncode != 0:
+                    continue
+
+                ppid = int(ppid_result.stdout.strip())
+
+                # Only kill if truly orphaned (PPID=1, meaning parent died)
+                if ppid != 1:
+                    continue
+
+                logger.warning(
+                    "[cleanup] Killing orphaned Claude subprocess PID %d (PPID=%d)",
+                    pid,
+                    ppid,
+                )
+                os.kill(pid, signal.SIGTERM)
+                # Wait up to 3 seconds for graceful exit
+                for _ in range(6):
+                    time.sleep(0.5)
+                    try:
+                        os.kill(pid, 0)
+                    except ProcessLookupError:
+                        break
+                else:
+                    logger.warning("[cleanup] Force-killing Claude subprocess PID %d", pid)
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                killed += 1
+
+            except (ValueError, ProcessLookupError, PermissionError) as e:
+                logger.debug("[cleanup] Could not kill PID %s: %s", pid_str, e)
+
+    except subprocess.TimeoutExpired:
+        logger.warning("[cleanup] Timeout scanning for orphaned Claude processes")
+    except Exception as e:
+        logger.debug("[cleanup] Error scanning for orphaned processes: %s", e)
+
+    return killed
+
+
 # Configuration (environment already loaded at top of file)
 API_ID = int(os.getenv("TELEGRAM_API_ID", "0"))
 API_HASH = os.getenv("TELEGRAM_API_HASH", "")
@@ -1579,13 +1663,25 @@ async def main():
         loop.call_soon_threadsafe(lambda: asyncio.ensure_future(_graceful_shutdown(client)))
 
     async def _graceful_shutdown(tg_client):
-        """Disconnect from Telegram and stop bridge-owned tasks.
+        """Cancel workers, kill SDK subprocesses, and disconnect.
 
-        Running sessions persist in Redis and will be recovered at next worker startup.
-        Session recovery, orphaned process cleanup, and worker spawning are all
-        the worker's exclusive responsibility.
+        Running sessions will be recovered at next startup by
+        _recover_interrupted_agent_sessions_startup() which resets all running
+        sessions to pending unconditionally.
         """
-        # Note: _active_workers is worker-process-local; bridge no longer manages workers.
+        from agent.agent_session_queue import _active_workers
+
+        # Cancel all worker asyncio tasks
+        for _pkey, worker_task in list(_active_workers.items()):
+            if worker_task and not worker_task.done():
+                worker_task.cancel()
+                logger.info(f"[{_pkey}] Cancelled worker task")
+        _active_workers.clear()
+
+        # Kill SDK subprocesses so they don't survive as orphans
+        orphans = _cleanup_orphaned_claude_processes()
+        if orphans:
+            logger.info(f"Killed {orphans} SDK subprocess(es) during shutdown")
 
         # Stop knowledge watcher if running
         try:
@@ -1612,6 +1708,11 @@ async def main():
     killed = _cleanup_session_locks()
     if killed:
         logger.info(f"Cleaned up {killed} stale process(es) holding session locks")
+
+    # Kill orphaned Claude Code CLI subprocesses from prior bridge runs
+    orphans_killed = _cleanup_orphaned_claude_processes()
+    if orphans_killed:
+        logger.info(f"Killed {orphans_killed} orphaned Claude Code subprocess(es)")
 
     # Connect using existing session only — never trigger SendCodeRequest.
     # The bridge cannot collect auth codes interactively; use telegram_login.py for that.
@@ -1781,9 +1882,42 @@ async def main():
     if clear_restart_flag():
         logger.info("Cleared stale restart flag from previous update")
 
-    # Session recovery, index rebuild, and worker spawning are handled exclusively
-    # by the standalone worker process (worker/__main__.py). The bridge only enqueues
-    # AgentSession records to Redis; execution is the worker's responsibility.
+    # Recover interrupted sessions and restart workers for any persisted sessions
+    from agent.agent_session_queue import (
+        _ensure_worker,
+        _get_pending_agent_sessions_sync,
+        _recover_interrupted_agent_sessions_startup,
+    )
+
+    # Rebuild AgentSession indexes using SCAN-based rebuild_indexes() (production-safe).
+    # This cleans up stale index entries (orphans from crashed/expired sessions)
+    # and fixes any index corruption without blocking the keyspace.
+    try:
+        from models.agent_session import AgentSession
+
+        rebuilt = AgentSession.rebuild_indexes()
+        logger.info(f"Rebuilt AgentSession indexes ({rebuilt} records reindexed)")
+    except Exception as _rebuild_err:
+        logger.warning(f"AgentSession index rebuild failed (non-fatal): {_rebuild_err}")
+
+    # Unified startup recovery: reset ALL running sessions to pending
+    # (at startup, all running sessions are orphaned from previous process)
+    recovered = _recover_interrupted_agent_sessions_startup()
+    if recovered:
+        logger.info(f"Recovered {recovered} interrupted session(s) at startup")
+
+    # Restart workers for pending sessions across all projects
+    for _pkey in ACTIVE_PROJECTS:
+        pending_sessions = _get_pending_agent_sessions_sync(_pkey)
+        if pending_sessions:
+            count = len(pending_sessions)
+            logger.info(f"[{_pkey}] Found {count} persisted session(s), restarting workers")
+            started_chats = set()
+            for _pending in pending_sessions:
+                _cid = _pending.chat_id or _pkey
+                if _cid not in started_chats:
+                    _ensure_worker(_cid)
+                    started_chats.add(_cid)
 
     # Scan for missed messages during downtime (catchup) -- run concurrently
 
@@ -1851,15 +1985,23 @@ async def main():
     except Exception as e:
         logger.error(f"Failed to start session watchdog: {e}")
 
-    # Start unified reflection scheduler (subsumes all recurring reflection tasks)
+    # Start unified reflection scheduler (subsumes session health monitor and all recurring tasks)
     try:
         from agent.reflection_scheduler import ReflectionScheduler
 
         _reflection_scheduler = ReflectionScheduler()
         asyncio.create_task(_reflection_scheduler.start())
-        logger.info("Reflection scheduler started")
+        logger.info("Reflection scheduler started (replaces standalone health monitor)")
     except Exception as e:
         logger.error(f"Failed to start reflection scheduler: {e}")
+        # Fall back to standalone health monitor
+        try:
+            from agent.agent_session_queue import _agent_session_health_loop
+
+            asyncio.create_task(_agent_session_health_loop())
+            logger.info("Fell back to standalone session health monitor")
+        except Exception as e2:
+            logger.error(f"Failed to start fallback health monitor: {e2}")
 
     # Start knowledge document watcher (monitors ~/work-vault/ for file changes)
     try:
@@ -1911,6 +2053,7 @@ async def main():
     _bridge_start_time = time.time()
 
     async def heartbeat_loop():
+        _last_zombie_cleanup = time.time()
         _last_connected_write = time.time()
 
         while True:
@@ -1922,6 +2065,41 @@ async def main():
             if now_ts - _last_connected_write >= 300:
                 _last_connected_write = now_ts
                 _write_last_connected()
+
+            # Check for orphaned pending sessions when no workers are active
+            from agent.agent_session_queue import _active_workers
+
+            active_count = sum(1 for w in _active_workers.values() if not w.done())
+            if active_count == 0:
+                try:
+                    from models.agent_session import AgentSession
+
+                    for _pkey in ACTIVE_PROJECTS:
+                        pending = await AgentSession.query.async_filter(
+                            project_key=_pkey, status="pending"
+                        )
+                        for entry in pending:
+                            cid = entry.chat_id or _pkey
+                            _ensure_worker(cid)
+                            logger.info(
+                                f"[heartbeat] Started worker for orphaned session "
+                                f"{entry.agent_session_id} (chat={cid})"
+                            )
+                except Exception as e:
+                    logger.debug(f"[heartbeat] Session poll error: {e}")
+
+            # Periodic zombie cleanup every 5 minutes
+            now = time.time()
+            if now - _last_zombie_cleanup >= 300:
+                _last_zombie_cleanup = now
+                try:
+                    killed = _cleanup_orphaned_claude_processes()
+                    if killed:
+                        logger.warning(
+                            f"[heartbeat] Zombie cleanup killed {killed} orphaned process(es)"
+                        )
+                except Exception as e:
+                    logger.debug(f"[heartbeat] Zombie cleanup error: {e}")
 
             # Knowledge watcher liveness check every 60s (piggyback on heartbeat)
             if _knowledge_watcher_ref[0] is not None:
@@ -1940,7 +2118,9 @@ async def main():
 
             # Log heartbeat every 4th tick (~2min) for watchdog
             if uptime_min > 0 and uptime_min % 2 == 0:
-                logger.info(f"[heartbeat] Bridge alive (uptime={uptime_min}m)")
+                logger.info(
+                    f"[heartbeat] Bridge alive (uptime={uptime_min}m, workers={active_count})"
+                )
 
     asyncio.create_task(heartbeat_loop())
 

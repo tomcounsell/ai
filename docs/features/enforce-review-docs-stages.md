@@ -10,7 +10,7 @@ The pipeline graph defined correct edges (TEST -> REVIEW -> DOCS -> MERGE), but 
 
 ### Hard Delivery Gates
 
-> **Note**: The Observer Agent (`bridge/observer.py`) was removed as part of the ChatSession/DevSession architecture redesign. Mandatory gate enforcement is now handled by ChatSession orchestration and the output router (`agent/output_router.py`, called via `agent/agent_session_queue.py`). The gate check functions in `agent/goal_gates.py` remain the source of truth for deterministic stage validation.
+> **Note**: The Observer Agent (`bridge/observer.py`) was removed as part of the ChatSession/DevSession architecture redesign. Mandatory gate enforcement is now handled by ChatSession orchestration and the nudge loop in `agent/agent_session_queue.py`. The gate check functions in `agent/goal_gates.py` remain the source of truth for deterministic stage validation.
 
 ### State Machine Stage Transitions (`bridge/pipeline_state.py`)
 

@@ -49,7 +49,7 @@ Each model is processed independently -- one model failure does not abort the sw
 | `agent/teammate_metrics.py` | Refactored metrics module (uses Popoto) |
 | `models/agent_session.py` | AgentSession with Meta.ttl |
 | `agent/agent_session_queue.py` | Refactored diagnostic fallback |
-| `worker/__main__.py` | Worker startup using rebuild_indexes (step 1 of startup sequence) |
+| `bridge/telegram_bridge.py` | Bridge startup using rebuild_indexes |
 | `scripts/popoto_index_cleanup.py` | Cleanup reflection callable |
 | `config/reflections.yaml` | Reflection registry entry |
 

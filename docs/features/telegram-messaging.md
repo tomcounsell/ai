@@ -4,7 +4,7 @@ Unified interface for reading and sending Telegram messages via the `valor-teleg
 
 ## Overview
 
-Consolidates two previously separate skills (`searching-message-history` and `get-telegram-messages`) into a single unified tool. Messages are read from Redis (Popoto ORM) populated by the bridge, while sending routes through the Redis outbox relay (requires bridge to be running).
+Consolidates two previously separate skills (`searching-message-history` and `get-telegram-messages`) into a single unified tool. Messages are read from Redis (Popoto ORM) populated by the bridge, while sending uses Telethon directly.
 
 ## CLI Reference
 
@@ -29,8 +29,6 @@ valor-telegram read --chat "Dev: Valor" --limit 5 --json
 
 ### Sending Messages
 
-Requires the bridge to be running (`./scripts/valor-service.sh status`).
-
 ```bash
 # Text message
 valor-telegram send --chat "Dev: Valor" "Hello world"
@@ -43,9 +41,6 @@ valor-telegram send --chat "Dev: Valor" --image ./screenshot.png "Check this"
 
 # Audio file
 valor-telegram send --chat "Dev: Valor" --audio ./recording.mp3
-
-# Forum group / topic (reply-to required)
-valor-telegram send --chat "Forum Group" --reply-to 123 "Message to topic"
 ```
 
 ### Listing Chats
@@ -71,9 +66,9 @@ valor-telegram send
     ↓
 resolve_chat(name) → chat_id
     ↓
-Redis outbox queue (telegram:outbox:cli-{timestamp})
+Telethon client (data/valor_bridge session)
     ↓
-bridge/telegram_relay.py → Telegram API
+Telegram API
 ```
 
 ### Chat Resolution
@@ -88,7 +83,7 @@ Chat names are resolved in order:
 | Component | Source | Purpose |
 |-----------|--------|---------|
 | Reading | Redis (Popoto `TelegramMessage` model), Telethon fallback | Messages stored by bridge, with API fallback |
-| Sending | Redis outbox relay (`bridge/telegram_relay.py`) | Queued via `telegram:outbox:cli-{timestamp}`; bridge delivers |
+| Sending | Telethon (direct API) | Real-time message delivery |
 | Chat names | Redis (Popoto `Chat` model) | Group name → chat_id mapping |
 | User names | `projects.json` (`dms.whitelist`) | Name → user_id mapping |
 
@@ -98,18 +93,18 @@ Chat names are resolved in order:
 |------|---------|
 | `tools/valor_telegram.py` | CLI implementation |
 | `.claude/skills/telegram/SKILL.md` | Agent skill documentation |
-| `tests/unit/test_valor_telegram.py` | Test suite |
+| `tests/test_valor_telegram.py` | Test suite |
 
 ## PM Tool vs CLI Tool
 
-Both `valor-telegram send` and `tools/send_telegram.py` route through the Redis outbox relay (`bridge/telegram_relay.py`), but use different session ID prefixes so the relay can distinguish their origins.
+The `valor-telegram send` CLI documented above is the **DevSession / manual** sending interface. It sends directly via Telethon.
 
-| Tool | Context | Session ID prefix | File Support |
-|------|---------|------------------|--------------|
-| `valor-telegram send` | DevSession / CLI | `cli-{unix_timestamp}` | `--file`, `--image`, `--audio`, `--reply-to` |
-| `python tools/send_telegram.py` | ChatSession (PM) | Session UUID | `--file` (repeatable, max 10 for albums; auto-detects media type) |
+For **ChatSession (PM)** sends, use `tools/send_telegram.py` instead. It routes through a Redis queue so the bridge relay can track message IDs for summarizer bypass. See [PM Telegram Tool](pm-telegram-tool.md) for details.
 
-See [PM Telegram Tool](pm-telegram-tool.md) for details on the PM send path.
+| Tool | Context | File Support |
+|------|---------|--------------|
+| `valor-telegram send` | DevSession / CLI | `--file`, `--image`, `--audio` |
+| `python tools/send_telegram.py` | ChatSession (PM) | `--file` (repeatable, max 10 for albums; auto-detects media type) |
 
 ## Related
 
