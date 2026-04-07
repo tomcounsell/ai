@@ -1012,18 +1012,6 @@ def _recover_interrupted_agent_sessions_startup() -> int:
     now = time.time()
     cutoff = now - AGENT_SESSION_HEALTH_MIN_RUNNING
 
-    def _ts(val):
-        """Convert datetime or float to Unix timestamp."""
-        if val is None:
-            return None
-        if isinstance(val, datetime):
-            if val.tzinfo is None:
-                val = val.replace(tzinfo=UTC)
-            return val.timestamp()
-        if isinstance(val, int | float):
-            return float(val)
-        return None
-
     # Filter out recently-started sessions (they are not orphans from a dead process)
     stale_sessions = []
     skipped = 0
@@ -1117,18 +1105,6 @@ async def _agent_session_health_check() -> None:
     checked = 0
     recovered = 0
     workers_started = 0
-
-    def _ts(val):
-        """Convert datetime or float to Unix timestamp."""
-        if val is None:
-            return None
-        if isinstance(val, datetime):
-            if val.tzinfo is None:
-                val = val.replace(tzinfo=UTC)
-            return val.timestamp()
-        if isinstance(val, int | float):
-            return float(val)
-        return None
 
     # === Check RUNNING sessions_list ===
     running_sessions = list(AgentSession.query.filter(status="running"))
