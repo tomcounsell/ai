@@ -5,6 +5,7 @@ appetite: Small
 owner: Valor
 created: 2026-04-07
 tracking: https://github.com/yudame/cuttlefish/issues/225
+plan_url: https://github.com/yudame/cuttlefish/blob/main/docs/plans/perplexity-error-surfacing.md
 last_comment_id:
 ---
 
