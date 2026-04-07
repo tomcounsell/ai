@@ -6,7 +6,7 @@ Validates:
 3. cmd_kill --all with no sessions returns "nothing to kill"
 4. _find_process_by_session_id returns None for unknown session
 5. _kill_process handles ProcessLookupError (already dead)
-6. _kill_agent_session sets status to "killed" via delete-and-recreate
+6. _kill_agent_session sets status to "killed" via finalize_session() (in-place mutation)
 7. cmd_status includes killed_count and killed_sessions in output
 8. Recovery functions filter on status="running" (killed jobs excluded by query)
 """
@@ -235,54 +235,35 @@ class TestKillProcess:
 class TestKillJob:
     @patch("tools.agent_session_scheduler._find_process_by_session_id", return_value=None)
     def test_sets_status_to_killed(self, _mock_find):
-        """_kill_agent_session transitions session status to 'killed' via delete-and-recreate."""
+        """_kill_agent_session transitions session status to 'killed' via finalize_session()."""
         session = _FakeSession(
             agent_session_id="session-abc", session_id="sess-1", status="running"
         )
-        created_job = _FakeSession(
-            agent_session_id="session-new", session_id="sess-1", status="killed"
-        )
 
-        fake_fields = {
-            "session_id": "sess-1",
-            "status": "running",
-            "priority": "normal",
-        }
-
-        with (
-            patch(
-                "agent.agent_session_queue._extract_agent_session_fields",
-                return_value=dict(fake_fields),
-            ),
-            patch(
-                "models.agent_session.AgentSession.create", return_value=created_job
-            ) as mock_create,
-        ):
+        with patch("models.session_lifecycle.finalize_session") as mock_finalize:
             result = _kill_agent_session(session)
 
         assert result["status"] == "killed"
         assert result["previous_status"] == "running"
-        assert session._deleted is True
-        # Verify the create call used status="killed"
-        create_kwargs = mock_create.call_args[1]
-        assert create_kwargs["status"] == "killed"
-        assert "completed_at" in create_kwargs
+        # finalize_session must be called with the session and "killed"
+        mock_finalize.assert_called_once_with(
+            session,
+            "killed",
+            reason="CLI kill",
+            skip_auto_tag=True,
+            skip_checkpoint=True,
+        )
+        # delete() must NOT be called — no more delete-and-recreate
+        assert session._deleted is False
 
     def test_skip_process_kill_for_pending(self):
         """For pending sessions, skip_process_kill=True skips process termination."""
         session = _FakeSession(
             agent_session_id="session-pend", session_id="sess-2", status="pending"
         )
-        created_job = _FakeSession(
-            agent_session_id="session-new", session_id="sess-2", status="killed"
-        )
 
         with (
-            patch(
-                "agent.agent_session_queue._extract_agent_session_fields",
-                return_value={"session_id": "sess-2", "status": "pending"},
-            ),
-            patch("models.agent_session.AgentSession.create", return_value=created_job),
+            patch("models.session_lifecycle.finalize_session"),
             patch("tools.agent_session_scheduler._find_process_by_session_id") as mock_find,
         ):
             result = _kill_agent_session(session, skip_process_kill=True)
@@ -300,17 +281,8 @@ class TestKillJob:
         session = _FakeSession(
             agent_session_id="session-run", session_id="sess-3", status="running"
         )
-        created_job = _FakeSession(
-            agent_session_id="session-new", session_id="sess-3", status="killed"
-        )
 
-        with (
-            patch(
-                "agent.agent_session_queue._extract_agent_session_fields",
-                return_value={"session_id": "sess-3", "status": "running"},
-            ),
-            patch("models.agent_session.AgentSession.create", return_value=created_job),
-        ):
+        with patch("models.session_lifecycle.finalize_session"):
             result = _kill_agent_session(session)
 
         mock_find.assert_called_once_with("sess-3")
@@ -375,24 +347,9 @@ class TestCmdKill:
             }
         )
 
-        created_sessions = [
-            _FakeSession(agent_session_id="new-1", status="killed"),
-            _FakeSession(agent_session_id="new-2", status="killed"),
-        ]
-        create_call_count = [0]
-
-        def fake_create(**kwargs):
-            session = created_sessions[create_call_count[0]]
-            create_call_count[0] += 1
-            return session
-
         with (
             patch("models.agent_session.AgentSession.query", fake_query),
-            patch("models.agent_session.AgentSession.create", side_effect=fake_create),
-            patch(
-                "agent.agent_session_queue._extract_agent_session_fields",
-                return_value={"status": "running"},
-            ),
+            patch("models.session_lifecycle.finalize_session"),
             patch("tools.agent_session_scheduler._find_process_by_session_id", return_value=None),
         ):
             ret = cmd_kill(_make_args(all=True))
@@ -411,15 +368,10 @@ class TestCmdKill:
             agent_session_id="other-session", session_id="s-other", status="running"
         )
         fake_query = _FakeQuery(sessions_by_status={"running": [other, target]})
-        created = _FakeSession(agent_session_id="new-target", status="killed")
 
         with (
             patch("models.agent_session.AgentSession.query", fake_query),
-            patch("models.agent_session.AgentSession.create", return_value=created),
-            patch(
-                "agent.agent_session_queue._extract_agent_session_fields",
-                return_value={"status": "running"},
-            ),
+            patch("models.session_lifecycle.finalize_session"),
             patch("tools.agent_session_scheduler._find_process_by_session_id", return_value=None),
         ):
             ret = cmd_kill(_make_args(agent_session_id="target-session"))
@@ -444,15 +396,10 @@ class TestCmdKill:
             agent_session_id="session-entry", session_id="target-session", status="running"
         )
         fake_query = _FakeQuery(sessions_by_status={"running": [target]})
-        created = _FakeSession(agent_session_id="new-sess", status="killed")
 
         with (
             patch("models.agent_session.AgentSession.query", fake_query),
-            patch("models.agent_session.AgentSession.create", return_value=created),
-            patch(
-                "agent.agent_session_queue._extract_agent_session_fields",
-                return_value={"status": "running"},
-            ),
+            patch("models.session_lifecycle.finalize_session"),
             patch("tools.agent_session_scheduler._find_process_by_session_id", return_value=None),
         ):
             ret = cmd_kill(_make_args(session_id="target-session"))
