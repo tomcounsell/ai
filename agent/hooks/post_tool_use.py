@@ -45,9 +45,7 @@ def _complete_pipeline_stage(session_id: str) -> None:
             return
 
         sm.complete_stage(stage)
-        logger.info(
-            f"[post_tool_use] Completed pipeline stage {stage} on session {session_id}"
-        )
+        logger.info(f"[post_tool_use] Completed pipeline stage {stage} on session {session_id}")
     except Exception as e:
         logger.warning(
             f"[post_tool_use] Failed to complete pipeline stage on session {session_id}: {e}"
