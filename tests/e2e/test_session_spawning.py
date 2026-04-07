@@ -1,6 +1,6 @@
-"""E2E tests for hook-driven DevSession spawning and completion.
+"""E2E tests for hook-driven Dev session spawning and completion.
 
-Tests the full lifecycle: PreToolUse creates DevSession in Redis with
+Tests the full lifecycle: PreToolUse creates a Dev session in Redis with
 parent linkage → SubagentStop marks it completed → status guards work.
 
 Uses real Redis, mocks only the Claude API boundary.
@@ -15,15 +15,15 @@ from models.agent_session import AgentSession
 
 
 @pytest.mark.e2e
-class TestDevSessionCreation:
-    """Verify PreToolUse hook logic creates DevSessions correctly."""
+class TestDevCreation:
+    """Verify PreToolUse hook logic creates Dev sessions correctly."""
 
     def test_dev_session_created_with_parent_linkage(self):
         """Simulating PreToolUse: create_child with parent_session_id."""
         ts = int(time.time())
         parent_session_id = f"chat_parent_{ts}"
 
-        # Create a parent ChatSession first
+        # Create a parent PM session first
         parent = AgentSession.create_pm(
             session_id=parent_session_id,
             project_key="valor",
@@ -44,7 +44,7 @@ class TestDevSessionCreation:
             message_text="dev-session build task",
         )
 
-        # Verify DevSession exists in Redis with correct linkage
+        # Verify Dev session exists in Redis with correct linkage
         assert dev.is_dev
         assert dev.parent_session_id == parent_session_id
         assert dev.status == "pending"
@@ -70,15 +70,15 @@ class TestDevSessionCreation:
 
 
 @pytest.mark.e2e
-class TestDevSessionCompletion:
-    """Verify SubagentStop hook logic marks DevSessions completed."""
+class TestDevCompletion:
+    """Verify SubagentStop hook logic marks Dev sessions completed."""
 
     def test_subagent_stop_completes_dev_session(self):
-        """SubagentStop should transition running DevSession to completed."""
+        """SubagentStop should transition running Dev session to completed."""
         ts = int(time.time())
         parent_sid = f"parent_completion_{ts}"
 
-        # Create parent ChatSession
+        # Create parent PM session
         AgentSession.create_pm(
             session_id=parent_sid,
             project_key="valor",
@@ -88,7 +88,7 @@ class TestDevSessionCompletion:
             message_text="build",
         )
 
-        # Create a running DevSession
+        # Create a running Dev session
         dev = AgentSession.create_dev(
             session_id=f"dev-{parent_sid}",
             project_key="default",
@@ -120,7 +120,7 @@ class TestDevSessionCompletion:
         assert len(completed) >= 1
 
     def test_status_guard_failed_not_overwritten(self):
-        """A 'failed' DevSession should not be overwritten to 'completed'."""
+        """A 'failed' Dev session should not be overwritten to 'completed'."""
         ts = int(time.time())
         parent_sid = f"parent_guard_{ts}"
 
@@ -165,7 +165,7 @@ class TestDevSessionCompletion:
         assert len(completed) == 0
 
     def test_multiple_dev_sessions_under_one_parent(self):
-        """Multiple DevSessions can exist under one parent ChatSession."""
+        """Multiple Dev sessions can exist under one parent PM session."""
         ts = int(time.time())
         parent_sid = f"parent_multi_{ts}"
 

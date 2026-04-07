@@ -11,7 +11,7 @@ class TestBuildTeammateInstructions:
 
     def test_no_agent_tool_instruction(self):
         result = build_teammate_instructions()
-        assert "Do NOT spawn a DevSession" in result
+        assert "Do NOT spawn a Dev session" in result
         assert "Do NOT use the Agent tool" in result
 
     def test_read_only_tools_mentioned(self):

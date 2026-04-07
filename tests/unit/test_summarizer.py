@@ -1946,16 +1946,16 @@ class TestSummarizerBypass:
 
 
 class TestSummarizerBypassParentSession:
-    """Tests for PM bypass guard with parent ChatSession lookup (issue #571).
+    """Tests for PM bypass guard with parent PM session lookup (issue #571).
 
-    In SDLC flows, the DevSession (child) is passed to send_response_with_files,
-    but PM messages are recorded on the parent ChatSession. The guard must check
+    In SDLC flows, the Dev session (child) is passed to send_response_with_files,
+    but PM messages are recorded on the parent PM session. The guard must check
     the parent session when the child has no PM messages.
     """
 
     @pytest.mark.asyncio
     async def test_bypass_when_parent_has_pm_messages(self):
-        """DevSession with parent ChatSession that has PM messages -> bypass fires."""
+        """Dev session with parent PM session that has PM messages -> bypass fires."""
         from bridge.response import send_response_with_files
 
         mock_client = MagicMock()
@@ -1972,7 +1972,7 @@ class TestSummarizerBypassParentSession:
         result = await send_response_with_files(
             mock_client,
             None,
-            "DevSession agent output",
+            "Dev session agent output",
             chat_id=12345,
             reply_to=67890,
             session=mock_session,
@@ -1982,7 +1982,7 @@ class TestSummarizerBypassParentSession:
 
     @pytest.mark.asyncio
     async def test_no_bypass_when_parent_is_dangling(self):
-        """DevSession with dangling parent_session_id -> bypass does not fire."""
+        """Dev session with dangling parent_session_id -> bypass does not fire."""
         from bridge.response import send_response_with_files
 
         mock_client = MagicMock()

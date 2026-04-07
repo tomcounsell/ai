@@ -18,7 +18,7 @@ class TestSessionCreationFromMessage:
     """Verify that incoming messages create the correct session type."""
 
     def test_chat_session_created_with_correct_fields(self, make_telegram_event):
-        """Simulates bridge handler creating a ChatSession from a Telegram event."""
+        """Simulates bridge handler creating a PM session from a Telegram event."""
         event = make_telegram_event(
             chat_id=-1001111111,
             message_id=101,
@@ -48,7 +48,7 @@ class TestSessionCreationFromMessage:
         assert session.chat_id == str(event.chat_id)
 
     def test_chat_session_for_non_work_message(self, make_telegram_event):
-        """Non-SDLC messages should also create ChatSessions (no more simple)."""
+        """Non-SDLC messages should also create PM sessions (no more simple)."""
         event = make_telegram_event(
             chat_id=-1002222222,
             message_id=202,

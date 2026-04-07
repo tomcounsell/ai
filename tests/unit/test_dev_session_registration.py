@@ -1,4 +1,4 @@
-"""Tests for DevSession registration via PreToolUse and SubagentStop hooks.
+"""Tests for Dev session registration via PreToolUse and SubagentStop hooks.
 
 Verifies that:
 - PreToolUse detects Agent tool calls with dev-session subagent_type and creates AgentSession
@@ -22,13 +22,13 @@ def mock_hook_context():
 
 @pytest.fixture
 def parent_session_env(monkeypatch):
-    """Set VALOR_SESSION_ID env var to simulate a parent ChatSession."""
+    """Set VALOR_SESSION_ID env var to simulate a parent PM session."""
     monkeypatch.setenv("VALOR_SESSION_ID", "parent-chat-session-abc")
 
 
 @pytest.fixture
 def parent_session_registry():
-    """Register a session in the session registry to simulate a parent ChatSession."""
+    """Register a session in the session registry to simulate a parent PM session."""
     from agent.hooks import session_registry
 
     session_registry._reset_for_testing()
@@ -39,7 +39,7 @@ def parent_session_registry():
     session_registry._reset_for_testing()
 
 
-class TestPreToolUseDevSessionDetection:
+class TestPreToolUseDevDetection:
     """PreToolUse hook should detect Agent tool calls spawning dev-sessions."""
 
     def _make_agent_input(self, subagent_type="dev-session", prompt="Build the feature"):
@@ -78,7 +78,7 @@ class TestPreToolUseDevSessionDetection:
     def test_ignores_agent_tool_with_non_dev_session_type(
         self, mock_hook_context, parent_session_env
     ):
-        """When Agent tool is called with a different subagent type, no DevSession is created."""
+        """When Agent tool is called with a different subagent type, no Dev session is created."""
         from agent.hooks.pre_tool_use import pre_tool_use_hook
 
         input_data = self._make_agent_input(subagent_type="code-reviewer", prompt="Review the PR")
@@ -90,7 +90,7 @@ class TestPreToolUseDevSessionDetection:
             assert result == {}
 
     def test_ignores_non_agent_tools(self, mock_hook_context, parent_session_env):
-        """Non-Agent tools (Write, Edit, Bash) should not trigger DevSession creation."""
+        """Non-Agent tools (Write, Edit, Bash) should not trigger Dev session creation."""
         from agent.hooks.pre_tool_use import pre_tool_use_hook
 
         input_data = {
@@ -109,7 +109,7 @@ class TestPreToolUseDevSessionDetection:
             mock_create.assert_not_called()
 
     def test_no_parent_session_id_skips_registration(self, mock_hook_context):
-        """When no session is in the registry, DevSession registration is skipped."""
+        """When no session is in the registry, Dev session registration is skipped."""
         from agent.hooks import session_registry
         from agent.hooks.pre_tool_use import pre_tool_use_hook
 
@@ -189,8 +189,8 @@ class TestCreateLocalFactory:
             mock_save.assert_called_once()
 
 
-class TestSubagentStopDevSessionCompletion:
-    """SubagentStop hook should log DevSession completion and update status."""
+class TestSubagentStopDevCompletion:
+    """SubagentStop hook should log Dev session completion and update status."""
 
     def _make_stop_input(self, agent_type="dev-session", agent_id="dev-agent-xyz"):
         return {

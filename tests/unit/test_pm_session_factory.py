@@ -1,4 +1,4 @@
-"""Tests for PM/DevSession factory method integration in bridge handler.
+"""Tests for PM/Dev session factory method integration in bridge handler.
 
 Verifies that the bridge handler correctly routes messages to create_pm()
 (default) or create_dev() (for "Dev: X" groups) based on chat title.

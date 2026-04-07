@@ -1,4 +1,4 @@
-"""Tests for PM (ChatSession) permission boundaries.
+"""Tests for PM session permission boundaries.
 
 Verifies that:
 - PM sessions get SESSION_TYPE=chat env var

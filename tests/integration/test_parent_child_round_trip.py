@@ -1,13 +1,13 @@
 """Integration test for the parent-child session hook lifecycle.
 
-Exercises the full round-trip: PM session spawns a child DevSession via
+Exercises the full round-trip: PM session spawns a child Dev session via
 PreToolUse hook, child runs, SubagentStop hook completes the child and
 updates the parent's pipeline stage_states. Uses real Redis (no mocks).
 
 Tests both success and failure outcome paths, plus edge cases like empty
 prompts and missing session registry entries.
 
-See docs/features/chat-dev-session-architecture.md "Hook-Driven Lifecycle"
+See docs/features/pm-dev-session-architecture.md "Hook-Driven Lifecycle"
 for the architecture this test validates.
 """
 
@@ -35,7 +35,7 @@ def _clean_session_registry():
 
 @pytest.fixture
 def pm_session(redis_test_db):
-    """Create a PM (ChatSession) in Redis for hook testing."""
+    """Create a PM session in Redis for hook testing."""
     return AgentSession.create(
         session_id="pm-round-trip-test",
         session_type="chat",
@@ -62,7 +62,7 @@ class TestSuccessRoundTrip:
     """Full lifecycle with a successful BUILD stage outcome."""
 
     def test_pretooluse_creates_child_and_starts_stage(self, pm_session):
-        """PreToolUse hook registers a DevSession and starts BUILD on parent."""
+        """PreToolUse hook registers a Dev session and starts BUILD on parent."""
         from agent.hooks.session_registry import register_pending, resolve
         from bridge.pipeline_state import PipelineStateMachine
 
@@ -90,7 +90,7 @@ class TestSuccessRoundTrip:
         # Verify stage extraction works
         assert _extract_stage_from_prompt(tool_input["prompt"]) == "BUILD"
 
-        # Verify a DevSession was created in Redis
+        # Verify a Dev session was created in Redis
         dev_sessions = list(
             AgentSession.query.filter(parent_agent_session_id=pm_session.session_id)
         )
@@ -109,7 +109,7 @@ class TestSuccessRoundTrip:
         assert resolve(FAKE_CLAUDE_UUID) == pm_session.session_id
 
     def test_subagent_stop_completes_child_and_stage(self, pm_session):
-        """SubagentStop hook marks DevSession complete and records stage success."""
+        """SubagentStop hook marks Dev session complete and records stage success."""
         from agent.hooks.session_registry import register_pending
         from bridge.pipeline_state import PipelineStateMachine
 
@@ -144,7 +144,7 @@ class TestSuccessRoundTrip:
             claude_uuid=FAKE_CLAUDE_UUID,
         )
 
-        # Verify DevSession status is completed
+        # Verify Dev session status is completed
         dev_sessions = list(
             AgentSession.query.filter(parent_agent_session_id=pm_session.session_id)
         )
@@ -161,7 +161,7 @@ class TestSuccessRoundTrip:
 
 
 class TestFailureRoundTrip:
-    """Full lifecycle where the DevSession reports a TEST failure."""
+    """Full lifecycle where the Dev session reports a TEST failure."""
 
     def test_subagent_stop_records_stage_failure(self, pm_session):
         """SubagentStop hook marks stage as failed when output indicates failure."""
@@ -233,7 +233,7 @@ class TestEdgeCases:
         }
         _maybe_register_dev_session(tool_input, claude_uuid=FAKE_CLAUDE_UUID)
 
-        # DevSession should still be created
+        # Dev session should still be created
         dev_sessions = list(
             AgentSession.query.filter(parent_agent_session_id=pm_session.session_id)
         )
@@ -256,7 +256,7 @@ class TestEdgeCases:
         # No register_pending called -> resolve returns None
         _maybe_register_dev_session(tool_input, claude_uuid="nonexistent-uuid")
 
-        # No DevSession should be created (no parent to link to)
+        # No Dev session should be created (no parent to link to)
         all_devs = list(AgentSession.query.filter(session_type="dev"))
         assert len(all_devs) == 0
 
@@ -274,7 +274,7 @@ class TestEdgeCases:
         }
         _maybe_register_dev_session(tool_input, claude_uuid=FAKE_CLAUDE_UUID)
 
-        # No DevSession created for non-dev-session types
+        # No Dev session created for non-dev-session types
         dev_sessions = list(
             AgentSession.query.filter(parent_agent_session_id=pm_session.session_id)
         )
