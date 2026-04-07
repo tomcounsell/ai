@@ -502,12 +502,11 @@ def _acquire_pop_lock(chat_id: str) -> bool:
     TTL=5s ensures self-healing if the process crashes while holding the lock.
     """
     try:
-        from popoto import Redis
+        from popoto.redis_db import POPOTO_REDIS_DB
 
-        redis_client = Redis.get_connection()
         lock_key = f"worker:pop_lock:{chat_id}"
         # SETNX returns True if key was set (lock acquired), False if already exists
-        acquired = redis_client.set(lock_key, "1", nx=True, ex=_POP_LOCK_TTL_SECONDS)
+        acquired = POPOTO_REDIS_DB.set(lock_key, "1", nx=True, ex=_POP_LOCK_TTL_SECONDS)
         return bool(acquired)
     except Exception as e:
         logger.warning(f"[chat:{chat_id}] Pop lock acquisition failed (non-fatal): {e}")
@@ -518,10 +517,9 @@ def _acquire_pop_lock(chat_id: str) -> bool:
 def _release_pop_lock(chat_id: str) -> None:
     """Release the Redis pop lock for the given chat_id."""
     try:
-        from popoto import Redis
+        from popoto.redis_db import POPOTO_REDIS_DB
 
-        redis_client = Redis.get_connection()
-        redis_client.delete(f"worker:pop_lock:{chat_id}")
+        POPOTO_REDIS_DB.delete(f"worker:pop_lock:{chat_id}")
     except Exception as e:
         logger.warning(f"[chat:{chat_id}] Pop lock release failed (non-fatal): {e}")
 
@@ -682,9 +680,7 @@ async def _pop_agent_session_with_fallback(chat_id: str) -> AgentSession | None:
     # NOT re-entrant: _pop_agent_session() acquired + released the lock before
     # returning None, so we are acquiring a fresh lock here.
     if not _acquire_pop_lock(chat_id):
-        logger.debug(
-            f"[chat:{chat_id}] Sync fallback: pop lock held by another worker, skipping"
-        )
+        logger.debug(f"[chat:{chat_id}] Sync fallback: pop lock held by another worker, skipping")
         return None
 
     try:
