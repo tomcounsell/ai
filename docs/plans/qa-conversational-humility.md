@@ -259,8 +259,8 @@ All changes use existing infrastructure. No `.mcp.json` changes.
 
 - [x] Create `docs/features/agent-message-delivery.md` describing the stop-hook review gate, delivery choices, and how PM/Teammate personas use it
 - [x] Update `docs/features/README.md` index table
-- [x] Rename `docs/features/chatsession-teammate-mode.md` → `chatsession-qa-mode.md` and document new Teammate persona
-- [x] Update `docs/features/chat-dev-session-architecture.md` to mention delivery instruction fields on AgentSession
+- [x] Rename `docs/features/pm-teammate-mode.md` → `chatsession-qa-mode.md` and document new Teammate persona
+- [x] Update `docs/features/pm-dev-session-architecture.md` to mention delivery instruction fields on AgentSession
 
 ## Success Criteria
 
@@ -393,7 +393,7 @@ All changes use existing infrastructure. No `.mcp.json` changes.
 - **Parallel**: false
 - Create `docs/features/agent-message-delivery.md`
 - Update `docs/features/README.md` index
-- Rename `docs/features/chatsession-teammate-mode.md` → `chatsession-qa-mode.md`
+- Rename `docs/features/pm-teammate-mode.md` → `chatsession-qa-mode.md`
 
 ### 8. Final Validation
 - **Task ID**: validate-final

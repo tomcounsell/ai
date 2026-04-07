@@ -92,7 +92,7 @@ Follow the pattern from `scripts/migrate_parent_session_field.py` but with key R
 
 ### Task 8: Update Documentation
 
-**Files:** `docs/features/standardized-enums.md`, `docs/features/chat-dev-session-architecture.md`
+**Files:** `docs/features/standardized-enums.md`, `docs/features/pm-dev-session-architecture.md`
 
 - Replace all references to `SessionType.CHAT`, `"chat"`, `session_type="chat"`
 - Update enum tables, code examples, architecture descriptions
@@ -174,7 +174,7 @@ No agent integration required. This is a model/enum rename with a migration scri
 ## Documentation
 
 - [x] Update `docs/features/standardized-enums.md` -- replace all SessionType.CHAT references, update enum table, update code examples
-- [x] Update `docs/features/chat-dev-session-architecture.md` -- replace "ChatSession (session_type=SessionType.CHAT)" with PM terminology, add TEAMMATE session description
+- [x] Update `docs/features/pm-dev-session-architecture.md` -- replace "PM session (session_type=SessionType.CHAT)" with PM terminology, add TEAMMATE session description
 - [x] Update `CLAUDE.md` system architecture section if it references session_type="chat"
 
 ## Success Criteria
@@ -187,7 +187,7 @@ No agent integration required. This is a model/enum rename with a migration scri
 - [x] Bridge creates `SessionType.TEAMMATE` sessions directly for teammate-persona routing (no `session_mode` secondary discriminator needed)
 - [x] `pytest tests/unit/test_enums.py` validates new enum values including TEAMMATE
 - [x] All existing tests pass: `pytest tests/unit/ tests/integration/ tests/e2e/` green
-- [x] Documentation updated: `docs/features/standardized-enums.md`, `docs/features/chat-dev-session-architecture.md`
+- [x] Documentation updated: `docs/features/standardized-enums.md`, `docs/features/pm-dev-session-architecture.md`
 
 ## Execution Order
 

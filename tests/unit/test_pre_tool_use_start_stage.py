@@ -175,7 +175,7 @@ class TestStartPipelineStage:
         assert "Failed to start pipeline stage BUILD" in caplog.text
 
 
-class TestMaybeRegisterDevSessionStartStage:
+class TestMaybeRegisterDevStartStage:
     """Test that _maybe_register_dev_session calls start_stage wiring."""
 
     def test_calls_start_stage_for_sdlc_prompt(self, monkeypatch, caplog):
@@ -222,7 +222,7 @@ class TestMaybeRegisterDevSessionStartStage:
         assert "No SDLC stage found" in caplog.text
 
     def test_start_stage_failure_does_not_block_registration(self, monkeypatch, caplog):
-        """start_stage failure should not prevent DevSession registration from completing."""
+        """start_stage failure should not prevent Dev session registration from completing."""
         mock_dev = MagicMock()
         mock_dev.agent_session_id = "session-101"
         mock_as_mod = MagicMock()

@@ -49,7 +49,7 @@ class TestSubagentStopHookBasic:
         assert result == {}
 
 
-class TestRegisterDevSessionCompletion:
+class TestRegisterDevCompletion:
     """Test _register_dev_session_completion helper."""
 
     def test_skips_when_no_session_id(self, monkeypatch, caplog):
@@ -57,7 +57,7 @@ class TestRegisterDevSessionCompletion:
         monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
         with caplog.at_level(logging.DEBUG):
             _register_dev_session_completion("agent-1")
-        assert "skipping DevSession completion" in caplog.text
+        assert "skipping Dev session completion" in caplog.text
 
     def test_marks_dev_session_completed(self, monkeypatch):
         """Should mark pending dev sessions as completed."""
@@ -110,7 +110,7 @@ class TestRegisterDevSessionCompletion:
             caplog.at_level(logging.WARNING),
         ):
             _register_dev_session_completion("agent-1", claude_uuid="test-uuid")
-        assert "Failed to register DevSession completion" in caplog.text
+        assert "Failed to register Dev session completion" in caplog.text
 
     def test_handles_query_error(self, monkeypatch, caplog):
         """Should log warning if Redis query raises."""
@@ -123,7 +123,7 @@ class TestRegisterDevSessionCompletion:
             caplog.at_level(logging.WARNING),
         ):
             _register_dev_session_completion("agent-1", claude_uuid="test-uuid")
-        assert "Failed to register DevSession completion" in caplog.text
+        assert "Failed to register Dev session completion" in caplog.text
 
 
 class TestGetSdlcStages:
@@ -306,7 +306,7 @@ class TestPostStageCommentOnCompletion:
         assert "non-fatal" in caplog.text
 
 
-class TestSubagentStopHookDevSession:
+class TestSubagentStopHookDevAgent:
     """Test full hook behavior for dev-session agent type."""
 
     @pytest.mark.asyncio

@@ -90,7 +90,7 @@ As of PR #601, the pipeline graph is fully wired into the runtime execution path
 
 ### Outcome Classification
 
-When a DevSession completes, the `subagent_stop_hook` calls `classify_outcome(stage, stop_reason, output_tail)` on the PipelineStateMachine. This uses a three-tier approach:
+When a Dev session completes, the `subagent_stop_hook` calls `classify_outcome(stage, stop_reason, output_tail)` on the PipelineStateMachine. This uses a three-tier approach:
 1. **Tier 0**: Parse `<!-- OUTCOME {...} -->` contracts from output (structured status from skills)
 2. **Tier 1**: SDK stop_reason — anything other than "end_turn" is a process failure
 3. **Tier 2**: Deterministic tail patterns scoped by stage (fallback when no OUTCOME contract)
@@ -109,7 +109,7 @@ The dashboard (`ui/data/sdlc.py`) routes stage reads through `PipelineStateMachi
 
 ## Integration
 
-ChatSession orchestration uses the graph for pipeline progression. Individual `/do-*` skills report their results; the ChatSession determines what happens next.
+PM session orchestration uses the graph for pipeline progression. Individual `/do-*` skills report their results; the PM session determines what happens next.
 
 ## Files
 

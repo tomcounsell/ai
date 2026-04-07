@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Send a Telegram message from the PM (ChatSession) via Redis outbox queue.
+"""Send a Telegram message from the PM session via Redis outbox queue.
 
-This tool is called by ChatSession via Bash to compose and send its own
+This tool is called by the PM session via Bash to compose and send its own
 Telegram messages, bypassing the summarizer. The bridge relay task
 (bridge/telegram_relay.py) processes the queue and sends via Telethon.
 
@@ -82,14 +82,14 @@ def send_message(text: str, file_paths: list[str] | None = None) -> None:
 
     if not chat_id:
         print(
-            "Error: TELEGRAM_CHAT_ID not set. This tool is only available in ChatSession context.",
+            "Error: TELEGRAM_CHAT_ID not set. This tool is only available in PM session context.",
             file=sys.stderr,
         )
         sys.exit(1)
 
     if not session_id:
         print(
-            "Error: VALOR_SESSION_ID not set. This tool is only available in ChatSession context.",
+            "Error: VALOR_SESSION_ID not set. This tool is only available in PM session context.",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -197,14 +197,14 @@ def send_reaction(feeling: str) -> None:
 
     if not chat_id:
         print(
-            "Error: TELEGRAM_CHAT_ID not set. This tool is only available in ChatSession context.",
+            "Error: TELEGRAM_CHAT_ID not set. This tool is only available in PM session context.",
             file=sys.stderr,
         )
         sys.exit(1)
 
     if not session_id:
         print(
-            "Error: VALOR_SESSION_ID not set. This tool is only available in ChatSession context.",
+            "Error: VALOR_SESSION_ID not set. This tool is only available in PM session context.",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -277,14 +277,14 @@ def send_emoji(feeling: str) -> None:
 
     if not chat_id:
         print(
-            "Error: TELEGRAM_CHAT_ID not set. This tool is only available in ChatSession context.",
+            "Error: TELEGRAM_CHAT_ID not set. This tool is only available in PM session context.",
             file=sys.stderr,
         )
         sys.exit(1)
 
     if not session_id:
         print(
-            "Error: VALOR_SESSION_ID not set. This tool is only available in ChatSession context.",
+            "Error: VALOR_SESSION_ID not set. This tool is only available in PM session context.",
             file=sys.stderr,
         )
         sys.exit(1)

@@ -1,4 +1,4 @@
-"""Tests for scripts/steer_child.py -- parent-child DevSession steering."""
+"""Tests for scripts/steer_child.py -- parent-child Dev session steering."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from scripts.steer_child import main
 
 @pytest.fixture
 def mock_parent():
-    """Create a mock parent ChatSession."""
+    """Create a mock parent PM session."""
     parent = MagicMock()
     parent.agent_session_id = "parent-001"
     parent.session_type = "pm"
@@ -22,7 +22,7 @@ def mock_parent():
 
 @pytest.fixture
 def mock_child():
-    """Create a mock child DevSession."""
+    """Create a mock child Dev session."""
     child = MagicMock()
     child.agent_session_id = "child-001"
     child.session_type = "dev"
@@ -64,7 +64,7 @@ class TestSteerChild:
         mock_push.assert_called_once_with(
             session_id="child-001",
             text="focus on tests",
-            sender="ChatSession",
+            sender="pm",
             is_abort=False,
         )
 
@@ -90,7 +90,7 @@ class TestSteerChild:
         mock_push.assert_called_once_with(
             session_id="child-001",
             text="stop everything",
-            sender="ChatSession",
+            sender="pm",
             is_abort=True,
         )
 
@@ -169,7 +169,7 @@ class TestSteerChild:
 
     @patch(_AGENT_SESSION)
     def test_non_dev_session_rejected(self, mock_agent_session_cls):
-        """Chat session (not DevSession) is rejected as steering target."""
+        """PM session (not a Dev session) is rejected as steering target."""
         chat = MagicMock()
         chat.is_dev = False
         mock_agent_session_cls.get_by_id.return_value = chat

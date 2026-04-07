@@ -25,7 +25,7 @@ The architecture represents a **living codebase** where users interact directly 
 │                       Python Bridge Layer                            │
 │                   (bridge/telegram_bridge.py)                        │
 │                                                                      │
-│  • Message routing via chat_title prefix (Dev: → DevSession)         │
+│  • Message routing via chat_title prefix (Dev: → Dev session)         │
 │  • Session management per chat                                       │
 │  • Multi-project support                                             │
 └───────────────────────────────┬─────────────────────────────────────┘
@@ -122,7 +122,7 @@ Domain-Specific Tools & MCP Servers
 - **Security**: Granular permissions per subagent/tool
 - **Flexibility**: Multiple execution paths (Claude Code + Gemini CLI)
 
-See [Chat Dev Session Architecture](chat-dev-session-architecture.md) for the current session architecture.
+See [Chat Dev Session Architecture](pm-dev-session-architecture.md) for the current session architecture.
 
 ## Design Principles
 

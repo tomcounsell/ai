@@ -301,7 +301,7 @@ Source modules with no test coverage. Priority targets for new tests.
 | Priority | Module | Lines | Risk |
 |----------|--------|------:|------|
 | Critical | `bridge/telegram_bridge.py` | 1,655 | Main entry point |
-| Critical | `agent/hooks/` | ~150 | DevSession lifecycle hooks |
+| Critical | `agent/hooks/` | ~150 | Dev session lifecycle hooks |
 | Critical | `bridge/context.py` | 557 | Context building |
 | Critical | `bridge/response.py` | 579 | Response formatting |
 | Critical | `config/loader.py` | 432 | Config initialization |

@@ -10,7 +10,7 @@ The pipeline graph defined correct edges (TEST -> REVIEW -> DOCS -> MERGE), but 
 
 ### Hard Delivery Gates
 
-> **Note**: The Observer Agent (`bridge/observer.py`) was removed as part of the ChatSession/DevSession architecture redesign. Mandatory gate enforcement is now handled by ChatSession orchestration and the output router (`agent/output_router.py`, called via `agent/agent_session_queue.py`). The gate check functions in `agent/goal_gates.py` remain the source of truth for deterministic stage validation.
+> **Note**: The Observer Agent (`bridge/observer.py`) was removed as part of the PM/Dev session architecture redesign. Mandatory gate enforcement is now handled by PM session orchestration and the output router (`agent/output_router.py`, called via `agent/agent_session_queue.py`). The gate check functions in `agent/goal_gates.py` remain the source of truth for deterministic stage validation.
 
 ### State Machine Stage Transitions (`bridge/pipeline_state.py`)
 
@@ -28,7 +28,7 @@ The `/do-docs` skill writes `status: docs_complete` to the plan document's front
 
 - [Pipeline Graph](pipeline-graph.md) — defines the stage transition edges
 - [Goal Gates](goal-gates.md) — deterministic gate check functions
-- [Chat Dev Session Architecture](chat-dev-session-architecture.md) — ChatSession/DevSession routing model that replaced the Observer
+- [Chat Dev Session Architecture](pm-dev-session-architecture.md) — PM/Dev session routing model that replaced the Observer
 
 ## Tracking
 

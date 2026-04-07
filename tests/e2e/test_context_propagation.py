@@ -1,7 +1,7 @@
 """E2E tests for context propagation across session types.
 
 Verifies that thread context, task lists, worktree paths, and parent
-linkage flow correctly from ChatSession → DevSession → Redis.
+linkage flow correctly from PM session → Dev session → Redis.
 Uses real Redis via conftest redis_test_db.
 """
 
@@ -18,7 +18,7 @@ from models.agent_session import (
 
 
 @pytest.mark.e2e
-class TestChatSessionContextFields:
+class TestPmContextFields:
     """Verify all context fields persist through create → save → reload."""
 
     def test_all_context_fields_roundtrip(self):
@@ -61,8 +61,8 @@ class TestChatSessionContextFields:
 
 
 @pytest.mark.e2e
-class TestDevSessionParentLinkage:
-    """Verify DevSession correctly links to its parent ChatSession."""
+class TestDevParentLinkage:
+    """Verify a Dev session correctly links to its parent PM session."""
 
     def test_dev_session_has_parent_reference(self):
         ts = int(time.time())
@@ -173,7 +173,7 @@ class TestDerivedPaths:
 
 @pytest.mark.e2e
 class TestSDLCStagesPropagation:
-    """Verify SDLC stages dict flows correctly on DevSessions."""
+    """Verify SDLC stages dict flows correctly on Dev sessions."""
 
     def test_stage_states_persist_as_json(self):
         ts = int(time.time())

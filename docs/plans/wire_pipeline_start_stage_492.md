@@ -15,8 +15,8 @@ last_comment_id:
 PipelineStateMachine has full start_stage/complete_stage/fail_stage logic, but start_stage() is only called in tests -- never in production. This means:
 
 **Current behavior:**
-- The PM (ChatSession) dispatches dev-sessions for SDLC stages via the Agent tool
-- The `pre_tool_use` hook registers the DevSession in Redis (`_maybe_register_dev_session`)
+- The PM (PM session) dispatches dev-sessions for SDLC stages via the Agent tool
+- The `pre_tool_use` hook registers the Dev session in Redis (`_maybe_register_dev_session`)
 - The `subagent_stop` hook fires when the dev-session returns and tries to find the current in_progress stage
 - But no stage was ever marked in_progress, so `sm.current_stage()` returns None
 - `stage_states` remains None on all production sessions
@@ -34,12 +34,12 @@ PipelineStateMachine has full start_stage/complete_stage/fail_stage logic, but s
 
 ## Data Flow
 
-1. **Entry point**: Human message arrives via Telegram, ChatSession (PM) assesses SDLC state
+1. **Entry point**: Human message arrives via Telegram, PM session (PM) assesses SDLC state
 2. **PM dispatches**: PM uses Agent tool with type="dev-session" and a prompt containing the stage assignment (e.g., "Stage: BUILD")
 3. **PreToolUse hook fires**: `pre_tool_use_hook()` detects `tool_name == "Agent"` and `type == "dev-session"`, calls `_maybe_register_dev_session()` -- **THIS IS WHERE start_stage() MUST BE ADDED**
 4. **Dev-session runs**: Subagent executes the stage work
 5. **SubagentStop hook fires**: `subagent_stop_hook()` calls `_record_stage_on_parent()` which loads PipelineStateMachine and calls `sm.current_stage()` to find the in_progress stage, then `sm.complete_stage()`
-6. **Output**: `stage_states` on parent ChatSession is updated with completed stage
+6. **Output**: `stage_states` on parent PM session is updated with completed stage
 
 ## Architectural Impact
 
@@ -74,11 +74,11 @@ No prerequisites -- this work modifies existing internal code with no external d
 
 ### Flow
 
-PM dispatches dev-session -> PreToolUse hook fires -> Extract stage from prompt -> Find parent ChatSession -> `sm.start_stage(STAGE)` -> Dev-session runs -> SubagentStop hook fires -> `sm.complete_stage(STAGE)` -> stage_states updated
+PM dispatches dev-session -> PreToolUse hook fires -> Extract stage from prompt -> Find parent PM session -> `sm.start_stage(STAGE)` -> Dev-session runs -> SubagentStop hook fires -> `sm.complete_stage(STAGE)` -> stage_states updated
 
 ### Technical Approach
 
-1. In `_maybe_register_dev_session()` (agent/hooks/pre_tool_use.py), after registering the DevSession, call `start_stage()` on the parent ChatSession's PipelineStateMachine
+1. In `_maybe_register_dev_session()` (agent/hooks/pre_tool_use.py), after registering the Dev session, call `start_stage()` on the parent PM session's PipelineStateMachine
 2. Extract the SDLC stage from the prompt text using pattern matching against the known SDLC_STAGES list. The PM includes the stage name in the prompt when dispatching (e.g., "Stage: BUILD", "Stage to execute -- BUILD")
 3. If no stage can be extracted from the prompt, log a warning and skip -- do not block the tool call
 4. Handle the case where stage_states is None (fresh session) by letting PipelineStateMachine.__init__ initialize defaults
@@ -182,7 +182,7 @@ No agent integration required -- this change operates within the hook system tha
 - **Parallel**: true
 - Add `_extract_stage_from_prompt(prompt: str) -> str | None` helper to `agent/hooks/pre_tool_use.py` that scans prompt text for SDLC stage names
 - Add `_start_pipeline_stage(parent_session_id: str, stage: str) -> None` helper that loads the parent AgentSession, creates PipelineStateMachine, and calls start_stage()
-- Call `_start_pipeline_stage()` from `_maybe_register_dev_session()` after the DevSession is registered
+- Call `_start_pipeline_stage()` from `_maybe_register_dev_session()` after the Dev session is registered
 - Wrap in try/except to ensure failures never block the Agent tool call
 - Create `tests/unit/test_pre_tool_use_start_stage.py` with tests for stage extraction and start_stage wiring
 

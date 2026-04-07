@@ -1,19 +1,19 @@
 # PM Telegram Tool
 
-ChatSession (the PM persona) composes and sends its own Telegram messages directly, bypassing the summarizer. This gives the PM full control over tone and content when communicating with stakeholders. Supports text messages, single file attachments, and multi-file albums (up to 10 files grouped as a Telegram album).
+PM session (the PM persona) composes and sends its own Telegram messages directly, bypassing the summarizer. This gives the PM full control over tone and content when communicating with stakeholders. Supports text messages, single file attachments, and multi-file albums (up to 10 files grouped as a Telegram album).
 
 ## Architecture
 
 ### Problem
 
-Previously, all ChatSession output was rewritten by the summarizer (a Haiku-powered compressor in `bridge/response.py`). The PM persona had communication guidelines but they were effectively discarded -- the summarizer overwrote everything with structured bullet points.
+Previously, all PM session output was rewritten by the summarizer (a Haiku-powered compressor in `bridge/response.py`). The PM persona had communication guidelines but they were effectively discarded -- the summarizer overwrote everything with structured bullet points.
 
 ### Solution
 
-A Redis-based IPC mechanism lets ChatSession queue messages from a subprocess, and the bridge relay delivers them via Telethon. The summarizer becomes a safety net that only fires if the PM ends a session without self-messaging.
+A Redis-based IPC mechanism lets PM session queue messages from a subprocess, and the bridge relay delivers them via Telethon. The summarizer becomes a safety net that only fires if the PM ends a session without self-messaging.
 
 ```
-ChatSession (Claude Code subprocess)
+PM session (Claude Code subprocess)
     |
     | python tools/send_telegram.py "message text"
     | python tools/send_telegram.py "caption" --file /path/to/file.png
@@ -30,7 +30,7 @@ Telethon send_markdown() or send_file() -> Telegram
 
 | Component | File | Purpose |
 |-----------|------|---------|
-| Send tool | `tools/send_telegram.py` | CLI script called by ChatSession via Bash. Validates input, applies linkification, enforces 4096-char limit, pushes to Redis queue. Supports `--file` for single attachments and multi-file albums (repeatable, max 10 files). |
+| Send tool | `tools/send_telegram.py` | CLI script called by PM session via Bash. Validates input, applies linkification, enforces 4096-char limit, pushes to Redis queue. Supports `--file` for single attachments and multi-file albums (repeatable, max 10 files). |
 | Bridge relay | `bridge/telegram_relay.py` | Async task in the bridge event loop. Polls `telegram:outbox:*` keys, sends via Telethon (`send_markdown` for text, `send_file` for single files or albums), records message IDs on AgentSession. Normalizes legacy `file_path` payloads to `file_paths` for backward compatibility. |
 | Formatting | `bridge/formatting.py` | Shared `linkify_references()` utility extracted from the summarizer. Converts `PR #N` and `Issue #N` to markdown links. |
 | Summarizer bypass | `bridge/response.py` | Before calling the summarizer, checks `session.has_pm_messages()`. If the PM already sent messages, skips summarizer and returns True. |
@@ -58,7 +58,7 @@ Telethon's `send_file()` auto-detects the media type. When multiple files are pr
 
 ### Flow
 
-1. ChatSession calls `python tools/send_telegram.py "caption" --file /path/to/file [--file /path/to/file2 ...]`
+1. PM session calls `python tools/send_telegram.py "caption" --file /path/to/file [--file /path/to/file2 ...]`
 2. `send_telegram.py` validates all files exist, resolves absolute paths, enforces the 10-file album limit, and includes `file_paths` (list) in the Redis queue payload
 3. `telegram_relay.py` detects `file_paths` in the payload and uses `client.send_file()` with the file list for album sends or a single file for single attachments
 4. If any files are missing at relay time, the relay filters them out and sends the available files. If no files remain, it falls back to text-only delivery
@@ -75,7 +75,7 @@ Telethon's `send_file()` auto-detects the media type. When multiple files are pr
 
 ## IPC Mechanism: Redis Queue
 
-ChatSession runs as a Claude Code subprocess and cannot access the bridge's Telethon client directly. Redis lists provide the IPC channel.
+PM session runs as a Claude Code subprocess and cannot access the bridge's Telethon client directly. Redis lists provide the IPC channel.
 
 ### Queue Contract
 
@@ -101,13 +101,13 @@ The summarizer is retained as a safety net. The decision tree in `bridge/respons
 
 1. Refresh the AgentSession from Redis to get the latest `pm_sent_message_ids`.
 2. If `session.has_pm_messages()` returns True: skip summarizer, return True. The PM already delivered its own messages.
-3. **Parent session lookup** (issue #571): If the session itself has no PM messages but has a `parent_chat_session_id` (i.e., it is a DevSession in an SDLC flow), look up the parent ChatSession via `get_parent_chat_session()` and check `has_pm_messages()` on the parent. If the parent has PM messages, skip the summarizer. This prevents dual messages in SDLC flows where the PM (ChatSession) self-messages and the DevSession output would otherwise also be summarized and sent.
+3. **Parent session lookup** (issue #571): If the session itself has no PM messages but has a `parent_chat_session_id` (i.e., it is a Dev session in an SDLC flow), look up the parent PM session via `get_parent_chat_session()` and check `has_pm_messages()` on the parent. If the parent has PM messages, skip the summarizer. This prevents dual messages in SDLC flows where the PM (PM session) self-messages and the Dev session output would otherwise also be summarized and sent.
 4. If neither session nor parent has PM messages: fall through to the existing summarizer path. The response text is compressed and sent as before.
 
 This means:
 - If the PM persona crashes before calling the tool, the summarizer catches the output.
 - If the PM deliberately returns text without using the tool, the summarizer formats and sends it.
-- If the tool or Redis fails, ChatSession sees a Bash tool error and can fall back to returning text.
+- If the tool or Redis fails, PM session sees a Bash tool error and can fall back to returning text.
 
 ## Environment Variables
 
@@ -123,8 +123,8 @@ The following environment variables are injected by `sdk_client.py` for chat-typ
 
 | Failure | Behavior |
 |---------|----------|
-| Redis connection failure in tool | Tool exits with non-zero code; ChatSession sees Bash error |
-| Missing `TELEGRAM_CHAT_ID` | Tool exits with error explaining it is only available in ChatSession context |
+| Redis connection failure in tool | Tool exits with non-zero code; PM session sees Bash error |
+| Missing `TELEGRAM_CHAT_ID` | Tool exits with error explaining it is only available in PM session context |
 | Empty message text (no file) | Tool rejects with clear error |
 | `--file` with nonexistent path | Tool exits with code 1 and descriptive error |
 | More than 10 `--file` flags | Tool exits with code 1, citing the album limit |
@@ -141,4 +141,4 @@ The following environment variables are injected by `sdk_client.py` for chat-typ
 - Plan: `docs/plans/pm-telegram-tool.md`
 - Prior art on summarizer architecture: PR #275 (semantic session routing), PR #456 (summarizer evidence hardening)
 - [Summarizer Format](summarizer-format.md) -- the existing summarizer that this feature partially bypasses
-- [Chat Dev Session Architecture](chat-dev-session-architecture.md) -- ChatSession/DevSession split that this feature extends
+- [Chat Dev Session Architecture](pm-dev-session-architecture.md) -- PM/Dev session split that this feature extends

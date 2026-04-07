@@ -88,7 +88,7 @@ class TestTelegramEnvInjection:
     """Tests for TELEGRAM_CHAT_ID and TELEGRAM_REPLY_TO env var injection (issue #497)."""
 
     def test_chat_session_injects_telegram_chat_id(self):
-        """ChatSession should inject TELEGRAM_CHAT_ID from chat_id."""
+        """PM session should inject TELEGRAM_CHAT_ID from chat_id."""
         agent = ValorAgent(
             chat_id="12345",
             session_type="pm",
@@ -106,7 +106,7 @@ class TestTelegramEnvInjection:
         assert "TELEGRAM_CHAT_ID" not in options.env
 
     def test_chat_session_without_chat_id_no_injection(self):
-        """ChatSession without chat_id should not inject TELEGRAM_CHAT_ID."""
+        """PM session without chat_id should not inject TELEGRAM_CHAT_ID."""
         agent = ValorAgent(
             chat_id=None,
             session_type="pm",

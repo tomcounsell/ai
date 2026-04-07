@@ -71,8 +71,8 @@ class TestWorkerRulesConstant:
         assert ".py" in WORKER_RULES or ".js" in WORKER_RULES or ".ts" in WORKER_RULES
 
     def test_references_pipeline_controller(self):
-        """Must reference the ChatSession as the pipeline controller."""
-        assert "ChatSession" in WORKER_RULES
+        """Must reference the PM session as the pipeline controller."""
+        assert "PM session" in WORKER_RULES
 
 
 # ---------------------------------------------------------------------------

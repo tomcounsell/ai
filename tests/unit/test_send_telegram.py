@@ -1,6 +1,6 @@
 """Tests for tools/send_telegram.py -- PM self-messaging tool.
 
-Tests the CLI tool that ChatSession uses to send Telegram messages
+Tests the CLI tool that the PM session uses to send Telegram messages
 via the Redis outbox queue, bypassing the summarizer.
 """
 

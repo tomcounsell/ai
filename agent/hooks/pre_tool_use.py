@@ -1,4 +1,4 @@
-"""PreToolUse hook: blocks sensitive writes, enforces PM restrictions, registers DevSessions."""
+"""PreToolUse hook: blocks sensitive writes, enforces PM limits, registers child Dev sessions."""
 
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ _STAGE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-# Paths the PM (ChatSession) is allowed to write to.
+# Paths the PM session is allowed to write to.
 # Everything else is blocked for PM sessions.
 PM_ALLOWED_WRITE_PREFIXES = (
     "docs/",
@@ -134,7 +134,7 @@ def _extract_stage_from_prompt(prompt: str) -> str | None:
 
 
 def _start_pipeline_stage(parent_session_id: str, stage: str) -> None:
-    """Start an SDLC stage on the parent ChatSession's PipelineStateMachine.
+    """Start an SDLC stage on the parent PM session's PipelineStateMachine.
 
     Loads the parent AgentSession from Redis, creates a PipelineStateMachine,
     and calls start_stage(). This marks the stage as in_progress so that
@@ -197,7 +197,7 @@ def _handle_skill_tool_start(tool_input: dict[str, Any], claude_uuid: str | None
 
 
 def _maybe_register_dev_session(tool_input: dict[str, Any], claude_uuid: str | None = None) -> None:
-    """Register a DevSession in Redis when the Agent tool spawns a dev-session.
+    """Register a Dev session in Redis when the Agent tool spawns a dev-session.
 
     Uses the session registry to resolve the bridge session ID from the
     Claude Code UUID (issue #597). Falls back gracefully if not found.
@@ -212,7 +212,7 @@ def _maybe_register_dev_session(tool_input: dict[str, Any], claude_uuid: str | N
     parent_session_id = resolve(claude_uuid)
     if not parent_session_id:
         logger.debug(
-            "[pre_tool_use] No bridge session in registry, skipping DevSession registration"
+            "[pre_tool_use] No bridge session in registry, skipping Dev session registration"
         )
         return
 
@@ -227,11 +227,11 @@ def _maybe_register_dev_session(tool_input: dict[str, Any], claude_uuid: str | N
             message_text=prompt_text,
         )
         logger.info(
-            f"[pre_tool_use] Registered DevSession "
+            f"[pre_tool_use] Registered Dev session "
             f"{dev_session.agent_session_id} parent={parent_session_id}"
         )
     except Exception as e:
-        logger.warning(f"[pre_tool_use] Failed to register DevSession: {e}")
+        logger.warning(f"[pre_tool_use] Failed to register Dev session: {e}")
 
     # Wire PipelineStateMachine.start_stage() so subagent_stop can later
     # find the in_progress stage and mark it completed.
@@ -254,7 +254,7 @@ async def pre_tool_use_hook(
     tool_use_id: str | None,
     context: HookContext,
 ) -> dict[str, Any]:
-    """Block writes to sensitive files and register DevSessions on Agent tool calls.
+    """Block writes to sensitive files and register child Dev sessions on Agent tool calls.
 
     Inspects Write and Edit tool calls for sensitive file paths
     and blocks them before execution. Also detects when the Agent tool
