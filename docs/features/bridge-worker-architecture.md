@@ -150,6 +150,20 @@ python -m tools.valor_session kill --id <ID>                # Kill a session
 ./scripts/valor-service.sh worker-status   # Worker-specific status
 ```
 
+## Worker Exit Code and launchd Restart Behavior
+
+The worker exits with **code 1** when shut down via SIGTERM (e.g., by `./scripts/valor-service.sh worker-restart`). This is intentional.
+
+launchd's `ThrottleInterval` (configured at 10 seconds in `com.valor.worker.plist`) only applies to **non-zero exits**. A zero exit is treated as voluntary success and triggers launchd's internal ~10-minute default throttle, causing the worker to be unavailable for up to 10 minutes after a normal restart.
+
+**How it works:**
+- A module-level flag `_shutdown_via_signal` in `worker/__main__.py` is set to `True` only on SIGTERM.
+- After `asyncio.run(_run_worker(...))` returns, `main()` checks the flag and calls `sys.exit(1)` if it is set.
+- SIGINT (developer Ctrl-C) leaves the flag unset and exits 0 — a voluntary stop during development should not be penalized with a forced restart.
+- `stop_worker()` in `scripts/valor-service.sh` uses `launchctl bootout` (the modern macOS API) to remove the worker from the launchd domain, consistent with `scripts/install_worker.sh`.
+
+**Result:** Worker killed via SIGTERM restarts within 15 seconds (10s `ThrottleInterval` + margin) rather than the ~10-minute default.
+
 ## Deployment Notes
 
 Both the bridge and worker must run simultaneously for sessions to be executed. If only the bridge is running, sessions will queue in Redis but not be processed until the worker starts. The existing launchd watchdog (`com.valor.bridge-watchdog`) auto-restarts the bridge; a separate launchd service (`com.valor.worker`) auto-restarts the worker.
