@@ -46,10 +46,10 @@ the `SESSION_TYPE` env var already injected by `sdk_client.py` when spawning sub
 
 ## Architectural Impact
 
-- **Interface changes**: `create_local()` already accepts `**kwargs` — no signature change needed
-- **New dependencies**: None — `os` is already imported in the hook
+- **Interface changes**: `create_local()` signature will be updated to accept `session_type` as an explicit parameter with a default value
+- **New dependencies**: None — but `import os` must be added to the hook (it is NOT currently imported)
 - **Coupling**: No change in coupling; hook already depends on `AgentSession`
-- **Reversibility**: Trivial — revert one line in the hook
+- **Reversibility**: Trivial — revert two lines in the hook and the signature default in `create_local()`
 
 ## Appetite
 
@@ -69,19 +69,38 @@ No prerequisites — this work has no external dependencies.
 
 ### Key Elements
 
-- **`user_prompt_submit.py`**: Read `SESSION_TYPE` env var and pass it to `create_local()` when present
-- **`create_local()` default**: Unchanged — when no `SESSION_TYPE` env var is set (plain CLI session), defaults to `SESSION_TYPE_DEV`
+- **`user_prompt_submit.py`**: Add `import os`, read `SESSION_TYPE` env var, and pass it to `create_local()` when present
+- **`create_local()` signature**: Update to accept `session_type` as an explicit keyword parameter with default `SESSION_TYPE_DEV`
 
 ### Flow
 
-subprocess spawned with `SESSION_TYPE=teammate` → hook fires → reads `os.environ.get("SESSION_TYPE")` → passes to `create_local(session_type="teammate")` → Redis record shows `Teammate`
+subprocess spawned with `SESSION_TYPE=teammate` → hook fires → reads `os.environ.get("SESSION_TYPE")` → passes `session_type="teammate"` to `create_local()` → Redis record shows `Teammate`
 
 ### Technical Approach
 
-In `.claude/hooks/user_prompt_submit.py`, before the `create_local()` call (around line 94):
+**Step 1 — Update `models/agent_session.py` `create_local()` signature** (around line 955):
+
+The current signature hardcodes `session_type=SESSION_TYPE_DEV` inside the constructor call. Change the method to accept `session_type` as an explicit parameter:
 
 ```python
-import os
+@classmethod
+def create_local(cls, session_id, ..., session_type: str = SESSION_TYPE_DEV, **kwargs):
+    ...
+    return cls(
+        ...,
+        session_type=session_type,
+        **kwargs,
+    )
+```
+
+This avoids the `TypeError: duplicate keyword argument` that would occur if `session_type` were passed via `**kwargs` while also being present as a hardcoded positional argument in the constructor call.
+
+**Step 2 — Update `.claude/hooks/user_prompt_submit.py`**:
+
+Add `import os` at the top of the file (it is NOT currently imported), then before the `create_local()` call (around line 94):
+
+```python
+import os  # add at top of file
 
 session_type_override = os.environ.get("SESSION_TYPE")  # "teammate", "pm", "dev", or None
 
@@ -94,8 +113,6 @@ agent_session = AgentSession.create_local(
     **({"session_type": session_type_override} if session_type_override else {}),
 )
 ```
-
-No changes needed to `models/agent_session.py` — `create_local()` already accepts `**kwargs`.
 
 ## Failure Path Test Strategy
 
@@ -119,10 +136,11 @@ No changes needed to `models/agent_session.py` — `create_local()` already acce
 ## Test Impact
 
 - [ ] `tests/unit/test_dev_session_registration.py::TestCreateLocal::test_creates_session_with_correct_fields` — UPDATE: assert `session_type` defaults to `"dev"` when `SESSION_TYPE` env var is absent (behaviour unchanged, but add explicit env-var-absent case)
-- [ ] `tests/unit/test_dev_session_registration.py::TestCreateLocal::test_accepts_kwargs` — UPDATE: extend to cover `session_type` kwarg passed from env var read
+- [ ] `tests/unit/test_dev_session_registration.py::TestCreateLocal::test_accepts_kwargs` — UPDATE: extend to cover `session_type` passed as explicit kwarg to `create_local()`
 
-New test to add:
+New tests to add:
 - [ ] `tests/unit/test_dev_session_registration.py::TestCreateLocal::test_session_type_from_env_var` — ADD: when `SESSION_TYPE=teammate` env var is set, `create_local()` stores `session_type="teammate"`
+- [ ] `tests/unit/test_hook_user_prompt_submit.py::TestSessionTypeHook::test_hook_reads_session_type_env_var` — ADD: patch `os.environ` with `SESSION_TYPE=teammate`, call the hook's `main()`, assert `create_local()` was called with `session_type="teammate"`. This is the critical path test for the hook layer, not just the model layer.
 
 ## Rabbit Holes
 
@@ -148,6 +166,7 @@ work begins, and `SESSION_TYPE` is set in the environment before the subprocess 
 - Fixing `parent_agent_session_id` null in hook (tracked separately as #808)
 - Adding `SESSION_TYPE` validation in `create_local()` or the hook
 - Backfilling existing `local-*` session records
+- Fixing `create_child()` (line 1005 in `models/agent_session.py`) — it has the same hardcoded `SESSION_TYPE_DEV` issue as `create_local()`, but `create_child()` is called by a different code path (worker spawning child sessions) and needs its own analysis. Track as a follow-up issue after this fix ships.
 
 ## Update System
 
@@ -172,7 +191,9 @@ Claude Code sessions register themselves in Redis; it does not expose new tools 
 - [ ] Teammate sessions spawned by a PM show `session_type: Teammate` on the dashboard
 - [ ] PM sessions spawned by a worker show `session_type: PM` on the dashboard
 - [ ] Dev sessions (no `SESSION_TYPE` env var) continue to default to `Developer`
-- [ ] Unit test covers `create_local()` with `session_type` kwarg from env var
+- [ ] `create_local()` accepts `session_type` as an explicit keyword parameter with default `SESSION_TYPE_DEV`
+- [ ] Unit test covers `create_local()` with `session_type` kwarg
+- [ ] Hook-layer test verifies that `user_prompt_submit.py` reads `SESSION_TYPE` env var and passes it through to `create_local()`
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 
@@ -200,15 +221,17 @@ Claude Code sessions register themselves in Redis; it does not expose new tools 
 
 ### Step by Step Tasks
 
-### 1. Apply Hook Fix and Add Test
+### 1. Apply Model + Hook Fix and Add Tests
 - **Task ID**: build-hook-fix
 - **Depends On**: none
-- **Validates**: tests/unit/test_dev_session_registration.py
+- **Validates**: tests/unit/test_dev_session_registration.py, tests/unit/test_hook_user_prompt_submit.py
 - **Assigned To**: hook-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- In `.claude/hooks/user_prompt_submit.py`, read `os.environ.get("SESSION_TYPE")` and pass it to `create_local()` when present
+- In `models/agent_session.py`, update `create_local()` to accept `session_type: str = SESSION_TYPE_DEV` as an explicit parameter instead of hardcoding it in the constructor call
+- In `.claude/hooks/user_prompt_submit.py`, add `import os` at the top, then read `os.environ.get("SESSION_TYPE")` and pass it to `create_local()` when present
 - Add `test_session_type_from_env_var` unit test to `tests/unit/test_dev_session_registration.py`
+- Add `test_hook_reads_session_type_env_var` test to `tests/unit/test_hook_user_prompt_submit.py` (patch `os.environ`, call hook's `main()`, assert `create_local()` called with correct `session_type`)
 - Update existing `test_creates_session_with_correct_fields` to explicitly assert the no-env-var default
 
 ### 2. Validate Fix
