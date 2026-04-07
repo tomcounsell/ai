@@ -913,6 +913,14 @@ class ValorAgent:
         if self.agent_session_id:
             env["AGENT_SESSION_ID"] = self.agent_session_id
 
+        # Inject parent session ID so child subprocess user_prompt_submit.py can link the
+        # local-* AgentSession back to this PM/Teammate session (issue #808).
+        # Only PM/Teammate sessions spawn tracked children — dev sessions are excluded.
+        # The env var carries the agent_session_id UUID (agt_xxx), which is the canonical
+        # FK stored in parent_agent_session_id on the child's AgentSession record.
+        if self.agent_session_id and self.session_type in (SessionType.PM, SessionType.TEAMMATE):
+            env["VALOR_PARENT_SESSION_ID"] = self.agent_session_id
+
         # Cross-repo gh resolution: set GH_REPO so all `gh` CLI commands in the
         # subprocess automatically target the correct repo (issue #375). This is
         # the deterministic fix -- SKILL.md --repo instructions remain as a safety net.

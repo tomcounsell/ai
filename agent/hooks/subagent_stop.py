@@ -61,6 +61,15 @@ def _register_dev_session_completion(
     Also records stage completion via PipelineStateMachine if a stage is in_progress.
     Uses classify_outcome() to determine success/fail before routing.
 
+    Two-lookup pattern (issue #808):
+    1. Resolve bridge session ID from Claude UUID via session_registry.
+    2. Look up parent AgentSession by bridge session_id to get agent_session_id UUID.
+    3. Query child sessions by that UUID (parent_agent_session_id = agent_session_id UUID).
+
+    This is required because session_registry.resolve() returns a bridge session ID
+    (e.g. "tg_valor_...") but parent_agent_session_id on local-* records stores the
+    agent_session_id UUID (e.g. "agt_xxx") set by VALOR_PARENT_SESSION_ID env var.
+
     Args:
         agent_id: The agent ID of the completing dev-session.
         input_data: The SubagentStopHookInput dict, used to extract output_tail
@@ -80,8 +89,23 @@ def _register_dev_session_completion(
         from models.agent_session import AgentSession
         from models.session_lifecycle import finalize_session
 
-        # Find dev sessions for this parent
-        dev_sessions = list(AgentSession.query.filter(parent_agent_session_id=parent_session_id))
+        # Two-lookup pattern: resolve bridge session_id → parent AgentSession → agent_session_id UUID.
+        # Child local-* records store the parent's agent_session_id UUID in parent_agent_session_id,
+        # not the bridge session_id, so we must look up the parent record first.
+        parent_agent_uuid: str | None = None
+        parent_sessions = list(AgentSession.query.filter(session_id=parent_session_id))
+        if parent_sessions:
+            parent_agent_uuid = parent_sessions[0].agent_session_id
+
+        if not parent_agent_uuid:
+            logger.debug(
+                f"[subagent_stop] Parent AgentSession not found for bridge session "
+                f"{parent_session_id}, skipping Dev session completion"
+            )
+            return
+
+        # Find child dev sessions by agent_session_id UUID (set via VALOR_PARENT_SESSION_ID)
+        dev_sessions = list(AgentSession.query.filter(parent_agent_session_id=parent_agent_uuid))
         for dev in dev_sessions:
             if dev.status not in ("completed", "failed"):
                 finalize_session(
@@ -92,7 +116,7 @@ def _register_dev_session_completion(
                 )
                 logger.info(
                     f"[subagent_stop] Dev session {dev.agent_session_id} completed "
-                    f"(parent={parent_session_id}, agent_id={agent_id})"
+                    f"(parent={parent_session_id}/{parent_agent_uuid}, agent_id={agent_id})"
                 )
 
         # Record SDLC stage completion on the parent PM session.
