@@ -89,14 +89,17 @@ The bridge also reads `AgentSession.status` to determine if a session is already
 
 ## Import Boundary
 
-The bridge imports from `agent.agent_session_queue`:
+The bridge imports from `agent.agent_session_queue` are allowlisted to these functions only:
 - `enqueue_agent_session` — enqueue new sessions
+- `maybe_send_revival_prompt` — send a revival prompt to a dormant session
+- `queue_revival_agent_session` — enqueue a revival session from a reply
+- `cleanup_stale_branches` — clean up stale git branches on startup
 - `register_callbacks` — register output delivery callbacks
 - `clear_restart_flag` — clear stale update restart flag
 
-The bridge does **not** import execution functions. If you see `_ensure_worker`, `_recover_interrupted_agent_sessions_startup`, `_agent_session_health_loop`, `_session_notify_listener`, or `_cleanup_orphaned_claude_processes` imported in `bridge/telegram_bridge.py`, that is a regression.
+Any function imported by the bridge that is not on this list is a violation of the boundary. The bridge does **not** import execution functions. If you see `_ensure_worker`, `_recover_interrupted_agent_sessions_startup`, `_agent_session_health_loop`, `_session_notify_listener`, or `_cleanup_orphaned_claude_processes` imported in `bridge/telegram_bridge.py`, that is a regression.
 
-This boundary is enforced by `tests/unit/test_worker_entry.py::TestImportDecoupling::test_bridge_has_no_execution_function_imports`.
+This boundary is enforced by `tests/unit/test_worker_entry.py::TestImportDecoupling::test_bridge_has_no_execution_function_imports`, which uses an allowlist to catch any unauthorized additions.
 
 ## Operator CLI
 
