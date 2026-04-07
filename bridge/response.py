@@ -159,7 +159,7 @@ REACTION_PROCESSING = "🤔"  # Default thinking emoji
 
 # These three are re-exported from agent.constants (canonical location).
 # Kept here for backward compatibility with existing imports.
-from agent.constants import (
+from agent.constants import (  # noqa: E402
     REACTION_COMPLETE,  # noqa: E402, F401
     REACTION_ERROR,  # noqa: E402, F401
     REACTION_SUCCESS,  # noqa: E402, F401
@@ -503,7 +503,7 @@ async def send_response_with_files(
         # Unknown delivery_action → fall through to normal summarizer path
 
     # PM self-messaging bypass: if the PM already sent messages via the
-    # send_telegram tool during this session (or its parent ChatSession in
+    # send_telegram tool during this session (or its parent PM session in
     # SDLC flows), skip the summarizer entirely. The PM authored its own
     # messages — the summarizer would be redundant.
     # Only set emoji reaction (handled by the caller). See issue #497, #571.

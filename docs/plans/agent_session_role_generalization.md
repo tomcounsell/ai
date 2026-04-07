@@ -15,7 +15,7 @@ last_comment_id:
 The AgentSession model has three naming/design issues left over from #631 that prevent the system from supporting arbitrary session roles beyond "chat" and "dev":
 
 **Current behavior:**
-1. `parent_chat_session_id` KeyField implies the parent is always a "ChatSession", but there is no ChatSession class — it's all AgentSession with different `session_type` values.
+1. `parent_chat_session_id` KeyField implies the parent is always a "PM session", but there is no PM session class — it's all AgentSession with different `session_type` values.
 2. No `role` field exists — session specialization is encoded only in `session_type` (a KeyField limited to "chat"/"dev"). Adding new roles would require KeyField changes and Redis key migrations.
 3. `create_dev()` factory method hard-codes dev-session creation. Every new role would need its own factory method.
 
@@ -23,7 +23,7 @@ The AgentSession model has three naming/design issues left over from #631 that p
 - `parent_chat_session_id` renamed to `parent_session_id` (accurate, role-neutral name)
 - New `role` DataField for flexible role assignment without key-level impact
 - `create_child(role=...)` factory replacing the rigid `create_dev()`
-- Docstrings updated where they reference "DevSession"/"ChatSession" as if they were distinct classes
+- Docstrings updated where they reference "Dev session"/"PM session" as if they were distinct classes
 
 ## Prior Art
 
@@ -47,12 +47,12 @@ The AgentSession model has three naming/design issues left over from #631 that p
 - **Confidence**: high
 - **Impact on plan**: `role` is a `Field(null=True)` — simple addition. `session_type` stays unchanged. Backfill: `session_type="dev"` → `role="dev"`, `session_type="chat"` → `role="pm"`.
 
-### spike-3: DevSession/ChatSession terminology audit
-- **Assumption**: "Hundreds of DevSession/ChatSession references need updating"
+### spike-3: Dev/PM session terminology audit
+- **Assumption**: "Hundreds of Dev/PM session references need updating"
 - **Method**: code-read
-- **Finding**: 733 total references across 70 files. However, these are **intentional architectural terminology** — "ChatSession" and "DevSession" are the official names for the two session roles. They correctly describe the architecture. The issue requested updating docstrings that treat them as distinct classes, but the actual usage is already correct (they reference roles, not classes).
+- **Finding**: 733 total references across 70 files. However, these are **intentional architectural terminology** — "PM session" and "Dev session" are the official names for the two session roles. They correctly describe the architecture. The issue requested updating docstrings that treat them as distinct classes, but the actual usage is already correct (they reference roles, not classes).
 - **Confidence**: high
-- **Impact on plan**: Scope down docstring updates to only the model file's class/module docstrings and the factory method docstrings that literally say "Creates a DevSession" — update those to "Creates a child AgentSession with role=dev". Do NOT bulk-rename 733 references.
+- **Impact on plan**: Scope down docstring updates to only the model file's class/module docstrings and the factory method docstrings that literally say "Creates a Dev session" — update those to "Creates a child AgentSession with role=dev". Do NOT bulk-rename 733 references.
 
 ## Data Flow
 
@@ -65,7 +65,7 @@ The AgentSession model has three naming/design issues left over from #631 that p
 
 - **New dependencies**: None
 - **Interface changes**: `parent_chat_session_id` → `parent_session_id` across all callers; `create_dev()` → `create_child(role=...)` with backward-compat wrapper
-- **Coupling**: Decreases — removes ChatSession-specific naming from a generic parent-child relationship
+- **Coupling**: Decreases — removes PM session-specific naming from a generic parent-child relationship
 - **Data ownership**: No change
 - **Reversibility**: Medium — another migration script could reverse the hash field rename
 
@@ -143,7 +143,7 @@ No prerequisites — this work uses existing Redis infrastructure and Popoto ORM
 
 ## Rabbit Holes
 
-- **Bulk-renaming 733 DevSession/ChatSession references**: These are intentional architectural terms. Only update model/factory docstrings, not every comment and doc.
+- **Bulk-renaming 733 Dev/PM session references**: These are intentional architectural terms. Only update model/factory docstrings, not every comment and doc.
 - **Replacing `session_type` with `role`**: They serve different purposes (permission model vs specialization). Keep both.
 - **Making `role` a KeyField**: This would change Redis key structure. Use DataField (`Field`) instead.
 - **Building a generic Popoto migration framework**: Write a standalone script.
@@ -172,7 +172,7 @@ No prerequisites — this work uses existing Redis infrastructure and Popoto ORM
 
 - Renaming `session_type` or changing its values (stays as KeyField discriminator)
 - Defining new role values beyond "pm" and "dev" (follow-up work)
-- Updating all 733 DevSession/ChatSession references (only model docstrings)
+- Updating all 733 Dev/PM session references (only model docstrings)
 - Modifying `create_chat()` or `create_local()` factory methods
 - Adding role-based permission checks (future work)
 - Multi-machine migration coordination (single Redis instance)
@@ -373,7 +373,7 @@ No agent integration required — this is a model-internal rename and field addi
 - **Severity**: CONCERN
 - **Critics**: Adversary
 - **Location**: Data Flow / Technical Approach
-- **Finding**: The migration script description focuses on renaming `parent_chat_session_id` and backfilling `role`, but the backfill logic is described as running only on records that have `parent_chat_session_id`. Records that are ChatSessions (no `parent_chat_session_id`) still need `role` backfilled to `"pm"` based on `session_type`. The script needs to handle all records, not just those with the parent field.
+- **Finding**: The migration script description focuses on renaming `parent_chat_session_id` and backfilling `role`, but the backfill logic is described as running only on records that have `parent_chat_session_id`. Records that are PM sessions (no `parent_chat_session_id`) still need `role` backfilled to `"pm"` based on `session_type`. The script needs to handle all records, not just those with the parent field.
 - **Suggestion**: Clarify the migration script processes ALL `AgentSession:*` records: rename the parent field where present, and backfill `role` from `session_type` on every record regardless.
 
 #### 6. Deployment sequence assumes single-operator execution

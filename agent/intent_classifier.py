@@ -1,11 +1,11 @@
-"""Binary intent classifier for ChatSession Teammate mode.
+"""Binary intent classifier for PM session Teammate mode.
 
 Uses Haiku to classify incoming messages as informational queries (Teammate)
 or work requests. Conservative threshold (0.90) ensures ambiguous messages
-default to the full DevSession pipeline.
+default to the full Dev-session pipeline.
 
 All operations are async and wrapped in try/except -- classifier failures
-must never prevent normal DevSession processing.
+must never prevent normal Dev-session processing.
 """
 
 from __future__ import annotations
@@ -123,7 +123,7 @@ async def classify_intent(
 
     Returns:
         IntentResult with intent, confidence, and reasoning.
-        On any failure, returns a work intent (fail-safe to DevSession).
+        On any failure, returns a work intent (fail-safe to dev-session).
     """
     start = time.monotonic()
 
@@ -173,5 +173,5 @@ async def classify_intent(
     except Exception as e:
         elapsed_ms = (time.monotonic() - start) * 1000
         logger.error(f"[intent_classifier] Classification failed in {elapsed_ms:.0f}ms: {e}")
-        # Fail-safe: default to work (DevSession)
+        # Fail-safe: default to work (dev-session)
         return IntentResult(intent="work", confidence=0.0, reasoning=f"classifier error: {e}")

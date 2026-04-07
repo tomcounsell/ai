@@ -16,7 +16,7 @@ Discriminator for AgentSession: pm, teammate, or dev.
 |--------|-------|-------|
 | `SessionType.PM` | `"pm"` | PM session -- PM persona, orchestration, read-only |
 | `SessionType.TEAMMATE` | `"teammate"` | Teammate session -- conversational, informational queries |
-| `SessionType.DEV` | `"dev"` | DevSession -- Dev persona, full permissions |
+| `SessionType.DEV` | `"dev"` | Dev session -- Dev persona, full permissions |
 
 ### PersonaType
 

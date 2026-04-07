@@ -25,7 +25,7 @@ The pre-merge nudge in `/do-merge` calls `get_display_progress()` and shows stag
 
 - **PR #490 (issue #488)**: Consolidate SDLC stage tracking -- Merged. Introduced `record_stage_completion()` as a convenience helper, but it was never wired to callers. Phase 1 (wire skills) was documented in instructions only.
 - **PR #472 (issue #463)**: Add CRITIQUE stage to pipeline -- Merged. Extended DISPLAY_STAGES and pipeline graph but did not address tracking reliability.
-- **PR #356 (issue #309)**: Observer-steered worker, rewrite /sdlc as single-stage router -- Merged. Established the ChatSession/DevSession split. Stage tracking hooks were added later.
+- **PR #356 (issue #309)**: Observer-steered worker, rewrite /sdlc as single-stage router -- Merged. Established the PM/Dev session split. Stage tracking hooks were added later.
 - **Issue #489**: Test SDLC pipeline state injection -- Closed. Tested that hooks fire correctly but did not address silent failure paths.
 
 ## Why Previous Fixes Failed

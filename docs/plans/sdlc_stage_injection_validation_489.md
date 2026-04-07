@@ -12,7 +12,7 @@ last_comment_id: 4110267149
 
 ## Problem
 
-The PM (ChatSession) was fabricating stage completion -- claiming "review passed" without running `/do-pr-review`. Two mechanisms were shipped directly to main to fix this, but were committed without a plan, PR, or comprehensive validation pass.
+The PM (PM session) was fabricating stage completion -- claiming "review passed" without running `/do-pr-review`. Two mechanisms were shipped directly to main to fix this, but were committed without a plan, PR, or comprehensive validation pass.
 
 **Current behavior:**
 Code is on main across 4 commits (c7e5a55d, 9829690d, a96cb432, 7e503655). Partial docs exist at `docs/features/sdlc-pipeline-integrity.md` (section D). Unit tests exist for `subagent_stop_hook` and `health_check`, but no integration-level validation confirms the end-to-end flow works.
@@ -28,9 +28,9 @@ A PR that bundles validation tests, confirms existing test coverage is adequate,
 
 ## Data Flow
 
-1. **Entry point**: PM (ChatSession) dispatches dev-session via `/sdlc` sub-skill
-2. **DevSession execution**: Dev-session runs the assigned stage (BUILD, TEST, etc.), updates `stage_states` on its AgentSession in Redis
-3. **SubagentStop hook** (`agent/hooks/subagent_stop.py`): Fires when dev-session completes; reads `sdlc_stages`/`stage_states` from parent ChatSession's AgentSession; returns `{"reason": "Pipeline state: {dict}"}` so PM sees actual completion state
+1. **Entry point**: PM (PM session) dispatches dev-session via `/sdlc` sub-skill
+2. **Dev session execution**: Dev-session runs the assigned stage (BUILD, TEST, etc.), updates `stage_states` on its AgentSession in Redis
+3. **SubagentStop hook** (`agent/hooks/subagent_stop.py`): Fires when dev-session completes; reads `sdlc_stages`/`stage_states` from parent PM session's AgentSession; returns `{"reason": "Pipeline state: {dict}"}` so PM sees actual completion state
 4. **Stage completion recording**: `_record_stage_on_parent()` calls `PipelineStateMachine.complete_stage()` to mark the in_progress stage as completed on the parent session
 5. **Watchdog kill path**: `health_check.py` watchdog sets `watchdog_unhealthy` on AgentSession; `job_queue.py` nudge loop checks `is_session_unhealthy()` before auto-continuing; if flagged, delivers output to Telegram instead of sending "Keep working"
 

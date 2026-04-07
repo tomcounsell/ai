@@ -150,7 +150,7 @@ Each part is a separate commit. Part 1 requires flushing existing AgentSession r
 - Building a Popoto migration framework
 - Removing `revival_context` (actively used despite issue claiming it is dead)
 - Addressing `classification_confidence` deprecation (tracked in issue #562)
-- Restructuring AgentSession into separate ChatSession/DevSession Popoto models
+- Restructuring AgentSession into separate PM/Dev session Popoto models
 
 ## Update System
 

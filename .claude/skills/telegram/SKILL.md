@@ -15,10 +15,10 @@ There are two sending interfaces. Use the correct one for your context:
 
 | Tool | Context | How It Works |
 |------|---------|--------------|
-| `python tools/send_telegram.py` | ChatSession (PM) | Queues via Redis, relay sends via Telethon, records msg_id for summarizer bypass |
-| `valor-telegram send` | DevSession / CLI | Sends directly via Telethon, no Redis queue, no summarizer bypass |
+| `python tools/send_telegram.py` | PM session | Queues via Redis, relay sends via Telethon, records msg_id for summarizer bypass |
+| `valor-telegram send` | Dev session / CLI | Sends directly via Telethon, no Redis queue, no summarizer bypass |
 
-**ChatSession (PM)** should always use `tools/send_telegram.py`. It supports text, single file attachments, and multi-file albums via `--file` (repeatable, max 10 files). Using `valor-telegram send` from ChatSession would bypass the Redis queue and break `has_pm_messages()` tracking.
+**PM sessions** should always use `tools/send_telegram.py`. It supports text, single file attachments, and multi-file albums via `--file` (repeatable, max 10 files). Using `valor-telegram send` from a PM session would bypass the Redis queue and break `has_pm_messages()` tracking.
 
 ### PM Tool Examples
 
@@ -36,7 +36,7 @@ python tools/send_telegram.py "PR review screenshots" --file before.png --file d
 python tools/send_telegram.py --file /path/to/document.pdf
 ```
 
-**DevSession** uses `valor-telegram send` for direct CLI sends when needed.
+**Dev sessions** use `valor-telegram send` for direct CLI sends when needed.
 
 ## Reading Messages
 
@@ -59,7 +59,7 @@ valor-telegram read --chat "Dev: Valor" --since "1 hour ago"
 valor-telegram read --chat "Dev: Valor" --limit 5 --json
 ```
 
-## Sending Messages (CLI -- DevSession only)
+## Sending Messages (CLI -- Dev session only)
 
 ```bash
 # Send text message
@@ -86,8 +86,8 @@ valor-telegram chats
 - **Check what someone said**: `valor-telegram read --chat "Tom" --limit 10`
 - **Find a past discussion**: `valor-telegram read --chat "Dev: Valor" --search "authentication"`
 - **Get recent context**: `valor-telegram read --chat "Dev: Valor" --since "2 hours ago"`
-- **Send a status update (DevSession)**: `valor-telegram send --chat "Dev: Valor" "Deployment complete"`
-- **Share a file (DevSession)**: `valor-telegram send --chat "Tom" "Here's the report" --file ./report.pdf`
+- **Send a status update (Dev session)**: `valor-telegram send --chat "Dev: Valor" "Deployment complete"`
+- **Share a file (Dev session)**: `valor-telegram send --chat "Tom" "Here's the report" --file ./report.pdf`
 
 ## Notes
 

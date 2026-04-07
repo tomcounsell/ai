@@ -131,7 +131,7 @@ _AGENT_SESSION_FIELDS = [
     "claude_session_uuid",
     # Session hierarchy fields — must be preserved across delete-and-recreate
     "parent_agent_session_id",
-    # === ChatSession/DevSession fields ===
+    # === Session role/type fields ===
     "session_type",
     # parent_session_id removed: it is now a deprecated @property alias for
     # parent_agent_session_id (already preserved above).
@@ -915,7 +915,7 @@ def get_queue_status(chat_id: str) -> dict:
 async def get_active_session_for_chat(chat_id: str) -> AgentSession | None:
     """Find the active AgentSession for a given Telegram chat_id.
 
-    Used for routing steering messages to the correct ChatSession.
+    Used for routing steering messages to the correct PM session.
     Returns the most recent running AgentSession for this chat.
     """
     sessions = await asyncio.to_thread(
@@ -2374,7 +2374,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
 
         Simple nudge model: the bridge has ONE response to any non-completion:
         "Keep working -- only stop when you need human input or you're done."
-        ChatSession owns all SDLC intelligence. The bridge just nudges.
+        The PM session owns all SDLC intelligence. The bridge just nudges.
 
         Completion detection:
         - stop_reason == "end_turn" AND output is non-empty → deliver

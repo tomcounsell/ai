@@ -120,7 +120,7 @@ def get_agent_definitions() -> dict[str, AgentDefinition]:
 
     # --- dev-session ---
     # Full-permission developer session for code changes.
-    # Spawned by ChatSession (PM persona) to do actual work.
+    # Spawned by a PM-role AgentSession to do actual work.
     # tools=None means all tools available — full write permissions.
     definitions["dev-session"] = AgentDefinition(
         description="Full-permission developer session for code changes",
@@ -147,8 +147,8 @@ def _load_dev_session_prompt() -> str:
 
     return (
         "You are a Developer agent with full permissions to read, write, and execute code.\n\n"
-        "You are spawned by a ChatSession (PM persona) to do the actual coding work.\n"
-        "Follow the SDLC pipeline stages as directed by your parent ChatSession.\n"
+        "You are spawned by a PM-role AgentSession to do the actual coding work.\n"
+        "Follow the SDLC pipeline stages as directed by your parent PM session.\n"
         "Commit at logical checkpoints as you work.\n"
     )
 

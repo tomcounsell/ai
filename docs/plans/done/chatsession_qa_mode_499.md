@@ -1,4 +1,4 @@
-# ChatSession Q&A Mode
+# PM session Q&A Mode
 
 **Issue:** #499
 **Slug:** chatsession-qa-mode-499
@@ -7,11 +7,11 @@
 
 ## Problem
 
-Every incoming message follows the same ChatSession -> DevSession path regardless of intent. Simple informational queries ("what's the status of feature X?", "how does the bridge work?", "where is the observer prompt?") spawn a full DevSession with all tools and permissions, adding 2-5 seconds of startup latency and unnecessary cost. ChatSession already has read-only capabilities and the PM persona — it just needs a decision point to answer directly instead of always delegating.
+Every incoming message follows the same PM session -> Dev session path regardless of intent. Simple informational queries ("what's the status of feature X?", "how does the bridge work?", "where is the observer prompt?") spawn a full Dev session with all tools and permissions, adding 2-5 seconds of startup latency and unnecessary cost. PM session already has read-only capabilities and the PM persona — it just needs a decision point to answer directly instead of always delegating.
 
 ## Solution
 
-Add a binary intent classifier and Q&A handler within the ChatSession message processing path. When a message is classified as an informational query with high confidence, ChatSession answers directly using read-only tools without spawning a DevSession.
+Add a binary intent classifier and Q&A handler within the PM session message processing path. When a message is classified as an informational query with high confidence, PM session answers directly using read-only tools without spawning a Dev session.
 
 ### Architecture
 
@@ -19,7 +19,7 @@ Add a binary intent classifier and Q&A handler within the ChatSession message pr
 Telegram Message
     |
     v
-ChatSession receives message
+PM session receives message
     |
     v
 Intent Classifier (Haiku, ~$0.0001/call)
@@ -29,7 +29,7 @@ Intent Classifier (Haiku, ~$0.0001/call)
     |                                   v
     |                               Direct response to Telegram
     |
-    |-- Work request (or low confidence) --> Normal DevSession spawn
+    |-- Work request (or low confidence) --> Normal Dev session spawn
 ```
 
 ### Component 1: Intent Classifier
@@ -41,7 +41,7 @@ A lightweight Haiku-based binary classifier that determines whether an incoming 
 - Input: message text, sender context, recent conversation history (last 3 messages if available)
 - Output: `{"intent": "qa" | "work", "confidence": float, "reasoning": str}`
 - Threshold: classify as Q&A only if confidence > 0.90 (conservative)
-- Fail-safe: any ambiguity defaults to DevSession (current behavior preserved)
+- Fail-safe: any ambiguity defaults to Dev session (current behavior preserved)
 - Uses the Anthropic API directly (not Claude Code SDK) for low-latency classification
 - Few-shot prompt with examples of each category
 
@@ -59,10 +59,10 @@ A lightweight Haiku-based binary classifier that determines whether an incoming 
 
 **File:** `agent/qa_handler.py` (new)
 
-Runs the ChatSession with Q&A-specific instructions instead of PM dispatch instructions. Uses the same SDK client infrastructure but with different prompt injection.
+Runs the PM session with Q&A-specific instructions instead of PM dispatch instructions. Uses the same SDK client infrastructure but with different prompt injection.
 
 - Tools: Read, Glob, Grep, WebFetch, plus Bash (read-only commands only: git log, git status, gh issue view, gh pr list, etc.)
-- No access to: file writes, branch creation, test execution, Agent tool (no DevSession spawning from Q&A path)
+- No access to: file writes, branch creation, test execution, Agent tool (no Dev session spawning from Q&A path)
 - System prompt: PM persona with Q&A-specific instructions ("answer directly, be conversational, cite file paths")
 - Nudge cap: lower than SDLC (e.g., 10 nudges vs 50) since Q&A should resolve quickly
 
@@ -74,9 +74,9 @@ Runs the ChatSession with Q&A-specific instructions instead of PM dispatch instr
 
 ### Component 3: Escape Hatch
 
-When a Q&A session receives a follow-up that looks like a work request ("ok fix that", "can you update it?", "make that change"), the intent classifier re-evaluates and routes to DevSession. This works naturally because each new message goes through classification independently. The follow-up message carries conversational context from the Q&A exchange, so the DevSession has the background it needs.
+When a Q&A session receives a follow-up that looks like a work request ("ok fix that", "can you update it?", "make that change"), the intent classifier re-evaluates and routes to Dev session. This works naturally because each new message goes through classification independently. The follow-up message carries conversational context from the Q&A exchange, so the Dev session has the background it needs.
 
-No special mechanism needed — the per-message classification handles this automatically. The session continuity (reply-to threading) ensures the DevSession sees what was discussed.
+No special mechanism needed — the per-message classification handles this automatically. The session continuity (reply-to threading) ensures the Dev session sees what was discussed.
 
 ### Component 4: Metrics
 
@@ -85,7 +85,7 @@ No special mechanism needed — the per-message classification handles this auto
 Track classification distribution and response times for observability.
 
 - Redis-backed counters: `qa_classified_count`, `work_classified_count`, `qa_low_confidence_count`
-- Response time tracking: time from message receipt to Telegram delivery for Q&A vs DevSession paths
+- Response time tracking: time from message receipt to Telegram delivery for Q&A vs Dev session paths
 - Logged to bridge.log for immediate visibility
 - Exposed via existing health/monitoring infrastructure
 
@@ -94,7 +94,7 @@ Track classification distribution and response times for observability.
 - [ ] 1. Create `agent/intent_classifier.py` with Haiku-based binary classifier
   - Few-shot prompt with 10+ examples each of Q&A and work requests
   - Async `classify_intent(message: str, context: dict) -> IntentResult` function
-  - Conservative threshold (0.90) with fail-safe to DevSession
+  - Conservative threshold (0.90) with fail-safe to Dev session
   - Unit tests with golden examples
 
 - [ ] 2. Create `agent/qa_handler.py` with Q&A-specific message enrichment
@@ -121,28 +121,28 @@ Track classification distribution and response times for observability.
 - [ ] 6. Write tests
   - Unit tests for intent classifier (golden set of 30+ examples)
   - Unit tests for Q&A handler message enrichment
-  - Integration test: Q&A message -> direct response (no DevSession)
-  - Integration test: work request -> DevSession spawn (no regression)
-  - Integration test: escape hatch (Q&A -> follow-up work request -> DevSession)
+  - Integration test: Q&A message -> direct response (no Dev session)
+  - Integration test: work request -> Dev session spawn (no regression)
+  - Integration test: escape hatch (Q&A -> follow-up work request -> Dev session)
 
 ## Success Criteria
 
 - [ ] Intent classifier distinguishes Q&A from work requests with >90% accuracy on a golden test set of 30+ examples
-- [ ] Q&A queries resolve without DevSession spawn (measurable latency improvement in logs)
+- [ ] Q&A queries resolve without Dev session spawn (measurable latency improvement in logs)
 - [ ] All work requests still route through full SDLC pipeline (no regressions in existing integration tests)
 - [ ] Q&A responses use PM persona with conversational tone (cite file paths, direct answers)
-- [ ] Escape hatch works: Q&A exchange followed by "fix that" spawns DevSession
-- [ ] Classifier failure (API error/timeout) falls back to DevSession (current behavior preserved)
+- [ ] Escape hatch works: Q&A exchange followed by "fix that" spawns Dev session
+- [ ] Classifier failure (API error/timeout) falls back to Dev session (current behavior preserved)
 - [ ] Metrics tracked: Q&A vs work classification counts, response times logged to bridge.log
 - [ ] Reduced nudge cap (10) enforced for Q&A sessions
 
 ## No-Gos
 
 - No shortcuts for "simple" code changes — all code work goes through full SDLC
-- No new session type — Q&A mode is a routing decision within the existing ChatSession, not a third session type
+- No new session type — Q&A mode is a routing decision within the existing PM session, not a third session type
 - No changes to the bridge layer — Q&A vs work routing happens entirely in the agent layer
 - No caching of classifier results — each message is classified independently for simplicity
-- No custom model selection for Q&A responses — use the same model as ChatSession
+- No custom model selection for Q&A responses — use the same model as PM session
 
 ## Update System
 
@@ -150,21 +150,21 @@ No update system changes required. The new files (`agent/intent_classifier.py`, 
 
 ## Agent Integration
 
-No new MCP server or tool exposure needed. The Q&A mode is internal to the ChatSession processing pipeline — it modifies how the ChatSession handles messages, not what tools are available to the agent. The existing read-only tools (Read, Glob, Grep, WebFetch) are already registered. The intent classifier uses the Anthropic API directly (like the memory extraction Haiku calls), not through MCP.
+No new MCP server or tool exposure needed. The Q&A mode is internal to the PM session processing pipeline — it modifies how the PM session handles messages, not what tools are available to the agent. The existing read-only tools (Read, Glob, Grep, WebFetch) are already registered. The intent classifier uses the Anthropic API directly (like the memory extraction Haiku calls), not through MCP.
 
-The bridge does not need changes — it continues to route messages to ChatSession via `job_queue.py`. The Q&A vs DevSession decision happens downstream in `sdk_client.py`.
+The bridge does not need changes — it continues to route messages to PM session via `job_queue.py`. The Q&A vs Dev session decision happens downstream in `sdk_client.py`.
 
 ## Failure Path Test Strategy
 
-1. **Classifier failure (API error):** Falls back to DevSession spawn (current behavior). Test: mock Haiku API timeout, verify DevSession is spawned.
-2. **Low confidence classification:** Defaults to DevSession. Test: ambiguous messages ("the bridge seems slow") should route to DevSession.
+1. **Classifier failure (API error):** Falls back to Dev session spawn (current behavior). Test: mock Haiku API timeout, verify Dev session is spawned.
+2. **Low confidence classification:** Defaults to Dev session. Test: ambiguous messages ("the bridge seems slow") should route to Dev session.
 3. **Q&A session hangs:** Reduced nudge cap (10) ensures timeout. Test: verify nudge cap is enforced for Q&A sessions.
-4. **False positive (work classified as Q&A):** User sends follow-up "fix that", which gets classified as work and spawns DevSession. Test: verify escape hatch works.
-5. **False negative (Q&A classified as work):** No harm — just unnecessary DevSession spawn. Current behavior preserved. Acceptable failure mode.
+4. **False positive (work classified as Q&A):** User sends follow-up "fix that", which gets classified as work and spawns Dev session. Test: verify escape hatch works.
+5. **False negative (Q&A classified as work):** No harm — just unnecessary Dev session spawn. Current behavior preserved. Acceptable failure mode.
 
 ## Test Impact
 
-No existing tests affected — this is a greenfield feature adding new files (`agent/intent_classifier.py`, `agent/qa_handler.py`, `agent/qa_metrics.py`) and modifying the ChatSession message enrichment path in `sdk_client.py`. The modification is additive (new code path gated by classifier result) and preserves the existing DevSession path as the default/fallback. Existing integration tests that send messages through the pipeline will continue to work because the classifier defaults to DevSession on any ambiguity.
+No existing tests affected — this is a greenfield feature adding new files (`agent/intent_classifier.py`, `agent/qa_handler.py`, `agent/qa_metrics.py`) and modifying the PM session message enrichment path in `sdk_client.py`. The modification is additive (new code path gated by classifier result) and preserves the existing Dev session path as the default/fallback. Existing integration tests that send messages through the pipeline will continue to work because the classifier defaults to Dev session on any ambiguity.
 
 ## Rabbit Holes
 
@@ -176,5 +176,5 @@ No existing tests affected — this is a greenfield feature adding new files (`a
 ## Documentation
 
 - [ ] Create `docs/features/chatsession-qa-mode.md` describing the Q&A routing architecture, classifier design, and escape hatch
-- [ ] Update `docs/features/chat-dev-session-architecture.md` to document the Q&A fast path within ChatSession routing
+- [ ] Update `docs/features/chat-dev-session-architecture.md` to document the Q&A fast path within PM session routing
 - [ ] Add entry to `docs/features/README.md` index table for the new feature doc

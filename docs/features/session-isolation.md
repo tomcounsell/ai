@@ -134,7 +134,7 @@ The `claude_session_uuid` field is included in `_AGENT_SESSION_FIELDS` so it is 
 
 ### Hook Session Registry (Issue #597)
 
-Hooks fired by the Claude Agent SDK execute in the **parent bridge process**, not inside the Claude Code subprocess. The `VALOR_SESSION_ID` env var (injected into the subprocess at `sdk_client.py`) is invisible to hooks because they run in a different process context. This caused all hook-side session lookups to fall back to Claude Code's internal UUID, breaking activity logging, Redis session tracking, heartbeat enrichment, and DevSession registration.
+Hooks fired by the Claude Agent SDK execute in the **parent bridge process**, not inside the Claude Code subprocess. The `VALOR_SESSION_ID` env var (injected into the subprocess at `sdk_client.py`) is invisible to hooks because they run in a different process context. This caused all hook-side session lookups to fall back to Claude Code's internal UUID, breaking activity logging, Redis session tracking, heartbeat enrichment, and Dev session registration.
 
 The fix is a **module-level registry** (`agent/hooks/session_registry.py`) that maps Claude Code UUIDs to bridge session IDs within the parent process. The registry uses a two-phase registration pattern:
 
@@ -149,7 +149,7 @@ The registry also tracks per-session tool activity (tool count and last 3 tool n
 
 **Hook call sites using the registry**:
 - `agent/health_check.py` -- watchdog tool count tracking
-- `agent/hooks/pre_tool_use.py` -- DevSession registration
+- `agent/hooks/pre_tool_use.py` -- Dev session registration
 - `agent/hooks/subagent_stop.py` -- completion tracking (two call sites)
 
 Note: The `VALOR_SESSION_ID` env var injection in `sdk_client.py` is retained for code running inside the Claude Code subprocess (shell scripts, Python tools via Bash). The registry is only for parent-process hook resolution.
