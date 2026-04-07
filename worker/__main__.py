@@ -23,6 +23,10 @@ from pathlib import Path
 
 logger = logging.getLogger("worker")
 
+# Set to True when SIGTERM is received; causes main() to exit with code 1
+# so launchd applies ThrottleInterval (10s) instead of the default ~10-minute throttle.
+_shutdown_via_signal = False
+
 
 def _configure_logging() -> None:
     """Set up logging for the standalone worker."""
@@ -221,7 +225,10 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     shutdown_event = asyncio.Event()
 
     def _signal_handler(sig, frame):
+        global _shutdown_via_signal
         logger.info(f"Received signal {sig}, shutting down gracefully...")
+        if sig == signal.SIGTERM:
+            _shutdown_via_signal = True
         request_shutdown()  # Signal all worker loops to finish current sessions
         shutdown_event.set()
 
@@ -281,6 +288,10 @@ def main() -> None:
         sys.exit(1)
 
     asyncio.run(_run_worker(projects, dry_run=args.dry_run))
+
+    if _shutdown_via_signal:
+        logger.info("Exiting with code 1 (SIGTERM) so launchd respects ThrottleInterval")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
