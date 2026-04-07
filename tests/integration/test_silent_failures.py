@@ -82,8 +82,14 @@ class TestPopJobLogging:
     """Tests that _pop_agent_session logs warnings on lifecycle transition failures."""
 
     @pytest.mark.asyncio
-    async def test_lifecycle_transition_failure_logs_warning(self, caplog, redis_test_db):
-        """When log_lifecycle_transition raises during pop, a warning is emitted."""
+    async def test_lifecycle_transition_failure_is_non_fatal(self, caplog, redis_test_db):
+        """When log_lifecycle_transition raises during pop, the session is
+        still returned and the failure is logged non-fatally.
+
+        transition_status() catches log_lifecycle_transition exceptions and
+        logs them at DEBUG level as non-fatal, so _pop_agent_session still
+        completes the pending->running transition and returns the session.
+        """
 
         from models.agent_session import AgentSession
 
@@ -107,21 +113,19 @@ class TestPopJobLogging:
 
         with (
             patch.object(AgentSession, "log_lifecycle_transition", failing_log),
-            caplog.at_level(logging.WARNING, logger="agent.agent_session_queue"),
+            caplog.at_level(logging.DEBUG, logger="models.session_lifecycle"),
         ):
             from agent.agent_session_queue import _pop_agent_session
 
             session = await _pop_agent_session("chat_2")
 
-        # Job should still be returned (failure is non-fatal)
+        # Session should still be returned (failure is non-fatal)
         assert session is not None
-        # Verify warning was logged
-        warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
-        assert any(
-            "lifecycle" in r.message.lower() or "test-pop" in r.message for r in warning_records
-        ), (
-            f"Expected warning about lifecycle transition, got: "
-            f"{[r.message for r in warning_records]}"
+        assert session.status == "running"
+        # Verify the lifecycle failure was noted (DEBUG log from transition_status)
+        debug_records = [r for r in caplog.records if "[lifecycle]" in r.message]
+        assert any("Lifecycle log failed" in r.message for r in debug_records), (
+            f"Expected non-fatal lifecycle log message, got: {[r.message for r in debug_records]}"
         )
 
 
@@ -133,17 +137,23 @@ class TestEnqueueContinuationSessionLookupLogging:
         """When no AgentSession exists for the session_id, an error is logged
         and the function falls back to enqueue_agent_session."""
 
-        mock_session_entry = MagicMock()
-        mock_session_entry.project_key = "test-project"
-        mock_session_entry.session_id = "nonexistent-session-999"
-        mock_session_entry.working_dir = "/tmp/test"
-        mock_session_entry.message_text = "continue"
-        mock_session_entry.sender_name = "Test"
-        mock_session_entry.chat_id = "chat_3"
-        mock_session_entry.telegram_message_id = 3
-        mock_session_entry.slug = None
-        mock_session_entry.task_list_id = None
-        mock_session_entry.classification_type = None
+        # Use a real AgentSession instance (not persisted) so the fallback
+        # _extract_agent_session_fields call sees real field values instead
+        # of MagicMock placeholders that crash AgentSession construction.
+        from models.agent_session import AgentSession as _AS
+
+        mock_session_entry = _AS(
+            project_key="test-project",
+            session_id="nonexistent-session-999",
+            working_dir="/tmp/test",
+            message_text="continue",
+            sender_name="Test",
+            chat_id="chat_3",
+            telegram_message_id=3,
+            status="pending",
+            priority="normal",
+            created_at=datetime.now(tz=UTC),
+        )
 
         from unittest.mock import AsyncMock as _AsyncMock
 

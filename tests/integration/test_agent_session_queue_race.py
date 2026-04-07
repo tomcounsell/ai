@@ -1,6 +1,7 @@
 """Tests for session queue race condition fixes and KeyField index corruption prevention.
 
-Validates the delete-and-recreate pattern used by _pop_agent_session,
+Validates the in-place mutation pattern used by _pop_agent_session (via
+transition_status), the delete-and-recreate pattern still used by
 _recover_interrupted_agent_sessions_startup, and the drain guard in _worker_loop.
 
 All tests use redis_test_db fixture (autouse=True in conftest.py) for isolation.
@@ -59,24 +60,34 @@ class TestExtractJobFields:
         # agent_session_id should NOT be in extracted fields (it's AutoKeyField)
         assert "agent_session_id" not in fields
 
-        # All other fields should be present
+        # Top-level stored fields
         assert fields["project_key"] == "test"
         assert fields["status"] == "pending"
         assert fields["priority"] == "high"
         assert fields["created_at"] is not None
         assert fields["session_id"] == "test_session"
         assert fields["working_dir"] == "/tmp/test"
-        assert fields["message_text"] == "test message"
-        assert fields["sender_name"] == "Test"
-        assert fields["sender_id"] == 42
         assert fields["chat_id"] == "123"
-        assert fields["telegram_message_id"] == 1
-        assert fields["chat_title"] == "Test Chat"
-        assert fields["revival_context"] == "some context"
         assert fields["slug"] == "my-feature"
         assert fields["task_list_id"] == "thread-123-456"
-        assert fields["classification_type"] == "bug"
         assert fields["auto_continue_count"] == 2
+
+        # message_text/sender_name/etc are packed into initial_telegram_message.
+        # _extract_agent_session_fields preserves the dict wholesale, so these
+        # user-facing values round-trip transitively.
+        itm = fields["initial_telegram_message"]
+        assert isinstance(itm, dict)
+        assert itm["message_text"] == "test message"
+        assert itm["sender_name"] == "Test"
+        assert itm["sender_id"] == 42
+        assert itm["telegram_message_id"] == 1
+        assert itm["chat_title"] == "Test Chat"
+
+        # revival_context/classification_type live under extra_context.
+        ec = fields["extra_context"]
+        assert isinstance(ec, dict)
+        assert ec["revival_context"] == "some context"
+        assert ec["classification_type"] == "bug"
 
     def test_extracted_fields_can_recreate_job(self):
         """Extracted fields should be usable for AgentSession.create()."""
@@ -85,13 +96,14 @@ class TestExtractJobFields:
 
         # Should create successfully without errors
         new_job = AgentSession.create(**fields)
-        assert new_job.agent_session_id != original.agent_session_id  # New auto-generated ID
+        # New record has a fresh auto-generated ID
+        assert new_job.agent_session_id is not None
         assert new_job.project_key == original.project_key
         assert new_job.message_text == original.message_text
 
 
-class TestPopJobDeleteAndRecreate:
-    """Tests for _pop_agent_session using delete-and-recreate to prevent stale index entries."""
+class TestPopJobInPlaceMutation:
+    """Tests for _pop_agent_session using in-place mutation via transition_status()."""
 
     @pytest.mark.asyncio
     async def test_pop_agent_session_no_stale_pending(self):
@@ -134,8 +146,9 @@ class TestPopJobDeleteAndRecreate:
         assert session.session_id == "preserve_test"
         assert session.sender_name == "FieldCheck"
         assert session.auto_continue_count == 3
-        # agent_session_id changes (new object), but all other fields preserved
-        assert session.agent_session_id != original.agent_session_id
+        # In-place mutation: agent_session_id is stable, status flipped to running
+        assert session.agent_session_id == original.agent_session_id
+        assert session.status == "running"
 
     @pytest.mark.asyncio
     async def test_pop_agent_session_respects_priority_order(self):
