@@ -18,6 +18,21 @@ _SDLC_STAGE_NAMES = frozenset(
     {"ISSUE", "PLAN", "CRITIQUE", "BUILD", "TEST", "PATCH", "REVIEW", "DOCS", "MERGE"}
 )
 
+# Maps Skill tool skill names to SDLC stage names.
+# When a PM session calls Skill(skill="do-build"), the pre_tool_use hook uses
+# this mapping to call start_stage("BUILD") on the parent PipelineStateMachine.
+# Skills not in this dict are silently ignored (e.g., do-discover-paths).
+_SKILL_TO_STAGE: dict[str, str] = {
+    "do-plan": "PLAN",
+    "do-plan-critique": "CRITIQUE",
+    "do-build": "BUILD",
+    "do-test": "TEST",
+    "do-patch": "PATCH",
+    "do-pr-review": "REVIEW",
+    "do-docs": "DOCS",
+    "do-merge": "MERGE",
+}
+
 # Pattern: "Stage: BUILD", "Stage to execute -- BUILD", "Stage to execute: BUILD"
 _STAGE_PATTERN = re.compile(
     r"Stage(?:\s+to\s+execute)?[\s:\-]+(\b(?:" + "|".join(_SDLC_STAGE_NAMES) + r")\b)",
@@ -150,6 +165,37 @@ def _start_pipeline_stage(parent_session_id: str, stage: str) -> None:
         )
 
 
+def _handle_skill_tool_start(tool_input: dict[str, Any], claude_uuid: str | None) -> None:
+    """Handle Skill tool invocations by starting the corresponding pipeline stage.
+
+    Called from pre_tool_use_hook when tool_name == "Skill". Looks up the skill
+    name in _SKILL_TO_STAGE and calls _start_pipeline_stage if a mapping exists.
+    Silently ignores unknown skills and missing session IDs.
+    """
+    skill_name = tool_input.get("skill", "")
+    if not skill_name:
+        logger.debug("[pre_tool_use] Skill tool called with empty skill name, skipping")
+        return
+
+    stage = _SKILL_TO_STAGE.get(skill_name)
+    if not stage:
+        logger.debug(
+            f"[pre_tool_use] Skill '{skill_name}' not in _SKILL_TO_STAGE, skipping stage tracking"
+        )
+        return
+
+    from agent.hooks.session_registry import resolve
+
+    session_id = resolve(claude_uuid)
+    if not session_id:
+        logger.debug(
+            f"[pre_tool_use] No session ID resolved for Skill '{skill_name}', skipping start_stage"
+        )
+        return
+
+    _start_pipeline_stage(session_id, stage)
+
+
 def _maybe_register_dev_session(tool_input: dict[str, Any], claude_uuid: str | None = None) -> None:
     """Register a DevSession in Redis when the Agent tool spawns a dev-session.
 
@@ -221,6 +267,15 @@ async def pre_tool_use_hook(
     if tool_name == "Agent":
         claude_uuid = input_data.get("session_id")
         _maybe_register_dev_session(tool_input, claude_uuid=claude_uuid)
+        return {}
+
+    # Detect Skill tool invocations and map to pipeline stage start
+    if tool_name == "Skill":
+        claude_uuid = input_data.get("session_id")
+        try:
+            _handle_skill_tool_start(tool_input, claude_uuid=claude_uuid)
+        except Exception as e:
+            logger.warning(f"[pre_tool_use] Skill stage start failed: {e}")
         return {}
 
     # Only inspect write-capable tools
