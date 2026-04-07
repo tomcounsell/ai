@@ -115,7 +115,8 @@ _AGENT_SESSION_FIELDS = [
     "parent_agent_session_id",
     # === ChatSession/DevSession fields ===
     "session_type",
-    "parent_session_id",
+    # parent_session_id removed: it is now a deprecated @property alias for
+    # parent_agent_session_id (already preserved above).
     "role",
     "slug",
     # === PM self-messaging fields ===

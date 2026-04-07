@@ -90,7 +90,9 @@ Single Popoto model (`AgentSession`) with discriminator field. Popoto ORM does n
 - `result_text` -- what was delivered to Telegram
 
 ### DevSession-specific fields
-- `parent_session_id` (KeyField) -- logical FK to parent session
+- `parent_agent_session_id` (KeyField) -- **canonical** parent link (role-neutral). Set by all session creators (`create_child`, `create_dev`, `enqueue_session`) and read by all hierarchy walkers (`scheduling_depth`, `get_parent_session`, `get_child_sessions`, the zombie health check, the dashboard).
+- `parent_session_id` -- **deprecated** `@property` alias delegating to `parent_agent_session_id`. Kept for one release cycle. New code should use `parent_agent_session_id` directly.
+- `parent_chat_session_id` -- **deprecated** `@property` alias also delegating to `parent_agent_session_id` (the legacy alias chain `parent_chat_session_id -> parent_session_id -> parent_agent_session_id` continues to resolve transparently).
 - `role` (DataField) -- session specialization ("pm", "dev", or null for legacy)
 - `stage_states` -- derived property reading from `session_events`
 - `slug` -- derives branch name, plan path, worktree

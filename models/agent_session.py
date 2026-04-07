@@ -21,7 +21,9 @@ Roles (specialization within a session type):
   None  - Unspecialized (legacy or generic sessions)
 
 Parent-child relationship:
-  parent_session_id links a child session to its parent (role-neutral).
+  parent_agent_session_id is the canonical parent link (role-neutral).
+  parent_session_id and parent_chat_session_id are deprecated aliases that
+  delegate to parent_agent_session_id via property.
   Use create_child(role=...) to spawn child sessions.
 
 Status lifecycle (see models/session_lifecycle.py for canonical mutation functions):
@@ -86,9 +88,12 @@ class AgentSession(Model):
         None  - Unspecialized (legacy or generic sessions)
 
     Parent-child hierarchy:
-        parent_session_id: Links child to parent (role-neutral, replaces
-            the old parent_chat_session_id which implied a ChatSession parent).
-        parent_agent_session_id: Generic agent hierarchy link.
+        parent_agent_session_id: Canonical parent link (role-neutral). Set
+            by all session creators (create_child, create_dev, enqueue_session).
+        parent_session_id: Deprecated alias property delegating to
+            parent_agent_session_id (kept for one release cycle).
+        parent_chat_session_id: Deprecated alias property delegating to
+            parent_agent_session_id via parent_session_id.
 
     Factory methods:
         create_pm(): Create a PM session (PM persona, read-only).
@@ -203,7 +208,8 @@ class AgentSession(Model):
     project_config = DictField(null=True)
 
     # === DevSession fields (null when session_type="pm" or "teammate") ===
-    parent_session_id = KeyField(null=True)  # Logical FK -> parent session (role-neutral)
+    # Note: parent_session_id is now a deprecated @property alias for
+    # parent_agent_session_id. See the alias block below.
     slug = Field(null=True)  # Derives branch, plan path, worktree
 
     # === Role field (flexible specialization beyond session_type) ===
@@ -303,15 +309,21 @@ class AgentSession(Model):
         elif "parent_job_id" in kwargs:  # legacy
             kwargs.pop("parent_job_id")  # legacy
 
-        # Map deprecated parent_chat_session_id → parent_session_id
-        if "parent_chat_session_id" in kwargs and "parent_session_id" not in kwargs:
+        # Map deprecated parent_chat_session_id → parent_agent_session_id
+        if "parent_chat_session_id" in kwargs and "parent_agent_session_id" not in kwargs:
             logger.warning(
                 "Deprecated: parent_chat_session_id passed to AgentSession; "
-                "use parent_session_id instead"
+                "use parent_agent_session_id instead"
             )
-            kwargs["parent_session_id"] = kwargs.pop("parent_chat_session_id")
+            kwargs["parent_agent_session_id"] = kwargs.pop("parent_chat_session_id")
         elif "parent_chat_session_id" in kwargs:
             kwargs.pop("parent_chat_session_id")
+
+        # Map deprecated parent_session_id → parent_agent_session_id
+        if "parent_session_id" in kwargs and "parent_agent_session_id" not in kwargs:
+            kwargs["parent_agent_session_id"] = kwargs.pop("parent_session_id")
+        elif "parent_session_id" in kwargs:
+            kwargs.pop("parent_session_id")
 
         if "agent_session_id" in kwargs:
             kwargs.pop("agent_session_id")  # AutoKeyField, ignore
@@ -394,17 +406,32 @@ class AgentSession(Model):
         kwargs = cls._normalize_kwargs(kwargs)
         return await super().async_create(**kwargs)
 
-    # === Backward-compatible property: parent_chat_session_id -> parent_session_id ===
+    # === Deprecated alias chain: parent_chat_session_id -> parent_session_id
+    # ===                          -> parent_agent_session_id (canonical)
+    #
+    # parent_agent_session_id is the only KeyField. The two aliases below are
+    # kept for one release cycle so legacy callers continue to work. New code
+    # should write parent_agent_session_id directly.
+
+    @property
+    def parent_session_id(self) -> str | None:
+        """Deprecated alias for parent_agent_session_id."""
+        return self.parent_agent_session_id
+
+    @parent_session_id.setter
+    def parent_session_id(self, value: str | None) -> None:
+        """Deprecated setter for parent_agent_session_id."""
+        self.parent_agent_session_id = value
 
     @property
     def parent_chat_session_id(self) -> str | None:
-        """Backward-compatible alias for parent_session_id."""
-        return self.parent_session_id
+        """Deprecated alias for parent_agent_session_id."""
+        return self.parent_agent_session_id
 
     @parent_chat_session_id.setter
     def parent_chat_session_id(self, value: str | None) -> None:
-        """Backward-compatible setter for parent_session_id."""
-        self.parent_session_id = value
+        """Deprecated setter for parent_agent_session_id."""
+        self.parent_agent_session_id = value
 
     # === Backward-compatible property: agent_session_id -> id ===
 
@@ -913,7 +940,8 @@ class AgentSession(Model):
             session_id: Unique session identifier.
             project_key: Project this session belongs to.
             working_dir: Working directory for the session.
-            parent_session_id: ID of the parent session.
+            parent_session_id: ID of the parent session. Stored as
+                parent_agent_session_id (the canonical field).
             message_text: Initial message text.
             slug: Optional work item slug.
             stage_states: Optional initial SDLC stage states.
@@ -932,7 +960,7 @@ class AgentSession(Model):
             session_type=SESSION_TYPE_DEV,
             project_key=project_key,
             working_dir=working_dir,
-            parent_session_id=parent_session_id,
+            parent_agent_session_id=parent_session_id,
             initial_telegram_message=itm,
             slug=slug,
             role=role,
@@ -982,13 +1010,13 @@ class AgentSession(Model):
 
     def get_parent_session(self) -> "AgentSession | None":
         """Return the parent session if this is a child session."""
-        if not self.parent_session_id:
+        if not self.parent_agent_session_id:
             return None
         try:
-            return AgentSession.query.get(self.parent_session_id)
+            return AgentSession.query.get(self.parent_agent_session_id)
         except Exception:
             logger.warning(
-                f"Parent session {self.parent_session_id} not found for session {self.id}"
+                f"Parent session {self.parent_agent_session_id} not found for session {self.id}"
             )
             return None
 
@@ -1000,9 +1028,9 @@ class AgentSession(Model):
         return self.get_parent_session()
 
     def get_child_sessions(self) -> list["AgentSession"]:
-        """Return all child sessions linked via parent_session_id."""
+        """Return all child sessions linked via parent_agent_session_id."""
         try:
-            return list(AgentSession.query.filter(parent_session_id=self.id))
+            return list(AgentSession.query.filter(parent_agent_session_id=self.id))
         except Exception as e:
             logger.warning(f"Failed to query child sessions for {self.id}: {e}")
             return []
