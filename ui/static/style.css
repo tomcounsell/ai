@@ -218,15 +218,10 @@ h3 {
     background: var(--green-bg);
 }
 
-/* Status labels — plain colored text, no pill */
-.status-label {
-    font-size: 13px;
-    font-weight: 500;
-}
 
 .status-running { color: #22c55e; }
 .status-pending { color: #eab308; }
-.status-dormant { color: var(--purple); font-size: 11px; }
+.status-dormant { color: #f87171; font-size: 11px; }
 .status-active, .status-waiting_for_children { color: #22c55e; }
 .status-completed { color: #6b7280; }
 .status-failed, .status-error, .status-abandoned, .status-killed {
@@ -235,17 +230,26 @@ h3 {
 }
 
 .priority-icon {
+    display: inline-block;
+    width: 16px;
+    text-align: left;
     font-size: 12px;
-    margin-right: 2px;
+}
+
+.status-label {
+    display: inline-block;
+    width: 48px;
+    text-align: left;
+    font-size: 13px;
+    font-weight: 500;
 }
 
 .duration-label {
     display: inline-block;
-    width: 28px;
-    text-align: right;
+    width: 32px;
+    text-align: left;
     font-size: 11px;
     color: var(--text-muted);
-    margin-left: 2px;
 }
 
 .badge-ok, .badge-success {
