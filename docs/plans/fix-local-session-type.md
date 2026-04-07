@@ -135,12 +135,12 @@ agent_session = AgentSession.create_local(
 
 ## Test Impact
 
-- [ ] `tests/unit/test_dev_session_registration.py::TestCreateLocal::test_creates_session_with_correct_fields` — UPDATE: assert `session_type` defaults to `"dev"` when `SESSION_TYPE` env var is absent (behaviour unchanged, but add explicit env-var-absent case)
-- [ ] `tests/unit/test_dev_session_registration.py::TestCreateLocal::test_accepts_kwargs` — UPDATE: extend to cover `session_type` passed as explicit kwarg to `create_local()`
+- [x] `tests/unit/test_dev_session_registration.py::TestCreateLocal::test_creates_session_with_correct_fields` — UPDATE: assert `session_type` defaults to `"dev"` when `SESSION_TYPE` env var is absent (behaviour unchanged, but add explicit env-var-absent case)
+- [x] `tests/unit/test_dev_session_registration.py::TestCreateLocal::test_accepts_kwargs` — UPDATE: extend to cover `session_type` passed as explicit kwarg to `create_local()`
 
 New tests to add:
-- [ ] `tests/unit/test_dev_session_registration.py::TestCreateLocal::test_session_type_from_env_var` — ADD: when `SESSION_TYPE=teammate` env var is set, `create_local()` stores `session_type="teammate"`
-- [ ] `tests/unit/test_hook_user_prompt_submit.py::TestSessionTypeHook::test_hook_reads_session_type_env_var` — ADD: patch `os.environ` with `SESSION_TYPE=teammate`, call the hook's `main()`, assert `create_local()` was called with `session_type="teammate"`. This is the critical path test for the hook layer, not just the model layer.
+- [x] `tests/unit/test_dev_session_registration.py::TestCreateLocal::test_session_type_from_env_var` — ADD: when `SESSION_TYPE=teammate` env var is set, `create_local()` stores `session_type="teammate"`
+- [x] `tests/unit/test_hook_user_prompt_submit.py::TestSessionTypeHook::test_hook_reads_session_type_env_var` — ADD: patch `os.environ` with `SESSION_TYPE=teammate`, call the hook's `main()`, assert `create_local()` was called with `session_type="teammate"`. This is the critical path test for the hook layer, not just the model layer.
 
 ## Rabbit Holes
 
@@ -181,21 +181,21 @@ Claude Code sessions register themselves in Redis; it does not expose new tools 
 
 ## Documentation
 
-- [ ] Update `docs/features/subconscious-memory.md` to note that `session_type` in the `local-*`
+- [x] Update `docs/features/subconscious-memory.md` to note that `session_type` in the `local-*`
   record now reflects the spawning process's `SESSION_TYPE` env var (not always `dev`)
-- [ ] Add a brief note in `docs/features/pm-dev-session-architecture.md` explaining that
+- [x] Add a brief note in `docs/features/pm-dev-session-architecture.md` explaining that
   `user_prompt_submit.py` reads `SESSION_TYPE` to register the correct persona on session start
 
 ## Success Criteria
 
-- [ ] Teammate sessions spawned by a PM show `session_type: Teammate` on the dashboard
-- [ ] PM sessions spawned by a worker show `session_type: PM` on the dashboard
-- [ ] Dev sessions (no `SESSION_TYPE` env var) continue to default to `Developer`
-- [ ] `create_local()` accepts `session_type` as an explicit keyword parameter with default `SESSION_TYPE_DEV`
-- [ ] Unit test covers `create_local()` with `session_type` kwarg
-- [ ] Hook-layer test verifies that `user_prompt_submit.py` reads `SESSION_TYPE` env var and passes it through to `create_local()`
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] Teammate sessions spawned by a PM show `session_type: Teammate` on the dashboard
+- [x] PM sessions spawned by a worker show `session_type: PM` on the dashboard
+- [x] Dev sessions (no `SESSION_TYPE` env var) continue to default to `Developer`
+- [x] `create_local()` accepts `session_type` as an explicit keyword parameter with default `SESSION_TYPE_DEV`
+- [x] Unit test covers `create_local()` with `session_type` kwarg
+- [x] Hook-layer test verifies that `user_prompt_submit.py` reads `SESSION_TYPE` env var and passes it through to `create_local()`
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 

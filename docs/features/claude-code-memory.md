@@ -98,13 +98,13 @@ The Stop hook has a 10-second timeout. Haiku extraction typically completes in 2
 
 Local Claude Code sessions create AgentSession records in Redis, providing dashboard observability on par with Telegram-originated sessions. The lifecycle is managed across three hooks using a sidecar file to share the AgentSession `agent_session_id`:
 
-1. **UserPromptSubmit hook**: On the first prompt of a session, creates an AgentSession via `AgentSession.create_local(session_type=<from env>, ...)` with `status="running"` and `session_id=f"local-{claude_session_id}"`. The `session_type` defaults to `"dev"` but is overridden by the `SESSION_TYPE` environment variable injected by `sdk_client.py` when spawning Teammate or PM subprocesses. The `agent_session_id` is persisted to `data/sessions/{session_id}/agent_session.json`.
+1. **UserPromptSubmit hook**: On the first prompt of a session, creates an AgentSession via `AgentSession.create_local(session_type=..., ...)` with `status="running"` and `session_id=f"local-{claude_session_id}"`. The hook reads the `SESSION_TYPE` environment variable injected by `sdk_client.py` when spawning subprocesses, so the record stores the actual persona (`teammate`, `pm`, or `dev`); if `SESSION_TYPE` is absent (standalone CLI use), it defaults to `dev`. The `agent_session_id` is persisted to `data/sessions/{session_id}/agent_session.json`.
 2. **PostToolUse hook**: On every tool call, reads `agent_session_id` from the sidecar and updates `updated_at` timestamp and increments `tool_call_count` on the AgentSession record.
 3. **Stop hook**: Reads `agent_session_id` from the sidecar, sets `completed_at`, and marks status as `completed` (or `failed` if `stop_reason` is "error" or "crash").
 
 The dashboard at `localhost:8500` picks up local sessions automatically via `AgentSession.query` -- no dashboard code changes were needed. Local sessions appear alongside Telegram sessions with correct status, timestamps, and project key.
 
-The `AgentSession.create_local(...)` call requires only `session_id`, `project_key`, and `working_dir`. It sets `session_type` from the `SESSION_TYPE` env var (defaulting to `"dev"`) and omits all Telegram-specific fields (no `chat_id` or `parent_chat_session_id`).
+The `AgentSession.create_local(...)` call requires only `session_id`, `project_key`, and `working_dir`. The `session_type` defaults to `"dev"` but is overridden by the `SESSION_TYPE` env var when set. Local sessions omit all Telegram-specific fields (no `chat_id` or `parent_chat_session_id`).
 
 ## State Management
 
@@ -149,7 +149,7 @@ Sidecar files are cleaned up by the Stop hook after extraction. Cross-session co
 | `.claude/hooks/user_prompt_submit.py` | UserPromptSubmit hook for prompt ingestion and AgentSession creation |
 | `.claude/hooks/post_tool_use.py` | PostToolUse hook with memory recall, SDLC state tracking, and AgentSession activity updates |
 | `.claude/hooks/stop.py` | Stop hook with extraction, AgentSession completion, sidecar cleanup, and post-merge learning |
-| `models/agent_session.py` | AgentSession model with `create()` factory for all sessions |
+| `models/agent_session.py` | AgentSession model; `create_local()` factory for local CLI sessions (accepts `session_type` kwarg, defaults to `"dev"`) |
 | `.claude/settings.json` | Hook registration (UserPromptSubmit entry) |
 
 ## Configuration
@@ -191,7 +191,7 @@ This is a parallel path to the Telegram agent memory system, not a replacement:
 | Ingestion | `Memory.safe_save()` in bridge | `ingest()` called from UserPromptSubmit hook |
 | Deja vu signals | `check_and_inject()` emits vague recognition and novel territory thoughts | `recall()` emits identical signals |
 | Post-merge learning | `extract_post_merge_learning()` in merge stage | `post_merge_extract()` triggered from Stop hook on `gh pr merge` detection |
-| Session tracking | AgentSession created by bridge handler (`AgentSession.create(session_type=...)`) | AgentSession created by UserPromptSubmit hook (`AgentSession.create(session_type="dev", ...)`) |
+| Session tracking | AgentSession created by bridge handler (`AgentSession.create(session_type=...)`) | AgentSession created by UserPromptSubmit hook (`AgentSession.create_local(session_type=SESSION_TYPE env var or "dev", ...)`) |
 | Category re-ranking | `_apply_category_weights()` in `check_and_inject()` | `_apply_category_weights()` imported from `agent.memory_hook` in `recall()` |
 | Shared code | `extract_topic_keywords()`, `_apply_category_weights()`, `extract_observations_async()`, `detect_outcomes_async()` | Same functions imported from `agent/` |
 

@@ -136,7 +136,7 @@ The function is designed to be called from the SDLC merge stage or a post-merge 
 
 The memory system also runs in Claude Code CLI sessions via hooks. See [Claude Code Memory](claude-code-memory.md) for full details.
 
-- **UserPromptSubmit hook** ingests qualifying user prompts (same importance=6.0 as Telegram messages) and creates an AgentSession record for dashboard observability
+- **UserPromptSubmit hook** ingests qualifying user prompts (same importance=6.0 as Telegram messages) and creates an AgentSession record for dashboard observability. The hook reads the `SESSION_TYPE` environment variable injected by `sdk_client.py` when spawning subprocesses; the `local-*` Redis record stores the actual persona (`teammate`, `pm`, or `dev`) rather than always defaulting to `dev`.
 - **PostToolUse hook** runs memory recall with a file-based sliding window (JSON sidecar files replace in-memory state since hooks are stateless processes) and updates AgentSession activity tracking
 - **Stop hook** runs Haiku extraction and outcome detection on the session transcript, completes the AgentSession lifecycle, and triggers post-merge learning extraction when applicable
 - **Novel territory signals** provide cues when the agent enters unfamiliar areas (zero bloom hits with many keywords). The vague recognition (deja vu) fallback was removed as it produced only noise -- see [Memory Hook Performance](memory-hook-performance.md)

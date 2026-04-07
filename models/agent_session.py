@@ -945,6 +945,7 @@ class AgentSession(Model):
         session_id: str,
         project_key: str,
         working_dir: str,
+        session_type: str = SESSION_TYPE_DEV,
         **kwargs,
     ) -> "AgentSession":
         """Create an AgentSession for a local Claude Code CLI session."""
@@ -952,7 +953,7 @@ class AgentSession(Model):
         chat_id = kwargs.pop("chat_id", None) or f"local{int(now.timestamp()) % 10000}"
         session = cls(
             session_id=session_id,
-            session_type=SESSION_TYPE_DEV,
+            session_type=session_type,
             project_key=project_key,
             working_dir=working_dir,
             chat_id=chat_id,
