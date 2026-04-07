@@ -724,7 +724,6 @@ _RETRY_SOURCE_MAP: dict[str, tuple[str, str]] = {
     "gemini": ("p2-gemini", "apps.podcast.tasks.step_gemini_research"),
     "together": ("p2-together", "apps.podcast.tasks.step_together_research"),
     "claude": ("p2-claude", "apps.podcast.tasks.step_claude_research"),
-    "mirofish": ("p2-mirofish", "apps.podcast.tasks.step_mirofish_research"),
 }
 
 

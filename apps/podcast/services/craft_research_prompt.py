@@ -23,7 +23,6 @@ class TargetedResearchPrompts(BaseModel):
     gemini_prompt: str
     together_prompt: str
     claude_prompt: str
-    mirofish_prompt: str = ""
 
 
 # --- Agents ---

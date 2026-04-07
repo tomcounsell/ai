@@ -735,24 +735,6 @@ def craft_targeted_research_prompts(
         },
     )
 
-    # MiroFish prompt: perspective-oriented simulation directive.
-    # If the AI did not generate a mirofish_prompt (backward compat with
-    # cached models), fall back to a sensible default.
-    mirofish_prompt_text = result.mirofish_prompt or (
-        f"Simulate diverse stakeholder reactions to the key claims in this "
-        f"episode about '{episode.title}'. Generate predictions, "
-        f"counter-arguments, and audience reception modeling."
-    )
-    mirofish_artifact, _ = EpisodeArtifact.objects.update_or_create(
-        episode=episode,
-        title="prompt-mirofish",
-        defaults={
-            "content": mirofish_prompt_text,
-            "description": "AI-crafted MiroFish swarm simulation prompt.",
-            "workflow_context": "Research Gathering",
-        },
-    )
-
     # Create empty placeholder artifacts for the targeted research steps.
     # These are required for fan-in correctness: without them, if one
     # research task finishes before the other starts, the signal would see
@@ -795,19 +777,9 @@ def craft_targeted_research_prompts(
             "workflow_context": "Research Gathering",
         },
     )
-    EpisodeArtifact.objects.update_or_create(
-        episode=episode,
-        title="p2-mirofish",
-        defaults={
-            "content": "",
-            "description": "MiroFish swarm intelligence (placeholder).",
-            "workflow_context": "Research Gathering",
-        },
-    )
-
     logger.info(
         "craft_targeted_research_prompts: saved prompt-gpt + prompt-gemini + "
-        "prompt-together + prompt-claude + prompt-mirofish artifacts for episode %s",
+        "prompt-together + prompt-claude artifacts for episode %s",
         episode_id,
     )
     return {
@@ -815,5 +787,4 @@ def craft_targeted_research_prompts(
         "prompt-gemini": gemini_artifact,
         "prompt-together": together_artifact,
         "prompt-claude": claude_artifact,
-        "prompt-mirofish": mirofish_artifact,
     }

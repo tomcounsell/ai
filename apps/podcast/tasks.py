@@ -220,7 +220,6 @@ def step_question_discovery(episode_id: int) -> None:
         step_gemini_research.enqueue(episode_id=episode_id)
         step_together_research.enqueue(episode_id=episode_id)
         step_claude_research.enqueue(episode_id=episode_id)
-        step_mirofish_research.enqueue(episode_id=episode_id)
     except Exception as exc:
         workflow.fail_step(episode_id, "Question Discovery", str(exc))
         raise
