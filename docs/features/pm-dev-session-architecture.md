@@ -177,19 +177,62 @@ The stop hook (`.claude/hooks/stop.py`) includes a warning for SDLC-classified s
 
 The parent-child session lifecycle is driven by two SDK hooks: **PreToolUse** and **SubagentStop**. These hooks automatically register child Dev sessions in Redis, start pipeline stages, and record stage outcomes when the child completes.
 
+### Child Session Self-Registration (VALOR_PARENT_SESSION_ID)
+
+Before spawning the child subprocess, `sdk_client.py._create_options()` injects the parent's `agent_session_id` UUID as `VALOR_PARENT_SESSION_ID` into the child's subprocess environment. This is how the child subprocess knows which parent to link to:
+
+```python
+# In sdk_client.py._create_options()
+if self.agent_session_id and self.session_type in (SessionType.PM, SessionType.TEAMMATE):
+    env["VALOR_PARENT_SESSION_ID"] = self.agent_session_id
+```
+
+When the child Claude Code CLI starts, `user_prompt_submit.py` fires on the first prompt. It reads `VALOR_PARENT_SESSION_ID` and passes it to `create_local()`:
+
+```python
+# In user_prompt_submit.py
+parent_agent_session_id = os.environ.get("VALOR_PARENT_SESSION_ID")
+agent_session = AgentSession.create_local(
+    session_id=local_session_id,
+    ...
+    **({"parent_agent_session_id": parent_agent_session_id} if parent_agent_session_id else {}),
+)
+```
+
+This creates **one** `local-*` AgentSession record with `parent_agent_session_id` correctly set to the parent's `agent_session_id` UUID.
+
+**Key**: `VALOR_PARENT_SESSION_ID` carries the `agent_session_id` UUID (e.g., `agt_xxx`), not the bridge `session_id` (e.g., `tg_valor_...`). This is the canonical FK stored in `parent_agent_session_id` on the child's AgentSession record.
+
+**Edge cases**:
+- `VALOR_PARENT_SESSION_ID` absent (non-child sessions, Dev sessions): `os.environ.get()` returns `None`, `create_local()` behaves identically to before.
+- `VALOR_PARENT_SESSION_ID` present but parent record deleted: child session saves fine, `parent_agent_session_id` points to a non-existent record (pre-existing risk, not introduced by this approach).
+
 ### Spawn-Execute-Return Flow
 
 ```
+sdk_client._create_options() injects VALOR_PARENT_SESSION_ID=<agent_session_id>
+    |
+    v
 PM (PM session) calls Agent tool with type="dev-session"
     |
     v
 PreToolUse hook fires (agent/hooks/pre_tool_use.py)
     |-- Detects tool_name == "Agent", type == "dev-session"
     |-- session_registry.resolve(claude_uuid) -> bridge session_id
-    |-- AgentSession.create_child(role="dev", parent_session_id=...)
     |-- _extract_stage_from_prompt(prompt) -> e.g. "BUILD"
     |-- PipelineStateMachine(parent).start_stage("BUILD")
     |       -> marks stage as "in_progress" in parent's stage_states
+    |   NOTE: create_child() is NOT called here (issue #808).
+    |         The child subprocess self-registers (see below).
+    |
+    v
+Child subprocess starts (Claude Code CLI)
+    |
+    v
+user_prompt_submit.py fires on first prompt
+    |-- Reads VALOR_PARENT_SESSION_ID from env -> parent agent_session_id UUID
+    |-- AgentSession.create_local(session_id="local-*", parent_agent_session_id=...)
+    |       -> Creates ONE linked AgentSession record (no orphaned dev-* record)
     |
     v
 Dev session executes assigned work
@@ -200,6 +243,9 @@ Dev session executes assigned work
 SubagentStop hook fires (agent/hooks/subagent_stop.py)
     |-- Detects agent_type == "dev-session"
     |-- session_registry.resolve(claude_uuid) -> bridge session_id
+    |-- Two-lookup: session_id -> AgentSession -> agent_session_id UUID
+    |-- AgentSession.query.filter(parent_agent_session_id=agent_session_id_uuid)
+    |       -> Finds local-* child record
     |-- Marks Dev session status = "completed" in Redis
     |-- _extract_output_tail(input_data) -> last ~500 chars
     |-- PipelineStateMachine(parent).classify_outcome(stage, ..., output_tail)
@@ -216,14 +262,17 @@ Hook returns {"reason": "Pipeline state: {stage_states}"}
 
 | Component | File | Role |
 |-----------|------|------|
-| `pre_tool_use_hook()` | `agent/hooks/pre_tool_use.py` | Registers Dev session, starts pipeline stage (both dev-session and Skill paths) |
+| `_create_options()` | `agent/sdk_client.py` | Injects `VALOR_PARENT_SESSION_ID` into child subprocess env (PM/Teammate sessions only) |
+| `pre_tool_use_hook()` | `agent/hooks/pre_tool_use.py` | Starts pipeline stage on dev-session Agent tool call (Skill path also handled) |
+| `_maybe_start_pipeline_stage()` | `agent/hooks/pre_tool_use.py` | Starts the SDLC pipeline stage; does NOT create child AgentSession (child self-registers) |
 | `post_tool_use_hook()` | `agent/hooks/post_tool_use.py` | Completes pipeline stage for Skill path; always runs watchdog health check |
 | `subagent_stop_hook()` | `agent/hooks/subagent_stop.py` | Completes Dev session, classifies outcome, records stage result (dev-session path) |
+| `_register_dev_session_completion()` | `agent/hooks/subagent_stop.py` | Two-lookup pattern: bridge session_id → agent_session_id UUID → find child local-* records |
 | `session_registry` | `agent/hooks/session_registry.py` | Maps Claude Code UUIDs to bridge session IDs (see [Session Isolation](session-isolation.md)) |
 | `PipelineStateMachine` | `bridge/pipeline_state.py` | Manages stage_states on the parent AgentSession |
 | `_extract_stage_from_prompt()` | `agent/hooks/pre_tool_use.py` | Parses "Stage: BUILD" patterns from dev-session prompts |
 | `classify_outcome()` | `bridge/pipeline_state.py` | Three-tier classification: OUTCOME contract, stop_reason, text patterns |
-| `user_prompt_submit.py` | `.claude/hooks/user_prompt_submit.py` | On first prompt of a Claude Code session, creates the `local-*` AgentSession record; reads `SESSION_TYPE` env var injected by `sdk_client.py` to register the correct persona (`teammate`, `pm`, or `dev`) |
+| `user_prompt_submit.py` | `.claude/hooks/user_prompt_submit.py` | On first prompt, creates the `local-*` AgentSession record; reads `SESSION_TYPE` and `VALOR_PARENT_SESSION_ID` env vars to register persona and parent linkage |
 
 ### Stage Extraction
 
