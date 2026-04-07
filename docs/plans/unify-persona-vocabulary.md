@@ -545,7 +545,7 @@ No agent integration required. No MCP server changes, no `.mcp.json` modificatio
 - **Severity**: CONCERN
 - **Critics**: Skeptic
 - **Location**: ui/data/sdlc.py lines 336
-- **Finding**: `_resolve_persona_display()` at line 336 checks `if raw == ChatMode.DEV` where `raw` is `session_type` (not session_mode). Since `ChatMode.DEV == "dev"` and `SessionType.DEV == "dev"`, this comparison works by string equality, but the plan's proposed replacement code in section 11 correctly uses `session_type` string checks instead. However, the existing code also lacks handling for `session_mode` with new PersonaType values. The plan's proposed function returns "Developer" for `session_type == "dev"` and "Project Manager" for `session_type == "chat"` but only checks for Teammate via `session_mode == PersonaType.TEAMMATE` -- meaning a ChatSession that is NOT in teammate mode shows as "Project Manager", which is the current behavior. This is fine but the plan's proposed code snippet should also handle the case where `session_mode == PersonaType.DEVELOPER` or `session_mode == PersonaType.PROJECT_MANAGER` is set explicitly.
+- **Finding**: `_resolve_persona_display()` at line 336 checks `if raw == ChatMode.DEV` where `raw` is `session_type` (not session_mode). Since `ChatMode.DEV == "dev"` and `SessionType.DEV == "dev"`, this comparison works by string equality, but the plan's proposed replacement code in section 11 correctly uses `session_type` string checks instead. However, the existing code also lacks handling for `session_mode` with new PersonaType values. The plan's proposed function returns "Developer" for `session_type == "dev"` and "Project Manager" for `session_type == "chat"` but only checks for Teammate via `session_mode == PersonaType.TEAMMATE` -- meaning a PM session that is NOT in teammate mode shows as "Project Manager", which is the current behavior. This is fine but the plan's proposed code snippet should also handle the case where `session_mode == PersonaType.DEVELOPER` or `session_mode == PersonaType.PROJECT_MANAGER` is set explicitly.
 - **Suggestion**: Revise the proposed `_resolve_persona_display()` to check `session_mode` first (if set, map PersonaType to display label), then fall back to session_type-based inference. This future-proofs against explicit persona assignment.
 
 ### Nits
@@ -554,7 +554,7 @@ No agent integration required. No MCP server changes, no `.mcp.json` modificatio
 - **Severity**: NIT
 - **Critics**: Simplifier
 - **Location**: agent/intent_classifier.py, module docstring line 1
-- **Finding**: The module docstring says "Binary intent classifier for ChatSession Q&A mode." This will need updating but is not listed explicitly in Task 6's bullet points (only "Update module docstring" is mentioned generically).
+- **Finding**: The module docstring says "Binary intent classifier for PM session Q&A mode." This will need updating but is not listed explicitly in Task 6's bullet points (only "Update module docstring" is mentioned generically).
 - **Suggestion**: No action needed -- the generic "Update module docstring" instruction in Task 6 covers this. Just noting for completeness.
 
 #### 5. config/enums.py ChatMode docstring references resolve_chat_mode

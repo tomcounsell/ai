@@ -25,7 +25,7 @@ The architecture represents a **living codebase** where users interact directly 
 │                       Python Bridge Layer                            │
 │                   (bridge/telegram_bridge.py)                        │
 │                                                                      │
-│  • Message routing via chat_title prefix (Dev: → DevSession)         │
+│  • Message routing via chat_title prefix (Dev: → Dev session)         │
 │  • Session management per chat                                       │
 │  • Multi-project support                                             │
 └───────────────────────────────┬─────────────────────────────────────┘

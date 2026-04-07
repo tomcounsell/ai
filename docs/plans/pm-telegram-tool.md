@@ -8,27 +8,27 @@ tracking: https://github.com/tomcounsell/ai/issues/497
 last_comment_id:
 ---
 
-# PM Telegram Tool: ChatSession Composes Its Own Messages
+# PM Telegram Tool: PM session Composes Its Own Messages
 
 ## Problem
 
-The PM persona (ChatSession) never writes its own Telegram messages. All output goes through the summarizer — a Haiku-powered compressor that rewrites PM output into bullet-point format. The result sounds like a CI bot, not a project manager.
+The PM persona (PM session) never writes its own Telegram messages. All output goes through the summarizer — a Haiku-powered compressor that rewrites PM output into bullet-point format. The result sounds like a CI bot, not a project manager.
 
 **Current behavior:**
-ChatSession returns text -> bridge captures it in `send_to_chat()` -> `send_response_with_files()` in `bridge/response.py` runs it through `summarize_response()` -> structured bullets are sent to Telegram. The PM persona has communication guidelines but never gets to apply them because the summarizer overrides its voice.
+PM session returns text -> bridge captures it in `send_to_chat()` -> `send_response_with_files()` in `bridge/response.py` runs it through `summarize_response()` -> structured bullets are sent to Telegram. The PM persona has communication guidelines but never gets to apply them because the summarizer overrides its voice.
 
 **Desired outcome:**
-ChatSession composes and sends its own Telegram messages via a tool, with full control over tone, content, and timing. The summarizer becomes a safety net: if the PM ends a session without self-messaging, the summarizer fires as fallback. PM messages read like a project manager talking to a stakeholder, not a build log.
+PM session composes and sends its own Telegram messages via a tool, with full control over tone, content, and timing. The summarizer becomes a safety net: if the PM ends a session without self-messaging, the summarizer fires as fallback. PM messages read like a project manager talking to a stakeholder, not a build log.
 
 ## Prior Art
 
 - **Issue #274 / PR #275**: Semantic Session Routing — added structured summarizer with context-aware routing. Established the current summarizer architecture.
-- **Issue #309**: Observer Agent replacement — replaced auto-continue/summarizer with stage-aware SDLC steerer. Shifted SDLC intelligence from bridge to ChatSession.
+- **Issue #309**: Observer Agent replacement — replaced auto-continue/summarizer with stage-aware SDLC steerer. Shifted SDLC intelligence from bridge to PM session.
 - **PR #248**: SDLC summary improvements — removed checkboxes, embedded issue numbers. Tuned summarizer output format.
 - **PR #187**: Summarizer overhaul — always summarize, SDLC templates. Established summarizer as the sole message author.
 - **PR #242**: Simplify summarizer — removed echo, always summarize.
 - **PR #456**: Summarizer evidence hardening — persona gate and evidence requirements.
-- **Issue #459**: SDLC Redesign — simplified pipeline, established ChatSession/DevSession split. Current architecture.
+- **Issue #459**: SDLC Redesign — simplified pipeline, established PM/Dev session split. Current architecture.
 
 ## Why Previous Fixes Failed
 
@@ -46,8 +46,8 @@ ChatSession composes and sends its own Telegram messages via a tool, with full c
 
 ### Current Flow (summarizer-as-author)
 1. **Entry point**: Human sends Telegram message
-2. **Bridge**: Routes to ChatSession via `_execute_job()` in `agent/job_queue.py`
-3. **ChatSession**: Processes message, orchestrates DevSessions, returns text output
+2. **Bridge**: Routes to PM session via `_execute_job()` in `agent/job_queue.py`
+3. **PM session**: Processes message, orchestrates Dev sessions, returns text output
 4. **Nudge loop**: `send_to_chat()` classifies output via `determine_delivery_action()` — decides deliver/nudge
 5. **Bridge send callback**: `_send()` in `telegram_bridge.py` L1448 calls `send_response_with_files()`
 6. **Summarizer**: `bridge/response.py` L396-429 runs `summarize_response()` which rewrites the text
@@ -55,19 +55,19 @@ ChatSession composes and sends its own Telegram messages via a tool, with full c
 
 ### Proposed Flow (PM-as-author)
 1. **Entry point**: Human sends Telegram message
-2. **Bridge**: Routes to ChatSession (unchanged)
-3. **ChatSession**: Processes message, composes Telegram messages, calls `send_telegram_message` tool which writes to Redis queue
+2. **Bridge**: Routes to PM session (unchanged)
+3. **PM session**: Processes message, composes Telegram messages, calls `send_telegram_message` tool which writes to Redis queue
 4. **Bridge message relay**: Async loop in bridge reads Redis queue, sends to Telegram via Telethon, records sent message IDs on AgentSession
 5. **Nudge loop**: `send_to_chat()` checks whether PM self-messaged during session. If yes, skip summarizer and only set emoji reaction. If no, fall through to summarizer as safety net.
 6. **Telegram**: PM-authored messages already delivered; summarizer only fires as fallback
 
 ## Architectural Impact
 
-- **New dependencies**: Redis pub/sub or list for IPC between ChatSession subprocess and bridge
+- **New dependencies**: Redis pub/sub or list for IPC between PM session subprocess and bridge
 - **Interface changes**: New `pm_sent_message_ids` field on AgentSession; new Redis key pattern for message queue
-- **Coupling**: Slightly increases coupling between ChatSession and bridge (via shared Redis contract), but reduces the summarizer's responsibilities
-- **Data ownership**: Message composition shifts from bridge/summarizer to ChatSession. Bridge retains delivery responsibility.
-- **Reversibility**: High — remove the tool from ChatSession's environment and the system falls back to summarizer-only behavior automatically
+- **Coupling**: Slightly increases coupling between PM session and bridge (via shared Redis contract), but reduces the summarizer's responsibilities
+- **Data ownership**: Message composition shifts from bridge/summarizer to PM session. Bridge retains delivery responsibility.
+- **Reversibility**: High — remove the tool from PM session's environment and the system falls back to summarizer-only behavior automatically
 
 ## Appetite
 
@@ -87,15 +87,15 @@ No prerequisites — this work uses existing Redis infrastructure and Telethon c
 
 ### Key Elements
 
-- **Redis message queue**: IPC channel between ChatSession subprocess and bridge process. ChatSession writes messages; bridge reads and sends via Telethon.
-- **`send_telegram_message` Bash tool**: ChatSession calls a Python script that pushes messages to the Redis queue. Pre-configured with `chat_id` and `reply_to` via environment variables.
+- **Redis message queue**: IPC channel between PM session subprocess and bridge process. PM session writes messages; bridge reads and sends via Telethon.
+- **`send_telegram_message` Bash tool**: PM session calls a Python script that pushes messages to the Redis queue. Pre-configured with `chat_id` and `reply_to` via environment variables.
 - **Bridge message relay**: Async task in bridge that polls the Redis queue and sends messages through the existing Telethon client.
 - **AgentSession `pm_sent_message_ids`**: ListField tracking Telegram message IDs sent by the PM during a session. Bridge populates this after each successful send.
 - **Summarizer bypass**: `send_response_with_files()` checks `pm_sent_message_ids` — if non-empty, skip summarizer and only apply emoji reaction.
 
 ### Flow
 
-**ChatSession wants to send message** -> calls `python tools/send_telegram.py "message text"` -> script reads `TELEGRAM_CHAT_ID` and `TELEGRAM_REPLY_TO` from env -> pushes `{chat_id, reply_to, text, session_id}` to Redis list `telegram:outbox:{session_id}` -> returns immediately
+**PM session wants to send message** -> calls `python tools/send_telegram.py "message text"` -> script reads `TELEGRAM_CHAT_ID` and `TELEGRAM_REPLY_TO` from env -> pushes `{chat_id, reply_to, text, session_id}` to Redis list `telegram:outbox:{session_id}` -> returns immediately
 
 **Bridge relay loop** -> polls `telegram:outbox:*` keys -> for each message, sends via Telethon `send_markdown()` -> records sent Telegram message ID on AgentSession `pm_sent_message_ids` -> deletes processed queue entry
 
@@ -103,9 +103,9 @@ No prerequisites — this work uses existing Redis infrastructure and Telethon c
 
 ### Technical Approach
 
-- **IPC via Redis list**: ChatSession runs as a Claude Code subprocess — it cannot access the bridge's Telethon client directly. Redis lists provide a reliable, ordered queue. The bridge already has a Redis connection.
-- **Environment variable injection**: `sdk_client.py` already injects `VALOR_SESSION_ID`, `JOB_ID`, `CHAT_ID` etc. Add `TELEGRAM_CHAT_ID` and `TELEGRAM_REPLY_TO` for ChatSession sessions.
-- **Bash-callable tool**: ChatSession has Bash access. A simple Python script in `tools/send_telegram.py` avoids MCP server complexity. The script uses the existing Redis connection pattern from `tools/`.
+- **IPC via Redis list**: PM session runs as a Claude Code subprocess — it cannot access the bridge's Telethon client directly. Redis lists provide a reliable, ordered queue. The bridge already has a Redis connection.
+- **Environment variable injection**: `sdk_client.py` already injects `VALOR_SESSION_ID`, `JOB_ID`, `CHAT_ID` etc. Add `TELEGRAM_CHAT_ID` and `TELEGRAM_REPLY_TO` for PM session sessions.
+- **Bash-callable tool**: PM session has Bash access. A simple Python script in `tools/send_telegram.py` avoids MCP server complexity. The script uses the existing Redis connection pattern from `tools/`.
 - **Relay as asyncio task**: The bridge's event loop already runs background tasks (calendar heartbeat, job queue). Add a relay task that processes the outbox queue.
 - **Linkification and formatting**: The `send_telegram.py` tool handles PR/Issue reference linkification (e.g., `PR #42` -> `[PR #42](url)`) using the existing `_linkify_references()` from `bridge/summarizer.py`, extracted to a shared utility.
 - **Length enforcement**: Telegram's 4096 char limit enforced in the tool before queueing.
@@ -113,17 +113,17 @@ No prerequisites — this work uses existing Redis infrastructure and Telethon c
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `tools/send_telegram.py` Redis connection failure — must log error and return non-zero exit code (ChatSession sees tool failure)
+- [ ] `tools/send_telegram.py` Redis connection failure — must log error and return non-zero exit code (PM session sees tool failure)
 - [ ] Bridge relay Telethon send failure — must log error, NOT delete from queue (retry on next poll)
 - [ ] AgentSession save failure for `pm_sent_message_ids` — non-fatal, log warning, still deliver message
 
 ### Empty/Invalid Input Handling
 - [ ] Empty message text to `send_telegram.py` — reject with clear error message
-- [ ] Missing `TELEGRAM_CHAT_ID` env var — reject with error explaining the tool is only available in ChatSession context
+- [ ] Missing `TELEGRAM_CHAT_ID` env var — reject with error explaining the tool is only available in PM session context
 - [ ] Malformed Redis queue entry — skip and log, don't crash relay loop
 
 ### Error State Rendering
-- [ ] If `send_telegram.py` fails, ChatSession sees a tool error and can fall back to returning text (which triggers summarizer)
+- [ ] If `send_telegram.py` fails, PM session sees a tool error and can fall back to returning text (which triggers summarizer)
 - [ ] If bridge relay fails to send all queued messages before session ends, summarizer fires as fallback
 
 ## Test Impact
@@ -135,7 +135,7 @@ No prerequisites — this work uses existing Redis infrastructure and Telethon c
 
 ## Rabbit Holes
 
-- **Building a full MCP server for Telegram**: Overkill. ChatSession has Bash access; a Python script in `tools/` is simpler and more maintainable. MCP server would need registration, health checks, and lifecycle management.
+- **Building a full MCP server for Telegram**: Overkill. PM session has Bash access; a Python script in `tools/` is simpler and more maintainable. MCP server would need registration, health checks, and lifecycle management.
 - **Real-time streaming of PM messages**: The relay can use simple polling (100ms interval) rather than pub/sub. The latency difference is negligible for Telegram delivery.
 - **Removing the summarizer entirely**: Keep it as safety net. Complete removal creates a risk of silent sessions where the PM crashes without sending a message.
 - **Multiple message formats (rich media, buttons, etc.)**: Text messages with markdown are sufficient for v1. File attachments and interactive elements are a separate concern.
@@ -151,7 +151,7 @@ No prerequisites — this work uses existing Redis infrastructure and Telethon c
 **Impact:** PM queues a message but the session completes before the bridge relay processes it. Summarizer fires because `pm_sent_message_ids` is empty, leading to duplicate messages.
 **Mitigation:** When session completes, `send_to_chat()` waits briefly (500ms) for the relay to process any pending queue entries before checking `pm_sent_message_ids`. Also check the queue length directly — if entries exist in `telegram:outbox:{session_id}`, wait for relay to drain.
 
-### Risk 3: ChatSession uses tool incorrectly or not at all
+### Risk 3: PM session uses tool incorrectly or not at all
 **Impact:** PM returns raw text without calling the tool, triggering the summarizer.
 **Mitigation:** This is actually the desired fallback behavior. The PM persona instructions encourage tool use but the summarizer catches the case gracefully. Over time, prompt iteration improves tool usage.
 
@@ -173,10 +173,10 @@ No prerequisites — this work uses existing Redis infrastructure and Telethon c
 
 ## No-Gos (Out of Scope)
 
-- DevSession Telegram access — only ChatSession gets the tool
+- Dev session Telegram access — only PM session gets the tool
 - Rich media messages (photos, documents, buttons) — text + markdown only for v1
 - Message editing/deletion — PM can only send new messages
-- Read receipts or delivery confirmation back to ChatSession — fire-and-forget from PM's perspective
+- Read receipts or delivery confirmation back to PM session — fire-and-forget from PM's perspective
 - Summarizer removal — it stays as fallback
 - PM persona rewrite — only add tool usage guidance, no personality overhaul
 
@@ -186,8 +186,8 @@ No update system changes required — this feature is purely internal to the bri
 
 ## Agent Integration
 
-- **New tool**: `tools/send_telegram.py` — a Bash-callable Python script that pushes messages to the Redis outbox queue. ChatSession calls it via Bash tool.
-- **No MCP server needed**: The tool is a standalone script, not an MCP server. ChatSession invokes it as `python tools/send_telegram.py "message text"`.
+- **New tool**: `tools/send_telegram.py` — a Bash-callable Python script that pushes messages to the Redis outbox queue. PM session calls it via Bash tool.
+- **No MCP server needed**: The tool is a standalone script, not an MCP server. PM session invokes it as `python tools/send_telegram.py "message text"`.
 - **Bridge modification**: `bridge/telegram_bridge.py` needs a new async relay task that processes the Redis outbox queue. This runs alongside the existing job queue consumer.
 - **Environment variable injection**: `agent/sdk_client.py` needs to inject `TELEGRAM_CHAT_ID` and `TELEGRAM_REPLY_TO` for chat-type sessions.
 - **Integration test**: Verify that calling `tools/send_telegram.py` with valid env vars queues a message in Redis, and the bridge relay picks it up.
@@ -205,8 +205,8 @@ No update system changes required — this feature is purely internal to the bri
 
 ## Success Criteria
 
-- [ ] ChatSession has a `send_telegram_message` tool (via Bash + `tools/send_telegram.py`) pre-configured with chat_id and reply_to via environment variables
-- [ ] ChatSession composes and sends its own Telegram messages using the tool
+- [ ] PM session has a `send_telegram_message` tool (via Bash + `tools/send_telegram.py`) pre-configured with chat_id and reply_to via environment variables
+- [ ] PM session composes and sends its own Telegram messages using the tool
 - [ ] Bridge relay task processes Redis outbox queue and sends messages via Telethon
 - [ ] Bridge skips summarizer when PM has already sent a message via tool during the session
 - [ ] Summarizer retained as fallback: fires when PM ends session without self-messaging
@@ -265,7 +265,7 @@ No update system changes required — this feature is purely internal to the bri
 - Apply linkification and 4096 char truncation before queueing
 - Return exit code 0 on success, non-zero on failure with stderr message
 
-### 3. Inject environment variables for ChatSession
+### 3. Inject environment variables for PM session
 - **Task ID**: build-env-injection
 - **Depends On**: none
 - **Validates**: tests/unit/test_sdk_client.py (update)
@@ -306,7 +306,7 @@ No update system changes required — this feature is purely internal to the bri
 - **Assigned To**: telegram-tool-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Update ChatSession system prompt injection in `sdk_client.py` L1403-1424 with tool usage instructions
+- Update PM session system prompt injection in `sdk_client.py` L1403-1424 with tool usage instructions
 - Add guidelines: use `send_telegram_message` for stakeholder communication, never expose SDLC stage names, write in business terms
 - Add instruction: if you don't call the tool, your return value will be summarized and sent automatically (fallback behavior)
 

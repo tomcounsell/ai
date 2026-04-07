@@ -1,8 +1,8 @@
-"""SubagentStop hook: logs subagent completion, registers DevSession,
-posts structured stage comments to the tracking GitHub issue, and injects
-SDLC pipeline state back into the PM's context.
+"""SubagentStop hook: logs subagent completion, registers child Dev session
+completion, posts structured stage comments to the tracking GitHub issue, and
+injects SDLC pipeline state back into the PM's context.
 
-Stage comments are posted via utils.issue_comments after each DevSession
+Stage comments are posted via utils.issue_comments after each Dev session
 completes, turning the GitHub issue into a living record of stage-by-stage
 progress. See docs/features/sdlc-stage-handoff.md for the full design."""
 
@@ -55,9 +55,9 @@ def _extract_output_tail(input_data: dict, max_chars: int = 500) -> str:
 def _register_dev_session_completion(
     agent_id: str, input_data: dict | None = None, claude_uuid: str | None = None
 ) -> None:
-    """Mark a DevSession as completed in Redis and record SDLC stage completion.
+    """Mark a Dev session as completed in Redis and record SDLC stage completion.
 
-    Looks up the DevSession by parent ChatSession and updates its status.
+    Looks up the Dev session by parent PM session and updates its status.
     Also records stage completion via PipelineStateMachine if a stage is in_progress.
     Uses classify_outcome() to determine success/fail before routing.
 
@@ -72,7 +72,7 @@ def _register_dev_session_completion(
     parent_session_id = resolve(claude_uuid)
     if not parent_session_id:
         logger.debug(
-            "[subagent_stop] No bridge session in registry, skipping DevSession completion"
+            "[subagent_stop] No bridge session in registry, skipping Dev session completion"
         )
         return
 
@@ -91,16 +91,16 @@ def _register_dev_session_completion(
                     skip_parent=True,  # Parent finalization handled separately below
                 )
                 logger.info(
-                    f"[subagent_stop] DevSession {dev.agent_session_id} completed "
+                    f"[subagent_stop] Dev session {dev.agent_session_id} completed "
                     f"(parent={parent_session_id}, agent_id={agent_id})"
                 )
 
-        # Record SDLC stage completion on the parent ChatSession.
+        # Record SDLC stage completion on the parent PM session.
         # Extract output tail for outcome classification.
         output_tail = _extract_output_tail(input_data or {})
         _record_stage_on_parent(parent_session_id, stop_reason=None, output_tail=output_tail)
     except Exception as e:
-        logger.warning(f"[subagent_stop] Failed to register DevSession completion: {e}")
+        logger.warning(f"[subagent_stop] Failed to register Dev session completion: {e}")
 
 
 def _record_stage_on_parent(
@@ -108,7 +108,7 @@ def _record_stage_on_parent(
     stop_reason: str | None = None,
     output_tail: str = "",
 ) -> None:
-    """Record stage completion on the parent ChatSession's PipelineStateMachine.
+    """Record stage completion on the parent PM session's PipelineStateMachine.
 
     Finds the current in_progress stage, classifies the outcome using
     classify_outcome(), and routes to complete_stage() or fail_stage()
@@ -116,7 +116,7 @@ def _record_stage_on_parent(
     the SDLC skill completion path.
 
     Args:
-        parent_session_id: The parent ChatSession's session_id.
+        parent_session_id: The parent PM session's session_id.
         stop_reason: SDK stop reason (e.g. 'end_turn', 'timeout'). None when
             not available from SubagentStopHookInput (which lacks this field).
         output_tail: Last ~500 chars of worker output for pattern matching.
@@ -290,10 +290,10 @@ async def subagent_stop_hook(
     tool_use_id: str | None,
     context: HookContext,
 ) -> dict[str, Any]:
-    """Log when a subagent finishes execution and register DevSession completion.
+    """Log when a subagent finishes execution and register Dev session completion.
 
     When agent_type is dev-session:
-    1. Updates DevSession status in Redis
+    1. Updates Dev session status in Redis
     2. Posts a structured stage comment to the tracking issue
     3. Injects current SDLC pipeline state via 'reason' so the PM sees
        which stages are actually complete vs still pending
@@ -308,7 +308,7 @@ async def subagent_stop_hook(
         f"agent_id={agent_id}, outcome={outcome}"
     )
 
-    # Register DevSession completion in Redis for parent ChatSession tracking
+    # Register Dev session completion in Redis for parent PM session tracking
     if agent_type == "dev-session":
         # Issue #597: Use session registry instead of os.environ for bridge session ID
         from agent.hooks.session_registry import resolve

@@ -167,7 +167,7 @@ Report deployment status with structured evidence:
 
 ### Step 0: Define what "deploy" means for this repo
 
-Before writing any config, have a conversation with your team (or with the PM/ChatSession) to answer these questions. Every repo's deploy is different -- there is no universal answer.
+Before writing any config, have a conversation with your team (or with the PM session) to answer these questions. Every repo's deploy is different -- there is no universal answer.
 
 **Questions to answer:**
 1. **Where does production run?** (Cloud platform, self-hosted machines, serverless, edge, etc.)

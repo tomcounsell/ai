@@ -270,7 +270,7 @@ def _extract_sdlc_env_vars(session_id: str, gh_repo: str | None = None) -> dict[
         if isinstance(branch, str) and branch:
             env["SDLC_PR_BRANCH"] = branch
 
-        # Work item slug (new DevSessions use session.slug, legacy uses slug)
+        # Work item slug (Dev sessions use session.slug, legacy uses slug)
         slug = getattr(session, "slug", None) or getattr(session, "slug", None)
         if isinstance(slug, str) and slug:
             env["SDLC_SLUG"] = slug
@@ -351,14 +351,14 @@ PERSONAS_OVERLAY_DIR = Path.home() / "Desktop" / "Valor" / "personas"
 PRINCIPAL_PATH = Path(__file__).parent.parent / "config" / "PRINCIPAL.md"
 
 # Worker safety rails injected into every agent session.
-# ChatSession is the sole pipeline controller —
+# The PM session is the sole pipeline controller —
 # it steers the worker one stage at a time via nudge messages.
 # This constant provides only the safety rails the worker needs; it does NOT
 # contain pipeline orchestration or /sdlc invocation instructions.
 WORKER_RULES = """\
 ## Worker Safety Rails
 
-Execute the task given to you. The ChatSession controls pipeline progression — \
+Execute the task given to you. The PM session controls pipeline progression — \
 you do not need to manage stages or orchestrate the pipeline yourself.
 
 ### Hard rules:
@@ -450,7 +450,7 @@ def load_principal_context(condensed: bool = True) -> str:
 
     Provides strategic context for decision-making: mission, goals, project
     priorities, and operating assumptions. Used by workers (condensed) and
-    the ChatSession (full) to ground autonomous decisions.
+    the PM session (full) to ground autonomous decisions.
 
     Args:
         condensed: If True, return only Mission + Goals + Projects sections
@@ -577,7 +577,7 @@ def load_system_prompt() -> str:
         ---
         [Work Completion Criteria — from CLAUDE.md]
 
-    ChatSession handles pipeline orchestration via nudge loop.
+    The PM session handles pipeline orchestration via nudge loop.
     The worker only receives safety rails — no pipeline stages or /sdlc references.
     """
     try:
@@ -918,7 +918,7 @@ class ValorAgent:
         if self.session_type:
             env["SESSION_TYPE"] = self.session_type
 
-        # PM sessions: inject Telegram context so ChatSession can send its
+        # PM sessions: inject Telegram context so the PM session can send its
         # own messages via tools/send_telegram.py (issue #497).
         # chat_id comes from the project config; reply_to is resolved from
         # the AgentSession's telegram_message_id in _extract_sdlc_env_vars below.
@@ -1353,7 +1353,7 @@ async def get_agent_response_sdk(
 
     Orchestrates a complete agent session from message receipt to response.
     Uses config-driven persona resolution (resolve_persona from
-    bridge.routing) to determine session behavior for ChatSessions:
+    bridge.routing) to determine session behavior for PM sessions:
 
     - Teammate persona: bypasses the Haiku intent classifier, sets
       session_mode=PersonaType.TEAMMATE directly on the session, reducing
@@ -1500,7 +1500,7 @@ async def get_agent_response_sdk(
             enriched_message += f"\nGITHUB: {github_org}/{github_repo}"
 
     # PM/Teammate routing: classify intent and choose Teammate or PM dispatch path.
-    # Teammate mode answers informational queries directly without spawning DevSession.
+    # Teammate mode answers informational queries directly without spawning a Dev session.
     _teammate_mode = False
     _classification_context = ""  # Advisory routing context for the agent
     if _session_type in (SessionType.PM, SessionType.TEAMMATE):
@@ -1603,7 +1603,7 @@ async def get_agent_response_sdk(
                 "fetch the last few comments with "
                 "`gh api repos/{owner}/{repo}/issues/{number}/comments` and look for "
                 "comments containing `<!-- sdlc-stage-comment -->`. Include a summary "
-                "of prior stage findings in the DevSession prompt so the next stage "
+                "of prior stage findings in the dev-session prompt so the next stage "
                 "has full context from previous stages.\n"
                 "2. **Spawn one dev-session for the next stage** — use the Agent tool "
                 "to dispatch exactly one stage at a time:\n"
