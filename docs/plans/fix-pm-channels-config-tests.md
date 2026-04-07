@@ -77,10 +77,10 @@ No prerequisites — this work has no external dependencies.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_pm_channels.py::TestPmConfigValidation::test_pm_persona_groups_exist` — UPDATE: same assertion against new fixture dict
-- [ ] `tests/unit/test_pm_channels.py::TestPmConfigValidation::test_pm_persona_defined` — UPDATE: same assertion against new fixture dict
-- [ ] `tests/unit/test_pm_channels.py::TestPmConfigValidation::test_dev_groups_use_developer_persona` — UPDATE: same assertion against new fixture dict (already passing, but fixture changes underneath)
-- [ ] `tests/unit/test_pm_channels.py::TestPmConfigValidation::test_valor_has_developer_group` — UPDATE: same assertion against new fixture dict
+- [x] `tests/unit/test_pm_channels.py::TestPmConfigValidation::test_pm_persona_groups_exist` — UPDATE: same assertion against new fixture dict
+- [x] `tests/unit/test_pm_channels.py::TestPmConfigValidation::test_pm_persona_defined` — UPDATE: same assertion against new fixture dict
+- [x] `tests/unit/test_pm_channels.py::TestPmConfigValidation::test_dev_groups_use_developer_persona` — UPDATE: same assertion against new fixture dict (already passing, but fixture changes underneath)
+- [x] `tests/unit/test_pm_channels.py::TestPmConfigValidation::test_valor_has_developer_group` — UPDATE: same assertion against new fixture dict
 
 All four tests in the class must continue to assert the same structural rules. No deletions, no rewrites — only the fixture source changes.
 
@@ -121,11 +121,11 @@ No documentation changes needed — this is a small test refactor that does not 
 
 ## Success Criteria
 
-- [ ] All four tests in `TestPmConfigValidation` pass on dev-only machines (minimal `projects.json`)
-- [ ] All four tests in `TestPmConfigValidation` pass on bridge machines (full `projects.json`)
-- [ ] The `config` fixture in `TestPmConfigValidation` does not call `Path.home()`, `Path(__file__)`, `open()`, or `json.load()`
-- [ ] `pytest tests/unit/test_pm_channels.py -v` exits 0 on the current machine
-- [ ] No other tests in `test_pm_channels.py` are broken
+- [x] All four tests in `TestPmConfigValidation` pass on dev-only machines (minimal `projects.json`)
+- [x] All four tests in `TestPmConfigValidation` pass on bridge machines (full `projects.json`)
+- [x] The `config` fixture in `TestPmConfigValidation` does not call `Path.home()`, `Path(__file__)`, `open()`, or `json.load()`
+- [x] `pytest tests/unit/test_pm_channels.py -v` exits 0 on the current machine
+- [x] No other tests in `test_pm_channels.py` are broken
 
 ## Team Orchestration
 
