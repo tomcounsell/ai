@@ -172,6 +172,7 @@ stateDiagram-v2
 
 | Trigger | Reason | Resumes When |
 |---------|--------|-------------|
+| Phase 3 | Perplexity research skipped or failed; manual paste panel shown | User pastes Perplexity result via `PastePerplexityResearchView`; Question Discovery re-enqueued |
 | Phase 4 | Automated research complete; review and optionally add manual/Grok research or retry failed sources | Per-source retry via `RetryResearchSourceView`, or `resume_workflow()` |
 | Phase 6 | Wave 1 quality gate failure | Human reviews briefing, triggers retry |
 | Phase 8 | Wave 2 quality gate failure | Human reviews plan, triggers retry |
