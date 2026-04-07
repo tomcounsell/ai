@@ -286,7 +286,7 @@ def _check_restart_flag(project_key: str) -> bool:
 **Bridge startup — clean up stale flag:**
 
 ```python
-# In bridge startup, after connecting to Telegram
+# In bridge startup, after _recover_interrupted_sessions()
 restart_flag = Path(PROJECT_DIR) / "data" / "restart-requested"
 if restart_flag.exists():
     restart_flag.unlink()

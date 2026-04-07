@@ -1701,7 +1701,7 @@ async def _worker_loop(chat_id: str, event: asyncio.Event) -> None:
                     # deleted by the nudge fallback path, skip completion to avoid
                     # overwriting the nudge's status back to "completed".
                     try:
-                        fresh = AgentSession.query.get(session.agent_session_id)
+                        fresh = AgentSession.get(session.agent_session_id)
                         if not fresh:
                             logger.info(
                                 "[chat:%s] Session %s no longer exists in Redis "

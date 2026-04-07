@@ -1,7 +1,5 @@
 # Personas
 
-> **Business context:** See [Persona Teamwork](~/work-vault/AI Valor Engels System/Personas/Persona Teamwork.md) in the work vault for the original leadership structure and role definitions (Pullman, Wells, Verne).
-
 Configurable persona system that replaces the monolithic `config/SOUL.md` with layered base + overlay files. Each persona defines role-specific behavior on top of a shared identity.
 
 ## How It Works

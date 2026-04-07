@@ -3,7 +3,7 @@ Standalone worker entry point for processing AgentSession records.
 
 Processes sessions from Redis without requiring a Telegram connection.
 Developer workstations run just the worker. Bridge machines run
-bridge + worker as separate processes (bridge handles I/O only).
+bridge + embedded worker (backward compatible).
 
 Usage:
     python -m worker                    # Process all projects
@@ -159,20 +159,14 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
         logger.warning(f"AgentSession index rebuild failed (non-fatal): {e}")
 
     # Step 2: Clean up corrupted sessions before recovery (prevents error spam)
-    try:
-        cleaned = cleanup_corrupted_agent_sessions()
-        if cleaned:
-            logger.info(f"Cleaned up {cleaned} corrupted session(s)")
-    except Exception as e:
-        logger.warning(f"Corrupted session cleanup failed (non-fatal): {e}")
+    cleaned = cleanup_corrupted_agent_sessions()
+    if cleaned:
+        logger.info(f"Cleaned up {cleaned} corrupted session(s)")
 
     # Step 3: Recover any sessions that were running when the previous process died
-    try:
-        recovered = _recover_interrupted_agent_sessions_startup()
-        if recovered:
-            logger.info(f"Recovered {recovered} interrupted session(s)")
-    except Exception as e:
-        logger.warning(f"Session recovery failed (non-fatal): {e}")
+    recovered = _recover_interrupted_agent_sessions_startup()
+    if recovered:
+        logger.info(f"Recovered {recovered} interrupted session(s)")
 
     # Step 4: Kill orphaned Claude Code CLI subprocesses from prior runs
     try:
