@@ -1,5 +1,5 @@
 ---
-status: docs_complete
+status: shipped
 type: bug
 appetite: Small
 owner: valor
