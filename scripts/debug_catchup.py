@@ -23,7 +23,10 @@ load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-API_ID = int(os.getenv("TELEGRAM_API_ID"))
+try:
+    API_ID = int(os.getenv("TELEGRAM_API_ID") or "0")
+except ValueError:
+    API_ID = 0
 API_HASH = os.getenv("TELEGRAM_API_HASH")
 SESSION_FILE = Path(__file__).parent.parent / "data" / "telegram_session"
 
