@@ -2809,6 +2809,22 @@ def record_revival_cooldown(chat_id: str) -> None:
     _save_cooldowns(cooldowns)
 
 
+def maybe_send_revival_prompt(project_key: str, working_dir: str, chat_id: str) -> dict | None:
+    """
+    Check whether a revival prompt should be sent for this chat.
+
+    Combines check_revival (git state inspection) with cooldown recording.
+    Returns revival_info dict if a revival is warranted, None otherwise.
+    The caller is responsible for actually sending the Telegram message.
+    """
+    if not project_key or not working_dir:
+        return None
+    revival_info = check_revival(project_key, working_dir, chat_id)
+    if revival_info:
+        record_revival_cooldown(chat_id)
+    return revival_info
+
+
 async def queue_revival_agent_session(
     revival_info: dict,
     chat_id: str,

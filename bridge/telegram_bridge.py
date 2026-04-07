@@ -1042,10 +1042,9 @@ async def main():
         import re as _re
 
         from agent.agent_session_queue import (
-            check_revival,
             enqueue_agent_session,
+            maybe_send_revival_prompt,
             queue_revival_agent_session,
-            record_revival_cooldown,
         )
         from agent.steering import push_steering_message
 
@@ -1435,7 +1434,7 @@ async def main():
         if not working_dir_str:
             working_dir_str = str(Path(__file__).parent.parent)
 
-        revival_info = check_revival(project_key, working_dir_str, telegram_chat_id)
+        revival_info = maybe_send_revival_prompt(project_key, working_dir_str, telegram_chat_id)
         if revival_info:
             revival_msg = f"Unfinished work detected on branch `{revival_info['branch']}`"
             checkpoint_ctx = revival_info.get("checkpoint_context", "")
@@ -1447,7 +1446,6 @@ async def main():
             from bridge.markdown import send_markdown
 
             await send_markdown(client, event.chat_id, revival_msg)
-            record_revival_cooldown(telegram_chat_id)
             logger.info(f"[{project_name}] Sent revival prompt for branch {revival_info['branch']}")
 
             # Mark the stale work as dormant so it doesn't re-trigger.
