@@ -166,13 +166,14 @@ def _get_project_key(cwd: str | None = None) -> str:
 
         return DEFAULT_PROJECT_KEY
     except Exception:
-        return "dm"
+        return "default"
 
 
 def recall(
     session_id: str,
     tool_name: str,
     tool_input: Any,
+    cwd: str | None = None,
 ) -> str | None:
     """Query memory and return thought blocks for injection.
 
@@ -252,7 +253,7 @@ def recall(
         from agent.memory_retrieval import retrieve_memories
         from utils.keyword_extraction import _cluster_keywords
 
-        project_key = _get_project_key()
+        project_key = _get_project_key(cwd)
 
         clusters = _cluster_keywords(unique_keywords)
         all_records = []
@@ -322,7 +323,7 @@ def recall(
         return None
 
 
-def ingest(content: str) -> bool:
+def ingest(content: str, cwd: str | None = None) -> bool:
     """Save a user prompt as a Memory record.
 
     Applies quality filter (length, trivial pattern detection) and
@@ -359,7 +360,7 @@ def ingest(content: str) -> bool:
         # Save as memory
         from models.memory import SOURCE_HUMAN
 
-        project_key = _get_project_key()
+        project_key = _get_project_key(cwd)
 
         m = Memory.safe_save(
             agent_id=project_key,
@@ -376,7 +377,7 @@ def ingest(content: str) -> bool:
         return False
 
 
-def extract(session_id: str, transcript_path: str | None) -> None:
+def extract(session_id: str, transcript_path: str | None, cwd: str | None = None) -> None:
     """Run post-session extraction and outcome detection.
 
     Reads the transcript, runs Haiku extraction for novel observations,
@@ -412,7 +413,8 @@ def extract(session_id: str, transcript_path: str | None) -> None:
         )
 
         # Run Haiku extraction
-        asyncio.run(extract_observations_async(session_id, truncated_text))
+        project_key = _get_project_key(cwd)
+        asyncio.run(extract_observations_async(session_id, truncated_text, project_key=project_key))
 
         # Run outcome detection using injected thoughts from sidecar
         state = _load_sidecar(session_id)
@@ -457,7 +459,7 @@ def cleanup_sidecar(session_id: str) -> None:
         pass  # Cleanup is best-effort
 
 
-def post_merge_extract(pr_number: str | int | None = None) -> None:
+def post_merge_extract(pr_number: str | int | None = None, cwd: str | None = None) -> None:
     """Run post-merge learning extraction for a merged PR.
 
     Wrapper around agent/memory_extraction.extract_post_merge_learning()
@@ -502,7 +504,7 @@ def post_merge_extract(pr_number: str | int | None = None) -> None:
 
         from agent.memory_extraction import extract_post_merge_learning
 
-        project_key = _get_project_key()
+        project_key = _get_project_key(cwd)
         asyncio.run(
             extract_post_merge_learning(
                 pr_title=pr_title,

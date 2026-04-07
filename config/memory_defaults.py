@@ -38,8 +38,11 @@ MEMORY_ACTED_SIGNAL = 0.85
 MEMORY_CONTRADICTED_SIGNAL = 0.15
 MEMORY_DISMISSED_WEAKEN = 0.85
 
-# Default project key used when VALOR_PROJECT_KEY env var is not set
-DEFAULT_PROJECT_KEY = "dm"
+# Default project key used when VALOR_PROJECT_KEY env var is not set.
+# "dm" is semantically reserved for Telegram direct messages -- do not use
+# it as a fallback for non-DM contexts. "default" signals a misconfigured
+# project rather than silently mislabeling records as DM-sourced.
+DEFAULT_PROJECT_KEY = "default"
 
 # Reciprocal Rank Fusion (RRF) tuning
 # RRF_K controls blending uniformity: higher values give more weight to lower-ranked

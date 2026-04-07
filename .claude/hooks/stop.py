@@ -116,10 +116,11 @@ def main():
 
     # Memory extraction -- run Haiku extraction and outcome detection
     # on session transcript. Fails silently on any error.
-    _run_memory_extraction(session_id, transcript_path)
+    cwd = hook_input.get("cwd", "")
+    _run_memory_extraction(session_id, transcript_path, cwd=cwd)
 
     # Post-merge learning extraction (if a PR was merged during this session)
-    _run_post_merge_extraction(session_id)
+    _run_post_merge_extraction(session_id, cwd=cwd)
 
 
 def _complete_agent_session(session_id: str, hook_input: dict) -> None:
@@ -166,7 +167,7 @@ def _complete_agent_session(session_id: str, hook_input: dict) -> None:
         pass  # Silent failure -- never block session stop
 
 
-def _run_post_merge_extraction(session_id: str) -> None:
+def _run_post_merge_extraction(session_id: str, cwd: str = "") -> None:
     """Run post-merge learning extraction if a PR was merged during this session.
 
     Checks the agent session sidecar for the merge_detected flag set by
@@ -183,12 +184,12 @@ def _run_post_merge_extraction(session_id: str) -> None:
 
         pr_number = sidecar.get("merged_pr_number")
         if pr_number:
-            post_merge_extract(pr_number)
+            post_merge_extract(pr_number, cwd=cwd)
     except Exception:
         pass  # Silent failure -- never block session stop
 
 
-def _run_memory_extraction(session_id: str, transcript_path: str | None) -> None:
+def _run_memory_extraction(session_id: str, transcript_path: str | None, cwd: str = "") -> None:
     """Run post-session memory extraction and outcome detection.
 
     Calls memory_bridge.extract() which handles Haiku extraction
@@ -200,7 +201,7 @@ def _run_memory_extraction(session_id: str, transcript_path: str | None) -> None
     try:
         from hook_utils.memory_bridge import extract
 
-        extract(session_id, transcript_path)
+        extract(session_id, transcript_path, cwd=cwd)
     except Exception:
         pass  # Silent failure -- never block session stop
 
