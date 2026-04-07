@@ -74,7 +74,7 @@ Because `_ensure_worker()` is a plain synchronous function (no `await`), the che
 1. Added immediately before `asyncio.create_task()`.
 2. Removed synchronously right after the task is registered in `_active_workers` (fast path — clears it before any re-entrant call can see it).
 3. Also removed via a `done_callback` as a safety net in case the task finishes before the synchronous removal runs (degenerate edge case).
-4. Removed in the `except` block if `create_task()` itself raises, so the set never leaks.
+4. Cleared in the `except` block if `create_task()` itself raises, so the set never leaks.
 
 The `_worker_loop` removes itself from `_active_workers` in its `finally` block. After it exits, the next call to `_ensure_worker()` (triggered by the next enqueue or the health check) starts a fresh task.
 
