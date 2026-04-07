@@ -42,14 +42,14 @@ Issue #273
 
 Simple emoji + bullets format, no stage line or link footer. Still summarized via Haiku. No message echo -- Telegram's reply-to feature provides context about what the response is answering.
 
-### Teammate Mode (Prose)
+### Q&A Mode (Prose)
 ```
 The bridge connects Telegram to Claude via Telethon. See bridge/telegram_bridge.py
-for the main entry point. The nudge loop in agent/agent_session_queue.py handles delivery
+for the main entry point. The nudge loop in agent/job_queue.py handles delivery
 routing based on stop_reason classification.
 ```
 
-When `session.session_mode == PersonaType.TEAMMATE`, `_compose_structured_summary()` bypasses all structured formatting — no emoji prefix, no bullet parsing, no template. The LLM summary (already in conversational prose via the `persona=teammate` context injected into the prompt) is returned directly. The processing reaction is cleared instead of setting a completion emoji.
+When `qa_mode=True` on the session, `_compose_structured_summary()` bypasses all structured formatting — no emoji prefix, no bullet parsing, no template. The LLM summary (already in conversational prose via `qa_mode=True` context in the prompt) is returned directly. The processing reaction is cleared instead of setting a completion emoji.
 
 ## Emoji Vocabulary
 
@@ -79,23 +79,23 @@ No checkbox icons are used. The ISSUE stage label includes the issue number when
 
 **How it works:**
 1. Reads `project_key` from the session object
-2. Looks up the GitHub org/repo from `projects.json` via `bridge.routing.load_config()`
+2. Looks up the GitHub org/repo from the registered project config via `get_project_config()`
 3. Applies regex replacement: `PR #123` becomes `[PR #123](https://github.com/org/repo/pull/123)`
 4. Similarly for `Issue #N` patterns
 
 **Safeguards:**
 - Negative lookbehind `(?<!\[)` prevents double-linking text already inside markdown `[...]` syntax
 - Graceful fallback: missing project_key, missing GitHub config, or no session returns text unchanged
-- This is additive — the link footer rendered in `_compose_structured_summary()` continues to work as the canonical link source for SDLC jobs
+- This is additive -- `_render_link_footer()` continues to work as the canonical link source for SDLC jobs
 
 **Called from:** `_compose_structured_summary()`, applied to the final joined text just before return.
 
 ## Implementation
 
-- `bridge/summarizer.py`: `summarize_response()` (always-summarize entry point), `_strip_process_narration()` (pre-summarization cleanup), `_compose_structured_summary()` (template renderer with inline stage progress and link footer rendering), `_parse_summary_and_questions()` (question extractor), `_normalize_question_prefix()` (legacy `?` to `>>` conversion), `_linkify_references()` (auto-link PR/Issue refs)
+- `bridge/summarizer.py`: `summarize_response()` (always-summarize entry point), `_strip_process_narration()` (pre-summarization cleanup), `_compose_structured_summary()` (template renderer), `_parse_summary_and_questions()` (question extractor), `_normalize_question_prefix()` (legacy `?` to `>>` conversion), `_render_stage_progress()`, `_render_link_footer()`, `_linkify_references()` (auto-link PR/Issue refs)
 - `bridge/response.py`: Always calls summarizer for non-empty text, passes `AgentSession` via `session=` kwarg. `_truncate_at_sentence_boundary()` ensures clean truncation at Telegram's 4096-char limit.
 - `bridge/telegram_bridge.py`: `_send` callback accepts and forwards `session` parameter
-- `agent/agent_session_queue.py`: `SendCallback` type includes session parameter, `send_to_chat()` uses `determine_delivery_action()` for routing decisions and passes `agent_session`
+- `agent/job_queue.py`: `SendCallback` type includes session parameter, `send_to_chat()` uses `classify_nudge_action()` for routing decisions and passes `agent_session`
 - `bridge/markdown.py`: `send_markdown()` with plain-text fallback
 
 ## Session Freshness
@@ -118,7 +118,7 @@ Diagnostic logging in `_compose_structured_summary()` confirms when stage progre
 ## Callback Chain
 
 ```
-agent/agent_session_queue.py send_to_chat()
+agent/job_queue.py send_to_chat()
   → send_cb(chat_id, msg, message_id, agent_session)
   → bridge/telegram_bridge.py _send(chat_id, text, reply_to, session)
   → bridge/response.py send_response_with_files(..., session=session)
@@ -167,7 +167,7 @@ The `expectations` field description explicitly states it should only be set whe
 3. **Questions**: Preserved exactly, surfaced after bullets via `---` separator with `>> ` prefix
 4. **SDLC work**: Emoji + stage line + bullets + questions + link footer (no message echo)
 5. **Status updates**: 2-4 bullet points
-6. **Teammate sessions** (`PersonaType.TEAMMATE`): Conversational prose — no bullets, no emoji prefix, no structured template. Bypasses `_compose_structured_summary()` formatting entirely.
+6. **Q&A sessions** (`qa_mode=True`): Conversational prose — no bullets, no emoji prefix, no structured template. Bypasses `_compose_structured_summary()` formatting entirely.
 
 ## Telegram Markdown
 

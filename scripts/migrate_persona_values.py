@@ -72,8 +72,7 @@ def migrate_persona_values(dry_run: bool = True) -> dict:
             elif current_mode in VALUE_MIGRATIONS:
                 new_value = VALUE_MIGRATIONS[current_mode]
                 logger.info(
-                    f"  Session {session.agent_session_id}: "
-                    f"session_mode {current_mode!r} -> {new_value!r}"
+                    f"  Session {session.job_id}: session_mode {current_mode!r} -> {new_value!r}"
                 )
                 if not dry_run:
                     session.session_mode = new_value
@@ -83,8 +82,7 @@ def migrate_persona_values(dry_run: bool = True) -> dict:
                 stats["already_migrated"] += 1
             else:
                 logger.warning(
-                    f"  Session {session.agent_session_id}: "
-                    f"unknown session_mode {current_mode!r}, skipping"
+                    f"  Session {session.job_id}: unknown session_mode {current_mode!r}, skipping"
                 )
 
             # Clean up legacy fields from Redis hash
@@ -99,28 +97,25 @@ def migrate_persona_values(dry_run: bool = True) -> dict:
                         if removed:
                             stats["legacy_fields_cleaned"] += 1
                             logger.info(
-                                f"  Session {session.agent_session_id}: "
-                                f"removed legacy field {field_name!r}"
+                                f"  Session {session.job_id}: removed legacy field {field_name!r}"
                             )
                     else:
                         exists = redis_client.hexists(key, field_name)
                         if exists:
                             stats["legacy_fields_cleaned"] += 1
                             logger.info(
-                                f"  Session {session.agent_session_id}: would remove legacy field "
+                                f"  Session {session.job_id}: would remove legacy field "
                                 f"{field_name!r}"
                             )
             except Exception as e:
-                logger.warning(
-                    f"  Session {session.agent_session_id}: legacy field cleanup failed: {e}"
-                )
+                logger.warning(f"  Session {session.job_id}: legacy field cleanup failed: {e}")
 
             if changed and not dry_run:
                 session.save()
 
         except Exception as e:
             stats["errors"] += 1
-            logger.error(f"Error migrating session {session.agent_session_id}: {e}")
+            logger.error(f"Error migrating session {session.job_id}: {e}")
 
     # Delete old qa_metrics:* Redis keys
     try:

@@ -470,28 +470,21 @@ This invokes the cascade skill defined in `.claude/skills/do-docs/SKILL.md`, whi
 - Creates GitHub issues for conflicts needing human review
 - Commits any doc updates to the PR branch before merge
 
-**Note**: The cascade is best-effort. If it finds nothing to update, that's fine — proceed to reporting. If it makes edits, those are committed directly to the PR branch.
+**Note**: The cascade is best-effort. If it finds nothing to update, that's fine — proceed to plan migration. If it makes edits, those are committed directly to the PR branch.
 
-### Step 8: Plan Stays Until Merge
+### Step 8: Plan Migration
 
-After PR is created and documentation cascade completes, the plan document is **not deleted here**. It remains at `{PLAN_PATH}` so that:
-- `do-merge` can read it to verify all checklist items are done
-- `do-docs` can use it as context during the DOCS stage
+After PR is successfully created and documentation cascade completes, clean up the completed plan:
 
-The plan will be deleted by `do-merge` after the PR is successfully merged.
+```bash
+cd $(git rev-parse --show-toplevel) && python scripts/migrate_completed_plan.py {PLAN_PATH}
+```
+
+This deletes the plan document and closes the tracking issue, completing the lifecycle.
 
 ### Step 9: Report PR Link
 
 After plan migration completes, include the PR URL prominently in your final response. When running via Telegram bridge, the agent's response (containing the PR link) will be automatically sent back to the chat where the build was initiated. No special action required - just ensure the PR URL is visible in your completion report.
-
-### OUTCOME Contract Emission
-
-As the very last line of your final response, emit an OUTCOME contract so the pipeline can classify the build result programmatically:
-
-- **Success** (PR created): `<!-- OUTCOME {"status":"success","stage":"BUILD","artifacts":{"pr_url":"<URL>"}} -->`
-- **Fail** (build failed, no PR): `<!-- OUTCOME {"status":"fail","stage":"BUILD","artifacts":{}} -->`
-
-This structured output is parsed by `classify_outcome()` in `bridge/pipeline_state.py` (Tier 0) before any text pattern matching.
 
 ## Agent Deployment Context
 

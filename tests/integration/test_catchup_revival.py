@@ -23,7 +23,7 @@ def _make_entity(chat_id: int, title: str):
 def _make_dialog(chat_id: int, title: str):
     """Create a minimal Telegram dialog-like object."""
     entity = _make_entity(chat_id, title)
-    return SimpleNamespace(id=chat_id, entity=entity)
+    return SimpleNamespace(entity=entity)
 
 
 def _make_message(msg_id: int, text: str, out: bool = False, minutes_ago: int = 5):
@@ -45,9 +45,9 @@ class TestCatchupRevival:
 
     @pytest.mark.asyncio
     async def test_enqueue_called_without_workflow_id(self):
-        """Revival path should call enqueue_agent_session_fn without workflow_id kwarg.
+        """Revival path should call enqueue_job_fn without workflow_id kwarg.
 
-        After PR #470 removed workflow_id from enqueue_agent_session, the catchup path
+        After PR #470 removed workflow_id from enqueue_job, the catchup path
         must not pass it. This test verifies the correct kwargs are used.
         """
         # Set up mocks
@@ -59,7 +59,7 @@ class TestCatchupRevival:
         client.get_messages.return_value = [message]
 
         should_respond_fn = AsyncMock(return_value=(True, False))
-        enqueue_agent_session_fn = AsyncMock()
+        enqueue_job_fn = AsyncMock()
         find_project_fn = MagicMock(
             return_value={"_key": "popoto", "working_directory": "/tmp/popoto"}
         )
@@ -79,17 +79,17 @@ class TestCatchupRevival:
                 monitored_groups=monitored_groups,
                 projects_config={},
                 should_respond_fn=should_respond_fn,
-                enqueue_agent_session_fn=enqueue_agent_session_fn,
+                enqueue_job_fn=enqueue_job_fn,
                 find_project_fn=find_project_fn,
             )
 
         assert queued == 1
-        enqueue_agent_session_fn.assert_called_once()
+        enqueue_job_fn.assert_called_once()
 
         # Verify workflow_id is NOT in the kwargs (it was removed in PR #470)
-        call_kwargs = enqueue_agent_session_fn.call_args[1]
+        call_kwargs = enqueue_job_fn.call_args[1]
         assert "workflow_id" not in call_kwargs, (
-            "workflow_id was removed in PR #470 and must not be passed to enqueue_agent_session_fn"
+            "workflow_id was removed in PR #470 and must not be passed to enqueue_job_fn"
         )
 
     @pytest.mark.asyncio
@@ -103,7 +103,7 @@ class TestCatchupRevival:
         client.get_messages.return_value = [message]
 
         should_respond_fn = AsyncMock(return_value=(True, False))
-        enqueue_agent_session_fn = AsyncMock()
+        enqueue_job_fn = AsyncMock()
         find_project_fn = MagicMock(
             return_value={"_key": "valor", "working_directory": "/tmp/valor"}
         )
@@ -121,12 +121,12 @@ class TestCatchupRevival:
                 monitored_groups=["dev: valor"],
                 projects_config={},
                 should_respond_fn=should_respond_fn,
-                enqueue_agent_session_fn=enqueue_agent_session_fn,
+                enqueue_job_fn=enqueue_job_fn,
                 find_project_fn=find_project_fn,
             )
 
         assert queued == 1
-        call_kwargs = enqueue_agent_session_fn.call_args[1]
+        call_kwargs = enqueue_job_fn.call_args[1]
         assert call_kwargs["project_key"] == "valor"
         assert call_kwargs["chat_id"] == "200"
         assert call_kwargs["telegram_message_id"] == 99
@@ -142,7 +142,7 @@ class TestCatchupRevival:
         our_msg = _make_message(msg_id=50, text="I will fix it", out=True)
         client.get_messages.return_value = [our_msg]
 
-        enqueue_agent_session_fn = AsyncMock()
+        enqueue_job_fn = AsyncMock()
         find_project_fn = MagicMock(
             return_value={"_key": "popoto", "working_directory": "/tmp/popoto"}
         )
@@ -152,12 +152,12 @@ class TestCatchupRevival:
             monitored_groups=["dev: popoto"],
             projects_config={},
             should_respond_fn=AsyncMock(return_value=(True, False)),
-            enqueue_agent_session_fn=enqueue_agent_session_fn,
+            enqueue_job_fn=enqueue_job_fn,
             find_project_fn=find_project_fn,
         )
 
         assert queued == 0
-        enqueue_agent_session_fn.assert_not_called()
+        enqueue_job_fn.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_skips_already_deduplicated_messages(self):
@@ -169,7 +169,7 @@ class TestCatchupRevival:
         message = _make_message(msg_id=55, text="Fix the tests")
         client.get_messages.return_value = [message]
 
-        enqueue_agent_session_fn = AsyncMock()
+        enqueue_job_fn = AsyncMock()
         find_project_fn = MagicMock(
             return_value={"_key": "popoto", "working_directory": "/tmp/popoto"}
         )
@@ -182,12 +182,12 @@ class TestCatchupRevival:
                 monitored_groups=["dev: popoto"],
                 projects_config={},
                 should_respond_fn=AsyncMock(return_value=(True, False)),
-                enqueue_agent_session_fn=enqueue_agent_session_fn,
+                enqueue_job_fn=enqueue_job_fn,
                 find_project_fn=find_project_fn,
             )
 
         assert queued == 0
-        enqueue_agent_session_fn.assert_not_called()
+        enqueue_job_fn.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_no_project_config_skips_group(self):
@@ -196,7 +196,7 @@ class TestCatchupRevival:
         dialog = _make_dialog(chat_id=100, title="Dev: Unknown")
         client.get_dialogs.return_value = [dialog]
 
-        enqueue_agent_session_fn = AsyncMock()
+        enqueue_job_fn = AsyncMock()
         find_project_fn = MagicMock(return_value=None)
 
         queued = await scan_for_missed_messages(
@@ -204,12 +204,12 @@ class TestCatchupRevival:
             monitored_groups=["dev: unknown"],
             projects_config={},
             should_respond_fn=AsyncMock(return_value=(True, False)),
-            enqueue_agent_session_fn=enqueue_agent_session_fn,
+            enqueue_job_fn=enqueue_job_fn,
             find_project_fn=find_project_fn,
         )
 
         assert queued == 0
-        enqueue_agent_session_fn.assert_not_called()
+        enqueue_job_fn.assert_not_called()
 
 
 class TestCatchupLookbackOverride:
@@ -227,7 +227,7 @@ class TestCatchupLookbackOverride:
         client.get_messages.return_value = [message]
 
         should_respond_fn = AsyncMock(return_value=(True, False))
-        enqueue_agent_session_fn = AsyncMock()
+        enqueue_job_fn = AsyncMock()
         find_project_fn = MagicMock(
             return_value={"_key": "popoto", "working_directory": "/tmp/popoto"}
         )
@@ -246,13 +246,13 @@ class TestCatchupLookbackOverride:
                 monitored_groups=["dev: popoto"],
                 projects_config={},
                 should_respond_fn=should_respond_fn,
-                enqueue_agent_session_fn=enqueue_agent_session_fn,
+                enqueue_job_fn=enqueue_job_fn,
                 find_project_fn=find_project_fn,
                 lookback_override=timedelta(hours=4),
             )
 
         assert queued == 1
-        enqueue_agent_session_fn.assert_called_once()
+        enqueue_job_fn.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_lookback_override_capped_at_24h(self):
@@ -266,7 +266,7 @@ class TestCatchupLookbackOverride:
         client.get_messages.return_value = [message]
 
         should_respond_fn = AsyncMock(return_value=(True, False))
-        enqueue_agent_session_fn = AsyncMock()
+        enqueue_job_fn = AsyncMock()
         find_project_fn = MagicMock(
             return_value={"_key": "popoto", "working_directory": "/tmp/popoto"}
         )
@@ -285,7 +285,7 @@ class TestCatchupLookbackOverride:
                 monitored_groups=["dev: popoto"],
                 projects_config={},
                 should_respond_fn=should_respond_fn,
-                enqueue_agent_session_fn=enqueue_agent_session_fn,
+                enqueue_job_fn=enqueue_job_fn,
                 find_project_fn=find_project_fn,
                 lookback_override=timedelta(hours=48),
             )
@@ -304,7 +304,7 @@ class TestCatchupLookbackOverride:
         message = _make_message(msg_id=42, text="Missed message", minutes_ago=90)
         client.get_messages.return_value = [message]
 
-        enqueue_agent_session_fn = AsyncMock()
+        enqueue_job_fn = AsyncMock()
         find_project_fn = MagicMock(
             return_value={"_key": "popoto", "working_directory": "/tmp/popoto"}
         )
@@ -314,7 +314,7 @@ class TestCatchupLookbackOverride:
             monitored_groups=["dev: popoto"],
             projects_config={},
             should_respond_fn=AsyncMock(return_value=(True, False)),
-            enqueue_agent_session_fn=enqueue_agent_session_fn,
+            enqueue_job_fn=enqueue_job_fn,
             find_project_fn=find_project_fn,
             # No lookback_override
         )

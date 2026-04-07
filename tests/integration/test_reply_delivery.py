@@ -32,7 +32,7 @@ class TestSteeringRaceCondition:
     3. Nobody consumes the steering message because the agent loop already exited
     4. The "continue" sits in Redis forever, response silently dropped
 
-    The fix: _execute_agent_session calls pop_all_steering_messages() after the agent
+    The fix: _execute_job calls pop_all_steering_messages() after the agent
     completes, logging any leftovers as warnings.
     """
 
@@ -232,7 +232,7 @@ class TestAutoContineCountPersistence:
         """AgentSession should persist auto_continue_count when explicitly set."""
         from models.agent_session import AgentSession
 
-        session = await AgentSession.async_create(
+        job = await AgentSession.async_create(
             project_key="test_project_ac",
             status="pending",
             created_at=1000.0,
@@ -244,15 +244,15 @@ class TestAutoContineCountPersistence:
             telegram_message_id=456,
             auto_continue_count=2,
         )
-        assert session.auto_continue_count == 2
-        await session.async_delete()
+        assert job.auto_continue_count == 2
+        await job.async_delete()
 
     @pytest.mark.asyncio
     async def test_agent_session_default_auto_continue_count(self):
         """Default auto_continue_count should be 0 for fresh jobs."""
         from models.agent_session import AgentSession
 
-        session = await AgentSession.async_create(
+        job = await AgentSession.async_create(
             project_key="test_project_ac_default",
             status="pending",
             created_at=1000.0,
@@ -263,5 +263,5 @@ class TestAutoContineCountPersistence:
             chat_id="chat_ac_default",
             telegram_message_id=457,
         )
-        assert session.auto_continue_count == 0
-        await session.async_delete()
+        assert job.auto_continue_count == 0
+        await job.async_delete()

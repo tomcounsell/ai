@@ -177,9 +177,9 @@ class TestMaybeRegisterDevSessionStartStage:
 
     def test_calls_start_stage_for_sdlc_prompt(self, monkeypatch, caplog):
         mock_dev = MagicMock()
-        mock_dev.agent_session_id = "session-99"
+        mock_dev.job_id = "job-99"
         mock_as_mod = MagicMock()
-        mock_as_mod.AgentSession.create_child.return_value = mock_dev
+        mock_as_mod.AgentSession.create_dev.return_value = mock_dev
 
         tool_input = {
             "type": "dev-session",
@@ -198,9 +198,9 @@ class TestMaybeRegisterDevSessionStartStage:
 
     def test_skips_start_stage_when_no_stage_in_prompt(self, monkeypatch, caplog):
         mock_dev = MagicMock()
-        mock_dev.agent_session_id = "session-100"
+        mock_dev.job_id = "job-100"
         mock_as_mod = MagicMock()
-        mock_as_mod.AgentSession.create_child.return_value = mock_dev
+        mock_as_mod.AgentSession.create_dev.return_value = mock_dev
 
         tool_input = {
             "type": "dev-session",
@@ -221,9 +221,9 @@ class TestMaybeRegisterDevSessionStartStage:
     def test_start_stage_failure_does_not_block_registration(self, monkeypatch, caplog):
         """start_stage failure should not prevent DevSession registration from completing."""
         mock_dev = MagicMock()
-        mock_dev.agent_session_id = "session-101"
+        mock_dev.job_id = "job-101"
         mock_as_mod = MagicMock()
-        mock_as_mod.AgentSession.create_child.return_value = mock_dev
+        mock_as_mod.AgentSession.create_dev.return_value = mock_dev
 
         tool_input = {
             "type": "dev-session",
@@ -251,7 +251,7 @@ class TestMaybeRegisterDevSessionStartStage:
                 pass
 
         # Registration should have happened before start_stage was called
-        mock_as_mod.AgentSession.create_child.assert_called_once()
+        mock_as_mod.AgentSession.create_dev.assert_called_once()
 
     def test_skips_entirely_for_non_dev_session(self, monkeypatch):
         monkeypatch.setenv("VALOR_SESSION_ID", "parent-session-13")

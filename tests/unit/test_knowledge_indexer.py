@@ -1,11 +1,9 @@
 """Tests for the knowledge document indexer pipeline."""
 
 import json
-from unittest.mock import MagicMock, patch
 
 import pytest
 
-from config.models import HAIKU
 from tools.knowledge.indexer import (
     LARGE_DOC_WORD_THRESHOLD,
     SUPPORTED_EXTENSIONS,
@@ -13,7 +11,6 @@ from tools.knowledge.indexer import (
     _is_supported_file,
     _make_reference,
     _split_by_headings,
-    _summarize_content,
 )
 
 
@@ -146,37 +143,3 @@ class TestIndexerPipeline:
     def test_large_doc_threshold(self):
         """Threshold for large doc splitting is 2000 words."""
         assert LARGE_DOC_WORD_THRESHOLD == 2000
-
-
-@pytest.mark.unit
-class TestSummarizeContent:
-    """Test the _summarize_content function."""
-
-    @patch("anthropic.Anthropic")
-    def test_summarize_uses_haiku_constant(self, mock_anthropic_cls):
-        """Verify _summarize_content passes the HAIKU model constant to the API."""
-        mock_client = MagicMock()
-        mock_anthropic_cls.return_value = mock_client
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(text="A summary of the document.")]
-        mock_client.messages.create.return_value = mock_response
-
-        result = _summarize_content("Some document content here.", "/path/to/doc.md")
-
-        mock_client.messages.create.assert_called_once()
-        call_kwargs = mock_client.messages.create.call_args
-        assert call_kwargs.kwargs["model"] == HAIKU
-        assert result == "A summary of the document."
-
-    @patch("anthropic.Anthropic")
-    def test_summarize_fallback_on_api_failure(self, mock_anthropic_cls):
-        """Verify _summarize_content falls back to truncation on API failure."""
-        mock_client = MagicMock()
-        mock_anthropic_cls.return_value = mock_client
-        mock_client.messages.create.side_effect = Exception("API error")
-
-        content = "A" * 1000
-        result = _summarize_content(content, "/path/to/doc.md")
-
-        # Should fall back to truncated content (500 chars + "...")
-        assert len(result) <= 504

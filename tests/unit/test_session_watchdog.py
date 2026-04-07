@@ -3,12 +3,10 @@
 import json
 import shutil
 import time
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from popoto.exceptions import ModelException
 
 from monitoring.session_watchdog import (
     assess_session_health,
@@ -17,6 +15,7 @@ from monitoring.session_watchdog import (
     detect_repetition,
     read_recent_tool_calls,
 )
+from popoto.exceptions import ModelException
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -43,13 +42,13 @@ def _make_post_event(tool_name, output_preview=""):
 
 def _make_session(
     session_id="test-123",
-    updated_at=None,
+    last_activity=None,
     started_at=None,
     tool_call_count=10,
 ):
     return SimpleNamespace(
         session_id=session_id,
-        updated_at=updated_at or time.time(),
+        last_activity=last_activity or time.time(),
         started_at=started_at or time.time() - 300,
         tool_call_count=tool_call_count,
         project_key="test",
@@ -276,8 +275,8 @@ class TestReadRecentToolCalls:
 class TestAssessSessionHealth:
     def test_healthy_session(self):
         session = _make_session(
-            updated_at=datetime.now(tz=UTC),
-            started_at=datetime.now(tz=UTC) - timedelta(seconds=300),
+            last_activity=time.time(),
+            started_at=time.time() - 300,
         )
         result = assess_session_health(session)
         assert result["healthy"] is True
@@ -285,8 +284,8 @@ class TestAssessSessionHealth:
 
     def test_silent_session(self):
         session = _make_session(
-            updated_at=datetime.now(tz=UTC) - timedelta(seconds=700),
-            started_at=datetime.now(tz=UTC) - timedelta(seconds=900),
+            last_activity=time.time() - 700,
+            started_at=time.time() - 900,
         )
         result = assess_session_health(session)
         assert result["healthy"] is False
@@ -295,8 +294,8 @@ class TestAssessSessionHealth:
 
     def test_long_running_session(self):
         session = _make_session(
-            updated_at=datetime.now(tz=UTC),
-            started_at=datetime.now(tz=UTC) - timedelta(seconds=7500),
+            last_activity=time.time(),
+            started_at=time.time() - 7500,
         )
         result = assess_session_health(session)
         assert result["healthy"] is False
@@ -304,8 +303,8 @@ class TestAssessSessionHealth:
 
     def test_multiple_issues_critical(self):
         session = _make_session(
-            updated_at=datetime.now(tz=UTC) - timedelta(seconds=700),
-            started_at=datetime.now(tz=UTC) - timedelta(seconds=7500),
+            last_activity=time.time() - 700,
+            started_at=time.time() - 7500,
         )
         result = assess_session_health(session)
         assert result["healthy"] is False
@@ -314,16 +313,16 @@ class TestAssessSessionHealth:
 
     def test_boundary_not_silent(self):
         session = _make_session(
-            updated_at=datetime.now(tz=UTC) - timedelta(seconds=599),
-            started_at=datetime.now(tz=UTC) - timedelta(seconds=300),
+            last_activity=time.time() - 599,
+            started_at=time.time() - 300,
         )
         result = assess_session_health(session)
         assert result["healthy"] is True
 
     def test_boundary_not_long_running(self):
         session = _make_session(
-            updated_at=datetime.now(tz=UTC),
-            started_at=datetime.now(tz=UTC) - timedelta(seconds=7199),
+            last_activity=time.time(),
+            started_at=time.time() - 7199,
         )
         result = assess_session_health(session)
         assert result["healthy"] is True

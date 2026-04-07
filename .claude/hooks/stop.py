@@ -125,17 +125,19 @@ def main():
 def _complete_agent_session(session_id: str, hook_input: dict) -> None:
     """Mark the AgentSession as completed or failed based on stop_reason.
 
-    Reads the agent_session_id from the sidecar file, updates the
+    Reads the agent_session_job_id from the sidecar file, updates the
     AgentSession status, completed_at timestamp, and log_path.
 
     Fails silently -- session completion errors never block stop.
     """
     try:
+        import time
+
         from hook_utils.memory_bridge import load_agent_session_sidecar
 
         sidecar = load_agent_session_sidecar(session_id)
-        agent_session_id = sidecar.get("agent_session_id")
-        if not agent_session_id:
+        job_id = sidecar.get("agent_session_job_id")
+        if not job_id:
             return
 
         from models.agent_session import AgentSession
@@ -149,19 +151,13 @@ def _complete_agent_session(session_id: str, hook_input: dict) -> None:
         agent_session = matches[0]
 
         stop_reason = hook_input.get("stop_reason", "unknown")
-        status = "failed" if stop_reason in ("error", "crash") else "completed"
+        if stop_reason in ("error", "crash"):
+            agent_session.status = "failed"
+        else:
+            agent_session.status = "completed"
 
-        # Delegate to lifecycle module with skip flags for hooks subprocess context
-        # (no heavy imports for auto-tagging or branch checkpointing)
-        from models.session_lifecycle import finalize_session
-
-        finalize_session(
-            agent_session,
-            status,
-            reason=f"stop hook: {stop_reason}",
-            skip_auto_tag=True,
-            skip_checkpoint=True,
-        )
+        agent_session.completed_at = time.time()
+        agent_session.save()
     except Exception:
         pass  # Silent failure -- never block session stop
 
@@ -206,9 +202,4 @@ def _run_memory_extraction(session_id: str, transcript_path: str | None) -> None
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        from hook_utils.constants import log_hook_error
-
-        log_hook_error("stop", str(e))
+    main()

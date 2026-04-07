@@ -36,7 +36,7 @@ Use `gh pr comment` as fallback.
 ### Blockers
 - [ ] **`file.py:42`** — `actual_code()` — [description]
 
-### Tech Debt
+### Tech Debt (non-blocking)
 - **`file.py:15`** — `code()` — [description]
 
 ### Verification Results
@@ -46,28 +46,7 @@ Use `gh pr comment` as fallback.
 [screenshot references if captured]
 ```
 
-**If no blockers but has tech_debt or nits:**
-```
-## Review: Changes Requested — Tech Debt
-
-[summary — no blockers, but outstanding tech debt/nits must be resolved before merge]
-
-### Verified
-- [x] Code correctness
-- [x] Security (no vulnerabilities found)
-- [x] Plan requirements met
-
-### Tech Debt
-- [ ] **`file.py:15`** — `code()` — [description]
-
-### Nits
-- [ ] **`file.py:30`** — `code()` — [description]
-
-### Screenshots
-[screenshot references if captured]
-```
-
-**If zero findings (no blockers, no tech_debt, no nits):**
+**If no blockers:**
 ```
 ## Review: Approved
 
@@ -79,25 +58,20 @@ Use `gh pr comment` as fallback.
 - [x] Security (no vulnerabilities found)
 - [x] Plan requirements met
 
+### Tech Debt (optional follow-ups)
+- [any non-blocking items]
+
 ### Screenshots
 [screenshot references if captured]
 ```
 
 ### 3. Post the Review
 
-**Three-tier decision (apply in order):**
-1. **Blockers found** → `--request-changes`
-2. **No blockers, but tech_debt or nits** → `--request-changes`
-3. **Zero findings** → `--approve`
-
 ```bash
 if [ "$SELF_AUTHORED" = "true" ]; then
   gh pr comment $PR_NUMBER --body "$REVIEW_BODY"
-elif [ "$HAS_ANY_FINDINGS" = "true" ]; then
-  # Blockers, tech_debt, or nits — all require changes
-  gh pr review $PR_NUMBER --request-changes --body "$REVIEW_BODY"
 else
-  # Zero findings — the ONLY path to approval
+  # Use --request-changes if blockers, --approve if clean
   gh pr review $PR_NUMBER --approve --body "$REVIEW_BODY"
 fi
 ```
@@ -128,7 +102,7 @@ fi
 
 ```bash
 # On approval (no blockers):
-python -m tools.sdlc_stage_marker --stage REVIEW --status completed 2>/dev/null || true
+python -m tools.session_progress --session-id "$SESSION_ID" --stage REVIEW --status completed 2>/dev/null || true
 ```
 
 ## Completion

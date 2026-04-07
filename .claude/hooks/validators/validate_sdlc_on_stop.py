@@ -243,9 +243,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        from hook_utils.constants import log_hook_error
-
-        log_hook_error("validate_sdlc_on_stop", str(e))
+    main()

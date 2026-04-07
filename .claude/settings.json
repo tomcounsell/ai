@@ -80,7 +80,7 @@
           },
           {
             "type": "command",
-            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/sdlc_reminder.py || true",
+            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/sdlc_reminder.py",
             "timeout": 10
           }
         ]
@@ -95,7 +95,7 @@
           },
           {
             "type": "command",
-            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/sdlc_reminder.py || true",
+            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/sdlc_reminder.py",
             "timeout": 10
           }
         ]
@@ -107,7 +107,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "./scripts/calendar_hook.sh || true",
+            "command": "./scripts/calendar_hook.sh",
             "timeout": 15
           },
           {
@@ -117,7 +117,7 @@
           },
           {
             "type": "command",
-            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_sdlc_on_stop.py || true",
+            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_sdlc_on_stop.py",
             "timeout": 15
           }
         ]

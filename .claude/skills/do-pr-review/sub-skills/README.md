@@ -36,4 +36,4 @@ focused instructions at each phase of the review process.
 
 All sub-skills include fallback instructions for when `$SDLC_*` variables are
 absent (backward compatibility). Skills can still derive values from git state,
-`gh` CLI, or nudge feedback context.
+`gh` CLI, or coaching message context.

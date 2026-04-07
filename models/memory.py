@@ -66,10 +66,6 @@ class Memory(WriteFilterMixin, AccessTrackerMixin, Model):
             tool_names (list[str]): Tool names from the session context
             dismissal_count (int): Consecutive dismissals before reset
             last_outcome (str): "acted" or "dismissed"
-            outcome_history (list[dict]): Last N outcome entries, each with:
-                outcome (str): "acted" or "dismissed"
-                reasoning (str): One-sentence LLM explanation
-                ts (int): Unix timestamp of the outcome
         relevance: Decay-sorted index, partitioned by project_key.
         confidence: Bayesian confidence, updated by ObservationProtocol.
         bm25: BM25 keyword search index on content for ranked retrieval.

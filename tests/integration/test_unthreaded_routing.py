@@ -2,13 +2,13 @@
 
 Verifies that when semantic routing matches an unthreaded message to an
 active (running/active) session, the message is pushed to the steering
-queue instead of creating a competing session. Dormant session matches still
+queue instead of creating a competing job. Dormant session matches still
 resume the session normally.
 
 Tests use Redis db=1 via the autouse redis_test_db fixture in conftest.py.
 """
 
-from datetime import UTC, datetime
+import time
 
 import pytest
 
@@ -20,7 +20,7 @@ class TestUnthreadedActiveSessionRouting:
 
     def test_push_steering_message_for_active_session(self):
         """When a message matches an active session, it should be pushed
-        to the steering queue (not create a new session)."""
+        to the steering queue (not create a new job)."""
         session_id = "tg_valor_123_456"
         push_steering_message(session_id, "use JWT for auth", "Tom")
 
@@ -71,7 +71,7 @@ class TestSemanticRoutingDecisionMatrix:
             status="running",
             message_text="implement feature X",
             working_dir="/tmp",
-            created_at=datetime.now(tz=UTC),
+            created_at=time.time(),
             expectations="waiting for auth decision",
         )
         session.save()
@@ -107,7 +107,7 @@ class TestSemanticRoutingDecisionMatrix:
             status="dormant",
             message_text="waiting for review",
             working_dir="/tmp",
-            created_at=datetime.now(tz=UTC),
+            created_at=time.time(),
             expectations="need PR approval",
         )
         session.save()
@@ -136,7 +136,7 @@ class TestSemanticRoutingDecisionMatrix:
             status="active",
             message_text="build the feature",
             working_dir="/tmp",
-            created_at=datetime.now(tz=UTC),
+            created_at=time.time(),
         )
         session.save()
 

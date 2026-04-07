@@ -14,30 +14,30 @@ Several classes of bugs can pass all existing tests while silently degrading the
 
 ## Solution
 
-### Gap 1: Exception Logging (agent/agent_session_queue.py)
+### Gap 1: Exception Logging (agent/job_queue.py)
 
-Replaced 7 `except Exception: pass` blocks in critical session queue functions with `except Exception as e: logger.warning(...)` calls. Each warning includes identifying context (session_id, file path) for debugging.
+Replaced 7 `except Exception: pass` blocks in critical job queue functions with `except Exception as e: logger.warning(...)` calls. Each warning includes identifying context (session_id, file path) for debugging.
 
 **Functions covered:**
-- `_push_agent_session` -- lifecycle transition logging
-- `_pop_agent_session` -- lifecycle transition logging
+- `_push_job` -- lifecycle transition logging
+- `_pop_job` -- lifecycle transition logging
 - `_enqueue_continuation` -- plan file resolution
-- `_execute_agent_session` -- session re-read from Redis
+- `_execute_job` -- session re-read from Redis
 - `_load_cooldowns` -- file read
 - `_save_cooldowns` -- file write
 - `check_revival` -- branch existence check
 
 **Test approach:** `tests/test_silent_failures.py` uses `caplog` to assert warnings are emitted when exceptions occur. Assertions check log level and presence of key identifiers -- not exact message text -- to avoid brittle tests.
 
-### Gap 2: Empty Output Anomaly Detection (agent/agent_session_queue.py)
+### Gap 2: Empty Output Anomaly Detection (agent/job_queue.py)
 
-Extracted the empty output guard into a pure function `should_guard_empty_output(msg, is_sdlc, has_remaining_stages) -> bool` in `agent/agent_session_queue.py`. The function returns True when output is empty/whitespace AND the session is SDLC with remaining stages. The production `send_to_chat` closure calls this function, and tests call it directly — following the same extraction pattern used for Gap 3.
+Extracted the empty output guard into a pure function `should_guard_empty_output(msg, is_sdlc, has_remaining_stages) -> bool` in `agent/job_queue.py`. The function returns True when output is empty/whitespace AND the job is SDLC with remaining stages. The production `send_to_chat` closure calls this function, and tests call it directly — following the same extraction pattern used for Gap 3.
 
 When the guard triggers, the empty output is delivered to the user with a "(empty output)" placeholder instead of being classified as STATUS_UPDATE and auto-continued.
 
 **Tests:** `TestEmptyOutputAnomalyDetection` in `tests/test_auto_continue.py` (5 unit tests calling `should_guard_empty_output` directly + 1 async test for `classify_output` behavior) and `TestEmptyOutputLoopTermination` in `tests/test_enqueue_continuation.py`.
 
-### Gap 3: Routing Decision Extraction (agent/agent_session_queue.py)
+### Gap 3: Routing Decision Extraction (agent/job_queue.py)
 
 > **Updated**: `classify_routing_decision()` and `RoutingDecision` were removed in PR #321 (Observer Agent). Routing decisions are now made by the [Observer Agent](observer-agent.md) with full session context. The `TestClassifyRoutingDecision` test class was removed from `tests/test_auto_continue.py`. Observer decision quality is now validated by 13 integration tests in `tests/test_observer.py` using real API calls with Haiku as a robustness floor.
 
@@ -97,7 +97,7 @@ grep -rn "except.*Exception.*:" --include="*.py" agent/ bridge/ | grep -v "logge
 
 | File | Change |
 |------|--------|
-| `agent/agent_session_queue.py` | Replace 7 silent exception handlers with logger.warning; extract `should_guard_empty_output()` and `classify_routing_decision()` |
+| `agent/job_queue.py` | Replace 7 silent exception handlers with logger.warning; extract `should_guard_empty_output()` and `classify_routing_decision()` |
 | `tests/test_silent_failures.py` | New: 8 test classes for Gap 1 exception logging |
 | `tests/test_auto_continue.py` | Add `TestClassifyRoutingDecision` (10 tests) and `TestEmptyOutputAnomalyDetection` (6 tests calling production `should_guard_empty_output`) |
 | `tests/test_enqueue_continuation.py` | Add `TestEmptyOutputLoopTermination` (3 tests) |

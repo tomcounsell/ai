@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import time
-from datetime import UTC, datetime
 
 import pytest
 
@@ -208,7 +207,7 @@ class TestAnalyzeSessionsFromRedis:
             status="completed",
             created_at=time.time(),
             started_at=time.time(),
-            updated_at=datetime.now(tz=UTC),
+            last_activity=time.time(),
             turn_count=5,
             tool_call_count=20,  # High ratio = thrashing
         )
@@ -229,7 +228,7 @@ class TestAnalyzeSessionsFromRedis:
             status="failed",
             created_at=time.time(),
             started_at=time.time(),
-            updated_at=datetime.now(tz=UTC),
+            last_activity=time.time(),
             turn_count=2,
             tool_call_count=3,
             summary="Crashed during build step",
@@ -344,46 +343,6 @@ class TestLegacyIntegerMigration:
         runner = ReflectionRunner()
         # Legacy integers must be reset to empty — no crash, safe re-run
         assert runner.state.completed_steps == []
-
-
-class TestPopotoIndexCleanupReflection:
-    """Tests for popoto-index-cleanup reflection registration."""
-
-    def test_reflection_registered_in_yaml(self):
-        """Verify popoto-index-cleanup exists in reflections.yaml."""
-        from pathlib import Path
-
-        import yaml
-
-        config_path = Path(__file__).parent.parent.parent / "config" / "reflections.yaml"
-        with open(config_path) as f:
-            config = yaml.safe_load(f)
-
-        names = [r["name"] for r in config["reflections"]]
-        assert "popoto-index-cleanup" in names
-
-    def test_reflection_entry_structure(self):
-        """Verify the reflection entry has required fields."""
-        from pathlib import Path
-
-        import yaml
-
-        config_path = Path(__file__).parent.parent.parent / "config" / "reflections.yaml"
-        with open(config_path) as f:
-            config = yaml.safe_load(f)
-
-        entry = next(r for r in config["reflections"] if r["name"] == "popoto-index-cleanup")
-        assert entry["execution_type"] == "function"
-        assert entry["callable"] == "scripts.popoto_index_cleanup.run_cleanup"
-        assert entry["enabled"] is True
-        assert entry["interval"] == 86400
-        assert entry["priority"] == "low"
-
-    def test_cleanup_callable_importable(self):
-        """Verify the cleanup function can be imported."""
-        from scripts.popoto_index_cleanup import run_cleanup
-
-        assert callable(run_cleanup)
 
 
 class TestRedisDataQuality:

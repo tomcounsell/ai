@@ -10,7 +10,7 @@ Tests use Redis db=1 via the autouse redis_test_db fixture in conftest.py.
 import json
 
 # claude_agent_sdk mock is centralized in conftest.py
-from agent.agent_session_queue import MAX_NUDGE_COUNT
+from agent.job_queue import MAX_NUDGE_COUNT
 from models.agent_session import AgentSession
 
 

@@ -1,6 +1,6 @@
 ---
 name: audit-models
-description: "Audit Popoto Redis models for relationship gaps, missing fields, naming inconsistencies, and architectural weaknesses. Use when reviewing data model health, checking model integrity, validating Redis models, scanning for data model issues, or reviewing the data layer with the architect."
+description: "Audit Popoto Redis models for relationship gaps, missing fields, naming inconsistencies, and architectural weaknesses. Use when reviewing data model health with the architect."
 disable-model-invocation: true
 allowed-tools: Read, Grep, Glob, Bash
 ---
@@ -36,7 +36,7 @@ Models with no foreign key reference to or from any other model. A model is "con
 ### 3. Naming Consistency
 
 Flag when:
-- The same concept uses different field names across models (e.g. `session_id` vs `agent_session_id` for the same thing)
+- The same concept uses different field names across models (e.g. `session_id` vs `job_id` for the same thing)
 - Field names contain legacy/deprecated terms (configurable: `job`, `redis`, `log`)
 - A field name is ambiguous without its model context (e.g. `id` fields that don't clarify what they identify)
 
@@ -81,7 +81,7 @@ Read every file in `models/` (excluding `__init__.py`). For each model class:
 - [orphan] DeadLetter: no FK references to/from other models
 
 #### WARNING
-- [naming-drift] AgentSession.agent_session_id vs convention: should be `id`
+- [naming-drift] AgentSession.job_id vs convention: should be `id`
 - [implicit-proxy] Link uses `chat_id` as proxy for missing `project_key`
 
 #### INFO

@@ -49,13 +49,13 @@ logger = logging.getLogger(__name__)
 # === Client Registry ===
 # Module-level registry of active SDK clients keyed by session_id.
 # In-memory only (intentionally not persisted). On crash/reboot, the dict
-# is empty and recovered sessions create fresh clients. See plan doc for
+# is empty and recovered jobs create fresh clients. See plan doc for
 # crash safety analysis.
 _active_clients: dict[str, "ClaudeSDKClient"] = {}
 
 # === Stop Reason Registry ===
 # Stores the stop_reason from the most recent ResultMessage for each session.
-# Populated by ValorAgent.query(), consumed by session_queue after query completes.
+# Populated by ValorAgent.query(), consumed by job_queue after query completes.
 # In-memory only — cleared when the session finishes.
 _session_stop_reasons: dict[str, str] = {}
 
@@ -64,7 +64,7 @@ _session_stop_reasons: dict[str, str] = {}
 # Used by the watchdog heartbeat for activity-based stall detection instead
 # of hard wall-clock timeouts. Updated on each tool call callback and log output.
 # In-memory only — reset on crash/reboot (new sessions start fresh).
-_updated_at_timestamps: dict[str, float] = {}
+_last_activity_timestamps: dict[str, float] = {}
 
 # Configurable inactivity threshold (seconds). Sessions idle longer than this
 # are considered stalled. Active sessions producing tool calls/logs are never
@@ -75,7 +75,7 @@ SDK_INACTIVITY_TIMEOUT_SECONDS = int(os.environ.get("SDK_INACTIVITY_TIMEOUT_SECO
 class CircuitOpenError(RuntimeError):
     """Raised when the Anthropic circuit breaker is open.
 
-    The worker loop catches this specifically to leave the session as pending
+    The worker loop catches this specifically to leave the job as pending
     (instead of marking it failed) so the health check can retry when
     the circuit closes.
     """
@@ -127,22 +127,22 @@ def record_session_activity(session_id: str) -> None:
     The watchdog uses this to detect stalls based on inactivity rather than
     wall-clock duration.
     """
-    _updated_at_timestamps[session_id] = time.time()
+    _last_activity_timestamps[session_id] = time.time()
 
 
-def get_session_updated_at(session_id: str) -> float | None:
+def get_session_last_activity(session_id: str) -> float | None:
     """Get the timestamp of the last activity for a session.
 
     Returns:
         Unix timestamp of last tool call or log output, or None if
         no activity has been recorded for this session.
     """
-    return _updated_at_timestamps.get(session_id)
+    return _last_activity_timestamps.get(session_id)
 
 
 def clear_session_activity(session_id: str) -> None:
     """Remove activity tracking for a completed/abandoned session."""
-    _updated_at_timestamps.pop(session_id, None)
+    _last_activity_timestamps.pop(session_id, None)
 
 
 def _get_prior_session_uuid(session_id: str) -> str | None:
@@ -188,7 +188,7 @@ def _has_prior_session(session_id: str) -> bool:
 
     Used by _create_options() to decide whether to set continue_conversation=True.
     Only returns True if an AgentSession with this session_id has been previously
-    saved (i.e., a prior session ran for this conversation thread). This prevents
+    saved (i.e., a prior job ran for this conversation thread). This prevents
     fresh sessions from reusing stale Claude Code session files on disk.
 
     See issue #232 for the cross-wire bug this fixes.
@@ -270,8 +270,8 @@ def _extract_sdlc_env_vars(session_id: str, gh_repo: str | None = None) -> dict[
         if isinstance(branch, str) and branch:
             env["SDLC_PR_BRANCH"] = branch
 
-        # Work item slug (new DevSessions use session.slug, legacy uses slug)
-        slug = getattr(session, "slug", None) or getattr(session, "slug", None)
+        # Work item slug (new DevSessions use session.slug, legacy uses work_item_slug)
+        slug = getattr(session, "slug", None) or getattr(session, "work_item_slug", None)
         if isinstance(slug, str) and slug:
             env["SDLC_SLUG"] = slug
 
@@ -352,7 +352,7 @@ PRINCIPAL_PATH = Path(__file__).parent.parent / "config" / "PRINCIPAL.md"
 
 # Worker safety rails injected into every agent session.
 # ChatSession is the sole pipeline controller —
-# it steers the worker one stage at a time via nudge messages.
+# it steers the worker one stage at a time via coaching messages.
 # This constant provides only the safety rails the worker needs; it does NOT
 # contain pipeline orchestration or /sdlc invocation instructions.
 WORKER_RULES = """\
@@ -827,7 +827,7 @@ class ValorAgent:
         chat_id: str | None = None,
         project_key: str | None = None,
         message_id: int | None = None,
-        agent_session_id: str | None = None,
+        job_id: str | None = None,
         gh_repo: str | None = None,
         target_repo: str | None = None,
         session_type: str | None = None,
@@ -844,15 +844,14 @@ class ValorAgent:
             chat_id: Optional chat ID for routing context injection.
             project_key: Optional project key for routing context injection.
             message_id: Optional message ID for routing context injection.
-            agent_session_id: Optional session ID injected as
-                AGENT_SESSION_ID env var for child session spawning.
+            job_id: Optional job ID injected as JOB_ID env var for child job spawning.
             gh_repo: Optional GitHub repo (org/repo) to set as GH_REPO env var.
                 When set, all `gh` CLI commands in the subprocess automatically
                 target this repo without needing explicit --repo flags.
             target_repo: Absolute path to the target project's repo root. For
                 cross-repo SDLC builds this differs from working_dir (the
                 orchestrator). Defaults to working_dir when not specified.
-            session_type: Session type ("pm", "teammate", or "dev"). Injected as
+            session_type: Session type ("chat" for PM, None for dev). Injected as
                 SESSION_TYPE env var so hooks can enforce write restrictions.
         """
         default_dir = Path(__file__).parent.parent
@@ -866,7 +865,7 @@ class ValorAgent:
         self.chat_id = chat_id
         self.project_key = project_key
         self.message_id = message_id
-        self.agent_session_id = agent_session_id
+        self.job_id = job_id
         self.gh_repo = gh_repo or None  # Normalize empty string to None
         self.target_repo = target_repo
         self.session_type = session_type
@@ -903,10 +902,10 @@ class ValorAgent:
         if session_id:
             env["VALOR_SESSION_ID"] = session_id
 
-        # Pass agent_session_id so the agent can reference its own session when spawning children
-        # via `schedule_session --parent-session $AGENT_SESSION_ID` (issue #359)
-        if self.agent_session_id:
-            env["AGENT_SESSION_ID"] = self.agent_session_id
+        # Pass job_id so the agent can reference its own job when spawning children
+        # via `schedule_job --parent-job $JOB_ID` (issue #359)
+        if self.job_id:
+            env["JOB_ID"] = self.job_id
 
         # Cross-repo gh resolution: set GH_REPO so all `gh` CLI commands in the
         # subprocess automatically target the correct repo (issue #375). This is
@@ -922,12 +921,12 @@ class ValorAgent:
         # own messages via tools/send_telegram.py (issue #497).
         # chat_id comes from the project config; reply_to is resolved from
         # the AgentSession's telegram_message_id in _extract_sdlc_env_vars below.
-        if self.session_type in (SessionType.PM, SessionType.TEAMMATE) and self.chat_id:
+        if self.session_type == SessionType.CHAT and self.chat_id:
             env["TELEGRAM_CHAT_ID"] = str(self.chat_id)
 
         # PM sessions: inject Sentry auth token so sentry-cli works without
         # manual export. Token is stored in ~/Desktop/Valor/.env (iCloud-synced).
-        if self.session_type in (SessionType.PM, SessionType.TEAMMATE):
+        if self.session_type == SessionType.CHAT:
             sentry_env = Path.home() / "Desktop" / "Valor" / ".env"
             if sentry_env.exists():
                 for line in sentry_env.read_text().splitlines():
@@ -997,7 +996,7 @@ class ValorAgent:
             )
             raise CircuitOpenError(
                 "Anthropic service unavailable (circuit breaker open). "
-                "Session will remain pending and retry when service recovers."
+                "Job will remain pending and retry when service recovers."
             )
 
         # Bug 2 fix (issue #374): Reset watchdog tool counts at query start
@@ -1212,7 +1211,7 @@ class ValorAgent:
                 # Clean up activity tracking — session is done
                 clear_session_activity(session_id)
                 # Note: _session_stop_reasons is NOT cleaned here — it's consumed
-                # by get_stop_reason() in session_queue after query returns. The pop()
+                # by get_stop_reason() in job_queue after query returns. The pop()
                 # in get_stop_reason() handles cleanup. If the nudge loop never runs
                 # (crash), entries are tiny (session_id -> str) and cleared on restart.
                 logger.debug(f"Unregistered active client for session {session_id}")
@@ -1347,7 +1346,7 @@ async def get_agent_response_sdk(
     sender_id: int | None = None,
     task_list_id: str | None = None,
     correlation_id: str | None = None,
-    agent_session_id: str | None = None,
+    job_id: str | None = None,
 ) -> str:
     """Get agent response using Claude Agent SDK.
 
@@ -1374,7 +1373,7 @@ async def get_agent_response_sdk(
         sender_id: Telegram user ID (for permission checking)
         task_list_id: Optional task list ID to scope sub-agent Task storage
         correlation_id: Optional end-to-end tracing ID from the bridge
-        agent_session_id: Optional session ID for child session spawning (issue #359)
+        job_id: Optional job ID for child job spawning (issue #359)
 
     Returns:
         The assistant's response text
@@ -1390,11 +1389,9 @@ async def get_agent_response_sdk(
 
     # Determine working directory based on work request classification
     project_name = project.get("name", "Valor") if project else "Valor"
-    project_key = project.get("_key", "valor") if project else "valor"
     project_working_dir = project.get("working_directory") if project else None
     if not project_working_dir:
         project_working_dir = AI_REPO_ROOT
-    is_cross_repo = project_key != "valor"
 
     # Check project mode: "pm" channels bypass SDLC classification entirely
     project_mode = project.get("mode", "dev") if project else "dev"
@@ -1429,7 +1426,7 @@ async def get_agent_response_sdk(
 
         if not classification:
             # Fallback: check for PR/issue references before defaulting to question.
-            # The async classifier can lose the race with session pickup, so this
+            # The async classifier can lose the race with job pickup, so this
             # fast-path catches messages like "Complete PR 478" that must be SDLC.
             import re as _re_cls
 
@@ -1443,7 +1440,7 @@ async def get_agent_response_sdk(
             else:
                 classification = ClassificationType.QUESTION
 
-        if classification == ClassificationType.SDLC and is_cross_repo:
+        if classification == ClassificationType.SDLC and project_working_dir != AI_REPO_ROOT:
             working_dir = AI_REPO_ROOT
             logger.info(
                 f"[{request_id}] SDLC routed: orchestrator in ai/, target={project_working_dir}"
@@ -1475,8 +1472,8 @@ async def get_agent_response_sdk(
         "requests from other sessions, other senders, or prior conversation threads."
     )
     # For SDLC-routed requests, inject target repo context (never for PM mode).
-    # PM session (session_type="pm") gets full pipeline instructions.
-    # PM sessions orchestrate via dev-session subagent
+    # ChatSession (session_type="chat") gets full pipeline instructions.
+    # All sessions are ChatSessions — orchestrate via dev-session subagent
     _session_type = None
     if session_id:
         try:
@@ -1489,7 +1486,11 @@ async def get_agent_response_sdk(
             pass
 
     # Cross-repo SDLC: inject target repo context
-    if project_mode != "pm" and classification == ClassificationType.SDLC and is_cross_repo:
+    if (
+        project_mode != "pm"
+        and classification == ClassificationType.SDLC
+        and project_working_dir != AI_REPO_ROOT
+    ):
         github_config = project.get("github", {}) if project else {}
         github_org = github_config.get("org", "")
         github_repo = github_config.get("repo", "")
@@ -1499,11 +1500,10 @@ async def get_agent_response_sdk(
         if github_org and github_repo:
             enriched_message += f"\nGITHUB: {github_org}/{github_repo}"
 
-    # PM/Teammate routing: classify intent and choose Teammate or PM dispatch path.
+    # ChatSession routing: classify intent and choose Teammate or PM dispatch path.
     # Teammate mode answers informational queries directly without spawning DevSession.
     _teammate_mode = False
-    _classification_context = ""  # Advisory routing context for the agent
-    if _session_type in (SessionType.PM, SessionType.TEAMMATE):
+    if _session_type == SessionType.CHAT:
         # Config-driven persona bypass: skip classifier when persona is already known
         from bridge.routing import resolve_persona as _resolve_persona_mode
 
@@ -1512,7 +1512,6 @@ async def get_agent_response_sdk(
         if _config_persona == PersonaType.TEAMMATE:
             # DMs and Teammate-persona groups: skip classifier, go straight to Teammate
             _teammate_mode = True
-            _classification_context = "teammate (config-driven, direct message or teammate group)"
             logger.info(
                 f"[{request_id}] Config-driven Teammate mode "
                 f"(persona={_config_persona!r}, is_dm={chat_title is None})"
@@ -1541,7 +1540,6 @@ async def get_agent_response_sdk(
                     pass  # Best-effort
         elif _config_persona in (PersonaType.PROJECT_MANAGER, PersonaType.DEVELOPER):
             # PM/Dev persona groups: skip classifier, use PM dispatch (not Teammate)
-            _classification_context = f"{_config_persona} (config-driven)"
             logger.info(f"[{request_id}] Config-driven {_config_persona} mode, skipping classifier")
         else:
             # Unconfigured: fall through to intent classifier
@@ -1556,10 +1554,6 @@ async def get_agent_response_sdk(
                     f"(conf={_intent_result.confidence:.2f}): {_intent_result.reasoning}"
                 )
 
-                _classification_context = (
-                    f"{_intent_result.intent} "
-                    f"(classifier confidence={_intent_result.confidence:.0%})"
-                )
                 if _intent_result.is_teammate:
                     _teammate_mode = True
                     logger.info(f"[{request_id}] Routing to Teammate mode (direct response)")
@@ -1579,13 +1573,6 @@ async def get_agent_response_sdk(
                 logger.warning(
                     f"[{request_id}] Intent classification failed, defaulting to PM dispatch: {e}"
                 )
-
-        # Inject classification context as advisory information
-        if _classification_context:
-            enriched_message += (
-                f"\n\n[Routing context: classified as {_classification_context}. "
-                f"This is an initial guess — use your judgment.]"
-            )
 
         if _teammate_mode:
             # Teammate mode: inject Teammate instructions instead of PM dispatch
@@ -1623,20 +1610,10 @@ async def get_agent_response_sdk(
                 "**Communicating with the stakeholder:**\n"
                 "You can send Telegram messages directly using:\n"
                 '  `python tools/send_telegram.py "Your message here"`\n'
-                "To attach a file (screenshot, document, image):\n"
-                '  `python tools/send_telegram.py "Caption text" --file /path/to/file.png`\n'
-                "Multiple files as an album (max 10):\n"
-                "  `python tools/send_telegram.py"
-                ' "Album caption" --file a.png --file b.png --file c.png`\n'
-                "File-only (no caption):\n"
-                "  `python tools/send_telegram.py --file /path/to/file.png`\n"
-                "Use --file to attach screenshots, images, or documents. "
-                "Repeat --file for albums. Telethon auto-detects the media type.\n"
-                "Use this tool for:\n"
+                "This sends your message immediately to the chat. Use it for:\n"
                 "- Status updates and progress reports\n"
                 "- Questions that need human input\n"
                 "- Final delivery summaries\n"
-                "- Sharing screenshots or files\n"
                 "Write in business terms — never expose SDLC stage names, "
                 "pipeline internals, or implementation details. "
                 "Speak like a project manager updating a stakeholder.\n"
@@ -1654,11 +1631,9 @@ async def get_agent_response_sdk(
     )
     wr_label = "yes" if has_worker_rules else "no (pm mode)"
     is_dm = chat_title is None
-    # PM session always uses PM persona; Teammate uses Teammate; otherwise resolve from config
-    if _session_type == SessionType.PM:
+    # ChatSession always uses PM persona; otherwise resolve from config
+    if _session_type == SessionType.CHAT:
         persona = PersonaType.PROJECT_MANAGER
-    elif _session_type == SessionType.TEAMMATE:
-        persona = PersonaType.TEAMMATE
     else:
         persona = _resolve_persona(project, chat_title, is_dm=is_dm)
     logger.info(
@@ -1669,21 +1644,21 @@ async def get_agent_response_sdk(
     try:
         # Extract project_key from config for env var injection
         _project_key = project.get("name", "valor").lower().replace(" ", "-") if project else None
-        # Extract message_id from the session context (passed through _execute_agent_session)
+        # Extract message_id from the job context (passed through _execute_job)
         _message_id = None  # message_id not available at this layer
 
         logger.info(f"[{request_id}] Resolved persona: {persona}")
 
         # Build system prompt based on persona and project mode.
-        # PM session (session_type="pm") uses PM persona with read-only permissions.
+        # ChatSession (session_type="chat") uses PM persona with read-only permissions.
         custom_system_prompt = None
         _permission_mode = "bypassPermissions"  # Default: full permissions
 
-        if _session_type == SessionType.PM:
-            # PM session: PM persona, full permissions but hook-restricted.
+        if _session_type == SessionType.CHAT:
+            # ChatSession: PM persona, full permissions but hook-restricted.
             # Can write to docs/ and use gh CLI. Code writes blocked by pre_tool_use hook.
             custom_system_prompt = load_pm_system_prompt(working_dir)
-            logger.info(f"[{request_id}] PM session mode: PM persona, bypassPermissions")
+            logger.info(f"[{request_id}] ChatSession mode: PM persona, bypassPermissions")
         elif project_mode == "pm":
             # PM mode: use PM system prompt (no WORKER_RULES, loads work-vault CLAUDE.md)
             custom_system_prompt = load_pm_system_prompt(working_dir)
@@ -1700,7 +1675,9 @@ async def get_agent_response_sdk(
         # set GH_REPO so all gh commands automatically target the correct repo.
         _gh_repo = None
         is_cross_repo_sdlc = (
-            project_mode != "pm" and classification == ClassificationType.SDLC and is_cross_repo
+            project_mode != "pm"
+            and classification == ClassificationType.SDLC
+            and project_working_dir != AI_REPO_ROOT
         )
         if is_cross_repo_sdlc:
             _github_config = project.get("github", {}) if project else {}
@@ -1720,7 +1697,7 @@ async def get_agent_response_sdk(
             chat_id=chat_id,
             project_key=_project_key,
             message_id=_message_id,
-            agent_session_id=agent_session_id,
+            job_id=job_id,
             gh_repo=_gh_repo,
             target_repo=project_working_dir,
             session_type=_session_type,
@@ -1731,7 +1708,7 @@ async def get_agent_response_sdk(
         logger.info(f"[{request_id}] SDK responded in {elapsed:.1f}s ({len(response)} chars)")
 
         # Record response time metric for Teammate observability
-        if _session_type in (SessionType.PM, SessionType.TEAMMATE):
+        if _session_type == SessionType.CHAT:
             try:
                 from agent.teammate_metrics import record_response_time
 
@@ -1747,7 +1724,7 @@ async def get_agent_response_sdk(
         # CRASH GUARD: Mark session as failed so the watchdog doesn't try to
         # interact with a dead session. Without this cleanup, the watchdog would
         # find the session still "active" and potentially trigger further errors.
-        # See nudge loop error-classified output bypass.
+        # See docs/features/coaching-loop.md "Error-Classified Output Bypass".
         try:
             from bridge.session_transcript import complete_transcript
 

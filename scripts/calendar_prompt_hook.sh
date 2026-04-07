@@ -3,7 +3,7 @@
 # user's first prompt via a quick Haiku call, then creates/extends a calendar event.
 # Rate-limited: only fires once per 10 minutes (first prompt wins).
 
-set +e  # Hooks must never fail noisily
+set -e
 
 LOCKDIR="$HOME/Desktop/Valor"
 STAMPFILE="$LOCKDIR/.calendar_hook_stamp"
@@ -71,13 +71,7 @@ if [ "$SAME_SESSION" = true ] && [ -f "$STAMPFILE" ]; then
             date +%s > "$STAMPFILE"
             export PATH="$HOME/src/ai/.venv/bin:$HOME/Library/Python/3.12/bin:$PATH"
             PREV_PROJECT=$(cat "$LOCKDIR/.calendar_hook_project" 2>/dev/null || echo "")
-            HOOK_LOG="${CLAUDE_PROJECT_DIR:-$HOME/src/ai}/logs/hooks.log"
-            valor-calendar --project "$PREV_PROJECT" "$SLUG" 2>/tmp/cal_prompt_err || {
-                ERR=$(cat /tmp/cal_prompt_err)
-                [ -n "$ERR" ] && echo "$(date -u '+%Y-%m-%d %H:%M:%S') - calendar_prompt_hook - ERROR - $ERR" >> "$HOOK_LOG"
-                true
-            }
-            exit 0
+            exec valor-calendar --project "$PREV_PROJECT" "$SLUG"
         fi
     fi
 fi
@@ -157,9 +151,4 @@ date +%s > "$STAMPFILE"
 echo "$SLUG" > "$SLUGFILE"
 echo "$PROJECT" > "$LOCKDIR/.calendar_hook_project"
 export PATH="$HOME/src/ai/.venv/bin:$HOME/Library/Python/3.12/bin:$PATH"
-HOOK_LOG="${CLAUDE_PROJECT_DIR:-$HOME/src/ai}/logs/hooks.log"
-valor-calendar --project "$PROJECT" "$SLUG" 2>/tmp/cal_prompt_err || {
-    ERR=$(cat /tmp/cal_prompt_err)
-    [ -n "$ERR" ] && echo "$(date -u '+%Y-%m-%d %H:%M:%S') - calendar_prompt_hook - ERROR - $ERR" >> "$HOOK_LOG"
-    true
-}
+exec valor-calendar --project "$PROJECT" "$SLUG"

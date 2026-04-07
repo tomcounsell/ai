@@ -18,19 +18,19 @@ class Session:
     user_id: str
     chat_id: str
     created_at: datetime
-    updated_at: datetime
+    last_activity: datetime
     message_count: int = 0
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
     def duration_minutes(self) -> float:
         """Get session duration in minutes."""
-        return (self.updated_at - self.created_at).total_seconds() / 60
+        return (self.last_activity - self.created_at).total_seconds() / 60
 
     @property
     def is_active(self) -> bool:
         """Check if session is considered active (activity in last hour)."""
-        return (utc_now() - self.updated_at).total_seconds() < 3600
+        return (utc_now() - self.last_activity).total_seconds() < 3600
 
     def to_dict(self) -> dict:
         """Convert to dictionary for serialization."""
@@ -39,7 +39,7 @@ class Session:
             "user_id": self.user_id,
             "chat_id": self.chat_id,
             "created_at": self.created_at.isoformat(),
-            "updated_at": self.updated_at.isoformat(),
+            "last_activity": self.last_activity.isoformat(),
             "message_count": self.message_count,
             "duration_minutes": self.duration_minutes,
             "is_active": self.is_active,
@@ -88,7 +88,7 @@ class SessionTracker:
             user_id=user_id,
             chat_id=chat_id,
             created_at=now,
-            updated_at=now,
+            last_activity=now,
             metadata=metadata or {},
         )
 
@@ -123,7 +123,7 @@ class SessionTracker:
         chat_sessions = [s for s in self._sessions.values() if s.chat_id == chat_id]
         if not chat_sessions:
             return None
-        return max(chat_sessions, key=lambda s: s.updated_at)
+        return max(chat_sessions, key=lambda s: s.last_activity)
 
     def update_activity(self, session_id: str) -> bool:
         """Update the last activity time for a session.
@@ -136,7 +136,7 @@ class SessionTracker:
         """
         session = self._sessions.get(session_id)
         if session:
-            session.updated_at = utc_now()
+            session.last_activity = utc_now()
             session.message_count += 1
             return True
         return False
@@ -181,7 +181,9 @@ class SessionTracker:
             Number of sessions cleaned up.
         """
         cutoff = utc_now() - timedelta(hours=max_age_hours)
-        stale_ids = [sid for sid, session in self._sessions.items() if session.updated_at < cutoff]
+        stale_ids = [
+            sid for sid, session in self._sessions.items() if session.last_activity < cutoff
+        ]
 
         for sid in stale_ids:
             del self._sessions[sid]

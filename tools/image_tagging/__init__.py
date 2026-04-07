@@ -12,9 +12,10 @@ from pathlib import Path
 
 import requests
 
-from config.models import MODEL_VISION, OPENROUTER_URL, SONNET
+from config.models import MODEL_VISION, SONNET
 
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 # Vision tasks - Anthropic API (primary), OpenRouter (fallback)
 DEFAULT_MODEL = SONNET
 DEFAULT_MODEL_OPENROUTER = MODEL_VISION

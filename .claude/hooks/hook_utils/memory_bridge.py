@@ -47,9 +47,11 @@ MAX_THOUGHTS = 3
 # ---------------------------------------------------------------------------
 try:
     from config.memory_defaults import (
+        DEJA_VU_BLOOM_HIT_THRESHOLD,
         NOVEL_TERRITORY_KEYWORD_THRESHOLD,
     )
 except Exception:
+    DEJA_VU_BLOOM_HIT_THRESHOLD = 3
     NOVEL_TERRITORY_KEYWORD_THRESHOLD = 7
 
 # Trivial prompt patterns to skip during ingestion
@@ -203,7 +205,7 @@ def recall(
             return None
 
         # Extract keywords from buffer (lazy import to avoid overhead on non-query calls)
-        from utils.keyword_extraction import extract_topic_keywords
+        from agent.memory_hook import extract_topic_keywords
 
         all_keywords: list[str] = []
         for entry in buffer[-BUFFER_SIZE:]:
@@ -249,7 +251,7 @@ def recall(
         # Multi-query decomposition -- cluster keywords and retrieve via BM25+RRF
         import time
 
-        from utils.keyword_extraction import _cluster_keywords
+        from agent.memory_hook import _cluster_keywords
         from agent.memory_retrieval import retrieve_memories
 
         project_key = _get_project_key()
@@ -279,15 +281,20 @@ def recall(
                 f"(budget: 15ms, clusters: {len(clusters)})"
             )
 
-        # No strong results -- return None (deja vu fallback removed:
-        # vague "encountered something related" thoughts waste context tokens)
+        # Deja vu: bloom hits but no strong results
         if not all_records:
             _save_sidecar(session_id, state)
+            if bloom_hits >= DEJA_VU_BLOOM_HIT_THRESHOLD:
+                topic_hint = ", ".join(unique_keywords[:3])
+                return (
+                    "<thought>I have encountered something related to "
+                    f"{topic_hint} before, but the details are unclear.</thought>"
+                )
             return None
 
         # Re-rank by category weights (corrections/decisions surface higher)
         try:
-            from utils.keyword_extraction import _apply_category_weights
+            from agent.memory_hook import _apply_category_weights
 
             all_records = _apply_category_weights(all_records)
         except Exception:
@@ -519,7 +526,7 @@ def post_merge_extract(pr_number: str | int | None = None) -> None:
 def load_agent_session_sidecar(session_id: str) -> dict:
     """Load the agent session sidecar data for a session.
 
-    Returns a dict that may contain 'agent_session_id' and
+    Returns a dict that may contain 'agent_session_job_id' and
     'merge_detected' among other keys. Returns empty dict if
     the file is missing or corrupt.
     """
@@ -538,7 +545,7 @@ def save_agent_session_sidecar(session_id: str, data: dict) -> None:
     """Persist agent session sidecar data atomically.
 
     Uses tmp + rename pattern to avoid partial writes.
-    Stores agent_session_id and other cross-hook state.
+    Stores agent_session_job_id and other cross-hook state.
     """
     sidecar_dir = _get_sidecar_dir(session_id)
     sidecar_dir.mkdir(parents=True, exist_ok=True)

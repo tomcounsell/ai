@@ -65,7 +65,6 @@ DevSession completes
   -> _extract_output_tail(input_data)    # last ~500 chars from transcript
   -> sm.classify_outcome(stage, stop_reason, output_tail)
       |
-      +-- Tier 0: Parse <!-- OUTCOME {...} --> contract -> "success" / "fail" / "partial"
       +-- Tier 1: SDK stop_reason != "end_turn" -> "fail"
       +-- Tier 2: Deterministic tail patterns scoped by stage -> "success" / "fail"
       +-- Default: "ambiguous"
@@ -73,8 +72,6 @@ DevSession completes
       "success" or "ambiguous" -> sm.complete_stage()
       "fail" or "partial"      -> sm.fail_stage()
 ```
-
-Tier 0 parses structured OUTCOME contracts that skills emit (e.g., `/do-pr-review` emits `<!-- OUTCOME {"status":"partial",...} -->`). This enables the `("REVIEW", "partial") -> PATCH` routing edge for tech debt and nit findings. See `docs/features/pipeline-state-machine.md` for the full three-tier classification reference.
 
 ### Failure Routing via Pipeline Graph
 
@@ -84,11 +81,14 @@ When `fail_stage()` fires, the pipeline graph (`PIPELINE_EDGES` in `bridge/pipel
 |---------------|---------|------------|
 | TEST | fail | PATCH |
 | REVIEW | fail | PATCH |
-| REVIEW | partial | PATCH |
 | PATCH | success | TEST |
 | PATCH | fail | TEST |
 
-This enables automatic PATCH cycles: a REVIEW that finds issues routes to PATCH, which routes back to TEST, which routes back to REVIEW. The cycle is bounded by `MAX_PATCH_CYCLES` (default 3) -- when reached, `get_next_stage()` returns None and the pipeline escalates to human review.
+This enables automatic PATCH cycles: a REVIEW that finds issues routes to PATCH, which routes back to TEST, which routes back to REVIEW. The cycle is bounded by `MAX_PATCH_CYCLES` (default 3) -- when reached, `get_next_stage()` returns None and the coach escalates to human review.
+
+### Coach Integration
+
+The coach (`bridge/coach.py`) uses graph-based routing via `PipelineStateMachine.next_stage(outcome)` instead of the previous linear scan of `DISPLAY_STAGES`. It infers the outcome from stage statuses: if any stage has status "failed", it passes `outcome="fail"` to get the graph-determined next stage.
 
 ### Safe Defaults
 

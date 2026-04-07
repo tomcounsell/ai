@@ -22,7 +22,7 @@ Hardened reliability fixes for the session watchdog, SDK stall detection, and ob
 
 Instead of hard wall-clock timeouts, the system now tracks session activity:
 
-- `_last_activity_timestamps` dict tracks the `updated_at` timestamp of last tool call or log output per session
+- `_last_activity_timestamps` dict tracks the timestamp of last tool call or log output per session
 - `record_session_activity(session_id)` updates the timestamp on each text block output and result message during SDK query execution
 - `get_session_last_activity(session_id)` exposes the timestamp for watchdog consumption
 - `clear_session_activity(session_id)` cleans up when a session completes
@@ -39,9 +39,9 @@ Errors are classified and handled with escalating backoff:
 - **Counter reset**: Successful observer runs reset the failure counter
 - **Import guard**: `_build_observer_system_prompt()` wraps `load_principal_context` import in try/except; on ImportError, builds prompt without principal context
 
-### 4. Escalation Handling (agent/agent_session_queue.py)
+### 4. Escalation Handling (agent/job_queue.py)
 
-The session queue processes circuit breaker signals from observer error results:
+The job queue processes circuit breaker signals from observer error results:
 
 - `retry_after`: Sleeps for the backoff duration, then re-runs the observer
 - `should_escalate`: Sends an escalation notice to Telegram with session ID, failure count, and error details, then delivers raw worker output as fallback

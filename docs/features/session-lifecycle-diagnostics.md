@@ -16,19 +16,20 @@ The `AgentSession.log_lifecycle_transition()` method is called at every status c
 
 | Caller | Transition | Context |
 |--------|-----------|---------|
-| `models/session_lifecycle.finalize_session()` | →completed/failed/killed/abandoned/cancelled | All terminal transitions |
-| `models/session_lifecycle.transition_status()` | →pending/running/active/dormant/waiting_for_children/superseded | All non-terminal transitions |
-
-All lifecycle logging is now centralized in `models/session_lifecycle.py`. The `finalize_session()` and `transition_status()` functions call `session.log_lifecycle_transition()` internally, so callers no longer need to call it directly. See [Session Lifecycle](session-lifecycle.md) for the full module documentation.
+| `session_transcript.start_transcript()` | →active | Transcript started |
+| `session_transcript.complete_transcript()` | →completed/failed/dormant | Transcript completed |
+| `job_queue._push_job()` | →pending | Job enqueued |
+| `job_queue._pop_job()` | →running | Worker picked up job |
+| `session_watchdog.fix_unhealthy_session()` | →abandoned | Watchdog remediation |
 
 Each call:
-1. Emits a structured INFO log: `LIFECYCLE session=X transition=old→new session_id=Y project=Z duration_in_prev_state=Ns context="..."`
+1. Emits a structured INFO log: `LIFECYCLE session=X transition=old→new job_id=Y project=Z duration_in_prev_state=Ns context="..."`
 2. Appends a `[lifecycle]` entry to the session's history list (duration is derived from history timestamps)
 
 ### Log Format
 
 ```
-LIFECYCLE session=tg_valor_-5051653062_6165 transition=pending→running id=abc123 project=valor duration_in_prev_state=2.3s context="worker picked up session"
+LIFECYCLE session=tg_valor_-5051653062_6165 transition=pending→running job_id=abc123 project=valor duration_in_prev_state=2.3s context="worker picked up job"
 ```
 
 Filter all lifecycle events: `grep LIFECYCLE logs/bridge.log`
@@ -40,10 +41,10 @@ Added to the existing session watchdog loop. Every 5 minutes, `check_stalled_ses
 | Status | Threshold | Rationale |
 |--------|-----------|-----------|
 | pending | 300s (5 min) | Jobs should be picked up quickly |
-| running | 2700s (45 min) | Matches agent session health monitor timeout |
-| active | 600s (10 min) | No `updated_at` update = likely stalled |
+| running | 2700s (45 min) | Matches job health monitor timeout |
+| active | 600s (10 min) | No `last_activity` update = likely stalled |
 
-For active sessions, `updated_at` is checked first — if recent activity exists within the threshold, the session is not considered stalled.
+For active sessions, `last_activity` is checked first — if recent activity exists within the threshold, the session is not considered stalled.
 
 When a stall is detected:
 - A `LIFECYCLE_STALL` warning is logged with session ID, status, duration, and last history entry
@@ -52,7 +53,7 @@ When a stall is detected:
 
 ### Stale Save Guard (#342)
 
-The `_execute_agent_session()` epilogue in `agent/agent_session_queue.py` previously saved a stale in-memory `agent_session` reference when `defer_reaction=True` (auto-continue). Since `_enqueue_continuation()` already deleted and recreated the session, this save resurrected a ghost record in Redis, causing the pending continuation to become invisible to the worker. The fix skips the save entirely and logs a debug message explaining why.
+The `_execute_job()` epilogue in `agent/job_queue.py` previously saved a stale in-memory `agent_session` reference when `defer_reaction=True` (auto-continue). Since `_enqueue_continuation()` already deleted and recreated the session, this save resurrected a ghost record in Redis, causing the pending continuation to become invisible to the worker. The fix skips the save entirely and logs a debug message explaining why.
 
 ### CLI Status Report
 
@@ -90,7 +91,7 @@ Constants in `monitoring/session_watchdog.py`:
 |------|---------|
 | `models/agent_session.py` | `log_lifecycle_transition()` method (duration derived from history entries) |
 | `bridge/session_transcript.py` | Lifecycle calls in start/complete |
-| `agent/agent_session_queue.py` | Lifecycle calls in push/pop |
+| `agent/job_queue.py` | Lifecycle calls in push/pop |
 | `monitoring/session_watchdog.py` | Stall detection (`check_stalled_sessions()`) |
 | `monitoring/session_status.py` | CLI session status report |
 | `tests/test_lifecycle_transition.py` | Integration tests for lifecycle logging |
@@ -113,72 +114,10 @@ When sessions fail, the `summary` field on `AgentSession` is now populated with 
 
 Summaries are truncated to 500 characters at capture time. The `AgentSession.summary` field supports up to 50,000 characters, but concise one-line summaries are preferred since full tracebacks are available in `bridge.log`.
 
-## Crash-Path Diagnostic Snapshot (#626)
-
-When a session terminates (whether by failure, cancellation, or normal completion), the worker `finally` block saves a diagnostic snapshot **before** calling `_complete_agent_session()`. A nudge guard then re-reads the session from Redis: if the session status is `"pending"` (nudge enqueued) or the session no longer exists (nudge fallback recreated it), completion is skipped to avoid overwriting the nudge. Otherwise, `_complete_agent_session()` proceeds normally. See [Session Lifecycle](session-lifecycle.md) for the full zombie loop prevention design.
-
-### What Gets Captured
-
-The `save_session_snapshot()` call records:
-
-| Field | Source | Purpose |
-|-------|--------|---------|
-| `event` | `"crash"` or `"complete"` | Distinguishes failure from clean exit |
-| `session_id` | `session.session_id` | Links to bridge session context |
-| `agent_session_id` | `session.agent_session_id` | Links to queue-level record |
-| `project_key` | `session.project_key` | Scopes to project |
-| `tool_count` | `get_activity()` | Number of tools invoked during session |
-| `trigger` | `"finally_block"` | Identifies snapshot origin |
-
-### Tool Count Fallback
-
-The `get_activity()` function in `agent/hooks/session_registry.py` retrieves tool counts for heartbeat and snapshot reporting. It uses a reverse lookup from `_uuid_to_bridge_id` to find the session's activity record. When this reverse lookup fails (e.g., the pending-to-UUID promotion never happened because the session crashed early), the function now falls back to `health_check._tool_counts`, which is the authoritative counter incremented on every tool call.
-
-```
-# Normal path: reverse UUID lookup finds activity in _sessions dict
-get_activity("bridge_session_123") -> {"tool_count": 42, "last_tools": ["Read", "Bash"]}
-
-# Fallback path: UUID lookup fails, reads from health_check counter
-get_activity("bridge_session_123") -> {"tool_count": 42, "last_tools": []}
-```
-
-The fallback logs a WARNING so the underlying registration gap can be investigated:
-```
-[session_registry] get_activity reverse lookup failed for bridge_session_123, falling back to health_check count=42
-```
-
-### Task Await (Exception Propagation)
-
-The `_execute_agent_session()` function previously used a `while task.is_running` / `sleep(2)` polling loop to wait for the background task. Exceptions that escaped `BackgroundTask._run_work` were silently swallowed because the polling loop only checked `is_running`, not the task's exception state.
-
-The fix replaces the polling loop with `await task._task`, which directly awaits the asyncio future. Any exception that escapes `_run_work` propagates immediately to the caller, where it is caught and stored in `task._error` for downstream handling.
-
-### Troubleshooting
-
-**Heartbeat shows stale tool count (0 tools when session clearly ran tools)**
-
-This occurs when the session registry's reverse UUID lookup fails. The `get_activity()` fallback to `health_check._tool_counts` was added to address this. If you see the WARNING log `get_activity reverse lookup failed`, the fallback is working. The root cause is that `_uuid_to_bridge_id` was never populated -- typically because the session crashed before the pending-to-UUID promotion in `_pop_agent_session()` completed.
-
-**Session dies with no trace in logs or snapshots**
-
-Before #626, if a session crashed after `_complete_agent_session()` ran but before any snapshot was saved, the session vanished. The crash snapshot in the `finally` block now runs before completion, ensuring at least one diagnostic record exists for every terminated session.
-
-### Files
-
-| File | Change |
-|------|--------|
-| `agent/agent_session_queue.py` | Crash snapshot in finally, task await, lifecycle logging |
-| `agent/hooks/session_registry.py` | Tool count fallback to `health_check._tool_counts` |
-| `tests/unit/test_crash_snapshot.py` | Tests for snapshot saving on all termination paths |
-| `tests/unit/test_session_registry_fallback.py` | Tests for tool count fallback behavior |
-
 ## Related
 
 - [Session Watchdog](session-watchdog.md) — Existing session health monitoring (silence, loops, errors, duration)
-- [Agent Session Health Monitor](agent-session-health-monitor.md) — Queue-level stuck session recovery
+- [Job Health Monitor](job-health-monitor.md) — Queue-level stuck job recovery
 - [Bridge Self-Healing](bridge-self-healing.md) — Process-level bridge health
 - [AgentSession Model](agent-session-model.md) — Unified session lifecycle model
-- [Agent Session Queue Reliability](agent-session-queue.md) — Queue-level reliability fixes
-- [Session Lifecycle](session-lifecycle.md) — Session state machine, zombie loop prevention
-- Issue #216 — Original tracking issue
-- Issue #626 — Silent session death fixes
+- Issue #216 — Tracking issue

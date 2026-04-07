@@ -17,18 +17,18 @@ The old system categorized output into five types (`QUESTION`, `STATUS_UPDATE`, 
 
 ## Auto-Continue
 
-The bridge uses a two-path auto-continue strategy based on whether the session is an SDLC pipeline session or a casual/ad-hoc session.
+The bridge uses a two-path auto-continue strategy based on whether the job is an SDLC pipeline job or a casual/ad-hoc job.
 
 ### Nudge Loop Routing (Current)
 
-All output routing decisions are made by the nudge loop in `agent/agent_session_queue.py`:
+All output routing decisions are made by the nudge loop in `agent/job_queue.py`:
 
 1. Worker agent produces output
 2. **Pipeline State Machine** (`bridge/pipeline_state.py`) tracks stage transitions on `AgentSession.stage_states`
 3. **Nudge loop** evaluates the output and session state:
    - **Nudge**: Re-enqueue with a continuation message to keep the agent working
    - **Deliver**: Send output to Telegram for human review
-4. **Hard guard** in `agent_session_queue.py`: nudge cap enforced
+4. **Hard guard** in `job_queue.py`: nudge cap enforced
 
 ### Decision Matrix
 
@@ -38,7 +38,7 @@ All output routing decisions are made by the nudge loop in `agent/agent_session_
 | Stages remaining | Genuine question for human | Deliver |
 | Stages remaining | Error/blocker | Deliver |
 | All stages done | Completion with evidence | Deliver |
-| Non-SDLC session | Any output | Deliver |
+| Non-SDLC job | Any output | Deliver |
 | Cap reached (50 nudges) | Any | Deliver (hard guard) |
 
 ### Safety Limits
@@ -68,9 +68,9 @@ logs/sessions/
 
 | Event | When Saved | What Is Captured |
 |---|---|---|
-| `resume` | Session starts or resumes | Session ID, session ID, sender, message preview |
+| `resume` | Job starts or resumes | Session ID, job ID, sender, message preview |
 | `auto_continue` | Status update triggers auto-continue | Classification result, continue count, message preview |
-| `error` | Agent encounters an error | Error details, session ID |
+| `error` | Agent encounters an error | Error details, job ID |
 | `complete` | Job finishes successfully | Job ID, sender |
 
 ### Cleanup
@@ -84,17 +84,17 @@ The thumbs-up emoji reaction (👍) in Telegram serves as a **human-to-human** c
 **Telethon cannot receive emoji reaction events** for user accounts -- this is a Telegram API limitation. Therefore:
 
 - The 👍 reaction is purely a visual signal between humans in the group chat
-- `mark_work_done()` is called **automatically** at session completion in `agent/agent_session_queue.py`
+- `mark_work_done()` is called **automatically** at job completion in `agent/job_queue.py`
 - No reaction handler exists or is needed in the bridge
 
 ## Relevant Files
 
 | File | Purpose |
 |---|---|
-| `agent/agent_session_queue.py` | Nudge loop: output routing decisions (deliver or nudge) |
+| `agent/job_queue.py` | Nudge loop: output routing decisions (deliver or nudge) |
 | `bridge/pipeline_state.py` | Pipeline state machine for stage tracking |
 | `bridge/session_logs.py` | `save_session_snapshot()`, `cleanup_old_snapshots()` |
-| `agent/agent_session_queue.py` | Observer wiring in `send_to_chat`, hard cap enforcement, `mark_work_done()` |
+| `agent/job_queue.py` | Observer wiring in `send_to_chat`, hard cap enforcement, `mark_work_done()` |
 | `models/agent_session.py` | `is_sdlc` (property, 2-check: stage_states then classification_type), `has_remaining_stages()`, `has_failed_stage()` (both delegate to PipelineStateMachine), `queued_steering_messages` |
 | `CLAUDE.md` | Auto-continue rules documentation |
 

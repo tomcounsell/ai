@@ -7,10 +7,10 @@ Run with: pytest tools/test-scheduler/tests/ -v
 import time
 
 from tools.test_scheduler import (
-    cancel_session,
-    get_session_results,
-    get_session_status,
-    list_sessions,
+    cancel_job,
+    get_job_results,
+    get_job_status,
+    list_jobs,
     schedule_tests,
 )
 
@@ -47,7 +47,7 @@ class TestScheduleTests:
         result = schedule_tests("pytest tests/ -v")
 
         assert "error" not in result
-        assert "agent_session_id" in result
+        assert "job_id" in result
         assert result["status"] == "scheduled"
 
     def test_schedule_generic(self):
@@ -55,7 +55,7 @@ class TestScheduleTests:
         result = schedule_tests("echo 'test'")
 
         assert "error" not in result
-        assert "agent_session_id" in result
+        assert "job_id" in result
 
     def test_test_count(self):
         """Test count is returned."""
@@ -65,39 +65,39 @@ class TestScheduleTests:
         assert result["test_count"] >= 1
 
 
-class TestSessionStatus:
-    """Test session status retrieval."""
+class TestJobStatus:
+    """Test job status retrieval."""
 
     def test_get_status(self):
-        """Get session status."""
+        """Get job status."""
         schedule_result = schedule_tests("echo 'hello'")
-        agent_session_id = schedule_result["agent_session_id"]
+        job_id = schedule_result["job_id"]
 
-        # Wait briefly for session to complete
+        # Wait briefly for job to complete
         time.sleep(1)
 
-        status = get_session_status(agent_session_id)
+        status = get_job_status(job_id)
 
         assert "error" not in status
-        assert status["agent_session_id"] == agent_session_id
+        assert status["job_id"] == job_id
 
-    def test_unknown_session(self):
-        """Unknown session returns error."""
-        result = get_session_status("nonexistent")
+    def test_unknown_job(self):
+        """Unknown job returns error."""
+        result = get_job_status("nonexistent")
         assert "error" in result
 
 
-class TestSessionCompletion:
-    """Test session completion and results."""
+class TestJobCompletion:
+    """Test job completion and results."""
 
-    def test_session_completes(self):
-        """Session completes successfully."""
+    def test_job_completes(self):
+        """Job completes successfully."""
         result = schedule_tests("echo 'test'")
-        agent_session_id = result["agent_session_id"]
+        job_id = result["job_id"]
 
         # Wait for completion
         for _ in range(10):
-            status = get_session_status(agent_session_id)
+            status = get_job_status(job_id)
             if status.get("status") == "completed":
                 break
             time.sleep(0.5)
@@ -108,42 +108,42 @@ class TestSessionCompletion:
     def test_get_results(self):
         """Get detailed results."""
         result = schedule_tests("echo 'test'")
-        agent_session_id = result["agent_session_id"]
+        job_id = result["job_id"]
 
         # Wait for completion
         time.sleep(2)
 
-        results = get_session_results(agent_session_id)
+        results = get_job_results(job_id)
 
         if results.get("status") == "completed" or "results" in results:
             assert "results" in results
 
 
-class TestListSessions:
-    """Test session listing."""
+class TestListJobs:
+    """Test job listing."""
 
-    def test_list_sessions(self):
-        """List all sessions."""
-        # Schedule a session first
+    def test_list_jobs(self):
+        """List all jobs."""
+        # Schedule a job first
         schedule_tests("echo 'test'")
 
-        result = list_sessions()
+        result = list_jobs()
 
-        assert "sessions" in result
+        assert "jobs" in result
         assert "total" in result
 
     def test_filter_by_status(self):
-        """Filter sessions by status."""
-        result = list_sessions(status_filter="completed")
+        """Filter jobs by status."""
+        result = list_jobs(status_filter="completed")
 
-        assert "sessions" in result
+        assert "jobs" in result
         assert result["filtered_by"] == "completed"
 
 
-class TestCancelSession:
-    """Test session cancellation."""
+class TestCancelJob:
+    """Test job cancellation."""
 
-    def test_cancel_unknown_session(self):
-        """Cancel unknown session returns error."""
-        result = cancel_session("nonexistent")
+    def test_cancel_unknown_job(self):
+        """Cancel unknown job returns error."""
+        result = cancel_job("nonexistent")
         assert "error" in result

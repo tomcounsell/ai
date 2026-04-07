@@ -15,7 +15,7 @@ last_comment_id:
 The SDLC pipeline has a graph-based routing system (`PIPELINE_EDGES` in `bridge/pipeline_graph.py`) that is well-designed, well-tested, and completely disconnected from the runtime execution path. Three separate routing implementations exist, only two are used at runtime, and neither uses the graph.
 
 **Current behavior:**
-- `_build_sdlc_stage_coaching()` in `bridge/coach.py` [NOTE: `bridge/coach.py` was deleted by PR #661; coaching logic moved to `bridge/session_coaching.py`] does a linear scan of `DISPLAY_STAGES` to find the first "pending" stage, ignoring the graph and its failure/cycle edges entirely
+- `_build_sdlc_stage_coaching()` in `bridge/coach.py` does a linear scan of `DISPLAY_STAGES` to find the first "pending" stage, ignoring the graph and its failure/cycle edges entirely
 - `_record_stage_on_parent()` in `agent/hooks/subagent_stop.py` always calls `complete_stage()`, never `fail_stage()` -- failed dev-sessions (test failures, review rejections) are recorded as successes
 - `classify_outcome()` in `bridge/pipeline_state.py` exists but is never called in production -- outcome detection from stop_reason and output patterns is dead code
 - `fail_stage()` exists but is never called in production -- the PATCH cycle path is dead code
@@ -44,7 +44,7 @@ The current (broken) flow when a dev-session completes:
 1. **Entry point**: DevSession finishes execution, SDK fires `subagent_stop` hook
 2. **`subagent_stop_hook()`** (`agent/hooks/subagent_stop.py`): Calls `_register_dev_session_completion()` which calls `_record_stage_on_parent()`
 3. **`_record_stage_on_parent()`**: Loads parent ChatSession, creates `PipelineStateMachine`, finds `current_stage()`, **always calls `complete_stage()`** regardless of actual outcome
-4. **Coach** (`bridge/coach.py` [deleted by PR #661; now `bridge/session_coaching.py`]): On next auto-continue, `_build_sdlc_stage_coaching()` scans `DISPLAY_STAGES` linearly for the first "pending" stage, ignoring graph edges
+4. **Coach** (`bridge/coach.py`): On next auto-continue, `_build_sdlc_stage_coaching()` scans `DISPLAY_STAGES` linearly for the first "pending" stage, ignoring graph edges
 5. **Dashboard** (`ui/data/sdlc.py`): If `stage_states` is empty, falls back to `_infer_stages_from_history()` heuristic
 
 The correct flow after this fix:
@@ -174,7 +174,7 @@ No update system changes required -- this feature is purely internal bridge/hook
 
 ## Agent Integration
 
-No agent integration required -- this is a bridge-internal change. The modifications are in hooks (`subagent_stop.py`, `pre_tool_use.py`), the coach (`bridge/session_coaching.py`, formerly `bridge/coach.py` which was deleted by PR #661), and the pipeline state machine (`bridge/pipeline_state.py`). No MCP server changes, no `.mcp.json` changes, no new tools exposed to the agent.
+No agent integration required -- this is a bridge-internal change. The modifications are in hooks (`subagent_stop.py`, `pre_tool_use.py`), the coach (`bridge/coach.py`), and the pipeline state machine (`bridge/pipeline_state.py`). No MCP server changes, no `.mcp.json` changes, no new tools exposed to the agent.
 
 ## Documentation
 

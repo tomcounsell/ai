@@ -1,71 +1,50 @@
 # AgentSession Model
 
-Unified Redis model tracking agent work from enqueue through completion. Replaces both `AgentSession` (queue) and `SessionLog` (transcript) with a single `AgentSession` model in `models/agent_session.py`.
+Unified Redis model tracking agent work from enqueue through completion. Replaces both `RedisJob` (queue) and `SessionLog` (transcript) with a single `AgentSession` model in `models/agent_session.py`.
 
 ## Status Lifecycle
 
 `pending` -> `running` -> `active` -> `dormant` -> `completed` | `failed` | `cancelled`
 
-The `cancelled` status is a terminal state set explicitly by the PM via `cancel_agent_session()`. Like `failed`, cancelled sessions block any sibling sessions that depend on them.
+The `cancelled` status is a terminal state set explicitly by the PM via `cancel_job()`. Like `failed`, cancelled jobs block any sibling jobs that depend on them.
 
 ## Key Fields
 
-**Identity:** `id` (AutoKeyField), `session_id`, `session_type` (KeyField), `project_key` (KeyField), `chat_id` (KeyField), `status` (IndexedField). `agent_session_id` is a backward-compatible property alias for `id`.
+**Queue-phase:** `job_id`, `project_key`, `status`, `priority`, `message_text`, `sender_name`, `chat_id`, `message_id`, `auto_continue_count`, `started_at`
 
-**Queue-phase:** `priority`, `scheduled_at` (DatetimeField), `created_at` (SortedField, datetime), `started_at` (DatetimeField), `updated_at` (DatetimeField, auto_now), `completed_at` (DatetimeField), `auto_continue_count`
+**Session-phase:** `turn_count`, `tool_call_count`, `log_path`, `summary`, `branch_name`, `tags`, `classification_type`, `session_mode`
 
-**Telegram origin (consolidated):** `initial_telegram_message` (DictField) — contains `sender_name`, `sender_id`, `message_text`, `telegram_message_id`, `chat_title`. Replaces the previous six separate fields. Property accessors (`sender_name`, `sender_id`, `message_text`) read from this dict for backward compatibility.
+**Semantic routing:** `context_summary` (what the session is about), `expectations` (what the agent needs from the human)
 
-**Session-phase:** `turn_count`, `tool_call_count`, `log_path`, `branch_name`, `tags`, `session_mode`, `context_summary`, `expectations`
+**Lifecycle:** `history` (ListField, append-only lifecycle events), `issue_url`, `plan_url`, `pr_url`
 
-**Extra context (consolidated):** `extra_context` (DictField) — contains `revival_context`, `classification_type`, `classification_confidence`, and other ad-hoc context. Property accessors expose individual fields.
+**Job dependencies:** `stable_job_id` (UUID, immutable across delete-and-recreate), `depends_on` (list of stable_job_id values), `commit_sha` (HEAD commit for checkpoint/restore)
 
-**Lifecycle:** `session_events` (ListField of `SessionEvent` dicts), `issue_url`, `plan_url`, `pr_url`
+## History Tracking
 
-**Parent-Child:** `parent_session_id` (KeyField), `parent_agent_session_id` (KeyField), `role` (DataField — "pm", "dev", or null), `slug`
-
-All timestamp fields use Popoto `DatetimeField` or `SortedField(type=datetime)` with proper UTC datetime objects. Float timestamps are auto-converted via `__setattr__`.
-
-## SessionEvent (Structured Event Log)
-
-`session_events` is a `ListField` of serialized `SessionEvent` Pydantic model dicts, replacing the old flat-string `history` field. Each event captures a lifecycle moment with typed fields.
-
-`SessionEvent` (defined in `models/session_event.py`) has:
-- `event_type` — `EventType` enum: `lifecycle`, `summary`, `delivery`, `stage`, `checkpoint`, `classify`, `system`, `user`
-- `timestamp` — Unix float timestamp
-- `text` — Human-readable description
-- `data` — Optional structured payload dict
-
-Factory methods: `SessionEvent.lifecycle()`, `.summary()`, `.delivery()`, `.stage_change()`, `.checkpoint()`, `.classify()`, `.system()`, `.user()`
-
-`append_event(event_type, text, data)` appends events capped at 20 entries. When truncation occurs, a `WARNING`-level log is emitted.
-
-### Derived Properties
-
-Several fields that were previously stored as independent model fields are now derived from the event log:
-
-| Property | Reads from | Write behavior |
-|----------|-----------|----------------|
-| `summary` | Last `summary` event text | Setter appends a `summary` event |
-| `result_text` | Last `delivery` event text | Setter appends a `delivery` event |
-| `stage_states` | Last `stage` event data | Setter appends a `stage` event |
-| `last_commit_sha` | Last `checkpoint` event text | Setter appends a `checkpoint` event |
-| `classification_type` | `extra_context["classification_type"]` | Setter updates `extra_context` |
-| `scheduling_depth` | Walks `parent_agent_session_id` chain (max 5) | Read-only |
+`append_history(role, text)` records lifecycle events capped at 20 entries. When truncation occurs, a `WARNING`-level log is emitted with the original length and number of dropped entries:
+- `[user]` - Original request
+- `[classify]` - Auto-classification result
+- `[summary]` - Session summary notes
 
 ## SDLC Stage Tracking
 
-Pipeline stage state is stored in `session_events` (as `stage` type events) on AgentSession, managed by the `PipelineStateMachine` in `bridge/pipeline_state.py`. The `stage_states` property reads the latest stage event's data and returns the stages dict. The state machine provides:
+Pipeline stage state is stored in the `stage_states` JSON field on AgentSession, managed by the `PipelineStateMachine` in `bridge/pipeline_state.py`. This is the single field for stage state -- the legacy `sdlc_stages` field was removed in PR #490 and all stage tracking is consolidated here. The state machine provides:
 
 | Method | Returns | Purpose |
 |---|---|---|
 | `PipelineStateMachine.has_remaining_stages()` | `bool` | `True` if pipeline graph has a non-terminal next stage from the last completed stage |
 | `PipelineStateMachine.has_failed_stage()` | `bool` | `True` if any stage has `FAILED` or `ERROR` status |
-| `PipelineStateMachine.get_display_progress()` | `dict` | Maps stage names to status — stored state only, no artifact inference |
+| `PipelineStateMachine.get_display_progress()` | `dict` | Maps stage names to status (`completed`, `in_progress`, `pending`, `failed`) |
+| `record_stage_completion(session, stage)` | `None` | Convenience helper that starts and completes a stage atomically |
 
 `is_sdlc` (property) returns `True` if either (1) `stage_states` contains any non-pending/non-ready stage, or (2) `classification_type == ClassificationType.SDLC` for freshly-classified sessions.
 
-String fields like `session_type`, `classification_type`, and `session_mode` use `StrEnum` members from `config/enums.py` (`SessionType`, `ClassificationType`, `ChatMode`). See [Standardized Enums](standardized-enums.md).
+String fields like `session_type`, `classification_type`, and `session_mode` use `StrEnum` members from `config/enums.py` (`SessionType`, `ClassificationType`, `ChatMode`). The `session_mode` field replaces the deprecated `qa_mode` boolean -- a backward-compatible `qa_mode` property reads `session_mode` first and falls back to the legacy `_qa_mode_legacy` field. See [Standardized Enums](standardized-enums.md).
+
+`_get_stage_states_dict()` parses the `stage_states` JSON field into a dict. It handles `None`, `dict`, and JSON string inputs.
+
+These are used by the [stage-aware auto-continue](bridge-workflow-gaps.md#stage-aware-path-sdlc-jobs) routing in `agent/job_queue.py`.
 
 ## Link Accumulation
 
@@ -78,11 +57,11 @@ Stage transitions are managed by the `PipelineStateMachine` in `bridge/pipeline_
 | Skill | Stage | Transitions | Links Set |
 |-------|-------|-------------|-----------|
 | `/sdlc` | ISSUE | `completed` after issue verified | `issue-url` |
-| `/do-plan` | PLAN | `in_progress` -> `completed` | `plan-url` |
-| `/do-build` | BUILD | `in_progress` -> `completed` | `pr-url` |
-| `/do-test` | TEST | `in_progress` -> `completed` or `failed` | — |
-| `/do-pr-review` | REVIEW | `in_progress` -> `completed` | — |
-| `/do-docs` | DOCS | `in_progress` -> `completed` | — |
+| `/do-plan` | PLAN | `in_progress` → `completed` | `plan-url` |
+| `/do-build` | BUILD | `in_progress` → `completed` | `pr-url` |
+| `/do-test` | TEST | `in_progress` → `completed` or `failed` | — |
+| `/do-pr-review` | REVIEW | `in_progress` → `completed` | — |
+| `/do-docs` | DOCS | `in_progress` → `completed` | — |
 
 ### Session Lookup Chain
 
@@ -112,7 +91,7 @@ The env var is only set when `session_id` is non-None (i.e., when the SDK is inv
 
 ### task_list_id Persistence
 
-`task_list_id` is computed in `_execute_agent_session()` and persisted to the `AgentSession` immediately after the session is found:
+`task_list_id` is computed in `_execute_job()` and persisted to the `AgentSession` immediately after the session is found:
 
 - **Tier 1 (ad-hoc):** `thread-{chat_id}-{root_msg_id}`
 - **Tier 2 (planned work):** The work item slug (e.g., `bridge-sdk-fix`)
@@ -123,8 +102,8 @@ This ensures hooks can resolve sessions via `task_list_id` even if `VALOR_SESSIO
 
 - `_find_session()` catches Redis connection errors and returns `None`
 - `main()` exits 0 when no session is found (fire-and-forget)
-- Debug logging on `append_event()`, `set_link()`, `get_stage_progress()` via `logging.getLogger(__name__)`
-- WARNING-level logging on `append_event()` and `set_link()` save failures, including operation context (role, field name)
+- Debug logging on `append_history()`, `set_link()`, `get_stage_progress()` via `logging.getLogger(__name__)`
+- WARNING-level logging on `append_history()` and `set_link()` save failures, including operation context (role, field name)
 
 ## Session Lifecycle Integrity
 
@@ -132,44 +111,33 @@ This ensures hooks can resolve sessions via `task_list_id` even if `VALOR_SESSIO
 
 Each `session_id` has exactly one `AgentSession` at any time. The `AgentSession` is the single source of truth for all session metadata -- no state needs to be passed as parameters between functions.
 
-**Session creation:** `_push_agent_session()` creates the session at enqueue time. `start_transcript()` updates the existing session with transcript-phase fields (log_path, branch_name, etc.) instead of creating a duplicate.
+**Session creation:** `_push_job()` creates the session at enqueue time. `start_transcript()` updates the existing session with transcript-phase fields (log_path, branch_name, etc.) instead of creating a duplicate.
 
-**Auto-continue reuse:** When `_enqueue_continuation()` fires, it reuses the existing session via delete-and-recreate rather than calling `enqueue_agent_session()` which would create a new orphaned record. This preserves all metadata automatically:
-- `classification_type` (via `extra_context`)
-- `session_events` (stage progress tracking)
+**Auto-continue reuse:** When `_enqueue_continuation()` fires, it reuses the existing session via delete-and-recreate rather than calling `enqueue_job()` which would create a new orphaned record. This preserves all metadata automatically:
+- `classification_type` (SDLC routing decisions)
+- `history` (stage progress tracking)
 - `issue_url`, `plan_url`, `pr_url` (link accumulation)
 - `context_summary`, `expectations` (semantic routing)
 
-Only four fields change during continuation: `status` (reset to "pending"), `initial_telegram_message.message_text` (nudge feedback), `auto_continue_count` (incremented), and `priority` (set to "high").
+Only four fields change during continuation: `status` (reset to "pending"), `message_text` (coaching message), `auto_continue_count` (incremented), and `priority` (set to "high").
 
-**Fresh reads in routing:** The `send_to_chat` closure in `_execute_agent_session()` re-reads the `AgentSession` from Redis before making routing decisions. This ensures `is_sdlc` and `stage_states` data are current, not the stale in-memory copy captured at session start.
+**Fresh reads in routing:** The `send_to_chat` closure in `_execute_job()` re-reads the `AgentSession` from Redis before making routing decisions. This ensures `is_sdlc` and `stage_states` data are current, not the stale in-memory copy captured at job start.
 
 ### Field Preservation on Status Change
 
-`status` is a Popoto `IndexedField`, so changing it only requires mutating the field and calling `.save()` — no delete-and-recreate needed.
+`status` is a Popoto `KeyField`, so changing it requires delete-and-recreate. The `_JOB_FIELDS` list in `agent/job_queue.py` enumerates all fields that must be preserved during delete-and-recreate operations. This list must be kept in sync with `AgentSession` model fields -- missing fields are silently dropped.
+
+Fields preserved: all queue-phase fields, session-phase fields, semantic routing fields (`context_summary`, `expectations`), history, and link URLs. The `_extract_job_fields()` helper reads every field in `_JOB_FIELDS` from the old session and passes them to `async_create()` on the new one.
 
 ## Backward Compatibility
 
-- `_normalize_kwargs()` maps deprecated field names to their new consolidated equivalents: `message_text`, `sender_name`, `sender_id`, `telegram_message_id`, `chat_title` -> `initial_telegram_message`; `revival_context`, `classification_type`, `classification_confidence` -> `extra_context`; `work_item_slug` -> `slug`; `last_activity` -> `updated_at`; `scheduled_after` -> `scheduled_at`; `history` -> `session_events`
-- `__setattr__` auto-converts float timestamps to `datetime` for DatetimeField fields
-- Property accessors provide read access to legacy field names (`sender_name`, `message_text`, etc.)
 - `models/session_log.py` exports `SessionLog = AgentSession` (shim)
-- No Redis data migration needed for new sessions; existing sessions can be migrated with `scripts/migrate_datetime_fields.py`
-
-## Migration
-
-For existing Redis data with float timestamps or flat history strings:
-
-```bash
-# Preview changes
-python scripts/migrate_datetime_fields.py --dry-run
-
-# Run migration
-python scripts/migrate_datetime_fields.py
-```
+- `agent/job_queue.py` exports `RedisJob = AgentSession` (alias)
+- No Redis data migration needed - old keys age out via TTL
 
 ## Related
 
 - [Session Transcripts](session-transcripts.md) - Transcript file logging
 - [Session Tagging](session-tagging.md) - Auto-tagging system
 - [Summarizer Format](summarizer-format.md) - Bullet-point summaries
+- [Job Dependency Tracking](job-dependency-tracking.md) - Sibling dependencies, branch mapping, checkpoint/restore

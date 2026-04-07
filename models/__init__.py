@@ -4,7 +4,7 @@ Provides fast, queryable Redis models for all persistent data:
 - TelegramMessage: incoming/outgoing Telegram messages (source of truth)
 - Link: URLs shared in Telegram chats
 - Chat: Telegram chat ID to name mapping
-- AgentSession: unified agent work lifecycle
+- AgentSession: unified agent work lifecycle (replaces RedisJob + SessionLog)
 - BridgeEvent: structured bridge events for analytics
 - DeadLetter: failed message queue
 - Reflection: per-reflection scheduler state (unified recurring task tracking)
@@ -13,7 +13,6 @@ Provides fast, queryable Redis models for all persistent data:
 - DedupRecord: per-chat message deduplication tracking
 - ObserverTelemetry: observer agent telemetry counters and events
 - Memory: subconscious memory records (human instructions, agent observations)
-- TeammateMetrics: teammate mode classification counters and response times
 """
 
 from models.agent_session import AgentSession
@@ -25,7 +24,6 @@ from models.link import Link
 from models.memory import Memory
 from models.reflection import Reflection
 from models.reflections import ReflectionIgnore, ReflectionRun
-from models.teammate_metrics import TeammateMetrics
 from models.telegram import TelegramMessage
 from models.telemetry import ObserverTelemetry
 
@@ -42,7 +40,6 @@ __all__ = [
     "Reflection",
     "ReflectionIgnore",
     "ReflectionRun",
-    "TeammateMetrics",
     "TelegramMessage",
     "Chat",
     "Link",

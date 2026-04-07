@@ -1,0 +1,279 @@
+"""Tests for job queue race condition fixes and KeyField index corruption prevention.
+
+Validates the delete-and-recreate pattern used by _pop_job,
+_recover_interrupted_jobs_startup, and the drain guard in _worker_loop.
+
+All tests use redis_test_db fixture (autouse=True in conftest.py) for isolation.
+"""
+
+import time
+
+import pytest
+
+from agent.job_queue import (
+    DRAIN_TIMEOUT,
+    _extract_job_fields,
+    _pop_job,
+    _pop_job_with_fallback,
+    _recover_interrupted_jobs_startup,
+)
+from models.agent_session import AgentSession
+
+
+def _create_test_job(**overrides) -> AgentSession:
+    """Create an AgentSession with sensible defaults for testing."""
+    defaults = {
+        "project_key": "test",
+        "status": "pending",
+        "priority": "high",
+        "created_at": time.time(),
+        "session_id": "test_session",
+        "working_dir": "/tmp/test",
+        "message_text": "test message",
+        "sender_name": "Test",
+        "chat_id": "123",
+        "telegram_message_id": 1,
+    }
+    defaults.update(overrides)
+    return AgentSession.create(**defaults)
+
+
+class TestExtractJobFields:
+    """Tests for the _extract_job_fields helper."""
+
+    def test_returns_complete_field_set(self):
+        """All non-auto fields should be present in the extracted dict."""
+        job = _create_test_job(
+            sender_id=42,
+            chat_title="Test Chat",
+            revival_context="some context",
+            work_item_slug="my-feature",
+            task_list_id="thread-123-456",
+            classification_type="bug",
+            auto_continue_count=2,
+        )
+
+        fields = _extract_job_fields(job)
+
+        # job_id should NOT be in extracted fields (it's AutoKeyField)
+        assert "job_id" not in fields
+
+        # All other fields should be present
+        assert fields["project_key"] == "test"
+        assert fields["status"] == "pending"
+        assert fields["priority"] == "high"
+        assert fields["created_at"] is not None
+        assert fields["session_id"] == "test_session"
+        assert fields["working_dir"] == "/tmp/test"
+        assert fields["message_text"] == "test message"
+        assert fields["sender_name"] == "Test"
+        assert fields["sender_id"] == 42
+        assert fields["chat_id"] == "123"
+        assert fields["telegram_message_id"] == 1
+        assert fields["chat_title"] == "Test Chat"
+        assert fields["revival_context"] == "some context"
+        assert fields["work_item_slug"] == "my-feature"
+        assert fields["task_list_id"] == "thread-123-456"
+        assert fields["classification_type"] == "bug"
+        assert fields["auto_continue_count"] == 2
+
+    def test_extracted_fields_can_recreate_job(self):
+        """Extracted fields should be usable for AgentSession.create()."""
+        original = _create_test_job()
+        fields = _extract_job_fields(original)
+
+        # Should create successfully without errors
+        new_job = AgentSession.create(**fields)
+        assert new_job.job_id != original.job_id  # New auto-generated ID
+        assert new_job.project_key == original.project_key
+        assert new_job.message_text == original.message_text
+
+
+class TestPopJobDeleteAndRecreate:
+    """Tests for _pop_job using delete-and-recreate to prevent stale index entries."""
+
+    @pytest.mark.asyncio
+    async def test_pop_job_no_stale_pending(self):
+        """After popping a job, it should NOT appear in the pending index."""
+        _create_test_job()
+
+        # Verify it's in pending
+        pending_before = AgentSession.query.filter(project_key="test", status="pending")
+        assert len(pending_before) == 1
+
+        # Pop the job
+        job = await _pop_job("123")
+        assert job is not None
+
+        # The old pending entry should be gone
+        pending_after = AgentSession.query.filter(project_key="test", status="pending")
+        assert len(pending_after) == 0, "Stale pending index entry found after _pop_job"
+
+        # The job should be in the running index
+        running = AgentSession.query.filter(project_key="test", status="running")
+        assert len(running) == 1
+
+    @pytest.mark.asyncio
+    async def test_pop_job_returns_none_on_empty_queue(self):
+        """_pop_job should return None when no pending jobs exist."""
+        result = await _pop_job("123")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_pop_job_preserves_fields(self):
+        """The popped job should retain all original field values."""
+        original = _create_test_job(
+            session_id="preserve_test",
+            sender_name="FieldCheck",
+            auto_continue_count=3,
+        )
+
+        job = await _pop_job("123")
+        assert job is not None
+        assert job.session_id == "preserve_test"
+        assert job.sender_name == "FieldCheck"
+        assert job.auto_continue_count == 3
+        # job_id changes (new object), but all other fields preserved
+        assert job.job_id != original.job_id
+
+    @pytest.mark.asyncio
+    async def test_pop_job_respects_priority_order(self):
+        """High priority jobs should be popped before low priority."""
+        _create_test_job(
+            priority="low",
+            message_text="low priority",
+            created_at=time.time(),
+        )
+        _create_test_job(
+            priority="high",
+            message_text="high priority",
+            created_at=time.time() + 1,
+        )
+
+        job = await _pop_job("123")
+        assert job is not None
+        assert job.message_text == "high priority"
+
+
+class TestRecoverInterruptedJobsStartup:
+    """Tests for _recover_interrupted_jobs_startup delete-and-recreate pattern."""
+
+    def test_no_stale_running_after_recovery(self):
+        """After recovery, no jobs should remain in the running index."""
+        _create_test_job(status="running", session_id="crashed_session")
+
+        running_before = AgentSession.query.filter(status="running")
+        assert len(running_before) == 1
+
+        recovered = _recover_interrupted_jobs_startup()
+        assert recovered == 1
+
+        running_after = AgentSession.query.filter(status="running")
+        assert len(running_after) == 0
+
+        pending = AgentSession.query.filter(status="pending")
+        assert len(pending) == 1
+        assert pending[0].priority == "high"
+        assert pending[0].session_id == "crashed_session"
+
+    def test_recover_multiple_running_jobs(self):
+        """Recovery should handle multiple running jobs."""
+        _create_test_job(status="running", session_id="s1", message_text="msg1")
+        _create_test_job(status="running", session_id="s2", message_text="msg2")
+
+        recovered = _recover_interrupted_jobs_startup()
+        assert recovered == 2
+
+        running = AgentSession.query.filter(status="running")
+        assert len(running) == 0
+
+        pending = AgentSession.query.filter(status="pending")
+        assert len(pending) == 2
+
+    def test_recover_returns_zero_when_nothing_to_recover(self):
+        """Recovery should return 0 when no running jobs exist."""
+        recovered = _recover_interrupted_jobs_startup()
+        assert recovered == 0
+
+
+class TestDrainGuard:
+    """Tests for the Event-based worker drain guard logic.
+
+    Validates the drain strategy: asyncio.Event notification from enqueue_job(),
+    with sync Popoto fallback via _pop_job_with_fallback() on timeout.
+    """
+
+    def test_drain_timeout_is_configurable_constant(self):
+        """DRAIN_TIMEOUT should be a module-level constant, not hardcoded."""
+        assert isinstance(DRAIN_TIMEOUT, int | float)
+        assert DRAIN_TIMEOUT > 0
+
+    @pytest.mark.asyncio
+    async def test_pop_job_with_fallback_finds_job_via_sync_query(self):
+        """_pop_job_with_fallback should find a pending job even when
+        _pop_job would miss it due to index visibility issues.
+
+        Since we can't easily reproduce the index race in tests, we test
+        the happy path: a job exists and _pop_job_with_fallback finds it.
+        """
+        _create_test_job(message_text="fallback target")
+
+        result = await _pop_job_with_fallback("123")
+        assert result is not None
+        assert result.message_text == "fallback target"
+
+    @pytest.mark.asyncio
+    async def test_pop_job_with_fallback_returns_none_when_empty(self):
+        """_pop_job_with_fallback should return None when no pending jobs exist."""
+        result = await _pop_job_with_fallback("123")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_pop_job_with_fallback_respects_priority(self):
+        """Sync fallback should respect priority ordering like _pop_job."""
+        _create_test_job(priority="low", message_text="low prio", created_at=time.time())
+        _create_test_job(priority="high", message_text="high prio", created_at=time.time() + 1)
+
+        result = await _pop_job_with_fallback("123")
+        assert result is not None
+        assert result.message_text == "high prio"
+
+    @pytest.mark.asyncio
+    async def test_pop_job_with_fallback_transitions_to_running(self):
+        """_pop_job_with_fallback should transition the job from pending to running."""
+        _create_test_job(message_text="status check")
+
+        result = await _pop_job_with_fallback("123")
+        assert result is not None
+
+        # No pending jobs should remain
+        pending = AgentSession.query.filter(chat_id="123", status="pending")
+        assert len(pending) == 0
+
+        # One running job should exist
+        running = AgentSession.query.filter(chat_id="123", status="running")
+        assert len(running) == 1
+
+    @pytest.mark.asyncio
+    async def test_event_based_drain_catches_late_job(self):
+        """When _pop_job returns None, creating a job should be found by fallback."""
+        # First call: no jobs
+        result1 = await _pop_job("123")
+        assert result1 is None
+
+        # Simulate a late-arriving job
+        _create_test_job(message_text="late arrival")
+
+        # Fallback should find it
+        result2 = await _pop_job_with_fallback("123")
+        assert result2 is not None
+        assert result2.message_text == "late arrival"
+
+    @pytest.mark.asyncio
+    async def test_drain_exits_when_truly_empty(self):
+        """When queue is truly empty, both _pop_job and fallback return None."""
+        result1 = await _pop_job("123")
+        assert result1 is None
+
+        result2 = await _pop_job_with_fallback("123")
+        assert result2 is None

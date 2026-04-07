@@ -28,7 +28,7 @@ Session stalls
   -> Compute backoff: min(10s * 2^retry_count, 300s)
   -> Wait for backoff duration
   -> Re-enqueue with retry context via delete-and-recreate
-  -> Worker picks up retry session
+  -> Worker picks up retry job
   -> Agent continues with context about prior stall
 ```
 
@@ -77,7 +77,7 @@ All settings are configurable via environment variables with safe defaults:
 - `retry_count` (int, default=0): How many times the session has been retried after stall detection
 - `last_stall_reason` (str, nullable): Diagnostic context from the most recent stall
 
-Both fields are preserved across the delete-and-recreate pattern via `_AGENT_SESSION_FIELDS` in `agent/agent_session_queue.py`.
+Both fields are preserved across the delete-and-recreate pattern via `_JOB_FIELDS` in `agent/job_queue.py`.
 
 ### Functions (`monitoring/session_watchdog.py`)
 
@@ -102,7 +102,7 @@ Originally added in #342, enhanced in #402. When a pending session is stalled (e
 
 ### Why Ensure-Only Was Insufficient
 
-The original #342 fix called `_ensure_worker()` for stalled pending sessions. This handled Race 2 (worker exits before pickup) but was a no-op when the worker was alive but stuck processing a different session — `_ensure_worker()` saw the existing worker as "alive" and did nothing. Sessions would stall indefinitely with the watchdog logging the same warning every 5 minutes.
+The original #342 fix called `_ensure_worker()` for stalled pending sessions. This handled Race 2 (worker exits before pickup) but was a no-op when the worker was alive but stuck processing a different job — `_ensure_worker()` saw the existing worker as "alive" and did nothing. Sessions would stall indefinitely with the watchdog logging the same warning every 5 minutes.
 
 ### Recovery Flow
 
@@ -115,7 +115,7 @@ Pending session stalled > 5 min
   -> _kill_stalled_worker(project_key) cancels stuck worker
   -> asyncio.sleep(backoff) with exponential delay
   -> _enqueue_stall_retry(session, reason) re-enqueues with retry context
-  -> Fresh worker picks up the re-enqueued session
+  -> Fresh worker picks up the re-enqueued job
   -> Session progresses normally
 ```
 
@@ -130,7 +130,7 @@ Pending session stalled (retry_count >= STALL_MAX_RETRIES)
 
 ### Stale Save Guard
 
-Also added in #342. The `_execute_agent_session()` epilogue previously called `agent_session.save()` when `defer_reaction=True` (auto-continue deferred). This resurrected a ghost session record in Redis because `_enqueue_continuation()` had already deleted the old session and created a fresh pending one. The stale save is now skipped entirely with a debug log.
+Also added in #342. The `_execute_job()` epilogue previously called `agent_session.save()` when `defer_reaction=True` (auto-continue deferred). This resurrected a ghost session record in Redis because `_enqueue_continuation()` had already deleted the old session and created a fresh pending one. The stale save is now skipped entirely with a debug log.
 
 ### Function: `_recover_stalled_pending(stalled)`
 
@@ -142,7 +142,7 @@ In `monitoring/session_watchdog.py`. Called from the watchdog loop after `check_
 
 ## Race Condition Mitigations
 
-- Watchdog operates on `active` sessions; agent session health monitor operates on `running` sessions with dead workers. Different status categories prevent overlap.
+- Watchdog operates on `active` sessions; job health monitor operates on `running` sessions with dead workers. Different status categories prevent overlap.
 - The delete-and-recreate pattern is atomic at the Redis level.
 - `_safe_abandon_session()` catches `ModelException` for concurrent modification.
 - **Stale save guard** (#342): When `defer_reaction=True`, the epilogue skips `agent_session.save()` to prevent resurrecting deleted sessions.
@@ -152,6 +152,6 @@ In `monitoring/session_watchdog.py`. Called from the watchdog loop after `check_
 
 - [Session Lifecycle Diagnostics](session-lifecycle-diagnostics.md): Foundation for stall detection (`LIFECYCLE_STALL` log entries)
 - [Session Watchdog](session-watchdog.md): The monitoring loop that runs stall checks
-- [Agent Session Health Monitor](agent-session-health-monitor.md): Complementary liveness monitor for running sessions with dead workers
+- [Job Health Monitor](job-health-monitor.md): Complementary liveness monitor for running jobs with dead workers
 - [Bridge Workflow Gaps](bridge-workflow-gaps.md): Auto-continue mechanism that retry builds upon
 - [Session Watchdog Reliability](session-watchdog-reliability.md): Activity-based stall detection and observer circuit breaker

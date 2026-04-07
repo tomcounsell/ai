@@ -100,25 +100,23 @@ Log rotation uses a dual-mechanism approach: Python-managed rotation for applica
 
 **Python-managed logs** (auto-rotate on write via `RotatingFileHandler`, 10MB max, 5 backups):
 - `bridge.log` — configured in `bridge/telegram_bridge.py`
-- `watchdog.log` — configured in `monitoring/bridge_watchdog.py`
-- `reflections.log` — configured in `scripts/reflections.py`
 
 **Shell-rotated logs** (`rotate_log()` in `valor-service.sh`, runs at bridge startup, 10MB max, 3 backups):
-- `bridge.error.log`, `reflections_error.log`
+- `bridge.error.log`, `watchdog.log`, `reflections.log`, `reflections_error.log`
 
 **newsyslog safety net** (`config/newsyslog.valor.conf`, installed to `/etc/newsyslog.d/valor.conf`): Covers all 5 launchd-managed logs with hourly checks, 10MB max, 5 bzip2-compressed backups. Uses the `N` flag (no signal) because launchd holds file descriptors open. Acts as a backup if the bridge doesn't restart for extended periods.
 
 ### 6. Startup Redis Key Cleanup (`bridge/telegram_bridge.py`)
 
-**Problem**: Stale Redis entries with non-standard 60-character `agent_session_id` keys (from historical data or crashes) trigger popoto validation errors on every query scan, generating thousands of error log entries.
+**Problem**: Stale Redis entries with non-standard 60-character `job_id` keys (from historical data or crashes) trigger popoto validation errors on every query scan, generating thousands of error log entries.
 
-**Solution**: On bridge startup, before recovering interrupted/orphaned sessions, the bridge calls `AgentSession.rebuild_indexes()` (SCAN-based, production-safe) to purge Redis set entries that point to missing or invalid objects. This is a one-time cleanup that prevents the validation errors from recurring. See [Popoto Index Hygiene](popoto-index-hygiene.md) for the daily automated cleanup reflection that supplements this startup check.
+**Solution**: On bridge startup, before recovering interrupted/orphaned jobs, the bridge calls `AgentSession.query.keys(clean=True)` to purge Redis set entries that point to missing or invalid objects. This is a one-time cleanup that prevents the validation errors from recurring.
 
-### 7. Orphan Recovery Hardening (`agent/agent_session_queue.py`)
+### 7. Orphan Recovery Hardening (`agent/job_queue.py`)
 
-**Problem**: The `_recover_orphaned_sessions()` function calls `.decode()` on Redis byte data without error handling. Corrupted UTF-8 data in orphaned sessions causes `UnicodeDecodeError` crashes that abort the entire recovery loop.
+**Problem**: The `_recover_orphaned_jobs()` function calls `.decode()` on Redis byte data without error handling. Corrupted UTF-8 data in orphaned sessions causes `UnicodeDecodeError` crashes that abort the entire recovery loop.
 
-**Solution**: All `.decode()` calls in `_recover_orphaned_sessions()` now use `errors='replace'`, which substitutes U+FFFD for corrupted bytes instead of crashing. The decode error context and raw key bytes are included in warning logs for forensic analysis.
+**Solution**: All `.decode()` calls in `_recover_orphaned_jobs()` now use `errors='replace'`, which substitutes U+FFFD for corrupted bytes instead of crashing. The decode error context and raw key bytes are included in warning logs for forensic analysis.
 
 ### 8. Perplexity Provider Error Handling (`tools/web/providers/perplexity.py`)
 
@@ -176,7 +174,7 @@ The watchdog is installed alongside the bridge:
 1. Acquires a lock (`data/update.lock`) to prevent concurrent runs
 2. Runs `git fetch` + `git pull` via `scripts/update/run.py --cron`
 3. If new commits arrived: syncs dependencies (if dep files changed), writes `data/restart-requested`
-4. The bridge session queue detects the restart flag and triggers a graceful restart after in-flight sessions complete
+4. The bridge job queue detects the restart flag and triggers a graceful restart after in-flight jobs complete
 
 **Verify polling is active**:
 ```bash

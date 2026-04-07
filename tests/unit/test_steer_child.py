@@ -13,9 +13,9 @@ from scripts.steer_child import main
 def mock_parent():
     """Create a mock parent ChatSession."""
     parent = MagicMock()
-    parent.agent_session_id = "parent-001"
-    parent.session_type = "pm"
-    parent.is_pm = True
+    parent.job_id = "parent-001"
+    parent.session_type = "chat"
+    parent.is_chat = True
     parent.is_dev = False
     return parent
 
@@ -24,11 +24,11 @@ def mock_parent():
 def mock_child():
     """Create a mock child DevSession."""
     child = MagicMock()
-    child.agent_session_id = "child-001"
+    child.job_id = "child-001"
     child.session_type = "dev"
-    child.is_pm = False
+    child.is_chat = False
     child.is_dev = True
-    child.parent_session_id = "parent-001"
+    child.parent_chat_session_id = "parent-001"
     child.status = "running"
     child.slug = "my-feature"
     child.current_stage = "BUILD"
@@ -151,7 +151,7 @@ class TestSteerChild:
     @patch(_AGENT_SESSION)
     def test_non_child_rejected(self, mock_agent_session_cls, mock_child):
         """Session that is not a child of the parent is rejected."""
-        mock_child.parent_session_id = "other-parent"
+        mock_child.parent_chat_session_id = "other-parent"
         mock_agent_session_cls.query.get.return_value = mock_child
 
         result = main(
@@ -300,7 +300,7 @@ class TestListChildren:
     ):
         """--list shows active child sessions."""
         mock_agent_session_cls.query.get.return_value = mock_parent
-        mock_parent.get_child_sessions.return_value = [mock_child]
+        mock_parent.get_dev_sessions.return_value = [mock_child]
 
         result = main(["--list", "--parent-id", "parent-001"])
 
@@ -313,7 +313,7 @@ class TestListChildren:
     def test_list_no_active_children(self, mock_agent_session_cls, mock_parent, capsys):
         """--list with no active children shows informative message."""
         mock_agent_session_cls.query.get.return_value = mock_parent
-        mock_parent.get_child_sessions.return_value = []
+        mock_parent.get_dev_sessions.return_value = []
 
         result = main(["--list", "--parent-id", "parent-001"])
 
@@ -332,10 +332,10 @@ class TestListChildren:
         """--list only shows running children, not completed ones."""
         completed_child = MagicMock()
         completed_child.status = "completed"
-        completed_child.agent_session_id = "child-002"
+        completed_child.job_id = "child-002"
 
         mock_agent_session_cls.query.get.return_value = mock_parent
-        mock_parent.get_child_sessions.return_value = [mock_child, completed_child]
+        mock_parent.get_dev_sessions.return_value = [mock_child, completed_child]
 
         result = main(["--list", "--parent-id", "parent-001"])
 

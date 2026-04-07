@@ -1,48 +1,43 @@
-"""Unit tests for the memory hook (thought injection).
-
-Tests for extracted utilities (extract_topic_keywords, _cluster_keywords,
-_apply_category_weights) import from utils.keyword_extraction (canonical location).
-Tests for session-scoped logic (check_and_inject, etc.) still import from
-agent.memory_hook since those functions live there.
-"""
+"""Unit tests for the memory hook (thought injection)."""
 
 
 class TestExtractTopicKeywords:
-    """Test utils/keyword_extraction.py extract_topic_keywords()."""
+    """Test agent/memory_hook.py extract_topic_keywords()."""
 
     def test_extracts_from_file_path(self):
-        from utils.keyword_extraction import extract_topic_keywords
+        from agent.memory_hook import extract_topic_keywords
 
         keywords = extract_topic_keywords("Read", {"file_path": "/src/deploy/config.yaml"})
         assert "deploy" in keywords
+        assert "config" in keywords
 
     def test_extracts_from_grep_pattern(self):
-        from utils.keyword_extraction import extract_topic_keywords
+        from agent.memory_hook import extract_topic_keywords
 
         keywords = extract_topic_keywords("Grep", {"pattern": "rollback.*strategy"})
         assert "rollback" in keywords
         assert "strategy" in keywords
 
     def test_extracts_from_command(self):
-        from utils.keyword_extraction import extract_topic_keywords
+        from agent.memory_hook import extract_topic_keywords
 
         keywords = extract_topic_keywords("Bash", {"command": "kubectl get pods"})
         assert "kubectl" in keywords
 
     def test_empty_input(self):
-        from utils.keyword_extraction import extract_topic_keywords
+        from agent.memory_hook import extract_topic_keywords
 
         keywords = extract_topic_keywords("", {})
         assert isinstance(keywords, list)
 
     def test_non_dict_input(self):
-        from utils.keyword_extraction import extract_topic_keywords
+        from agent.memory_hook import extract_topic_keywords
 
         keywords = extract_topic_keywords("Read", "just a string")
         assert isinstance(keywords, list)
 
     def test_filters_noise_words(self):
-        from utils.keyword_extraction import extract_topic_keywords
+        from agent.memory_hook import extract_topic_keywords
 
         keywords = extract_topic_keywords("Read", {"file_path": "/usr/bin/test/file"})
         assert "usr" not in keywords
@@ -50,50 +45,24 @@ class TestExtractTopicKeywords:
         assert "test" not in keywords
 
     def test_caps_at_10_keywords(self):
-        from utils.keyword_extraction import extract_topic_keywords
+        from agent.memory_hook import extract_topic_keywords
 
         # Long path with many segments
         long_path = "/a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p/q/r/s/t/u/v/w/x/y/z"
         keywords = extract_topic_keywords("Read", {"file_path": long_path})
         assert len(keywords) <= 10
 
-    def test_filters_project_path_segments(self):
-        """Verify project-path stopwords are filtered from file path keywords."""
-        from utils.keyword_extraction import extract_topic_keywords
-
-        keywords = extract_topic_keywords(
-            "Read",
-            {"file_path": "/Users/valorengels/src/ai/agent/memory_hook.py"},
-        )
-        assert "users" not in keywords
-        assert "valorengels" not in keywords
-        assert "agent" not in keywords
-        assert "memory_hook" in keywords
-
-    def test_preserves_file_stem_compound(self):
-        """File stems are kept as compound terms, not split into parts."""
-        from utils.keyword_extraction import extract_topic_keywords
-
-        keywords = extract_topic_keywords(
-            "Read",
-            {"file_path": "/Users/valorengels/src/ai/agent/agent_session_queue.py"},
-        )
-        assert "agent_session_queue" in keywords
-        # Individual segments from the stem should NOT appear separately
-        # (they come from directory path and get filtered as stopwords)
-        assert "agent" not in keywords
-
 
 class TestClusterKeywords:
-    """Test utils/keyword_extraction.py _cluster_keywords()."""
+    """Test agent/memory_hook.py _cluster_keywords()."""
 
     def test_empty_list(self):
-        from utils.keyword_extraction import _cluster_keywords
+        from agent.memory_hook import _cluster_keywords
 
         assert _cluster_keywords([]) == []
 
     def test_small_list_single_cluster(self):
-        from utils.keyword_extraction import _cluster_keywords
+        from agent.memory_hook import _cluster_keywords
 
         keywords = ["redis", "memory", "bloom"]
         result = _cluster_keywords(keywords)
@@ -101,28 +70,28 @@ class TestClusterKeywords:
         assert result[0] == keywords
 
     def test_five_keywords_single_cluster(self):
-        from utils.keyword_extraction import _cluster_keywords
+        from agent.memory_hook import _cluster_keywords
 
         keywords = ["a", "b", "c", "d", "e"]
         result = _cluster_keywords(keywords)
         assert len(result) == 1
 
     def test_six_keywords_triggers_decomposition(self):
-        from utils.keyword_extraction import _cluster_keywords
+        from agent.memory_hook import _cluster_keywords
 
         keywords = [f"kw{i}" for i in range(6)]
         result = _cluster_keywords(keywords)
         assert len(result) >= 2
 
     def test_large_list_caps_at_max_clusters(self):
-        from utils.keyword_extraction import _cluster_keywords
+        from agent.memory_hook import _cluster_keywords
 
         keywords = [f"kw{i}" for i in range(15)]
         result = _cluster_keywords(keywords, max_clusters=3)
         assert len(result) <= 3
 
     def test_all_keywords_preserved(self):
-        from utils.keyword_extraction import _cluster_keywords
+        from agent.memory_hook import _cluster_keywords
 
         keywords = [f"kw{i}" for i in range(12)]
         result = _cluster_keywords(keywords)
@@ -131,7 +100,7 @@ class TestClusterKeywords:
 
     def test_no_tiny_trailing_cluster(self):
         """Trailing clusters with < 2 items are merged into previous."""
-        from utils.keyword_extraction import _cluster_keywords
+        from agent.memory_hook import _cluster_keywords
 
         # 7 keywords with max_clusters=3 -> cluster_size=3 -> [3, 3, 1]
         # The trailing [1] should be merged into the second cluster
@@ -215,23 +184,21 @@ class TestDejaVuSignals:
         _tool_counts.pop(session, None)
         _tool_buffers.pop(session, None)
 
-    def test_bloom_hits_no_results_returns_none(self):
-        """Returns None when bloom hits exist but retrieval returns no results.
-
-        Deja vu fallback was removed -- bloom hits with no strong results
-        should always return None regardless of bloom hit count.
-        """
+    def test_vague_recognition_signal(self):
+        """Returns vague recognition thought when bloom hits but no strong results."""
         from unittest.mock import MagicMock, patch
 
         from agent.memory_hook import _tool_buffers, _tool_counts, check_and_inject
-        from config.memory_defaults import INJECTION_WINDOW_SIZE
+        from config.memory_defaults import (
+            DEJA_VU_BLOOM_HIT_THRESHOLD,
+            INJECTION_WINDOW_SIZE,
+        )
 
-        session = "test-no-deja-vu"
+        session = "test-vague-recognition"
         _tool_counts.pop(session, None)
         _tool_buffers.pop(session, None)
 
-        # Many keywords that all hit bloom -- previously would trigger deja vu
-        keywords = [f"kw_{i}" for i in range(10)]
+        keywords = [f"kw_{i}" for i in range(DEJA_VU_BLOOM_HIT_THRESHOLD + 2)]
 
         mock_bloom = MagicMock()
         mock_bloom.might_exist = MagicMock(return_value=True)
@@ -248,7 +215,8 @@ class TestDejaVuSignals:
                 check_and_inject(session, "Read", {"file_path": f"f{i}.py"})
             result = check_and_inject(session, "Read", {"file_path": "final.py"})
 
-        assert result is None
+        assert result is not None
+        assert "encountered something related" in result
 
         # Cleanup
         _tool_counts.pop(session, None)
@@ -265,7 +233,7 @@ class TestDejaVuSignals:
         _tool_counts.pop(session, None)
         _tool_buffers.pop(session, None)
 
-        # Only 2 keywords
+        # Only 2 keywords -- below DEJA_VU_BLOOM_HIT_THRESHOLD (3)
         keywords = ["kw_0", "kw_1"]
 
         mock_bloom = MagicMock()
@@ -291,17 +259,17 @@ class TestDejaVuSignals:
 
 
 class TestApplyCategoryWeights:
-    """Test utils/keyword_extraction.py _apply_category_weights()."""
+    """Test agent/memory_hook.py _apply_category_weights()."""
 
     def test_empty_list_returns_empty(self):
-        from utils.keyword_extraction import _apply_category_weights
+        from agent.memory_hook import _apply_category_weights
 
         assert _apply_category_weights([]) == []
 
     def test_none_metadata_gets_default_weight(self):
         from unittest.mock import MagicMock
 
-        from utils.keyword_extraction import _apply_category_weights
+        from agent.memory_hook import _apply_category_weights
 
         record = MagicMock()
         record.metadata = None
@@ -313,7 +281,7 @@ class TestApplyCategoryWeights:
     def test_missing_category_gets_default_weight(self):
         from unittest.mock import MagicMock
 
-        from utils.keyword_extraction import _apply_category_weights
+        from agent.memory_hook import _apply_category_weights
 
         record = MagicMock()
         record.metadata = {}
@@ -324,7 +292,7 @@ class TestApplyCategoryWeights:
     def test_correction_ranks_higher_than_pattern(self):
         from unittest.mock import MagicMock
 
-        from utils.keyword_extraction import _apply_category_weights
+        from agent.memory_hook import _apply_category_weights
 
         correction = MagicMock()
         correction.metadata = {"category": "correction"}
@@ -342,7 +310,7 @@ class TestApplyCategoryWeights:
     def test_decision_ranks_higher_than_pattern(self):
         from unittest.mock import MagicMock
 
-        from utils.keyword_extraction import _apply_category_weights
+        from agent.memory_hook import _apply_category_weights
 
         decision = MagicMock()
         decision.metadata = {"category": "decision"}
@@ -358,7 +326,7 @@ class TestApplyCategoryWeights:
     def test_high_score_pattern_beats_low_score_correction(self):
         from unittest.mock import MagicMock
 
-        from utils.keyword_extraction import _apply_category_weights
+        from agent.memory_hook import _apply_category_weights
 
         correction = MagicMock()
         correction.metadata = {"category": "correction"}
@@ -375,7 +343,7 @@ class TestApplyCategoryWeights:
     def test_non_dict_metadata_gets_default_weight(self):
         from unittest.mock import MagicMock
 
-        from utils.keyword_extraction import _apply_category_weights
+        from agent.memory_hook import _apply_category_weights
 
         record = MagicMock()
         record.metadata = "not a dict"
@@ -386,7 +354,7 @@ class TestApplyCategoryWeights:
     def test_non_string_category_gets_default_weight(self):
         from unittest.mock import MagicMock
 
-        from utils.keyword_extraction import _apply_category_weights
+        from agent.memory_hook import _apply_category_weights
 
         record = MagicMock()
         record.metadata = {"category": 123}
@@ -397,7 +365,7 @@ class TestApplyCategoryWeights:
     def test_preserves_all_records(self):
         from unittest.mock import MagicMock
 
-        from utils.keyword_extraction import _apply_category_weights
+        from agent.memory_hook import _apply_category_weights
 
         records = []
         for i in range(5):

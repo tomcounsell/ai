@@ -14,8 +14,6 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from config.models import OPENROUTER_URL
-
 
 class JudgmentScore(Enum):
     """Score levels for AI judgments."""
@@ -31,7 +29,7 @@ class JudgmentScore(Enum):
 class JudgeConfig:
     """Configuration for AI judge."""
 
-    model: str = "gemma4:e2b"  # Local model for speed
+    model: str = "gemma2:3b"  # Local model for speed
     temperature: float = 0.1  # Low for consistency
     strict_mode: bool = True  # High quality standards
     custom_criteria: list[str] | None = None
@@ -100,13 +98,13 @@ def _call_openrouter(prompt: str, config: JudgeConfig) -> str | None:
         import httpx
 
         response = httpx.post(
-            OPENROUTER_URL,
+            "https://openrouter.ai/api/v1/chat/completions",
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
             },
             json={
-                "model": "google/gemma-4-e2b:free",
+                "model": "google/gemma-2-9b-it:free",
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": config.temperature,
             },

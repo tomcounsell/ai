@@ -34,7 +34,7 @@ ASYNC_CODE_PATTERNS = [
     r"`bridge/",  # backtick-quoted file paths
     r"`agent/",  # backtick-quoted file paths
     r"bridge/\w+\.py",  # file path references like bridge/telegram_bridge.py
-    r"agent/\w+\.py",  # file path references like agent/agent_session_queue.py
+    r"agent/\w+\.py",  # file path references like agent/job_queue.py
     r"`asyncio",  # backtick-quoted module references
     r"async\s+def\s",  # async function definitions
     r"create_task\(",  # asyncio.create_task() calls

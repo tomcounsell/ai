@@ -314,24 +314,24 @@ class TestClassificationResult:
         assert result.confidence == 0.95
         assert result.reason == "Direct question detected"
 
-    def test_nudge_feedback_default_none(self):
-        """nudge_feedback defaults to None when not provided."""
+    def test_coaching_message_default_none(self):
+        """coaching_message defaults to None when not provided."""
         result = ClassificationResult(
             output_type=OutputType.STATUS_UPDATE,
             confidence=0.9,
             reason="Test",
         )
-        assert result.nudge_feedback is None
+        assert result.coaching_message is None
 
-    def test_nudge_feedback_set(self):
-        """nudge_feedback can be set explicitly."""
+    def test_coaching_message_set(self):
+        """coaching_message can be set explicitly."""
         result = ClassificationResult(
             output_type=OutputType.STATUS_UPDATE,
             confidence=0.9,
             reason="Test",
-            nudge_feedback="You said 'should work' but didn't show test output.",
+            coaching_message="You said 'should work' but didn't show test output.",
         )
-        assert result.nudge_feedback == "You said 'should work' but didn't show test output."
+        assert result.coaching_message == "You said 'should work' but didn't show test output."
 
     def test_confidence_range(self):
         """Confidence is a float between 0.0 and 1.0."""
@@ -418,30 +418,30 @@ class TestParseClassificationResponse:
         assert result is not None
         assert result.confidence == 0.5
 
-    def test_nudge_feedback_extracted(self):
-        """nudge_feedback is extracted from LLM JSON response."""
+    def test_coaching_message_extracted(self):
+        """coaching_message is extracted from LLM JSON response."""
         raw = (
             '{"type": "status", "confidence": 0.92, '
             '"reason": "hedging language", '
-            '"nudge_feedback": "You said \'should work\' — run the tests and share output."}'
+            '"coaching_message": "You said \'should work\' — run the tests and share output."}'
         )
         result = _parse_classification_response(raw)
         assert result is not None
-        assert result.nudge_feedback == "You said 'should work' — run the tests and share output."
+        assert result.coaching_message == "You said 'should work' — run the tests and share output."
 
-    def test_nudge_feedback_absent_defaults_none(self):
-        """When nudge_feedback is missing from JSON, it defaults to None."""
+    def test_coaching_message_absent_defaults_none(self):
+        """When coaching_message is missing from JSON, it defaults to None."""
         raw = '{"type": "completion", "confidence": 0.95, "reason": "done"}'
         result = _parse_classification_response(raw)
         assert result is not None
-        assert result.nudge_feedback is None
+        assert result.coaching_message is None
 
     def test_hedging_patterns_not_used_for_was_rejected(self):
         """was_rejected_completion is NOT set by hedging pattern matching.
 
         The old code scanned reason text for patterns like 'hedg', 'no evidence'.
         This has been removed — was_rejected_completion should only be set
-        when nudge_feedback is present (indicating the LLM flagged it).
+        when coaching_message is present (indicating the LLM flagged it).
         """
         raw = (
             '{"type": "status", "confidence": 0.90, '
@@ -449,46 +449,48 @@ class TestParseClassificationResponse:
         )
         result = _parse_classification_response(raw)
         assert result is not None
-        # Without nudge_feedback, was_rejected_completion should be False
+        # Without coaching_message, was_rejected_completion should be False
         assert result.was_rejected_completion is False
 
-    def test_was_rejected_set_when_nudge_feedback_present(self):
-        """was_rejected_completion is True when nudge_feedback is present on status."""
+    def test_was_rejected_set_when_coaching_message_present(self):
+        """was_rejected_completion is True when coaching_message is present on status."""
         raw = (
             '{"type": "status", "confidence": 0.90, '
             '"reason": "completion downgraded", '
-            '"nudge_feedback": "Include test output next time."}'
+            '"coaching_message": "Include test output next time."}'
         )
         result = _parse_classification_response(raw)
         assert result is not None
         assert result.was_rejected_completion is True
-        assert result.nudge_feedback == "Include test output next time."
+        assert result.coaching_message == "Include test output next time."
 
-    def test_nudge_feedback_null_for_non_status_types(self):
-        """nudge_feedback should be None for completion, question, blocker, error."""
+    def test_coaching_message_null_for_non_status_types(self):
+        """coaching_message should be None for completion, question, blocker, error."""
         for type_str in ("completion", "question", "blocker", "error"):
             raw = (
                 f'{{"type": "{type_str}", "confidence": 0.95, '
-                f'"reason": "test", "nudge_feedback": null}}'
+                f'"reason": "test", "coaching_message": null}}'
             )
             result = _parse_classification_response(raw)
             assert result is not None
-            assert result.nudge_feedback is None, f"nudge_feedback should be None for {type_str}"
+            assert result.coaching_message is None, (
+                f"coaching_message should be None for {type_str}"
+            )
             assert result.was_rejected_completion is False, (
                 f"was_rejected_completion should be False for {type_str}"
             )
 
-    def test_nudge_feedback_on_non_status_ignored_for_rejection(self):
-        """Even if LLM mistakenly sets nudge_feedback on completion, was_rejected stays False."""
+    def test_coaching_message_on_non_status_ignored_for_rejection(self):
+        """Even if LLM mistakenly sets coaching_message on completion, was_rejected stays False."""
         raw = (
             '{"type": "completion", "confidence": 0.95, '
             '"reason": "done", '
-            '"nudge_feedback": "Some nudge_feedback text"}'
+            '"coaching_message": "Some coaching text"}'
         )
         result = _parse_classification_response(raw)
         assert result is not None
-        # nudge_feedback IS preserved (it's in the JSON)
-        assert result.nudge_feedback == "Some nudge_feedback text"
+        # coaching_message IS preserved (it's in the JSON)
+        assert result.coaching_message == "Some coaching text"
         # But was_rejected_completion is only set for STATUS_UPDATE
         assert result.was_rejected_completion is False
 
@@ -582,27 +584,27 @@ class TestClassifyWithHeuristics:
         result = _classify_with_heuristics("Running tests now...")
         assert result.output_type == OutputType.QUESTION
 
-    def test_heuristics_always_return_nudge_feedback_none(self):
-        """All heuristic paths return nudge_feedback=None."""
+    def test_heuristics_always_return_coaching_message_none(self):
+        """All heuristic paths return coaching_message=None."""
         # Question path
         result = _classify_with_heuristics("Should I proceed?")
-        assert result.nudge_feedback is None
+        assert result.coaching_message is None
 
         # Error path
         result = _classify_with_heuristics("Error: something broke")
-        assert result.nudge_feedback is None
+        assert result.coaching_message is None
 
         # Blocker path
         result = _classify_with_heuristics("Blocked on API access")
-        assert result.nudge_feedback is None
+        assert result.coaching_message is None
 
         # Completion path
         result = _classify_with_heuristics("Done. All committed.")
-        assert result.nudge_feedback is None
+        assert result.coaching_message is None
 
         # Default status path
         result = _classify_with_heuristics("Working on it now")
-        assert result.nudge_feedback is None
+        assert result.coaching_message is None
 
     def test_empty_text(self):
         """Empty text still returns a valid classification (default QUESTION)."""
@@ -644,9 +646,10 @@ class TestEmptyPromiseDetection:
         """'Got it' + commitment without evidence = empty promise."""
         result = _classify_with_heuristics("Got it. Will report final results and blockers only.")
         assert result.output_type == OutputType.STATUS_UPDATE
-        assert result.nudge_feedback is not None
+        assert result.coaching_message is not None
         assert (
-            "empty" in result.nudge_feedback.lower() or "evidence" in result.nudge_feedback.lower()
+            "empty" in result.coaching_message.lower()
+            or "evidence" in result.coaching_message.lower()
         )
 
     def test_understood_without_evidence_is_empty_promise(self):
@@ -655,13 +658,13 @@ class TestEmptyPromiseDetection:
             "Understood. I'll adjust my communication style going forward."
         )
         assert result.output_type == OutputType.STATUS_UPDATE
-        assert result.nudge_feedback is not None
+        assert result.coaching_message is not None
 
     def test_noted_without_evidence_is_empty_promise(self):
         """'Noted' with a vague commitment = empty promise."""
         result = _classify_with_heuristics("Noted. You'll see the difference in my next output.")
         assert result.output_type == OutputType.STATUS_UPDATE
-        assert result.nudge_feedback is not None
+        assert result.coaching_message is not None
 
     def test_acknowledgment_with_commit_is_not_empty(self):
         """Acknowledgment WITH a commit hash = real action, not empty."""
@@ -676,18 +679,21 @@ class TestEmptyPromiseDetection:
         result = _classify_with_heuristics(
             "Understood. Saved memory to feedback_no_plans.md with this rule."
         )
-        assert result.output_type != OutputType.STATUS_UPDATE or result.nudge_feedback is None
+        assert result.output_type != OutputType.STATUS_UPDATE or result.coaching_message is None
 
     def test_normal_status_not_flagged(self):
         """Regular status updates should not trigger empty promise detection."""
         result = _classify_with_heuristics("Running tests now, found 3 issues so far.")
-        assert result.nudge_feedback is None or "empty" not in (result.nudge_feedback or "").lower()
+        assert (
+            result.coaching_message is None
+            or "empty" not in (result.coaching_message or "").lower()
+        )
 
     def test_will_do_without_evidence(self):
         """'Will do' without proof = empty promise."""
         result = _classify_with_heuristics("Will do. I'll change my approach from now on.")
         assert result.output_type == OutputType.STATUS_UPDATE
-        assert result.nudge_feedback is not None
+        assert result.coaching_message is not None
 
 
 class TestApplyHeuristicConfidenceGate:
@@ -932,14 +938,14 @@ class TestClassifyOutput:
         assert result.output_type == OutputType.STATUS_UPDATE
 
     @pytest.mark.asyncio
-    async def test_llm_returns_nudge_feedback_for_hedging(self):
-        """LLM classifier returns specific nudge_feedback when hedging language detected."""
+    async def test_llm_returns_coaching_for_hedging(self):
+        """LLM classifier returns specific coaching when hedging language detected."""
         mock_response = AsyncMock()
         mock_response.content = [
             AsyncMock(
                 text='{"type": "status", "confidence": 0.92, '
                 '"reason": "Hedging language without verification", '
-                '"nudge_feedback": "You used hedging language. Run the tests."}'
+                '"coaching_message": "You used hedging language. Run the tests."}'
             )
         ]
         mock_client = AsyncMock()
@@ -952,18 +958,18 @@ class TestClassifyOutput:
             result = await classify_output("I think the bug is fixed now. Should work.")
 
         assert result.output_type == OutputType.STATUS_UPDATE
-        assert result.nudge_feedback == "You used hedging language. Run the tests."
+        assert result.coaching_message == "You used hedging language. Run the tests."
         assert result.was_rejected_completion is True
 
     @pytest.mark.asyncio
-    async def test_llm_returns_nudge_feedback_for_missing_evidence(self):
-        """LLM classifier returns specific nudge_feedback when evidence is missing."""
+    async def test_llm_returns_coaching_for_missing_evidence(self):
+        """LLM classifier returns specific coaching when evidence is missing."""
         mock_response = AsyncMock()
         mock_response.content = [
             AsyncMock(
                 text='{"type": "status", "confidence": 0.90, '
                 '"reason": "Claims tests pass but shows no output", '
-                '"nudge_feedback": "Paste the pytest output with pass/fail counts."}'
+                '"coaching_message": "Paste the pytest output with pass/fail counts."}'
             )
         ]
         mock_client = AsyncMock()
@@ -976,18 +982,18 @@ class TestClassifyOutput:
             result = await classify_output("All tests pass. Task complete.")
 
         assert result.output_type == OutputType.STATUS_UPDATE
-        assert result.nudge_feedback == "Paste the pytest output with pass/fail counts."
+        assert result.coaching_message == "Paste the pytest output with pass/fail counts."
         assert result.was_rejected_completion is True
 
     @pytest.mark.asyncio
-    async def test_llm_no_nudge_feedback_for_genuine_completion(self):
-        """LLM returns null nudge_feedback for genuine completions with evidence."""
+    async def test_llm_no_coaching_for_genuine_completion(self):
+        """LLM returns null coaching_message for genuine completions with evidence."""
         mock_response = AsyncMock()
         mock_response.content = [
             AsyncMock(
                 text='{"type": "completion", "confidence": 0.98, '
                 '"reason": "verified completion with evidence", '
-                '"nudge_feedback": null}'
+                '"coaching_message": null}'
             )
         ]
         mock_client = AsyncMock()
@@ -1002,7 +1008,7 @@ class TestClassifyOutput:
             )
 
         assert result.output_type == OutputType.COMPLETION
-        assert result.nudge_feedback is None
+        assert result.coaching_message is None
         assert result.was_rejected_completion is False
 
     @pytest.mark.asyncio
@@ -1781,29 +1787,14 @@ class TestLinkifyReferences:
         session.project_key = project_key
         return session
 
-    def setup_method(self):
-        """Initialize per-test project configs dict and patcher."""
-        self._project_configs = {}
-        self._patcher = None
-
-    def teardown_method(self):
-        """Stop any active patcher."""
-        if self._patcher:
-            self._patcher.stop()
-            self._patcher = None
-
     def _register_config(self, project_key="valor", org="tomcounsell", repo="ai"):
-        """Set up project config mock for testing.
+        """Register a project config with GitHub org/repo for testing."""
+        from agent.job_queue import register_project_config
 
-        Patches bridge.formatting.load_config to return a config with the
-        specified GitHub org/repo, replacing the old register_project_config approach.
-        """
-        self._project_configs[project_key] = {"github": {"org": org, "repo": repo}}
-        mock_config = {"projects": self._project_configs}
-        if self._patcher:
-            self._patcher.stop()
-        self._patcher = patch("bridge.formatting.load_config", return_value=mock_config)
-        self._patcher.start()
+        register_project_config(
+            project_key,
+            {"github": {"org": org, "repo": repo}},
+        )
 
     def test_pr_reference_linkified(self):
         """PR #N is converted to a markdown link."""
@@ -1850,13 +1841,10 @@ class TestLinkifyReferences:
         assert result == "PR #323"
 
     def test_no_github_config_returns_unchanged(self):
-        """project_key exists but no GitHub config returns unchanged."""
-        self._project_configs["no-github"] = {"name": "No GitHub"}
-        mock_config = {"projects": self._project_configs}
-        if self._patcher:
-            self._patcher.stop()
-        self._patcher = patch("bridge.formatting.load_config", return_value=mock_config)
-        self._patcher.start()
+        """project_key exists but no GitHub config registered returns unchanged."""
+        from agent.job_queue import register_project_config
+
+        register_project_config("no-github", {"name": "No GitHub"})
         session = self._make_session("no-github")
         result = _linkify_references("PR #323", session)
         assert result == "PR #323"
@@ -1927,7 +1915,7 @@ class TestSummarizerBypass:
         mock_session.session_id = "test-session"
         mock_session.is_sdlc = False
         # Ensure parent lookup also returns no PM messages
-        mock_session.get_parent_session.return_value = None
+        mock_session.get_parent_chat_session.return_value = None
 
         # Mock send_markdown to avoid Telethon calls
         with patch("bridge.markdown.send_markdown", new_callable=AsyncMock) as mock_send:
@@ -1967,7 +1955,7 @@ class TestSummarizerBypassParentSession:
         mock_session.has_pm_messages.return_value = False
         mock_session.pm_sent_message_ids = []
         mock_session.session_id = "dev-session-1"
-        mock_session.get_parent_session.return_value = mock_parent
+        mock_session.get_parent_chat_session.return_value = mock_parent
 
         result = await send_response_with_files(
             mock_client,
@@ -1982,7 +1970,7 @@ class TestSummarizerBypassParentSession:
 
     @pytest.mark.asyncio
     async def test_no_bypass_when_parent_is_dangling(self):
-        """DevSession with dangling parent_session_id -> bypass does not fire."""
+        """DevSession with dangling parent_chat_session_id -> bypass does not fire."""
         from bridge.response import send_response_with_files
 
         mock_client = MagicMock()
@@ -1990,7 +1978,7 @@ class TestSummarizerBypassParentSession:
         mock_session.has_pm_messages.return_value = False
         mock_session.pm_sent_message_ids = []
         mock_session.session_id = "dev-session-2"
-        mock_session.get_parent_session.return_value = None
+        mock_session.get_parent_chat_session.return_value = None
         mock_session.is_sdlc = False
 
         with patch("bridge.markdown.send_markdown", new_callable=AsyncMock) as mock_send:
@@ -2008,7 +1996,7 @@ class TestSummarizerBypassParentSession:
 
     @pytest.mark.asyncio
     async def test_no_bypass_when_no_parent(self):
-        """Session without parent_session_id -> no parent lookup, no bypass."""
+        """Session without parent_chat_session_id -> no parent lookup, no bypass."""
         from bridge.response import send_response_with_files
 
         mock_client = MagicMock()
@@ -2017,8 +2005,8 @@ class TestSummarizerBypassParentSession:
         mock_session.pm_sent_message_ids = []
         mock_session.session_id = "chat-session-1"
         mock_session.is_sdlc = False
-        # Remove get_parent_session to simulate a plain session
-        del mock_session.get_parent_session
+        # Remove get_parent_chat_session to simulate a plain session
+        del mock_session.get_parent_chat_session
 
         with patch("bridge.markdown.send_markdown", new_callable=AsyncMock) as mock_send:
             mock_send.return_value = MagicMock()

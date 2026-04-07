@@ -58,7 +58,7 @@ BACKGROUND_SKILLS = frozenset(
     }
 )
 FORK_SKILLS = frozenset(
-    {"do-build", "do-pr-review", "do-docs-audit", "pthread", "do-design-audit", "sdlc"}
+    {"do-build", "do-pr-review", "do-docs-audit", "pthread", "do-design-review", "sdlc"}
 )
 
 TRIGGER_PHRASES = re.compile(

@@ -11,8 +11,8 @@ import time
 import pytest
 
 from models.agent_session import (
+    SESSION_TYPE_CHAT,
     SESSION_TYPE_DEV,
-    SESSION_TYPE_PM,
     AgentSession,
 )
 
@@ -23,7 +23,7 @@ class TestChatSessionContextFields:
 
     def test_all_context_fields_roundtrip(self):
         ts = int(time.time())
-        session = AgentSession.create_pm(
+        session = AgentSession.create_chat(
             session_id=f"ctx_{ts}",
             project_key="valor",
             working_dir="/Users/test/src/ai",
@@ -36,7 +36,7 @@ class TestChatSessionContextFields:
         )
         # Set additional context fields
         session.task_list_id = "thread-ctx_chat_123-42"
-        session.slug = "my-feature"
+        session.work_item_slug = "my-feature"
         session.branch_name = "session/my-feature"
         session.correlation_id = f"corr_{ts}"
         session.save()
@@ -45,7 +45,7 @@ class TestChatSessionContextFields:
         reloaded = list(AgentSession.query.filter(session_id=session.session_id))[0]
 
         assert reloaded.session_id == f"ctx_{ts}"
-        assert reloaded.session_type == SESSION_TYPE_PM
+        assert reloaded.session_type == SESSION_TYPE_CHAT
         assert reloaded.project_key == "valor"
         assert reloaded.working_dir == "/Users/test/src/ai"
         assert reloaded.chat_id == "ctx_chat_123"
@@ -55,7 +55,7 @@ class TestChatSessionContextFields:
         assert reloaded.sender_id == 111222
         assert reloaded.chat_title == "Dev: Valor"
         assert reloaded.task_list_id == "thread-ctx_chat_123-42"
-        assert reloaded.slug == "my-feature"
+        assert reloaded.work_item_slug == "my-feature"
         assert reloaded.branch_name == "session/my-feature"
         assert reloaded.correlation_id == f"corr_{ts}"
 
@@ -66,7 +66,7 @@ class TestDevSessionParentLinkage:
 
     def test_dev_session_has_parent_reference(self):
         ts = int(time.time())
-        chat = AgentSession.create_pm(
+        chat = AgentSession.create_chat(
             session_id=f"parent_{ts}",
             project_key="valor",
             working_dir="/tmp/test",
@@ -79,23 +79,23 @@ class TestDevSessionParentLinkage:
             session_id=f"child_{ts}",
             project_key="valor",
             working_dir="/tmp/test/.worktrees/my-feature",
-            parent_session_id=chat.agent_session_id,
+            parent_chat_session_id=chat.job_id,
             message_text="/do-build",
             slug="my-feature",
         )
 
         assert dev.session_type == SESSION_TYPE_DEV
-        assert dev.parent_session_id == chat.agent_session_id
+        assert dev.parent_chat_session_id == chat.job_id
 
         # Navigate from child to parent via filter
         parents = list(AgentSession.query.filter(session_id=chat.session_id))
         assert len(parents) == 1
-        assert parents[0].agent_session_id == chat.agent_session_id
-        assert parents[0].session_type == SESSION_TYPE_PM
+        assert parents[0].job_id == chat.job_id
+        assert parents[0].session_type == SESSION_TYPE_CHAT
 
     def test_chat_session_finds_its_dev_sessions(self):
         ts = int(time.time())
-        chat = AgentSession.create_pm(
+        chat = AgentSession.create_chat(
             session_id=f"multi_parent_{ts}",
             project_key="valor",
             working_dir="/tmp/test",
@@ -108,21 +108,21 @@ class TestDevSessionParentLinkage:
             session_id=f"dev1_{ts}",
             project_key="valor",
             working_dir="/tmp/test",
-            parent_session_id=chat.agent_session_id,
+            parent_chat_session_id=chat.job_id,
             message_text="/do-build",
         )
         dev2 = AgentSession.create_dev(
             session_id=f"dev2_{ts}",
             project_key="valor",
             working_dir="/tmp/test",
-            parent_session_id=chat.agent_session_id,
+            parent_chat_session_id=chat.job_id,
             message_text="/do-test",
         )
 
-        children = chat.get_child_sessions()
-        child_ids = {c.agent_session_id for c in children}
-        assert dev1.agent_session_id in child_ids
-        assert dev2.agent_session_id in child_ids
+        children = chat.get_dev_sessions()
+        child_ids = {c.job_id for c in children}
+        assert dev1.job_id in child_ids
+        assert dev2.job_id in child_ids
 
     def test_orphan_dev_session_returns_none_parent(self):
         ts = int(time.time())
@@ -130,10 +130,10 @@ class TestDevSessionParentLinkage:
             session_id=f"orphan_{ts}",
             project_key="valor",
             working_dir="/tmp/test",
-            parent_session_id="nonexistent_id",
+            parent_chat_session_id="nonexistent_id",
             message_text="lost",
         )
-        assert dev.get_parent_session() is None
+        assert dev.get_parent_chat_session() is None
 
 
 @pytest.mark.e2e
@@ -146,7 +146,7 @@ class TestDerivedPaths:
             session_id=f"slug_{ts}",
             project_key="valor",
             working_dir="/tmp/test",
-            parent_session_id="parent_x",
+            parent_chat_session_id="parent_x",
             message_text="build",
             slug="my-cool-feature",
         )
@@ -155,7 +155,7 @@ class TestDerivedPaths:
 
     def test_no_slug_falls_back_to_branch_name(self):
         ts = int(time.time())
-        session = AgentSession.create_pm(
+        session = AgentSession.create_chat(
             session_id=f"nosluq_{ts}",
             project_key="valor",
             working_dir="/tmp/test",
@@ -182,7 +182,7 @@ class TestSDLCStagesPropagation:
             session_id=f"stages_{ts}",
             project_key="valor",
             working_dir="/tmp/test",
-            parent_session_id="parent_y",
+            parent_chat_session_id="parent_y",
             message_text="/do-build",
             stage_states=stages,
         )
@@ -197,7 +197,7 @@ class TestSDLCStagesPropagation:
 
     def test_chat_session_without_stage_states(self):
         ts = int(time.time())
-        chat = AgentSession.create_pm(
+        chat = AgentSession.create_chat(
             session_id=f"nosdlc_{ts}",
             project_key="valor",
             working_dir="/tmp/test",
@@ -216,7 +216,7 @@ class TestSessionTypeDiscriminator:
     def test_factory_methods_set_correct_types(self):
         ts = int(time.time())
 
-        chat = AgentSession.create_pm(
+        chat = AgentSession.create_chat(
             session_id=f"type_chat_{ts}",
             project_key="valor",
             working_dir="/tmp",
@@ -228,16 +228,16 @@ class TestSessionTypeDiscriminator:
             session_id=f"type_dev_{ts}",
             project_key="valor",
             working_dir="/tmp",
-            parent_session_id=chat.agent_session_id,
+            parent_chat_session_id=chat.job_id,
             message_text="build",
         )
 
-        assert chat.is_pm and not chat.is_dev
-        assert dev.is_dev and not dev.is_pm
+        assert chat.is_chat and not chat.is_dev
+        assert dev.is_dev and not dev.is_chat
 
     def test_session_type_queryable(self):
         ts = int(time.time())
-        AgentSession.create_pm(
+        AgentSession.create_chat(
             session_id=f"qt_chat_{ts}",
             project_key="query_test",
             working_dir="/tmp",
@@ -249,11 +249,11 @@ class TestSessionTypeDiscriminator:
             session_id=f"qt_dev_{ts}",
             project_key="query_test",
             working_dir="/tmp",
-            parent_session_id="parent_x",
+            parent_chat_session_id="parent_x",
             message_text="build",
         )
 
-        chats = list(AgentSession.query.filter(session_type=SESSION_TYPE_PM))
+        chats = list(AgentSession.query.filter(session_type=SESSION_TYPE_CHAT))
         devs = list(AgentSession.query.filter(session_type=SESSION_TYPE_DEV))
 
         chat_ids = {s.session_id for s in chats}

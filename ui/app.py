@@ -29,8 +29,8 @@ def _filter_format_timestamp(ts: float | None) -> str:
     """Jinja2 filter: format Unix timestamp to humanized relative time."""
     if ts is None:
         return "-"
-    dt = datetime.datetime.fromtimestamp(ts, tz=datetime.UTC).astimezone()
-    now = utc_now().astimezone()
+    dt = datetime.datetime.fromtimestamp(ts, tz=datetime.UTC)
+    now = utc_now()
     diff = now - dt
 
     if diff.total_seconds() < 0:
@@ -41,7 +41,7 @@ def _filter_format_timestamp(ts: float | None) -> str:
         mins = int(diff.total_seconds() / 60)
         return f"{mins}m ago"
     if diff.total_seconds() < 86400 and dt.date() == now.date():
-        return dt.strftime("%H:%M")
+        return f"today {dt.strftime('%H:%M')}"
     if dt.date() == (now - datetime.timedelta(days=1)).date():
         return f"yesterday {dt.strftime('%H:%M')}"
     if diff.days < 7:
@@ -50,14 +50,14 @@ def _filter_format_timestamp(ts: float | None) -> str:
 
 
 def _filter_format_duration(seconds: float | None) -> str:
-    """Jinja2 filter: format seconds to compact integer duration."""
+    """Jinja2 filter: format seconds to human-readable duration."""
     if seconds is None:
         return "-"
     if seconds < 60:
-        return "<1m"
+        return f"{seconds:.1f}s"
     if seconds < 3600:
-        return f"{int(seconds / 60)}m"
-    return f"{int(seconds / 3600)}h"
+        return f"{seconds / 60:.1f}m"
+    return f"{seconds / 3600:.1f}h"
 
 
 def _filter_format_interval(seconds: int | None) -> str:
@@ -151,18 +151,6 @@ def create_app() -> FastAPI:
             {"sessions": sessions},
         )
 
-    @app.get("/session/{agent_session_id}/modal-content", response_class=HTMLResponse)
-    def session_modal_content(request: Request, agent_session_id: str):
-        """HTMX partial: session detail content for modal."""
-        from ui.data.sdlc import get_pipeline_detail
-
-        pipeline = get_pipeline_detail(agent_session_id)
-        return templates.TemplateResponse(
-            request,
-            "_partials/session_modal_content.html",
-            {"pipeline": pipeline},
-        )
-
     def _get_bridge_health() -> dict:
         """Check bridge health from last_connected file freshness."""
         import time
@@ -183,114 +171,17 @@ def create_app() -> FastAPI:
             pass
         return {"status": "error", "age_s": None}
 
-    def _get_worker_health() -> dict:
-        """Check worker health from last_worker_connected file freshness."""
-        import time
-
-        heartbeat_file = Path(__file__).parent.parent / "data" / "last_worker_connected"
-        try:
-            if heartbeat_file.exists():
-                mtime = heartbeat_file.stat().st_mtime
-                age_s = round(time.time() - mtime)
-                if age_s < 360:
-                    return {"status": "ok", "age_s": age_s}
-                elif age_s < 600:
-                    return {"status": "running", "age_s": age_s}
-                else:
-                    return {"status": "error", "age_s": age_s}
-        except OSError:
-            pass
-        return {"status": "error", "age_s": None}
-
-    def _session_to_json(s) -> dict:
-        """Serialize a PipelineProgress to JSON dict for the dashboard API."""
-        result = {
-            "agent_session_id": s.agent_session_id,
-            "session_id": s.session_id,
-            "display_name": s.display_name,
-            "session_type": s.session_type,
-            "status": s.status,
-            "project_key": s.project_key,
-            "project_name": s.project_name,
-            "slug": s.slug,
-            "branch_name": s.branch_name,
-            "current_stage": s.current_stage,
-            "stages": [{"name": st.name, "status": st.status} for st in s.stages],
-            "created_at": s.created_at,
-            "started_at": s.started_at,
-            "completed_at": s.completed_at,
-            "updated_at": s.updated_at,
-            "duration": s.duration,
-            "issue_url": s.issue_url,
-            "pr_url": s.pr_url,
-            "message_text": s.message_text,
-            "parent_agent_session_id": s.parent_agent_session_id,
-            "context_summary": s.context_summary,
-            "expectations": s.expectations,
-            "turn_count": s.turn_count,
-            "tool_call_count": s.tool_call_count,
-            "watchdog_unhealthy": s.watchdog_unhealthy,
-            "priority": s.priority,
-            "classification_type": s.classification_type,
-            "is_stale": s.is_stale,
-            "children": [_session_to_json(c) for c in s.children],
-            "events": [
-                {
-                    "role": e.role,
-                    "text": e.text,
-                    "timestamp": e.timestamp,
-                }
-                for e in s.events
-            ],
-        }
-        return result
-
-    @app.get("/dashboard.json")
-    def dashboard_json():
-        """Full dashboard state as JSON for programmatic consumption."""
-        from fastapi.responses import JSONResponse
-
-        from ui.data.machine import get_machine_name, get_machine_projects
-        from ui.data.reflections import get_all_reflections
-        from ui.data.sdlc import get_all_sessions
-
-        bridge = _get_bridge_health()
-        worker = _get_worker_health()
-        sessions = get_all_sessions()
-        reflections = get_all_reflections()
-
-        return JSONResponse(
-            {
-                "health": {
-                    "webserver": "ok",
-                    "bridge": bridge["status"],
-                    "bridge_last_seen_s": bridge["age_s"],
-                    "worker": worker["status"],
-                    "worker_last_seen_s": worker["age_s"],
-                },
-                "sessions": [_session_to_json(s) for s in sessions],
-                "reflections": reflections,
-                "machine": {
-                    "name": get_machine_name(),
-                    "projects": get_machine_projects(),
-                },
-            }
-        )
-
     @app.get("/health")
     def health_status():
         """Health JSON endpoint for programmatic access."""
         from fastapi.responses import JSONResponse
 
         bridge = _get_bridge_health()
-        worker = _get_worker_health()
         return JSONResponse(
             {
                 "webserver": "ok",
                 "bridge": bridge["status"],
                 "bridge_last_seen_s": bridge["age_s"],
-                "worker": worker["status"],
-                "worker_last_seen_s": worker["age_s"],
             }
         )
 
@@ -303,17 +194,8 @@ def create_app() -> FastAPI:
             bridge_label = f"bridge: slow ({bridge['age_s']}s)"
         elif bridge["status"] == "error":
             bridge_label = "bridge: down"
-
-        worker = _get_worker_health()
-        worker_label = "worker: ok"
-        if worker["status"] == "running":
-            worker_label = f"worker: slow ({worker['age_s']}s)"
-        elif worker["status"] == "error":
-            worker_label = "worker: down"
-
         return HTMLResponse(
             f'<span class="badge badge-{bridge["status"]}">{bridge_label}</span>'
-            f'<span class="badge badge-{worker["status"]}">{worker_label}</span>'
             f'<span class="badge badge-ok">web: ok</span>'
         )
 

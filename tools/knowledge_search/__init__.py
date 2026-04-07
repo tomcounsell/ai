@@ -13,8 +13,7 @@ from typing import Literal
 
 import requests
 
-from config.models import OPENROUTER_EMBEDDINGS_URL
-
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 EMBEDDING_MODEL = "openai/text-embedding-3-small"
 DEFAULT_DB_PATH = Path.home() / ".valor" / "knowledge.db"
 
@@ -66,7 +65,7 @@ def _compute_embedding(text: str, api_key: str) -> list[float] | None:
     """Compute embedding for text using OpenRouter."""
     try:
         response = requests.post(
-            OPENROUTER_EMBEDDINGS_URL,
+            "https://openrouter.ai/api/v1/embeddings",
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",

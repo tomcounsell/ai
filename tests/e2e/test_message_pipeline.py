@@ -185,7 +185,7 @@ class TestWorkRequestClassification:
 
 @pytest.mark.e2e
 class TestNeedsResponseClassification:
-    """Test fast-path classify_needs_response (bool: True/False)."""
+    """Test fast-path classify_needs_response (no LLM)."""
 
     def test_short_messages_ignored(self):
         assert classify_needs_response("ok") is False
@@ -194,11 +194,7 @@ class TestNeedsResponseClassification:
     def test_common_acknowledgments_ignored(self):
         assert classify_needs_response("thanks") is False
         assert classify_needs_response("gotcha") is False
-
-    def test_social_banter_ignored(self):
         assert classify_needs_response("nice") is False
-        assert classify_needs_response("lol") is False
-        assert classify_needs_response("haha") is False
 
     def test_emoji_acknowledgments_ignored(self):
         assert classify_needs_response("\U0001f44d") is False

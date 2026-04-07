@@ -31,9 +31,9 @@
     },
     {
       "name": "check-status",
-      "description": "Check scheduled session status",
+      "description": "Check scheduled job status",
       "steps": [
-        "get_session_status('session_id')"
+        "get_job_status('job_id')"
       ]
     }
   ]

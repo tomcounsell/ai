@@ -9,13 +9,8 @@ All operations fail silently -- memory errors never block prompt submission.
 """
 
 import sys
-from pathlib import Path
 
 # Standalone script -- sys.path mutation is safe (never imported as library)
-# Add project root to path for model imports
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
-# Add utils to path
 sys.path.insert(0, str(__file__).rsplit("/", 1)[0])
 
 from hook_utils.constants import read_hook_input
@@ -50,8 +45,8 @@ def main():
             )
 
             sidecar = load_agent_session_sidecar(session_id)
-            agent_session_id = sidecar.get("agent_session_id")
-            if agent_session_id:
+            job_id = sidecar.get("agent_session_job_id")
+            if job_id:
                 # Subsequent prompt in same session -- re-activate
                 import time
 
@@ -62,21 +57,10 @@ def main():
                     matches = list(AgentSession.query.filter(session_id=local_sid))
                     if matches:
                         agent_session = matches[0]
-                        # Use lifecycle module for consistent transition logging
-                        from models.session_lifecycle import transition_status
-
-                        agent_session.updated_at = time.time()
+                        agent_session.status = "running"
+                        agent_session.last_activity = time.time()
                         agent_session.completed_at = None
-                        transition_status(
-                            agent_session,
-                            "running",
-                            reason="subsequent prompt reactivated local session",
-                            reject_from_terminal=False,
-                        )
-                        # If transition was idempotent (already running), field
-                        # changes above were not saved. Ensure they persist.
-                        if agent_session.status == "running":
-                            agent_session.save()
+                        agent_session.save()
                 except Exception:
                     pass  # Non-fatal
             else:
@@ -99,16 +83,11 @@ def main():
                     message_text=prompt[:500] if prompt else "",
                 )
 
-                sidecar["agent_session_id"] = agent_session.agent_session_id
+                sidecar["agent_session_job_id"] = agent_session.job_id
                 save_agent_session_sidecar(session_id, sidecar)
     except Exception:
         pass  # Silent failure -- never block prompt submission
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        from hook_utils.constants import log_hook_error
-
-        log_hook_error("user_prompt_submit", str(e))
+    main()

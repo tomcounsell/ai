@@ -50,21 +50,28 @@ This skill is decomposed into focused sub-skills in `sub-skills/`:
 
 Each sub-skill has a single responsibility and receives pre-resolved context.
 
-## Stage Marker
+## Session Progress Tracking
 
-At the very start of this skill, write an in_progress marker:
-
-```bash
-python -m tools.sdlc_stage_marker --stage REVIEW --status in_progress 2>/dev/null || true
-```
-
-After posting the review (Step 6), on approval (no blockers):
+Extract the session ID from the conversation context. The bridge injects `SESSION_ID: {id}` into enriched messages. Look for this pattern and store it:
 
 ```bash
-python -m tools.sdlc_stage_marker --stage REVIEW --status completed 2>/dev/null || true
+# Extract SESSION_ID from context
+# Look for a line like "SESSION_ID: abc123" in the message you received
+# Store in variable: SESSION_ID="abc123"
+
+# Mark REVIEW stage as in_progress at the start
+python -m tools.session_progress --session-id "$SESSION_ID" --stage REVIEW --status in_progress 2>/dev/null || true
 ```
 
-Note: If blockers found, leave as in_progress — the SDLC dispatcher will invoke /do-patch and then re-run review, which will complete the stage after fixes.
+After posting the review (Step 6):
+
+```bash
+# On approval (no blockers):
+python -m tools.session_progress --session-id "$SESSION_ID" --stage REVIEW --status completed 2>/dev/null || true
+
+# Note: If blockers found, leave as in_progress - the SDLC dispatcher will invoke /do-patch
+# and then re-run review, which will complete the stage after fixes
+```
 
 ## Goal Alignment
 
@@ -274,9 +281,7 @@ SELF_AUTHORED=$( [ "$PR_AUTHOR" = "$CURRENT_USER" ] && echo "true" || echo "fals
 
 Self-authored PRs cannot use `gh pr review --approve` or `--request-changes` (GitHub rejects these). Use `gh pr comment` as fallback.
 
-**Three-tier decision tree (apply in order):**
-
-#### Tier 1: Blockers found → Request Changes
+**If blockers found:**
 ```bash
 REVIEW_BODY="$(cat <<'EOF'
 ## Review: Changes Requested
@@ -287,7 +292,7 @@ REVIEW_BODY="$(cat <<'EOF'
 - [ ] **`file.py:42`** — `actual_code()` — [description of issue]
 - [ ] **`file.py:87`** — `actual_code()` — [description of issue]
 
-### Tech Debt
+### Tech Debt (non-blocking)
 - **`file.py:15`** — `code()` — [description]
 
 ### Screenshots
@@ -302,37 +307,7 @@ else
 fi
 ```
 
-#### Tier 2: No blockers, but has tech_debt or nits → Request Changes
-```bash
-REVIEW_BODY="$(cat <<'EOF'
-## Review: Changes Requested — Tech Debt
-
-[summary — no blockers, but outstanding tech debt/nits must be resolved before merge]
-
-### Verified
-- [x] Code correctness
-- [x] Security (no vulnerabilities found)
-- [x] Plan requirements met
-
-### Tech Debt
-- [ ] **`file.py:15`** — `code()` — [description]
-
-### Nits
-- [ ] **`file.py:30`** — `code()` — [description]
-
-### Screenshots
-[screenshot references if captured]
-EOF
-)"
-
-if [ "$SELF_AUTHORED" = "true" ]; then
-  gh pr comment $PR_NUMBER --body "$REVIEW_BODY"
-else
-  gh pr review $PR_NUMBER --request-changes --body "$REVIEW_BODY"
-fi
-```
-
-#### Tier 3: Zero findings → Approve
+**If no blockers:**
 ```bash
 REVIEW_BODY="$(cat <<'EOF'
 ## Review: Approved
@@ -344,6 +319,9 @@ REVIEW_BODY="$(cat <<'EOF'
 - [x] Test coverage
 - [x] Security (no vulnerabilities found)
 - [x] Plan requirements met
+
+### Tech Debt (optional follow-ups)
+- [any non-blocking items]
 
 ### Screenshots
 [screenshot references if captured]
@@ -427,7 +405,7 @@ After posting the review and verifying it was posted (Steps 6-6.5), emit a typed
 
 **Partial (no blockers, but has tech_debt and/or nits that need patching):**
 ```
-<!-- OUTCOME {"status":"partial","stage":"REVIEW","artifacts":{"review_url":"{review_url}","blockers":0,"tech_debt":2,"nits":1},"notes":"Changes requested: 2 tech_debt and 1 nit findings. Routing to /do-patch.","next_skill":"/do-patch"} -->
+<!-- OUTCOME {"status":"partial","stage":"REVIEW","artifacts":{"review_url":"{review_url}","blockers":0,"tech_debt":2,"nits":1},"notes":"Approved with 2 tech_debt and 1 nit findings. Routing to /do-patch.","next_skill":"/do-patch"} -->
 ```
 
 **Fail (blockers found):**
@@ -442,7 +420,6 @@ After posting the review and verifying it was posted (Steps 6-6.5), emit a typed
 1. **Reviews MUST be posted on GitHub.** A review that only exists in agent output is NOT a review. Use `gh pr review` to post, or `gh pr comment` for self-authored PRs. Step 6.5 verifies posting succeeded. The SDLC dispatcher checks for both reviews and comments before advancing.
 2. **Tech debt and nits get patched.** `/do-patch` fixes all tech debt and non-subjective nits. Only purely subjective nits may be skipped — and that requires human approval.
 3. **Never approve and skip issues.** If you found tech debt or nits, they appear in the review body. The pipeline will patch them. Don't omit findings to make the review look clean.
-4. **Approval is reserved for zero-finding reviews ONLY.** If ANY tech_debt or nits exist, use `--request-changes`, never `--approve`. GitHub approval is a meaningful quality gate — it signals the PR is truly ready to merge with no outstanding work.
 
 ## Best Practices
 

@@ -113,47 +113,47 @@ No prerequisites — this work modifies only internal model fields with no exter
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [x] `append_event()` (renamed from `append_history`) has try/except on save — test that save failures are logged but don't crash
-- [x] `set_link()`, `record_pm_message()`, `push_steering_message()` all have try/except — verify logging on failure
-- [x] `cleanup_expired()` datetime comparison — test with sessions that have `None` timestamps
+- [ ] `append_event()` (renamed from `append_history`) has try/except on save — test that save failures are logged but don't crash
+- [ ] `set_link()`, `record_pm_message()`, `push_steering_message()` all have try/except — verify logging on failure
+- [ ] `cleanup_expired()` datetime comparison — test with sessions that have `None` timestamps
 
 ### Empty/Invalid Input Handling
-- [x] `initial_telegram_message` is `None` for local CLI sessions — verify property accessors return `None` gracefully
-- [x] `extra_context` is `None` — verify `classification_type` property returns `None`
-- [x] `session_events` is `None` or empty — verify `summary`, `result_text`, `stage_states`, `last_commit_sha` all return `None`
-- [x] `scheduling_depth` property with broken parent chain (parent deleted) — verify it stops and returns partial count
+- [ ] `initial_telegram_message` is `None` for local CLI sessions — verify property accessors return `None` gracefully
+- [ ] `extra_context` is `None` — verify `classification_type` property returns `None`
+- [ ] `session_events` is `None` or empty — verify `summary`, `result_text`, `stage_states`, `last_commit_sha` all return `None`
+- [ ] `scheduling_depth` property with broken parent chain (parent deleted) — verify it stops and returns partial count
 
 ### Error State Rendering
-- [x] UI templates handle `None` datetime fields (sessions created before migration)
-- [x] Dashboard session detail renders correctly with new field structure
+- [ ] UI templates handle `None` datetime fields (sessions created before migration)
+- [ ] Dashboard session detail renders correctly with new field structure
 
 ## Test Impact
 
 **Note:** This list is a starting point. Builders must grep-audit every renamed field and update ALL callers, including files not listed here. The `initial_telegram_message` consolidation alone touches 48+ files.
 
-- [x] `tests/unit/test_job_hierarchy.py` — UPDATE: datetime objects, remove `depends_on`/`stable_job_id`, remove `commit_sha` field usage
-- [x] `tests/unit/test_job_dependencies.py` — DELETE: `depends_on` and `stable_job_id` removed entirely
-- [x] `tests/unit/test_session_status.py` — UPDATE: `updated_at` rename, datetime objects
-- [x] `tests/unit/test_ui_sdlc_data.py` — UPDATE: `updated_at` rename, datetime objects, `work_item_slug` → `slug`
-- [x] `tests/unit/test_job_queue_async.py` — UPDATE: datetime objects, remove `scheduling_depth`
-- [x] `tests/unit/test_job_scheduler_kill.py` — UPDATE: datetime objects
-- [x] `tests/unit/test_summarizer.py` — UPDATE: remove `_qa_mode_legacy` references
-- [x] `tests/unit/test_qa_nudge_cap.py` — UPDATE: remove `_qa_mode_legacy` references
-- [x] `tests/unit/test_session_tags.py` — UPDATE: `work_item_slug` → `slug`, `sender` property removal
-- [x] `tests/unit/test_sdlc_env_vars.py` — UPDATE: `work_item_slug` → `slug`
-- [x] `tests/unit/test_pipeline_integrity.py` — UPDATE: remove `work_item_slug` from field lists
-- [x] `tests/unit/test_model_relationships.py` — UPDATE: `sender` property, datetime objects
-- [x] `tests/unit/test_config_driven_routing.py` — UPDATE: remove `_qa_mode_legacy` references
-- [x] `tests/integration/test_agent_session_lifecycle.py` — UPDATE: datetime objects, `updated_at` rename, `session_events` rename, factory method removal
-- [x] `tests/integration/test_job_scheduler.py` — UPDATE: datetime objects, `scheduling_depth` removal, `scheduled_at` rename
-- [x] `tests/integration/test_job_health_monitor.py` — UPDATE: datetime objects
-- [x] `tests/integration/test_connectivity_gaps.py` — UPDATE: datetime objects, `work_item_slug` → `slug`
-- [x] `tests/integration/test_job_queue_race.py` — UPDATE: `work_item_slug` → `slug`, `revival_context` → `extra_context`
-- [x] `tests/integration/test_redis_models.py` — UPDATE: field renames, `sender` property
-- [x] `tests/e2e/test_session_continuity.py` — UPDATE: datetime objects
-- [x] `tests/e2e/test_session_lifecycle.py` — UPDATE: datetime objects, factory methods
-- [x] `tests/e2e/test_context_propagation.py` — UPDATE: `work_item_slug` → `slug`
-- [x] `tests/e2e/test_nudge_loop.py` — UPDATE: `work_item_slug` → `slug`
+- [ ] `tests/unit/test_job_hierarchy.py` — UPDATE: datetime objects, remove `depends_on`/`stable_job_id`, remove `commit_sha` field usage
+- [ ] `tests/unit/test_job_dependencies.py` — DELETE: `depends_on` and `stable_job_id` removed entirely
+- [ ] `tests/unit/test_session_status.py` — UPDATE: `updated_at` rename, datetime objects
+- [ ] `tests/unit/test_ui_sdlc_data.py` — UPDATE: `updated_at` rename, datetime objects, `work_item_slug` → `slug`
+- [ ] `tests/unit/test_job_queue_async.py` — UPDATE: datetime objects, remove `scheduling_depth`
+- [ ] `tests/unit/test_job_scheduler_kill.py` — UPDATE: datetime objects
+- [ ] `tests/unit/test_summarizer.py` — UPDATE: remove `_qa_mode_legacy` references
+- [ ] `tests/unit/test_qa_nudge_cap.py` — UPDATE: remove `_qa_mode_legacy` references
+- [ ] `tests/unit/test_session_tags.py` — UPDATE: `work_item_slug` → `slug`, `sender` property removal
+- [ ] `tests/unit/test_sdlc_env_vars.py` — UPDATE: `work_item_slug` → `slug`
+- [ ] `tests/unit/test_pipeline_integrity.py` — UPDATE: remove `work_item_slug` from field lists
+- [ ] `tests/unit/test_model_relationships.py` — UPDATE: `sender` property, datetime objects
+- [ ] `tests/unit/test_config_driven_routing.py` — UPDATE: remove `_qa_mode_legacy` references
+- [ ] `tests/integration/test_agent_session_lifecycle.py` — UPDATE: datetime objects, `updated_at` rename, `session_events` rename, factory method removal
+- [ ] `tests/integration/test_job_scheduler.py` — UPDATE: datetime objects, `scheduling_depth` removal, `scheduled_at` rename
+- [ ] `tests/integration/test_job_health_monitor.py` — UPDATE: datetime objects
+- [ ] `tests/integration/test_connectivity_gaps.py` — UPDATE: datetime objects, `work_item_slug` → `slug`
+- [ ] `tests/integration/test_job_queue_race.py` — UPDATE: `work_item_slug` → `slug`, `revival_context` → `extra_context`
+- [ ] `tests/integration/test_redis_models.py` — UPDATE: field renames, `sender` property
+- [ ] `tests/e2e/test_session_continuity.py` — UPDATE: datetime objects
+- [ ] `tests/e2e/test_session_lifecycle.py` — UPDATE: datetime objects, factory methods
+- [ ] `tests/e2e/test_context_propagation.py` — UPDATE: `work_item_slug` → `slug`
+- [ ] `tests/e2e/test_nudge_loop.py` — UPDATE: `work_item_slug` → `slug`
 
 ## Rabbit Holes
 
@@ -199,38 +199,38 @@ No agent integration required — AgentSession is used internally by the bridge,
 ## Documentation
 
 ### Feature Documentation
-- [x] Update `docs/features/agent-session-model.md` — new field types, names, and `SessionEvent` model
-- [x] Update `docs/features/redis-models.md` — field type audit table
+- [ ] Update `docs/features/agent-session-model.md` — new field types, names, and `SessionEvent` model
+- [ ] Update `docs/features/redis-models.md` — field type audit table
 
 ### Related Documentation
-- [x] Update `docs/features/job-queue.md` — remove `depends_on`, `scheduling_depth` references
-- [x] Update `docs/features/job-scheduling.md` — `scheduling_depth` removal, `scheduled_at` rename
-- [x] Update `docs/features/session-watchdog.md` — datetime field references
-- [x] Update `docs/features/chat-dev-session-architecture.md` — factory method removal, field renames
+- [ ] Update `docs/features/job-queue.md` — remove `depends_on`, `scheduling_depth` references
+- [ ] Update `docs/features/job-scheduling.md` — `scheduling_depth` removal, `scheduled_at` rename
+- [ ] Update `docs/features/session-watchdog.md` — datetime field references
+- [ ] Update `docs/features/chat-dev-session-architecture.md` — factory method removal, field renames
 
 ### Inline Documentation
-- [x] Docstrings on `SessionEvent` model and all new `@property` accessors
+- [ ] Docstrings on `SessionEvent` model and all new `@property` accessors
 
 ## Success Criteria
 
-- [x] All timestamp fields use `DatetimeField` or `SortedField(type=datetime)` instead of `Field(type=float)`
-- [x] `last_activity` renamed to `updated_at` with `auto_now=True`
-- [x] `scheduled_after` renamed to `scheduled_at`
-- [x] `_qa_mode_legacy` field and raw Redis `hget` fallback removed
-- [x] `scheduling_depth` field replaced with derived `@property` walking `parent_job_id` chain
-- [x] `sender_name`, `sender_id`, `telegram_message_id`, `message_text`, `chat_title`, `telegram_message_key` consolidated into `initial_telegram_message` DictField
-- [x] `revival_context` renamed to `extra_context` as general-purpose DictField
-- [x] `classification_type` + `classification_confidence` folded into `extra_context`
-- [x] `history` renamed to `session_events` with `SessionEvent` Pydantic model
-- [x] `summary`, `result_text`, `stage_states`, `commit_sha` removed as fields, replaced with `@property` reading from `session_events`
-- [x] `depends_on` and `stable_job_id` removed
-- [x] Factory methods and trivial query wrappers removed
-- [x] `work_item_slug` removed, all callers use `slug`
-- [x] All callers use `datetime.now(tz=timezone.utc)` instead of `time.time()`
-- [x] All existing tests pass
-- [x] UI templates render datetime fields correctly
-- [x] Tests pass (`/do-test`)
-- [x] Documentation updated (`/do-docs`)
+- [ ] All timestamp fields use `DatetimeField` or `SortedField(type=datetime)` instead of `Field(type=float)`
+- [ ] `last_activity` renamed to `updated_at` with `auto_now=True`
+- [ ] `scheduled_after` renamed to `scheduled_at`
+- [ ] `_qa_mode_legacy` field and raw Redis `hget` fallback removed
+- [ ] `scheduling_depth` field replaced with derived `@property` walking `parent_job_id` chain
+- [ ] `sender_name`, `sender_id`, `telegram_message_id`, `message_text`, `chat_title`, `telegram_message_key` consolidated into `initial_telegram_message` DictField
+- [ ] `revival_context` renamed to `extra_context` as general-purpose DictField
+- [ ] `classification_type` + `classification_confidence` folded into `extra_context`
+- [ ] `history` renamed to `session_events` with `SessionEvent` Pydantic model
+- [ ] `summary`, `result_text`, `stage_states`, `commit_sha` removed as fields, replaced with `@property` reading from `session_events`
+- [ ] `depends_on` and `stable_job_id` removed
+- [ ] Factory methods and trivial query wrappers removed
+- [ ] `work_item_slug` removed, all callers use `slug`
+- [ ] All callers use `datetime.now(tz=timezone.utc)` instead of `time.time()`
+- [ ] All existing tests pass
+- [ ] UI templates render datetime fields correctly
+- [ ] Tests pass (`/do-test`)
+- [ ] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 

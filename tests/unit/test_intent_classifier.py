@@ -211,7 +211,7 @@ GOLDEN_WORK_EXAMPLES = [
     ("work 0.95", "ok fix that"),
     ("work 0.99", "Merge PR 42"),
     ("work 0.98", "Make the tests pass"),
-    ("work 0.97", "Refactor the session queue"),
+    ("work 0.97", "Refactor the job queue"),
     ("work 0.93", "Can you update the docs?"),
     ("work 0.99", "Complete issue 499"),
     ("work 0.99", "Run the SDLC pipeline on this"),

@@ -21,7 +21,7 @@ The SDLC Observer at `/sdlc/` shows all `AgentSession` instances that have SDLC 
 ### Pipeline Detail (`/sdlc/{job_id}/`)
 - Stat boxes: status, current stage, duration, session type
 - Full stage progress indicator
-- Details table: session ID, session ID, project, branch, slug, timestamps
+- Details table: job ID, session ID, project, branch, slug, timestamps
 - Links section: issue URL, plan URL, PR URL
 - Event timeline from session history
 - Original message text

@@ -54,7 +54,7 @@ def is_narration_only(text: str) -> bool:
         "Let me look at the code. Now let me examine the tests."
 
     Examples that return False:
-        "Let me check the config. Found the issue in agent/agent_session_queue.py line 42."
+        "Let me check the config. Found the issue in agent/job_queue.py line 42."
         "Let me look at the logs.\n```\nERROR: connection refused\n```"
         "" (empty string)
 
@@ -102,8 +102,8 @@ NARRATION_FALLBACK_MESSAGE = (
     "Please re-trigger if you'd like me to try again."
 )
 
-# Nudge feedback sent when narration gate triggers an auto-continue
-NARRATION_NUDGE_FEEDBACK = (
+# Coaching message sent when narration gate triggers an auto-continue
+NARRATION_COACHING_MESSAGE = (
     "You announced you would investigate but stopped before producing findings. "
     "Continue the investigation and report actual results."
 )

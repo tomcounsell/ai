@@ -32,46 +32,21 @@ import httpx
 
 from bridge.message_quality import PROCESS_NARRATION_PATTERNS as _PROCESS_NARRATION_PATTERNS
 from config.enums import PersonaType
-from config.models import MODEL_FAST, OPENROUTER_HAIKU, OPENROUTER_URL
+from config.models import MODEL_FAST, OPENROUTER_HAIKU
 from utils.api_keys import get_anthropic_api_key
 
 logger = logging.getLogger(__name__)
 
+# Thresholds
+FILE_ATTACH_THRESHOLD = 3000  # Attach full output as file above this
+SAFETY_TRUNCATE = 4096  # Telegram hard limit
 
-def _safe_int(env_key: str, default: int) -> int:
-    """Parse an env var as int, falling back to *default* on any error."""
-    try:
-        return int(os.environ.get(env_key, str(default)))
-    except (ValueError, TypeError):
-        logger.warning("%s has non-integer value, using default %d", env_key, default)
-        return default
-
-
-def _safe_float(env_key: str, default: float) -> float:
-    """Parse an env var as float, falling back to *default* on any error."""
-    try:
-        return float(os.environ.get(env_key, str(default)))
-    except (ValueError, TypeError):
-        logger.warning("%s has non-float value, using default %s", env_key, default)
-        return default
-
-
-# Thresholds (overridable via env vars)
-# FILE_ATTACH_THRESHOLD: character count above which the full agent response is
-# also sent as a .txt file attachment. Valid range: 500-10000 (default 3000).
-FILE_ATTACH_THRESHOLD = _safe_int("FILE_ATTACH_THRESHOLD", 3000)
-# SAFETY_TRUNCATE: hard ceiling in characters when all summarization backends
-# fail and we must truncate the raw text. Valid range: 1000-8192 (default 4096).
-SAFETY_TRUNCATE = _safe_int("SAFETY_TRUNCATE", 4096)
-
-# OpenRouter config imported from config.models
+# OpenRouter config
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 # Classification confidence threshold — below this, default to QUESTION
 # (conservative: pauses for human input rather than auto-continuing)
-# Override via env var; value must be a float between 0.0 and 1.0.
-# Valid range: 0.0-1.0 (default 0.80). Higher values make the system more
-# conservative, defaulting to QUESTION when confidence is below this threshold.
-CLASSIFICATION_CONFIDENCE_THRESHOLD = _safe_float("CLASSIFICATION_CONFIDENCE_THRESHOLD", 0.80)
+CLASSIFICATION_CONFIDENCE_THRESHOLD = 0.80
 
 
 def _extract_open_questions(text: str) -> list[str]:
@@ -186,7 +161,7 @@ class ClassificationResult:
     confidence: float  # 0.0-1.0
     reason: str  # Brief explanation
     was_rejected_completion: bool = False  # True when COMPLETION → STATUS_UPDATE downgrade
-    nudge_feedback: str | None = None  # LLM-generated feedback for rejected completions
+    coaching_message: str | None = None  # LLM-generated coaching for rejected completions
     has_workarounds: bool = False  # True when agent encountered problems it worked around
 
 
@@ -302,13 +277,13 @@ You classify developer agent output to determine if human input is needed.
 
 Respond with ONLY a JSON object — no markdown, no explanation, no extra text:
 {"type": "question|status|completion|blocker|error", \
-"confidence": 0.95, "reason": "brief explanation", "nudge_feedback": null, \
+"confidence": 0.95, "reason": "brief explanation", "coaching_message": null, \
 "has_workarounds": false}
 
-The nudge_feedback field is REQUIRED in your response. Set it to a helpful string \
+The coaching_message field is REQUIRED in your response. Set it to a helpful string \
 when you classify as "status" and the output LOOKS like a completion attempt but \
-lacks evidence (i.e., you are downgrading a completion to status). The nudge \
-feedback should explain what was missing and what the agent should include next time. \
+lacks evidence (i.e., you are downgrading a completion to status). The coaching \
+message should explain what was missing and what the agent should include next time. \
 Set it to null for all other classifications.
 
 The has_workarounds field detects when the agent encountered problems, errors, or \
@@ -366,7 +341,7 @@ direct answers to "how does X work?" or "what is X?" questions
   IMPORTANT: If the output explains a system, answers a question, or provides information \
 the user asked for — that is COMPLETION, not STATUS_UPDATE. The user asked, the agent answered.
 
-  NOT completion (classify as STATUS_UPDATE instead, and provide a nudge_feedback):
+  NOT completion (classify as STATUS_UPDATE instead, and provide a coaching_message):
   - "Done" or "Complete" without any evidence (for work tasks)
   - "Should work now" (hedging = not verified)
   - "Committed and pushed" without test results
@@ -381,30 +356,30 @@ ERROR — Something failed or broke.
   Examples: "Error: ModuleNotFoundError", "Build failed with exit code 1", "Tests failing: 3 errors"
   Key signals: "error:", "failed:", exception names, non-zero exit codes
 
-Few-shot examples of nudge_feedback for downgraded completions:
+Few-shot examples of coaching_message for downgraded completions:
 
 Input: "I think the bug is fixed now. Should work."
 Output: {"type": "status", "confidence": 0.92, "reason": "Hedging language without verification", \
-"nudge_feedback": "You used hedging language ('I think', 'should work') which signals \
+"coaching_message": "You used hedging language ('I think', 'should work') which signals \
 uncertainty. Run the reproduction steps or tests and share the actual output to confirm the fix."}
 
 Input: "All tests pass. Task complete."
 (but no test output shown)
 Output: {"type": "status", "confidence": 0.90, "reason": "Claims tests pass but shows no output", \
-"nudge_feedback": "You claimed tests pass but didn't include the test output. Run pytest and \
+"coaching_message": "You claimed tests pass but didn't include the test output. Run pytest and \
 paste the results showing pass/fail counts so completion can be verified."}
 
 Input: "Fixed the issue and committed. I believe everything is working correctly."
 Output: {"type": "status", "confidence": 0.91, \
 "reason": "Completion claim with hedging, no evidence", \
-"nudge_feedback": "You said 'I believe everything is working' — \
+"coaching_message": "You said 'I believe everything is working' — \
 that's hedging, not evidence. Show the commit hash, test output, \
 and any verification commands you ran."}
 
 Input: "I'll implement a fix for this by adding a check in the hook..."
 Output: {"type": "status", "confidence": 0.93, \
 "reason": "Agent plans to write code outside SDLC pipeline", \
-"nudge_feedback": "Implementation work should go through /sdlc to ensure proper branch, \
+"coaching_message": "Implementation work should go through /sdlc to ensure proper branch, \
 testing, and review. Use /sdlc to create an issue and start the pipeline instead of \
 writing code directly."}
 
@@ -416,34 +391,34 @@ completions and questions are delivered to Telegram. The structured format uses 
 points with stage progress lines for SDLC work."
 Output: {"type": "completion", "confidence": 0.92, \
 "reason": "Factual answer to user question about system architecture", \
-"nudge_feedback": null, "has_workarounds": false}
+"coaching_message": null, "has_workarounds": false}
 
 Input: "There are two root causes: the classifier misclassifies informational answers as status \
 updates because they lack evidence like test output, and the shared Claude Code session \
 causes context to leak between concurrent conversations."
 Output: {"type": "completion", "confidence": 0.93, \
 "reason": "Direct analysis answering user's question about a bug", \
-"nudge_feedback": null, "has_workarounds": false}
+"coaching_message": null, "has_workarounds": false}
 
 Input: "Let me investigate the logs to find out what happened..."
 Output: {"type": "status", "confidence": 0.90, \
 "reason": "Agent describing planned investigation, not yet answering", \
-"nudge_feedback": null, "has_workarounds": false}
+"coaching_message": null, "has_workarounds": false}
 
-Few-shot examples of EMPTY PROMISES (must be classified as status with nudge feedback):
+Few-shot examples of EMPTY PROMISES (must be classified as status with coaching):
 
 CRITICAL CONTEXT: By the time a response reaches Telegram, the agent's session is OVER. \
 There is no future execution. The agent cannot "will do" anything — it has already finished. \
 Any "I will", "I'll", "going forward", "from now on", "next time" language is an empty promise \
 UNLESS the agent already made the change in this session and shows evidence. \
-The only exception is scheduling/queuing a session that will execute later AND report back \
-via Telegram (e.g., "I've queued a build session — you'll get a message when it completes"). \
+The only exception is scheduling/queuing a job that will execute later AND report back \
+via Telegram (e.g., "I've queued a build job — you'll get a message when it completes"). \
 Otherwise the only honest responses are: "I did X (proof)" or "I didn't do X (why)."
 
 Input: "Will do. I'll update the config next time."
 Output: {"type": "status", "confidence": 0.95, \
 "reason": "Empty promise — agent says 'will do' but session is ending, there is no next time", \
-"nudge_feedback": "You said 'will do' but your session is about to end — there is no \
+"coaching_message": "You said 'will do' but your session is about to end — there is no \
 future execution to fulfill this promise. Either make the change NOW (edit a file, save a \
 memory, update a config) and show evidence, or be honest that you didn't do it.", \
 "has_workarounds": false}
@@ -451,7 +426,7 @@ memory, update a config) and show evidence, or be honest that you didn't do it."
 Input: "Noted. I'll adjust my approach going forward."
 Output: {"type": "status", "confidence": 0.95, \
 "reason": "Empty promise — 'going forward' implies future action but session is ending", \
-"nudge_feedback": "You said 'going forward' but this session is ending. There is no \
+"coaching_message": "You said 'going forward' but this session is ending. There is no \
 'going forward' unless you made a durable change right now. What did you actually change? \
 Show a commit hash, file path, or memory entry — or admit no change was made.", \
 "has_workarounds": false}
@@ -459,7 +434,7 @@ Show a commit hash, file path, or memory entry — or admit no change was made."
 Input: "Updated bridge/summarizer.py to reject empty promises. Committed abc1234."
 Output: {"type": "completion", "confidence": 0.90, \
 "reason": "Concrete action taken with evidence — file path and commit hash", \
-"nudge_feedback": null, "has_workarounds": false}"""
+"coaching_message": null, "has_workarounds": false}"""
 
 # False question detection explained:
 # Many agent outputs contain question-like text that should NOT pause for human input:
@@ -520,7 +495,7 @@ def _detect_empty_promise(text_lower: str) -> bool:
         r"\b(?:saved|written|created)\b.*\bmemory\b",
         r"https?://github\.com/.+/commit/",  # GitHub commit URLs
         r"\brestarted?\b.*\b(?:bridge|service)\b",  # service restart
-        r"\b(?:scheduled|queued)\b.*\bsession[_-]?[a-f0-9]{6,}\b",  # session ID
+        r"\b(?:scheduled|queued)\b.*\bjob[_-]?[a-f0-9]{6,}\b",  # job ID
     ]
 
     has_evidence = any(re.search(p, text_lower) for p in evidence_patterns)
@@ -584,7 +559,7 @@ def _classify_with_heuristics(text: str) -> ClassificationResult:
             output_type=OutputType.STATUS_UPDATE,
             confidence=0.90,
             reason="Empty promise — session is ending, 'will do' has no future execution",
-            nudge_feedback=(
+            coaching_message=(
                 "Your session is about to end. You cannot 'will do' anything — "
                 "there is no future execution. Make the change NOW (edit a file, "
                 "save a memory, update a config) and show evidence, or honestly "
@@ -853,13 +828,13 @@ def _parse_classification_response(raw: str) -> ClassificationResult | None:
     except (TypeError, ValueError):
         confidence = 0.5
 
-    # Extract optional nudge_feedback from LLM response
-    nudge_feedback = data.get("nudge_feedback")
-    if nudge_feedback is not None:
-        nudge_feedback = str(nudge_feedback)
+    # Extract optional coaching_message from LLM response
+    coaching_message = data.get("coaching_message")
+    if coaching_message is not None:
+        coaching_message = str(coaching_message)
         # Treat JSON null / empty string as None
-        if not nudge_feedback or nudge_feedback == "null":
-            nudge_feedback = None
+        if not coaching_message or coaching_message == "null":
+            coaching_message = None
 
     # Extract has_workarounds flag
     has_workarounds = bool(data.get("has_workarounds", False))
@@ -868,13 +843,13 @@ def _parse_classification_response(raw: str) -> ClassificationResult | None:
         output_type=output_type,
         confidence=confidence,
         reason=str(reason),
-        nudge_feedback=nudge_feedback,
+        coaching_message=coaching_message,
         has_workarounds=has_workarounds,
     )
 
-    # Detect rejected completions: LLM provided a nudge_feedback on a
+    # Detect rejected completions: LLM provided a coaching_message on a
     # STATUS_UPDATE, meaning it downgraded a completion attempt
-    if result.output_type == OutputType.STATUS_UPDATE and result.nudge_feedback:
+    if result.output_type == OutputType.STATUS_UPDATE and result.coaching_message:
         result.was_rejected_completion = True
 
     return result
@@ -928,8 +903,8 @@ def _get_status_emoji(session, is_completion: bool = True) -> str:
             # PR link on completed session suggests merge milestone
             if links.get("pr") and status in ("completed",):
                 is_milestone = True
-        except Exception as e:
-            logger.debug(f"Failed to get session links for emoji selection: {e}")
+        except Exception:
+            pass
 
     if status in ("completed",):
         return "✅" if is_milestone else ""
@@ -966,8 +941,8 @@ def _build_summary_prompt(
             context_parts.append(f"Work type: {session.classification_type}")
         if session.branch_name:
             context_parts.append(f"Branch: {session.branch_name}")
-        if hasattr(session, "slug") and session.slug:
-            context_parts.append(f"Work item: {session.slug}")
+        if hasattr(session, "work_item_slug") and session.work_item_slug:
+            context_parts.append(f"Work item: {session.work_item_slug}")
         # Include tracked links for context
         if hasattr(session, "get_links"):
             links = session.get_links()

@@ -57,21 +57,6 @@ def append_to_log(session_dir: Path, filename: str, entry: dict) -> None:
         f.write(json.dumps(entry) + "\n")
 
 
-def log_hook_error(hook_name: str, error: str) -> None:
-    """Log a hook error to logs/hooks.log in a format reflections can parse.
-
-    Format: 2026-04-01 12:00:00 - hook_name - ERROR - message
-    """
-    try:
-        log_path = get_project_dir() / "logs" / "hooks.log"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
-        with open(log_path, "a") as f:
-            f.write(f"{ts} - {hook_name} - ERROR - {error}\n")
-    except Exception:
-        pass  # Last-resort silence — logging must never crash a hook
-
-
 def write_json_log(session_dir: Path, filename: str, data: dict) -> None:
     """Write data to a JSON file (overwrites)."""
     log_path = session_dir / filename

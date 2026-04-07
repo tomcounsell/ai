@@ -66,8 +66,8 @@ class TestEnumerateClaudeProcesses:
 
     SAMPLE_PS_OUTPUT = """\
   PID   ELAPSED  RSS COMMAND
-12345    05:23 102400 claude --dangerously-skip-permissions
-12346 1-02:30:00 524288 claude --dangerously-skip-permissions
+12345    05:23 102400 /usr/local/bin/claude --session abc
+12346 1-02:30:00 524288 /usr/local/bin/claude --session old
 12347    15:00  51200 /usr/local/bin/pyright --watch
 99999    01:00  10240 /usr/bin/python3 some_other_process
 """
@@ -134,7 +134,7 @@ class TestEnumerateClaudeProcesses:
             returncode=0,
             stdout=(
                 "  PID   ELAPSED  RSS COMMAND\nbadline\n"
-                "12345    05:23 102400 claude --dangerously-skip-permissions\n"
+                "12345    05:23 102400 /usr/local/bin/claude -- /Users/test\n"
             ),
             stderr="",
         )

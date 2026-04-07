@@ -169,32 +169,31 @@ class TestMergeGuardHook:
 class TestEnqueueContinuationFallback:
     """Test that the fallback path preserves session metadata."""
 
-    def test_extract_agent_session_fields_includes_metadata(self):
-        """Verify _AGENT_SESSION_FIELDS includes all critical session metadata."""
-        from agent.agent_session_queue import _AGENT_SESSION_FIELDS
+    def test_extract_job_fields_includes_metadata(self):
+        """Verify _JOB_FIELDS includes all critical session metadata."""
+        from agent.job_queue import _JOB_FIELDS
 
         critical_fields = [
             "context_summary",
             "expectations",
             "issue_url",
             "pr_url",
-            "session_events",
+            "history",
             "correlation_id",
-            "slug",
+            "classification_type",
+            "work_item_slug",
         ]
         for field in critical_fields:
-            assert field in _AGENT_SESSION_FIELDS, (
-                f"Critical field {field!r} missing from _AGENT_SESSION_FIELDS"
-            )
+            assert field in _JOB_FIELDS, f"Critical field {field!r} missing from _JOB_FIELDS"
 
     def test_diagnose_missing_session_returns_dict(self):
         """Verify _diagnose_missing_session returns diagnostic info."""
-        from agent.agent_session_queue import _diagnose_missing_session
+        from agent.job_queue import _diagnose_missing_session
 
         result = _diagnose_missing_session("nonexistent-session-id-12345")
         assert isinstance(result, dict)
-        # Should have hash_exists, popoto_query_matches, or error (if Redis not available)
-        assert "hash_exists" in result or "error" in result
+        # Should either have matching_keys or error (if Redis not available)
+        assert "matching_keys" in result or "error" in result
 
 
 class TestMergeStageTracking:

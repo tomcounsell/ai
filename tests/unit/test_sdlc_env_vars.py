@@ -16,8 +16,8 @@ class TestExtractSdlcEnvVars:
         session.created_at = kwargs.get("created_at", 1000)
         session.pr_url = kwargs.get("pr_url", None)
         session.branch_name = kwargs.get("branch_name", None)
-        session.slug = kwargs.get("slug", None)
-        session.slug = kwargs.get("slug", None)
+        session.slug = kwargs.get("work_item_slug", None)
+        session.work_item_slug = kwargs.get("work_item_slug", None)
         session.plan_url = kwargs.get("plan_url", None)
         session.issue_url = kwargs.get("issue_url", None)
         return session
@@ -30,7 +30,7 @@ class TestExtractSdlcEnvVars:
         session = self._make_session(
             pr_url="https://github.com/tomcounsell/ai/pull/220",
             branch_name="session/my-feature",
-            slug="my-feature",
+            work_item_slug="my-feature",
             plan_url="https://github.com/tomcounsell/ai/blob/main/docs/plans/my-feature.md",
             issue_url="https://github.com/tomcounsell/ai/issues/415",
         )
@@ -81,7 +81,7 @@ class TestExtractSdlcEnvVars:
 
         session = self._make_session(
             pr_url="https://github.com/tomcounsell/ai/pull/42",
-            slug="fix-bug",
+            work_item_slug="fix-bug",
         )
         mock_as.query.filter.return_value = [session]
         result = _extract_sdlc_env_vars("test-session")

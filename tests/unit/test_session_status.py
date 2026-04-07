@@ -40,11 +40,11 @@ class TestFormatDuration:
 
 def _make_fake_session(
     session_id="sess-001",
-    agent_session_id="session-001",
+    job_id="job-001",
     status="active",
     created_at=None,
     started_at=None,
-    updated_at=None,
+    last_activity=None,
     project_key="test",
     history=None,
 ):
@@ -52,11 +52,11 @@ def _make_fake_session(
     now = time.time()
     mock = MagicMock()
     mock.session_id = session_id
-    mock.agent_session_id = agent_session_id
+    mock.job_id = job_id
     mock.status = status
     mock.created_at = created_at or now - 300
     mock.started_at = started_at or now - 200
-    mock.updated_at = updated_at or now - 10
+    mock.last_activity = last_activity or now - 10
     mock.project_key = project_key
     mock._get_history_list.return_value = history or []
     return mock
@@ -124,7 +124,7 @@ class TestGetSessionReport:
         healthy = _make_fake_session(
             session_id="healthy-001",
             status="active",
-            updated_at=now - 10,
+            last_activity=now - 10,
             started_at=now - 60,
         )
         mock_query = MagicMock()
@@ -141,7 +141,7 @@ class TestGetSessionReport:
         healthy = _make_fake_session(
             session_id="healthy-001",
             status="active",
-            updated_at=now - 10,
+            last_activity=now - 10,
         )
         mock_query = MagicMock()
         mock_query.all.return_value = [healthy]

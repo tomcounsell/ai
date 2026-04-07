@@ -10,7 +10,8 @@ AgentSession (Popoto/Redis)
     v
 ui/data/sdlc.py
     _session_to_pipeline()         # converts AgentSession -> PipelineProgress
-        _parse_stage_states()      # parses stage_states JSON -> StageState list (all sessions)
+        _parse_stage_states()      # parses stage_states JSON -> StageState list
+        _infer_stages_from_history()  # fallback for pre-#492 sessions
         _get_project_metadata()    # resolves project_key -> name + metadata
     |
     v
@@ -33,7 +34,7 @@ Browser (HTMX polling for live updates)
 1. Calls `AgentSession.query.all()` to fetch all sessions from Redis via Popoto
 2. Splits sessions into **active** (running/pending/in_progress/active/waiting_for_children) and **inactive** (everything else)
 3. Filters inactive sessions by the retention cutoff (see Configuration below)
-4. Uses a timestamp fallback chain for ordering and filtering: `completed_at -> updated_at -> started_at -> created_at`
+4. Uses a timestamp fallback chain for ordering and filtering: `completed_at -> last_activity -> started_at -> created_at`
 5. Returns active sessions (always shown, no cap) followed by up to `limit` inactive sessions, sorted newest-first
 
 ## SDLC Stage Pills
@@ -50,9 +51,9 @@ The `AgentSession.stage_states` field (populated by the PipelineStateMachine sin
 
 Internal metadata keys like `_patch_cycle_count` and `_critique_cycle_count` are ignored because the parser only iterates over the known `SDLC_STAGES` list.
 
-### Stored State Only
+### Fallback: History Inference
 
-All sessions (with or without a slug) use `_parse_stage_states()` to read `AgentSession.stage_states` directly. Artifact inference was removed in PR #733 (issue #729) — the dashboard no longer checks plan files on disk, PR existence, or GitHub review state. `stage_states` is the single source of truth for the dashboard just as it is for the merge gate.
+For sessions created before `stage_states` was wired in, `_infer_stages_from_history()` scans the session's `history` list for entries matching `[stage] STAGE_NAME`. It marks mentioned stages as completed and the last-mentioned stage as in-progress. This provides graceful degradation -- older sessions show approximate stage pills rather than empty dashes.
 
 ### CSS Rendering
 
@@ -109,7 +110,7 @@ DASHBOARD_RETENTION_HOURS=24 python -m ui.app
 
 Sessions are stored in Redis via Popoto and survive bridge restarts. The dashboard reads directly from Redis, so session data persists as long as Redis is running. Key design decisions for data persistence:
 
-- **Timestamp fallback chain**: `get_all_sessions()` uses `completed_at or updated_at or started_at or created_at` so sessions with `updated_at=None` are not silently dropped from the retention filter
+- **Timestamp fallback chain**: `get_all_sessions()` uses `completed_at or last_activity or started_at or created_at` so sessions with `last_activity=None` are not silently dropped from the retention filter
 - **Active sessions always shown**: Sessions with active status bypass the retention cutoff entirely
 - **Inactive session limit**: Up to 50 inactive sessions are returned per query (up from the original 16) to support reviewing past work
 
@@ -119,9 +120,9 @@ Sessions are stored in Redis via Popoto and survive bridge restarts. The dashboa
 
 The central data model for dashboard display, containing:
 
-- Session identity: `agent_session_id`, `session_id`, `session_type`, `status`, `slug`
+- Session identity: `job_id`, `session_id`, `session_type`, `status`, `slug`
 - Project context: `project_key`, `project_name`, `project_metadata`
-- Timestamps: `created_at`, `started_at`, `completed_at`, `updated_at`
+- Timestamps: `created_at`, `started_at`, `completed_at`, `last_activity`
 - SDLC state: `stages` (list of `StageState`), `current_stage`, `events`
 - Links: `issue_url`, `plan_url`, `pr_url`
 - Computed properties: `duration`, `is_active`, `is_complete`, `display_name`

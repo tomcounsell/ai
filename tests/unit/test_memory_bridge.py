@@ -147,7 +147,7 @@ class TestRecall:
         )
 
         # Mock out the query path to avoid importing Memory
-        with patch("utils.keyword_extraction.extract_topic_keywords", return_value=[]):
+        with patch("agent.memory_hook.extract_topic_keywords", return_value=[]):
             for i in range(BUFFER_SIZE + 5):
                 recall("test-session", "Read", {"file_path": f"file_{i}.py"})
 
@@ -165,7 +165,7 @@ class TestRecall:
 
         # Mock extract_topic_keywords to return empty
         with patch(
-            "utils.keyword_extraction.extract_topic_keywords",
+            "agent.memory_hook.extract_topic_keywords",
             return_value=[],
         ):
             # Fill up to WINDOW_SIZE to trigger query path
@@ -193,7 +193,7 @@ class TestRecall:
 
         with (
             patch(
-                "utils.keyword_extraction.extract_topic_keywords",
+                "agent.memory_hook.extract_topic_keywords",
                 return_value=keywords,
             ),
             patch("models.memory.Memory", mock_memory_cls),
@@ -204,6 +204,39 @@ class TestRecall:
 
         assert result is not None
         assert "new territory" in result
+
+    def test_recall_deja_vu_signal(self, tmp_path, monkeypatch):
+        """Returns deja vu thought when bloom hits but no strong results."""
+        from hook_utils.memory_bridge import DEJA_VU_BLOOM_HIT_THRESHOLD, WINDOW_SIZE, recall
+
+        monkeypatch.setattr(
+            "hook_utils.memory_bridge._get_sidecar_dir",
+            lambda sid: tmp_path / sid,
+        )
+
+        keywords = [f"kw_{i}" for i in range(DEJA_VU_BLOOM_HIT_THRESHOLD + 2)]
+
+        mock_bloom = MagicMock()
+        mock_bloom.might_exist = MagicMock(return_value=True)
+
+        mock_memory_cls = MagicMock()
+        mock_memory_cls._meta.fields.get.return_value = mock_bloom
+
+        with (
+            patch(
+                "agent.memory_hook.extract_topic_keywords",
+                return_value=keywords,
+            ),
+            patch("models.memory.Memory", mock_memory_cls),
+            patch("agent.memory_retrieval.retrieve_memories", return_value=[]),
+            patch("hook_utils.memory_bridge._get_project_key", return_value="test"),
+        ):
+            for i in range(WINDOW_SIZE - 1):
+                recall("test-session", "Read", {"file_path": f"f{i}.py"})
+            result = recall("test-session", "Read", {"file_path": "final.py"})
+
+        assert result is not None
+        assert "encountered something related" in result
 
 
 class TestRecallCategoryReranking:
@@ -234,12 +267,12 @@ class TestRecallCategoryReranking:
         mock_record.score = 0.8
 
         with (
-            patch("utils.keyword_extraction.extract_topic_keywords", return_value=keywords),
+            patch("agent.memory_hook.extract_topic_keywords", return_value=keywords),
             patch("models.memory.Memory", mock_memory_cls),
             patch("agent.memory_retrieval.retrieve_memories", return_value=[mock_record]),
             patch("hook_utils.memory_bridge._get_project_key", return_value="test"),
             patch(
-                "utils.keyword_extraction._apply_category_weights",
+                "agent.memory_hook._apply_category_weights",
                 wraps=lambda records: records,
             ) as mock_rerank,
         ):
@@ -466,11 +499,11 @@ class TestAgentSessionSidecar:
         )
         sidecar_dir = tmp_path / "test-session"
         sidecar_dir.mkdir(parents=True)
-        data = {"agent_session_id": "session-123", "merge_detected": True}
+        data = {"agent_session_job_id": "job-123", "merge_detected": True}
         (sidecar_dir / "agent_session.json").write_text(json.dumps(data))
 
         result = load_agent_session_sidecar("test-session")
-        assert result["agent_session_id"] == "session-123"
+        assert result["agent_session_job_id"] == "job-123"
         assert result["merge_detected"] is True
 
     def test_save_atomic(self, tmp_path, monkeypatch):
@@ -481,7 +514,7 @@ class TestAgentSessionSidecar:
             "hook_utils.memory_bridge._get_sidecar_dir",
             lambda sid: tmp_path / sid,
         )
-        data = {"agent_session_id": "session-456"}
+        data = {"agent_session_job_id": "job-456"}
         save_agent_session_sidecar("test-session", data)
 
         # No tmp file left
@@ -491,7 +524,7 @@ class TestAgentSessionSidecar:
 
         # Round-trip
         loaded = load_agent_session_sidecar("test-session")
-        assert loaded["agent_session_id"] == "session-456"
+        assert loaded["agent_session_job_id"] == "job-456"
 
     def test_load_non_dict(self, tmp_path, monkeypatch):
         """Returns empty dict when sidecar contains non-dict JSON value."""

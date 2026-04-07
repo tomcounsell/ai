@@ -4,8 +4,7 @@ Extracts novel observations from agent response text via Haiku,
 saves them as Memory records with category-based importance levels.
 
 Detects outcomes by comparing injected thoughts against response
-content using LLM judgment (with bigram fallback), feeds results
-into ObservationProtocol.
+content using bigram overlap, feeds results into ObservationProtocol.
 
 All operations are async, wrapped in try/except — failures must never
 crash the agent or block session completion.
@@ -17,7 +16,6 @@ import json
 import logging
 import os
 import re
-import time
 
 logger = logging.getLogger(__name__)
 
@@ -332,114 +330,6 @@ async def extract_post_merge_learning(
         return None
 
 
-# Outcome judgment prompt for Haiku — classifies influence of injected thoughts
-# Uses double-braces {{}} to escape literal braces from str.format()
-OUTCOME_JUDGMENT_PROMPT = (
-    "You are evaluating whether injected memory thoughts influenced an agent's response.\n"
-    "For each thought below, classify its relationship to the response as:\n"
-    '  "acted" — the response was meaningfully influenced by this memory\n'
-    '  "echoed" — keywords overlap but no causal link (coincidental)\n'
-    '  "dismissed" — no relationship between memory and response\n'
-    "\n"
-    "Return a JSON array with one object per thought, each with:\n"
-    '  "index": the 0-based index of the thought\n'
-    '  "outcome": "acted", "echoed", or "dismissed"\n'
-    '  "reasoning": one sentence explaining your judgment\n'
-    "\n"
-    "Example:\n"
-    '[{{"index": 0, "outcome": "acted",'
-    ' "reasoning": "Response adopted the deployment strategy."}}]\n'
-    "\n"
-    "Thoughts:\n{thoughts}\n\n"
-    "---\n\n"
-    "Agent response:\n{response}"
-)
-
-# Truncation bounds for outcome judgment
-_OUTCOME_RESPONSE_MAX_CHARS = 4000
-_OUTCOME_THOUGHT_MAX_CHARS = 500
-_OUTCOME_MAX_THOUGHTS = 5
-
-
-def _judge_outcomes_llm(
-    injected_thoughts: list[tuple[str, str]],
-    response_text: str,
-) -> dict[str, dict] | None:
-    """Use Haiku to judge whether injected thoughts influenced the response.
-
-    Returns dict of {memory_key: {"outcome": str, "reasoning": str}} or None
-    on failure. Callers should fall back to bigram overlap when this returns None.
-
-    Maps "echoed" to "dismissed" for ObservationProtocol compatibility --
-    echoed keywords without causal influence are noise, not signal.
-    """
-    try:
-        import anthropic
-
-        from config.models import MODEL_FAST
-        from utils.api_keys import get_anthropic_api_key
-
-        api_key = get_anthropic_api_key()
-        if not api_key:
-            return None
-
-        # Apply truncation bounds
-        capped_thoughts = injected_thoughts[:_OUTCOME_MAX_THOUGHTS]
-        thoughts_text = "\n".join(
-            f"[{i}] {content[:_OUTCOME_THOUGHT_MAX_CHARS]}"
-            for i, (_key, content) in enumerate(capped_thoughts)
-        )
-        truncated_response = response_text[:_OUTCOME_RESPONSE_MAX_CHARS]
-
-        prompt = OUTCOME_JUDGMENT_PROMPT.format(
-            thoughts=thoughts_text,
-            response=truncated_response,
-        )
-
-        client = anthropic.Anthropic(api_key=api_key)
-        message = client.messages.create(
-            model=MODEL_FAST,
-            max_tokens=300,
-            messages=[{"role": "user", "content": prompt}],
-        )
-
-        raw_text = message.content[0].text.strip()
-        judgments = json.loads(raw_text)
-
-        if not isinstance(judgments, list):
-            return None
-
-        result: dict[str, dict] = {}
-        for item in judgments:
-            if not isinstance(item, dict):
-                continue
-            idx = item.get("index")
-            if not isinstance(idx, int) or idx < 0 or idx >= len(capped_thoughts):
-                continue
-            outcome = item.get("outcome", "dismissed")
-            reasoning = item.get("reasoning", "")
-
-            # Map "echoed" to "dismissed" for ObservationProtocol compatibility
-            if outcome == "echoed":
-                outcome = "dismissed"
-            elif outcome not in ("acted", "dismissed"):
-                outcome = "dismissed"
-
-            memory_key = capped_thoughts[idx][0]
-            result[memory_key] = {"outcome": outcome, "reasoning": str(reasoning)[:200]}
-
-        # Fill in any thoughts that weren't covered by the LLM response
-        for i, (key, _content) in enumerate(capped_thoughts):
-            if key not in result:
-                result[key] = {"outcome": "dismissed", "reasoning": "not classified by judge"}
-
-        return result
-
-    except Exception as e:
-        logger.debug(f"[memory_extraction] LLM outcome judgment failed, will use fallback: {e}")
-        return None
-
-
 def _extract_bigrams(text: str) -> set[tuple[str, ...]]:
     """Extract unigrams and bigrams from text for overlap detection.
 
@@ -454,19 +344,12 @@ def _extract_bigrams(text: str) -> set[tuple[str, ...]]:
 def _persist_outcome_metadata(
     memories: list,
     outcome_map: dict[str, str],
-    reasoning_map: dict[str, str] | None = None,
 ) -> None:
     """Persist dismissal/acted outcome data in Memory metadata.
 
-    Updates dismissal_count, last_outcome, and outcome_history in each
-    memory's metadata dict. When dismissal_count reaches the threshold,
-    decays importance. Resets dismissal_count on "acted" outcomes.
-
-    Args:
-        memories: List of Memory instances to update.
-        outcome_map: Dict of {memory_id: "acted"|"dismissed"}.
-        reasoning_map: Optional dict of {memory_id: reasoning_string}
-            from LLM judge. If absent, reasoning defaults to empty string.
+    Updates dismissal_count and last_outcome in each memory's metadata dict.
+    When dismissal_count reaches the threshold, decays importance.
+    Resets dismissal_count on "acted" outcomes.
 
     Runs after ObservationProtocol to avoid conflicting saves.
     All exceptions are caught per-record -- one failure does not block others.
@@ -474,12 +357,8 @@ def _persist_outcome_metadata(
     from config.memory_defaults import (
         DISMISSAL_DECAY_THRESHOLD,
         DISMISSAL_IMPORTANCE_DECAY,
-        MAX_OUTCOME_HISTORY,
         MIN_IMPORTANCE_FLOOR,
     )
-
-    if reasoning_map is None:
-        reasoning_map = {}
 
     for m in memories:
         mid = getattr(m, "memory_id", "")
@@ -490,22 +369,6 @@ def _persist_outcome_metadata(
             meta = getattr(m, "metadata", None) or {}
             if not isinstance(meta, dict):
                 meta = {}
-
-            # Append to outcome_history (capped at MAX_OUTCOME_HISTORY)
-            history = meta.get("outcome_history", [])
-            if not isinstance(history, list):
-                history = []
-            history.append(
-                {
-                    "outcome": outcome,
-                    "reasoning": reasoning_map.get(mid, ""),
-                    "ts": int(time.time()),
-                }
-            )
-            # Keep only the most recent entries
-            if len(history) > MAX_OUTCOME_HISTORY:
-                history = history[-MAX_OUTCOME_HISTORY:]
-            meta["outcome_history"] = history
 
             if outcome == "dismissed":
                 meta["dismissal_count"] = meta.get("dismissal_count", 0) + 1
@@ -533,26 +396,14 @@ def _persist_outcome_metadata(
             continue  # fail-silent per record
 
 
-def compute_act_rate(outcome_history: list[dict]) -> float | None:
-    """Compute the act rate from an outcome history list.
-
-    Returns the ratio of "acted" outcomes to total outcomes, or None if
-    the history is empty.
-    """
-    if not outcome_history:
-        return None
-    acted = sum(1 for entry in outcome_history if entry.get("outcome") == "acted")
-    return acted / len(outcome_history)
-
-
 async def detect_outcomes_async(
     injected_thoughts: list[tuple[str, str]],
     response_text: str,
 ) -> dict[str, str]:
     """Compare injected thoughts against response content.
 
-    Uses LLM judgment (Haiku) as the primary signal. Falls back to bigram
-    (1-2 word phrase) overlap when the LLM call fails or is unavailable.
+    Uses bigram (1-2 word phrase) overlap for v1.
+    Non-empty overlap -> "acted", empty -> "dismissed".
 
     Feeds results into ObservationProtocol.on_context_used().
 
@@ -562,41 +413,25 @@ async def detect_outcomes_async(
         return {}
 
     try:
+        response_bigrams = _extract_bigrams(response_text)
         outcome_map: dict[str, str] = {}
-        reasoning_map: dict[str, str] = {}
         memory_keys: list[str] = []
 
-        # Try LLM judgment first
-        llm_result = _judge_outcomes_llm(injected_thoughts, response_text)
+        for memory_key, thought_content in injected_thoughts:
+            thought_bigrams = _extract_bigrams(thought_content)
+            overlap = thought_bigrams & response_bigrams
 
-        if llm_result is not None:
-            # LLM judgment succeeded -- use it
-            for memory_key, thought_content in injected_thoughts:
-                judgment = llm_result.get(memory_key, {})
-                outcome_map[memory_key] = judgment.get("outcome", "dismissed")
-                reasoning_map[memory_key] = judgment.get("reasoning", "")
-                memory_keys.append(memory_key)
-            logger.debug("[memory_extraction] Used LLM judgment for outcome detection")
-        else:
-            # Fallback to bigram overlap
-            response_bigrams = _extract_bigrams(response_text)
-            for memory_key, thought_content in injected_thoughts:
-                thought_bigrams = _extract_bigrams(thought_content)
-                overlap = thought_bigrams & response_bigrams
+            if overlap:
+                outcome_map[memory_key] = "acted"
+            else:
+                outcome_map[memory_key] = "dismissed"
 
-                if overlap:
-                    outcome_map[memory_key] = "acted"
-                else:
-                    outcome_map[memory_key] = "dismissed"
-
-                memory_keys.append(memory_key)
-            logger.debug("[memory_extraction] Used bigram fallback for outcome detection")
+            memory_keys.append(memory_key)
 
         # Feed into ObservationProtocol
         try:
-            from popoto import ObservationProtocol
-
             from models.memory import Memory
+            from popoto import ObservationProtocol
 
             # Load memory instances by key
             memories = []
@@ -628,9 +463,9 @@ async def detect_outcomes_async(
                         f"{acted} acted, {dismissed} dismissed"
                     )
 
-                # Persist dismissal/acted data in metadata (with reasoning)
+                # Persist dismissal/acted data in metadata
                 # Done after ObservationProtocol to avoid conflicting saves
-                _persist_outcome_metadata(memories, outcome_map, reasoning_map)
+                _persist_outcome_metadata(memories, outcome_map)
 
         except Exception as e:
             logger.warning(f"[memory_extraction] ObservationProtocol failed (non-fatal): {e}")

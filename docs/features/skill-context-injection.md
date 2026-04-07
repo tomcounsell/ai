@@ -4,7 +4,7 @@ Pre-resolved SDLC context variables injected as environment variables into Claud
 
 ## Problem
 
-Skills are static Markdown templates with placeholder variables like `{pr_number}` and `{owner}/{repo}`. When the Observer dispatches a skill, the worker must derive these values from context clues (nudge feedback messages, git state, `gh` CLI calls). This causes:
+Skills are static Markdown templates with placeholder variables like `{pr_number}` and `{owner}/{repo}`. When the Observer dispatches a skill, the worker must derive these values from context clues (coaching messages, git state, `gh` CLI calls). This causes:
 
 - **Context loss**: The agent fails to resolve a variable and hallucinates or skips steps (e.g., the PR review branch-checkout bug at d77d2b0d where the reviewer read files from the wrong branch)
 - **Cognitive overload**: Large skills (300+ lines) mix mechanical setup with judgment work, causing lost-place errors
@@ -19,7 +19,7 @@ Skills are static Markdown templates with placeholder variables like `{pr_number
 |----------|-------------|---------|
 | `SDLC_PR_NUMBER` | `AgentSession.pr_url` | `220` |
 | `SDLC_PR_BRANCH` | `AgentSession.branch_name` | `session/my-feature` |
-| `SDLC_SLUG` | `AgentSession.slug` | `my-feature` |
+| `SDLC_SLUG` | `AgentSession.work_item_slug` | `my-feature` |
 | `SDLC_PLAN_PATH` | `AgentSession.plan_url` | `docs/plans/my-feature.md` |
 | `SDLC_ISSUE_NUMBER` | `AgentSession.issue_url` | `415` |
 | `SDLC_REPO` | `ValorAgent.gh_repo` | `tomcounsell/ai` |
@@ -32,11 +32,11 @@ Skills are static Markdown templates with placeholder variables like `{pr_number
 
 **Implementation:** `_extract_sdlc_env_vars()` in `agent/sdk_client.py`, called from `_create_options()` after the existing `GH_REPO` injection block.
 
-### Part 2: Observer Nudge Feedback Enrichment
+### Part 2: Observer Coaching Enrichment
 
-The nudge feedback enrichment provides redundancy — SDLC context variables are available via both env vars and nudge feedback text.
+The coaching message enrichment provides redundancy — SDLC context variables are available via both env vars and coaching message text.
 
-The Observer system prompt instructs it to append resolved variables to nudge feedback messages:
+The Observer system prompt instructs it to append resolved variables to coaching messages:
 ```
 Context: SDLC_PR_NUMBER=220, SDLC_SLUG=my-feature, SDLC_PR_BRANCH=session/my-feature
 ```
@@ -60,12 +60,12 @@ Sub-skills are guidance documents in `.claude/skills/do-pr-review/sub-skills/`. 
 AgentSession (Redis)
   ├─ pr_url ──────────► _extract_sdlc_env_vars() ──► SDLC_PR_NUMBER env var
   ├─ branch_name ─────► _extract_sdlc_env_vars() ──► SDLC_PR_BRANCH env var
-  ├─ slug ────────────► _extract_sdlc_env_vars() ──► SDLC_SLUG env var
+  ├─ work_item_slug ──► _extract_sdlc_env_vars() ──► SDLC_SLUG env var
   ├─ plan_url ────────► _extract_sdlc_env_vars() ──► SDLC_PLAN_PATH env var
   └─ issue_url ───────► _extract_sdlc_env_vars() ──► SDLC_ISSUE_NUMBER env var
 
 Observer (read_session)
-  └─ _build_sdlc_context() ──► sdlc_context dict ──► nudge feedback text
+  └─ _build_sdlc_context() ──► sdlc_context dict ──► coaching message text
 ```
 
 ## Backward Compatibility
@@ -79,7 +79,7 @@ Observer (read_session)
 | File | Role |
 |------|------|
 | `agent/sdk_client.py` | `_extract_sdlc_env_vars()` — env var injection |
-| `agent/sdk_client.py` | SDLC context enrichment in nudge feedback messages |
+| `agent/sdk_client.py` | SDLC context enrichment in coaching messages |
 | `.claude/skills/do-pr-review/SKILL.md` | Updated to use `$SDLC_*` with fallback |
 | `.claude/skills/do-pr-review/sub-skills/` | 4 focused sub-skill files + README |
 | `tests/unit/test_sdlc_env_vars.py` | 10 unit tests |

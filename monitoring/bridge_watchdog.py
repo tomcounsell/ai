@@ -19,7 +19,6 @@ Usage:
 import argparse
 import json
 import logging
-import logging.handlers
 import os
 import subprocess
 import sys
@@ -46,17 +45,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Add rotating file handler for watchdog log
-LOGS_DIR = PROJECT_DIR / "logs"
-LOGS_DIR.mkdir(parents=True, exist_ok=True)
-_watchdog_file_handler = logging.handlers.RotatingFileHandler(
-    LOGS_DIR / "watchdog.log",
-    maxBytes=10 * 1024 * 1024,  # 10MB
-    backupCount=5,
-)
-_watchdog_file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-logger.addHandler(_watchdog_file_handler)
-
 # Files and directories
 LOG_FILE = PROJECT_DIR / "logs" / "bridge.log"
 ERROR_LOG = PROJECT_DIR / "logs" / "bridge.error.log"
@@ -70,12 +58,10 @@ WATCHDOG_INTERVAL = 60  # Check every 60 seconds (hardcoded per plan)
 ZOMBIE_THRESHOLD_SECONDS = 7200  # 2 hours - processes older than this are zombies
 SOFT_INSTANCE_LIMIT = 5  # Warn when more than this many active claude processes
 
-# Process name patterns to scan for zombies.
-# ZOMBIE_PROCESS_EXCLUDES filters out Claude Desktop app helper processes.
-ZOMBIE_PROCESS_PATTERNS = ("claude ", "pyright")
-
-# Patterns to exclude from process matching (Desktop app helpers)
-ZOMBIE_PROCESS_EXCLUDES = ("Claude.app", "Claude Helper")
+# Process name patterns to scan for zombies (CLI invocations only)
+# NOTE: "claude" alone matches Claude Desktop app processes (false positives).
+# We match specific CLI patterns instead.
+ZOMBIE_PROCESS_PATTERNS = ("claude --", "pyright")
 
 
 @dataclass
@@ -186,14 +172,10 @@ def _enumerate_claude_processes() -> list[dict]:
         # Check if this line matches any of our target patterns
         matched = False
         for pattern in ZOMBIE_PROCESS_PATTERNS:
-            if pattern in line:
+            if pattern in line.lower():
                 matched = True
                 break
         if not matched:
-            continue
-
-        # Exclude Desktop app helper processes
-        if any(excl in line for excl in ZOMBIE_PROCESS_EXCLUDES):
             continue
 
         # Parse: PID ETIME RSS COMMAND...

@@ -4,7 +4,7 @@ Automatic and manual tag management for AgentSession instances. Tags categorize 
 
 ## How It Works
 
-Tags are stored in the `AgentSession.tags` ListField (Redis via Popoto). Auto-tagging runs at session completion time inside `finalize_session()` in `models/session_lifecycle.py`.
+Tags are stored in the `AgentSession.tags` ListField (Redis via Popoto). Auto-tagging runs at session completion time inside `complete_transcript()` in `bridge/session_transcript.py`.
 
 ### Auto-Tag Rules
 
@@ -17,7 +17,7 @@ Tags are stored in the `AgentSession.tags` ListField (Redis via Popoto). Auto-ta
 | Transcript contains `gh pr create` | `pr-created` |
 | Transcript contains `pytest` or `Skill(do-test` | `tested` |
 | Sender or session_id contains "reflections" | `reflections` |
-| `slug` is set | `planned-work` |
+| `work_item_slug` is set | `planned-work` |
 | `turn_count >= 20` | `long-session` |
 
 Auto-tagging reads only the last 50 lines of the transcript for pattern matching. It never removes existing tags — only adds new ones. Failures are caught and logged without breaking session completion.
@@ -44,7 +44,7 @@ auto_tag_session("session-123")
 
 ## Integration Points
 
-- **`models/session_lifecycle.py`**: `auto_tag_session()` is called in `finalize_session()` before the AgentSession status update
+- **`bridge/session_transcript.py`**: `auto_tag_session()` is called in `complete_transcript()` before the AgentSession status update
 - **`models/agent_session.py`**: Tags stored in `AgentSession.tags` ListField
 - **`tools/session_tags.py`**: Public API module
 
@@ -55,7 +55,7 @@ auto_tag_session("session-123")
 | Rule-based, not LLM | Simpler, faster, deterministic — sufficient for v1 |
 | Last 50 lines only | Avoids reading large transcripts; most signals appear near session end |
 | Python-side filtering for `sessions_by_tag` | Popoto ListField may not support native contains queries; dataset is small |
-| Auto-tag in `finalize_session()` | Single entrypoint where every terminal session transition runs |
+| Auto-tag in `complete_transcript()` | Natural chokepoint where every session finalizes |
 | try/except around auto-tagging | Tagging is non-critical — must never break session completion |
 | Open tag vocabulary | Any string is valid; well-known tags are auto-applied but custom tags are welcome |
 
@@ -64,7 +64,7 @@ auto_tag_session("session-123")
 | Component | Path | Purpose |
 |-----------|------|---------|
 | Session tags module | `tools/session_tags.py` | CRUD and auto-tagging API |
-| Lifecycle integration | `models/session_lifecycle.py` | Calls auto_tag_session at completion via `finalize_session()` |
+| Transcript integration | `bridge/session_transcript.py` | Calls auto_tag_session at completion |
 | AgentSession model | `models/agent_session.py` | Tags stored in ListField |
 | Unit tests | `tests/unit/test_session_tags.py` | 33 tests covering all rules and edge cases |
 

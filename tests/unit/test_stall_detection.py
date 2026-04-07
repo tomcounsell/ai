@@ -3,7 +3,7 @@
 Tests check_stalled_sessions (detection) and fix_unhealthy_session (abandon).
 The old stall retry mechanisms (_recover_stalled_pending, _kill_stalled_worker,
 _enqueue_stall_retry) were deleted in the bridge-resilience refactor.
-Recovery is now handled by the unified _agent_session_health_check in agent/agent_session_queue.py.
+Recovery is now handled by the unified _job_health_check in agent/job_queue.py.
 """
 
 import time
@@ -31,20 +31,20 @@ def _make_agent_session(
     status="active",
     started_at="DEFAULT",
     created_at="DEFAULT",
-    updated_at="DEFAULT",
+    last_activity="DEFAULT",
     project_key="test",
     chat_id="12345",
-    agent_session_id="session-001",
+    job_id="job-001",
     history=None,
 ):
     now = time.time()
     ns = SimpleNamespace(
         session_id=session_id,
-        agent_session_id=agent_session_id,
+        job_id=job_id,
         status=status,
         started_at=now - 60 if started_at == "DEFAULT" else started_at,
         created_at=now - 120 if created_at == "DEFAULT" else created_at,
-        updated_at=now if updated_at == "DEFAULT" else updated_at,
+        last_activity=now if last_activity == "DEFAULT" else last_activity,
         project_key=project_key,
         chat_id=chat_id,
     )
@@ -146,7 +146,7 @@ class TestCheckStalledSessions:
         session = _make_agent_session(
             session_id="stalled-active",
             status="active",
-            updated_at=now - (STALL_THRESHOLD_ACTIVE + 60),
+            last_activity=now - (STALL_THRESHOLD_ACTIVE + 60),
             started_at=now - 3600,
         )
         mock_query = _mock_query_for_sessions({"active": [session]})
@@ -158,7 +158,7 @@ class TestCheckStalledSessions:
         now = time.time()
         session = _make_agent_session(
             status="active",
-            updated_at=now - 30,
+            last_activity=now - 30,
             started_at=now - 3600,
         )
         mock_query = _mock_query_for_sessions({"active": [session]})
@@ -187,7 +187,7 @@ class TestFixUnhealthySession:
         session = _make_agent_session(
             session_id="abandon-test",
             status="active",
-            updated_at=now - 2000,
+            last_activity=now - 2000,
             started_at=now - 3000,
         )
         assessment = {
@@ -211,7 +211,7 @@ class TestFixUnhealthySession:
         session = _make_agent_session(
             session_id="critical-test",
             status="active",
-            updated_at=now - 100,
+            last_activity=now - 100,
             started_at=now - 500,
         )
         assessment = {
@@ -242,7 +242,7 @@ class TestFixUnhealthySession:
         session = _make_agent_session(
             session_id="long-test",
             status="active",
-            updated_at=now - 100,  # Recent activity
+            last_activity=now - 100,  # Recent activity
             started_at=now - 8000,  # >2 hours
         )
         assessment = {

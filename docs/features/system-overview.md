@@ -199,7 +199,7 @@ See [Chat Dev Session Architecture](chat-dev-session-architecture.md) for the cu
   - **Benefits**: Current information, concise summaries
 
 ### Infrastructure
-- **Redis** (Popoto ORM): Primary data store for all session and message state
+- **Redis** (Popoto ORM): Primary data store for all session, job, and message state
   - **Why**: Fast, atomic operations, real-time querying via Popoto Django-like syntax
   - **Benefits**: No SQL, crash-safe, supports sorted sets for priority queues
 

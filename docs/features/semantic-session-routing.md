@@ -29,9 +29,15 @@ When a message arrives without reply-to threading, the router (`bridge/session_r
 5. **Confidence threshold**: Only matches with confidence >= 0.80 are auto-routed. Below that, a new session is created (current behavior preserved).
 6. **Graceful degradation**: Any failure (API error, parse error, invalid session ID) silently falls through to new session creation.
 
-### Always-On (No Feature Flag)
+### Feature Flag
 
-Semantic routing is always enabled. The `SEMANTIC_ROUTING` environment variable and `is_semantic_routing_enabled()` function were removed in issue #705. The router runs on every non-reply message with zero-cost short-circuit when no sessions have expectations.
+Semantic routing is disabled by default. Enable via environment variable:
+
+```bash
+SEMANTIC_ROUTING=true  # or "1" or "yes" (case-insensitive)
+```
+
+When disabled, the system behaves exactly as before -- all non-reply messages create new sessions.
 
 ## Architecture
 
@@ -39,12 +45,9 @@ Semantic routing is always enabled. The `SEMANTIC_ROUTING` environment variable 
 Message arrives (no reply-to)
     |
     v
-Check in-memory coalescing guard (_recent_session_by_chat)
+is_semantic_routing_enabled()? --NO--> Create new session (current behavior)
     |
-    v
-Recent session for this chat? --YES--> Push to queued_steering_messages + ack
-    |
-    NO
+    YES
     v
 find_matching_session(chat_id, message_text, project_key)
     |
@@ -71,7 +74,7 @@ Create new session           |
 
 ### Phase 3: Active Session Steering (#318)
 
-When semantic routing matches an unthreaded message to a session that is currently **running or active**, the message is pushed to the session's steering queue (`agent/steering.py`) instead of creating a competing session. The Observer picks up the message at its next checkpoint.
+When semantic routing matches an unthreaded message to a session that is currently **running or active**, the message is pushed to the session's steering queue (`agent/steering.py`) instead of creating a competing job. The Observer picks up the message at its next checkpoint.
 
 **Decision matrix:**
 
@@ -149,37 +152,18 @@ The threshold is intentionally conservative. False positives (routing to the wro
 |------|--------|
 | `models/agent_session.py` | Added `context_summary` and `expectations` fields |
 | `bridge/summarizer.py` | Structured `tool_use` output, `StructuredSummary` dataclass, OpenRouter fallback (replaces Ollama) |
-| `bridge/session_router.py` | Semantic router: `find_matching_session()` (always-on, no feature flag) |
+| `bridge/session_router.py` | New module: `find_matching_session()`, `is_semantic_routing_enabled()` |
 | `bridge/response.py` | Persist routing fields after summarization |
 | `bridge/telegram_bridge.py` | Integrate semantic router in non-reply-to message handling; active session steering (#318) |
 | `tests/test_summarizer.py` | Updated mocks for `StructuredSummary` returns and OpenRouter fallback |
 | `tests/test_unthreaded_routing.py` | Decision matrix tests: active steering, dormant passthrough, abort detection, FIFO ordering, missing session fallthrough |
 
-## In-Memory Coalescing Guard
-
-The in-memory coalescing guard (`_recent_session_by_chat`) bridges the Redis visibility gap for rapid-fire messages (issue #705). When two messages arrive within ~200ms, the second message cannot find the first's session in Redis because `AgentSession.async_create()` hasn't completed yet.
-
-**How it works:**
-
-1. A module-level dict `_recent_session_by_chat: dict[str, tuple[str, float]]` maps `chat_id` to `(session_id, timestamp)`.
-2. Just before `enqueue_agent_session()`, the dict is set with the new session_id and current timestamp.
-3. When the next message arrives, the dict is checked first (before Redis). If a recent session exists within `PENDING_MERGE_WINDOW_SECONDS` (8s), the message is pushed to `queued_steering_messages` on the existing session.
-4. Stale entries (older than the merge window) are lazily cleaned up on each check.
-5. If the `AgentSession` doesn't exist in Redis yet (Race 2), a single retry after 200ms is attempted. If still missing, falls through to normal session creation.
-
-**Key properties:**
-
-- Process-local (not cross-process), which is fine since the bridge is a single asyncio process
-- Bounded by active chat count (at most one entry per chat)
-- Wrapped in try/except -- failures silently fall through to normal session creation
-- Complements (not replaces) the Redis-based pending merge check
-
 ## Configuration
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `SEMANTIC_ROUTING` | disabled | Feature flag: set to `true`, `1`, or `yes` to enable |
 | `ROUTING_CONFIDENCE_THRESHOLD` | 0.80 | Minimum confidence for auto-routing (code constant) |
-| `PENDING_MERGE_WINDOW_SECONDS` | 8 | Time window for coalescing messages into existing sessions |
 
 ## Testing
 

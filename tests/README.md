@@ -32,7 +32,7 @@ Every test is auto-tagged by filename via `tests/conftest.py`. When a feature ch
 | `sdlc` | Pipeline stages, observer, steering, hooks, state machine | `pytest -m sdlc` |
 | `messaging` | Telegram routing, delivery, dedup, markdown, media | `pytest -m messaging` |
 | `sessions` | Lifecycle, watchdog, stall detection, recovery, goals | `pytest -m sessions` |
-| `summarizer` | Response summarization, nudge feedback, message formatting | `pytest -m summarizer` |
+| `summarizer` | Response summarization, coaching, message formatting | `pytest -m summarizer` |
 | `classifiers` | Intake, work requests, message quality, auto-continue | `pytest -m classifiers` |
 | `validation` | Commit messages, plan sections, build checks, docs audit | `pytest -m validation` |
 | `reflections` | Learning system, bug detection, scheduling, reports | `pytest -m reflections` |
@@ -99,7 +99,6 @@ tests/
 | unit | `test_sdlc_reminder.py` | — | SDLC reminder messaging |
 | integration | `test_steering.py` | 32 | Steering queue push/pop/clear |
 | integration | `test_cross_repo_build.py` | 8 | Cross-repo build flow |
-| integration | `test_artifact_inference.py` | 15 | Artifact-based pipeline stage inference (real gh CLI + filesystem) |
 
 ### `sessions` — Session lifecycle and health
 
@@ -121,6 +120,7 @@ tests/
 | Level | File | Tests | Description |
 |-------|------|------:|-------------|
 | unit | `test_summarizer.py` | 158 | Response summarization, classification |
+| unit | `test_coach.py` | 54 | Coaching message building |
 
 ### `classifiers` — Message classification
 

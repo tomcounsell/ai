@@ -1,10 +1,10 @@
-"""Tests for the nudge loop in agent/agent_session_queue.py.
+"""Tests for the nudge loop in agent/job_queue.py.
 
 Tests the send_to_chat nudge behavior: completion detection, rate-limit
 backoff, max nudge safety cap, and empty output handling.
 """
 
-from agent.agent_session_queue import MAX_NUDGE_COUNT, NUDGE_MESSAGE, determine_delivery_action
+from agent.job_queue import MAX_NUDGE_COUNT, NUDGE_MESSAGE, classify_nudge_action
 
 
 class TestNudgeConstants:
@@ -46,12 +46,12 @@ class TestObserverRemoval:
     """Verify that Observer is no longer imported in send_to_chat path."""
 
     def test_no_observer_import_in_job_queue(self):
-        """agent_session_queue.py should not import Observer at module level."""
+        """job_queue.py should not import Observer at module level."""
         import ast
         from pathlib import Path
 
-        queue_path = Path(__file__).parent.parent.parent / "agent" / "agent_session_queue.py"
-        source = queue_path.read_text()
+        job_queue_path = Path(__file__).parent.parent.parent / "agent" / "job_queue.py"
+        source = job_queue_path.read_text()
         tree = ast.parse(source)
 
         for node in ast.walk(tree):
@@ -66,8 +66,8 @@ class TestObserverRemoval:
         """should_guard_empty_output was removed — nudge loop handles empty output."""
         from pathlib import Path
 
-        queue_path = Path(__file__).parent.parent.parent / "agent" / "agent_session_queue.py"
-        source = queue_path.read_text()
+        job_queue_path = Path(__file__).parent.parent.parent / "agent" / "job_queue.py"
+        source = job_queue_path.read_text()
         assert "def should_guard_empty_output" not in source, (
             "should_guard_empty_output should be removed — nudge loop handles empty output"
         )
@@ -76,8 +76,8 @@ class TestObserverRemoval:
         """MAX_AUTO_CONTINUES and MAX_AUTO_CONTINUES_SDLC replaced by MAX_NUDGE_COUNT."""
         from pathlib import Path
 
-        queue_path = Path(__file__).parent.parent.parent / "agent" / "agent_session_queue.py"
-        source = queue_path.read_text()
+        job_queue_path = Path(__file__).parent.parent.parent / "agent" / "job_queue.py"
+        source = job_queue_path.read_text()
         assert "MAX_AUTO_CONTINUES_SDLC" not in source, (
             "MAX_AUTO_CONTINUES_SDLC should be replaced by MAX_NUDGE_COUNT"
         )
@@ -91,16 +91,16 @@ class TestObserverRemoval:
 
 
 class TestNonSdlcDelivery:
-    """Verify non-SDLC Teammate messages deliver via determine_delivery_action without nudging.
+    """Verify non-SDLC Teammate messages deliver via classify_nudge_action without nudging.
 
-    Tests the actual determine_delivery_action function from agent_session_queue.py rather than
+    Tests the actual classify_nudge_action function from job_queue.py rather than
     replicating send_to_chat logic inline. This ensures tests stay in sync with
     the real routing decisions.
     """
 
     def test_end_turn_delivers(self):
         """Teammate message with stop_reason='end_turn' should deliver, not nudge."""
-        action = determine_delivery_action(
+        action = classify_nudge_action(
             msg="Here is the answer to your question about Python decorators.",
             stop_reason="end_turn",
             auto_continue_count=0,
@@ -111,7 +111,7 @@ class TestNonSdlcDelivery:
 
     def test_end_turn_does_not_nudge(self):
         """Teammate completion should return deliver, not any nudge action."""
-        action = determine_delivery_action(
+        action = classify_nudge_action(
             msg="The answer is 42.",
             stop_reason="end_turn",
             auto_continue_count=0,
@@ -121,7 +121,7 @@ class TestNonSdlcDelivery:
 
     def test_auto_continue_count_unaffected_by_delivery(self):
         """Delivery action means auto_continue_count stays at 0 in send_to_chat."""
-        action = determine_delivery_action(
+        action = classify_nudge_action(
             msg="Django uses the MTV pattern.",
             stop_reason="end_turn",
             auto_continue_count=0,
@@ -132,7 +132,7 @@ class TestNonSdlcDelivery:
 
     def test_rate_limited_nudges(self):
         """Rate-limited stop reason should nudge, not deliver."""
-        action = determine_delivery_action(
+        action = classify_nudge_action(
             msg="partial output",
             stop_reason="rate_limited",
             auto_continue_count=0,
@@ -142,7 +142,7 @@ class TestNonSdlcDelivery:
 
     def test_empty_output_nudges(self):
         """Empty output should nudge when under cap."""
-        action = determine_delivery_action(
+        action = classify_nudge_action(
             msg="",
             stop_reason="end_turn",
             auto_continue_count=0,
@@ -152,7 +152,7 @@ class TestNonSdlcDelivery:
 
     def test_empty_output_at_cap_delivers_fallback(self):
         """Empty output at nudge cap should deliver fallback."""
-        action = determine_delivery_action(
+        action = classify_nudge_action(
             msg="",
             stop_reason="end_turn",
             auto_continue_count=MAX_NUDGE_COUNT,
@@ -162,7 +162,7 @@ class TestNonSdlcDelivery:
 
     def test_completed_session_delivers(self):
         """Already-completed session should deliver without nudge."""
-        action = determine_delivery_action(
+        action = classify_nudge_action(
             msg="final output",
             stop_reason="end_turn",
             auto_continue_count=0,
@@ -173,7 +173,7 @@ class TestNonSdlcDelivery:
 
     def test_completion_already_sent_drops(self):
         """If completion was already sent, subsequent output is dropped."""
-        action = determine_delivery_action(
+        action = classify_nudge_action(
             msg="more output",
             stop_reason="end_turn",
             auto_continue_count=0,
@@ -184,7 +184,7 @@ class TestNonSdlcDelivery:
 
     def test_nudge_cap_forces_delivery(self):
         """At nudge safety cap with content, should deliver."""
-        action = determine_delivery_action(
+        action = classify_nudge_action(
             msg="substantial output after many nudges",
             stop_reason="end_turn",
             auto_continue_count=MAX_NUDGE_COUNT,
@@ -194,13 +194,13 @@ class TestNonSdlcDelivery:
 
 
 class TestPmSentMessageIds:
-    """Tests for pm_sent_message_ids field preserved in session queue (issue #497)."""
+    """Tests for pm_sent_message_ids field preserved in job queue (issue #497)."""
 
     def test_pm_sent_message_ids_in_job_fields(self):
-        """pm_sent_message_ids should be in the _AGENT_SESSION_FIELDS list for preservation."""
-        from agent.agent_session_queue import _AGENT_SESSION_FIELDS
+        """pm_sent_message_ids should be in the _JOB_FIELDS list for preservation."""
+        from agent.job_queue import _JOB_FIELDS
 
-        assert "pm_sent_message_ids" in _AGENT_SESSION_FIELDS
+        assert "pm_sent_message_ids" in _JOB_FIELDS
 
     def test_outbox_drain_import(self):
         """bridge.telegram_relay.get_outbox_length should be importable."""

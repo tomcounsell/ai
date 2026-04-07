@@ -14,8 +14,8 @@ from typing import Literal
 
 from bridge.utc import utc_iso
 
-# In-memory session storage (for simplicity)
-_sessions: dict[str, dict] = {}
+# In-memory job storage (for simplicity)
+_jobs: dict[str, dict] = {}
 _lock = threading.Lock()
 
 DEFAULT_RESULTS_DIR = Path.home() / ".valor" / "test_results"
@@ -80,18 +80,18 @@ def _parse_test_specification(spec: str) -> list[dict]:
     return tests
 
 
-def _run_test_job(agent_session_id: str, tests: list[dict], timeout_minutes: int):
+def _run_test_job(job_id: str, tests: list[dict], timeout_minutes: int):
     """
     Execute tests in background thread.
 
     Args:
-        agent_session_id: Session identifier
+        job_id: Job identifier
         tests: List of tests to run
         timeout_minutes: Maximum runtime
     """
     with _lock:
-        _sessions[agent_session_id]["status"] = "running"
-        _sessions[agent_session_id]["started_at"] = utc_iso()
+        _jobs[job_id]["status"] = "running"
+        _jobs[job_id]["started_at"] = utc_iso()
 
     results = []
     timeout_seconds = timeout_minutes * 60
@@ -141,12 +141,12 @@ def _run_test_job(agent_session_id: str, tests: list[dict], timeout_minutes: int
                 }
             )
 
-    # Update session status
+    # Update job status
     with _lock:
-        _sessions[agent_session_id]["status"] = "completed"
-        _sessions[agent_session_id]["completed_at"] = utc_iso()
-        _sessions[agent_session_id]["results"] = results
-        _sessions[agent_session_id]["summary"] = {
+        _jobs[job_id]["status"] = "completed"
+        _jobs[job_id]["completed_at"] = utc_iso()
+        _jobs[job_id]["results"] = results
+        _jobs[job_id]["summary"] = {
             "total": len(results),
             "passed": sum(1 for r in results if r["passed"]),
             "failed": sum(1 for r in results if not r["passed"]),
@@ -155,8 +155,8 @@ def _run_test_job(agent_session_id: str, tests: list[dict], timeout_minutes: int
     # Save results to file
     results_dir = DEFAULT_RESULTS_DIR
     results_dir.mkdir(parents=True, exist_ok=True)
-    results_file = results_dir / f"{agent_session_id}.json"
-    results_file.write_text(json.dumps(_sessions[agent_session_id], indent=2))
+    results_file = results_dir / f"{job_id}.json"
+    results_file.write_text(json.dumps(_jobs[job_id], indent=2))
 
 
 def schedule_tests(
@@ -174,11 +174,11 @@ def schedule_tests(
         notification_chat_id: Where to send results (optional)
         max_workers: Parallel execution limit (default: 2)
         timeout_minutes: Maximum runtime (default: 10)
-        priority: Session priority
+        priority: Job priority
 
     Returns:
         dict with:
-            - agent_session_id: Scheduled session identifier
+            - job_id: Scheduled job identifier
             - status: Scheduling status
             - tests_to_run: List of tests
             - estimated_duration: Estimated run time
@@ -192,11 +192,11 @@ def schedule_tests(
     if not tests:
         return {"error": "No tests found in specification"}
 
-    # Create session
-    agent_session_id = str(uuid.uuid4())[:8]
+    # Create job
+    job_id = str(uuid.uuid4())[:8]
 
-    session = {
-        "agent_session_id": agent_session_id,
+    job = {
+        "job_id": job_id,
         "status": "scheduled",
         "created_at": utc_iso(),
         "specification": test_specification,
@@ -208,12 +208,12 @@ def schedule_tests(
     }
 
     with _lock:
-        _sessions[agent_session_id] = session
+        _jobs[job_id] = job
 
     # Start background execution
     thread = threading.Thread(
         target=_run_test_job,
-        args=(agent_session_id, tests, timeout_minutes),
+        args=(job_id, tests, timeout_minutes),
         daemon=True,
     )
     thread.start()
@@ -223,7 +223,7 @@ def schedule_tests(
     estimated_duration = f"{estimated_seconds // 60}m {estimated_seconds % 60}s"
 
     return {
-        "agent_session_id": agent_session_id,
+        "job_id": job_id,
         "status": "scheduled",
         "tests_to_run": [t["command"] for t in tests],
         "test_count": len(tests),
@@ -232,113 +232,113 @@ def schedule_tests(
     }
 
 
-def get_session_status(agent_session_id: str) -> dict:
+def get_job_status(job_id: str) -> dict:
     """
-    Get status of a scheduled session.
+    Get status of a scheduled job.
 
     Args:
-        agent_session_id: Session identifier
+        job_id: Job identifier
 
     Returns:
-        dict with session status
+        dict with job status
     """
     with _lock:
-        session = _sessions.get(agent_session_id)
+        job = _jobs.get(job_id)
 
-    if not session:
+    if not job:
         # Try loading from file
-        results_file = DEFAULT_RESULTS_DIR / f"{agent_session_id}.json"
+        results_file = DEFAULT_RESULTS_DIR / f"{job_id}.json"
         if results_file.exists():
             return json.loads(results_file.read_text())
-        return {"error": f"Session not found: {agent_session_id}"}
+        return {"error": f"Job not found: {job_id}"}
 
-    return session
+    return job
 
 
-def list_sessions(
+def list_jobs(
     status_filter: str | None = None,
     limit: int = 10,
 ) -> dict:
     """
-    List scheduled sessions.
+    List scheduled jobs.
 
     Args:
         status_filter: Filter by status (scheduled, running, completed)
-        limit: Maximum sessions to return
+        limit: Maximum jobs to return
 
     Returns:
-        dict with session list
+        dict with job list
     """
     with _lock:
-        sessions = list(_sessions.values())
+        jobs = list(_jobs.values())
 
     if status_filter:
-        sessions = [s for s in sessions if s["status"] == status_filter]
+        jobs = [j for j in jobs if j["status"] == status_filter]
 
     # Sort by creation time, newest first
-    sessions.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+    jobs.sort(key=lambda x: x.get("created_at", ""), reverse=True)
 
     return {
-        "sessions": sessions[:limit],
-        "total": len(sessions),
+        "jobs": jobs[:limit],
+        "total": len(jobs),
         "filtered_by": status_filter,
     }
 
 
-def cancel_session(agent_session_id: str) -> dict:
+def cancel_job(job_id: str) -> dict:
     """
-    Cancel a scheduled session.
+    Cancel a scheduled job.
 
     Args:
-        agent_session_id: Session identifier
+        job_id: Job identifier
 
     Returns:
         dict with cancellation result
     """
     with _lock:
-        session = _sessions.get(agent_session_id)
-        if not session:
-            return {"error": f"Session not found: {agent_session_id}"}
+        job = _jobs.get(job_id)
+        if not job:
+            return {"error": f"Job not found: {job_id}"}
 
-        if session["status"] == "completed":
-            return {"error": "Cannot cancel completed session"}
+        if job["status"] == "completed":
+            return {"error": "Cannot cancel completed job"}
 
-        session["status"] = "cancelled"
-        session["cancelled_at"] = utc_iso()
+        job["status"] = "cancelled"
+        job["cancelled_at"] = utc_iso()
 
     return {
-        "agent_session_id": agent_session_id,
+        "job_id": job_id,
         "status": "cancelled",
     }
 
 
-def get_session_results(agent_session_id: str) -> dict:
+def get_job_results(job_id: str) -> dict:
     """
-    Get detailed results for a completed session.
+    Get detailed results for a completed job.
 
     Args:
-        agent_session_id: Session identifier
+        job_id: Job identifier
 
     Returns:
         dict with test results
     """
-    session = get_session_status(agent_session_id)
+    job = get_job_status(job_id)
 
-    if "error" in session:
-        return session
+    if "error" in job:
+        return job
 
-    if session.get("status") != "completed":
+    if job.get("status") != "completed":
         return {
-            "error": "Session not completed",
-            "status": session.get("status"),
+            "error": "Job not completed",
+            "status": job.get("status"),
         }
 
     return {
-        "agent_session_id": agent_session_id,
-        "results": session.get("results", []),
-        "summary": session.get("summary", {}),
-        "started_at": session.get("started_at"),
-        "completed_at": session.get("completed_at"),
+        "job_id": job_id,
+        "results": job.get("results", []),
+        "summary": job.get("summary", {}),
+        "started_at": job.get("started_at"),
+        "completed_at": job.get("completed_at"),
     }
 
 
@@ -358,14 +358,14 @@ if __name__ == "__main__":
         print(f"Error: {result['error']}")
         sys.exit(1)
     else:
-        print(f"Session ID: {result['agent_session_id']}")
+        print(f"Job ID: {result['job_id']}")
         print(f"Tests: {result['test_count']}")
         print(f"Estimated: {result['estimated_duration']}")
 
         # Wait for completion
         print("\nWaiting for completion...")
         while True:
-            status = get_session_status(result["agent_session_id"])
+            status = get_job_status(result["job_id"])
             if status.get("status") == "completed":
                 print(f"\nResults: {json.dumps(status.get('summary', {}), indent=2)}")
                 break

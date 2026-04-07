@@ -6,21 +6,6 @@ allowed-tools: Read, Write, Edit, Glob, Bash, AskUserQuestion
 
 # Make a Plan (Shape Up Methodology)
 
-## Stage Marker
-
-At the very start of this skill, write an in_progress marker:
-
-```bash
-python -m tools.sdlc_stage_marker --stage PLAN --status in_progress 2>/dev/null || true
-```
-
-After the plan document is committed and pushed (end of Step 5), write the completion marker:
-
-```bash
-python -m tools.sdlc_stage_marker --stage PLAN --status completed 2>/dev/null || true
-```
-
-
 Creates structured feature plans in `docs/plans/` following Shape Up principles: narrow the problem, set appetite, rough out the solution, identify rabbit holes, and define boundaries.
 
 ## What this skill does

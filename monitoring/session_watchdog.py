@@ -20,25 +20,11 @@ import json
 import logging
 import os
 import time
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from popoto.exceptions import ModelException
-
 from models.agent_session import AgentSession
-
-
-def _to_timestamp(val) -> float | None:
-    """Convert a datetime or float to a Unix timestamp."""
-    if val is None:
-        return None
-    if isinstance(val, datetime):
-        return val.timestamp()
-    if isinstance(val, (int, float)):
-        return float(val)
-    return None
-
+from popoto.exceptions import ModelException
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +54,7 @@ STALL_THRESHOLDS = {
 
 
 # Transcript liveness: if transcript.txt was modified within this many minutes,
-# the session is considered alive (doing sub-agent work) even if updated_at
+# the session is considered alive (doing sub-agent work) even if last_activity
 # in Redis is stale. See issue #360.
 TRANSCRIPT_STALE_THRESHOLD_MIN = 15
 
@@ -85,7 +71,7 @@ def _check_transcript_liveness(
 
     Uses os.path.getmtime() on logs/sessions/{session_id}/transcript.txt
     to determine if the session is actively doing work (e.g., sub-agent calls)
-    even when the Redis updated_at field hasn't been updated.
+    even when the Redis last_activity field hasn't been updated.
 
     Args:
         session_id: The session ID to check.
@@ -181,19 +167,13 @@ async def check_all_sessions() -> None:
             # to save/update them, popoto raises ModelException (e.g. unique
             # constraint violations). We catch all ModelException variants and
             # mark the session as failed to prevent the watchdog from looping
-            # on it every cycle. See nudge loop related guards.
+            # on it every cycle. See docs/features/coaching-loop.md "Related Guards".
             try:
-                from models.session_lifecycle import finalize_session
-
+                session.status = "failed"
                 # Capture exception details so the reflections system can produce
                 # actionable bug reports instead of "empty error summary" issues.
                 session.summary = f"Watchdog: {type(e).__name__}: {e}"[:500]
-                finalize_session(
-                    session, "failed",
-                    reason=f"watchdog: stale session ({type(e).__name__})",
-                    skip_auto_tag=True,
-                    skip_checkpoint=True,
-                )
+                session.save()
                 logger.warning(
                     "[watchdog] Marked stale session %s as failed (%s)",
                     session.session_id,
@@ -230,13 +210,13 @@ def check_stalled_sessions() -> list[dict]:
     how long they've been in that state. Uses started_at (falling back
     to created_at) as the reference timestamp.
 
-    For active sessions, also checks updated_at -- if updated_at is recent
+    For active sessions, also checks last_activity -- if last_activity is recent
     (within the active threshold), the session is not considered stalled.
 
     Thresholds:
         - pending > 300s (5 min) = stalled
         - running > 2700s (45 min) = stalled
-        - active with no recent updated_at > 600s (10 min) = stalled
+        - active with no recent last_activity > 600s (10 min) = stalled
 
     Returns:
         List of dicts for stalled sessions, each containing:
@@ -260,39 +240,37 @@ def check_stalled_sessions() -> list[dict]:
 
         for session in sessions:
             try:
-                session_id = session.session_id or session.agent_session_id or "unknown"
+                session_id = session.session_id or session.job_id or "unknown"
 
                 # Determine reference timestamp based on status
-                ref_time = (
-                    _to_timestamp(session.started_at) or _to_timestamp(session.created_at) or now
-                )
+                ref_time = session.started_at or session.created_at or now
 
-                # For active sessions, use updated_at as reference
+                # For active sessions, use last_activity as reference
                 if status_val == "active":
-                    updated_at_ts = _to_timestamp(session.updated_at)
+                    last_activity = session.last_activity
 
                     # Also check in-memory activity tracking from sdk_client,
                     # which is updated on every tool call and log output.
                     # Use whichever timestamp is more recent.
                     try:
-                        from agent.sdk_client import get_session_updated_at
+                        from agent.sdk_client import get_session_last_activity
 
-                        inmem_activity = get_session_updated_at(session_id)
+                        inmem_activity = get_session_last_activity(session_id)
                         if inmem_activity is not None:
-                            if updated_at_ts is None or inmem_activity > updated_at_ts:
-                                updated_at_ts = inmem_activity
+                            if last_activity is None or inmem_activity > last_activity:
+                                last_activity = inmem_activity
                     except ImportError:
                         pass
 
-                    if updated_at_ts is not None:
-                        # If updated_at is recent, session is not stalled
-                        activity_age = now - updated_at_ts
+                    if last_activity is not None:
+                        # If last_activity is recent, session is not stalled
+                        activity_age = now - last_activity
                         if activity_age < threshold:
                             continue
-                        # Use updated_at as the reference for duration
-                        ref_time = updated_at_ts
+                        # Use last_activity as the reference for duration
+                        ref_time = last_activity
 
-                    # Transcript liveness check (issue #360): even if updated_at
+                    # Transcript liveness check (issue #360): even if last_activity
                     # is stale, the session may be alive doing sub-agent work.
                     # Check transcript.txt mtime before declaring stalled.
                     transcript_stale, transcript_age_min = _check_transcript_liveness(session_id)
@@ -373,14 +351,12 @@ def assess_session_health(session: AgentSession) -> dict[str, Any]:
     now = time.time()
 
     # Check for silence
-    updated_ts = _to_timestamp(session.updated_at)
-    silence_duration = (now - updated_ts) if updated_ts else 0
+    silence_duration = now - session.last_activity
     if silence_duration > SILENCE_THRESHOLD:
         issues.append(f"Silent for {int(silence_duration / 60)} minutes")
 
     # Check for excessive duration
-    started_ts = _to_timestamp(session.started_at)
-    session_duration = (now - started_ts) if started_ts else 0
+    session_duration = now - session.started_at
     if session_duration > DURATION_THRESHOLD:
         issues.append(f"Running for {int(session_duration / 3600)} hours")
 
@@ -582,14 +558,13 @@ def _safe_abandon_session(session: AgentSession, reason: str) -> bool:
         (session may have been deleted by another process).
     """
     try:
-        from models.session_lifecycle import finalize_session
+        session.log_lifecycle_transition("abandoned", reason)
+    except Exception:
+        pass
 
-        finalize_session(
-            session, "abandoned",
-            reason=reason,
-            skip_auto_tag=True,
-            skip_checkpoint=True,
-        )
+    session.status = "abandoned"
+    try:
+        session.save()
         return True
     except ModelException as e:
         # Session was likely deleted or modified by another process between
@@ -607,7 +582,7 @@ async def fix_unhealthy_session(session: AgentSession, assessment: dict[str, Any
     """Fix an unhealthy session by abandoning it.
 
     Recovery of jobs with dead workers is handled by the unified health check
-    in agent/agent_session_queue.py (_agent_session_health_check). The session watchdog only
+    in agent/job_queue.py (_job_health_check). The session watchdog only
     handles session-level health (silence, looping, error cascades).
 
     Args:
@@ -627,8 +602,7 @@ async def fix_unhealthy_session(session: AgentSession, assessment: dict[str, Any
     now = time.time()
 
     # Calculate silence duration
-    updated_ts = _to_timestamp(session.updated_at)
-    silence_duration = (now - updated_ts) if updated_ts else 0
+    silence_duration = now - session.last_activity
 
     # Most common case: session is stuck/silent
     if silence_duration > ABANDON_THRESHOLD:
@@ -642,8 +616,7 @@ async def fix_unhealthy_session(session: AgentSession, assessment: dict[str, Any
         return True
 
     # Long-running session
-    started_ts = _to_timestamp(session.started_at)
-    session_duration = (now - started_ts) if started_ts else 0
+    session_duration = now - session.started_at
     if session_duration > DURATION_THRESHOLD:
         reason = f"running for {int(session_duration / 3600)}h"
         _safe_abandon_session(session, f"watchdog: {reason}")

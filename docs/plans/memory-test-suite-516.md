@@ -13,7 +13,7 @@ PR #606 implemented a first pass at this test suite but was reverted (commit 959
 3. **LOW: Weak assertions in injection pipeline tests** -- Tests only verified "no crash" (smoke tests) but docstrings claimed behavioral validation. **Prevention:** Every test must have assertions that verify behavioral outcomes (return values, state changes, data content), not just absence of exceptions. Docstrings must accurately reflect assertion strength.
 4. **LOW: test_safe_save_returns_none_on_bad_kwargs tested wrong thing** -- Conflated write-filter testing with error-path testing. **Prevention:** Separate write-filter enforcement tests (below-threshold importance is silently dropped) from error-path tests (bad kwargs cause safe failure).
 5. **INFO: Hardcoded threshold 0.15** -- Should reference `Memory._wf_min_threshold`. **Prevention:** Import the constant from the model; never hardcode threshold values in tests.
-6. **INFO: AI judge model hardcoded as "gemma3:4b"** -- Inconsistent with existing `judge.py` convention (`JudgeConfig` default was `"gemma2:3b"`, now superseded by `gemma4:e2b` via `config.models.OLLAMA_LOCAL_MODEL`). **Prevention:** Use `JudgeConfig` defaults from `tests/ai_judge/judge.py`; do not hardcode model names in test files.
+6. **INFO: AI judge model hardcoded as "gemma3:4b"** -- Inconsistent with existing `judge.py` convention (`JudgeConfig` default is `"gemma2:3b"`). **Prevention:** Use `JudgeConfig` defaults from `tests/ai_judge/judge.py`; do not hardcode model names in test files.
 
 ## Problem
 
@@ -54,7 +54,7 @@ New file `tests/integration/test_memory_injection_pipeline.py` covering:
 - [ ] **Multi-query decomposition**: Provide >5 keywords, verify `_cluster_keywords()` decomposes and queries each cluster
 - [ ] **Session cleanup**: Verify `clear_session()` removes all session-scoped state
 
-### Layer 3: AI judge tests (requires Ollama with gemma4:e2b)
+### Layer 3: AI judge tests (requires Ollama with gemma2:3b)
 
 New file `tests/ai_judge/test_memory_usefulness.py` covering:
 
@@ -92,7 +92,7 @@ Before creating test files, update `tests/conftest.py` FEATURE_MAP to add memory
 - All integration tests use a unique `project_key` per test (UUID-prefixed) for Redis isolation, via the shared `unique_project_key()` helper
 - All created memories are cleaned up in fixture teardown via the shared `cleanup_memories()` helper
 - AI judge tests are marked `@pytest.mark.slow` and skipped when Ollama is not available (consistent with existing `tests/ai_judge/` convention -- tests use local Ollama, not Anthropic API)
-- AI judge tests use `JudgeConfig` defaults from `tests/ai_judge/judge.py` (model `"gemma4:e2b"`) -- no hardcoded model names in test files
+- AI judge tests use `JudgeConfig` defaults from `tests/ai_judge/judge.py` (model `"gemma2:3b"`) -- no hardcoded model names in test files
 
 ## Scope
 

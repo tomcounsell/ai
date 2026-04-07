@@ -8,7 +8,7 @@ tracking: https://github.com/tomcounsell/ai/issues/22
 
 ## Problem Statement
 
-The codebase uses JSONL files and JSON files for temporary state in several places — dead letters, bridge events, calendar caches. These are susceptible to race conditions (read-modify-write on files), don't support atomic operations, and require parsing entire files for queries. Meanwhile, `AgentSession` (formerly `RedisJob`) in `agent/agent_session_queue.py` already demonstrates popoto working well for the session queue.
+The codebase uses JSONL files and JSON files for temporary state in several places — dead letters, bridge events, calendar caches. These are susceptible to race conditions (read-modify-write on files), don't support atomic operations, and require parsing entire files for queries. Meanwhile, `AgentSession` (formerly `RedisJob`) in `agent/job_queue.py` already demonstrates popoto working well for the job queue.
 
 Additionally, all incoming/outgoing Telegram messages and agent session state exist only in SQLite (long-term archive) or ephemerally in memory. There's no fast, queryable, real-time view of current message flow and session activity.
 
@@ -94,15 +94,15 @@ class AgentSession(Model):
     chat_id = Field()
     sender = Field()
     started_at = SortedField(type=float, partition_by="project_key")
-    updated_at = SortedField(type=float)
+    last_activity = SortedField(type=float)
     tool_call_count = IntField(default=0)
     branch_name = Field(null=True)
     message_text = Field(max_length=20_000, null=True)  # original request
 ```
 
 **Changes**:
-- `_execute_agent_session()` in `agent/agent_session_queue.py` — create AgentSession on session start, update on completion
-- Health check watchdog — update `tool_call_count` and `updated_at` on each check
+- `_execute_job()` in `agent/job_queue.py` — create AgentSession on job start, update on completion
+- Health check watchdog — update `tool_call_count` and `last_activity` on each check
 - Revival detection — query `AgentSession.query.filter(status="active")` instead of git state checks
 - Bridge shutdown — mark active sessions as dormant
 
@@ -145,7 +145,7 @@ class BridgeEventPublisher(Publisher):
 | `bridge/dead_letters.py` | Rewrite with DeadLetter model |
 | `bridge/telegram_bridge.py` | Update log_event(), add TelegramMessage writes |
 | `tools/telegram_history/__init__.py` | Add Redis mirror alongside SQLite |
-| `agent/agent_session_queue.py` | Add AgentSession lifecycle |
+| `agent/job_queue.py` | Add AgentSession lifecycle |
 | `agent/health_check.py` | Update session tracking |
 | `models/__init__.py` | New package |
 | `models/telegram.py` | New — TelegramMessage model |

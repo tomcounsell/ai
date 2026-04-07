@@ -43,7 +43,7 @@ def _list_children(parent_id: str) -> int:
         print(f"Error: parent session '{parent_id}' not found", file=sys.stderr)
         return 1
 
-    children = parent.get_child_sessions()
+    children = parent.get_dev_sessions()
     running = [c for c in children if c.status == "running"]
 
     if not running:
@@ -54,7 +54,7 @@ def _list_children(parent_id: str) -> int:
     for child in running:
         slug_info = f" slug={child.slug}" if child.slug else ""
         stage_info = f" stage={child.current_stage}" if child.current_stage else ""
-        print(f"  {child.agent_session_id}{slug_info}{stage_info} status={child.status}")
+        print(f"  {child.job_id}{slug_info}{stage_info} status={child.status}")
 
     return 0
 
@@ -89,7 +89,7 @@ def _steer_child(session_id: str, message: str, parent_id: str, abort: bool) -> 
         return 1
 
     # Validate parent-child relationship
-    if child.parent_session_id != parent_id:
+    if child.parent_chat_session_id != parent_id:
         print(
             f"Error: session '{session_id}' is not a child of '{parent_id}'",
             file=sys.stderr,

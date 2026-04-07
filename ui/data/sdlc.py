@@ -7,10 +7,10 @@ All functions are synchronous (def, not async def) because Popoto uses
 synchronous Redis calls. FastAPI runs sync route handlers in a threadpool.
 """
 
-import datetime
 import json
 import logging
 import os
+import re
 import time
 
 from pydantic import BaseModel
@@ -66,33 +66,9 @@ class PipelineEvent(BaseModel):
 
 
 class PipelineProgress(BaseModel):
-    """Complete pipeline view for a single AgentSession.
+    """Complete pipeline view for a single AgentSession."""
 
-    Fields:
-        agent_session_id: Unique identifier for this agent session.
-        session_id: Telegram/local session identifier.
-        session_type: Display persona (e.g., "Developer", "Project Manager").
-        status: Lifecycle status (pending, running, completed, etc.).
-        slug: Work item slug for planned work.
-        message_text: Original message that triggered this session.
-        project_key: Project identifier from projects.json.
-        project_name: Human-readable project name.
-        project_metadata: Enriched project info (repo, chat, stack, etc.).
-        branch_name: Git branch for this session's work.
-        created_at/started_at/completed_at/updated_at: Timestamps as floats.
-        parent_agent_session_id: ID of the parent session (for hierarchy).
-        children: Child sessions nested under this parent.
-        context_summary: What this session is about (human-friendly).
-        expectations: What the agent needs from the human (for dormant sessions).
-        turn_count: Number of conversation turns.
-        tool_call_count: Number of tool calls made.
-        watchdog_unhealthy: Reason string when flagged unhealthy, None when healthy.
-        priority: Session priority (urgent, high, normal, low).
-        classification_type: Session classification (sdlc, qa, etc.).
-        is_stale: True if session is running but updated_at is >10 minutes ago.
-    """
-
-    agent_session_id: str
+    job_id: str
     session_id: str | None = None
     session_type: str | None = None
     status: str | None = None
@@ -105,21 +81,7 @@ class PipelineProgress(BaseModel):
     created_at: float | None = None
     started_at: float | None = None
     completed_at: float | None = None
-    updated_at: float | None = None
-
-    # Parent/child hierarchy
-    parent_agent_session_id: str | None = None
-    children: list["PipelineProgress"] = []
-
-    # Session metadata
-    context_summary: str | None = None
-    expectations: str | None = None
-    turn_count: int | None = None
-    tool_call_count: int | None = None
-    watchdog_unhealthy: str | None = None
-    priority: str | None = None
-    classification_type: str | None = None
-    is_stale: bool = False
+    last_activity: float | None = None
 
     # SDLC state
     stages: list[StageState] = []
@@ -150,9 +112,7 @@ class PipelineProgress(BaseModel):
 
     @property
     def display_name(self) -> str:
-        """Human-friendly name: context_summary, then slug, then truncated message."""
-        if self.context_summary:
-            return self.context_summary
+        """Human-friendly name: slug if available, else truncated message."""
         if self.slug:
             return self.slug
         if self.message_text:
@@ -160,7 +120,7 @@ class PipelineProgress(BaseModel):
             if len(self.message_text) > 60:
                 text += "..."
             return text
-        return self.agent_session_id or "unknown"
+        return self.job_id or "unknown"
 
 
 # === Project config helpers ===
@@ -226,6 +186,74 @@ def _get_project_metadata(project_key: str | None) -> tuple[str | None, dict | N
         metadata["machine"] = context["machine"]
 
     return name, metadata if metadata else None
+
+
+# === Stage inference from history ===
+
+
+def _infer_stages_from_history(history_list: list | None) -> list["StageState"]:
+    """DEPRECATED: Infer SDLC stage states from session history entries.
+
+    This fallback exists for in-flight sessions created before stage_states
+    was eagerly initialized at session creation (pre-#563). It will be removed
+    in a future release once all existing sessions have stage_states populated.
+
+    New sessions get stage_states initialized in _push_job() when
+    classification_type is "sdlc", so this path should only fire for
+    legacy sessions.
+
+    Returns empty list if no stage info found in history.
+    """
+    logger.warning(
+        "DEPRECATED: _infer_stages_from_history() called. "
+        "This session lacks stage_states -- it was created before eager initialization (#563). "
+        "This fallback will be removed in a future release."
+    )
+
+    if not history_list or not isinstance(history_list, list):
+        return []
+
+    # Collect mentioned stage names from history
+    mentioned_stages = set()
+    active_stage = None
+    stage_pattern = re.compile(r"^\[stage\]\s*(\w+)", re.IGNORECASE)
+
+    for entry in history_list:
+        if not isinstance(entry, str):
+            continue
+        match = stage_pattern.match(entry)
+        if match:
+            stage_name = match.group(1).upper()
+            if stage_name in SDLC_STAGES:
+                mentioned_stages.add(stage_name)
+
+    if not mentioned_stages:
+        return []
+
+    # Build stage list: stages mentioned in history are completed,
+    # the last mentioned stage is marked in_progress (heuristic)
+    last_stage_idx = -1
+    for stage_name in mentioned_stages:
+        idx = SDLC_STAGES.index(stage_name)
+        if idx > last_stage_idx:
+            last_stage_idx = idx
+            active_stage = stage_name
+
+    stages = []
+    for name in SDLC_STAGES:
+        if name == active_stage:
+            stages.append(StageState(name=name, status="in_progress"))
+        elif name in mentioned_stages:
+            stages.append(StageState(name=name, status="completed"))
+        else:
+            idx = SDLC_STAGES.index(name)
+            if idx < last_stage_idx and all(SDLC_STAGES[i] in mentioned_stages for i in range(idx)):
+                # Earlier stages implied completed
+                stages.append(StageState(name=name, status="completed"))
+            else:
+                stages.append(StageState(name=name, status="pending"))
+
+    return stages
 
 
 # === Parsing helpers ===
@@ -314,12 +342,8 @@ def _resolve_persona_display(session) -> str | None:
         return None
     if raw == "dev":
         return "Developer"
-    if raw == "pm":
-        return "Project Manager"
-    if raw == "teammate":
-        return "Teammate"
     if raw == "chat":
-        return "Project Manager"  # Legacy fallback for pre-migration sessions
+        return "Project Manager"
     return _safe_str(raw)
 
 
@@ -331,14 +355,7 @@ def _safe_str(val, default: str | None = None) -> str | None:
 
 
 def _safe_float(val) -> float | None:
-    """Return val as a float if it's a real number, else None.
-
-    Handles datetime.datetime objects by converting via .timestamp(),
-    which is needed because Popoto stores datetime fields as Python
-    datetime objects, not raw floats.
-    """
-    if isinstance(val, datetime.datetime):
-        return val.timestamp()
+    """Return val as a float if it's a real number, else None."""
     if isinstance(val, int | float):
         return float(val)
     if isinstance(val, str):
@@ -350,16 +367,14 @@ def _safe_float(val) -> float | None:
 
 
 def _session_to_pipeline(session) -> PipelineProgress:
-    """Convert an AgentSession instance to a PipelineProgress model.
-
-    Uses stored stage_states as the authoritative source for all sessions.
-    Artifact inference was removed in PR #733 (issue #729).
-    """
-    slug = _safe_str(session.slug) or ""
-
+    """Convert an AgentSession instance to a PipelineProgress model."""
     stages = _parse_stage_states(session.stage_states)
 
+    # Fallback: infer stages from history when stage_states is empty
     history_list = session.history if isinstance(session.history, list) else None
+    if not stages and history_list:
+        stages = _infer_stages_from_history(history_list)
+
     events = _parse_history(history_list)
 
     # Determine current stage
@@ -369,47 +384,17 @@ def _session_to_pipeline(session) -> PipelineProgress:
             current = s.name
             break
 
+    slug = _safe_str(session.slug) or _safe_str(session.work_item_slug) or ""
+
     # Resolve project name and metadata
     project_key = _safe_str(session.project_key)
     project_name, project_metadata = _get_project_metadata(project_key)
 
-    # Populate new metadata fields from AgentSession attributes
-    status = _safe_str(session.status)
-    updated_at = _safe_float(session.updated_at)
-
-    # Compute staleness: running/active sessions with no update in >10 minutes
-    is_stale = False
-    if status in ("running", "active") and updated_at:
-        is_stale = (time.time() - updated_at) > 600  # 10 minutes
-
-    # Extract classification_type (stored in extra_context dict)
-    classification_type = None
-    extra_context = getattr(session, "extra_context", None)
-    if isinstance(extra_context, dict):
-        classification_type = extra_context.get("classification_type")
-    elif hasattr(session, "classification_type"):
-        classification_type = _safe_str(getattr(session, "classification_type", None))
-
-    # Safe int extraction for count fields
-    turn_count = getattr(session, "turn_count", None)
-    if turn_count is not None:
-        try:
-            turn_count = int(turn_count)
-        except (ValueError, TypeError):
-            turn_count = None
-
-    tool_call_count = getattr(session, "tool_call_count", None)
-    if tool_call_count is not None:
-        try:
-            tool_call_count = int(tool_call_count)
-        except (ValueError, TypeError):
-            tool_call_count = None
-
     return PipelineProgress(
-        agent_session_id=_safe_str(session.agent_session_id) or "",
+        job_id=_safe_str(session.job_id) or "",
         session_id=_safe_str(session.session_id),
         session_type=_resolve_persona_display(session),
-        status=status,
+        status=_safe_str(session.status),
         slug=slug,
         message_text=_safe_str(session.message_text),
         project_key=project_key,
@@ -419,16 +404,7 @@ def _session_to_pipeline(session) -> PipelineProgress:
         created_at=_safe_float(session.created_at),
         started_at=_safe_float(session.started_at),
         completed_at=_safe_float(session.completed_at),
-        updated_at=updated_at,
-        parent_agent_session_id=_safe_str(getattr(session, "parent_agent_session_id", None)),
-        context_summary=_safe_str(getattr(session, "context_summary", None)),
-        expectations=_safe_str(getattr(session, "expectations", None)),
-        turn_count=turn_count,
-        tool_call_count=tool_call_count,
-        watchdog_unhealthy=_safe_str(getattr(session, "watchdog_unhealthy", None)),
-        priority=_safe_str(getattr(session, "priority", None)),
-        classification_type=classification_type,
-        is_stale=is_stale,
+        last_activity=_safe_float(session.last_activity),
         stages=stages,
         current_stage=current,
         events=events,
@@ -441,21 +417,18 @@ def _session_to_pipeline(session) -> PipelineProgress:
 # === Public query functions ===
 
 
-def get_all_sessions(limit: int = 15) -> list[PipelineProgress]:
+def get_all_sessions(limit: int = 50) -> list[PipelineProgress]:
     """Get agent sessions sorted by last activity.
 
-    Active parent sessions always appear (no cap). Inactive parent sessions
-    are filtered to those within the configured retention period
-    (DASHBOARD_RETENTION_HOURS env var, default 48h), capped at `limit`.
-
-    The limit applies only to top-level (parent) rows. All children of
-    included parents are attached regardless of the limit.
+    Active sessions always appear (no cap). Inactive sessions are filtered
+    to those within the configured retention period (DASHBOARD_RETENTION_HOURS
+    env var, default 48h), capped at `limit` total.
 
     Args:
-        limit: Maximum number of inactive parent sessions to show.
+        limit: Maximum number of inactive sessions to show.
 
     Returns:
-        List of top-level PipelineProgress (with children nested), newest first.
+        List of PipelineProgress, newest activity first.
     """
     from models.agent_session import AgentSession
 
@@ -466,52 +439,32 @@ def get_all_sessions(limit: int = 15) -> list[PipelineProgress]:
         return []
 
     cutoff = time.time() - DASHBOARD_RETENTION_HOURS * 3600
+    active = []
+    inactive = []
 
     def _best_timestamp(p: PipelineProgress) -> float:
         """Pick the best available timestamp for ordering/filtering."""
-        return p.completed_at or p.updated_at or p.started_at or p.created_at or 0
+        return p.completed_at or p.last_activity or p.started_at or p.created_at or 0
 
-    # Convert all sessions to PipelineProgress, skipping test data
-    all_pipelines = []
     for session in all_sessions:
-        if getattr(session, "project_key", None) == "test":
-            continue
         try:
             pipeline = _session_to_pipeline(session)
         except Exception:
-            logger.debug(f"Skipping corrupt session: {getattr(session, 'agent_session_id', '?')}")
+            logger.debug(f"Skipping corrupt session: {getattr(session, 'job_id', '?')}")
             continue
-        if _best_timestamp(pipeline) >= cutoff or pipeline.status in (
+        if pipeline.status in (
             "running",
             "pending",
             "in_progress",
             "active",
             "waiting_for_children",
         ):
-            all_pipelines.append(pipeline)
-
-    # Group children under parents (no N+1 queries)
-    by_id: dict[str, PipelineProgress] = {p.agent_session_id: p for p in all_pipelines}
-    child_ids: set[str] = set()
-    for p in all_pipelines:
-        if p.parent_agent_session_id and p.parent_agent_session_id in by_id:
-            parent = by_id[p.parent_agent_session_id]
-            parent.children.append(p)
-            child_ids.add(p.agent_session_id)
-        # Orphaned children (parent not in list) remain as top-level rows
-
-    top_level = [p for p in all_pipelines if p.agent_session_id not in child_ids]
-
-    # Split into active/inactive, apply limit only to inactive parents
-    active = []
-    inactive = []
-    for p in top_level:
-        if p.status in ("running", "pending", "in_progress", "active", "waiting_for_children"):
-            active.append(p)
+            active.append(pipeline)
         else:
-            inactive.append(p)
+            if _best_timestamp(pipeline) >= cutoff:
+                inactive.append(pipeline)
 
-    active.sort(key=lambda p: p.updated_at or p.created_at or 0, reverse=True)
+    active.sort(key=lambda p: p.last_activity or p.created_at or 0, reverse=True)
     inactive.sort(key=_best_timestamp, reverse=True)
 
     return active + inactive[:limit]
@@ -529,11 +482,11 @@ def get_active_pipelines() -> list[PipelineProgress]:
     return [p for p in all_sessions if p.stages and p.status not in ("completed", "failed")]
 
 
-def get_pipeline_detail(agent_session_id: str) -> PipelineProgress | None:
+def get_pipeline_detail(job_id: str) -> PipelineProgress | None:
     """Get detailed pipeline information for a specific session.
 
     Args:
-        agent_session_id: The AgentSession agent_session_id to look up.
+        job_id: The AgentSession job_id to look up.
 
     Returns:
         PipelineProgress with full details, or None if not found.
@@ -541,14 +494,12 @@ def get_pipeline_detail(agent_session_id: str) -> PipelineProgress | None:
     from models.agent_session import AgentSession
 
     try:
-        # AgentSession.query.get() requires a Popoto key object, not a raw string.
-        # Filter via all() instead.
-        matches = [s for s in AgentSession.query.all() if s.id == agent_session_id]
-        if not matches:
+        session = AgentSession.query.get(job_id)
+        if not session:
             return None
-        return _session_to_pipeline(matches[0])
+        return _session_to_pipeline(session)
     except Exception as e:
-        logger.warning(f"Failed to get pipeline detail for {agent_session_id}: {e}")
+        logger.warning(f"Failed to get pipeline detail for {job_id}: {e}")
         return None
 
 
@@ -579,7 +530,7 @@ def get_recent_completions(limit: int = 25, page: int = 1) -> list[PipelineProgr
         try:
             pipeline = _session_to_pipeline(session)
         except Exception:
-            logger.debug(f"Skipping corrupt session: {getattr(session, 'agent_session_id', '?')}")
+            logger.debug(f"Skipping corrupt session: {getattr(session, 'job_id', '?')}")
             continue
         completed.append(pipeline)
 

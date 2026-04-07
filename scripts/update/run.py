@@ -21,8 +21,6 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from datetime import UTC  # noqa: E402
-
 from scripts.update import (  # noqa: E402
     cal_integration,
     deps,
@@ -30,9 +28,6 @@ from scripts.update import (  # noqa: E402
     git,
     hardlinks,
     hooks,
-    migrations,
-    officecli,
-    rodney,
     service,
     verify,
 )
@@ -119,9 +114,6 @@ class UpdateResult:
     hardlink_result: hardlinks.HardlinkSyncResult | None = None
     env_sync_result: env_sync.EnvSyncResult | None = None
     hook_audit: hooks.HookAuditResult | None = None
-    migration_result: migrations.MigrationResult | None = None
-    officecli_result: officecli.InstallResult | None = None
-    rodney_result: rodney.InstallResult | None = None
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -140,67 +132,6 @@ def log(msg: str, verbose: bool = True, always: bool = False) -> None:
         _log_buffer.append(line)
     else:
         print(line)
-
-
-def _cleanup_stale_sessions(project_dir: Path, age_minutes: int = 30) -> int:
-    """Kill running/pending sessions with no live process.
-
-    Terminal sessions (killed/abandoned/failed/completed) are preserved
-    for reflections to analyze — reflections handles its own 90-day expiry.
-
-    Returns the number of sessions transitioned to 'killed'.
-    """
-    import time
-    from datetime import datetime
-
-    from agent.agent_session_queue import _extract_agent_session_fields
-    from models.agent_session import AgentSession
-
-    now = time.time()
-    threshold = age_minutes * 60
-    killed_count = 0
-
-    for status in ("running", "pending"):
-        sessions = list(AgentSession.query.filter(status=status))
-        for s in sessions:
-            created = s.created_at
-            if not created:
-                continue
-            if isinstance(created, datetime):
-                age = now - created.timestamp()
-            elif isinstance(created, str):
-                try:
-                    dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
-                    age = now - dt.timestamp()
-                except (ValueError, TypeError):
-                    continue
-            else:
-                try:
-                    age = now - float(created)
-                except (TypeError, ValueError):
-                    continue
-
-            if age < threshold:
-                continue
-
-            # Check if process is still alive
-            pid = getattr(s, "pid", None)
-            if pid:
-                try:
-                    os.kill(int(pid), 0)
-                    continue  # process alive, skip
-                except (OSError, ValueError):
-                    pass  # process dead
-
-            # Transition via delete-and-recreate (Popoto KeyField pattern)
-            fields = _extract_agent_session_fields(s)
-            s.delete()
-            fields["status"] = "killed"
-            fields["completed_at"] = datetime.now(tz=UTC)
-            AgentSession.create(**fields)
-            killed_count += 1
-
-    return killed_count
 
 
 def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
@@ -393,53 +324,10 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                     log(f"WARN: Failed to commit bump: {e}", v)
                     result.warnings.append("Dep bump succeeded but commit/push failed")
 
-    # Step 3.6: Run pending data migrations (after git pull, before service restart)
-    log("Checking pending migrations...", v)
-    result.migration_result = migrations.run_pending_migrations(project_dir)
-    mig = result.migration_result
-    if mig.ran:
-        for name in mig.ran:
-            desc = migrations.MIGRATIONS.get(name, (None, name))[1]
-            log(f"  Migrated: {desc}", v, always=True)
-    if mig.failed:
-        for err in mig.errors:
-            log(f"  FAIL: {err}", v, always=True)
-            result.errors.append(f"Migration failed: {err}")
-    if not mig.ran and not mig.failed:
-        log("No pending migrations", v)
-
-    # Step 3.7: OfficeCLI binary install/update
-    log("Checking OfficeCLI...", v)
-    result.officecli_result = officecli.install_or_update()
-    oc = result.officecli_result
-    if oc.success:
-        if oc.action == "skipped":
-            log(f"OfficeCLI {oc.version} (up to date)", v)
-        else:
-            log(f"OfficeCLI {oc.action}: {oc.version}", v, always=True)
-    else:
-        log(f"WARN: OfficeCLI {oc.action}: {oc.error}", v)
-        result.warnings.append(f"OfficeCLI: {oc.error}")
-
-    # Step 3.8: Rodney binary install/update (happy path testing)
-    log("Checking Rodney...", v)
-    result.rodney_result = rodney.install_or_update()
-    rr = result.rodney_result
-    if rr.success:
-        if rr.action == "skipped":
-            log(f"Rodney {rr.version} (up to date)", v)
-        else:
-            log(f"Rodney {rr.action}: {rr.version}", v, always=True)
-    else:
-        log(f"WARN: Rodney {rr.action}: {rr.error}", v)
-        result.warnings.append(f"Rodney: {rr.error}")
-
     # Step 4: Ollama model (full mode only)
     if config.do_ollama:
-        from config.models import OLLAMA_LOCAL_MODEL, OLLAMA_SUPERSEDED_MODELS
-
         log("Checking Ollama model...", v)
-        ollama_model = os.getenv("OLLAMA_SUMMARIZER_MODEL", OLLAMA_LOCAL_MODEL)
+        ollama_model = os.getenv("OLLAMA_SUMMARIZER_MODEL", "qwen3:4b")
         ollama_check = verify.check_ollama(ollama_model)
 
         if not ollama_check.available:
@@ -451,55 +339,6 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                     result.warnings.append(f"Failed to pull Ollama model {ollama_model}")
             else:
                 log("Ollama not installed, skipping", v)
-
-        # Smoke test: verify the model can generate a response
-        if ollama_check.available or verify.check_ollama(ollama_model).available:
-            log(f"Smoke testing {ollama_model}...", v)
-            try:
-                import subprocess
-
-                smoke_result = subprocess.run(
-                    ["ollama", "run", ollama_model, "hi"],
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                )
-                if smoke_result.returncode == 0 and smoke_result.stdout.strip():
-                    log(f"Smoke test passed for {ollama_model}", v)
-                else:
-                    result.warnings.append(
-                        f"Smoke test failed for {ollama_model}: "
-                        f"{smoke_result.stderr.strip() or 'empty response'}"
-                    )
-            except subprocess.TimeoutExpired:
-                result.warnings.append(f"Smoke test timed out for {ollama_model}")
-            except Exception as e:
-                result.warnings.append(f"Smoke test error for {ollama_model}: {e}")
-
-        # Cleanup superseded models (best-effort, never fail the update)
-        if ollama_check.available or verify.check_ollama(ollama_model).available:
-            log("Cleaning up superseded Ollama models...", v)
-            for old_model in OLLAMA_SUPERSEDED_MODELS:
-                try:
-                    import subprocess
-
-                    rm_result = subprocess.run(
-                        ["ollama", "rm", old_model],
-                        capture_output=True,
-                        text=True,
-                        timeout=30,
-                    )
-                    if rm_result.returncode == 0:
-                        log(f"  Removed {old_model}", v, always=True)
-                    else:
-                        # Model may not exist, that is fine
-                        stderr = rm_result.stderr.strip()
-                        if "not found" in stderr.lower():
-                            log(f"  {old_model} not present, skipping", v)
-                        else:
-                            log(f"  WARN: Failed to remove {old_model}: {stderr}", v)
-                except Exception as e:
-                    log(f"  WARN: Failed to remove {old_model}: {e}", v)
 
     # Step 4.5: Machine identity verification
     log("Verifying machine identity...", v)
@@ -596,15 +435,6 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         # Cron mode: set restart flag instead of restarting
         log("Setting restart flag for graceful restart...", v, always=True)
         git.set_restart_requested(project_dir, result.git_result.commit_count)
-
-    # Step 5.5: Clean up stale sessions (kill orphaned running/pending)
-    # Terminal sessions are preserved for reflections to analyze.
-    try:
-        stale_killed = _cleanup_stale_sessions(project_dir)
-        if stale_killed > 0:
-            log(f"Cleaned up {stale_killed} stale session(s)", v)
-    except Exception as e:
-        log(f"WARN: Session cleanup failed: {e}", v)
 
     # Step 6: Environment verification
     if config.do_verify:

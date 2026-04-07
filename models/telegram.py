@@ -43,9 +43,7 @@ class TelegramMessage(Model):
     classification_confidence = Field(type=float, null=True)
 
     # === Cross-reference to AgentSession ===
-    agent_session_id = Field(
-        null=True
-    )  # agent_session_id of the AgentSession that processed this message
+    agent_session_id = Field(null=True)  # job_id of the AgentSession that processed this message
 
     @classmethod
     def cleanup_expired(cls, max_age_days: int = 90) -> int:

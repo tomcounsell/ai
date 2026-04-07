@@ -6,8 +6,8 @@ Popoto models stored in Redis form the persistent state layer of the system. Thi
 
 ```
 TelegramMessage ──────── AgentSession
-  msg_id                   id
-  agent_session_id ──────> id
+  msg_id                   job_id
+  agent_session_id ──────> job_id
   msg_id <─────────────── telegram_message_key
   project_key              project_key
   chat_id                  chat_id
@@ -41,13 +41,6 @@ BridgeEvent              Memory
                            relevance (DecayingSortedField)
                            confidence (ConfidenceField)
                            bloom (ExistenceFilter)
-
-TeammateMetrics (singleton, key="global")
-  teammate_classified_count (IntField)
-  teammate_low_confidence_count (IntField)
-  work_classified_count (IntField)
-  teammate_response_times (SortedField)
-  work_response_times (SortedField)
 ```
 
 ## Cross-References
@@ -58,8 +51,8 @@ When a Telegram message triggers an agent session:
 
 1. **Bridge stores TelegramMessage** with media, URL, and classification metadata
 2. **Bridge enqueues AgentSession** with `telegram_message_key` pointing to the TelegramMessage's `msg_id`
-3. **Session worker resolves TelegramMessage** via `telegram_message_key` to get enrichment parameters
-4. **Session worker sets back-reference**: `TelegramMessage.agent_session_id = AgentSession.id`
+3. **Job worker resolves TelegramMessage** via `telegram_message_key` to get enrichment parameters
+4. **Job worker sets back-reference**: `TelegramMessage.agent_session_id = AgentSession.job_id`
 
 This bidirectional link enables:
 - Looking up which session processed a given message
@@ -68,7 +61,7 @@ This bidirectional link enables:
 
 ### Fallback Path
 
-For sessions created before the migration (no `telegram_message_key`), the session worker falls back to reading enrichment fields directly from AgentSession. These fields are retained on AgentSession for backward compatibility with pre-existing records.
+For sessions created before the migration (no `telegram_message_key`), the job worker falls back to reading enrichment fields directly from AgentSession. These fields are retained on AgentSession for backward compatibility with pre-existing records.
 
 ## project_key
 
@@ -122,7 +115,7 @@ The script:
 
 | Field | Purpose | Notes |
 |-------|---------|-------|
-| `id` | AgentSession primary key (AutoKeyField) | `session.agent_session_id` backward-compat alias available |
+| `job_id` | AgentSession primary key (AutoKeyField) | `session.id` property alias available |
 | `session_id` | Telegram-derived session identifier | Format: `tg_{project}_{chat_id}_{msg_id}` |
 | `telegram_message_id` | Telegram message ID (integer) | Renamed from `message_id` for clarity |
 | `telegram_message_key` | Popoto key to TelegramMessage | Renamed from `trigger_message_id` for clarity |
@@ -140,40 +133,19 @@ Popoto field types have different implications for how records behave on mutatio
 
 | Field | Type | Mutable? | Notes |
 |-------|------|----------|-------|
-| `id` | AutoKeyField | Never | Primary key, auto-generated |
-| `session_type` | KeyField | No | Set once at creation ("pm", "teammate", or "dev") |
+| `job_id` | AutoKeyField | Never | Primary key, auto-generated |
+| `session_type` | KeyField | No | Set once at creation ("chat" or "dev") |
 | `project_key` | KeyField | No | Set once at creation |
 | `chat_id` | KeyField | No | Set once at creation |
-| `parent_session_id` | KeyField | No | Set once at creation (child sessions only, renamed from `parent_chat_session_id`) |
-| `role` | Field | No | Set once at creation ("pm", "dev", or null for legacy) |
-| `parent_agent_session_id` | KeyField | No | Set once at creation (child sessions only) |
+| `parent_chat_session_id` | KeyField | No | Set once at creation (DevSession only) |
+| `parent_job_id` | KeyField | No | Set once at creation (child jobs only) |
+| `stable_job_id` | KeyField | No | Set once at creation, never changes |
 | `status` | IndexedField | Yes | Mutate and save directly; no delete-and-recreate |
-
-### AgentSession Datetime Fields
-
-All timestamp fields use Popoto `DatetimeField` or `SortedField(type=datetime)`:
-
-| Field | Type | Notes |
-|-------|------|-------|
-| `created_at` | SortedField(type=datetime) | Partitioned by project_key |
-| `started_at` | DatetimeField(null=True) | Set when worker picks up session |
-| `updated_at` | DatetimeField(auto_now=True) | Renamed from `last_activity` |
-| `completed_at` | DatetimeField(null=True) | Set on terminal status |
-| `scheduled_at` | DatetimeField(null=True) | Renamed from `scheduled_after` |
-
-Float timestamps are auto-converted to datetime via `__setattr__`. Note: Popoto `DatetimeField` returns naive datetimes from Redis (no timezone info). Code that compares with `time.time()` must assume UTC for naive datetimes.
-
-### AgentSession Consolidated DictFields
-
-| Field | Contains | Replaces |
-|-------|----------|----------|
-| `initial_telegram_message` | `sender_name`, `sender_id`, `message_text`, `telegram_message_id`, `chat_title` | Six separate fields |
-| `extra_context` | `revival_context`, `classification_type`, `classification_confidence` | Three separate fields |
 
 The `status` field was changed from KeyField to IndexedField (popoto >= 1.4.3) to eliminate the delete-and-recreate overhead on every lifecycle transition (pending -> running -> active -> completed). This removed the primary source of duplicate session records in the dashboard.
 
 ### Where Delete-and-Recreate Is Still Needed
 
-With `status` as an IndexedField, the delete-and-recreate pattern is no longer needed for status transitions. All status transitions (session pickup, completion, failure, recovery, watchdog marking, nudge re-enqueue) use direct field mutation and `.save()`.
+With `status` as an IndexedField, the delete-and-recreate pattern is no longer needed for status transitions. All status transitions (job pickup, completion, failure, recovery, watchdog marking, nudge re-enqueue) use direct field mutation and `.save()`.
 
-The delete-and-recreate pattern remains in `agent/agent_session_queue.py` only in the `_AGENT_SESSION_FIELDS` list, which defines the fields to copy if a record ever needs to be re-created for KeyField changes. In practice, no current code path changes a KeyField value after creation -- the `bridge/session_transcript.py` module guards against `chat_id` mutation by logging a warning and skipping the write if the value would change.
+The delete-and-recreate pattern remains in `agent/job_queue.py` only in the `_JOB_FIELDS` list, which defines the fields to copy if a record ever needs to be re-created for KeyField changes. In practice, no current code path changes a KeyField value after creation -- the `bridge/session_transcript.py` module guards against `chat_id` mutation by logging a warning and skipping the write if the value would change.

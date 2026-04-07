@@ -3,7 +3,7 @@
 # Rate-limited: only calls valor-calendar if 10+ minutes since last call.
 # Reads project slug from directory name of cwd passed via stdin JSON.
 
-set +e  # Hooks must never fail noisily
+set -e
 
 LOCKDIR="$HOME/Desktop/Valor"
 STAMPFILE="$LOCKDIR/.calendar_hook_stamp"
@@ -84,22 +84,9 @@ fi
 mkdir -p "$LOCKDIR"
 date +%s > "$STAMPFILE"
 [ -n "$SESSION_ID" ] && echo "$SESSION_ID" > "$SESSIONFILE"
-VENV_CAL="$CLAUDE_PROJECT_DIR/.venv/bin/valor-calendar"
-SYS_CAL="$HOME/Library/Python/3.12/bin/valor-calendar"
-CAL="${VENV_CAL}"
-[ ! -x "$CAL" ] && CAL="$SYS_CAL"
-
-HOOK_LOG="${CLAUDE_PROJECT_DIR:-$HOME/src/ai}/logs/hooks.log"
+export PATH="$HOME/Library/Python/3.12/bin:$PATH"
 if [ -n "$PROJECT" ]; then
-    "$CAL" --project "$PROJECT" "$SLUG" 2>/tmp/cal_hook_err || {
-        ERR=$(cat /tmp/cal_hook_err)
-        [ -n "$ERR" ] && echo "$(date -u '+%Y-%m-%d %H:%M:%S') - calendar_hook - ERROR - $ERR" >> "$HOOK_LOG"
-        true
-    }
+    exec valor-calendar --project "$PROJECT" "$SLUG"
 else
-    "$CAL" "$SLUG" 2>/tmp/cal_hook_err || {
-        ERR=$(cat /tmp/cal_hook_err)
-        [ -n "$ERR" ] && echo "$(date -u '+%Y-%m-%d %H:%M:%S') - calendar_hook - ERROR - $ERR" >> "$HOOK_LOG"
-        true
-    }
+    exec valor-calendar "$SLUG"
 fi

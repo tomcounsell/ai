@@ -6,12 +6,12 @@ Covers the gaps identified in PR #180 review:
 3. Summarizer composition (_compose_structured_summary)
 4. Summarizer with session context (summarize_response with session param)
 5. Markdown send (send_markdown fallback behavior)
-6. Backward compat (SessionLog shim, sender property)
+6. Backward compat (SessionLog shim, RedisJob alias, sender property)
 7. Full lifecycle simulations (SDLC, Teammate, chit-chat)
 """
 
 import json
-from datetime import UTC, datetime
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -41,9 +41,9 @@ def session(redis_test_db):
         status="active",
         chat_id="100",
         sender_name="Tom",
-        created_at=datetime.now(tz=UTC),
-        started_at=datetime.now(tz=UTC),
-        updated_at=datetime.now(tz=UTC),
+        created_at=time.time(),
+        started_at=time.time(),
+        last_activity=time.time(),
         message_text="SDLC 177",
         turn_count=0,
         tool_call_count=0,
@@ -60,9 +60,9 @@ def sdlc_session(redis_test_db):
         status="completed",
         chat_id="200",
         sender_name="Tom",
-        created_at=datetime.now(tz=UTC),
-        started_at=datetime.now(tz=UTC),
-        updated_at=datetime.now(tz=UTC),
+        created_at=time.time(),
+        started_at=time.time(),
+        last_activity=time.time(),
         message_text="SDLC 177",
         classification_type="feature",
         branch_name="session/summarizer-bullet-format",
@@ -86,10 +86,10 @@ def qa_session(redis_test_db):
         status="completed",
         chat_id="300",
         sender_name="Kevin",
-        created_at=datetime.now(tz=UTC),
-        started_at=datetime.now(tz=UTC),
-        updated_at=datetime.now(tz=UTC),
-        message_text="How does the session queue work?",
+        created_at=time.time(),
+        started_at=time.time(),
+        last_activity=time.time(),
+        message_text="How does the job queue work?",
         turn_count=3,
         tool_call_count=5,
     )
@@ -104,9 +104,9 @@ def chat_session(redis_test_db):
         status="completed",
         chat_id="400",
         sender_name="Tom",
-        created_at=datetime.now(tz=UTC),
-        started_at=datetime.now(tz=UTC),
-        updated_at=datetime.now(tz=UTC),
+        created_at=time.time(),
+        started_at=time.time(),
+        last_activity=time.time(),
         message_text="Hey, how's it going?",
         turn_count=2,
         tool_call_count=0,
@@ -151,7 +151,7 @@ class TestHistoryTracking:
             session_id="no-history",
             project_key="test",
             status="active",
-            created_at=datetime.now(tz=UTC),
+            created_at=time.time(),
         )
         # history field is None by default
         assert s._get_history_list() == []
@@ -280,7 +280,7 @@ class TestGetStatusEmoji:
             session_id="failed-1",
             project_key="test",
             status="failed",
-            created_at=datetime.now(tz=UTC),
+            created_at=time.time(),
         )
         assert _get_status_emoji(s) == "❌"
 
@@ -313,7 +313,7 @@ class TestComposeStructuredSummary:
         from bridge.summarizer import _compose_structured_summary
 
         result = _compose_structured_summary(
-            "The session queue uses FILO ordering per project.",
+            "The job queue uses FILO ordering per project.",
             session=qa_session,
             is_completion=True,
         )
@@ -399,9 +399,7 @@ class TestSummarizeWithSession:
         long_text = "Here is a very long explanation. " * 200
         mock_haiku = AsyncMock(
             return_value=StructuredSummary(
-                context_summary="",
-                response="The session queue uses FILO ordering.",
-                expectations=None,
+                context_summary="", response="The job queue uses FILO ordering.", expectations=None
             )
         )
 
@@ -520,12 +518,17 @@ class TestEscapeMarkdown:
 
 
 class TestBackwardCompatibility:
-    """Tests for SessionLog shim and sender property."""
+    """Tests for SessionLog shim, RedisJob alias, and sender property."""
 
     def test_session_log_is_agent_session(self):
         from models.session_log import SessionLog
 
         assert SessionLog is AgentSession
+
+    def test_redis_job_is_agent_session(self):
+        from agent.job_queue import RedisJob
+
+        assert RedisJob is AgentSession
 
     def test_models_init_exports_both(self):
         from models import AgentSession as AgentSessionAlias
@@ -544,7 +547,7 @@ class TestBackwardCompatibility:
             session_id="shim-test",
             project_key="test",
             status="active",
-            created_at=datetime.now(tz=UTC),
+            created_at=time.time(),
             sender_name="Test",
         )
         assert s.session_id == "shim-test"
@@ -568,13 +571,13 @@ class TestSDLCLifecycle:
             status="pending",
             chat_id="500",
             sender_name="Tom",
-            created_at=datetime.now(tz=UTC),
+            created_at=time.time(),
             message_text="SDLC 177",
             priority="high",
         )
         assert s.status == "pending"
 
-        # 2. Simulate session pickup -- delete and recreate as running
+        # 2. Simulate job pickup -- delete and recreate as running
         fields = {
             "session_id": s.session_id,
             "project_key": s.project_key,
@@ -585,7 +588,7 @@ class TestSDLCLifecycle:
             "priority": s.priority,
         }
         s.delete()
-        s = AgentSession.create(status="running", started_at=datetime.now(tz=UTC), **fields)
+        s = AgentSession.create(status="running", started_at=time.time(), **fields)
         assert s.status == "running"
 
         # 3. Track SDLC stages via stage_states
@@ -641,9 +644,9 @@ class TestSDLCClassificationTypeLifecycle:
             status="running",
             chat_id="800",
             sender_name="Valor",
-            created_at=datetime.now(tz=UTC),
-            started_at=datetime.now(tz=UTC),
-            updated_at=datetime.now(tz=UTC),
+            created_at=time.time(),
+            started_at=time.time(),
+            last_activity=time.time(),
             message_text="SDLC issue 276",
             classification_type="sdlc",
         )
@@ -678,17 +681,17 @@ class TestSDLCClassificationTypeLifecycle:
         """
         from bridge.summarizer import _compose_structured_summary
 
-        # Simulate the continuation session (created by _push_agent_session with propagated type)
+        # Simulate the continuation session (created by _push_job with propagated type)
         s = AgentSession.create(
             session_id="sdlc-continued-1",
             project_key="test",
             status="running",
             chat_id="800",
             sender_name="System (auto-continue)",
-            created_at=datetime.now(tz=UTC),
-            started_at=datetime.now(tz=UTC),
-            updated_at=datetime.now(tz=UTC),
-            message_text="[System Nudge] continue building",
+            created_at=time.time(),
+            started_at=time.time(),
+            last_activity=time.time(),
+            message_text="[System Coach] continue building",
             classification_type="sdlc",
         )
 
@@ -726,20 +729,20 @@ class TestQALifecycle:
             status="completed",
             chat_id="600",
             sender_name="Kevin",
-            created_at=datetime.now(tz=UTC),
-            message_text="How does the session queue work?",
+            created_at=time.time(),
+            message_text="How does the job queue work?",
         )
-        s.append_history("user", "How does the session queue work?")
+        s.append_history("user", "How does the job queue work?")
 
         result = _compose_structured_summary(
-            "The session queue uses a FILO stack with per-project sequential workers.",
+            "The job queue uses a FILO stack with per-project sequential workers.",
             session=s,
             is_completion=True,
         )
 
         # Should have emoji + label + answer, no stages, no links
         assert "✅" in result
-        assert "session queue" in result.lower()
+        assert "job queue" in result.lower()
         assert "FILO" in result
         assert "☑" not in result
         assert "☐" not in result
@@ -758,7 +761,7 @@ class TestChitChatLifecycle:
             status="completed",
             chat_id="700",
             sender_name="Tom",
-            created_at=datetime.now(tz=UTC),
+            created_at=time.time(),
             message_text="Hey, how's it going?",
         )
 

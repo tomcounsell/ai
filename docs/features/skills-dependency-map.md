@@ -111,10 +111,10 @@ These 6 skills form the autonomous development loop. Everything else is support.
 | setup | New machine config |
 | update | Pull + deploy |
 | reclassify | Change plan type |
-| audit-tools | Tool quality check |
+| audit-next-tool | Tool quality check |
 | do-skills-audit | Skills quality check |
 | do-docs-audit | Docs accuracy check |
-| do-design-audit | UI quality review |
+| do-design-review | UI quality review |
 | frontend-design | Design reference |
 | pthread | Parallel execution pattern |
 
@@ -147,8 +147,8 @@ new-skill (generic) <--- new-valor-skill (wraps with Valor patterns)
 - **sdlc** vs **do-build**: sdlc describes the pattern that do-build executes. sdlc adds Plan + Review phases around do-build. Consider whether sdlc should be folded into CLAUDE.md workflow docs instead of being a skill.
 - **do-docs** vs **do-docs-audit**: different purposes (cascade updates vs. accuracy audit) but similar names. Not redundant, just confusingly similar.
 - **add-feature** vs **new-valor-skill** vs **new-skill**: three skills about "adding things". add-feature is a guide, new-skill is generic, new-valor-skill is project-specific. Clear separation but worth noting.
-- **audit-tools** vs **do-skills-audit**: tool audit vs skill audit. Different targets, reasonable separation.
-- **do-design-audit** vs **frontend-design**: review vs. reference. Different purposes.
+- **audit-next-tool** vs **do-skills-audit**: tool audit vs skill audit. Different targets, reasonable separation.
+- **do-design-review** vs **frontend-design**: review vs. reference. Different purposes.
 
 ### Skills That Could Be Docs Instead of Skills
 - **add-feature** - pure reference guide, no runtime behavior

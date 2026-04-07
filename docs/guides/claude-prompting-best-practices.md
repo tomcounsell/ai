@@ -54,11 +54,11 @@ High-performing agent prompts define the decision tree, not a script. The model 
 
 ---
 
-### 2.3 Nudge Feedback Messages in Orchestration
+### 2.3 Coaching Messages in Orchestration
 
-When a PM or observer agent sends a nudge feedback message to a worker agent, the quality of that message directly affects the quality of downstream output. The goal is to orient, not instruct — the worker already knows how to do its job.
+When a PM or observer agent sends a coaching message to a worker agent, the quality of that message directly affects the quality of downstream output. The goal is to orient, not instruct — the worker already knows how to do its job.
 
-**The anatomy of a good nudge feedback message:**
+**The anatomy of a good coaching message:**
 - Acknowledge what was completed ("Good progress on the plan")
 - Name the next stage and the relevant skill or tool to invoke
 - State what success looks like at that stage
@@ -118,7 +118,7 @@ Anthropic is training successive Claude versions to have more genuine values, be
 
 **Patterns that will age poorly:**
 - Urgency theater — ALL CAPS, threats, and pressure signals
-- Format pressure as motivation (`{ respond in JSON }` as a nudge instruction)
+- Format pressure as motivation (`{ respond in JSON }` as a coaching instruction)
 - Purely mechanical scripts ("invoke /do-test to run the test suite")
 - Prompts that assume the model needs to be tricked into performing
 
@@ -133,7 +133,7 @@ Anthropic is training successive Claude versions to have more genuine values, be
 - [ ] Escalation channel: narrow opening for genuine critical questions
 - [ ] Stakes stated once, calmly
 
-### Nudge Feedback Message Checklist
+### Coaching Message Checklist
 - [ ] Acknowledge the work just completed
 - [ ] Name the next stage and relevant skill/tool
 - [ ] State what success looks like at that stage
@@ -141,7 +141,7 @@ Anthropic is training successive Claude versions to have more genuine values, be
 - [ ] Reopen escalation channel only if the next stage warrants it
 
 ### Single-Sentence Test
-Before sending any prompt or nudge feedback message, ask: *does this treat the model as a competent agent or as a machine that needs to be coerced?* If the latter — rewrite it.
+Before sending any prompt or coaching message, ask: *does this treat the model as a competent agent or as a machine that needs to be coerced?* If the latter — rewrite it.
 
 ---
 

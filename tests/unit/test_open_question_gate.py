@@ -2,7 +2,7 @@
 
 Tests the _extract_open_questions() function and its integration with:
 1. summarize_response() — populating expectations when open questions found
-2. Stage-aware auto-continue in agent_session_queue.py — pausing when open questions detected
+2. Stage-aware auto-continue in job_queue.py — pausing when open questions detected
 
 Run with: pytest tests/test_open_question_gate.py -v
 """
@@ -320,8 +320,8 @@ class TestSummarizeResponseOpenQuestions:
 class TestStageAwareOpenQuestionGate:
     """Tests for the open question gate in the stage-aware auto-continue path.
 
-    These tests verify the logic in agent/agent_session_queue.py that checks for
-    open questions before auto-continuing SDLC sessions.
+    These tests verify the logic in agent/job_queue.py that checks for
+    open questions before auto-continuing SDLC jobs.
     """
 
     def test_extract_open_questions_used_by_gate(self):
@@ -349,7 +349,7 @@ class TestStageAwareOpenQuestionGate:
 
     def test_open_questions_in_quoted_content_still_detected(self):
         """## Open Questions in quoted/referenced content is still detected
-        by the extractor. Stage-scoping is the gate's responsibility (agent_session_queue.py),
+        by the extractor. Stage-scoping is the gate's responsibility (job_queue.py),
         not the extractor's.
         """
         quoted_output = (
@@ -366,14 +366,14 @@ class TestStageAwareOpenQuestionGate:
         """Extracted questions format correctly for expectations field."""
         text = "## Open Questions\n\n1. Question one?\n2. Question two?\n"
         questions = _extract_open_questions(text)
-        # This is how agent_session_queue.py would not format them, but how
+        # This is how job_queue.py would not format them, but how
         # summarize_response formats them for the expectations field
         expectations = "\n".join(f"? {q}" for q in questions)
         assert "? Question one?" in expectations
         assert "? Question two?" in expectations
 
     def test_gate_only_triggers_during_plan_stage(self):
-        """The open question gate in agent_session_queue.py only checks for questions
+        """The open question gate in job_queue.py only checks for questions
         when the current SDLC stage is PLAN. During BUILD/TEST/etc., open
         questions in the output are ignored (they're likely quoted content).
         """
@@ -382,7 +382,7 @@ class TestStageAwareOpenQuestionGate:
         questions = _extract_open_questions(plan_output_with_questions)
         assert len(questions) == 1
 
-        # But the gate logic in agent_session_queue.py wraps the call:
+        # But the gate logic in job_queue.py wraps the call:
         #   open_questions = _extract_open_questions(msg) if _current_stage == "PLAN" else []
         # So during non-PLAN stages, even if questions exist, the gate returns []
         non_plan_result = (

@@ -229,13 +229,12 @@ valor-telegram read --chat "Dev: Valor" --limit 10
 # Search messages
 valor-telegram read --chat "Dev: Valor" --search "keyword"
 
+# Send message
+valor-telegram send --chat "Dev: Valor" "Hello"
+
 # List chats
 valor-telegram chats
 ```
-
-> **TOOL USAGE ONLY** — The `valor-telegram send` command is for programmatic tool
-> invocation only. Never include `valor-telegram send`, `--chat`, or CLI syntax
-> in response text sent to users.
 
 **When to check history**: Use `valor-telegram read --search` when context cues suggest prior messages may be relevant:
 - "what do you think of these" / "those links I shared"

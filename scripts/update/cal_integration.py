@@ -177,15 +177,9 @@ def generate_calendar_config(project_dir: Path) -> CalendarConfigResult:
     """Generate Google Calendar config by matching projects to calendars."""
     base_dir = Path.home() / "Desktop" / "Valor"
     config_path = base_dir / "calendar_config.json"
+    token_path = base_dir / "google_token.json"
 
-    # Check OAuth token (per-machine or shared)
-    try:
-        from tools.google_workspace.auth import TOKEN_PATH
-
-        token_path = TOKEN_PATH
-    except Exception:
-        token_path = base_dir / "google_token.json"
-
+    # Check OAuth token
     if not token_path.exists():
         return CalendarConfigResult(
             success=False,

@@ -12,7 +12,7 @@ Before this feature, pipeline routing was defined in three places that disagreed
 
 | Location | Definition |
 |----------|-----------|
-| SDLC `SKILL.md` dispatch table | 10 numbered rows covering all stages including PATCH |
+| SDLC `SKILL.md` dispatch table | 9 stages including PATCH |
 | Observer `_STAGE_TO_SKILL` | 6 stages without PATCH |
 | `build_pipeline.py` stage tracking | 6 stages without PATCH |
 
@@ -25,15 +25,12 @@ The graph is a simple Python dict mapping `(stage, outcome)` tuples to next stag
 ```python
 PIPELINE_EDGES: dict[tuple[str, str], str] = {
     ("ISSUE", "success"): "PLAN",
-    ("PLAN", "success"): "CRITIQUE",
-    ("CRITIQUE", "success"): "BUILD",
-    ("CRITIQUE", "fail"): "PLAN",
+    ("PLAN", "success"): "BUILD",
     ("BUILD", "success"): "TEST",
     ("TEST", "success"): "REVIEW",
     ("TEST", "fail"): "PATCH",
     ("REVIEW", "success"): "DOCS",
     ("REVIEW", "fail"): "PATCH",
-    ("REVIEW", "partial"): "PATCH",
     ("PATCH", "success"): "TEST",
     ("PATCH", "fail"): "TEST",
     ("DOCS", "success"): "MERGE",
@@ -43,20 +40,19 @@ PIPELINE_EDGES: dict[tuple[str, str], str] = {
 ### Happy Path
 
 ```
-ISSUE -> PLAN -> CRITIQUE -> BUILD -> TEST -> REVIEW -> DOCS -> MERGE
+ISSUE -> PLAN -> BUILD -> TEST -> REVIEW -> DOCS -> MERGE
 ```
 
 ### Failure Cycles
 
 ```
-CRITIQUE(fail) -> PLAN -> CRITIQUE  (plan revision loop)
-TEST(fail) -> PATCH -> TEST         (test failure fix loop)
+TEST(fail) -> PATCH -> TEST        (test failure fix loop)
 REVIEW(fail) -> PATCH -> TEST -> REVIEW  (review feedback loop)
 ```
 
-### Max Cycle Limits
+### Max Cycle Limit
 
-A `MAX_PATCH_CYCLES` counter (default: 3) prevents infinite PATCH -> TEST loops. A `MAX_CRITIQUE_CYCLES` counter (default: 2) prevents infinite CRITIQUE -> PLAN loops. When either limit is reached, `get_next_stage()` returns `None`, escalating to human review.
+A `MAX_PATCH_CYCLES` counter (default: 3) prevents infinite PATCH -> TEST loops. When the limit is reached, `get_next_stage()` returns `None`, escalating to human review.
 
 ## Key Exports
 
@@ -66,15 +62,14 @@ A `MAX_PATCH_CYCLES` counter (default: 3) prevents infinite PATCH -> TEST loops.
 | `STAGE_TO_SKILL` | `dict[str, str]` | Stage to `/do-*` command mapping |
 | `DISPLAY_STAGES` | `list[str]` | PM-facing linear stage list (excludes PATCH) |
 | `get_next_stage()` | function | Graph traversal with cycle counter |
-| `MAX_PATCH_CYCLES` | `int` | Max PATCH cycles before escalation (default 3) |
-| `MAX_CRITIQUE_CYCLES` | `int` | Max CRITIQUE cycles before escalation (default 2) |
+| `MAX_PATCH_CYCLES` | `int` | Max cycles before escalation (default 3) |
 
 ## Design Decisions
 
 - **PATCH is routing-only**: It does not appear in `DISPLAY_STAGES` or progress templates. It is a routing concept for the Observer, not a stage the PM sees.
 - **No external dependencies**: Pure Python data structures, no state machine library needed.
 - **Fallback behavior**: Unknown outcomes fall back to the "success" transition. Unknown stages return `None`.
-- **MERGE is terminal**: MERGE requires human authorization via the `/do-merge` skill. There is no edge beyond MERGE.
+- **MERGE is terminal**: `get_next_stage("DOCS", "success")` returns `None` because MERGE has no corresponding skill -- it requires human decision.
 
 ## Mandatory Gate Enforcement
 
@@ -90,24 +85,23 @@ As of PR #601, the pipeline graph is fully wired into the runtime execution path
 
 ### Outcome Classification
 
-When a DevSession completes, the `subagent_stop_hook` calls `classify_outcome(stage, stop_reason, output_tail)` on the PipelineStateMachine. This uses a three-tier approach:
-1. **Tier 0**: Parse `<!-- OUTCOME {...} -->` contracts from output (structured status from skills)
-2. **Tier 1**: SDK stop_reason — anything other than "end_turn" is a process failure
-3. **Tier 2**: Deterministic tail patterns scoped by stage (fallback when no OUTCOME contract)
-
-Tier 0 enables the `("REVIEW", "partial")` edge: when `/do-pr-review` finds tech debt or nits, it emits `status: "partial"`, routing to PATCH instead of DOCS.
+When a DevSession completes, the `subagent_stop_hook` calls `classify_outcome(stage, stop_reason, output_tail)` on the PipelineStateMachine. This uses a two-tier approach:
+1. SDK stop_reason: anything other than "end_turn" is a process failure
+2. Deterministic tail patterns scoped by stage (e.g., "changes requested" in REVIEW output -> fail)
 
 The result routes to `complete_stage()` (success/ambiguous) or `fail_stage()` (fail/partial), which triggers the appropriate graph edge.
 
+### Coach Graph-Based Routing
+
+The coach (`bridge/coach.py`) uses `PipelineStateMachine.next_stage(outcome)` to determine the next stage from the graph, replacing the previous linear scan of `DISPLAY_STAGES`. It infers the outcome from stage statuses written by the subagent_stop hook.
+
 ### Stage States Initialization
 
-SDLC sessions have `stage_states` initialized eagerly at session creation (ISSUE=ready, all others=pending).
-
-### Dashboard Artifact Inference
-
-The dashboard (`ui/data/sdlc.py`) uses `PipelineStateMachine.get_display_progress(slug=slug)` for sessions with a slug, ensuring the dashboard shows the same artifact-enriched pipeline state as the merge gate. When hook-based tracking fails to record a stage transition, artifact inference fills the gap by checking observable artifacts (plan files, PR existence, review status). Results are cached with a 30-second TTL to avoid repeated subprocess calls. The deprecated `_infer_stages_from_history()` fallback has been removed.
+SDLC sessions have `stage_states` initialized eagerly at session creation (ISSUE=ready, all others=pending), eliminating the need for the dashboard inference fallback (`_infer_stages_from_history()`), which is now deprecated.
 
 ## Integration
+
+The coach (`bridge/coach.py`) imports `DISPLAY_STAGES` and `STAGE_TO_SKILL` from the graph module instead of maintaining its own hardcoded copies.
 
 ChatSession orchestration uses the graph for pipeline progression. Individual `/do-*` skills report their results; the ChatSession determines what happens next.
 
@@ -117,6 +111,7 @@ ChatSession orchestration uses the graph for pipeline progression. Individual `/
 |------|------|
 | `bridge/pipeline_graph.py` | Canonical graph definition |
 | `agent/hooks/subagent_stop.py` | Calls `classify_outcome()` and routes to `complete_stage()`/`fail_stage()` |
-| `agent/agent_session_queue.py` | Nudge loop uses graph for routing decisions; initializes `stage_states` for SDLC sessions |
+| `agent/job_queue.py` | Nudge loop uses graph for routing decisions; initializes `stage_states` for SDLC sessions |
+| `bridge/coach.py` | Uses `PipelineStateMachine.next_stage(outcome)` for graph-based routing |
 | `bridge/pipeline_state.py` | `PipelineStateMachine` -- stage tracking, outcome classification, and transitions using the graph |
 | `tests/unit/test_pipeline_graph.py` | 27 tests covering all routing scenarios |

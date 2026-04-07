@@ -1,6 +1,5 @@
 """Tests for the SDLC data access layer and Pydantic serializers."""
 
-import datetime
 import json
 import time
 from unittest.mock import MagicMock, patch
@@ -8,47 +7,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 pytestmark = [pytest.mark.unit, pytest.mark.webui]
-
-
-def _make_mock_session(**overrides):
-    """Create a mock AgentSession with sensible defaults for all fields.
-
-    Supports all fields needed by _session_to_pipeline(), including the new
-    metadata fields added for parent/child hierarchy and session visibility.
-    """
-    defaults = {
-        "agent_session_id": "mock-session-1",
-        "session_id": "sess-1",
-        "session_type": "dev",
-        "session_mode": None,
-        "status": "running",
-        "slug": None,
-        "message_text": "test message",
-        "project_key": None,
-        "branch_name": None,
-        "created_at": time.time(),
-        "started_at": time.time(),
-        "completed_at": None,
-        "updated_at": time.time(),
-        "stage_states": None,
-        "history": [],
-        "issue_url": None,
-        "plan_url": None,
-        "pr_url": None,
-        "parent_agent_session_id": None,
-        "context_summary": None,
-        "expectations": None,
-        "turn_count": 0,
-        "tool_call_count": 0,
-        "watchdog_unhealthy": None,
-        "priority": "normal",
-        "extra_context": None,
-    }
-    defaults.update(overrides)
-    mock = MagicMock()
-    for key, val in defaults.items():
-        setattr(mock, key, val)
-    return mock
 
 
 class TestStageStateParsing:
@@ -167,36 +125,22 @@ class TestStageStateModel:
 class TestPipelineProgress:
     """Tests for the PipelineProgress Pydantic model."""
 
-    def test_display_name_prefers_context_summary(self):
-        """context_summary takes priority over slug and message_text."""
-        from ui.data.sdlc import PipelineProgress
-
-        p = PipelineProgress(
-            agent_session_id="123",
-            context_summary="Implementing auth flow",
-            slug="auth-flow",
-            message_text="Build the auth",
-        )
-        assert p.display_name == "Implementing auth flow"
-
     def test_display_name_with_slug(self):
         from ui.data.sdlc import PipelineProgress
 
-        p = PipelineProgress(agent_session_id="123", slug="my-feature")
+        p = PipelineProgress(job_id="123", slug="my-feature")
         assert p.display_name == "my-feature"
 
     def test_display_name_with_message(self):
         from ui.data.sdlc import PipelineProgress
 
-        p = PipelineProgress(
-            agent_session_id="123", message_text="Build the web UI for reflections"
-        )
+        p = PipelineProgress(job_id="123", message_text="Build the web UI for reflections")
         assert p.display_name == "Build the web UI for reflections"
 
     def test_display_name_truncated(self):
         from ui.data.sdlc import PipelineProgress
 
-        p = PipelineProgress(agent_session_id="123", message_text="A" * 100)
+        p = PipelineProgress(job_id="123", message_text="A" * 100)
         assert len(p.display_name) < 100
         assert "..." in p.display_name
 
@@ -204,34 +148,34 @@ class TestPipelineProgress:
         from ui.data.sdlc import PipelineProgress
 
         for status in ("pending", "running", "active", "waiting_for_children"):
-            p = PipelineProgress(agent_session_id="123", status=status)
+            p = PipelineProgress(job_id="123", status=status)
             assert p.is_active, f"Expected {status} to be active"
 
     def test_is_complete_states(self):
         from ui.data.sdlc import PipelineProgress
 
         for status in ("completed", "failed"):
-            p = PipelineProgress(agent_session_id="123", status=status)
+            p = PipelineProgress(job_id="123", status=status)
             assert p.is_complete
 
     def test_duration_calculation(self):
         from ui.data.sdlc import PipelineProgress
 
         now = time.time()
-        p = PipelineProgress(agent_session_id="123", started_at=now - 100, completed_at=now)
+        p = PipelineProgress(job_id="123", started_at=now - 100, completed_at=now)
         assert abs(p.duration - 100) < 1
 
     def test_duration_none_when_no_start(self):
         from ui.data.sdlc import PipelineProgress
 
-        p = PipelineProgress(agent_session_id="123")
+        p = PipelineProgress(job_id="123")
         assert p.duration is None
 
     def test_project_name_field(self):
         from ui.data.sdlc import PipelineProgress
 
         p = PipelineProgress(
-            agent_session_id="123",
+            job_id="123",
             project_key="popoto",
             project_name="Popoto ORM",
         )
@@ -240,7 +184,7 @@ class TestPipelineProgress:
     def test_project_name_defaults_none(self):
         from ui.data.sdlc import PipelineProgress
 
-        p = PipelineProgress(agent_session_id="123", project_key="popoto")
+        p = PipelineProgress(job_id="123", project_key="popoto")
         assert p.project_name is None
 
     def test_project_metadata_field(self):
@@ -251,255 +195,11 @@ class TestPipelineProgress:
             "tech_stack": "Python, Redis",
         }
         p = PipelineProgress(
-            agent_session_id="123",
+            job_id="123",
             project_key="popoto",
             project_metadata=metadata,
         )
         assert p.project_metadata["github_repo"] == "tomcounsell/popoto"
-
-    def test_new_metadata_fields(self):
-        """All new session metadata fields should be settable."""
-        from ui.data.sdlc import PipelineProgress
-
-        p = PipelineProgress(
-            agent_session_id="123",
-            context_summary="Building auth flow",
-            expectations="Need API key from human",
-            turn_count=5,
-            tool_call_count=12,
-            watchdog_unhealthy="No response for 15 minutes",
-            priority="high",
-            classification_type="sdlc",
-            is_stale=True,
-            parent_agent_session_id="parent-456",
-        )
-        assert p.context_summary == "Building auth flow"
-        assert p.expectations == "Need API key from human"
-        assert p.turn_count == 5
-        assert p.tool_call_count == 12
-        assert p.watchdog_unhealthy == "No response for 15 minutes"
-        assert p.priority == "high"
-        assert p.classification_type == "sdlc"
-        assert p.is_stale is True
-        assert p.parent_agent_session_id == "parent-456"
-
-    def test_children_field_default_empty(self):
-        """Children field defaults to empty list."""
-        from ui.data.sdlc import PipelineProgress
-
-        p = PipelineProgress(agent_session_id="123")
-        assert p.children == []
-
-    def test_is_stale_default_false(self):
-        """is_stale defaults to False."""
-        from ui.data.sdlc import PipelineProgress
-
-        p = PipelineProgress(agent_session_id="123")
-        assert p.is_stale is False
-
-    def test_none_metadata_fields_render_cleanly(self):
-        """None/missing metadata fields should not raise errors."""
-        from ui.data.sdlc import PipelineProgress
-
-        p = PipelineProgress(
-            agent_session_id="123",
-            context_summary=None,
-            expectations=None,
-            turn_count=None,
-            tool_call_count=None,
-        )
-        assert p.context_summary is None
-        assert p.expectations is None
-        assert p.turn_count is None
-        assert p.tool_call_count is None
-
-
-class TestSessionToPipeline:
-    """Tests for _session_to_pipeline conversion with new fields."""
-
-    def test_populates_new_metadata_fields(self):
-        """_session_to_pipeline should extract new fields from AgentSession."""
-        from ui.data.sdlc import _session_to_pipeline
-
-        mock_session = _make_mock_session(
-            context_summary="Implementing feature X",
-            expectations="Waiting for review",
-            turn_count=10,
-            tool_call_count=25,
-            watchdog_unhealthy="Stuck for 20 min",
-            priority="high",
-            extra_context={"classification_type": "sdlc"},
-        )
-        pipeline = _session_to_pipeline(mock_session)
-        assert pipeline.context_summary == "Implementing feature X"
-        assert pipeline.expectations == "Waiting for review"
-        assert pipeline.turn_count == 10
-        assert pipeline.tool_call_count == 25
-        assert pipeline.watchdog_unhealthy == "Stuck for 20 min"
-        assert pipeline.priority == "high"
-        assert pipeline.classification_type == "sdlc"
-
-    def test_staleness_detection_stale(self):
-        """Running session with old updated_at should be flagged stale."""
-        from ui.data.sdlc import _session_to_pipeline
-
-        mock_session = _make_mock_session(
-            status="running",
-            updated_at=time.time() - 700,  # >10 minutes ago
-        )
-        pipeline = _session_to_pipeline(mock_session)
-        assert pipeline.is_stale is True
-
-    def test_staleness_detection_fresh(self):
-        """Running session with recent updated_at should not be stale."""
-        from ui.data.sdlc import _session_to_pipeline
-
-        mock_session = _make_mock_session(
-            status="running",
-            updated_at=time.time() - 60,  # 1 minute ago
-        )
-        pipeline = _session_to_pipeline(mock_session)
-        assert pipeline.is_stale is False
-
-    def test_staleness_not_applied_to_completed(self):
-        """Completed sessions should never be flagged stale."""
-        from ui.data.sdlc import _session_to_pipeline
-
-        mock_session = _make_mock_session(
-            status="completed",
-            updated_at=time.time() - 7200,  # 2 hours ago
-        )
-        pipeline = _session_to_pipeline(mock_session)
-        assert pipeline.is_stale is False
-
-    def test_datetime_timestamps_converted(self):
-        """datetime.datetime values in timestamp fields should be converted to float."""
-        from ui.data.sdlc import _session_to_pipeline
-
-        now = datetime.datetime.now()
-        mock_session = _make_mock_session(
-            created_at=now,
-            started_at=now,
-            updated_at=now,
-        )
-        pipeline = _session_to_pipeline(mock_session)
-        assert isinstance(pipeline.created_at, float)
-        assert isinstance(pipeline.started_at, float)
-        assert isinstance(pipeline.updated_at, float)
-        assert pipeline.created_at == now.timestamp()
-
-    def test_parent_agent_session_id_populated(self):
-        """parent_agent_session_id should be passed through."""
-        from ui.data.sdlc import _session_to_pipeline
-
-        mock_session = _make_mock_session(
-            parent_agent_session_id="parent-abc",
-        )
-        pipeline = _session_to_pipeline(mock_session)
-        assert pipeline.parent_agent_session_id == "parent-abc"
-
-    def test_missing_new_fields_handled_gracefully(self):
-        """Sessions without new fields (e.g., old records) should not raise."""
-        from ui.data.sdlc import _session_to_pipeline
-
-        mock_session = MagicMock()
-        mock_session.agent_session_id = "old-session"
-        mock_session.session_id = "sess-1"
-        mock_session.session_type = "dev"
-        mock_session.session_mode = None
-        mock_session.status = "completed"
-        mock_session.slug = None
-        mock_session.message_text = "old message"
-        mock_session.project_key = None
-        mock_session.branch_name = None
-        mock_session.created_at = time.time()
-        mock_session.started_at = time.time()
-        mock_session.completed_at = time.time()
-        mock_session.updated_at = time.time()
-        mock_session.stage_states = None
-        mock_session.history = []
-        mock_session.issue_url = None
-        mock_session.plan_url = None
-        mock_session.pr_url = None
-        # These attributes won't exist on very old sessions
-        del mock_session.parent_agent_session_id
-        del mock_session.context_summary
-        del mock_session.expectations
-        del mock_session.turn_count
-        del mock_session.tool_call_count
-        del mock_session.watchdog_unhealthy
-        del mock_session.priority
-        del mock_session.extra_context
-
-        # Should not raise
-        pipeline = _session_to_pipeline(mock_session)
-        assert pipeline.agent_session_id == "old-session"
-        assert pipeline.parent_agent_session_id is None
-        assert pipeline.context_summary is None
-
-
-class TestParentChildGrouping:
-    """Tests for parent/child session grouping in get_all_sessions."""
-
-    def test_children_grouped_under_parent(self):
-        """Child sessions should be nested under their parent."""
-        from ui.data.sdlc import get_all_sessions
-
-        parent = _make_mock_session(
-            agent_session_id="parent-1",
-            status="running",
-            parent_agent_session_id=None,
-        )
-        child = _make_mock_session(
-            agent_session_id="child-1",
-            status="running",
-            parent_agent_session_id="parent-1",
-        )
-
-        with patch("models.agent_session.AgentSession") as mock_as:
-            mock_as.query.all.return_value = [parent, child]
-            with patch("ui.data.sdlc._get_project_metadata", return_value=(None, None)):
-                result = get_all_sessions()
-
-        # Child should be nested, not at top level
-        assert len(result) == 1
-        assert result[0].agent_session_id == "parent-1"
-        assert len(result[0].children) == 1
-        assert result[0].children[0].agent_session_id == "child-1"
-
-    def test_orphaned_child_stays_top_level(self):
-        """Child whose parent is not in the list stays at top level."""
-        from ui.data.sdlc import get_all_sessions
-
-        child = _make_mock_session(
-            agent_session_id="orphan-1",
-            status="running",
-            parent_agent_session_id="missing-parent",
-        )
-
-        with patch("models.agent_session.AgentSession") as mock_as:
-            mock_as.query.all.return_value = [child]
-            with patch("ui.data.sdlc._get_project_metadata", return_value=(None, None)):
-                result = get_all_sessions()
-
-        assert len(result) == 1
-        assert result[0].agent_session_id == "orphan-1"
-
-
-class TestRetentionWithDatetime:
-    """Tests verifying retention filter works with datetime timestamps."""
-
-    def test_datetime_timestamps_enable_retention(self):
-        """Sessions with datetime timestamps should pass the retention filter."""
-        from ui.data.sdlc import _safe_float
-
-        # Before the fix, this would return None and sessions would get
-        # timestamp 0, placing them before the 48h cutoff
-        now_dt = datetime.datetime.now()
-        ts = _safe_float(now_dt)
-        assert ts is not None
-        cutoff = time.time() - 48 * 3600
-        assert ts > cutoff  # Recent datetime should be within retention
 
 
 class TestHistoryParsing:
@@ -630,224 +330,75 @@ class TestSafeFloat:
 
         assert _safe_float("") is None
 
-    def test_datetime_input(self):
-        """datetime.datetime objects should be converted via .timestamp()."""
-        from ui.data.sdlc import _safe_float
 
-        dt = datetime.datetime(2026, 1, 1)
-        result = _safe_float(dt)
-        assert result is not None
-        assert isinstance(result, float)
-        assert result == dt.timestamp()
+class TestHistoryFallback:
+    """Tests for inferring stage states from session history."""
 
-    def test_datetime_with_timezone(self):
-        """datetime with UTC timezone should convert correctly."""
-        from ui.data.sdlc import _safe_float
+    def test_infer_empty_history(self):
+        from ui.data.sdlc import _infer_stages_from_history
 
-        dt = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
-        result = _safe_float(dt)
-        assert result is not None
-        assert isinstance(result, float)
-        assert result == dt.timestamp()
+        assert _infer_stages_from_history(None) == []
+        assert _infer_stages_from_history([]) == []
 
-    def test_datetime_preserves_precision(self):
-        """datetime conversion should preserve sub-second precision."""
-        from ui.data.sdlc import _safe_float
+    def test_infer_no_stage_entries(self):
+        from ui.data.sdlc import _infer_stages_from_history
 
-        dt = datetime.datetime(2026, 6, 15, 12, 30, 45, 123456)
-        result = _safe_float(dt)
-        assert result is not None
-        # Reconstruct and verify roundtrip
-        reconstructed = datetime.datetime.fromtimestamp(result)
-        assert reconstructed.year == 2026
-        assert reconstructed.month == 6
+        history = ["[lifecycle] pending->running", "[user] hello"]
+        result = _infer_stages_from_history(history)
+        assert result == []
 
+    def test_infer_single_stage(self):
+        from ui.data.sdlc import _infer_stages_from_history
 
-class TestArtifactInference:
-    """Tests for artifact-enriched stage states via PipelineStateMachine."""
+        history = ["[stage] PLAN started"]
+        result = _infer_stages_from_history(history)
+        assert len(result) == 8
+        by_name = {s.name: s for s in result}
+        assert by_name["PLAN"].is_active  # Last mentioned = in_progress
 
-    def _make_session(self, **overrides):
-        """Create a mock session with sensible defaults."""
-        session = MagicMock()
-        session.agent_session_id = overrides.get("agent_session_id", "test-123")
-        session.session_id = overrides.get("session_id", "sess-1")
-        session.session_type = overrides.get("session_type", "pm")
-        session.session_mode = overrides.get("session_mode", None)
-        session.status = overrides.get("status", "running")
-        session.slug = overrides.get("slug", None)
-        session.message_text = overrides.get("message_text", "test")
-        session.project_key = overrides.get("project_key", None)
-        session.branch_name = overrides.get("branch_name", None)
-        session.created_at = overrides.get("created_at", time.time())
-        session.started_at = overrides.get("started_at", time.time())
-        session.completed_at = overrides.get("completed_at", None)
-        session.updated_at = overrides.get("updated_at", None)
-        session.stage_states = overrides.get("stage_states", None)
-        session.history = overrides.get("history", None)
-        session.issue_url = overrides.get("issue_url", None)
-        session.plan_url = overrides.get("plan_url", None)
-        session.pr_url = overrides.get("pr_url", None)
-        return session
+    def test_infer_multiple_stages(self):
+        from ui.data.sdlc import _infer_stages_from_history
 
-    def test_session_with_slug_uses_artifact_inference(self):
-        """Sessions with a slug should use PipelineStateMachine.get_display_progress()."""
-        from ui.data.sdlc import _session_to_pipeline
-
-        mock_display = {
-            "ISSUE": "completed",
-            "PLAN": "completed",
-            "CRITIQUE": "completed",
-            "BUILD": "in_progress",
-            "TEST": "pending",
-            "REVIEW": "pending",
-            "DOCS": "pending",
-            "MERGE": "pending",
-        }
-        session = self._make_session(
-            slug="my-feature",
-            stage_states={"ISSUE": "completed", "PLAN": "pending"},
-        )
-
-        with patch("bridge.pipeline_state.PipelineStateMachine") as mock_psm:
-            mock_psm.return_value.get_display_progress.return_value = mock_display
-            pipeline = _session_to_pipeline(session)
-
-        assert len(pipeline.stages) == 8
-        by_name = {s.name: s for s in pipeline.stages}
-        # Artifact inference should show PLAN as completed (overriding stored "pending")
+        history = [
+            "[stage] ISSUE completed",
+            "[stage] PLAN completed",
+            "[stage] BUILD started",
+        ]
+        result = _infer_stages_from_history(history)
+        by_name = {s.name: s for s in result}
+        assert by_name["ISSUE"].is_done
         assert by_name["PLAN"].is_done
         assert by_name["BUILD"].is_active
-        mock_psm.return_value.get_display_progress.assert_called_once_with(slug="my-feature")
 
-    def test_session_without_slug_uses_stored_state(self):
-        """Sessions without a slug should use _parse_stage_states() only."""
+    def test_session_to_pipeline_uses_history_fallback(self):
+        """When stage_states is None but history has stage entries, infer stages."""
         from ui.data.sdlc import _session_to_pipeline
 
-        session = self._make_session(
-            slug=None,
-            stage_states={"ISSUE": "completed", "PLAN": "in_progress"},
-        )
+        mock_session = MagicMock()
+        mock_session.job_id = "test-123"
+        mock_session.session_id = "sess-1"
+        mock_session.session_type = "chat"
+        mock_session.status = "running"
+        mock_session.slug = None
+        mock_session.work_item_slug = None
+        mock_session.message_text = "test"
+        mock_session.project_key = None
+        mock_session.branch_name = None
+        mock_session.created_at = time.time()
+        mock_session.started_at = time.time()
+        mock_session.completed_at = None
+        mock_session.last_activity = None
+        mock_session.stage_states = None
+        mock_session.history = ["[stage] ISSUE done", "[stage] PLAN started"]
+        mock_session.issue_url = None
+        mock_session.plan_url = None
+        mock_session.pr_url = None
 
-        with patch("bridge.pipeline_state.PipelineStateMachine") as mock_psm:
-            pipeline = _session_to_pipeline(session)
-
-        # PipelineStateMachine should not be called without a slug
-        mock_psm.assert_not_called()
+        pipeline = _session_to_pipeline(mock_session)
         assert len(pipeline.stages) == 8
         by_name = {s.name: s for s in pipeline.stages}
         assert by_name["ISSUE"].is_done
         assert by_name["PLAN"].is_active
-
-    def test_session_with_empty_slug_uses_stored_state(self):
-        """Sessions with empty string slug should not use artifact inference."""
-        from ui.data.sdlc import _session_to_pipeline
-
-        session = self._make_session(
-            slug="",
-            stage_states={"ISSUE": "completed"},
-        )
-
-        with patch("bridge.pipeline_state.PipelineStateMachine") as mock_psm:
-            _session_to_pipeline(session)
-
-        mock_psm.assert_not_called()
-
-    def test_artifact_inference_failure_falls_back_to_stored_state(self):
-        """When PipelineStateMachine raises, fall back to _parse_stage_states()."""
-        from ui.data.sdlc import _artifact_inference_cache, _session_to_pipeline
-
-        # Clear cache to force a fresh call
-        _artifact_inference_cache.clear()
-
-        session = self._make_session(
-            slug="failing-feature",
-            stage_states={"ISSUE": "completed", "PLAN": "in_progress"},
-        )
-
-        with patch(
-            "bridge.pipeline_state.PipelineStateMachine",
-            side_effect=Exception("gh not available"),
-        ):
-            pipeline = _session_to_pipeline(session)
-
-        assert len(pipeline.stages) == 8
-        by_name = {s.name: s for s in pipeline.stages}
-        # Should fall back to stored state
-        assert by_name["ISSUE"].is_done
-        assert by_name["PLAN"].is_active
-
-    def test_session_no_slug_no_stage_states_produces_empty_stages(self):
-        """Sessions with no slug and no stage_states should have empty stages."""
-        from ui.data.sdlc import _session_to_pipeline
-
-        session = self._make_session(slug=None, stage_states=None)
-        pipeline = _session_to_pipeline(session)
-        assert pipeline.stages == []
-
-    def test_cache_hit_within_ttl(self):
-        """Cache should return cached results within the same time bucket."""
-        from ui.data.sdlc import (
-            _ARTIFACT_INFERENCE_TTL,
-            _artifact_inference_cache,
-            _get_artifact_enriched_stages,
-        )
-
-        _artifact_inference_cache.clear()
-
-        cached_display = {
-            "ISSUE": "completed",
-            "PLAN": "completed",
-            "CRITIQUE": "pending",
-            "BUILD": "pending",
-            "TEST": "pending",
-            "REVIEW": "pending",
-            "DOCS": "pending",
-            "MERGE": "pending",
-        }
-        time_bucket = int(time.time() / _ARTIFACT_INFERENCE_TTL)
-        _artifact_inference_cache[("cached-slug", time_bucket)] = cached_display
-
-        session = self._make_session(slug="cached-slug")
-
-        with patch("bridge.pipeline_state.PipelineStateMachine") as mock_psm:
-            result = _get_artifact_enriched_stages(session, "cached-slug")
-
-        # PipelineStateMachine should NOT be called -- cache hit
-        mock_psm.assert_not_called()
-        by_name = {s.name: s for s in result}
-        assert by_name["ISSUE"].is_done
-        assert by_name["PLAN"].is_done
-
-    def test_cache_miss_after_ttl(self):
-        """Cache should miss when the time bucket has changed."""
-        from ui.data.sdlc import (
-            _ARTIFACT_INFERENCE_TTL,
-            _artifact_inference_cache,
-            _get_artifact_enriched_stages,
-        )
-
-        _artifact_inference_cache.clear()
-
-        # Insert with an old time bucket
-        old_bucket = int(time.time() / _ARTIFACT_INFERENCE_TTL) - 5
-        _artifact_inference_cache[("stale-slug", old_bucket)] = {"ISSUE": "completed"}
-
-        session = self._make_session(slug="stale-slug")
-
-        fresh_display = {
-            s: "pending"
-            for s in ["ISSUE", "PLAN", "CRITIQUE", "BUILD", "TEST", "REVIEW", "DOCS", "MERGE"]
-        }
-        fresh_display["ISSUE"] = "in_progress"
-
-        with patch("bridge.pipeline_state.PipelineStateMachine") as mock_psm:
-            mock_psm.return_value.get_display_progress.return_value = fresh_display
-            result = _get_artifact_enriched_stages(session, "stale-slug")
-
-        # Should have called PipelineStateMachine (cache miss)
-        mock_psm.return_value.get_display_progress.assert_called_once_with(slug="stale-slug")
-        by_name = {s.name: s for s in result}
-        assert by_name["ISSUE"].is_active
 
 
 class TestProjectMetadata:
@@ -910,7 +461,7 @@ class TestRetentionFilter:
 
         now = time.time()
         p = PipelineProgress(
-            agent_session_id="123",
+            job_id="123",
             status="completed",
             completed_at=now - 3600,  # 1 hour ago
         )
@@ -918,21 +469,21 @@ class TestRetentionFilter:
         assert p.completed_at > (now - 48 * 3600)
 
     def test_timestamp_fallback_chain(self):
-        """When updated_at is None, fallback to other timestamps."""
+        """When last_activity is None, fallback to other timestamps."""
         from ui.data.sdlc import PipelineProgress
 
         now = time.time()
         # Session with only created_at set
         p = PipelineProgress(
-            agent_session_id="123",
+            job_id="123",
             status="completed",
             created_at=now - 3600,
-            updated_at=None,
+            last_activity=None,
             completed_at=None,
             started_at=None,
         )
-        # Best timestamp fallback: completed_at or updated_at or started_at or created_at
-        best_ts = p.completed_at or p.updated_at or p.started_at or p.created_at or 0
+        # Best timestamp fallback: completed_at or last_activity or started_at or created_at
+        best_ts = p.completed_at or p.last_activity or p.started_at or p.created_at or 0
         assert best_ts == p.created_at
         assert best_ts > 0
 
@@ -961,5 +512,5 @@ class TestSdlcQueryFunctions:
     def test_get_pipeline_detail_not_found(self):
         from ui.data.sdlc import get_pipeline_detail
 
-        result = get_pipeline_detail("nonexistent-session-id-12345")
+        result = get_pipeline_detail("nonexistent-job-id-12345")
         assert result is None

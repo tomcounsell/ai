@@ -133,7 +133,6 @@ def get_confidence_ranked(
         from models.memory import Memory
 
         # Derive hash key from popoto API instead of hardcoding
-        # TODO: Replace ":data" suffix with proper accessor once tomcounsell/popoto#323 ships
         base_key = ConfidenceField.get_special_use_field_db_key(Memory, "confidence")
         hash_key = base_key.redis_key + ":data"
         raw_data = POPOTO_REDIS_DB.hgetall(hash_key)

@@ -6,8 +6,6 @@ and the PM's send_telegram tool (tools/send_telegram.py).
 
 import re
 
-from bridge.routing import load_config
-
 
 def linkify_references(text: str, project_key: str | None = None) -> str:
     """Convert plain PR #N and Issue #N references to markdown links.
@@ -27,10 +25,11 @@ def linkify_references(text: str, project_key: str | None = None) -> str:
     if not text or not project_key or not str(project_key).strip():
         return text
 
-    # Look up GitHub org/repo from projects.json config
+    # Look up GitHub org/repo from registered project config
     try:
-        all_projects = load_config().get("projects", {})
-        config = all_projects.get(str(project_key), {})
+        from agent.job_queue import get_project_config
+
+        config = get_project_config(str(project_key))
         github_config = config.get("github", {})
         org = github_config.get("org")
         repo = github_config.get("repo")

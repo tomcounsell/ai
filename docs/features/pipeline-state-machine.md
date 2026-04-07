@@ -14,7 +14,7 @@ The previous system inferred pipeline stage status by parsing agent transcripts 
 Stage status is set programmatically at the points where transitions actually happen:
 - `start_stage()` in the PreToolUse hook when the PM dispatches a dev-session for an SDLC stage
 - `complete_stage()` in the SubagentStop hook when the dev-session returns successfully
-- `fail_stage()` when the session fails
+- `fail_stage()` when the job fails
 
 State is persisted as a JSON dict on `AgentSession.stage_states` -- one Redis field, no history parsing.
 
@@ -69,8 +69,12 @@ sm.current_stage()            # "BUILD" or None
 sm.next_stage("success")      # ("TEST", "/do-test")
 sm.has_remaining_stages()     # True if pipeline not complete
 sm.has_failed_stage()         # True if any stage failed
-sm.get_display_progress()     # {stage: status} for DISPLAY_STAGES — stored state only
-sm.classify_outcome(stage, stop_reason, output_tail)  # "success"/"fail"/"partial"/"ambiguous"
+sm.get_display_progress()     # {stage: status} for DISPLAY_STAGES
+sm.classify_outcome(stage, stop_reason, output_tail)  # "success"/"fail"/"ambiguous"
+
+# Convenience: start + complete in one shot (for atomic stage completions)
+from bridge.pipeline_state import record_stage_completion
+record_stage_completion(session, "BUILD")
 ```
 
 ## Stage Statuses
@@ -92,81 +96,21 @@ The state machine validates transitions using `PIPELINE_EDGES` from `bridge/pipe
 - PATCH can start when TEST or REVIEW has failed/completed
 - TEST can restart after PATCH completes (cycle support)
 
-## Artifact-Based Inference
-
-Artifact inference was **deleted in PR #733** (issue #729). `get_display_progress()` no longer accepts a `slug=` parameter and does not check plan files, PRs, or GitHub review state. Stored `stage_states` is the single source of truth.
-
-See `docs/features/sdlc-stage-tracking.md` for why inference was removed and how the belt-and-suspenders skill marker system replaces it.
-
 ## Outcome Classification
 
-`classify_outcome()` uses a three-tier approach to classify the result of a completed stage:
+`classify_outcome()` uses a two-tier approach:
+1. **SDK stop_reason**: non-`end_turn` reasons (rate_limited, timeout, etc.) are process failures
+2. **Output tail patterns**: stage-specific patterns in the last 500 chars of output
 
-### Tier 0: OUTCOME Contract (Structured)
-
-Skills can emit a structured OUTCOME contract as an HTML comment in their output:
-
-```
-<!-- OUTCOME {"status":"success","stage":"BUILD","artifacts":{"pr_url":"..."}} -->
-```
-
-The contract is a JSON object with these fields:
-- `status` (required): `"success"`, `"fail"`, or `"partial"`
-- `stage` (optional): The stage name (e.g., `"BUILD"`, `"TEST"`, `"REVIEW"`). If present and mismatched with the expected stage, the contract is ignored and classification falls through to Tier 1/2.
-- `artifacts` (optional): Stage-specific metadata (PR URLs, test counts, etc.)
-
-If a valid OUTCOME block is found with a recognized status, it is returned immediately -- no further classification is performed. The `"partial"` status enables nuanced routing: for example, a REVIEW that approves but finds nits returns `"partial"`, which triggers a PATCH cycle via `pipeline_graph.py`.
-
-Skills that emit OUTCOME contracts:
-- `/do-build`: success (PR created) or fail (build failed)
-- `/do-test`: success (all tests passed), fail (test failures), or partial (flaky tests)
-- `/do-pr-review`: success (no findings), partial (approved with findings), or fail (changes requested)
-
-### Tier 1: SDK Stop Reason
-
-Non-`end_turn` stop reasons (rate_limited, timeout, etc.) indicate process failures and return `"fail"`.
-
-### Tier 2: Output Tail Patterns
-
-Stage-specific text patterns in the last ~500 chars of output. Each stage has its own pattern set (e.g., `"pull/"` for BUILD, `"passed"` for TEST).
-
-Falls back to `"ambiguous"` when no pattern matches, for the Observer LLM to handle.
-
-## Router Integration (Read Path)
-
-The SDLC router skill (`.claude/skills/sdlc/SKILL.md`) reads `stage_states` as the **primary signal** for routing decisions. This completes the read/write cycle: hooks write stage transitions (via `start_stage()`/`complete_stage()`/`fail_stage()`), and the router reads the resulting state to determine which sub-skill to dispatch next.
-
-### How the Router Reads stage_states
-
-The router invokes `tools/sdlc_stage_query.py` via bash to read stored stage state:
-
-```bash
-STAGE_STATES=$(python -m tools.sdlc_stage_query --session-id "$VALOR_SESSION_ID" 2>/dev/null)
-```
-
-The CLI tool loads the PM session from Redis, reads `stage_states`, and returns a JSON dict mapping stage names to statuses.
-
-### Routing Logic
-
-- **stage_states available**: Used as the primary signal. A stage is considered complete only if it shows `"completed"` in stage_states.
-- **stage_states unavailable** (empty JSON `{}`): Falls back to conversation dispatch history to determine what has already run. Artifact inference is not used. This happens for local Claude Code invocations without a PM session.
-
-### Merge Gate
-
-Row 10 in the dispatch table (merge-ready) requires ALL display stages (ISSUE, PLAN, CRITIQUE, BUILD, TEST, REVIEW, DOCS) to show `"completed"` in stage_states. This prevents stages from being silently skipped when a prior stage's work happens to produce artifacts that satisfy a later stage's check (e.g., `/do-build` creating docs does not satisfy the DOCS stage).
-
-When stage_states is unavailable (cold start), the merge gate emits an explicit warning listing every unrecorded stage and requires acknowledgment before proceeding. Artifact inference is not used.
+Falls back to `"ambiguous"` for the Observer LLM to handle.
 
 ## Integration Points
 
-- **SDLC Router** (`.claude/skills/sdlc/SKILL.md`): Reads `stage_states` via `tools/sdlc_stage_query.py` CLI tool as primary routing signal
-- **Stage Query Tool** (`tools/sdlc_stage_query.py`): CLI interface for reading `stage_states` from a PM session by session ID or issue number
 - **PreToolUse hook** (`agent/hooks/pre_tool_use.py`): Calls `start_stage()` when the PM dispatches a dev-session, marking the stage as `in_progress`
 - **SubagentStop hook** (`agent/hooks/subagent_stop.py`): Calls `complete_stage()` when the dev-session returns, marking the stage as `completed`
 - **ChatSession**: Uses state machine for stage queries and outcome classification
-- **Job Queue** (`agent/agent_session_queue.py`): Creates state machine in `send_to_chat()`, applies transitions from Observer decisions
-- **AgentSession** (`models/agent_session.py`): `get_stage_progress()` convenience wrapper around `get_display_progress()`
-- **Merge Gate** (`.claude/commands/do-merge.md`): Reads `get_display_progress()` for pre-merge pipeline validation
+- **Job Queue** (`agent/job_queue.py`): Creates state machine in `send_to_chat()`, applies transitions from Observer decisions
+- **Summarizer** (`bridge/summarizer.py`): Reads `get_display_progress()` for Telegram stage rendering
 
 ## What Was Deleted
 
@@ -178,14 +122,10 @@ When stage_states is unavailable (cold start), the merge gate emits an explicit 
 
 | File | Purpose |
 |------|---------|
-| `bridge/pipeline_state.py` | PipelineStateMachine class — stored-state-only stage tracking |
-| `tools/sdlc_stage_marker.py` | CLI tool for skills to write in_progress/completed markers |
+| `bridge/pipeline_state.py` | PipelineStateMachine class + `record_stage_completion()` helper |
 | `bridge/pipeline_graph.py` | Transition table (PIPELINE_EDGES, DISPLAY_STAGES) |
 | `models/agent_session.py` | `stage_states` field on AgentSession |
-| `tools/sdlc_stage_query.py` | CLI tool for reading stage_states (used by SDLC router) |
-| `.claude/skills/sdlc/SKILL.md` | SDLC router skill (reads stage_states in Step 2.0) |
 | `agent/hooks/pre_tool_use.py` | `start_stage()` wiring via `_extract_stage_from_prompt()` and `_start_pipeline_stage()` |
 | `agent/hooks/subagent_stop.py` | `complete_stage()` wiring via `_record_stage_on_parent()` |
 | `tests/unit/test_pipeline_state_machine.py` | State machine unit tests |
-| `tests/unit/test_sdlc_stage_query.py` | Stage query CLI tool unit tests |
 | `tests/unit/test_pre_tool_use_start_stage.py` | Stage extraction and start_stage wiring tests |

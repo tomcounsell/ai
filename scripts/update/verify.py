@@ -272,7 +272,7 @@ def check_valor_tools(project_dir: Path) -> list[ToolCheck]:
     return results
 
 
-def check_ollama(model: str = "gemma4:e2b") -> ToolCheck:
+def check_ollama(model: str = "qwen3:1.7b") -> ToolCheck:
     """Check if Ollama is available and has the required model."""
     if not shutil.which("ollama"):
         return ToolCheck(name="ollama", available=False, error="Not installed")
@@ -295,7 +295,7 @@ def check_ollama(model: str = "gemma4:e2b") -> ToolCheck:
         return ToolCheck(name="ollama", available=False, error=str(e))
 
 
-def pull_ollama_model(model: str = "gemma4:e2b") -> bool:
+def pull_ollama_model(model: str = "qwen3:1.7b") -> bool:
     """Pull an Ollama model. Returns True if successful."""
     if not shutil.which("ollama"):
         return False
@@ -783,31 +783,6 @@ def check_telegram_session(project_dir: Path) -> ToolCheck:
         )
 
 
-def check_google_token(project_dir: Path) -> ToolCheck:
-    """Verify per-machine Google OAuth token exists, migrating from shared if needed."""
-    try:
-        # Import triggers migration automatically
-        from tools.google_workspace.auth import TOKEN_PATH
-
-        if TOKEN_PATH.exists():
-            return ToolCheck(
-                name="google-token",
-                available=True,
-                version=TOKEN_PATH.name,
-            )
-        return ToolCheck(
-            name="google-token",
-            available=False,
-            error=f"No token at {TOKEN_PATH}. Run OAuth flow to create.",
-        )
-    except Exception as e:
-        return ToolCheck(
-            name="google-token",
-            available=False,
-            error=f"Token check failed: {e}",
-        )
-
-
 def verify_environment(project_dir: Path, check_ollama_model: bool = True) -> VerificationResult:
     """Run all environment verification checks."""
     result = VerificationResult()
@@ -817,10 +792,9 @@ def verify_environment(project_dir: Path, check_ollama_model: bool = True) -> Ve
     result.dev_tools = check_dev_tools(project_dir)
     result.valor_tools = check_valor_tools(project_dir)
     result.valor_tools.append(check_telegram_session(project_dir))
-    result.valor_tools.append(check_google_token(project_dir))
 
     if check_ollama_model:
-        ollama_model = os.getenv("OLLAMA_SUMMARIZER_MODEL", "gemma4:e2b")
+        ollama_model = os.getenv("OLLAMA_SUMMARIZER_MODEL", "qwen3:1.7b")
         result.ollama = check_ollama(ollama_model)
 
     result.sdk_auth = check_sdk_auth(project_dir)

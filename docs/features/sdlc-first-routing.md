@@ -24,7 +24,7 @@ A two-stage routing system: fast-path pattern matching for obvious cases, LLM cl
    - Short acknowledgments (`continue`, `ok`, `yes`) → `passthrough`
 
 2. **LLM classification** (for everything else):
-   - Primary: Ollama (gemma4:e2b, fast, local, free)
+   - Primary: Ollama (qwen3:1.7b, fast, local, free)
    - Fallback: Anthropic Haiku (when Ollama unavailable)
    - Prompt asks for single-word `sdlc` or `question` response
    - Any classification failure defaults to `question` (safe fallback)
@@ -38,7 +38,7 @@ Based on classification result:
 | `sdlc` | `ai/` repo root | Full SDLC pipeline access, TARGET_REPO context injected |
 | `question` | Target project dir | Direct project context, no SDLC overhead |
 
-The SDK client reads `classification_type` from the `AgentSession` stored by the bridge. If not set (e.g., async classifier lost the race with session pickup), a synchronous fast-path regex checks the message for PR/issue references before falling back to `"question"`. This prevents messages like "Complete PR 478" from being misrouted.
+The SDK client reads `classification_type` from the `AgentSession` stored by the bridge. If not set (e.g., async classifier lost the race with job pickup), a synchronous fast-path regex checks the message for PR/issue references before falling back to `"question"`. This prevents messages like "Complete PR 478" from being misrouted.
 
 For SDLC-routed requests, a `TARGET_REPO` context block is injected into the system prompt so the agent knows which project to dispatch workers to. The subprocess environment includes `GH_REPO=org/repo` so all `gh` CLI commands automatically target the correct repository. A `GITHUB: org/repo` line in the prompt context serves as a secondary safety net.
 
@@ -64,7 +64,7 @@ When SDLC is invoked for a non-ai project (e.g., popoto), the worker runs with `
 
 The `gh` CLI supports a `GH_REPO` environment variable that automatically applies to all commands in the subprocess. This is the deterministic fix -- it requires no LLM cooperation.
 
-When `get_agent_response_sdk()` detects a cross-repo SDLC request (classification is "sdlc", project key is not "valor", and project mode is not "pm"), it:
+When `get_agent_response_sdk()` detects a cross-repo SDLC request (classification is "sdlc", project working directory differs from the ai repo root, and project mode is not "pm"), it:
 
 1. Extracts `github.org` and `github.repo` from the project config in `~/Desktop/Valor/projects.json`
 2. Passes `gh_repo="org/repo"` to `ValorAgent.__init__()`
@@ -74,8 +74,7 @@ All `gh` commands in the subprocess then automatically target the correct reposi
 
 ```python
 # In get_agent_response_sdk():
-is_cross_repo = project_key != "valor"
-if project_mode != "pm" and classification == "sdlc" and is_cross_repo:
+if project_mode != "pm" and classification == "sdlc" and project_working_dir != AI_REPO_ROOT:
     _github_config = project.get("github", {})
     _gh_org = _github_config.get("org", "")
     _gh_name = _github_config.get("repo", "")

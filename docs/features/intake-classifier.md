@@ -33,7 +33,7 @@ INTAKE CLASSIFIER (new, #320)
     +-- new_work -> fall through to enqueue (current behavior)
     |
     v
-enqueue_agent_session() (existing path)
+enqueue_job() (existing path)
 ```
 
 ## Classification Categories
@@ -60,9 +60,7 @@ Unlike the existing `classify_request_async()` (which runs fire-and-forget), the
 
 ### Session Matching
 
-For non-reply interjections, the classifier finds the most recent active/running/dormant session in the same chat (by `updated_at` or `created_at`). No multi-session disambiguation -- just pick the most recent one.
-
-As of #619, the classifier also includes **pending** sessions within an 8-second recency window (`PENDING_MERGE_WINDOW_SECONDS`, bumped from 7 to 8 in #705). This allows follow-up messages sent in quick succession to be recognized as interjections into pending sessions, rather than spawning competing sessions. Pending sessions older than 8 seconds are excluded to prevent unrelated messages from attaching to stale jobs. For sub-200ms arrivals (before Redis write completes), an in-memory coalescing guard provides coverage — see `docs/features/semantic-session-routing.md`.
+For non-reply interjections, the classifier finds the most recent active/running/dormant session in the same chat (by `last_activity` or `created_at`). No multi-session disambiguation -- just pick the most recent one.
 
 ### Race Condition Mitigation
 
@@ -91,7 +89,7 @@ This prevents "ok" from accidentally completing a running session (Risk 3).
 | `bridge/telegram_bridge.py` | Calls `classify_message_intent_async()` after the reply-to fast path |
 | `models/agent_session.py` | `push_steering_message()` buffers interjections for Observer |
 | `agent/steering.py` | `push_steering_message()` pushes to Redis for PostToolUse hook |
-| `agent/agent_session_queue.py` | Nudge loop processes `queued_steering_messages` populated by the intake classifier |
+| `agent/job_queue.py` | Nudge loop processes `queued_steering_messages` populated by the intake classifier |
 
 ## Testing
 

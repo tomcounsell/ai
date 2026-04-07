@@ -5,7 +5,7 @@ classified as SDLC work before enqueue, preventing the race condition where
 the async classifier loses the race and defaults to "question".
 
 See: PR #478 postmortem — "Complete PR 478" was classified as "question"
-because the async classifier hadn't finished before the session was picked up.
+because the async classifier hadn't finished before the job was picked up.
 """
 
 import re

@@ -1,6 +1,6 @@
 """Tests for Teammate reduced nudge cap in the nudge loop."""
 
-from agent.agent_session_queue import MAX_NUDGE_COUNT, determine_delivery_action
+from agent.job_queue import MAX_NUDGE_COUNT, classify_nudge_action
 from agent.teammate_handler import TEAMMATE_MAX_NUDGE_COUNT
 
 
@@ -10,7 +10,7 @@ class TestTeammateNudgeCap:
 
     def test_empty_output_nudges_within_teammate_cap(self):
         """Within Teammate cap, empty output should still nudge."""
-        action = determine_delivery_action(
+        action = classify_nudge_action(
             msg="",
             stop_reason=None,
             auto_continue_count=5,
@@ -20,7 +20,7 @@ class TestTeammateNudgeCap:
 
     def test_empty_output_delivers_at_teammate_cap(self):
         """At Teammate cap, empty output should deliver fallback."""
-        action = determine_delivery_action(
+        action = classify_nudge_action(
             msg="",
             stop_reason=None,
             auto_continue_count=TEAMMATE_MAX_NUDGE_COUNT,
@@ -30,7 +30,7 @@ class TestTeammateNudgeCap:
 
     def test_normal_cap_still_allows_more_nudges(self):
         """At Teammate cap count, normal cap should still allow nudges."""
-        action = determine_delivery_action(
+        action = classify_nudge_action(
             msg="",
             stop_reason=None,
             auto_continue_count=TEAMMATE_MAX_NUDGE_COUNT,
@@ -49,7 +49,7 @@ class TestTeammateReactionClearing:
         session = MagicMock()
         session.session_mode = "teammate"
 
-        # The reaction logic in agent_session_queue.py checks session_mode and returns None
+        # The reaction logic in job_queue.py checks session_mode and returns None
         # for successful Teammate sessions. We test the conditional directly.
         task_error = False
         if session and getattr(session, "session_mode", None) == "teammate" and not task_error:

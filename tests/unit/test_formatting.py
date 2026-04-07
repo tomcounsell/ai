@@ -10,16 +10,16 @@ class TestLinkifyReferences:
 
     def test_linkifies_pr_reference(self):
         """Should convert 'PR #42' to a markdown link."""
-        mock_config = {"projects": {"ai": {"github": {"org": "tomcounsell", "repo": "ai"}}}}
-        with patch("bridge.formatting.load_config", return_value=mock_config):
+        with patch("agent.job_queue.get_project_config") as mock_config:
+            mock_config.return_value = {"github": {"org": "tomcounsell", "repo": "ai"}}
             result = linkify_references("See PR #42 for details", "ai")
 
         assert "[PR #42](https://github.com/tomcounsell/ai/pull/42)" in result
 
     def test_linkifies_issue_reference(self):
         """Should convert 'Issue #100' to a markdown link."""
-        mock_config = {"projects": {"ai": {"github": {"org": "tomcounsell", "repo": "ai"}}}}
-        with patch("bridge.formatting.load_config", return_value=mock_config):
+        with patch("agent.job_queue.get_project_config") as mock_config:
+            mock_config.return_value = {"github": {"org": "tomcounsell", "repo": "ai"}}
             result = linkify_references("Fix for Issue #100", "ai")
 
         assert "[Issue #100](https://github.com/tomcounsell/ai/issues/100)" in result
@@ -27,8 +27,8 @@ class TestLinkifyReferences:
     def test_no_double_linkify(self):
         """Should not re-link already-linked references."""
         already_linked = "[PR #42](https://github.com/tomcounsell/ai/pull/42)"
-        mock_config = {"projects": {"ai": {"github": {"org": "tomcounsell", "repo": "ai"}}}}
-        with patch("bridge.formatting.load_config", return_value=mock_config):
+        with patch("agent.job_queue.get_project_config") as mock_config:
+            mock_config.return_value = {"github": {"org": "tomcounsell", "repo": "ai"}}
             result = linkify_references(already_linked, "ai")
 
         # Should not contain double brackets
@@ -41,8 +41,8 @@ class TestLinkifyReferences:
 
     def test_returns_text_unchanged_without_github_config(self):
         """Should return text as-is when GitHub config missing."""
-        mock_config = {"projects": {"ai": {}}}
-        with patch("bridge.formatting.load_config", return_value=mock_config):
+        with patch("agent.job_queue.get_project_config") as mock_config:
+            mock_config.return_value = {}
             result = linkify_references("See PR #42", "ai")
 
         assert result == "See PR #42"

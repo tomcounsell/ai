@@ -23,7 +23,7 @@ Human Message (Telegram)                    Agent Session
         |                |      (keyword + relevance + confidence)
         v                |                   |
   Outcome Detection -----+                   v
-  (LLM judge + bigram)                <thought> blocks
+  (bigram overlap)                    <thought> blocks
         |                            via additionalContext
         v
   ObservationProtocol
@@ -70,9 +70,9 @@ After a session completes in `agent/messenger.py`:
 1. `run_post_session_extraction()` is called after `BackgroundTask._result` is set
 2. Haiku extracts novel observations as structured JSON (category, observation text, file_paths, tags), with a line-based fallback parser for robustness
 3. Each observation is saved as Memory with categorized importance (corrections/decisions at 4.0, patterns/surprises at 1.0) and structured metadata attached via `DictField`
-4. Outcome detection uses LLM judgment (Haiku) to classify each injected thought as `"acted"` (response was influenced), `"echoed"` (keyword overlap but no causal link), or `"dismissed"` (no relationship). `"echoed"` maps to `"dismissed"` for scoring. Bigram overlap is retained as a zero-cost fallback when the Haiku call fails or is rate-limited.
+4. Outcome detection compares injected thoughts against response using bigram overlap
 5. `ObservationProtocol.on_context_used()` strengthens acted-on memories and weakens dismissed ones
-6. `_persist_outcome_metadata()` runs after ObservationProtocol, updating `dismissal_count`, `last_outcome`, and `outcome_history` in each memory's metadata. Each history entry includes `outcome`, `reasoning` (one-sentence LLM explanation), and `ts` (unix timestamp), capped at 10 entries. When a memory reaches the dismissal threshold (3 consecutive dismissals), its importance is decayed by 0.7x (floor: 0.2). Acting on a memory resets the dismissal counter
+6. `_persist_outcome_metadata()` runs after ObservationProtocol, updating `dismissal_count` and `last_outcome` in each memory's metadata. When a memory reaches the dismissal threshold (3 consecutive dismissals), its importance is decayed by 0.7x (floor: 0.2). Acting on a memory resets the dismissal counter
 
 ### Flow 4: System Prompt Priming
 
@@ -137,7 +137,7 @@ The memory system also runs in Claude Code CLI sessions via hooks. See [Claude C
 - **UserPromptSubmit hook** ingests qualifying user prompts (same importance=6.0 as Telegram messages) and creates an AgentSession record for dashboard observability
 - **PostToolUse hook** runs memory recall with a file-based sliding window (JSON sidecar files replace in-memory state since hooks are stateless processes) and updates AgentSession activity tracking
 - **Stop hook** runs Haiku extraction and outcome detection on the session transcript, completes the AgentSession lifecycle, and triggers post-merge learning extraction when applicable
-- **Novel territory signals** provide cues when the agent enters unfamiliar areas (zero bloom hits with many keywords). The vague recognition (deja vu) fallback was removed as it produced only noise -- see [Memory Hook Performance](memory-hook-performance.md)
+- **Deja vu signals** provide vague recognition or novel territory cues when recall results are ambiguous (shared thresholds with SDK agent path via `config/memory_defaults.py`)
 - **Post-merge learning** is triggered from the Stop hook when `gh pr merge` is detected during the session, calling `extract_post_merge_learning()` with PR metadata fetched via `gh` CLI
 - Bridge module: `.claude/hooks/hook_utils/memory_bridge.py`
 
@@ -166,7 +166,7 @@ After RRF fusion returns scored results, `_apply_category_weights()` re-ranks th
 
 **Fail-safe:** If metadata is None, not a dict, or missing the category key, the default weight (1.0) is used. If `CATEGORY_RECALL_WEIGHTS` cannot be imported, records are returned in their original order.
 
-Both `check_and_inject()` (SDK/Telegram path) and `recall()` (Claude Code hooks path) apply the same re-ranking. The bridge imports `_apply_category_weights` from `utils.keyword_extraction` (keyword utilities were extracted to break the import chain -- see [Memory Hook Performance](memory-hook-performance.md)).
+Both `check_and_inject()` (SDK/Telegram path) and `recall()` (Claude Code hooks path) apply the same re-ranking. The bridge imports `_apply_category_weights` from `agent.memory_hook`.
 
 ## Structured Metadata
 
@@ -182,7 +182,6 @@ Memory records carry an optional `metadata` DictField with structured data from 
 | `tool_names` | `list[str]` | Extraction | Tool names from the session context |
 | `dismissal_count` | `int` | Outcome tracking | Consecutive dismissals before last reset |
 | `last_outcome` | `str` | Outcome tracking | `"acted"` or `"dismissed"` |
-| `outcome_history` | `list[dict]` | Outcome tracking | Last 10 outcome entries with `outcome`, `reasoning`, `ts` |
 
 Additionally, the Memory model has a top-level `reference` StringField (not inside metadata) for actionable pointers. Knowledge-sourced memories use this to store a JSON tool call pointing to the source file. See [Knowledge Document Integration](knowledge-document-integration.md).
 
@@ -191,11 +190,9 @@ Additionally, the Memory model has a top-level `reference` StringField (not insi
 ```bash
 python -m tools.memory_search search "query" --category correction
 python -m tools.memory_search search "query" --tag redis
-python -m tools.memory_search search "query" --act-rate 0.5  # memories with >=50% act rate
-python -m tools.memory_search inspect --stats  # aggregate outcome statistics
 ```
 
-Metadata filtering happens after retrieval returns results. The `inspect` command displays outcome history (date, outcome, reasoning) and computed act rate when present. The `stats` subcommand shows aggregate outcome statistics: total memories with history, average act rate, and top 5 most-acted-on memories.
+Metadata filtering happens after retrieval returns results. The `inspect` command displays metadata when present.
 
 ## Dismissal Tracking
 
@@ -243,7 +240,7 @@ The memory system MUST work equally across all agent session types — SDK/Teleg
 | `config/memory_defaults.py` | Tuned Defaults overrides for popoto constants, RRF tuning, and dismissal tracking thresholds |
 | `agent/memory_hook.py` | PostToolUse thought injection with sliding window rate limiting, multi-query decomposition via `_cluster_keywords()` (Telegram agent path) |
 | `agent/memory_retrieval.py` | BM25 + RRF fusion retrieval: `retrieve_memories()`, `rrf_fuse()`, ranked signal accessors |
-| `agent/memory_extraction.py` | Post-session JSON extraction with line-based fallback, LLM-judged outcome detection (with bigram fallback), outcome history persistence, dismissal tracking via `_persist_outcome_metadata()`, post-merge learning extraction |
+| `agent/memory_extraction.py` | Post-session JSON extraction with line-based fallback, bigram outcome detection, dismissal tracking via `_persist_outcome_metadata()`, post-merge learning extraction |
 | `agent/health_check.py` | Integration point: `watchdog_hook()` calls `check_and_inject()` |
 | `agent/messenger.py` | Integration point: `_run_work()` calls `run_post_session_extraction()` |
 | `bridge/telegram_bridge.py` | Integration point: `Memory.safe_save()` after `store_message()` |
@@ -275,7 +272,6 @@ All tuning constants are in `config/memory_defaults.py`. Call `apply_defaults()`
 | `INJECTION_BUFFER_SIZE` | 9 | Total tool calls in rolling buffer |
 | `DEJA_VU_BLOOM_HIT_THRESHOLD` | 3 | Bloom hits needed for "vague recognition" thought (shared across both paths) |
 | `NOVEL_TERRITORY_KEYWORD_THRESHOLD` | 7 | Unique keywords with zero bloom hits needed for "novel territory" thought |
-| `MAX_OUTCOME_HISTORY` | 10 | Maximum outcome history entries per memory (oldest dropped) |
 | `DISMISSAL_DECAY_THRESHOLD` | 3 | Consecutive dismissals before importance decays |
 | `DISMISSAL_IMPORTANCE_DECAY` | 0.7 | Importance multiplier on threshold breach |
 | `MIN_IMPORTANCE_FLOOR` | 0.2 | Minimum importance after decay (never drops below this) |
@@ -311,5 +307,4 @@ No schema migrations are involved. Redis keys can be flushed without side effect
 - Prior art: Issue #394 (original agent memory integration layer)
 - Retrieval enhancement: [#583](https://github.com/tomcounsell/ai/issues/583) (PR [#584](https://github.com/tomcounsell/ai/pull/584)) -- structured metadata, dismissal tracking, multi-query decomposition
 - Metadata-aware recall: [#586](https://github.com/tomcounsell/ai/issues/586) -- category-weighted recall re-ranking, post-merge metadata parity, retrieval recipes
-- Trigger training: [#613](https://github.com/tomcounsell/ai/issues/613) -- LLM-judged outcome detection, outcome history, act rate tracking
 - Downstream: Issue #395 (multi-persona memory partitioning), Issue #393 (behavioral episode memory)

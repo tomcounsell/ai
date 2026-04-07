@@ -9,38 +9,9 @@ user-invocable: false
 
 Unified interface for reading and sending Telegram messages.
 
-## PM Tool vs CLI Tool
-
-There are two sending interfaces. Use the correct one for your context:
-
-| Tool | Context | How It Works |
-|------|---------|--------------|
-| `python tools/send_telegram.py` | ChatSession (PM) | Queues via Redis, relay sends via Telethon, records msg_id for summarizer bypass |
-| `valor-telegram send` | DevSession / CLI | Sends directly via Telethon, no Redis queue, no summarizer bypass |
-
-**ChatSession (PM)** should always use `tools/send_telegram.py`. It supports text, single file attachments, and multi-file albums via `--file` (repeatable, max 10 files). Using `valor-telegram send` from ChatSession would bypass the Redis queue and break `has_pm_messages()` tracking.
-
-### PM Tool Examples
-
-```bash
-# Text only
-python tools/send_telegram.py "Status update message"
-
-# Single file with caption
-python tools/send_telegram.py "Screenshot attached" --file /path/to/screenshot.png
-
-# Multi-file album (grouped as one Telegram album message)
-python tools/send_telegram.py "PR review screenshots" --file before.png --file during.png --file after.png
-
-# File only (no caption)
-python tools/send_telegram.py --file /path/to/document.pdf
-```
-
-**DevSession** uses `valor-telegram send` for direct CLI sends when needed.
+**CLI**: `valor-telegram`
 
 ## Reading Messages
-
-**CLI**: `valor-telegram`
 
 ```bash
 # Recent messages from a chat
@@ -59,7 +30,7 @@ valor-telegram read --chat "Dev: Valor" --since "1 hour ago"
 valor-telegram read --chat "Dev: Valor" --limit 5 --json
 ```
 
-## Sending Messages (CLI -- DevSession only)
+## Sending Messages
 
 ```bash
 # Send text message
@@ -86,8 +57,8 @@ valor-telegram chats
 - **Check what someone said**: `valor-telegram read --chat "Tom" --limit 10`
 - **Find a past discussion**: `valor-telegram read --chat "Dev: Valor" --search "authentication"`
 - **Get recent context**: `valor-telegram read --chat "Dev: Valor" --since "2 hours ago"`
-- **Send a status update (DevSession)**: `valor-telegram send --chat "Dev: Valor" "Deployment complete"`
-- **Share a file (DevSession)**: `valor-telegram send --chat "Tom" "Here's the report" --file ./report.pdf`
+- **Send a status update**: `valor-telegram send --chat "Dev: Valor" "Deployment complete"`
+- **Share a file**: `valor-telegram send --chat "Tom" "Here's the report" --file ./report.pdf`
 
 ## Notes
 

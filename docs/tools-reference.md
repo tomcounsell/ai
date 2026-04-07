@@ -79,49 +79,6 @@ for r in results:
     print(f"{r.relevance:.2f} | {r.path} | {r.section} | {r.impact_type}")
 ```
 
-### Emoji Embedding (`tools.emoji_embedding`)
-
-Embedding-based emoji selection for Telegram reactions. Maps feeling words to the nearest emoji via cosine similarity, searching both the 73 standard Telegram reaction emojis and any available Premium custom emoji packs.
-
-```python
-from tools.emoji_embedding import find_best_emoji, find_best_emoji_for_message, EmojiResult
-
-result = find_best_emoji("excited")        # -> EmojiResult
-str(result)                                 # -> "🔥" (backward compatible)
-result.is_custom                            # -> True if custom emoji matched
-result.document_id                          # -> Telegram document_id for custom emoji
-
-result = find_best_emoji_for_message(text)  # -> EmojiResult for message context
-```
-
-Returns an `EmojiResult` dataclass carrying both standard emoji and optional custom emoji data. `str(result)` preserves backward compatibility. Custom emoji wins only when its score exceeds the standard match by a 0.05 delta.
-
-Used by the bridge for automatic reaction selection and by `send_telegram --react` / `--emoji` for agent-initiated reactions and messages. See `docs/features/emoji-embedding-reactions.md` for full documentation.
-
-### Send Telegram Reactions (`tools.send_telegram --react`)
-
-Set an emoji reaction on a Telegram message by describing a feeling word. The feeling is resolved to the nearest emoji (standard or custom) via the embedding index.
-
-```bash
-python tools/send_telegram.py --react "excited"
-python tools/send_telegram.py --react "great work"
-python tools/send_telegram.py --react "thinking"
-```
-
-Requires `TELEGRAM_REPLY_TO` to be set (identifies the message to react to). The reaction payload is queued to the Redis outbox and delivered by `bridge/telegram_relay.py`. When a custom emoji is matched, the payload includes `custom_emoji_document_id` for the relay to dispatch via `ReactionCustomEmoji`.
-
-### Send Telegram Custom Emoji (`tools.send_telegram --emoji`)
-
-Send a standalone custom emoji message by describing a feeling word. The feeling is resolved to the best emoji via the embedding index, preferring custom emoji when available.
-
-```bash
-python tools/send_telegram.py --emoji "celebration"
-python tools/send_telegram.py --emoji "excited"
-python tools/send_telegram.py --emoji "sad"
-```
-
-Requires `TELEGRAM_CHAT_ID` and `VALOR_SESSION_ID`. Queues a `custom_emoji_message` payload to the Redis outbox. The relay renders it using `MessageEntityCustomEmoji` for Premium custom emoji, falling back to plain text if the send fails.
-
 ### Link Analysis (`tools.link_analysis`)
 
 URL extraction and metadata analysis.
@@ -145,92 +102,42 @@ bug_sessions = sessions_by_tag("bug")
 auto_tag_session("session-123")  # called automatically at session completion
 ```
 
-### Agent Session Scheduler (`tools.agent_session_scheduler`)
+### Job Scheduler (`tools.job_scheduler`)
 
-Agent-initiated queue operations. Schedule SDLC sessions, push arbitrary messages,
+Agent-initiated queue operations. Schedule SDLC jobs, push arbitrary messages,
 and manage queue state mid-conversation.
 
 ```bash
 # Schedule SDLC work for a GitHub issue
-python -m tools.agent_session_scheduler schedule --issue 113
-python -m tools.agent_session_scheduler schedule --issue 113 --after "2026-03-12T02:00:00Z"
+python -m tools.job_scheduler schedule --issue 113
+python -m tools.job_scheduler schedule --issue 113 --after "2026-03-12T02:00:00Z"
 
-# Push arbitrary session
-python -m tools.agent_session_scheduler push --message "What is the architecture?"
+# Push arbitrary job
+python -m tools.job_scheduler push --message "What is the architecture?"
 
 # Queue status
-python -m tools.agent_session_scheduler status
+python -m tools.job_scheduler status
 
 # Queue manipulation
-python -m tools.agent_session_scheduler bump --agent-session-id <ID>
-python -m tools.agent_session_scheduler pop --project valor
-python -m tools.agent_session_scheduler cancel --agent-session-id <ID>
+python -m tools.job_scheduler bump --job-id <JOB_ID>
+python -m tools.job_scheduler pop --project valor
+python -m tools.job_scheduler cancel --job-id <JOB_ID>
 
-# Kill a running or pending session (terminates subprocess, sets status="killed")
-python -m tools.agent_session_scheduler kill --agent-session-id <ID>
-python -m tools.agent_session_scheduler kill --session-id <SESSION_ID>
-python -m tools.agent_session_scheduler kill --all
+# Kill a running or pending job (terminates subprocess, sets status="killed")
+python -m tools.job_scheduler kill --job-id <JOB_ID>
+python -m tools.job_scheduler kill --session-id <SESSION_ID>
+python -m tools.job_scheduler kill --all
 
 # List sessions by status
-python -m tools.agent_session_scheduler list --status killed,abandoned
-python -m tools.agent_session_scheduler list --status completed --limit 5
+python -m tools.job_scheduler list --status killed,abandoned
+python -m tools.job_scheduler list --status completed --limit 5
 
 # Clean up stale sessions (deletes killed/abandoned/failed older than N minutes)
-python -m tools.agent_session_scheduler cleanup --age 30 --dry-run   # Preview
-python -m tools.agent_session_scheduler cleanup --age 30              # Delete
+python -m tools.job_scheduler cleanup --age 30 --dry-run   # Preview
+python -m tools.job_scheduler cleanup --age 30              # Delete
 ```
 
-See `docs/features/agent-session-scheduling.md` for full documentation.
-
-### SDLC Stage Query (`tools.sdlc_stage_query`)
-
-Query SDLC pipeline `stage_states` from a PM session. Used by the SDLC router skill as the primary signal for routing decisions (which sub-skill to dispatch next). Returns JSON mapping stage names to statuses.
-
-```bash
-# Query by session ID
-python -m tools.sdlc_stage_query --session-id tg_project_123_456
-
-# Query by GitHub issue number (finds the PM session tracking that issue)
-python -m tools.sdlc_stage_query --issue-number 704
-
-# No args — falls back to VALOR_SESSION_ID / AGENT_SESSION_ID env vars
-python -m tools.sdlc_stage_query
-```
-
-```python
-from tools.sdlc_stage_query import query_stage_states
-
-states = query_stage_states(session_id="tg_project_123_456")
-# {"ISSUE": "completed", "PLAN": "completed", "BUILD": "in_progress", ...}
-
-states = query_stage_states(issue_number=704)
-```
-
-Always exits 0 and returns `{}` on any error (missing session, Redis down, malformed data). See `docs/features/pipeline-state-machine.md` for how the router uses this tool.
-
-## OfficeCLI
-
-Standalone binary at `~/.local/bin/officecli` for creating, reading, and editing Office documents (.docx, .xlsx, .pptx). No dependencies, no Office installation needed. Installed and updated automatically by the update system (`scripts/update/officecli.py`).
-
-```bash
-# Create files
-officecli create report.docx
-officecli create data.xlsx
-officecli create slides.pptx
-
-# Read and inspect
-officecli view report.docx outline       # Document structure
-officecli view report.docx stats         # Page/word/shape counts
-officecli get report.docx '/body/p[1]' --json
-
-# Edit
-officecli set data.xlsx /Sheet1/A1 --prop value="Name" --prop bold=true
-officecli add slides.pptx /slide[1] --type shape --prop text="Revenue grew 25%"
-```
-
-Strategy: L1 (read) then L2 (DOM edit) then L3 (raw XML). Use `--json` for structured output. Run `officecli <format> set` for help on available properties.
-
-See `.claude/skills/officecli/SKILL.md` for the full agent reference.
+See `docs/features/job-scheduling.md` for full documentation.
 
 ## Image Tools
 

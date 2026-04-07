@@ -70,7 +70,7 @@ Set `SKIP_SDLC=1` to bypass **all** SDLC stop gates — both the Claude Code hoo
 
 See `.claude/skills/sdlc/SKILL.md` for the ground truth on pipeline stages.
 
-Stages: **Plan → Critique → Build → Test → Patch → Review → Patch → Docs → Merge**
+Stages: **Plan → Build → Test → Patch → Review → Patch → Docs → Merge**
 
 Key properties:
 - **Commits happen throughout Build** at logical checkpoints — not batched at end

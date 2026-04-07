@@ -63,7 +63,7 @@ class TestRegisterDevSessionCompletion:
         """Should mark pending dev sessions as completed."""
         mock_dev = MagicMock()
         mock_dev.status = "running"
-        mock_dev.agent_session_id = "session-42"
+        mock_dev.job_id = "job-42"
 
         mock_query = MagicMock()
         mock_query.filter.return_value = [mock_dev]

@@ -22,7 +22,7 @@ import pytest
 def _make_mock_agent_session(**overrides):
     """Create a mock AgentSession with sensible defaults."""
     defaults = {
-        "agent_session_id": "session-001",
+        "job_id": "job-001",
         "session_id": "tg_test_12345_100",
         "project_key": "test-project",
         "status": "pending",
@@ -92,9 +92,8 @@ class TestTelegramMessageEnrichmentFields:
 
     def test_project_key_is_key_field(self):
         """TelegramMessage.project_key should be a KeyField for querying."""
-        from popoto import KeyField
-
         from models.telegram import TelegramMessage
+        from popoto import KeyField
 
         pk_field = TelegramMessage._meta.fields["project_key"]
         assert isinstance(pk_field, KeyField)
@@ -121,7 +120,7 @@ class TestEnrichmentFromTelegramMessage:
         """When telegram_message_key is None, enrichment defaults are all empty."""
         session = _make_mock_agent_session(telegram_message_key=None)
 
-        # Simulate the enrichment logic from agent_session_queue.py
+        # Simulate the enrichment logic from job_queue.py
         enrich_has_media = False
         enrich_media_type = None
         enrich_youtube_urls = None
@@ -147,7 +146,7 @@ class TestEnrichmentFromTelegramMessage:
         tm.non_youtube_urls = '["https://docs.python.org"]'
         tm.reply_to_msg_id = 77
 
-        # Simulate enrichment logic from agent_session_queue.py
+        # Simulate enrichment logic from job_queue.py
         enrich_has_media = False
         enrich_media_type = None
         enrich_youtube_urls = None
@@ -207,37 +206,37 @@ class TestBackReferenceSetting:
         assert "agent_session_id" in TelegramMessage._meta.field_names
 
     def test_agent_session_id_set_on_telegram_message(self):
-        """When a session has telegram_message_key, agent_session_id should be set on TM."""
+        """When a job has telegram_message_key, agent_session_id should be set on TM."""
         tm = MagicMock()
         tm.agent_session_id = None
         tm.save = MagicMock()
 
-        # Simulate agent_session_queue.py back-reference setting
+        # Simulate job_queue.py:1461-1471
         telegram_message_key = "tm-001"
-        agent_session_id = "session-abc"
+        job_id = "job-abc"
 
         if telegram_message_key:
             trigger_msgs = [tm]
             if trigger_msgs and not trigger_msgs[0].agent_session_id:
-                trigger_msgs[0].agent_session_id = agent_session_id
+                trigger_msgs[0].agent_session_id = job_id
                 trigger_msgs[0].save()
 
-        assert tm.agent_session_id == "session-abc"
+        assert tm.agent_session_id == "job-abc"
         tm.save.assert_called_once()
 
     def test_agent_session_id_not_overwritten(self):
         """Back-reference should not overwrite existing agent_session_id."""
         tm = MagicMock()
-        tm.agent_session_id = "session-existing"
+        tm.agent_session_id = "job-existing"
         tm.save = MagicMock()
 
         if True:  # telegram_message_key is set
             trigger_msgs = [tm]
             if trigger_msgs and not trigger_msgs[0].agent_session_id:
-                trigger_msgs[0].agent_session_id = "session-new"
+                trigger_msgs[0].agent_session_id = "job-new"
                 trigger_msgs[0].save()
 
-        assert tm.agent_session_id == "session-existing"
+        assert tm.agent_session_id == "job-existing"
         tm.save.assert_not_called()
 
     def test_no_back_reference_when_no_trigger(self):
@@ -311,9 +310,8 @@ class TestProjectKeyPresence:
 
     def test_chat_project_key_is_regular_field(self):
         """Chat.project_key is a regular Field (not KeyField) to avoid delete-and-recreate."""
-        from popoto import Field, KeyField
-
         from models.chat import Chat
+        from popoto import Field, KeyField
 
         pk_field = Chat._meta.fields["project_key"]
         assert isinstance(pk_field, Field)
@@ -470,23 +468,34 @@ class TestMigrationScript:
 
 
 class TestAgentSessionIdAlias:
-    """Test the AgentSession.id property that aliases agent_session_id."""
+    """Test the AgentSession.id property that aliases job_id."""
 
-    def test_id_field_exists(self):
-        """AgentSession should have an 'id' AutoKeyField."""
-        from popoto import AutoKeyField
-
+    def test_id_property_exists(self):
+        """AgentSession should have an 'id' property."""
         from models.agent_session import AgentSession
 
         assert hasattr(AgentSession, "id")
-        assert isinstance(AgentSession.id, AutoKeyField)
+        assert isinstance(AgentSession.id, property)
 
-    def test_agent_session_id_property_exists(self):
-        """AgentSession should have an 'agent_session_id' backward-compat property."""
+    def test_id_property_has_getter(self):
+        """The id property should have a getter function."""
         from models.agent_session import AgentSession
 
-        assert isinstance(AgentSession.agent_session_id, property)
-        assert AgentSession.agent_session_id.fget is not None
+        assert AgentSession.id.fget is not None
+
+    def test_id_returns_job_id_value(self):
+        """AgentSession.id should delegate to self.job_id."""
+        from models.agent_session import AgentSession
+
+        # Verify the property implementation logic
+        class FakeSession:
+            def __init__(self, jid):
+                self.job_id = jid
+
+            id = AgentSession.id
+
+        assert FakeSession("job-xyz").id == "job-xyz"
+        assert FakeSession(None).id is None
 
 
 # ===================================================================
@@ -500,33 +509,16 @@ class TestAgentSessionFieldPresence:
     @pytest.mark.parametrize(
         "field_name",
         [
-            "initial_telegram_message",
-            "extra_context",
+            "classification_type",
+            "telegram_message_id",
         ],
     )
     def test_retained_fields_present(self, field_name):
-        """AgentSession should have consolidated DictFields."""
+        """AgentSession should retain classification and message fields."""
         from models.agent_session import AgentSession
 
         assert field_name in AgentSession._meta.field_names, (
             f"AgentSession.{field_name} should exist"
-        )
-
-    @pytest.mark.parametrize(
-        "property_name",
-        [
-            "classification_type",
-            "telegram_message_id",
-            "sender_name",
-            "message_text",
-        ],
-    )
-    def test_property_accessors_exist(self, property_name):
-        """AgentSession should have property accessors for consolidated fields."""
-        from models.agent_session import AgentSession
-
-        assert hasattr(AgentSession, property_name), (
-            f"AgentSession.{property_name} property should exist"
         )
 
     @pytest.mark.parametrize(

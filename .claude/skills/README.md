@@ -26,7 +26,6 @@ Human-readable index of all Claude Code skills in this project. Not loaded by Cl
 | reclassify | 52 | Infra | - | Reclassify plan type during Planning phase |
 | sdlc | 284 | User + Model | - | Single entry point — dispatcher for all development work (ground truth for pipeline stages) |
 | setup | 407 | Infra | - | Configure new machine for Valor bridge |
-| skillify | 148 | User only | - | Capture a session's repeatable process into a reusable skill |
 | telegram | 68 | Model only | - | Read and send Telegram messages |
 | update | 183 | Infra | - | Pull changes, sync deps, restart bridge |
 

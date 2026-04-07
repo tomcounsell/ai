@@ -18,7 +18,7 @@ class TestPerChatQueueIsolation:
 
     def test_sessions_from_different_chats_are_independent(self):
         """Two chats creating sessions should not interfere."""
-        AgentSession.create_pm(
+        AgentSession.create_chat(
             session_id=f"iso_a_{int(time.time())}",
             project_key="valor",
             working_dir="/tmp/test",
@@ -27,7 +27,7 @@ class TestPerChatQueueIsolation:
             message_text="Hello from chat A",
             sender_name="Alice",
         )
-        AgentSession.create_pm(
+        AgentSession.create_chat(
             session_id=f"iso_b_{int(time.time())}",
             project_key="valor",
             working_dir="/tmp/test",
@@ -45,11 +45,11 @@ class TestPerChatQueueIsolation:
         assert len(b_sessions) == 1
         assert a_sessions[0].sender_name == "Alice"
         assert b_sessions[0].sender_name == "Bob"
-        assert a_sessions[0].agent_session_id != b_sessions[0].agent_session_id
+        assert a_sessions[0].job_id != b_sessions[0].job_id
 
     def test_steering_messages_isolated_between_sessions(self):
         """Steering messages pushed to one session must not appear in another."""
-        s1 = AgentSession.create_pm(
+        s1 = AgentSession.create_chat(
             session_id=f"steer_a_{int(time.time())}",
             project_key="valor",
             working_dir="/tmp/test",
@@ -57,7 +57,7 @@ class TestPerChatQueueIsolation:
             telegram_message_id=10,
             message_text="msg1",
         )
-        s2 = AgentSession.create_pm(
+        s2 = AgentSession.create_chat(
             session_id=f"steer_b_{int(time.time())}",
             project_key="valor",
             working_dir="/tmp/test",
@@ -82,7 +82,7 @@ class TestPerChatQueueIsolation:
     def test_same_project_different_chats_are_parallel(self):
         """Two chats for the same project should create independent sessions."""
         ts = int(time.time())
-        AgentSession.create_pm(
+        AgentSession.create_chat(
             session_id=f"par_a_{ts}",
             project_key="shared_project",
             working_dir="/tmp/test",
@@ -90,7 +90,7 @@ class TestPerChatQueueIsolation:
             telegram_message_id=100,
             message_text="task 1",
         )
-        AgentSession.create_pm(
+        AgentSession.create_chat(
             session_id=f"par_b_{ts}",
             project_key="shared_project",
             working_dir="/tmp/test",
@@ -111,7 +111,7 @@ class TestPerChatQueueIsolation:
         """Message dedup should be per-chat, not global."""
         ts = int(time.time())
         # Same message_id in two different chats — both should be created
-        s1 = AgentSession.create_pm(
+        s1 = AgentSession.create_chat(
             session_id=f"dedup_a_{ts}",
             project_key="valor",
             working_dir="/tmp/test",
@@ -119,7 +119,7 @@ class TestPerChatQueueIsolation:
             telegram_message_id=999,
             message_text="same message",
         )
-        s2 = AgentSession.create_pm(
+        s2 = AgentSession.create_chat(
             session_id=f"dedup_b_{ts}",
             project_key="valor",
             working_dir="/tmp/test",
@@ -128,5 +128,5 @@ class TestPerChatQueueIsolation:
             message_text="same message",
         )
 
-        assert s1.agent_session_id != s2.agent_session_id
+        assert s1.job_id != s2.job_id
         assert s1.chat_id != s2.chat_id

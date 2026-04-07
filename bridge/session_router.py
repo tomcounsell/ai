@@ -6,11 +6,13 @@ expectations (i.e., are waiting for specific human input). If a
 high-confidence match is found, the message is routed to that session
 instead of creating a new one.
 
-Always-on (no feature flag). Confidence threshold: >= 0.80 for auto-routing.
+Feature-flagged via SEMANTIC_ROUTING env var (default: disabled).
+Confidence threshold: >= 0.80 for auto-routing.
 """
 
 import json
 import logging
+import os
 
 import anthropic
 
@@ -23,6 +25,16 @@ logger = logging.getLogger(__name__)
 # Below this, a new session is created (current behavior).
 # Medium-confidence disambiguation (0.50-0.80) is deferred to Phase 3.
 ROUTING_CONFIDENCE_THRESHOLD = 0.80
+
+
+def is_semantic_routing_enabled() -> bool:
+    """Check if semantic routing is enabled via feature flag.
+
+    Controlled by SEMANTIC_ROUTING env var. Defaults to disabled.
+    Accepts: 'true', '1', 'yes' (case-insensitive).
+    """
+    val = os.environ.get("SEMANTIC_ROUTING", "").lower().strip()
+    return val in ("true", "1", "yes")
 
 
 async def find_matching_session(
@@ -68,9 +80,9 @@ async def find_matching_session(
             )
             return (None, 0.0)
 
-        # Cap at 5 most recent by updated_at
+        # Cap at 5 most recent by last_activity
         candidates.sort(
-            key=lambda s: s.updated_at or s.created_at or 0,
+            key=lambda s: s.last_activity or s.created_at or 0,
             reverse=True,
         )
         candidates = candidates[:5]

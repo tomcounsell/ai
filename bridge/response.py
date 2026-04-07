@@ -1,19 +1,14 @@
 """Message cleaning, tool log filtering, file extraction,
 response sending, and reaction management."""
 
-from __future__ import annotations
-
+import asyncio
 import logging
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from tools.emoji_embedding import EmojiResult
 
 from telethon import TelegramClient
 from telethon.tl.functions.messages import SendReactionRequest
-from telethon.tl.types import Message, ReactionCustomEmoji, ReactionEmoji
+from telethon.tl.types import Message, ReactionEmoji
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +155,21 @@ REACTION_SUCCESS = "👍"  # Simple ack, no text reply needed
 REACTION_COMPLETE = "🏆"  # Work done, text reply attached
 REACTION_ERROR = "😱"  # Something went wrong
 
+# Intent-specific processing emojis (classified by local Ollama)
+# All emojis validated 2026-02-13 via scripts/test_emoji_reactions.py
+INTENT_REACTIONS = {
+    "search": "👀",  # Searching/looking
+    "code_execution": "👨‍💻",  # Running code
+    "image_generation": "🤩",  # Creating an image
+    "image_analysis": "🤓",  # Analyzing an image
+    "file_operation": "✍",  # File operations/writing
+    "git_operation": "👨‍💻",  # Git work
+    "chat": "😎",  # Casual conversation
+    "tool_use": "🫡",  # Executing command
+    "system": "👾",  # System task
+    "unknown": "🤔",  # Default thinking
+}
+
 
 def filter_tool_logs(response: str) -> str:
     """
@@ -182,14 +192,6 @@ def filter_tool_logs(response: str) -> str:
         r"^[\U0001F300-\U0001F9FF\u2600-\u26FF\u2700-\u27BF]\s*\w+:", re.UNICODE
     )
 
-    # Delivery-choice prefixes: internal agent control signals that should never
-    # be sent as user-facing text. These are parsed by the stop hook to set
-    # delivery_action on the session, but can leak through the nudge loop's
-    # parallel send path if the stop hook hasn't written to Redis yet.
-    delivery_choice_pattern = re.compile(
-        r"^(REACT:\s*|SEND\s*$|EDIT:\s*|SILENT\s*$|CONTINUE\s*$)", re.IGNORECASE
-    )
-
     for line in lines:
         stripped = line.strip()
 
@@ -198,11 +200,6 @@ def filter_tool_logs(response: str) -> str:
             # Only add blank line if last line wasn't blank
             if filtered and filtered[-1].strip():
                 filtered.append(line)
-            continue
-
-        # Skip delivery-choice control signals (REACT:, SEND, EDIT:, SILENT, CONTINUE)
-        # These are internal protocol between agent and stop hook, never user-facing.
-        if delivery_choice_pattern.match(stripped):
             continue
 
         # Skip lines matching explicit tool log patterns
@@ -433,70 +430,6 @@ async def send_response_with_files(
         except Exception:
             pass  # Fall back to existing session object
 
-    # ── Delivery instruction check ──
-    # If the stop-hook review gate wrote a delivery instruction, execute it
-    # directly instead of running the summarizer. The agent already reviewed
-    # and approved the output.
-    if session and getattr(session, "delivery_action", None):
-        delivery_action = session.delivery_action
-
-        if delivery_action == "send":
-            # Agent approved or edited the message — send delivery_text
-            delivery_text = getattr(session, "delivery_text", None) or text
-            # Still send any extracted files first
-            if files:
-                for f in files:
-                    try:
-                        await client.send_file(_chat_id, f, reply_to=_reply_to)
-                    except Exception as e:
-                        logger.error(f"Failed to send file: {e}")
-            if delivery_text:
-                if len(delivery_text) > 4096:
-                    delivery_text = _truncate_at_sentence_boundary(delivery_text, limit=4096)
-                try:
-                    from bridge.markdown import send_markdown
-
-                    return await send_markdown(client, _chat_id, delivery_text, reply_to=_reply_to)
-                except Exception as e:
-                    logger.error(f"Delivery send failed: {e}")
-            return None
-
-        if delivery_action == "react":
-            # Agent chose emoji-only reaction; fall back to SEND if reaction fails
-            delivery_emoji = getattr(session, "delivery_emoji", None) or "👍"
-            reacted = False
-            if _reply_to:
-                reacted = await set_reaction(client, _chat_id, _reply_to, delivery_emoji)
-            if reacted:
-                logger.info(
-                    f"Delivery: react-only ({delivery_emoji}) for "
-                    f"session {getattr(session, 'session_id', 'unknown')}"
-                )
-                return None
-            # Reaction failed — fall back to sending the draft text
-            logger.warning(
-                f"Delivery: react failed, falling back to SEND for "
-                f"session {getattr(session, 'session_id', 'unknown')}"
-            )
-            fallback_text = getattr(session, "delivery_text", None) or text
-            if fallback_text:
-                if len(fallback_text) > 4096:
-                    fallback_text = _truncate_at_sentence_boundary(fallback_text, limit=4096)
-                try:
-                    from bridge.markdown import send_markdown
-
-                    return await send_markdown(client, _chat_id, fallback_text, reply_to=_reply_to)
-                except Exception as e:
-                    logger.error(f"React fallback send also failed: {e}")
-            return None
-
-        if delivery_action == "silent":
-            # Agent chose silence — no text, no emoji
-            logger.info(f"Delivery: silent for session {getattr(session, 'session_id', 'unknown')}")
-            return None
-
-        # Unknown delivery_action → fall through to normal summarizer path
-
     # PM self-messaging bypass: if the PM already sent messages via the
     # send_telegram tool during this session (or its parent ChatSession in
     # SDLC flows), skip the summarizer entirely. The PM authored its own
@@ -506,15 +439,15 @@ async def send_response_with_files(
     # returning, so file attachments are not lost on PM self-message sessions.
     pm_bypass = session and hasattr(session, "has_pm_messages") and session.has_pm_messages()
     pm_bypass_source = "session"
-    if not pm_bypass and session and hasattr(session, "get_parent_session"):
-        parent = session.get_parent_session()
+    if not pm_bypass and session and hasattr(session, "get_parent_chat_session"):
+        parent = session.get_parent_chat_session()
         if parent and hasattr(parent, "has_pm_messages") and parent.has_pm_messages():
             pm_bypass = True
             pm_bypass_source = "parent"
     if pm_bypass:
         # Log pm_sent_message_ids from the source that triggered the bypass
-        if pm_bypass_source == "parent" and hasattr(session, "get_parent_session"):
-            _parent = session.get_parent_session()
+        if pm_bypass_source == "parent" and hasattr(session, "get_parent_chat_session"):
+            _parent = session.get_parent_chat_session()
             _bypass_ids = getattr(_parent, "pm_sent_message_ids", []) if _parent else []
         else:
             _bypass_ids = getattr(session, "pm_sent_message_ids", [])
@@ -615,14 +548,6 @@ async def send_response_with_files(
         except Exception as e:
             logger.error(f"Failed to send file {file_path}: {e}")
             await client.send_message(_chat_id, f"Failed to send file: {file_path.name}")
-        finally:
-            # Clean up temp files created by the summarizer
-            if str(file_path).startswith("/tmp/valor_full_output_"):
-                try:
-                    Path(file_path).unlink(missing_ok=True)
-                    logger.debug(f"Cleaned up temp file: {file_path}")
-                except Exception:
-                    pass  # Non-fatal: OS will clean /tmp eventually
 
     # PM bypass (dual-personality guard): files have been sent above,
     # skip text/summarizer output. This prevents sending both PM
@@ -667,67 +592,64 @@ async def send_response_with_files(
     return None
 
 
-async def set_reaction(
-    client: TelegramClient, chat_id: int, msg_id: int, emoji: str | EmojiResult | None
-) -> bool:
-    """Set a reaction on a message.
-
-    Supports both standard emoji strings and ``EmojiResult`` objects from
-    the emoji embedding system. When an ``EmojiResult`` with ``is_custom=True``
-    is provided, attempts to set a custom emoji reaction via
-    ``ReactionCustomEmoji(document_id=...)``. Falls back to the standard
-    emoji from the same result on failure (non-Premium, restricted chat, etc.).
+def get_processing_emoji(message: str) -> str:
+    """
+    Get the appropriate processing emoji based on message intent.
+    Uses local Ollama for fast classification.
 
     Args:
-        client: Telegram client.
-        chat_id: Chat ID.
-        msg_id: Message ID.
-        emoji: Emoji string, EmojiResult, or None to remove reactions.
+        message: The user's message
 
     Returns:
-        True if successful, False otherwise.
+        Emoji string for the processing stage
     """
-    from tools.emoji_embedding import EmojiResult
-
-    # Normalize to EmojiResult if string
-    if isinstance(emoji, str):
-        emoji_result = EmojiResult(emoji=emoji)
-    elif isinstance(emoji, EmojiResult):
-        emoji_result = emoji
-    elif emoji is None:
-        # Remove reactions
-        try:
-            await client(SendReactionRequest(peer=chat_id, msg_id=msg_id, reaction=[]))
-            return True
-        except Exception as e:
-            logger.debug(f"Could not remove reaction: {e}")
-            return False
-    else:
-        logger.debug(f"set_reaction: unexpected emoji type {type(emoji)}")
-        return False
-
-    # Try custom emoji first if applicable
-    if emoji_result.is_custom and emoji_result.document_id is not None:
-        try:
-            reaction = [ReactionCustomEmoji(document_id=emoji_result.document_id)]
-            await client(SendReactionRequest(peer=chat_id, msg_id=msg_id, reaction=reaction))
-            return True
-        except Exception as e:
-            logger.debug(
-                f"Custom emoji reaction failed (doc_id={emoji_result.document_id}), "
-                f"falling back to standard: {e}"
-            )
-            # Fall through to standard emoji
-
-    # Standard emoji path
-    standard_emoji = emoji_result.emoji or str(emoji_result)
-    if not standard_emoji:
-        return False
-
     try:
-        reaction = [ReactionEmoji(emoticon=standard_emoji)]
-        await client(SendReactionRequest(peer=chat_id, msg_id=msg_id, reaction=reaction))
+        # intent/ module classifies message type (search, code, chat, etc.)
+        # to pick a contextual reaction emoji. Falls back to default on failure.
+        from intent import classify_intent
+
+        result = classify_intent(message, use_ollama=True)
+        intent = result.get("intent", "unknown")
+        return INTENT_REACTIONS.get(intent, REACTION_PROCESSING)
+    except Exception as e:
+        logger.debug(f"Intent classification failed: {e}")
+        return REACTION_PROCESSING
+
+
+async def get_processing_emoji_async(message: str) -> str:
+    """
+    Async wrapper for intent classification.
+    Runs in executor to not block the event loop.
+    """
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, get_processing_emoji, message)
+
+
+async def set_reaction(
+    client: TelegramClient, chat_id: int, msg_id: int, emoji: str | None
+) -> bool:
+    """
+    Set a reaction on a message.
+
+    Args:
+        client: Telegram client
+        chat_id: Chat ID
+        msg_id: Message ID
+        emoji: Emoji to react with, or None to remove reactions
+
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        reaction = [ReactionEmoji(emoticon=emoji)] if emoji else []
+        await client(
+            SendReactionRequest(
+                peer=chat_id,
+                msg_id=msg_id,
+                reaction=reaction,
+            )
+        )
         return True
     except Exception as e:
-        logger.debug(f"Could not set reaction '{standard_emoji}': {e}")
+        logger.debug(f"Could not set reaction '{emoji}': {e}")
         return False

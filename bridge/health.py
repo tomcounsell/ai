@@ -1,7 +1,7 @@
 """Dependency health tracking for the bridge.
 
 Centralizes health status of all external dependencies (Telegram, Anthropic, Redis)
-via their circuit breakers. Provides a summary dict for diagnostics and the session
+via their circuit breakers. Provides a summary dict for diagnostics and the job
 status CLI.
 """
 

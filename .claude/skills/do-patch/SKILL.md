@@ -72,12 +72,7 @@ Parse the input to classify the fix type:
 - **Test failure**: pytest output with `FAILED`, `ERROR`, or traceback lines
 - **Review blocker**: prose describing a code issue, race condition, logic bug, or style violation
 
-**If the fix type is "review blocker" or "review findings"**: You MUST fetch the actual PR review comments from GitHub (see Build Context Recovery step 6 above). The PATCH_ARG may be a summary that omits specific findings. The PR comments are the authoritative source of what needs fixing.
-
-**ALL review findings must be addressed** — not just blockers. Nits, tech debt suggestions, and style feedback are all actionable. A "minimum approve" with unresolved findings is not acceptable. For each finding:
-- **Fix it** if the fix is straightforward and aligned with the plan
-- **Annotate it** if the finding should remain as-is — add an inline code comment: `# NOTE: [finding] -- left as-is because [rationale]` so the next reviewer sees a deliberate decision, not a skipped issue
-- **Never silently skip** a finding — every item must have a visible disposition
+**If the fix type is "review blocker"**: You MUST fetch the actual PR review comments from GitHub (see Build Context Recovery step 6 above). The PATCH_ARG may be a summary that omits specific blockers. The PR comments are the authoritative source of what needs fixing.
 
 #### Root Cause Analysis: Trace & Verify
 

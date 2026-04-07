@@ -53,8 +53,8 @@ SENSITIVE_FRAGMENTS = (
 
 
 def _is_pm_session() -> bool:
-    """Check if the current session is a PM session."""
-    return os.environ.get("SESSION_TYPE") == SessionType.PM
+    """Check if the current session is a PM (ChatSession)."""
+    return os.environ.get("SESSION_TYPE") == SessionType.CHAT
 
 
 def _is_pm_allowed_write(file_path: str) -> bool:
@@ -172,17 +172,15 @@ def _maybe_register_dev_session(tool_input: dict[str, Any], claude_uuid: str | N
 
     try:
         prompt_text = tool_input.get("prompt", "")[:200] or "dev-session"
-        dev_session = AgentSession.create_child(
-            role="dev",
+        dev_session = AgentSession.create_dev(
             session_id=f"dev-{parent_session_id}",
             project_key="default",
             working_dir=os.getcwd(),
-            parent_session_id=parent_session_id,
+            parent_chat_session_id=parent_session_id,
             message_text=prompt_text,
         )
         logger.info(
-            f"[pre_tool_use] Registered DevSession "
-            f"{dev_session.agent_session_id} parent={parent_session_id}"
+            f"[pre_tool_use] Registered DevSession {dev_session.job_id} parent={parent_session_id}"
         )
     except Exception as e:
         logger.warning(f"[pre_tool_use] Failed to register DevSession: {e}")

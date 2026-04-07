@@ -47,7 +47,7 @@ def start_transcript(
     chat_id: str | None = None,
     sender: str | None = None,
     branch_name: str | None = None,
-    slug: str | None = None,
+    work_item_slug: str | None = None,
     classification_type: str | None = None,
     correlation_id: str | None = None,
 ) -> str | None:
@@ -59,7 +59,7 @@ def start_transcript(
         chat_id: Telegram chat ID (optional).
         sender: Who triggered the session (optional).
         branch_name: Git branch associated with the session (optional).
-        slug: Named work item slug (tier 2, optional).
+        work_item_slug: Named work item slug (tier 2, optional).
         classification_type: Auto-classified type (bug/feature/chore, optional).
         correlation_id: End-to-end tracing ID (optional).
 
@@ -70,7 +70,7 @@ def start_transcript(
 
     log_path = str(_transcript_path(session_id))
 
-    # Look up existing session (created by _push_agent_session at enqueue time) and
+    # Look up existing session (created by _push_job at enqueue time) and
     # update it with transcript-phase fields. Only create a new one if no
     # session exists (defensive fallback for standalone transcript usage).
     try:
@@ -79,13 +79,13 @@ def start_transcript(
         if existing:
             s = existing[0]
             s.log_path = log_path
-            s.updated_at = now
+            s.last_activity = now
             if sender:
                 s.sender_name = sender
             if branch_name:
                 s.branch_name = branch_name
-            if slug:
-                s.slug = slug
+            if work_item_slug:
+                s.work_item_slug = work_item_slug
             if classification_type:
                 s.classification_type = classification_type
             if chat_id is not None:
@@ -118,12 +118,12 @@ def start_transcript(
                 sender_name=sender,
                 created_at=now,
                 started_at=now,
-                updated_at=now,
+                last_activity=now,
                 turn_count=0,
                 tool_call_count=0,
                 log_path=log_path,
                 branch_name=branch_name,
-                slug=slug,
+                work_item_slug=work_item_slug,
                 classification_type=classification_type,
                 correlation_id=correlation_id,
             )
@@ -202,7 +202,7 @@ def append_turn(
         if sessions:
             s = sessions[0]
             s.turn_count = (s.turn_count or 0) + 1
-            s.updated_at = time.time()
+            s.last_activity = time.time()
             s.save()
     except Exception as e:
         logger.debug(f"Failed to update SessionLog turn_count for {session_id}: {e}")
@@ -243,7 +243,7 @@ def append_tool_result(
         if sessions:
             s = sessions[0]
             s.tool_call_count = (s.tool_call_count or 0) + 1
-            s.updated_at = time.time()
+            s.last_activity = time.time()
             s.save()
     except Exception as e:
         logger.debug(f"Failed to update SessionLog tool_call_count for {session_id}: {e}")
@@ -276,24 +276,33 @@ def complete_transcript(
     except Exception as e:
         logger.debug(f"Failed to write transcript end for {session_id}: {e}")
 
-    # Delegate status mutation and all side effects to the lifecycle module.
-    # finalize_session() handles: lifecycle log, auto-tag, branch checkpoint,
-    # parent finalization, status + completed_at + save.
+    # Auto-tag the session before finalizing status
     try:
-        from models.session_lifecycle import TERMINAL_STATUSES, finalize_session
+        from tools.session_tags import auto_tag_session
 
+        auto_tag_session(session_id)
+    except Exception as e:
+        logger.debug(f"Auto-tagging failed for {session_id} (non-fatal): {e}")
+
+    # Update SessionLog
+    try:
         sessions = list(AgentSession.query.filter(session_id=session_id))
         if sessions:
             s = sessions[0]
+
+            # Log lifecycle transition BEFORE status change
+            # so log_lifecycle_transition captures old_status→new_status correctly
+            try:
+                s.log_lifecycle_transition(status, f"transcript completed: {status}")
+            except Exception:
+                pass
+
+            # status is an IndexedField — direct mutation is safe
+            s.status = status
+            s.completed_at = time.time()
+            s.last_activity = time.time()
             if summary:
                 s.summary = summary
-                s.save()  # persist summary before finalize (finalize does its own save)
-            if status in TERMINAL_STATUSES:
-                finalize_session(s, status, reason=f"transcript completed: {status}")
-            else:
-                # Non-terminal status like "dormant" — use transition_status
-                from models.session_lifecycle import transition_status
-
-                transition_status(s, status, reason=f"transcript completed: {status}")
+            s.save()
     except Exception as e:
         logger.warning(f"Failed to update SessionLog completion for {session_id}: {e}")

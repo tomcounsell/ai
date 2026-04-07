@@ -7,18 +7,24 @@ description: "Use when cascading documentation updates after code changes. Finds
 
 After a code change lands, find every document that references the changed area and make targeted, surgical updates so docs match the actual implementation.
 
-## Stage Marker
+## Session Progress Tracking
 
-At the very start of this skill, write an in_progress marker:
+Extract the session ID from the conversation context. The bridge injects `SESSION_ID: {id}` into enriched messages. Look for this pattern and store it:
 
 ```bash
-python -m tools.sdlc_stage_marker --stage DOCS --status in_progress 2>/dev/null || true
+# Extract SESSION_ID from context
+# Look for a line like "SESSION_ID: abc123" in the message you received
+# Store in variable: SESSION_ID="abc123"
+
+# Mark DOCS stage as in_progress at the start
+python -m tools.session_progress --session-id "$SESSION_ID" --stage DOCS --status in_progress 2>/dev/null || true
 ```
 
-After all documentation updates are complete and committed (Step 4), write the completion marker:
+After all documentation updates are complete and committed (Step 4):
 
 ```bash
-python -m tools.sdlc_stage_marker --stage DOCS --status completed 2>/dev/null || true
+# Mark DOCS stage complete
+python -m tools.session_progress --session-id "$SESSION_ID" --stage DOCS --status completed 2>/dev/null || true
 ```
 
 ## Goal Alignment
@@ -330,40 +336,7 @@ After all edits are complete:
    **No changes needed**: (list if applicable)
    ```
 
-5. **Mark plan as docs-complete (if plan file exists):**
-
-   Locate the plan file using the current branch slug or PR context:
-   ```bash
-   BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
-   SLUG=$(echo "$BRANCH" | sed 's|^session/||')   PLAN_PATH="docs/plans/${SLUG}.md"
-   ```
-
-   If the plan file exists, add `status: docs_complete` to its YAML frontmatter:
-   ```python
-   import re
-   from pathlib import Path
-
-   plan_path = Path('docs/plans/{slug}.md')
-   if plan_path.exists():
-       text = plan_path.read_text()
-       if text.startswith('---\n'):
-           end = text.index('\n---', 4)
-           frontmatter = text[4:end]
-           if 'status:' not in frontmatter:
-               new_fm = frontmatter + '\nstatus: docs_complete'
-           else:
-               new_fm = re.sub(r'status:\s*\S+', 'status: docs_complete', frontmatter)
-           plan_path.write_text('---\n' + new_fm + '\n---' + text[end + 4:])
-       else:
-           plan_path.write_text('---\nstatus: docs_complete\n---\n\n' + text)
-       print(f'Marked {plan_path} as docs_complete')
-   else:
-       print(f'No plan found at {plan_path} — skipping plan marker')
-   ```
-
-   This marks the plan ready for deletion at merge time.
-
-6. **Commit and push changes:**
+5. **Commit and push changes:**
    ```bash
    git add -A && git commit -m "Docs: cascade updates for <brief change description>" && git push
    ```

@@ -4,12 +4,11 @@ Covers:
 1. AgentSession.log_lifecycle_transition() emits structured log, appends history
 2. Duration derived from started_at/created_at
 3. session_transcript.py calls log_lifecycle_transition() on start and complete
-4. agent_session_queue.py calls log_lifecycle_transition() at key points
+4. job_queue.py calls log_lifecycle_transition() at key points
 """
 
 import logging
 import time
-from datetime import UTC, datetime
 
 import pytest
 
@@ -28,7 +27,7 @@ class TestLogLifecycleTransition:
             session_id="llt-test-2",
             project_key="test",
             status="pending",
-            created_at=datetime.now(tz=UTC),
+            created_at=time.time(),
         )
         s.log_lifecycle_transition("running", "worker picked up")
 
@@ -45,7 +44,7 @@ class TestLogLifecycleTransition:
             session_id="llt-test-3",
             project_key="test",
             status="active",
-            created_at=datetime.now(tz=UTC),
+            created_at=time.time(),
         )
         s.log_lifecycle_transition("completed", "transcript completed: completed")
 
@@ -59,7 +58,7 @@ class TestLogLifecycleTransition:
             session_id="llt-test-4",
             project_key="testproj",
             status="pending",
-            created_at=datetime.now(tz=UTC),
+            created_at=time.time(),
         )
         with caplog.at_level(logging.INFO, logger="models.agent_session"):
             s.log_lifecycle_transition("running", "test context")
@@ -97,7 +96,7 @@ class TestLogLifecycleTransition:
             session_id="llt-test-6",
             project_key="test",
             status="active",
-            created_at=datetime.now(tz=UTC),
+            created_at=time.time(),
         )
         # Force status to None for edge case testing
         s.status = None
@@ -114,7 +113,7 @@ class TestLogLifecycleTransition:
             session_id="llt-test-7",
             project_key="test",
             status="pending",
-            created_at=datetime.now(tz=UTC),
+            created_at=time.time(),
         )
         with caplog.at_level(logging.INFO, logger="models.agent_session"):
             s.log_lifecycle_transition("running")
@@ -201,18 +200,18 @@ class TestSessionTranscriptLifecycleLogging:
         assert len(history) >= 1
 
 
-# ── agent_session_queue.py instrumentation ─────────────────────────────────────────────
+# ── job_queue.py instrumentation ─────────────────────────────────────────────
 
 
 class TestJobQueueLifecycleLogging:
-    """Tests that agent_session_queue functions log lifecycle transitions."""
+    """Tests that job_queue functions log lifecycle transitions."""
 
     @pytest.mark.asyncio
-    async def test_push_agent_session_logs_pending_transition(self, redis_test_db):
-        """_push_agent_session() logs lifecycle transition to 'pending'."""
-        from agent.agent_session_queue import _push_agent_session
+    async def test_push_job_logs_pending_transition(self, redis_test_db):
+        """_push_job() logs lifecycle transition to 'pending'."""
+        from agent.job_queue import _push_job
 
-        await _push_agent_session(
+        await _push_job(
             project_key="test",
             session_id="jq-lc-test-1",
             working_dir="/tmp/test",
@@ -230,11 +229,11 @@ class TestJobQueueLifecycleLogging:
         assert any("pending" in entry for entry in lifecycle_entries)
 
     @pytest.mark.asyncio
-    async def test_pop_agent_session_logs_running_transition(self, redis_test_db):
-        """_pop_agent_session() logs lifecycle transition to 'running'."""
-        from agent.agent_session_queue import _pop_agent_session, _push_agent_session
+    async def test_pop_job_logs_running_transition(self, redis_test_db):
+        """_pop_job() logs lifecycle transition to 'running'."""
+        from agent.job_queue import _pop_job, _push_job
 
-        await _push_agent_session(
+        await _push_job(
             project_key="test",
             session_id="jq-lc-test-2",
             working_dir="/tmp/test",
@@ -244,8 +243,8 @@ class TestJobQueueLifecycleLogging:
             telegram_message_id=1,
         )
 
-        session = await _pop_agent_session("100")
-        assert session is not None
+        job = await _pop_job("100")
+        assert job is not None
 
         # The running session should have a lifecycle entry
         sessions = list(AgentSession.query.filter(status="running"))
@@ -260,8 +259,8 @@ class TestJobQueueLifecycleLogging:
         lifecycle_entries = [h for h in history if "[lifecycle]" in h]
         assert any("running" in entry for entry in lifecycle_entries)
 
-    def test_session_fields_includes_history(self):
-        """_AGENT_SESSION_FIELDS includes history for lifecycle entry preservation."""
-        from agent.agent_session_queue import _AGENT_SESSION_FIELDS
+    def test_job_fields_includes_history(self):
+        """_JOB_FIELDS includes history for lifecycle entry preservation."""
+        from agent.job_queue import _JOB_FIELDS
 
-        assert "history" in _AGENT_SESSION_FIELDS
+        assert "history" in _JOB_FIELDS

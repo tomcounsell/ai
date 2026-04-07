@@ -44,11 +44,10 @@ Parse `TEST_ARGS` to determine what to run:
 | `--direct` | Force direct execution, skip parallel agent dispatch |
 | `unit --direct` | Run `tests/unit/` directly (combinable with any target) |
 | `frontend <url> "<scenario>"` | Run a browser-based UI test via `frontend-tester` subagent |
-| `happy-paths` | Run `python tools/happy_path_runner.py tests/happy-paths/scripts/` directly via bash. No subagent dispatch. |
 
 **Parsing rules:**
 1. Extract flags: `--changed`, `--no-lint`
-2. If target is `frontend`, route to **Frontend Testing** (see below). If target is `happy-paths`, route to **Happy Path Testing** (see below). Neither runs pytest.
+2. If target is `frontend`, route to **Frontend Testing** (see below) — do not run pytest
 3. Whatever remains is the **target**: a test type name (`unit`, `integration`, `e2e`, `tools`, `performance`) or a file/directory path
 4. If no target and no `--changed`, target is "all"
 5. Extract `--direct` flag alongside `--changed` and `--no-lint`
@@ -434,24 +433,6 @@ The `frontend-tester` agent owns all `agent-browser` interaction — the skill n
 | frontend/checkout | FAIL | 0      | 1      | /tmp/...   |
 ```
 
-
-## Happy Path Testing (`happy-paths` target)
-
-When `TEST_ARGS` starts with `happy-paths`, run the deterministic test runner directly. No subagent needed.
-
-### Execution:
-```bash
-python tools/happy_path_runner.py tests/happy-paths/scripts/
-```
-
-### Result format:
-The runner outputs a markdown summary table to stdout with pass/fail/error counts per script, followed by a JSON summary in an HTML comment block.
-Include results in the summary table alongside pytest and frontend suites.
-
-### When running all tests:
-If `tests/happy-paths/scripts/` contains `.sh` files, include happy-paths execution
-alongside pytest and frontend targets. Run via bash, not subagent.
-
 ## CWD-Relative Execution
 
 All commands run relative to the current working directory. Do not attempt to detect or navigate to worktrees. When `/do-test` is invoked:
@@ -532,16 +513,6 @@ For each stale xfail detected (either form):
 **Important:** Runtime `pytest.xfail()` is a stronger smell than decorator `@pytest.mark.xfail`. If `--changed` mode is active and the changed files include a bug fix, runtime xfails in related test files should be flagged as **blockers**, not just warnings.
 
 **Skip if:** No xfail markers found in the test suite.
-
-## OUTCOME Contract Emission
-
-As the very last line of your final response, emit an OUTCOME contract so the pipeline can classify the test result programmatically:
-
-- **Success** (all tests passed): `<!-- OUTCOME {"status":"success","stage":"TEST","artifacts":{"passed":<N>,"failed":0}} -->`
-- **Fail** (test failures found): `<!-- OUTCOME {"status":"fail","stage":"TEST","artifacts":{"passed":<N>,"failed":<N>}} -->`
-- **Partial** (tests passed but with flaky tests or warnings): `<!-- OUTCOME {"status":"partial","stage":"TEST","artifacts":{"passed":<N>,"failed":0,"flaky":<N>}} -->`
-
-This structured output is parsed by `classify_outcome()` in `bridge/pipeline_state.py` (Tier 0) before any text pattern matching.
 
 ## Notes
 

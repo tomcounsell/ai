@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, field_validator
@@ -96,45 +95,6 @@ class StageStates(BaseModel):
     def to_dict(self) -> dict[str, str]:
         """Return the validated stages dict."""
         return dict(self.stages)
-
-
-# Regex to match <!-- OUTCOME {...} --> blocks in agent output
-_OUTCOME_RE = re.compile(r"<!-- OUTCOME (\{.*?\}) -->")
-
-
-def _parse_outcome_contract(output_tail: str) -> dict | None:
-    """Parse an OUTCOME contract from agent output tail.
-
-    Scans for ``<!-- OUTCOME {...} -->`` blocks and parses the JSON payload.
-    If multiple blocks exist, uses the last one (most recent).
-
-    Args:
-        output_tail: Last ~500 chars of agent output.
-
-    Returns:
-        Parsed dict with at least a ``status`` key, or None if no valid
-        OUTCOME block is found.
-    """
-    if not output_tail:
-        return None
-
-    matches = _OUTCOME_RE.findall(output_tail)
-    if not matches:
-        return None
-
-    # Use last match (most recent OUTCOME block)
-    raw = matches[-1]
-    try:
-        parsed = json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        logger.debug("_parse_outcome_contract: malformed JSON in OUTCOME block")
-        return None
-
-    if not isinstance(parsed, dict) or "status" not in parsed:
-        logger.debug("_parse_outcome_contract: missing 'status' key in OUTCOME block")
-        return None
-
-    return parsed
 
 
 class PipelineStateMachine:
@@ -400,9 +360,6 @@ class PipelineStateMachine:
     def get_display_progress(self) -> dict[str, str]:
         """Return stage statuses for display (excludes PATCH).
 
-        Returns stored state only. Stage completion is exclusively determined
-        by PipelineStateMachine stored state — no artifact inference.
-
         Returns:
             Dict mapping display stage names to their status strings.
             Only includes DISPLAY_STAGES (not PATCH).
@@ -486,9 +443,7 @@ class PipelineStateMachine:
     ) -> str:
         """Classify a stage's outcome from SDK stop_reason and output patterns.
 
-        Three-tier approach:
-        0. OUTCOME contract: structured ``<!-- OUTCOME {...} -->`` block in output.
-           If found with a valid status, returns immediately.
+        Two-tier approach:
         1. stop_reason from SDK: anything other than "end_turn" is a process
            failure (rate_limited, timeout, etc.)
         2. For "end_turn": deterministic tail patterns scoped to the known stage.
@@ -499,27 +454,8 @@ class PipelineStateMachine:
             output_tail: Last ~500 chars of worker output.
 
         Returns:
-            "success", "fail", "partial", or "ambiguous".
+            "success", "fail", or "ambiguous".
         """
-        # Tier 0: OUTCOME contract parsing
-        contract = _parse_outcome_contract(output_tail)
-        if contract:
-            status = contract.get("status", "")
-            contract_stage = contract.get("stage", "")
-            if contract_stage and contract_stage != stage:
-                logger.warning(
-                    f"classify_outcome({stage}): OUTCOME contract stage mismatch "
-                    f"(expected {stage}, got {contract_stage}) — falling through to Tier 1/2"
-                )
-            elif status in ("success", "fail", "partial"):
-                logger.info(f"classify_outcome({stage}): OUTCOME contract -> {status}")
-                return status
-            else:
-                logger.debug(
-                    f"classify_outcome({stage}): OUTCOME contract has unknown status "
-                    f"{status!r} — falling through to Tier 1/2"
-                )
-
         # Tier 1: SDK stop_reason
         if stop_reason and stop_reason != "end_turn":
             logger.info(f"classify_outcome({stage}): stop_reason={stop_reason} -> fail")
@@ -580,3 +516,29 @@ class PipelineStateMachine:
             "current_stage": self.current_stage(),
             "has_remaining": self.has_remaining_stages(),
         }
+
+
+def record_stage_completion(session: AgentSession, stage: str) -> None:
+    """Record a stage as completed in one shot.
+
+    Convenience helper for skills that complete a stage atomically
+    (no separate start/complete needed). Handles the case where
+    the session has no stage_states yet by initializing defaults.
+
+    Args:
+        session: The AgentSession to update.
+        stage: The SDLC stage name (e.g., "BUILD", "TEST").
+    """
+    sm = PipelineStateMachine(session)
+    current = sm.states.get(stage, "pending")
+    if current != "in_progress":
+        try:
+            sm.start_stage(stage)
+        except ValueError:
+            logger.warning(
+                f"record_stage_completion: could not start {stage} "
+                f"(current={current}), forcing completion"
+            )
+            sm.states[stage] = "in_progress"
+            sm._save()
+    sm.complete_stage(stage)

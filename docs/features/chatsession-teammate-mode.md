@@ -4,7 +4,7 @@
 
 ChatSession teammate mode adds a fast path for informational queries. When a user asks a question (e.g., "where is the observer prompt?", "what tests are failing?"), the ChatSession answers directly using read-only tools instead of spawning a full DevSession. This reduces latency and cost for simple lookups while preserving the full SDLC pipeline for actual work requests.
 
-Teammate mode is now a first-class session type (`SessionType.TEAMMATE`). It was previously a routing decision within the PM session, gated by a binary intent classifier. Teammate sessions are indicated by the `session_mode` field set to `PersonaType.TEAMMATE` (from `config/enums.py`). The `ChatMode` enum has been removed -- `PersonaType` is the sole persona identifier.
+Teammate mode is not a new session type. It is a routing decision within the existing ChatSession, gated by a binary intent classifier. Teammate sessions are indicated by the `session_mode` field set to `PersonaType.TEAMMATE` (from `config/enums.py`). The `ChatMode` enum has been removed -- `PersonaType` is the sole persona identifier.
 
 ## Architecture
 
@@ -53,11 +53,11 @@ Provides teammate-specific instructions that replace the PM dispatch block when 
 - **Tools blocked**: file writes, branch creation, test execution, Agent tool (no DevSession spawning)
 - **Nudge cap**: 10 (vs 50 for normal sessions), set via `TEAMMATE_MAX_NUDGE_COUNT`
 - **Persona**: same PM persona with teammate-specific additions (conversational tone, cite file paths, direct answers)
-- **Delivery**: teammate sessions use the [stop-hook review gate](agent-message-delivery.md) when Telegram-triggered, giving the agent final say over output (SEND/EDIT/REACT/SILENT/CONTINUE). Falls through to the summarizer when no delivery instruction is set.
+- **Single delivery path**: teammate sessions always go through the summarizer -- no dual-path ambiguity with `send_telegram.py`
 
 ### Metrics (`agent/teammate_metrics.py`)
 
-Popoto-backed counters for observability (migrated from raw Redis in PR #650). All operations are fire-and-forget -- metrics failures never affect message processing.
+Redis-backed counters for observability. All operations are fire-and-forget -- metrics failures never affect message processing.
 
 - `teammate_classified_count`: messages routed to teammate mode
 - `work_classified_count`: messages routed to DevSession
@@ -73,7 +73,7 @@ No special mechanism needed. Each incoming message is classified independently. 
 
 ### `agent/sdk_client.py`
 
-In `_execute_agent_request()`, after determining the session type is "pm" or "teammate":
+In `_execute_agent_request()`, after determining the session type is "chat":
 
 1. Calls `classify_intent(message)` to get the intent result
 2. Calls `record_classification()` to track metrics
@@ -88,7 +88,7 @@ Teammate sessions bypass structured formatting entirely:
 - `_compose_structured_summary()` returns the LLM summary directly without emoji prefix, bullet parsing, or structured template
 - `SUMMARIZER_SYSTEM_PROMPT` includes a teammate format rule: respond in prose, no bullets, no status emoji
 
-### `agent/agent_session_queue.py`
+### `agent/job_queue.py`
 
 In the nudge loop, checks the session's `session_mode` field:
 
@@ -99,7 +99,7 @@ In the nudge loop, checks the session's `session_mode` field:
 ## Key Design Decisions
 
 1. **Conservative threshold (0.90)**: false negatives (teammate classified as work) cause no harm -- just unnecessary DevSession spawn. False positives (work classified as teammate) are more costly, so the threshold is high.
-2. **First-class session type**: teammate now has its own `SessionType.TEAMMATE` enum value. The bridge routes teammate-persona messages directly to `session_type="teammate"` instead of routing through PM sessions.
+2. **No new session type**: teammate is a routing decision, not a new `session_type` value. The `session_mode` field on AgentSession stores `PersonaType.TEAMMATE` to track the routing decision separately from `classification_type` (which preserves the bridge's original classification).
 3. **No bridge changes**: teammate vs work routing happens entirely in the agent layer. The bridge continues routing all messages to ChatSession.
 4. **No caching**: each message is classified independently for simplicity.
 
@@ -110,6 +110,6 @@ In the nudge loop, checks the session's `session_mode` field:
 | `agent/intent_classifier.py` | Haiku-based binary classifier with few-shot prompt |
 | `agent/teammate_handler.py` | Teammate instruction builder (research-first) and nudge cap constant |
 | `bridge/summarizer.py` | Teammate prose bypass in `_compose_structured_summary()` and prompt context |
-| `agent/teammate_metrics.py` | Popoto-backed classification and response time counters (see [Popoto Index Hygiene](popoto-index-hygiene.md)) |
+| `agent/teammate_metrics.py` | Redis-backed classification and response time counters |
 | `agent/sdk_client.py` | Integration point: classifier call and instruction injection |
-| `agent/agent_session_queue.py` | Integration point: reduced nudge cap for teammate sessions |
+| `agent/job_queue.py` | Integration point: reduced nudge cap for teammate sessions |

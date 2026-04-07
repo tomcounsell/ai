@@ -114,7 +114,7 @@ class TestBuildOutputVerification:
 
         with caplog.at_level(logging.WARNING):
             # Simulate the warning that /do-build should emit
-            logging.getLogger("agent.agent_session_queue").warning(
+            logging.getLogger("agent.job_queue").warning(
                 f"BUILD WARNING: No commits on {branch}. Builder agents produced no code changes."
             )
 

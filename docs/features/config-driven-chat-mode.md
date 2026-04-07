@@ -62,11 +62,10 @@ This is useful for groups where the agent should observe and learn from conversa
 
 ### Bridge (`bridge/telegram_bridge.py`)
 
-The bridge calls `resolve_persona()` when determining session type for a new session:
+The bridge calls `resolve_persona()` when determining session type for a new job:
 
 - If persona is `PersonaType.DEVELOPER` -> creates a DevSession (session_type="dev")
-- **pm or unconfigured** -> creates a PM session (session_type="pm"). The PM session decides whether to spawn a DevSession.
-- **teammate** -> creates a Teammate session (session_type="teammate"). Handles informational queries directly.
+- Everything else -> creates a ChatSession (session_type="chat")
 
 ### SDK Client (`agent/sdk_client.py`)
 

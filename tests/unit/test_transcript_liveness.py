@@ -130,7 +130,7 @@ class TestCheckStalledSessionsWithTranscript:
 
     def test_active_session_with_fresh_transcript_not_stalled(self, tmp_path):
         """An active session whose transcript is fresh should NOT be marked stalled,
-        even if updated_at is old."""
+        even if last_activity is old."""
         from types import SimpleNamespace
 
         from monitoring.session_watchdog import (
@@ -139,14 +139,14 @@ class TestCheckStalledSessionsWithTranscript:
         )
 
         now = time.time()
-        # updated_at is old (would normally trigger stall)
+        # last_activity is old (would normally trigger stall)
         session = SimpleNamespace(
             session_id="transcript-fresh",
-            agent_session_id="session-001",
+            job_id="job-001",
             status="active",
             started_at=now - 3600,
             created_at=now - 3600,
-            updated_at=now - (STALL_THRESHOLD_ACTIVE + 120),
+            last_activity=now - (STALL_THRESHOLD_ACTIVE + 120),
             project_key="test",
         )
         session._get_history_list = lambda: []
@@ -191,11 +191,11 @@ class TestCheckStalledSessionsWithTranscript:
         now = time.time()
         session = SimpleNamespace(
             session_id="transcript-stale",
-            agent_session_id="session-002",
+            job_id="job-002",
             status="active",
             started_at=now - 3600,
             created_at=now - 3600,
-            updated_at=now - (STALL_THRESHOLD_ACTIVE + 120),
+            last_activity=now - (STALL_THRESHOLD_ACTIVE + 120),
             project_key="test",
         )
         session._get_history_list = lambda: []
@@ -231,11 +231,11 @@ class TestCheckStalledSessionsWithTranscript:
         now = time.time()
         session = SimpleNamespace(
             session_id="pending-session",
-            agent_session_id="session-003",
+            job_id="job-003",
             status="pending",
             started_at=None,
             created_at=now - (STALL_THRESHOLD_PENDING + 60),
-            updated_at=now,
+            last_activity=now,
             project_key="test",
         )
         session._get_history_list = lambda: []

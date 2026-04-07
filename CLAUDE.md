@@ -32,60 +32,6 @@ gws sheets spreadsheets values get --params '{"spreadsheetId": "ID", "range": "S
 
 **Workflows:** `gws workflow +standup-report`, `+meeting-prep`, `+email-to-task`, `+weekly-digest`
 
-## OfficeCLI
-
-CLI for creating, reading, and editing Office documents (.docx, .xlsx, .pptx). Single binary at `~/.local/bin/officecli`, no dependencies.
-
-Usage: `officecli <command> <file> [path] [flags]`
-
-**Commands:** `create`, `view`, `get`, `query`, `set`, `add`, `remove`, `move`, `swap`, `batch`, `validate`, `open`, `close`
-
-**Strategy:** L1 (read) then L2 (DOM edit) then L3 (raw XML). Always prefer higher layers. Add `--json` for structured output.
-
-**Help system:** When unsure about property names or syntax, run help instead of guessing:
-```bash
-officecli pptx set              # All settable elements and properties
-officecli pptx set shape        # Shape properties in detail
-officecli pptx set shape.fill   # Specific property format and examples
-```
-
-**Common patterns:**
-```bash
-# Create files
-officecli create report.docx
-officecli create data.xlsx
-officecli create slides.pptx
-
-# Read and inspect
-officecli view report.docx outline           # Document structure
-officecli view report.docx stats             # Page/word/shape counts
-officecli view report.docx issues            # Formatting problems
-officecli get report.docx '/body/p[1]' --json
-officecli get slides.pptx '/slide[1]' --depth 1
-
-# Edit Word
-officecli add report.docx /body --type paragraph --prop text="Summary" --prop style=Heading1
-officecli set report.docx '/body/p[1]/r[1]' --prop font=Arial --prop size=12pt
-
-# Edit Excel
-officecli set data.xlsx /Sheet1/A1 --prop value="Name" --prop bold=true
-officecli set data.xlsx /Sheet1/B2 --prop value=95
-
-# Edit PowerPoint
-officecli add slides.pptx / --type slide --prop title="Q4 Report" --prop background=1A1A2E
-officecli add slides.pptx /slide[1] --type shape --prop text="Revenue grew 25%" --prop x=2cm --prop y=5cm
-
-# Batch operations (multiple edits in one save)
-echo '[{"command":"set","path":"/Sheet1/A1","props":{"value":"Name","bold":"true"}}]' | officecli batch data.xlsx --json
-
-# Resident mode (3+ commands on same file)
-officecli open report.docx    # Keep in memory
-officecli set report.docx ... # Fast, no file I/O
-officecli close report.docx   # Save and release
-```
-
-**Output:** Use `--json` for structured output. Use `--depth N` with `get` to expand children. Use `--max-lines N` with `view text` for large documents.
-
 ## Reading Telegram Messages
 
 Use `valor-telegram` to read messages from any chat. It checks Redis first, then falls back to the Telegram API automatically.
@@ -111,7 +57,6 @@ valor-telegram read --chat "Dev: Valor" --since "1 hour ago"
 | `pytest -m sdlc` | Run tests for a specific feature (see `tests/README.md`) |
 | `python -m ruff format . && python -m ruff check .` | Format and lint |
 | `python -m ui.app` | Start web UI server on localhost:8500 |
-| `curl -s localhost:8500/dashboard.json` | Check the dashboard — full system state as JSON (sessions, health, reflections, machine) |
 | `python scripts/reflections.py` | Run reflections maintenance manually |
 | `python scripts/reflections.py --dry-run` | Test reflections without side effects |
 | `python scripts/reflections.py --ignore "pattern"` | Silence a bug pattern for 14 days |
@@ -121,13 +66,13 @@ valor-telegram read --chat "Dev: Valor" --since "1 hour ago"
 | `python scripts/autoexperiment.py --target summarizer --dry-run` | Dry-run autoexperiment on summarizer |
 | `python scripts/autoexperiment.py --list-targets` | List autoexperiment targets |
 | `./scripts/install_autoexperiment.sh` | Install autoexperiment nightly schedule |
-| `python -m tools.agent_session_scheduler status` | Show queue status (pending, running, killed counts) |
-| `python -m tools.agent_session_scheduler list --status killed,abandoned` | List sessions filtered by status |
-| `python -m tools.agent_session_scheduler kill --agent-session-id <ID>` | Kill a running or pending session by ID |
-| `python -m tools.agent_session_scheduler kill --session-id <ID>` | Kill a session by session ID |
-| `python -m tools.agent_session_scheduler kill --all` | Kill all running and pending sessions |
-| `python -m tools.agent_session_scheduler cleanup --age 30 --dry-run` | Preview stale session cleanup |
-| `python -m tools.agent_session_scheduler cleanup --age 30` | Delete stale killed/abandoned/failed sessions |
+| `python -m tools.job_scheduler status` | Show queue status (pending, running, killed counts) |
+| `python -m tools.job_scheduler list --status killed,abandoned` | List sessions filtered by status |
+| `python -m tools.job_scheduler kill --job-id <ID>` | Kill a running or pending job by ID |
+| `python -m tools.job_scheduler kill --session-id <ID>` | Kill a job by session ID |
+| `python -m tools.job_scheduler kill --all` | Kill all running and pending jobs |
+| `python -m tools.job_scheduler cleanup --age 30 --dry-run` | Preview stale session cleanup |
+| `python -m tools.job_scheduler cleanup --age 30` | Delete stale killed/abandoned/failed sessions |
 | `python -m tools.memory_search search "query"` | Search memories by query |
 | `python -m tools.memory_search search "query" --category correction` | Search filtered by category |
 | `python -m tools.memory_search search "query" --tag redis` | Search filtered by tag |
@@ -212,7 +157,7 @@ The standard flow from conversation to shipped feature:
 - If there is no question -- just a status update -- the summarizer auto-sends "continue"
 - Status updates without questions or signs of completion are NOT stopping points
 - The agent keeps working until the phase is complete or it's genuinely blocked
-- **SDLC sessions**: ChatSession steers pipeline progression between stages
+- **SDLC jobs**: ChatSession steers pipeline progression between stages
 - **ChatSession** orchestrates DevSession work; all messages route through ChatSession
 - Auto-continue caps are set to 50 as safety backstops (ChatSession manages actual routing)
 - The auto-continue counter resets when the human sends a new message
@@ -233,8 +178,7 @@ Telegram → Python Bridge (Telethon) → ChatSession (read-only, PM persona)
 ```
 
 **Session Types** (see `docs/features/chat-dev-session-architecture.md`):
-- **PM Session** (`session_type="pm"`) - Orchestrates work, PM persona, read-only
-- **Teammate Session** (`session_type="teammate"`) - Conversational, Teammate persona
+- **ChatSession** (`session_type="chat"`) - Orchestrates work, PM persona, read-only
 - **DevSession** (`session_type="dev"`) - Does coding work, Dev persona, full permissions
 - **Nudge loop** - Bridge output routing (deliver or nudge, no SDLC awareness)
 

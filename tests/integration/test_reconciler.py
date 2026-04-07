@@ -95,7 +95,7 @@ class TestReconcilerGapDetection:
                 client=client,
                 monitored_groups=["agent builders chat"],
                 should_respond_fn=should_respond_fn,
-                enqueue_agent_session_fn=mock_enqueue,
+                enqueue_job_fn=mock_enqueue,
                 find_project_fn=MagicMock(return_value=project),
             )
 
@@ -111,11 +111,11 @@ class TestReconcilerGapDetection:
             assert 7 in recorded_dedup
 
             # Verify enqueue parameters
-            for session in enqueued:
-                assert session["project_key"] == "builders"
-                assert session["priority"] == "low"
-                assert session["chat_id"] == str(-(1000000000000 + entity_id))
-                assert session["sender_name"] == "Alice"
+            for job in enqueued:
+                assert job["project_key"] == "builders"
+                assert job["priority"] == "low"
+                assert job["chat_id"] == str(-(1000000000000 + entity_id))
+                assert job["sender_name"] == "Alice"
 
             # Second scan: should find no new gaps (6 and 7 now in dedup)
             enqueued.clear()
@@ -123,7 +123,7 @@ class TestReconcilerGapDetection:
                 client=client,
                 monitored_groups=["agent builders chat"],
                 should_respond_fn=should_respond_fn,
-                enqueue_agent_session_fn=mock_enqueue,
+                enqueue_job_fn=mock_enqueue,
                 find_project_fn=MagicMock(return_value=project),
             )
 
@@ -176,7 +176,7 @@ class TestReconcilerGapDetection:
                 client=client,
                 monitored_groups=["test group"],
                 should_respond_fn=should_respond_fn,
-                enqueue_agent_session_fn=mock_enqueue,
+                enqueue_job_fn=mock_enqueue,
                 find_project_fn=MagicMock(return_value=project),
             )
 

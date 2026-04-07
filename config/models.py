@@ -7,8 +7,6 @@ Import model constants from here rather than hardcoding model strings.
 When model versions change, update them in ONE place here.
 """
 
-import os
-
 # =============================================================================
 # ANTHROPIC DIRECT API MODELS
 # Format: model ID as used with Anthropic's API directly
@@ -32,22 +30,6 @@ SONNET_4 = "claude-sonnet-4-20250514"
 # Use cases: Complex multi-step reasoning, nuanced analysis, creative tasks
 # Strengths: Highest quality output, best at handling ambiguity
 OPUS = "claude-opus-4-5-20251101"
-
-
-# =============================================================================
-# OPENROUTER API ENDPOINTS
-# Override via environment variables for custom/proxy deployments
-# =============================================================================
-
-# Chat completions endpoint (used by summarizer, tools, scripts).
-# Override: set OPENROUTER_URL env var to point at a custom or proxy endpoint.
-OPENROUTER_URL = os.environ.get("OPENROUTER_URL", "https://openrouter.ai/api/v1/chat/completions")
-
-# Embeddings endpoint (used by knowledge_search / doc_impact_finder).
-# Override: set OPENROUTER_EMBEDDINGS_URL env var for a custom embeddings proxy.
-OPENROUTER_EMBEDDINGS_URL = os.environ.get(
-    "OPENROUTER_EMBEDDINGS_URL", "https://openrouter.ai/api/v1/embeddings"
-)
 
 
 # =============================================================================
@@ -106,24 +88,8 @@ OPENROUTER_KIMI_K2_5 = "moonshotai/kimi-k2.5"
 # Qwen3 32B - Good code understanding, ultra-cheap
 OPENROUTER_QWEN3_32B = "qwen/qwen3-32b"
 
-# Gemma 4 E2B - Free tier option, multimodal, 128K context
-OPENROUTER_GEMMA4_FREE = "google/gemma-4-e2b:free"
-
-
-# =============================================================================
-# LOCAL OLLAMA MODELS
-# Used for fast, local inference (message classification, intent, AI judge)
-# =============================================================================
-
-OLLAMA_LOCAL_MODEL = "gemma4:e2b"
-
-# Models superseded by OLLAMA_LOCAL_MODEL — cleaned up during /update
-OLLAMA_SUPERSEDED_MODELS = [
-    "gemma2:3b",
-    "gemma3:4b",
-    "qwen3:1.7b",
-    "qwen3:4b",
-]
+# Gemma 3 27B - Free tier option
+OPENROUTER_GEMMA3_FREE = "google/gemma-3-27b-it:free"
 
 
 # =============================================================================

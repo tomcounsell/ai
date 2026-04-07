@@ -202,7 +202,7 @@ def backfill_enrichment_metadata(dry_run: bool, max_age_days: int) -> dict[str, 
                 tm.classification_confidence = session.classification_confidence
 
             # Set cross-references
-            tm.agent_session_id = session.agent_session_id
+            tm.agent_session_id = session.job_id
             tm.save()
 
             session.telegram_message_key = tm.msg_id

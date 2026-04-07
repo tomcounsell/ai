@@ -1,14 +1,14 @@
-"""Tests for silent failure logging in agent_session_queue.py (Gap 1).
+"""Tests for silent failure logging in job_queue.py (Gap 1).
 
-Verifies that critical exception handlers in agent_session_queue.py emit
+Verifies that critical exception handlers in job_queue.py emit
 logger.warning() calls instead of silently swallowing exceptions
 with `except Exception: pass`.
 
 The 7 critical locations are:
-- _push_agent_session: lifecycle transition logging
-- _pop_agent_session: lifecycle transition logging
+- _push_job: lifecycle transition logging
+- _pop_job: lifecycle transition logging
 - _enqueue_nudge: plan file resolution from session context
-- _execute_agent_session: session re-read from Redis
+- _execute_job: session re-read from Redis
 - _load_cooldowns: file read
 - _save_cooldowns: file write
 - check_revival: branch existence check
@@ -19,7 +19,6 @@ file path, etc.) — NOT exact message text, per risk mitigation in the plan.
 """
 
 import logging
-from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -28,11 +27,12 @@ import pytest
 
 
 class TestPushJobLogging:
-    """Tests that _push_agent_session logs warnings on lifecycle transition failures."""
+    """Tests that _push_job logs warnings on lifecycle transition failures."""
 
     @pytest.mark.asyncio
     async def test_lifecycle_transition_failure_logs_warning(self, caplog, redis_test_db):
         """When log_lifecycle_transition raises, a warning is emitted."""
+        import time
 
         from models.agent_session import AgentSession
 
@@ -43,7 +43,7 @@ class TestPushJobLogging:
             status="pending",
             chat_id="chat_1",
             sender_name="Test",
-            created_at=datetime.now(tz=UTC),
+            created_at=time.time(),
             message_text="test message",
             working_dir="/tmp/test",
             telegram_message_id=1,
@@ -57,11 +57,11 @@ class TestPushJobLogging:
                 "log_lifecycle_transition",
                 side_effect=Exception("Redis connection lost"),
             ),
-            caplog.at_level(logging.WARNING, logger="agent.agent_session_queue"),
+            caplog.at_level(logging.WARNING, logger="agent.job_queue"),
         ):
-            from agent.agent_session_queue import _push_agent_session
+            from agent.job_queue import _push_job
 
-            await _push_agent_session(
+            await _push_job(
                 project_key="test-project",
                 session_id="test-push-lifecycle",
                 working_dir="/tmp/test",
@@ -79,11 +79,12 @@ class TestPushJobLogging:
 
 
 class TestPopJobLogging:
-    """Tests that _pop_agent_session logs warnings on lifecycle transition failures."""
+    """Tests that _pop_job logs warnings on lifecycle transition failures."""
 
     @pytest.mark.asyncio
     async def test_lifecycle_transition_failure_logs_warning(self, caplog, redis_test_db):
         """When log_lifecycle_transition raises during pop, a warning is emitted."""
+        import time
 
         from models.agent_session import AgentSession
 
@@ -94,7 +95,7 @@ class TestPopJobLogging:
             status="pending",
             chat_id="chat_2",
             sender_name="Test",
-            created_at=datetime.now(tz=UTC),
+            created_at=time.time(),
             message_text="test message",
             working_dir="/tmp/test",
             telegram_message_id=2,
@@ -107,14 +108,14 @@ class TestPopJobLogging:
 
         with (
             patch.object(AgentSession, "log_lifecycle_transition", failing_log),
-            caplog.at_level(logging.WARNING, logger="agent.agent_session_queue"),
+            caplog.at_level(logging.WARNING, logger="agent.job_queue"),
         ):
-            from agent.agent_session_queue import _pop_agent_session
+            from agent.job_queue import _pop_job
 
-            session = await _pop_agent_session("chat_2")
+            job = await _pop_job("chat_2")
 
         # Job should still be returned (failure is non-fatal)
-        assert session is not None
+        assert job is not None
         # Verify warning was logged
         warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert any(
@@ -131,30 +132,30 @@ class TestEnqueueContinuationSessionLookupLogging:
     @pytest.mark.asyncio
     async def test_missing_session_logs_error_and_falls_back(self, caplog, redis_test_db):
         """When no AgentSession exists for the session_id, an error is logged
-        and the function falls back to enqueue_agent_session."""
+        and the function falls back to enqueue_job."""
 
-        mock_session_entry = MagicMock()
-        mock_session_entry.project_key = "test-project"
-        mock_session_entry.session_id = "nonexistent-session-999"
-        mock_session_entry.working_dir = "/tmp/test"
-        mock_session_entry.message_text = "continue"
-        mock_session_entry.sender_name = "Test"
-        mock_session_entry.chat_id = "chat_3"
-        mock_session_entry.telegram_message_id = 3
-        mock_session_entry.slug = None
-        mock_session_entry.task_list_id = None
-        mock_session_entry.classification_type = None
+        mock_job = MagicMock()
+        mock_job.project_key = "test-project"
+        mock_job.session_id = "nonexistent-session-999"
+        mock_job.working_dir = "/tmp/test"
+        mock_job.message_text = "continue"
+        mock_job.sender_name = "Test"
+        mock_job.chat_id = "chat_3"
+        mock_job.telegram_message_id = 3
+        mock_job.work_item_slug = None
+        mock_job.task_list_id = None
+        mock_job.classification_type = None
 
         from unittest.mock import AsyncMock as _AsyncMock
 
         with (
-            caplog.at_level(logging.ERROR, logger="agent.agent_session_queue"),
-            patch("agent.agent_session_queue.enqueue_agent_session", new_callable=_AsyncMock),
+            caplog.at_level(logging.ERROR, logger="agent.job_queue"),
+            patch("agent.job_queue.enqueue_job", new_callable=_AsyncMock),
         ):
-            from agent.agent_session_queue import _enqueue_nudge
+            from agent.job_queue import _enqueue_nudge
 
             await _enqueue_nudge(
-                session=mock_session_entry,
+                job=mock_job,
                 branch_name="session/test",
                 task_list_id="tl",
                 auto_continue_count=1,
@@ -173,8 +174,8 @@ class TestLoadCooldownsLogging:
 
     def test_file_read_failure_logs_warning(self, caplog, tmp_path):
         """When cooldown file read fails, a warning is emitted."""
-        import agent.agent_session_queue as jq
-        from agent.agent_session_queue import _load_cooldowns
+        import agent.job_queue as jq
+        from agent.job_queue import _load_cooldowns
 
         # Save and replace the cooldown file path
         original = jq._COOLDOWN_FILE
@@ -184,7 +185,7 @@ class TestLoadCooldownsLogging:
         jq._COOLDOWN_FILE.write_text("{invalid json content")
 
         try:
-            with caplog.at_level(logging.WARNING, logger="agent.agent_session_queue"):
+            with caplog.at_level(logging.WARNING, logger="agent.job_queue"):
                 result = _load_cooldowns()
 
             # Should return empty dict on failure
@@ -203,8 +204,8 @@ class TestSaveCooldownsLogging:
 
     def test_file_write_failure_logs_warning(self, caplog):
         """When cooldown file write fails, a warning is emitted."""
-        import agent.agent_session_queue as jq
-        from agent.agent_session_queue import _save_cooldowns
+        import agent.job_queue as jq
+        from agent.job_queue import _save_cooldowns
 
         original = jq._COOLDOWN_FILE
         # Point to a path that can't be written (permission denied simulation)
@@ -212,7 +213,7 @@ class TestSaveCooldownsLogging:
         jq._COOLDOWN_FILE.parent.mkdir = MagicMock(side_effect=Exception("Permission denied"))
 
         try:
-            with caplog.at_level(logging.WARNING, logger="agent.agent_session_queue"):
+            with caplog.at_level(logging.WARNING, logger="agent.job_queue"):
                 _save_cooldowns({"test-project": 1234567890.0})
 
             warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
@@ -230,7 +231,7 @@ class TestCheckRevivalBranchLogging:
         """When subprocess fails checking branch existence, a warning is emitted."""
         import time as _time
 
-        from agent.agent_session_queue import check_revival
+        from agent.job_queue import check_revival
         from models.agent_session import AgentSession
 
         # Create a session in Redis that belongs to this chat so the branch
@@ -250,9 +251,9 @@ class TestCheckRevivalBranchLogging:
         )
 
         with (
-            patch("agent.agent_session_queue._load_cooldowns", return_value={}),
+            patch("agent.job_queue._load_cooldowns", return_value={}),
             patch("subprocess.run", side_effect=Exception("git not found")),
-            caplog.at_level(logging.WARNING, logger="agent.agent_session_queue"),
+            caplog.at_level(logging.WARNING, logger="agent.job_queue"),
         ):
             result = check_revival(
                 project_key="test-revival-project",
@@ -276,21 +277,21 @@ class TestNoSilentPassRemaining:
         """Critical functions should not have bare 'except Exception: pass'."""
         import inspect
 
-        from agent.agent_session_queue import (
+        from agent.job_queue import (
             _enqueue_nudge,
-            _execute_agent_session,
+            _execute_job,
             _load_cooldowns,
-            _pop_agent_session,
-            _push_agent_session,
+            _pop_job,
+            _push_job,
             _save_cooldowns,
             check_revival,
         )
 
         critical_functions = [
-            _push_agent_session,
-            _pop_agent_session,
+            _push_job,
+            _pop_job,
             _enqueue_nudge,
-            _execute_agent_session,
+            _execute_job,
             _load_cooldowns,
             _save_cooldowns,
             check_revival,

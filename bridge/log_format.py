@@ -1,6 +1,6 @@
 """Structured JSON log formatter for the bridge.
 
-Provides a JSON formatter that includes correlation_id, agent_session_id, session_id,
+Provides a JSON formatter that includes correlation_id, job_id, session_id,
 and chat_id fields on every log line for observability.
 
 Usage:
@@ -27,13 +27,13 @@ class StructuredJsonFormatter(logging.Formatter):
     - logger: logger name
     - function: function name
     - message: formatted message
-    - agent_session_id: if present in LogRecord extras
+    - job_id: if present in LogRecord extras
     - session_id: if present in LogRecord extras
     - correlation_id: if present in LogRecord extras
     - chat_id: if present in LogRecord extras
     """
 
-    EXTRA_FIELDS = ("agent_session_id", "session_id", "correlation_id", "chat_id")
+    EXTRA_FIELDS = ("job_id", "session_id", "correlation_id", "chat_id")
 
     def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:  # noqa: N802
         """Format time as UTC ISO 8601 with Z suffix."""

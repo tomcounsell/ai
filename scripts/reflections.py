@@ -3,28 +3,26 @@
 Reflections - Autonomous Daily Maintenance System
 
 A long-running process that performs daily self-directed maintenance tasks.
-17 units: 14 independent items + 3 merged pipelines.
+15 units: 12 independent items + 3 merged pipelines.
 
 Independent units:
 1. legacy_code_scan — Clean Up Stale Code
 2. log_review           — Review Previous Day's Logs
 3. task_management      — Clean Up Task Management
 4. documentation_audit  — Audit Documentation
-5. skills_audit        — Skills Audit
-6. hooks_audit         — Hooks Audit
-7. redis_ttl_cleanup   — Redis TTL Cleanup
-8. redis_data_quality  — Redis Data Quality
-9. branch_plan_cleanup — Branch and Plan Cleanup
-10. feature_docs_audit — Feature Docs Audit
-11. principal_staleness — Principal Context Staleness
-12. disk_space_check    — Disk Space Check
-13. pr_review_audit     — PR Review Audit
-14. linkedin_messages   — Check & Reply to LinkedIn Messages
+5. skills_audit         — Skills Audit
+6. redis_ttl_cleanup    — Redis TTL Cleanup
+7. redis_data_quality   — Redis Data Quality
+8. branch_plan_cleanup  — Branch and Plan Cleanup
+9. feature_docs_audit   — Feature Docs Audit
+10. principal_staleness — Principal Context Staleness
+11. disk_space_check    — Disk Space Check
+12. pr_review_audit     — PR Review Audit
 
 Merged pipelines (sub-steps run internally, one checkpoint per pipeline):
-15. session_intelligence    — Session Analysis + LLM Reflection + Bug Filing
-16. behavioral_learning     — Episode Cycle-Close + Pattern Crystallization
-17. daily_report_and_notify — Daily Report + GitHub Issues + Telegram (must be last)
+13. session_intelligence    — Session Analysis + LLM Reflection + Bug Filing
+14. behavioral_learning     — Episode Cycle-Close + Pattern Crystallization
+15. daily_report_and_notify — Daily Report + GitHub Issues + Telegram (must be last)
 
 All persistence is Redis-backed via Popoto models (see models/ directory).
 State: ReflectionRun | Ignore patterns: ReflectionIgnore
@@ -37,7 +35,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import logging.handlers
 import os
 import re
 import shutil
@@ -77,18 +74,6 @@ logger = logging.getLogger("reflections")
 PROJECT_ROOT = Path(__file__).parent.parent
 AI_ROOT = PROJECT_ROOT  # Preserved alias; do not reassign in production code
 LOGS_DIR = PROJECT_ROOT / "logs"
-
-# Add rotating file handler for reflections log
-LOGS_DIR.mkdir(parents=True, exist_ok=True)
-_reflections_file_handler = logging.handlers.RotatingFileHandler(
-    LOGS_DIR / "reflections.log",
-    maxBytes=10 * 1024 * 1024,  # 10MB
-    backupCount=5,
-)
-_reflections_file_handler.setFormatter(
-    logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-)
-logger.addHandler(_reflections_file_handler)
 REFLECTIONS_DIR = LOGS_DIR / "reflections"
 DATA_DIR = PROJECT_ROOT / "data"
 SESSIONS_DIR = LOGS_DIR / "sessions"
@@ -237,11 +222,7 @@ def analyze_sessions_from_redis(target_date: str) -> dict[str, Any]:
         target_sessions = []
         for session in all_sessions:
             if session.started_at:
-                sa = session.started_at
-                if isinstance(sa, datetime):
-                    session_date = sa.strftime("%Y-%m-%d")
-                else:
-                    session_date = datetime.fromtimestamp(sa).strftime("%Y-%m-%d")
+                session_date = datetime.fromtimestamp(session.started_at).strftime("%Y-%m-%d")
                 if session_date == target_date:
                     target_sessions.append(session)
 
@@ -681,7 +662,6 @@ class ReflectionRunner:
             ("task_management", "Clean Up Task Management", self.step_clean_tasks),
             ("documentation_audit", "Audit Documentation", self.step_audit_docs),
             ("skills_audit", "Skills Audit", self.step_skills_audit),
-            ("hooks_audit", "Hooks Audit", self.step_hooks_audit),
             ("redis_ttl_cleanup", "Redis TTL Cleanup", self.step_redis_cleanup),
             ("redis_data_quality", "Redis Data Quality", self.step_redis_data_quality),
             ("branch_plan_cleanup", "Branch and Plan Cleanup", self.step_branch_plan_cleanup),
@@ -689,7 +669,6 @@ class ReflectionRunner:
             ("principal_staleness", "Principal Context Staleness", self.step_principal_staleness),
             ("disk_space_check", "Disk Space Check", self.step_disk_space_check),
             ("pr_review_audit", "PR Review Audit", self.step_pr_review_audit),
-            ("linkedin_messages", "LinkedIn Messages", self.step_linkedin_messages),
             ("session_intelligence", "Session Intelligence", self.step_session_intelligence),
             ("behavioral_learning", "Behavioral Learning", self.step_behavioral_learning),
             ("daily_report_and_notify", "Daily Report & Notify", self.step_daily_report_and_notify),
@@ -1442,90 +1421,6 @@ class ReflectionRunner:
             logger.error(f"Skills audit failed: {e}")
             self.state.step_progress["skills_audit"] = {"error": str(e)}
 
-    async def step_hooks_audit(self) -> None:
-        """Audit Claude Code hooks for safety and configuration issues.
-
-        Checks:
-        - logs/hooks.log for recent errors
-        - .claude/settings.json for hook configuration consistency
-        - Stop/SubagentStop hooks have || true
-        - Referenced hook scripts exist
-        """
-        findings: list[str] = []
-        error_count = 0
-        settings_issues = 0
-
-        # 1. Scan hooks.log for recent errors
-        hooks_log = PROJECT_ROOT / "logs" / "hooks.log"
-        if hooks_log.exists():
-            try:
-                errors = extract_structured_errors(hooks_log)
-                # Filter to last 24 hours
-                cutoff = (utc_now() - timedelta(days=1)).strftime("%Y-%m-%d")
-                recent = [e for e in errors if e.get("timestamp", "") >= cutoff]
-                error_count = len(recent)
-                if recent:
-                    # Count unique hook names
-                    hook_names = set()
-                    for e in recent:
-                        msg = e.get("message", "")
-                        # Extract hook name from "hook_name - ERROR - message" format
-                        parts = msg.split(" - ")
-                        if parts:
-                            hook_names.add(parts[0].strip())
-                    names = ", ".join(sorted(hook_names)) or "unknown"
-                    findings.append(f"{error_count} hook error(s) in last 24h from: {names}")
-            except Exception as e:
-                logger.warning(f"Failed to scan hooks.log: {e}")
-
-        # 2. Validate settings.json hook configuration
-        settings_path = PROJECT_ROOT / ".claude" / "settings.json"
-        if settings_path.exists():
-            try:
-                settings = json.loads(settings_path.read_text())
-                hooks = settings.get("hooks", {})
-
-                for event_type, matchers in hooks.items():
-                    for matcher_block in matchers:
-                        for hook in matcher_block.get("hooks", []):
-                            cmd = hook.get("command", "")
-                            has_or_true = "|| true" in cmd
-
-                            # Stop/SubagentStop hooks must have || true
-                            if event_type in ("Stop", "SubagentStop") and not has_or_true:
-                                findings.append(
-                                    f"FAIL: {event_type} hook missing || true: {cmd[:60]}"
-                                )
-                                settings_issues += 1
-
-                            # Check referenced scripts exist
-                            # Extract script path from command
-                            for part in cmd.replace("|| true", "").split():
-                                if part.endswith(".py") or part.endswith(".sh"):
-                                    script_path = part.replace(
-                                        '"$CLAUDE_PROJECT_DIR"/', ""
-                                    ).replace("$CLAUDE_PROJECT_DIR/", "")
-                                    full_path = PROJECT_ROOT / script_path
-                                    if not full_path.exists():
-                                        findings.append(
-                                            f"WARN: Hook script not found: {script_path}"
-                                        )
-                                        settings_issues += 1
-                                    break
-            except (json.JSONDecodeError, OSError) as e:
-                logger.warning(f"Failed to parse settings.json: {e}")
-                settings_issues += 1
-
-        self.state.step_progress["hooks_audit"] = {
-            "log_errors_24h": error_count,
-            "settings_issues": settings_issues,
-        }
-
-        if findings:
-            self.state.findings["ai:hooks_audit"] = findings
-
-        logger.info(f"Hooks audit: {error_count} log errors, {settings_issues} settings issues")
-
     async def step_redis_cleanup(self) -> None:
         """Step 12: Run TTL cleanup on all Redis models.
 
@@ -1617,10 +1512,7 @@ class ReflectionRunner:
             if dead_chats:
                 findings.append(f"{len(dead_chats)} chat(s) with no activity in 30+ days")
                 for chat in dead_chats[:5]:
-                    _ua = chat.updated_at
-                    if isinstance(_ua, datetime):
-                        _ua = _ua.timestamp() if _ua.tzinfo else _ua.replace(tzinfo=UTC).timestamp()
-                    days_inactive = int((_time.time() - (_ua or 0)) / 86400)
+                    days_inactive = int((_time.time() - chat.updated_at) / 86400)
                     findings.append(
                         f"  Inactive: {chat.chat_name} "
                         f"({days_inactive} days, type={chat.chat_type})"
@@ -1629,15 +1521,9 @@ class ReflectionRunner:
             # 3. Transcript error pattern analysis: find common errors in recent sessions
             recent_cutoff = _time.time() - (7 * 86400)
             all_sessions = AgentSession.query.all()
-
-            def _is_recent(s):
-                sa = s.started_at
-                if not sa:
-                    return False
-                ts = sa.timestamp() if isinstance(sa, datetime) else float(sa)
-                return ts > recent_cutoff
-
-            recent_sessions = [s for s in all_sessions if _is_recent(s)]
+            recent_sessions = [
+                s for s in all_sessions if s.started_at and s.started_at > recent_cutoff
+            ]
 
             error_keywords: dict[str, int] = {}
             for session in recent_sessions:
@@ -2072,9 +1958,8 @@ class ReflectionRunner:
         """
         import time as _time
 
-        from models.cyclic_episode import CyclicEpisode
-
         from models.agent_session import AgentSession
+        from models.cyclic_episode import CyclicEpisode
         from scripts.fingerprint_classifier import classify_session
 
         cutoff = _time.time() - 86400  # past 24 hours
@@ -2092,11 +1977,8 @@ class ReflectionRunner:
 
         for session in all_sessions:
             # Skip sessions not completed in the past 24h
-            ca = session.completed_at
-            if ca is None:
-                continue
-            completed_ts = ca.timestamp() if isinstance(ca, datetime) else float(ca)
-            if completed_ts < cutoff:
+            completed_at = session.completed_at or 0
+            if completed_at < cutoff:
                 continue
 
             # Skip non-SDLC sessions
@@ -2110,7 +1992,7 @@ class ReflectionRunner:
                 continue
 
             # Check if episode already exists for this session (idempotent)
-            existing = CyclicEpisode.query.filter(raw_ref=session.agent_session_id)
+            existing = CyclicEpisode.query.filter(raw_ref=session.job_id)
             if existing:
                 sessions_skipped += 1
                 continue
@@ -2119,9 +2001,7 @@ class ReflectionRunner:
             try:
                 fingerprint = classify_session(session)
             except Exception as e:
-                logger.warning(
-                    f"Fingerprint classification failed for {session.agent_session_id}: {e}"
-                )
+                logger.warning(f"Fingerprint classification failed for {session.job_id}: {e}")
                 fingerprint = {
                     "problem_topology": "ambiguous",
                     "affected_layer": "unknown",
@@ -2147,7 +2027,7 @@ class ReflectionRunner:
             ]
             if dedup_matches:
                 logger.info(
-                    f"Semantic dedup: skipping episode for session {session.agent_session_id}, "
+                    f"Semantic dedup: skipping episode for session {session.job_id}, "
                     f"existing episode with same fingerprint+branch: {dedup_matches[0].episode_id}"
                 )
                 sessions_skipped += 1
@@ -2160,7 +2040,7 @@ class ReflectionRunner:
             try:
                 CyclicEpisode.create(
                     vault=vault,
-                    raw_ref=session.agent_session_id,
+                    raw_ref=session.job_id,
                     created_at=_time.time(),
                     problem_topology=fingerprint["problem_topology"],
                     affected_layer=fingerprint["affected_layer"],
@@ -2186,14 +2066,12 @@ class ReflectionRunner:
                 )
                 episodes_created += 1
                 logger.info(
-                    f"Created CyclicEpisode for session {session.agent_session_id}: "
+                    f"Created CyclicEpisode for session {session.job_id}: "
                     f"topology={fingerprint['problem_topology']}, "
                     f"layer={fingerprint['affected_layer']}"
                 )
             except Exception as e:
-                logger.warning(
-                    f"Failed to create episode for session {session.agent_session_id}: {e}"
-                )
+                logger.warning(f"Failed to create episode for session {session.job_id}: {e}")
 
         self.state.step_progress["episode_cycle_close"] = {
             "episodes_created": episodes_created,
@@ -2759,75 +2637,6 @@ class ReflectionRunner:
         else:
             logger.info("PR review audit: scanned %d PRs, no unaddressed findings", prs_scanned)
 
-    async def step_linkedin_messages(self) -> None:
-        """Step 14: Check and reply to LinkedIn messages.
-
-        Spawns a Claude Code session with the linkedin-messaging skill to:
-        1. Open LinkedIn messaging inbox via agent-browser
-        2. Scan for unread/recent conversations
-        3. Research contacts against ~/work-vault/Consulting/leads/ and chats/
-        4. Reply where warranted using teammate persona voice
-        5. Update contact files in the knowledge base
-
-        Requires Chrome to be available on the local machine. The Claude CLI
-        session handles all browser automation via agent-browser CDP.
-        """
-        findings: list[str] = []
-
-        prompt = (
-            "/linkedin-messaging\n\n"
-            "Daily check: scan the LinkedIn inbox for unread or recent messages "
-            "(last 24 hours). For each conversation needing attention, follow the "
-            "full workflow in the skill: read the thread, research the contact, "
-            "draft and send a reply as Valor (teammate persona), and update the "
-            "knowledge base. Skip spam and automated messages. "
-            "Report a summary of actions taken."
-        )
-
-        claude_bin = shutil.which("claude")
-        if not claude_bin:
-            logger.warning("LinkedIn messages: claude CLI not found on PATH, skipping")
-            self.state.step_progress["linkedin_messages"] = {
-                "skipped": True,
-                "reason": "no claude CLI",
-            }
-            return
-
-        try:
-            result = subprocess.run(
-                [claude_bin, "--print", "--dangerously-skip-permissions", prompt],
-                capture_output=True,
-                text=True,
-                timeout=600,  # 10 minute cap
-                cwd=str(PROJECT_ROOT),
-                env={**os.environ, "CLAUDE_CODE_TASK_LIST_ID": "reflections-linkedin"},
-            )
-
-            if result.returncode == 0:
-                # Extract summary from output (last non-empty lines)
-                output_lines = [line for line in result.stdout.strip().splitlines() if line.strip()]
-                summary = "\n".join(output_lines[-10:]) if output_lines else "No output"
-                logger.info("LinkedIn messages: session completed successfully")
-                logger.info("LinkedIn summary: %s", summary[:500])
-
-                if "replied" in summary.lower() or "sent" in summary.lower():
-                    findings.append(f"LinkedIn: {summary[:200]}")
-                    self.state.add_finding("linkedin_messages", summary[:200])
-            else:
-                error_msg = result.stderr[:200] if result.stderr else "Unknown error"
-                logger.warning("LinkedIn messages: claude session failed: %s", error_msg)
-                findings.append(f"LinkedIn session failed: {error_msg}")
-
-        except subprocess.TimeoutExpired:
-            logger.warning("LinkedIn messages: session timed out after 600s")
-            findings.append("LinkedIn session timed out")
-        except Exception as e:
-            logger.warning("LinkedIn messages: %s: %s", type(e).__name__, str(e)[:200])
-
-        self.state.step_progress["linkedin_messages"] = {
-            "findings": len(findings),
-        }
-
     async def step_session_intelligence(self) -> None:
         """Pipeline: Session Analysis → LLM Reflection → Bug Filing.
 
@@ -3009,16 +2818,6 @@ async def main() -> None:
         runner.state.dry_run = True
         logger.info("DRY RUN mode — no side effects will be triggered")
     await runner.run()
-
-    # Clean up old session log directories (7+ days old)
-    try:
-        from bridge.session_logs import cleanup_old_snapshots
-
-        removed = cleanup_old_snapshots()
-        if removed:
-            logger.info("Session log cleanup: removed %d old session directories", removed)
-    except Exception:
-        logger.exception("Session log cleanup failed (non-fatal)")
 
 
 if __name__ == "__main__":

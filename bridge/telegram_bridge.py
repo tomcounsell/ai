@@ -26,7 +26,7 @@ import subprocess
 import sys
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 
 from bridge.utc import utc_iso, utc_now
@@ -87,6 +87,8 @@ from bridge.response import (  # noqa: E402
     clean_message,
     extract_files_from_response,  # noqa: F401
     filter_tool_logs,
+    get_processing_emoji,  # noqa: F401
+    get_processing_emoji_async,
     send_response_with_files,
     set_reaction,
 )
@@ -104,12 +106,6 @@ from bridge.routing import (  # noqa: E402
     should_respond_sync,  # noqa: F401
 )
 from config.enums import PersonaType, SessionType  # noqa: E402
-
-# Maximum age (seconds) of a pending session that can absorb follow-up messages.
-# Messages arriving within this window attach to the pending session via the
-# steering queue instead of spawning a competing session. See issue #619.
-PENDING_MERGE_WINDOW_SECONDS = 8
-
 from tools.link_analysis import (  # noqa: E402
     extract_urls,
     extract_youtube_urls,
@@ -119,13 +115,6 @@ from tools.telegram_history import (  # noqa: E402
     store_link,
     store_message,
 )
-
-# In-memory coalescing guard: bridges the Redis visibility gap for rapid-fire messages.
-# Maps chat_id -> (session_id, timestamp). Set before enqueue_agent_session() so the
-# second message can find the first's session even before Redis write completes.
-# Single-threaded asyncio means dict writes are atomic between await points.
-# See issue #705 for the race condition this solves.
-_recent_session_by_chat: dict[str, tuple[str, float]] = {}
 
 # =============================================================================
 # Message Queue for Graceful Restart
@@ -535,7 +524,7 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()],
 )
 
-# Add file handler to the ROOT logger so all child loggers (agent.agent_session_queue,
+# Add file handler to the ROOT logger so all child loggers (agent.job_queue,
 # bridge.*, tools.*, etc.) inherit it automatically. Without this, only
 # the bridge.telegram_bridge module logger would write to bridge.log.
 root_logger = logging.getLogger()
@@ -844,9 +833,8 @@ async def main():
         # Save to subconscious memory (non-fatal, never crashes bridge)
         try:
             if text and text.strip() and not getattr(sender, "bot", False):
-                from popoto import InteractionWeight
-
                 from models.memory import Memory
+                from popoto import InteractionWeight
 
                 Memory.safe_save(
                     agent_id=sender_name or "unknown",
@@ -952,69 +940,75 @@ async def main():
             try:
                 from bridge.session_router import (
                     find_matching_session,
+                    is_semantic_routing_enabled,
                 )
 
-                matched_id, confidence = await find_matching_session(
-                    chat_id=telegram_chat_id,
-                    message_text=clean_text,
-                    project_key=project_key,
-                )
-                if matched_id:
-                    # Check if matched session is active (running/active).
-                    # If so, queue the message as a steering message instead
-                    # of creating a competing session. (#318)
-                    try:
-                        from models.agent_session import AgentSession
-
-                        matched_sessions = list(AgentSession.query.filter(session_id=matched_id))
-                        matched_session = matched_sessions[0] if matched_sessions else None
-                        if matched_session and matched_session.status in (
-                            "running",
-                            "active",
-                        ):
-                            # Active session: queue steering message, ack, return
-                            from agent.steering import ABORT_KEYWORDS, push_steering_message
-
-                            is_abort = clean_text.strip().lower() in ABORT_KEYWORDS
-                            push_steering_message(
-                                matched_id,
-                                clean_text,
-                                sender_name,
-                                is_abort=is_abort,
-                            )
-                            ack_text = (
-                                "Stopping current task."
-                                if is_abort
-                                else "Noted \u2014 I'll incorporate this on my next checkpoint."
-                            )
-                            from bridge.markdown import send_markdown
-
-                            await send_markdown(
-                                client, event.chat_id, ack_text, reply_to=message.id
-                            )
-                            await set_reaction(client, event.chat_id, message.id, REACTION_RECEIVED)
-                            action = "abort" if is_abort else "steer"
-                            logger.info(
-                                f"[routing] Semantic routing: steered unthreaded message "
-                                f"into {matched_session.status} session {matched_id} "
-                                f"({action}, confidence: {confidence:.2f})"
-                            )
-                            return
-                    except Exception as e:
-                        # Steering into active session failed — fall through
-                        # to normal routing (use matched_id as session_id)
-                        logger.warning(
-                            f"Semantic routing active session check failed (non-fatal): {e}"
-                        )
-
-                    # Dormant or other status: use matched session as before
-                    session_id = matched_id
-                    logger.info(
-                        f"[routing] Semantic routing: matched session {session_id} "
-                        f"(confidence: {confidence:.2f})"
+                if is_semantic_routing_enabled():
+                    matched_id, confidence = await find_matching_session(
+                        chat_id=telegram_chat_id,
+                        message_text=clean_text,
+                        project_key=project_key,
                     )
-                else:
-                    logger.info("[routing] Semantic routing: no_match")
+                    if matched_id:
+                        # Check if matched session is active (running/active).
+                        # If so, queue the message as a steering message instead
+                        # of creating a competing job. (#318)
+                        try:
+                            from models.agent_session import AgentSession
+
+                            matched_sessions = list(
+                                AgentSession.query.filter(session_id=matched_id)
+                            )
+                            matched_session = matched_sessions[0] if matched_sessions else None
+                            if matched_session and matched_session.status in (
+                                "running",
+                                "active",
+                            ):
+                                # Active session: queue steering message, ack, return
+                                from agent.steering import ABORT_KEYWORDS, push_steering_message
+
+                                is_abort = clean_text.strip().lower() in ABORT_KEYWORDS
+                                push_steering_message(
+                                    matched_id,
+                                    clean_text,
+                                    sender_name,
+                                    is_abort=is_abort,
+                                )
+                                ack_text = (
+                                    "Stopping current task."
+                                    if is_abort
+                                    else "Noted \u2014 I'll incorporate this on my next checkpoint."
+                                )
+                                from bridge.markdown import send_markdown
+
+                                await send_markdown(
+                                    client, event.chat_id, ack_text, reply_to=message.id
+                                )
+                                await set_reaction(
+                                    client, event.chat_id, message.id, REACTION_RECEIVED
+                                )
+                                action = "abort" if is_abort else "steer"
+                                logger.info(
+                                    f"[routing] Semantic routing: steered unthreaded message "
+                                    f"into {matched_session.status} session {matched_id} "
+                                    f"({action}, confidence: {confidence:.2f})"
+                                )
+                                return
+                        except Exception as e:
+                            # Steering into active session failed — fall through
+                            # to normal routing (use matched_id as session_id)
+                            logger.warning(
+                                f"Semantic routing active session check failed (non-fatal): {e}"
+                            )
+
+                        # Dormant or other status: use matched session as before
+                        session_id = matched_id
+                        logger.info(
+                            f"[routing] Semantic routing: matched session {session_id} "
+                            f"(confidence: {confidence:.2f})"
+                        )
+                    else:
+                        logger.info("[routing] Semantic routing: no_match")
             except Exception as e:
                 # Semantic routing failures are non-fatal — fall through
                 # to fresh session creation
@@ -1025,74 +1019,19 @@ async def main():
                 session_id = f"tg_{project_key}_{event.chat_id}_{message.id}"
                 logger.info(f"[routing] Session {session_id} (continuation=False)")
 
-            # Terminal-status guard on intake path (#730).
-            # If routing matched an existing session_id but that session has since
-            # reached a terminal status (completed/failed/killed/abandoned/cancelled),
-            # generate a fresh session_id instead of re-enqueuing the terminal session.
-            # This prevents _mark_superseded() from converting completed→superseded,
-            # which would re-activate the session for the worker and cause the
-            # completed→superseded→pending→running→completed cycling bug.
-            # Skipped for reply-to messages — those intentionally resume a prior session.
-            if not (is_reply_to_valor and message.reply_to_msg_id):
-                try:
-                    from models.agent_session import AgentSession
-                    from models.session_lifecycle import TERMINAL_STATUSES
-
-                    existing = list(AgentSession.query.filter(session_id=session_id))
-                    if existing and existing[0].status in TERMINAL_STATUSES:
-                        old_session_id = session_id
-                        session_id = f"tg_{project_key}_{event.chat_id}_{message.id}"
-                        logger.info(
-                            f"[routing] Intake terminal guard: session {old_session_id} "
-                            f"is terminal ({existing[0].status}), forcing fresh session "
-                            f"{session_id}"
-                        )
-                except Exception as e:
-                    logger.debug(f"Intake terminal guard check failed (non-fatal): {e}")
-
-            # Set in-memory coalescing guard EARLY, before any await calls.
-            # This bridges the Redis visibility gap for rapid-fire messages
-            # (<200ms apart). Must be set here so Message 2's guard check
-            # at line ~1268 can find Message 1's session even before the
-            # Redis write in enqueue_agent_session() completes. See #705.
-            if not (is_reply_to_valor and message.reply_to_msg_id):
-                _recent_session_by_chat[telegram_chat_id] = (session_id, time.time())
-
-        # === MARK AS READ ===
-        try:
-            await event.message.mark_read()
-        except Exception as e:
-            logger.debug(f"mark_read failed (non-fatal): {e}")
-
         # === REACTION WORKFLOW ===
         # 1. 👀 Eyes = Message received/acknowledged
         await set_reaction(client, event.chat_id, message.id, REACTION_RECEIVED)
 
-        # 2. Embedding-based emoji selection (fire-and-forget async task)
-        # find_best_emoji_for_message makes a synchronous HTTP call for embeddings,
-        # so we run it in a thread to avoid blocking the Telethon event loop.
-        # Minimum delay lets 👀 linger so it feels like natural "reading, thinking"
-        # before transitioning to the contextual emoji.
-        async def select_and_set_emoji_reaction():
-            """Select contextual emoji via embedding similarity and set as reaction."""
-            try:
-                from tools.emoji_embedding import find_best_emoji_for_message
-
-                # Let 👀 stay visible for a natural "reading" moment
-                await asyncio.sleep(2)
-                emoji = await asyncio.to_thread(find_best_emoji_for_message, clean_text)
-                await set_reaction(client, event.chat_id, message.id, emoji)
-                logger.debug(f"Embedding emoji selected: {emoji}")
-            except Exception as e:
-                logger.debug(f"Embedding emoji selection failed (non-fatal): {e}")
-
-        asyncio.create_task(select_and_set_emoji_reaction())
-
-        # 3. Work-type classification (separate async task, non-blocking)
+        # Classify intent with Ollama (fast, for reaction emoji)
         classification_result = {}  # Mutable container for async classification result
 
-        async def classify_work_type():
-            """Classify work type for session routing."""
+        async def classify_and_update_reaction():
+            """Classify intent with Ollama and update reaction emoji."""
+            emoji = await get_processing_emoji_async(clean_text)
+            await set_reaction(client, event.chat_id, message.id, emoji)
+            logger.debug(f"Intent classified, reaction set to {emoji}")
+            # Also classify work type (non-blocking, result stored for enqueue)
             try:
                 from tools.classifier import classify_request_async
 
@@ -1106,10 +1045,11 @@ async def main():
             except Exception as e:
                 logger.debug(f"Work classification failed (non-fatal): {e}")
 
-        asyncio.create_task(classify_work_type())
+        # Start intent classification (don't await)
+        asyncio.create_task(classify_and_update_reaction())
 
         # Synchronous fast-path: PR/issue references always mean SDLC work.
-        # The async classifier above may not finish before enqueue_agent_session runs,
+        # The async classifier above may not finish before enqueue_job runs,
         # causing classification_type=None → default "question". This fast-path
         # guarantees correct classification for PR/issue messages. See issue #478 postmortem.
         import re as _re_cls
@@ -1122,13 +1062,13 @@ async def main():
                 f"[routing] Fast-path SDLC classification (PR/issue reference): {clean_text[:120]}"
             )
 
-        # === Session queue with per-session branching ===
+        # === Job queue with per-session branching ===
         import re as _re
 
-        from agent.agent_session_queue import (
+        from agent.job_queue import (
             check_revival,
-            enqueue_agent_session,
-            queue_revival_agent_session,
+            enqueue_job,
+            queue_revival_job,
             record_revival_cooldown,
         )
         from agent.steering import push_steering_message
@@ -1164,7 +1104,7 @@ async def main():
                             f"[{project_name}] Reply to revival "
                             "notification, queuing revival with context"
                         )
-                        await queue_revival_agent_session(
+                        await queue_revival_job(
                             revival_info=revival_info,
                             chat_id=telegram_chat_id,
                             message_id=message.id,
@@ -1183,8 +1123,8 @@ async def main():
                 from models.agent_session import AgentSession
 
                 # Check both "running" and "active" statuses -- "running" is the
-                # primary status during agent execution (set by _pop_agent_session), while
-                # "active" is set later by _execute_agent_session for auto-continue deferral.
+                # primary status during agent execution (set by _pop_job), while
+                # "active" is set later by _execute_job for auto-continue deferral.
                 # Both represent "agent is currently working" for steering purposes.
                 matching_session = None
                 for check_status in ("running", "active"):
@@ -1194,7 +1134,7 @@ async def main():
                         break
 
                 if matching_session:
-                    # Route to steering queue instead of session queue.
+                    # Route to steering queue instead of job queue.
                     # push_steering_message auto-detects abort keywords.
                     from agent.steering import ABORT_KEYWORDS
 
@@ -1218,52 +1158,15 @@ async def main():
                     return
                 else:
                     # No running/active session found -- check for pending (race window)
-                    # If within PENDING_MERGE_WINDOW_SECONDS, steer into it (#619)
                     pending_sessions = AgentSession.query.filter(
                         session_id=session_id, status="pending"
                     )
                     if pending_sessions:
-                        pending_session = pending_sessions[0]
-                        _ct = pending_session.created_at
-                        if isinstance(_ct, datetime):
-                            _ct = (
-                                _ct.timestamp()
-                                if _ct.tzinfo
-                                else _ct.replace(tzinfo=UTC).timestamp()
-                            )
-                        age = time.time() - (_ct or 0)
-                        if age <= PENDING_MERGE_WINDOW_SECONDS:
-                            # Recent pending session: push to steering queue
-                            from agent.steering import ABORT_KEYWORDS
-
-                            is_abort = clean_text.strip().lower() in ABORT_KEYWORDS
-                            push_steering_message(
-                                session_id,
-                                clean_text,
-                                sender_name,
-                                is_abort=is_abort,
-                            )
-                            ack_text = (
-                                "Stopping current task." if is_abort else "Adding to current task"
-                            )
-                            from bridge.markdown import send_markdown
-
-                            await send_markdown(
-                                client, event.chat_id, ack_text, reply_to=message.id
-                            )
-                            logger.info(
-                                f"[{project_name}] Steered message into "
-                                f"pending session {session_id} "
-                                f"(age={age:.1f}s <= {PENDING_MERGE_WINDOW_SECONDS}s)"
-                            )
-                            return
-                        else:
-                            logger.info(
-                                f"[{project_name}] Steering check found session {session_id} "
-                                f"in 'pending' status but too old "
-                                f"(age={age:.1f}s > {PENDING_MERGE_WINDOW_SECONDS}s) "
-                                f"-- message will queue normally"
-                            )
+                        logger.info(
+                            f"[{project_name}] Steering check found session {session_id} "
+                            f"in 'pending' status -- message will queue normally and be "
+                            f"consumed when the job starts via PostToolUse hook"
+                        )
             except (ConnectionError, OSError) as e:
                 # Redis/DB connection errors -- log at ERROR with traceback
                 logger.error(
@@ -1279,87 +1182,6 @@ async def main():
                     exc_info=True,
                 )
 
-        # === IN-MEMORY COALESCING GUARD (#705) ===
-        # Bridges the Redis visibility gap for rapid-fire messages (<200ms apart).
-        # The in-memory dict is set before enqueue_agent_session(), so the second
-        # message can find the first's session even before the Redis write completes.
-        if not (is_reply_to_valor and message.reply_to_msg_id):
-            try:
-                now_ts = time.time()
-                # Lazy cleanup: remove stale entries older than merge window
-                stale_chats = [
-                    cid
-                    for cid, (_, ts) in _recent_session_by_chat.items()
-                    if now_ts - ts > PENDING_MERGE_WINDOW_SECONDS
-                ]
-                for cid in stale_chats:
-                    del _recent_session_by_chat[cid]
-
-                if telegram_chat_id in _recent_session_by_chat:
-                    guard_session_id, guard_ts = _recent_session_by_chat[telegram_chat_id]
-                    guard_age = now_ts - guard_ts
-                    if guard_age <= PENDING_MERGE_WINDOW_SECONDS and guard_session_id != session_id:
-                        # Found a recent session in the in-memory guard — coalesce
-                        from models.agent_session import AgentSession
-
-                        guard_sessions = list(
-                            AgentSession.query.filter(session_id=guard_session_id)
-                        )
-                        if not guard_sessions:
-                            # Session not yet in Redis (Race 2) — brief retry
-                            await asyncio.sleep(0.2)
-                            guard_sessions = list(
-                                AgentSession.query.filter(session_id=guard_session_id)
-                            )
-
-                        if guard_sessions:
-                            guard_session = guard_sessions[0]
-                            # Push to AgentSession's queued_steering_messages
-                            # (Popoto model field) so ChatSession sees it on pickup.
-                            guard_session.push_steering_message(clean_text)
-
-                            # Also push to Redis steering queue so the
-                            # PostToolUse hook picks it up immediately
-                            from agent.steering import push_steering_message
-
-                            push_steering_message(
-                                guard_session_id,
-                                clean_text,
-                                sender_name,
-                            )
-
-                            from bridge.markdown import send_markdown
-
-                            await send_markdown(
-                                client,
-                                event.chat_id,
-                                "Adding to current task",
-                                reply_to=message.id,
-                            )
-                            logger.info(
-                                f"[{project_name}] In-memory coalescing guard: "
-                                f"merged message into session {guard_session_id} "
-                                f"(age={guard_age:.3f}s)"
-                            )
-                            # Record as processed so bridge restart
-                            # catch-up doesn't reprocess this message
-                            from bridge.dedup import record_message_processed
-
-                            await record_message_processed(event.chat_id, message.id)
-                            return
-                        else:
-                            # AgentSession still not in Redis after retry — fall through
-                            logger.warning(
-                                f"[{project_name}] In-memory coalescing guard: "
-                                f"session {guard_session_id} not found in Redis after retry, "
-                                f"falling through to normal routing"
-                            )
-            except Exception as e:
-                # Coalescing guard failures are non-fatal — fall through
-                logger.warning(
-                    f"[{project_name}] In-memory coalescing guard failed (non-fatal): {e}"
-                )
-
         # === INTAKE CLASSIFIER: Haiku triage for non-reply messages (#320) ===
         # Runs on messages that didn't hit the reply-to fast path above.
         # Classifies intent as interjection/new_work/acknowledgment to decide routing.
@@ -1368,7 +1190,7 @@ async def main():
             try:
                 from models.agent_session import AgentSession
 
-                # Find active/running/dormant/pending sessions in this chat
+                # Find active/running/dormant sessions in this chat
                 active_sessions = []
                 for check_status in ("running", "active", "dormant"):
                     sessions = AgentSession.query.filter(
@@ -1377,22 +1199,11 @@ async def main():
                     if sessions:
                         active_sessions.extend(sessions)
 
-                # Also include recent pending sessions within the merge window (#619)
-                pending_sessions = AgentSession.query.filter(
-                    chat_id=telegram_chat_id, status="pending"
-                )
-                if pending_sessions:
-                    now_ts = time.time()
-                    for ps in pending_sessions:
-                        age = now_ts - (ps.created_at or 0)
-                        if age <= PENDING_MERGE_WINDOW_SECONDS:
-                            active_sessions.append(ps)
-
                 if active_sessions:
-                    # Pick the most recent session (by updated_at or created_at)
+                    # Pick the most recent session (by last_activity or created_at)
                     target_session = max(
                         active_sessions,
-                        key=lambda s: s.updated_at or s.created_at or 0,
+                        key=lambda s: s.last_activity or s.created_at or 0,
                     )
 
                     # Classify message intent with Haiku
@@ -1419,7 +1230,7 @@ async def main():
                         # Re-check session status (Race 1 mitigation: session may
                         # have completed during classification)
                         fresh_session = None
-                        for check_status in ("running", "active", "pending"):
+                        for check_status in ("running", "active"):
                             sessions = AgentSession.query.filter(
                                 session_id=target_session.session_id,
                                 status=check_status,
@@ -1467,13 +1278,12 @@ async def main():
                     elif intent == "acknowledgment":
                         # Only acknowledge dormant sessions with expectations
                         if target_session.status == "dormant" and target_session.expectations:
-                            from models.session_lifecycle import finalize_session
-
-                            finalize_session(
-                                target_session,
+                            target_session.status = "completed"
+                            target_session.log_lifecycle_transition(
                                 "completed",
-                                reason=f"Acknowledged by {sender_name}: {clean_text[:80]}",
+                                f"Acknowledged by {sender_name}: {clean_text[:80]}",
                             )
+                            target_session.save()
                             await set_reaction(
                                 client,
                                 event.chat_id,
@@ -1577,7 +1387,7 @@ async def main():
         # Classification inheritance: if this is a reply-to continuation and
         # the async classifier hasn't completed yet, inherit classification_type
         # from the original session. This prevents the race condition where
-        # enqueue_agent_session gets classification_type=None because the async task
+        # enqueue_job gets classification_type=None because the async task
         # hasn't finished. See issue #375 Bug 2.
         if is_reply_to_valor and message.reply_to_msg_id and not classification_result.get("type"):
             try:
@@ -1607,22 +1417,10 @@ async def main():
                 f"[{project_name}] Dev mode (config-driven): {chat_title!r} → session_type=dev"
             )
         else:
-            if _persona == PersonaType.TEAMMATE:
-                _session_type = (
-                    SessionType.TEAMMATE
-                )  # Teammate session — read-only, no orchestration
-            else:
-                _session_type = SessionType.PM  # PM session — orchestrates work, spawns children
-
-        # Refresh the coalescing guard timestamp right before enqueue.
-        # The initial guard was set early (before awaits) to close the race window;
-        # this refresh ensures the timestamp is accurate for subsequent messages.
-        if not (is_reply_to_valor and message.reply_to_msg_id):
-            _recent_session_by_chat[telegram_chat_id] = (session_id, time.time())
+            _session_type = SessionType.CHAT  # ChatSession — PM persona, handles SDLC and Teammate
 
         # Enqueue: session_type drives ChatSession vs DevSession creation.
-        # Pass full project config so the session carries it through the pipeline.
-        depth = await enqueue_agent_session(
+        depth = await enqueue_job(
             project_key=project_key,
             session_id=session_id,
             working_dir=working_dir_str,
@@ -1637,10 +1435,9 @@ async def main():
             correlation_id=correlation_id,
             telegram_message_key=stored_msg_id,
             session_type=_session_type,
-            project_config=project,
         )
         logger.info(
-            f"[{project_name}] Queued session for {sender_name} (msg {message_id}, depth={depth})"
+            f"[{project_name}] Queued job for {sender_name} (msg {message_id}, depth={depth})"
         )
 
         # Record message as processed (dedup for catch_up replays)
@@ -1665,11 +1462,11 @@ async def main():
     async def _graceful_shutdown(tg_client):
         """Cancel workers, kill SDK subprocesses, and disconnect.
 
-        Running sessions will be recovered at next startup by
-        _recover_interrupted_agent_sessions_startup() which resets all running
-        sessions to pending unconditionally.
+        Running jobs will be recovered at next startup by
+        _recover_interrupted_jobs_startup() which resets all running
+        jobs to pending unconditionally.
         """
-        from agent.agent_session_queue import _active_workers
+        from agent.job_queue import _active_workers
 
         # Cancel all worker asyncio tasks
         for _pkey, worker_task in list(_active_workers.items()):
@@ -1796,11 +1593,15 @@ async def main():
     except Exception as e:
         logger.error(f"Dead letter replay failed: {e}")
 
-    # Register session queue callbacks for each project
-    from agent.agent_session_queue import cleanup_stale_branches
-    from agent.agent_session_queue import register_callbacks as register_queue_callbacks
+    # Register job queue callbacks for each project
+    from agent.job_queue import (
+        cleanup_stale_branches,
+        register_project_config,
+    )
+    from agent.job_queue import register_callbacks as register_queue_callbacks
 
     for _pkey, _pconfig in CONFIG.get("projects", {}).items():
+        register_project_config(_pkey, _pconfig)
         _wd = _pconfig.get("working_directory", DEFAULTS.get("working_directory", ""))
         if not _wd:
             continue
@@ -1839,12 +1640,12 @@ async def main():
                                 pass
                         elif filtered:
                             logger.error(
-                                f"Session queue send returned False for chat {chat_id} "
+                                f"Job queue send returned False for chat {chat_id} "
                                 f"({len(filtered)} chars)"
                             )
                 except Exception as e:
                     logger.error(
-                        f"Session queue _send callback failed for chat {chat_id}: {e}",
+                        f"Job queue _send callback failed for chat {chat_id}: {e}",
                         exc_info=True,
                     )
 
@@ -1861,7 +1662,7 @@ async def main():
             await _make_send_cb(),
             await _make_react_cb(),
         )
-        logger.info(f"[{_pkey}] Registered session queue callbacks")
+        logger.info(f"[{_pkey}] Registered job queue callbacks")
 
         # Clean up stale session branches on startup
         cleaned = await cleanup_stale_branches(_wd)
@@ -1874,47 +1675,53 @@ async def main():
         await _make_send_cb(),
         await _make_react_cb(),
     )
-    logger.info("[dm] Registered session queue callbacks")
+    logger.info("[dm] Registered job queue callbacks")
 
     # Clear stale restart flag from previous update (bridge has already restarted with new code)
-    from agent.agent_session_queue import clear_restart_flag
+    from agent.job_queue import clear_restart_flag
 
     if clear_restart_flag():
         logger.info("Cleared stale restart flag from previous update")
 
-    # Recover interrupted sessions and restart workers for any persisted sessions
-    from agent.agent_session_queue import (
+    # Recover interrupted jobs and restart workers for any persisted jobs
+    from agent.job_queue import (
         _ensure_worker,
-        _get_pending_agent_sessions_sync,
-        _recover_interrupted_agent_sessions_startup,
+        _get_pending_jobs_sync,
+        _recover_interrupted_jobs_startup,
     )
 
-    # Rebuild AgentSession indexes using SCAN-based rebuild_indexes() (production-safe).
-    # This cleans up stale index entries (orphans from crashed/expired sessions)
-    # and fixes any index corruption without blocking the keyspace.
+    # Clean up stale Redis keys with invalid job_id format (e.g. 60-char
+    # keys from old data). This silences the popoto "auto key value is length
+    # N" validation errors that spam the error log on every query.
+    # Temporarily suppress popoto's "{clean} is for debugging" warning.
     try:
         from models.agent_session import AgentSession
 
-        rebuilt = AgentSession.rebuild_indexes()
-        logger.info(f"Rebuilt AgentSession indexes ({rebuilt} records reindexed)")
-    except Exception as _rebuild_err:
-        logger.warning(f"AgentSession index rebuild failed (non-fatal): {_rebuild_err}")
+        _popoto_keys_logger = logging.getLogger("POPOTO.Query")
+        _prev_level = _popoto_keys_logger.level
+        _popoto_keys_logger.setLevel(logging.ERROR)
+        try:
+            AgentSession.query.keys(clean=True)
+        finally:
+            _popoto_keys_logger.setLevel(_prev_level)
+        logger.info("Cleaned stale Redis keys for AgentSession")
+    except Exception as _clean_err:
+        logger.warning(f"Redis key cleanup failed (non-fatal): {_clean_err}")
 
-    # Unified startup recovery: reset ALL running sessions to pending
-    # (at startup, all running sessions are orphaned from previous process)
-    recovered = _recover_interrupted_agent_sessions_startup()
+    # Unified startup recovery: reset ALL running jobs to pending
+    # (at startup, all running jobs are orphaned from previous process)
+    recovered = _recover_interrupted_jobs_startup()
     if recovered:
-        logger.info(f"Recovered {recovered} interrupted session(s) at startup")
+        logger.info(f"Recovered {recovered} interrupted job(s) at startup")
 
-    # Restart workers for pending sessions across all projects
+    # Restart workers for pending jobs across all projects
     for _pkey in ACTIVE_PROJECTS:
-        pending_sessions = _get_pending_agent_sessions_sync(_pkey)
-        if pending_sessions:
-            count = len(pending_sessions)
-            logger.info(f"[{_pkey}] Found {count} persisted session(s), restarting workers")
+        pending_jobs = _get_pending_jobs_sync(_pkey)
+        if pending_jobs:
+            logger.info(f"[{_pkey}] Found {len(pending_jobs)} persisted job(s), restarting workers")
             started_chats = set()
-            for _pending in pending_sessions:
-                _cid = _pending.chat_id or _pkey
+            for _job in pending_jobs:
+                _cid = _job.chat_id or _pkey
                 if _cid not in started_chats:
                     _ensure_worker(_cid)
                     started_chats.add(_cid)
@@ -1926,7 +1733,7 @@ async def main():
         try:
             from datetime import UTC
 
-            from agent.agent_session_queue import enqueue_agent_session as _enqueue_agent_session
+            from agent.job_queue import enqueue_job as _enqueue_job
             from bridge.catchup import scan_for_missed_messages
 
             # Use the last_connected value captured BEFORE we wrote the new
@@ -1948,7 +1755,7 @@ async def main():
                 monitored_groups=ALL_MONITORED_GROUPS,
                 projects_config=CONFIG,
                 should_respond_fn=should_respond_async,
-                enqueue_agent_session_fn=_enqueue_agent_session,
+                enqueue_job_fn=_enqueue_job,
                 find_project_fn=find_project_for_chat,
                 lookback_override=lookback,
             )
@@ -1960,7 +1767,7 @@ async def main():
 
     # Start message reconciler (detects live-session gaps)
     try:
-        from agent.agent_session_queue import enqueue_agent_session as _reconciler_enqueue
+        from agent.job_queue import enqueue_job as _reconciler_enqueue
         from bridge.reconciler import reconciler_loop
 
         asyncio.create_task(
@@ -1968,7 +1775,7 @@ async def main():
                 client=client,
                 monitored_groups=ALL_MONITORED_GROUPS,
                 should_respond_fn=should_respond_async,
-                enqueue_agent_session_fn=_reconciler_enqueue,
+                enqueue_job_fn=_reconciler_enqueue,
                 find_project_fn=find_project_for_chat,
             )
         )
@@ -1985,7 +1792,7 @@ async def main():
     except Exception as e:
         logger.error(f"Failed to start session watchdog: {e}")
 
-    # Start unified reflection scheduler (subsumes session health monitor and all recurring tasks)
+    # Start unified reflection scheduler (subsumes job health monitor and all recurring tasks)
     try:
         from agent.reflection_scheduler import ReflectionScheduler
 
@@ -1996,10 +1803,10 @@ async def main():
         logger.error(f"Failed to start reflection scheduler: {e}")
         # Fall back to standalone health monitor
         try:
-            from agent.agent_session_queue import _agent_session_health_loop
+            from agent.job_queue import _job_health_loop
 
-            asyncio.create_task(_agent_session_health_loop())
-            logger.info("Fell back to standalone session health monitor")
+            asyncio.create_task(_job_health_loop())
+            logger.info("Fell back to standalone job health monitor")
         except Exception as e2:
             logger.error(f"Failed to start fallback health monitor: {e2}")
 
@@ -2066,8 +1873,8 @@ async def main():
                 _last_connected_write = now_ts
                 _write_last_connected()
 
-            # Check for orphaned pending sessions when no workers are active
-            from agent.agent_session_queue import _active_workers
+            # Check for orphaned pending jobs when no workers are active
+            from agent.job_queue import _active_workers
 
             active_count = sum(1 for w in _active_workers.values() if not w.done())
             if active_count == 0:
@@ -2078,15 +1885,15 @@ async def main():
                         pending = await AgentSession.query.async_filter(
                             project_key=_pkey, status="pending"
                         )
-                        for entry in pending:
-                            cid = entry.chat_id or _pkey
+                        for job in pending:
+                            cid = job.chat_id or _pkey
                             _ensure_worker(cid)
                             logger.info(
-                                f"[heartbeat] Started worker for orphaned session "
-                                f"{entry.agent_session_id} (chat={cid})"
+                                f"[heartbeat] Started worker for orphaned job "
+                                f"{job.job_id} (chat={cid})"
                             )
                 except Exception as e:
-                    logger.debug(f"[heartbeat] Session poll error: {e}")
+                    logger.debug(f"[heartbeat] Job poll error: {e}")
 
             # Periodic zombie cleanup every 5 minutes
             now = time.time()

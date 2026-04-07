@@ -1,15 +1,5 @@
 """Claude Agent SDK integration for Valor."""
 
-from .agent_session_queue import (
-    PRIORITY_RANK,
-    AgentSession,
-    check_revival,
-    cleanup_stale_branches,
-    enqueue_agent_session,
-    queue_revival_agent_session,
-    record_revival_cooldown,
-    register_callbacks,
-)
 from .branch_manager import (
     BranchState,
     WorkStatus,
@@ -26,6 +16,20 @@ from .completion import (
     load_completion_criteria,
     mark_work_complete,
     verify_completion,
+)
+from .job_queue import (
+    PRIORITY_RANK,
+    AgentSession,
+    Job,
+    RedisJob,
+    check_revival,
+    cleanup_stale_branches,
+    enqueue_job,
+    get_project_config,
+    queue_revival_job,
+    record_revival_cooldown,
+    register_callbacks,
+    register_project_config,
 )
 from .messenger import BackgroundTask, BossMessenger
 from .sdk_client import (
@@ -63,13 +67,17 @@ __all__ = [
     "BranchState",
     "WorkStatus",
     "AgentSession",
-    "enqueue_agent_session",
+    "RedisJob",
+    "Job",
+    "enqueue_job",
     "PRIORITY_RANK",
     "check_revival",
     "register_callbacks",
+    "register_project_config",
+    "get_project_config",
     "cleanup_stale_branches",
     "record_revival_cooldown",
-    "queue_revival_agent_session",
+    "queue_revival_job",
     "push_steering_message",
     "pop_steering_message",
     "pop_all_steering_messages",

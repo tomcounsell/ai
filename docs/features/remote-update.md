@@ -35,14 +35,14 @@ We update Valor's codebase almost daily, but changes only take effect on the mac
 
 - **`scripts/remote-update.sh`**: Single shell script that does the essential update — git pull, uv sync. Does NOT restart the bridge itself. Stripped-down version of the Claude Code `/update` skill (no calendar config, no MCP checks, no CLI tool audit — those are setup concerns, not update concerns).
 - **Bridge command intercept**: Before any message processing, check if the raw text is `/update`. Run the script, reply with the result. If code changed, queue a restart (don't restart immediately).
-- **Queued restart**: Instead of killing the bridge mid-response, the update writes a restart flag file. The session queue worker checks for this flag between sessions and triggers a graceful restart only when idle.
+- **Queued restart**: Instead of killing the bridge mid-response, the update writes a restart flag file. The job queue worker checks for this flag between jobs and triggers a graceful restart only when idle.
 - **Launchd cron plist**: A second launchd job that runs `remote-update.sh` every 12 hours. If code changed, it writes the restart flag. Independent of the bridge — runs even if the bridge is down (in that case, launchd's `KeepAlive` will restart the bridge with the new code anyway).
 
 ### Flow
 
 **Manual trigger:**
 
-Supervisor types `/update` in any monitored Telegram group → Bridge intercepts before `should_respond_async` → Runs `scripts/remote-update.sh` → Replies with result summary → If code changed, writes restart flag → Session queue worker picks up flag between sessions → Graceful restart when idle
+Supervisor types `/update` in any monitored Telegram group → Bridge intercepts before `should_respond_async` → Runs `scripts/remote-update.sh` → Replies with result summary → If code changed, writes restart flag → Job queue worker picks up flag between jobs → Graceful restart when idle
 
 **Automatic cron:**
 
@@ -51,7 +51,7 @@ Launchd fires every 12 hours → Runs `scripts/remote-update.sh` → Logs result
 **Restart flag lifecycle:**
 
 1. Update script (or bridge handler) creates `data/restart-requested` flag file
-2. Session queue worker checks for flag after completing 
+2. Job queue worker checks for flag after completing each job
 3. If flag exists and no jobs are running → trigger graceful shutdown via `SHUTTING_DOWN` + disconnect
 4. Launchd's `KeepAlive` (or `valor-service.sh restart`) brings bridge back with new code
 5. On startup, bridge deletes the flag file if still present
@@ -150,7 +150,7 @@ fi
 
 # ── Signal bridge to restart when idle ────────────────────────────────
 # Don't restart immediately — the bridge may be mid-response.
-# Write a flag file; the session queue worker checks this between sessions
+# Write a flag file; the job queue worker checks this between jobs
 # and triggers a graceful restart only when no jobs are running.
 RESTART_FLAG="$PROJECT_DIR/data/restart-requested"
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $COMMIT_COUNT commit(s)" > "$RESTART_FLAG"
@@ -213,8 +213,8 @@ async def _handle_update_command(client, event):
     """Run remote update script and reply with results.
 
     The script pulls code and syncs deps but does NOT restart the bridge.
-    If code changed, it writes a restart flag that the session queue picks up
-    between sessions for a graceful restart when idle.
+    If code changed, it writes a restart flag that the job queue picks up
+    between jobs for a graceful restart when idle.
     """
     await set_reaction(client, event.chat_id, event.message.id, REACTION_RECEIVED)
 
@@ -247,14 +247,14 @@ Why intercept before everything:
 
 Authorization: Any message in a monitored group works. The bridge already only listens to groups configured in `ACTIVE_PROJECTS`. If someone outside those groups types `/update`, the bridge never sees it. No additional auth needed.
 
-#### 2b. Queued restart (`agent/agent_session_queue.py` + `bridge/telegram_bridge.py`)
+#### 2b. Queued restart (`agent/job_queue.py` + `bridge/telegram_bridge.py`)
 
 The update script writes `data/restart-requested` instead of calling `valor-service.sh restart`. The bridge picks this up when idle.
 
-**Session queue worker — check after each session completes:**
+**Job queue worker — check after each job completes:**
 
 ```python
-# In agent/agent_session_queue.py, after session completion (in the worker loop)
+# In agent/job_queue.py, after job completion (in the worker loop)
 
 RESTART_FLAG = Path(PROJECT_DIR) / "data" / "restart-requested"
 
@@ -266,7 +266,7 @@ def _check_restart_flag(project_key: str) -> bool:
     # Don't restart if other jobs are still running
     running = AgentSession.query.filter(project_key=project_key, status="running")
     if running:
-        logger.info(f"[{project_key}] Restart requested but {len(running)} session(s) still running — deferring")
+        logger.info(f"[{project_key}] Restart requested but {len(running)} job(s) still running — deferring")
         return False
 
     # Also check all projects, not just this one
@@ -275,18 +275,18 @@ def _check_restart_flag(project_key: str) -> bool:
             continue
         other_running = AgentSession.query.filter(project_key=pkey, status="running")
         if other_running:
-            logger.info(f"[{project_key}] Restart requested but {pkey} has running sessions — deferring")
+            logger.info(f"[{project_key}] Restart requested but {pkey} has running jobs — deferring")
             return False
 
     flag_content = RESTART_FLAG.read_text().strip()
-    logger.info(f"[{project_key}] Restart flag found ({flag_content}), no running sessions — restarting bridge")
+    logger.info(f"[{project_key}] Restart flag found ({flag_content}), no running jobs — restarting bridge")
     return True
 ```
 
 **Bridge startup — clean up stale flag:**
 
 ```python
-# In bridge startup, after _recover_interrupted_sessions()
+# In bridge startup, after _recover_interrupted_jobs()
 restart_flag = Path(PROJECT_DIR) / "data" / "restart-requested"
 if restart_flag.exists():
     restart_flag.unlink()
@@ -310,7 +310,7 @@ def _trigger_restart():
 ```
 
 **Why this approach:**
-- No mid-response interruption — restart only happens between sessions
+- No mid-response interruption — restart only happens between jobs
 - Uses existing graceful shutdown machinery (`SIGTERM` → `_shutdown_handler` → `_graceful_shutdown`)
 - Launchd `KeepAlive` brings the bridge back automatically with new code
 - Flag file is simple, no Redis dependency, survives bridge crashes
@@ -344,7 +344,7 @@ Install/uninstall via `valor-service.sh`:
 
 ### Risk 1: Bridge restarts itself mid-response (RESOLVED by design)
 **Impact:** If the bridge is mid-response to a user message when `/update` triggers a restart, that response is lost.
-**Mitigation:** Eliminated by design. The update script no longer restarts the bridge directly. It writes a restart flag file. The session queue worker checks the flag between sessions and only triggers a restart when all projects have no running sessions. The bridge finishes its current work before restarting. Worst case: if the bridge is perpetually busy, the restart is deferred until a quiet moment. A very long-running session (2+ hours) would delay the update — acceptable tradeoff vs losing a response.
+**Mitigation:** Eliminated by design. The update script no longer restarts the bridge directly. It writes a restart flag file. The job queue worker checks the flag between jobs and only triggers a restart when all projects have no running jobs. The bridge finishes its current work before restarting. Worst case: if the bridge is perpetually busy, the restart is deferred until a quiet moment. A very long-running job (2+ hours) would delay the update — acceptable tradeoff vs losing a response.
 
 ### Risk 2: Cron and manual trigger race
 **Impact:** If someone types `/update` at the same moment the cron fires, two `git pull` + restart sequences run simultaneously.
@@ -370,7 +370,7 @@ Install/uninstall via `valor-service.sh`:
 
 - [ ] `/update` in any monitored Telegram group triggers git pull + dep sync
 - [ ] Bridge replies with update result (commits pulled, or "already up to date")
-- [ ] If code changed, restart flag is written; bridge restarts only after current sessions complete
+- [ ] If code changed, restart flag is written; bridge restarts only after current jobs complete
 - [ ] No restart if already up to date (no flag, no bounce)
 - [ ] Cron runs every 12 hours and updates if new commits exist on main
 - [ ] Lockfile prevents concurrent update runs
@@ -384,6 +384,6 @@ Install/uninstall via `valor-service.sh`:
 |------|--------|
 | `scripts/remote-update.sh` | **NEW** — Core update script (pull, sync deps, write restart flag) |
 | `bridge/telegram_bridge.py` | Add `/update` command intercept at top of handler; clean restart flag on startup |
-| `agent/agent_session_queue.py` | Add `_check_restart_flag()` after session completion; `_trigger_restart()` via SIGTERM |
+| `agent/job_queue.py` | Add `_check_restart_flag()` after job completion; `_trigger_restart()` via SIGTERM |
 | `scripts/valor-service.sh` | Add update cron plist to `install`/`uninstall` commands |
 | `tests/test_remote_update.py` | **NEW** — Test script output parsing, bridge intercept, restart flag lifecycle |

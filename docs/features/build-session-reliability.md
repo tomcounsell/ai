@@ -4,7 +4,7 @@ Fixes for four compounding bugs that caused build sessions to hang, lose work, a
 
 ## Logging Propagation
 
-**Problem:** After the Feb 5 bridge module extraction, session queue log lines (`Executing session`, `SDK query`, `SDK responded`) disappeared from `bridge.log` because the file handler was only attached to the `bridge.telegram_bridge` module logger.
+**Problem:** After the Feb 5 bridge module extraction, job queue log lines (`Executing job`, `SDK query`, `SDK responded`) disappeared from `bridge.log` because the file handler was only attached to the `bridge.telegram_bridge` module logger.
 
 **Fix:** The file handler is now attached to the **root logger** so all child loggers inherit it. A level-based `InternalDebugFilter` ensures internal packages (`bridge`, `agent`, `tools`, `monitoring`, `models`) log at DEBUG level while external packages only pass INFO+. This captures external library warnings/errors while filtering their debug spam.
 

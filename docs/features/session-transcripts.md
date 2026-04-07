@@ -57,14 +57,14 @@ This runs unconditionally — the legacy `--chat` flag is accepted but ignored s
 | `chat_id` | KeyField | Telegram chat ID |
 | `sender` | Field | Who triggered the session |
 | `started_at` | SortedField | Unix timestamp, partitioned by project_key |
-| `updated_at` | DatetimeField | Last activity timestamp (auto_now=True) |
+| `last_activity` | SortedField | Last activity timestamp |
 | `completed_at` | Field | Completion timestamp |
 | `turn_count` | IntField | Number of conversation turns |
 | `tool_call_count` | IntField | Number of tool calls |
 | `log_path` | Field | Path to transcript .txt file |
 | `summary` | Field | Brief session outcome summary |
 | `branch_name` | Field | Git branch (for tier 2 work items) |
-| `slug` | Field | Named work item slug (tier 2) |
+| `work_item_slug` | Field | Named work item slug (tier 2) |
 | `tags` | ListField | Categorization tags (e.g., "pr-review") |
 | `classification_type` | Field | bug, feature, or chore |
 | `classification_confidence` | Field | 0.0-1.0 |
@@ -89,7 +89,7 @@ log_path = start_transcript(
     chat_id="12345",
     sender="Tom",
     branch_name="session/fix-tests",
-    slug="fix-tests",
+    work_item_slug="fix-tests",
 )
 
 # Append a conversation turn
@@ -118,13 +118,13 @@ complete_transcript(
 
 ## Integration Points
 
-The session transcript module is integrated at the session lifecycle boundaries in `agent/agent_session_queue.py`:
+The session transcript module is integrated at the job lifecycle boundaries in `agent/job_queue.py`:
 
-- **Session start**: `start_transcript()` called when a session begins processing
-- **Session end**: `complete_transcript()` called when the session completes or fails
+- **Session start**: `start_transcript()` called when a job begins processing
+- **Session end**: `complete_transcript()` called when the job completes or fails
 
 The `AgentSession` model is used everywhere:
-- `agent/agent_session_queue.py` - Creates/updates AgentSession at session boundaries
+- `agent/job_queue.py` - Creates/updates AgentSession at job boundaries
 - `agent/sdk_client.py` - Marks session as failed on SDK errors
 - `agent/health_check.py` - Updates tool_call_count during sessions
 - `monitoring/session_watchdog.py` - Monitors active sessions for health issues
@@ -132,7 +132,7 @@ The `AgentSession` model is used everywhere:
 
 ## Session Tagging
 
-The `tags` ListField stores session categorization tags (e.g., "bug", "sdlc", "pr-created", "reflections"). Auto-tagging runs automatically at session completion inside `finalize_session()` in `models/session_lifecycle.py` via `tools/session_tags.py`. The `complete_transcript()` function delegates status mutation and all side effects to `finalize_session()`. See [Session Tagging](session-tagging.md) for the full tagging system documentation.
+The `tags` ListField stores session categorization tags (e.g., "bug", "sdlc", "pr-created", "reflections"). Auto-tagging runs automatically at session completion inside `complete_transcript()` via `tools/session_tags.py`. See [Session Tagging](session-tagging.md) for the full tagging system documentation.
 
 ## Cleanup
 
@@ -143,4 +143,4 @@ from models.agent_session import AgentSession
 deleted = AgentSession.cleanup_expired(max_age_days=90)
 ```
 
-This is called automatically by the reflections maintenance task (step 13: "Redis TTL Cleanup").
+This is called automatically by the reflections maintenance job (step 13: "Redis TTL Cleanup").

@@ -59,7 +59,7 @@ class TestReconcileOnce:
             client=client,
             monitored_groups=[],
             should_respond_fn=AsyncMock(),
-            enqueue_agent_session_fn=AsyncMock(),
+            enqueue_job_fn=AsyncMock(),
             find_project_fn=MagicMock(),
         )
         assert result == 0
@@ -87,7 +87,7 @@ class TestReconcileOnce:
                 client=client,
                 monitored_groups=["test group"],
                 should_respond_fn=AsyncMock(),
-                enqueue_agent_session_fn=enqueue_fn,
+                enqueue_job_fn=enqueue_fn,
                 find_project_fn=MagicMock(return_value=_make_project()),
             )
 
@@ -116,7 +116,7 @@ class TestReconcileOnce:
                 client=client,
                 monitored_groups=["test group"],
                 should_respond_fn=AsyncMock(),
-                enqueue_agent_session_fn=enqueue_fn,
+                enqueue_job_fn=enqueue_fn,
                 find_project_fn=MagicMock(return_value=_make_project()),
             )
 
@@ -145,7 +145,7 @@ class TestReconcileOnce:
                 client=client,
                 monitored_groups=["test group"],
                 should_respond_fn=AsyncMock(),
-                enqueue_agent_session_fn=enqueue_fn,
+                enqueue_job_fn=enqueue_fn,
                 find_project_fn=MagicMock(return_value=_make_project()),
             )
 
@@ -174,7 +174,7 @@ class TestReconcileOnce:
                 client=client,
                 monitored_groups=["test group"],
                 should_respond_fn=AsyncMock(),
-                enqueue_agent_session_fn=enqueue_fn,
+                enqueue_job_fn=enqueue_fn,
                 find_project_fn=MagicMock(return_value=_make_project()),
             )
 
@@ -204,7 +204,7 @@ class TestReconcileOnce:
                 client=client,
                 monitored_groups=["test group"],
                 should_respond_fn=should_respond_fn,
-                enqueue_agent_session_fn=enqueue_fn,
+                enqueue_job_fn=enqueue_fn,
                 find_project_fn=MagicMock(return_value=_make_project()),
             )
 
@@ -235,7 +235,7 @@ class TestReconcileOnce:
                 client=client,
                 monitored_groups=["test group"],
                 should_respond_fn=should_respond_fn,
-                enqueue_agent_session_fn=enqueue_fn,
+                enqueue_job_fn=enqueue_fn,
                 find_project_fn=MagicMock(return_value=_make_project()),
             )
 
@@ -273,7 +273,7 @@ class TestReconcileOnce:
                 client=client,
                 monitored_groups=["test group"],
                 should_respond_fn=AsyncMock(return_value=(True, False)),
-                enqueue_agent_session_fn=enqueue_fn,
+                enqueue_job_fn=enqueue_fn,
                 find_project_fn=MagicMock(return_value=_make_project()),
             )
 
@@ -309,7 +309,7 @@ class TestReconcileOnce:
                 client=client,
                 monitored_groups=["bad group", "good group"],
                 should_respond_fn=should_respond_fn,
-                enqueue_agent_session_fn=enqueue_fn,
+                enqueue_job_fn=enqueue_fn,
                 find_project_fn=find_project,
             )
 
@@ -330,7 +330,7 @@ class TestReconcileOnce:
             client=client,
             monitored_groups=["unknown group"],
             should_respond_fn=AsyncMock(),
-            enqueue_agent_session_fn=enqueue_fn,
+            enqueue_job_fn=enqueue_fn,
             find_project_fn=MagicMock(return_value=None),
         )
 
@@ -351,7 +351,7 @@ class TestReconcileOnce:
             client=client,
             monitored_groups=["some other group"],
             should_respond_fn=AsyncMock(),
-            enqueue_agent_session_fn=enqueue_fn,
+            enqueue_job_fn=enqueue_fn,
             find_project_fn=MagicMock(),
         )
 
@@ -382,7 +382,7 @@ class TestReconcileOnce:
                 client=client,
                 monitored_groups=["test group"],
                 should_respond_fn=should_respond_fn,
-                enqueue_agent_session_fn=enqueue_fn,
+                enqueue_job_fn=enqueue_fn,
                 find_project_fn=MagicMock(return_value=_make_project()),
             )
 

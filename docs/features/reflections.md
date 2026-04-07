@@ -28,7 +28,7 @@ reflections:
     interval: 300       # 5 minutes
     priority: high
     execution_type: function
-    callable: "agent.agent_session_queue._job_health_check"
+    callable: "agent.job_queue._job_health_check"
     enabled: true
 ```
 
@@ -50,7 +50,7 @@ reflections:
 | `health-check` | 5 min | high | function | Check running jobs for liveness, recover stuck ones |
 | `orphan-recovery` | 30 min | normal | function | Recover stranded AgentSession objects |
 | `stale-branch-cleanup` | daily | low | function | Clean up session branches older than 72 hours |
-| `popoto-index-cleanup` | daily | low | function | Rebuild Popoto model indexes to remove orphaned entries (see [Popoto Index Hygiene](popoto-index-hygiene.md)) |
+| `daily-maintenance` | daily | low | function | Full 14-unit maintenance pipeline |
 
 ### State Model (`models/reflection.py`)
 
@@ -90,13 +90,13 @@ All log files have rotation configured to prevent unbounded growth. Two mechanis
 
 | Log File | Writer | Rotation Mechanism | Max Size | Backups |
 |----------|--------|--------------------|----------|---------|
-| `bridge.log` | Python (RotatingFileHandler) | `logging.handlers.RotatingFileHandler` in `bridge/telegram_bridge.py` | 10MB | 5 |
-| `watchdog.log` | Python (RotatingFileHandler) | `logging.handlers.RotatingFileHandler` in `monitoring/bridge_watchdog.py` | 10MB | 5 |
-| `reflections.log` | Python (RotatingFileHandler) | `logging.handlers.RotatingFileHandler` in `scripts/reflections.py` | 10MB | 5 |
+| `bridge.log` | Python (RotatingFileHandler) | `logging.handlers.RotatingFileHandler` | 10MB | 5 |
 | `bridge.error.log` | launchd (StandardErrorPath) | Shell `rotate_log` in `valor-service.sh` | 10MB | 3 |
+| `watchdog.log` | launchd (StandardOutPath) | Shell `rotate_log` in `valor-service.sh` | 10MB | 3 |
+| `reflections.log` | launchd (StandardOutPath) | Shell `rotate_log` in `valor-service.sh` | 10MB | 3 |
 | `reflections_error.log` | launchd (StandardErrorPath) | Shell `rotate_log` in `valor-service.sh` | 10MB | 3 |
 
-**Python-rotated files** use `RotatingFileHandler` which rotates automatically during writes. No service restart needed. Services using `config/settings.py:configure_logging()` also get rotation automatically via `RotatingFileHandler` with configurable `max_file_size` and `backup_count`.
+**Python-rotated files** use `RotatingFileHandler` which rotates automatically during writes. No service restart needed.
 
 **Shell-rotated files** are rotated by the `rotate_log` function in `scripts/valor-service.sh` on every service start/restart. A `newsyslog` config (`config/newsyslog.valor.conf`) provides a safety net for long-running services -- macOS runs newsyslog hourly via launchd. Note: since launchd holds file descriptors open, newsyslog rotation may not be effective until the next service restart. The shell `rotate_log` function is the primary mechanism.
 
@@ -106,13 +106,13 @@ The bridge watchdog (`com.valor.bridge-watchdog`) is intentionally NOT in the re
 
 When the watchdog detects that the bridge process is not running (via `pgrep`), it calls `crash_tracker.log_crash("bridge_dead_on_watchdog_check")` to record the event. This captures SIGKILL and OOM kills that leave no traceback. The crash tracker's pattern detection requires 3+ crashes in 30 minutes before triggering escalation, so a single false positive from a startup race is harmless.
 
-## Daily Maintenance Pipeline (16 Units)
+## Daily Maintenance Pipeline (15 Units)
 
-The daily maintenance pipeline runs from `scripts/reflections.py`. It is invoked manually or via launchd (not via the reflection scheduler -- the `daily-maintenance` registry entry was removed in PR #664). The runner loads state from Redis, executes each unit in order, and checkpoints after every unit. If interrupted, the next run resumes from where it left off. Each unit is independently failable -- a crash in one unit does not block the rest.
+The `daily-maintenance` reflection runs the full pipeline from `scripts/reflections.py`. The runner loads state from Redis, executes each unit in order, and checkpoints after every unit. If interrupted, the next run resumes from where it left off. Each unit is independently failable — a crash in one unit does not block the rest.
 
-The pipeline has 16 units: 13 independent items and 3 merged pipelines. Completed units are tracked by string key (e.g. `"legacy_code_scan"`), not by integer position. This means units can be reordered or renamed without data migrations — any unknown key in `completed_steps` is simply skipped.
+The pipeline has 15 units: 12 independent items and 3 merged pipelines. Completed units are tracked by string key (e.g. `"legacy_code_scan"`), not by integer position. This means units can be reordered or renamed without data migrations — any unknown key in `completed_steps` is simply skipped.
 
-### 16-Unit Pipeline
+### 15-Unit Pipeline
 
 **Independent units** (each checkpointed individually):
 
@@ -123,22 +123,21 @@ The pipeline has 16 units: 13 independent items and 3 merged pipelines. Complete
 | 3 | `task_management` | Clean Up Task Management | Lists open bug issues via `gh issue list` per project | Per-project | Non-blocking, requires `gh` auth |
 | 4 | `documentation_audit` | Audit Documentation | Weekly LLM-powered accuracy audit of `docs/` (see [Documentation Audit](documentation-audit.md)) | AI repo only | Non-blocking, requires `ANTHROPIC_API_KEY` |
 | 5 | `skills_audit` | Skills Audit | Validates all SKILL.md files against template standards (see [Skills Audit](do-skills-audit.md)) | AI repo only | Non-blocking |
-| 6 | `hooks_audit` | Hooks Audit | Scans hooks.log for recent errors and validates settings.json hook configuration (see [Hooks Best Practices](hooks-best-practices.md)) | AI repo only | Non-blocking |
-| 7 | `redis_ttl_cleanup` | Redis TTL Cleanup | Prunes expired records across all Redis models | AI repo only | Non-blocking |
-| 8 | `redis_data_quality` | Redis Data Quality | Surfaces data quality issues: unsummarized links, dead channels, error patterns | AI repo only | Non-blocking |
-| 9 | `branch_plan_cleanup` | Branch and Plan Cleanup | Deletes merged branches; ensures plans have open issues; flags completed plans for docs migration | AI repo only | Non-blocking, requires `gh` auth |
-| 10 | `feature_docs_audit` | Feature Docs Audit | Checks for stale references, README accuracy, plan-masquerading-as-feature, stub docs | AI repo only | Non-blocking |
-| 11 | `principal_staleness` | Principal Context Staleness | Checks age of PRINCIPAL.md and flags if stale | AI repo only | Non-blocking |
-| 12 | `disk_space_check` | Disk Space Check | Checks free disk space on project volume; finding if below 10 GB (see [Adding Reflection Tasks](adding-reflection-tasks.md)) | AI repo only | Non-blocking |
-| 13 | `pr_review_audit` | PR Review Audit | Scans merged PRs for unaddressed review findings from do-pr-review, files GitHub issues with severity labels | Per-project | Non-blocking, requires `gh` auth |
+| 6 | `redis_ttl_cleanup` | Redis TTL Cleanup | Prunes expired records across all Redis models | AI repo only | Non-blocking |
+| 7 | `redis_data_quality` | Redis Data Quality | Surfaces data quality issues: unsummarized links, dead channels, error patterns | AI repo only | Non-blocking |
+| 8 | `branch_plan_cleanup` | Branch and Plan Cleanup | Deletes merged branches; ensures plans have open issues; flags completed plans for docs migration | AI repo only | Non-blocking, requires `gh` auth |
+| 9 | `feature_docs_audit` | Feature Docs Audit | Checks for stale references, README accuracy, plan-masquerading-as-feature, stub docs | AI repo only | Non-blocking |
+| 10 | `principal_staleness` | Principal Context Staleness | Checks age of PRINCIPAL.md and flags if stale | AI repo only | Non-blocking |
+| 11 | `disk_space_check` | Disk Space Check | Checks free disk space on project volume; finding if below 10 GB (see [Adding Reflection Tasks](adding-reflection-tasks.md)) | AI repo only | Non-blocking |
+| 12 | `pr_review_audit` | PR Review Audit | Scans merged PRs for unaddressed review findings from do-pr-review, files GitHub issues with severity labels | Per-project | Non-blocking, requires `gh` auth |
 
 **Merged pipelines** (sub-steps run internally, one checkpoint for the whole group):
 
 | # | Key | Name | Sub-steps | Description |
 |---|-----|------|-----------|-------------|
-| 14 | `session_intelligence` | Session Intelligence | session_analysis → llm_reflection → auto_fix_bugs | Analyzes sessions, reflects via Haiku, files high-confidence bug issues |
-| 15 | `behavioral_learning` | Behavioral Learning | episode_cycle_close → pattern_crystallization | Closes completed SDLC episodes and crystallizes recurring patterns |
-| 16 | `daily_report_and_notify` | Daily Report & Notify | produce_report → create_github_issue | Writes report, posts GitHub issues, sends Telegram summary (must be last) |
+| 13 | `session_intelligence` | Session Intelligence | session_analysis → llm_reflection → auto_fix_bugs | Analyzes sessions, reflects via Haiku, files high-confidence bug issues |
+| 14 | `behavioral_learning` | Behavioral Learning | episode_cycle_close → pattern_crystallization | Closes completed SDLC episodes and crystallizes recurring patterns |
+| 15 | `daily_report_and_notify` | Daily Report & Notify | produce_report → create_github_issue | Writes report, posts GitHub issues, sends Telegram summary (must be last) |
 
 **Removed:** `step_check_sentry` — was a permanent no-op (Sentry MCP never available in standalone mode). Deleted entirely.
 
@@ -453,10 +452,6 @@ The scheduler picks it up on the next tick. No code changes or service restarts 
 | `tail -f logs/bridge.log` | Stream bridge logs (includes reflection scheduler output) |
 | `python -c "from models.reflections import ReflectionIgnore; [print(f'{e.pattern} (expires {e.expires_at})') for e in ReflectionIgnore.get_active()]"` | View active ignore entries |
 
-### Session Log Cleanup
-
-After the daily maintenance pipeline completes, `main()` calls `bridge.session_logs.cleanup_old_snapshots()` to prune session log directories older than 7 days from `logs/sessions/`. The count of removed directories is logged. Failures are caught and logged as non-fatal -- they never block the rest of the pipeline.
-
 ### Output Locations
 
 | Path | Content |
@@ -472,7 +467,7 @@ After the daily maintenance pipeline completes, `main()` calls `bridge.session_l
 | `config/reflections.yaml` | Declarative registry of all reflections |
 | `models/reflection.py` | Reflection state model (per-reflection Redis tracking) |
 | `models/reflections.py` | Core models: ReflectionRun (daily pipeline state), ReflectionIgnore (auto-fix suppression), PRReviewAudit (PR review dedup) |
-| `scripts/reflections.py` | Daily maintenance 16-unit runner |
+| `scripts/reflections.py` | Daily maintenance 15-unit runner |
 | `scripts/reflections_report.py` | GitHub issue creation module |
 | `scripts/install_reflections.sh` | launchd installation script (kept for manual invocation) |
 | `com.valor.reflections.plist` | launchd schedule definition (kept for manual invocation) |
@@ -510,5 +505,4 @@ After the daily maintenance pipeline completes, `main()` calls `bridge.session_l
 ## See Also
 
 - [Documentation Audit](documentation-audit.md) — `documentation_audit` unit deep dive
-- [Hooks Best Practices & Audit](hooks-best-practices.md) — `hooks_audit` unit deep dive
 - [Skills Audit](do-skills-audit.md) — `skills_audit` unit deep dive

@@ -21,7 +21,7 @@ All tools are available in `tools/`:
 - **image-gen** - Image generation tool
 
 ### Supporting Modules (Added 2026-01-19)
-- **tools/emoji_embedding.py** - Embedding-based emoji reaction selection (replaced intent/ module)
+- **intent/** - Ollama-based intent classification with heuristic fallback
 
 See [tools/README.md](../tools/README.md) for usage documentation.
 
@@ -377,7 +377,7 @@ See [tools/README.md](../tools/README.md) for usage documentation.
 - `timeout_minutes`: Maximum runtime (default: 10)
 
 **Output**:
-- `agent_session_id`: Scheduled session identifier
+- `job_id`: Scheduled job identifier
 - `status`: Scheduling status
 - `tests_to_run`: List of tests that will run
 - `estimated_duration`: Estimated run time

@@ -2,71 +2,6 @@
 
 You are the merge gate for the SDLC pipeline. Your job is to programmatically verify all prerequisites are met, then execute the merge.
 
-## Pre-Merge Pipeline Check
-
-Before running gate checks, take a moment to review what the pipeline actually completed. Run this and share the output with the user:
-
-```bash
-BRANCH=$(gh pr view $ARGUMENTS --json headRefName -q .headRefName)
-SLUG=$(echo "$BRANCH" | sed 's|^session/||')
-
-python3 -c "
-from bridge.pipeline_graph import DISPLAY_STAGES
-
-# Try programmatic state machine first
-try:
-    from bridge.pipeline_state import PipelineStateMachine
-    from models.agent_session import AgentSession
-    session = AgentSession.get_by_slug('$SLUG')
-    if session:
-        sm = PipelineStateMachine(session)
-        states = sm.get_display_progress()
-    else:
-        states = {}
-except Exception:
-    states = {}
-
-# Show pipeline progress
-icons = {'completed': '✓', 'in_progress': '~', 'failed': '✗'}
-stages_display = []
-skipped = []
-for stage in DISPLAY_STAGES:
-    if stage == 'MERGE':
-        continue
-    status = states.get(stage, 'pending')
-    icon = icons.get(status, '·')
-    stages_display.append(f'{icon} {stage}')
-    if status in ('pending', 'ready'):
-        skipped.append(stage)
-
-print('Pipeline: ' + '  '.join(stages_display))
-all_pending = all(s in ('pending', 'ready') for s in states.values())
-if all_pending and not states:
-    print()
-    print('WARNING: No pipeline state found (cold start or Redis cleared).')
-    print('Stage completion cannot be verified. Treat all stages as unconfirmed.')
-    print('Proceed only if you have manually verified all stages completed.')
-elif skipped:
-    print()
-    names = ', '.join(skipped)
-    print(f'WARNING: The following stages were NOT recorded as completed: {names}')
-    print()
-    print('These stages may have been skipped entirely or run without writing state markers.')
-    print('Do NOT proceed without explicitly acknowledging each skipped stage.')
-    print('For emergency hotfixes only: state which stages you are intentionally skipping and why.')
-else:
-    print()
-    print('All stages completed. Good to merge.')
-"
-```
-
-If the pipeline state shows ALL stages as pending/ready (cold start — no Redis state recorded), warn
-clearly that no pipeline state was found and require explicit acknowledgment before merging.
-
-If specific stages were skipped, STOP and list them. Do NOT proceed until the user explicitly
-acknowledges each skipped stage and provides a reason. Emergency hotfixes are the only valid
-exception, and even then the acknowledgment must be explicit and on-record.
-
 ## Prerequisites Check
 
 Use the pipeline state machine to verify TEST, REVIEW, and DOCS stages are completed:
@@ -193,23 +128,7 @@ gh pr merge $ARGUMENTS --squash --delete-branch
 rm -f data/merge_authorized_$ARGUMENTS
 ```
 
-4. Delete the plan file now that the PR is merged:
-
-```bash
-BRANCH=$(gh pr view $ARGUMENTS --json headRefName -q .headRefName 2>/dev/null || echo "")
-SLUG=$(echo "$BRANCH" | sed 's|^session/||')
-PLAN_PATH="docs/plans/${SLUG}.md"
-
-if [ -f "$PLAN_PATH" ]; then
-  python scripts/migrate_completed_plan.py "$PLAN_PATH" && echo "Plan deleted: $PLAN_PATH" || echo "WARN: Plan migration failed for $PLAN_PATH — delete manually if needed"
-else
-  echo "No plan at $PLAN_PATH — skipping cleanup"
-fi
-```
-
-   If plan deletion fails, report a warning but do NOT block success reporting. The plan can always be deleted manually.
-
-5. Report success.
+4. Report success.
 
 ### If any gate fails:
 
