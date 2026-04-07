@@ -165,6 +165,14 @@ If `TARGET_REPO == ORCHESTRATOR_REPO`, this is a same-repo build and no special 
     - If exit code 0: all plan assertions pass, proceed to review
     - If exit code 1: feed the failure report into `/do-patch` for fixes, then re-run validation (up to 3 iterations)
     - The script checks file existence assertions, verification table commands, and success criteria from the plan
+16c. **Run AI semantic evaluation against acceptance criteria** - After validate_build.py passes, run the AI evaluator:
+    ```bash
+    (cd $TARGET_REPO/.worktrees/{slug} && python scripts/evaluate_build.py $PLAN_PATH)
+    ```
+    - Exit code 0: all criteria PASS or PARTIAL — log any PARTIAL verdicts as warnings, proceed to step 17
+    - Exit code 2: FAIL verdicts found — bundle ALL FAIL verdicts into a single `/do-patch` call (not one call per FAIL); log `[AI Evaluator] FAIL on N criteria — routing to patch cycle (attempt X/2)` before each invocation; max 2 iterations; if FAIL persists after 2 iterations, log "AI evaluator: 2 iterations reached, proceeding to review" and proceed to step 17
+    - Exit code 3: no `## Acceptance Criteria` section — log "AI evaluator: no Acceptance Criteria section, skipping" and proceed to step 17
+    - Exit code 1 or any error: log "AI evaluator failed (non-blocking): {error}" and proceed to step 17
 17. **Advance to review stage** after tests pass:
     ```bash
     python -c "from agent.build_pipeline import advance_stage; advance_stage('{slug}', 'review')"

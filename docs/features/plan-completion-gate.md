@@ -44,6 +44,8 @@ Design principles:
 
 Step 16b in `.claude/skills/do-build/SKILL.md` runs `validate_build.py` after the definition-of-done check. If validation fails (exit 1), the failure report feeds into `/do-patch` for fixes, with up to 3 retry iterations before advancing to review.
 
+Step 16c (the **AI semantic evaluator**) runs immediately after. It reads the plan's `## Acceptance Criteria` section and compares each criterion against the git diff using Claude Haiku as an AI judge. FAIL verdicts route to `/do-patch` (max 2 iterations); PARTIAL verdicts are logged as warnings; any evaluator error is caught and treated as a skip. The evaluator is non-blocking — pipeline always advances to review. See `docs/features/do-build-ai-evaluator.md` for the full spec.
+
 ### 4. `/do-pr-review` plan checkbox validation
 
 Step 4b in `.claude/skills/do-pr-review/sub-skills/code-review.md` walks each unchecked `- [ ]` item in key plan sections and assesses whether the PR diff addresses it:
@@ -70,6 +72,8 @@ A plan checkbox scan in `.claude/commands/do-merge.md` runs between the pipeline
 |------|------|
 | `scripts/validate_build.py` | Deterministic plan-to-build validator |
 | `tests/unit/test_validate_build.py` | Unit tests for the validator |
+| `scripts/evaluate_build.py` | AI semantic evaluator (step 16c) — verdict per acceptance criterion |
+| `tests/unit/test_evaluate_build.py` | Unit tests for the AI evaluator |
 | `.claude/skills/do-docs/SKILL.md` | Removed plan status update section |
 | `.claude/skills/do-build/SKILL.md` | Added validate_build.py step (16b) |
 | `.claude/skills/do-pr-review/sub-skills/code-review.md` | Added checkbox validation (4b) |
@@ -78,7 +82,7 @@ A plan checkbox scan in `.claude/commands/do-merge.md` runs between the pipeline
 ## How It Works End-to-End
 
 1. Developer creates a plan with checkboxes across sections (Acceptance Criteria, Test Impact, Documentation, etc.)
-2. `/do-build` implements the plan and runs `validate_build.py` to verify file assertions and verification commands pass
+2. `/do-build` implements the plan and runs `validate_build.py` (step 16b) to verify file assertions and verification commands pass, then `evaluate_build.py` (step 16c) for AI semantic evaluation against Acceptance Criteria
 3. `/do-pr-review` cross-references unchecked plan items against the PR diff and flags unaddressed items
 4. `/do-docs` updates documentation and writes `status: docs_complete` to the plan frontmatter, signaling DOCS stage completion
 5. `/do-merge` scans for any remaining unchecked items and blocks the merge if requirements are still open
