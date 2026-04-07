@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: bug
 appetite: Small
 owner: valor
@@ -169,8 +169,8 @@ No agent integration required — this is a bridge-internal hook change. The hoo
 
 ## Documentation
 
-- [ ] Update `docs/features/sdlc-stage-handoff.md` to document the Skill tool → stage tracking path alongside the existing dev-session path.
-- [ ] Add an inline comment in `pre_tool_use.py` explaining `_SKILL_TO_STAGE` and when it is used.
+- [x] Update `docs/features/sdlc-stage-handoff.md` to document the Skill tool → stage tracking path alongside the existing dev-session path.
+- [x] Add an inline comment in `pre_tool_use.py` explaining `_SKILL_TO_STAGE` and when it is used.
 
 ## Success Criteria
 
