@@ -107,21 +107,21 @@ Caller has string id → calls `AgentSession.get_by_id(id)` → receives session
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] Identify each `except Exception: pass` (or similar silent handler) around the 12 affected sites and convert to `logger.warning` calls. Add a test asserting the warning is logged when the lookup misses.
-- [ ] No new exception handlers introduced — only existing ones modified.
+- [x] Identify each `except Exception: pass` (or similar silent handler) around the 12 affected sites and convert to `logger.warning` calls. Add a test asserting the warning is logged when the lookup misses.
+- [x] No new exception handlers introduced — only existing ones modified.
 
 ### Empty/Invalid Input Handling
-- [ ] `get_by_id("")` returns `None` (test case).
-- [ ] `get_by_id(None)` returns `None` without raising (test case).
-- [ ] Whitespace-only ids return `None` (test case).
+- [x] `get_by_id("")` returns `None` (test case).
+- [x] `get_by_id(None)` returns `None` without raising (test case).
+- [x] Whitespace-only ids return `None` (test case).
 
 ### Error State Rendering
-- [ ] Lookups that fail now log a structured warning with the id and reason. Test asserts the warning is emitted via `caplog`.
+- [x] Lookups that fail now log a structured warning with the id and reason. Test asserts the warning is emitted via `caplog`.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_agent_session_lookup.py` — CREATE: covers `get_by_id` positive and negative cases plus warning emission.
-- [ ] `tests/integration/` — No existing integration tests assert the broken behavior; sweep is mechanical. If a test relies on the silent-fail fallback, it should be updated to assert the new logged-warning behavior.
+- [x] `tests/unit/test_agent_session_lookup.py` — CREATE: covers `get_by_id` positive and negative cases plus warning emission.
+- [x] `tests/integration/` — No existing integration tests assert the broken behavior; sweep is mechanical. If a test relies on the silent-fail fallback, it should be updated to assert the new logged-warning behavior.
 
 No other existing tests are expected to break — the call-site changes preserve return semantics (session-or-None), only making the lookup actually succeed when the session exists.
 
@@ -164,23 +164,23 @@ No agent integration required — `AgentSession` is not exposed via MCP and the 
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/session-isolation.md` (or the closest existing AgentSession doc) with a short note on the canonical lookup pattern: "Use `AgentSession.get_by_id(string)` for raw-string lookups; `query.get()` requires Popoto key objects."
-- [ ] If no AgentSession-specific feature doc exists, add a note to `docs/features/README.md` pointing to the model.
+- [x] Update `docs/features/session-isolation.md` (or the closest existing AgentSession doc) with a short note on the canonical lookup pattern: "Use `AgentSession.get_by_id(string)` for raw-string lookups; `query.get()` requires Popoto key objects."
+- [x] If no AgentSession-specific feature doc exists, add a note to `docs/features/README.md` pointing to the model.
 
 ### Inline Documentation
-- [ ] Docstring on `AgentSession.get_by_id` explaining when to use it vs. `query.get(redis_key=...)`.
-- [ ] Remove the stale inline comment at `ui/data/sdlc.py:558` once the call site is fixed.
+- [x] Docstring on `AgentSession.get_by_id` explaining when to use it vs. `query.get(redis_key=...)`.
+- [x] Remove the stale inline comment at `ui/data/sdlc.py:558` once the call site is fixed.
 
 ## Success Criteria
 
-- [ ] `AgentSession.get_by_id(string)` classmethod exists and is unit-tested.
-- [ ] All 12 broken call sites listed in issue #765 use the canonical pattern.
-- [ ] Silent `except Exception: pass` blocks around the affected lookups log warnings instead.
-- [ ] New unit test in `tests/unit/test_agent_session_lookup.py` covers positive, negative, and warning paths.
-- [ ] Lint/test scan fails CI when `AgentSession.query.get(<positional>)` is introduced.
-- [ ] Tests pass (`/do-test`).
-- [ ] Documentation updated (`/do-docs`).
-- [ ] Worker dogfooding: nudge guard no longer logs `'str' object has no attribute 'redis_key'`.
+- [x] `AgentSession.get_by_id(string)` classmethod exists and is unit-tested.
+- [x] All 12 broken call sites listed in issue #765 use the canonical pattern.
+- [x] Silent `except Exception: pass` blocks around the affected lookups log warnings instead.
+- [x] New unit test in `tests/unit/test_agent_session_lookup.py` covers positive, negative, and warning paths.
+- [x] Lint/test scan fails CI when `AgentSession.query.get(<positional>)` is introduced.
+- [x] Tests pass (`/do-test`).
+- [x] Documentation updated (`/do-docs`).
+- [x] Worker dogfooding: nudge guard no longer logs `'str' object has no attribute 'redis_key'`.
 
 ## Team Orchestration
 
