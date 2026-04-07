@@ -295,6 +295,34 @@ No agent integration required — this is a worker-internal change. The agent's 
 
 ## Critique Results
 
+### Fourth Pass — NEEDS REVISION (2026-04-07)
+
+**Findings**: 3 total (1 blocker, 1 concern, 1 nit)
+
+#### Blocker
+
+**Semaphore placement inconsistency: Flow shows semaphore-before-pop, Task 2 says semaphore-wraps-execution-only**
+
+The Hot Path flow (Solution section) states: "_worker_loop **waits for global semaphore** → acquires Redis pop lock → `_pop_agent_session()` → ... → `_execute_agent_session()` → releases semaphore." This means the semaphore should be acquired BEFORE the pop. However, Task 2 bullet says "Wrap `_execute_agent_session(session)` in `async with _global_session_semaphore`" — i.e., acquired AFTER the pop.
+
+If acquired after the pop, `_pop_agent_session()` marks the session `running` in Redis BEFORE the semaphore slot is obtained. Multiple workers can pop sessions simultaneously, put them all into `running` status, and then queue for the semaphore. The dashboard will show N sessions as `running` even though only `MAX_CONCURRENT_SESSIONS` are actually executing. This directly violates the success criterion "Dashboard never shows more running sessions than the configured limit."
+
+Fix: Revise Task 2's bullet to wrap the entire pop+execute block: acquire the semaphore before calling `_pop_agent_session()`, and release it after `_execute_agent_session()` completes. This keeps the Hot Path flow accurate and ensures the dashboard ceiling holds.
+
+#### Concern
+
+**Cross-module semaphore injection mechanism is unspecified**
+
+Task 2 says `_global_session_semaphore: asyncio.Semaphore | None = None` at module level in `agent_session_queue.py`, and initialization in `_run_worker()` in `worker/__main__.py`. But Task 2 does NOT specify how `_run_worker()` injects the initialized semaphore into `agent_session_queue._global_session_semaphore`. Without this step, the `None` sentinel remains and `async with None` crashes `_worker_loop` with `TypeError`. The builder needs explicit guidance: `import agent.agent_session_queue as _queue; _queue._global_session_semaphore = asyncio.Semaphore(max_sessions)`.
+
+#### Nit
+
+**Task 4 unnecessarily duplicates `create_local()` test in the wrong file**
+
+Task 4 says "Add test for `create_local()` using `session_id` as `chat_id`" in `tests/unit/test_agent_session_queue.py`. But `create_local()` is a classmethod on `AgentSession` (`models/agent_session.py`), not part of the queue module. Test Impact already says to create `tests/unit/test_agent_session.py` for this test. Remove the `create_local()` bullet from Task 4 to avoid test duplication in the wrong file.
+
+---
+
 ### Third Pass — NEEDS REVISION (2026-04-07)
 
 **Findings**: 4 total (1 blocker, 2 concerns, 1 nit)
