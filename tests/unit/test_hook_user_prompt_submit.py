@@ -9,14 +9,17 @@ tests. These tests therefore validate the end-to-end contract through two lenses
      correctly in isolation (trivial sanity test for the pattern used in the hook).
   2. AgentSession.create_local() kwarg pass-through — confirm that passing the
      env value as session_type kwarg stores the correct value in the session record.
+  3. Full call-chain test — load the actual hook module, call main(), and assert
+     that create_local receives the session_type kwarg derived from the env var.
 
-Together they close the critical path: env var → hook reads it → create_local gets it → Redis stores it.
+Together they close the critical path:
+  env var → hook reads it → create_local gets it → Redis stores it.
 """
 
+import importlib.util
 import os
-from unittest.mock import patch
-
-import pytest
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 
 class TestSessionTypeEnvVarPattern:
@@ -112,3 +115,97 @@ class TestCreateLocalSessionTypeKwarg:
             )
 
             assert session.session_type == "dev"
+
+
+# ---------------------------------------------------------------------------
+# Helper: load hook module from .claude/hooks/user_prompt_submit.py
+# ---------------------------------------------------------------------------
+
+_HOOK_PATH = (
+    Path(__file__).resolve().parent.parent.parent / ".claude" / "hooks" / "user_prompt_submit.py"
+)
+
+
+def _load_hook_module():
+    """Load user_prompt_submit as a module (importlib, not normal import path)."""
+    spec = importlib.util.spec_from_file_location("user_prompt_submit", str(_HOOK_PATH))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class TestMainCallChain:
+    """Full call-chain test: env var → main() → create_local receives session_type."""
+
+    def test_main_passes_session_type_teammate_to_create_local(self, monkeypatch):
+        """When SESSION_TYPE=teammate, main() calls create_local with session_type='teammate'."""
+        hook = _load_hook_module()
+
+        # Minimal hook input: first prompt in a new session (no existing agent_session_id)
+        fake_hook_input = {
+            "prompt": "Hello, teammate!",
+            "session_id": "test-session-abc",
+            "cwd": "/tmp",
+        }
+
+        # Sidecar has no agent_session_id yet (first prompt scenario)
+        fake_sidecar = {}
+
+        # AgentSession stub returned by create_local
+        fake_agent_session = MagicMock()
+        fake_agent_session.agent_session_id = "mock-agent-id-123"
+
+        monkeypatch.setenv("SESSION_TYPE", "teammate")
+
+        with (
+            patch.object(hook, "read_hook_input", return_value=fake_hook_input),
+            patch("hook_utils.memory_bridge.ingest"),
+            patch("hook_utils.memory_bridge.load_agent_session_sidecar", return_value=fake_sidecar),
+            patch("hook_utils.memory_bridge.save_agent_session_sidecar"),
+            patch("hook_utils.memory_bridge._get_project_key", return_value="ai"),
+            patch(
+                "models.agent_session.AgentSession.create_local", return_value=fake_agent_session
+            ) as mock_create,
+        ):
+            hook.main()
+
+        mock_create.assert_called_once()
+        call_kwargs = mock_create.call_args.kwargs
+        assert call_kwargs.get("session_type") == "teammate", (
+            f"Expected create_local to be called with session_type='teammate', "
+            f"but got kwargs: {call_kwargs}"
+        )
+
+    def test_main_omits_session_type_when_env_var_unset(self, monkeypatch):
+        """When SESSION_TYPE is not set, main() calls create_local without session_type kwarg."""
+        hook = _load_hook_module()
+
+        fake_hook_input = {
+            "prompt": "Hello, default!",
+            "session_id": "test-session-xyz",
+            "cwd": "/tmp",
+        }
+        fake_sidecar = {}
+        fake_agent_session = MagicMock()
+        fake_agent_session.agent_session_id = "mock-agent-id-456"
+
+        monkeypatch.delenv("SESSION_TYPE", raising=False)
+
+        with (
+            patch.object(hook, "read_hook_input", return_value=fake_hook_input),
+            patch("hook_utils.memory_bridge.ingest"),
+            patch("hook_utils.memory_bridge.load_agent_session_sidecar", return_value=fake_sidecar),
+            patch("hook_utils.memory_bridge.save_agent_session_sidecar"),
+            patch("hook_utils.memory_bridge._get_project_key", return_value="ai"),
+            patch(
+                "models.agent_session.AgentSession.create_local", return_value=fake_agent_session
+            ) as mock_create,
+        ):
+            hook.main()
+
+        mock_create.assert_called_once()
+        call_kwargs = mock_create.call_args.kwargs
+        assert "session_type" not in call_kwargs, (
+            f"Expected create_local to be called WITHOUT session_type kwarg, "
+            f"but got kwargs: {call_kwargs}"
+        )
