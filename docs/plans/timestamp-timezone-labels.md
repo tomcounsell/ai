@@ -85,18 +85,16 @@ No prerequisites — this work has no external dependencies.
 
 ### Key Elements
 
-- **`tools/valor_session.py:_format_ts`**: Append ` UTC` to the strftime format string. The value is already correctly UTC at line 119; just label it.
-- **`worker/__main__.py` logging config**: Add `datefmt="%Y-%m-%d %H:%M:%S"` and set `converter=time.gmtime` on the root handler so log timestamps emit in UTC. Optionally append ` UTC` to the format string.
+- **`tools/valor_session.py:_format_ts`**: Append ` UTC` to the strftime format string. For the `float` branch (line 119), the value is already correctly UTC. For the `fromisoformat` branch (line 121), the result may be a naive datetime if the stored ISO string has no offset — call `dt.replace(tzinfo=UTC)` when `dt.tzinfo is None` before formatting (per PR #557, all stored timestamps are UTC, so treating naive values as UTC is correct).
+- **`worker/__main__.py` logging config**: Create a `UTCFormatter(logging.Formatter)` subclass with `converter = staticmethod(time.gmtime)` and use it in `_configure_logging()` instead of global monkey-patching. Set `datefmt="%Y-%m-%d %H:%M:%S"` and append ` UTC` as a literal in the format string (e.g., `format="%(asctime)s UTC %(name)s %(levelname)s %(message)s"`).
 - **`ui/app.py:_filter_format_timestamp`**: Same-day `%H:%M` format could show a TZ note but the existing relative strings ("5m ago", "just now") are inherently timezone-agnostic — no change needed for those. For the fallback `%Y-%m-%d` (old dates, no time shown), no TZ label needed either.
 
 ### Technical Approach
 
-All three changes are isolated formatting tweaks:
+All changes are isolated formatting tweaks:
 
-1. `tools/valor_session.py` line 122: `"%Y-%m-%d %H:%M:%S"` → `"%Y-%m-%d %H:%M:%S UTC"`
-2. `worker/__main__.py` `_setup_logging`: add `import time`; set `logging.Formatter.converter = time.gmtime` before `basicConfig`; add `datefmt="%Y-%m-%d %H:%M:%S"` to `basicConfig`; change format string to include ` UTC` in `%(asctime)s` output by appending it to the datefmt or by using a custom Formatter subclass with `usesTime()`.
-
-The cleanest approach for the worker is a custom Formatter that forces UTC and appends the label, rather than monkey-patching the global `Formatter.converter`.
+1. `tools/valor_session.py` line 122: `"%Y-%m-%d %H:%M:%S"` → `"%Y-%m-%d %H:%M:%S UTC"`. After `dt = datetime.fromisoformat(str(ts))`, add: `if dt.tzinfo is None: dt = dt.replace(tzinfo=UTC)`.
+2. `worker/__main__.py` `_configure_logging`: add `import time` at top of file; create a `UTCFormatter` subclass inside `_configure_logging` (or at module level) with `converter = staticmethod(time.gmtime)`; use it for both handlers instead of `logging.basicConfig`; set `datefmt="%Y-%m-%d %H:%M:%S"` and format string `"%(asctime)s UTC %(name)s %(levelname)s %(message)s"`. This approach does not monkey-patch the global class attribute and avoids affecting third-party loggers.
 
 ## Failure Path Test Strategy
 
@@ -201,8 +199,12 @@ No agent integration required — this is a display-only change to CLI output an
 - **Agent Type**: builder
 - **Parallel**: true
 - Change line 122: `dt.strftime("%Y-%m-%d %H:%M:%S")` → `dt.strftime("%Y-%m-%d %H:%M:%S UTC")`
-- Handle the `fromisoformat` branch: if `dt` is naive (no tzinfo), convert to UTC before formatting
-- Create `tests/unit/test_valor_session_format_ts.py` with assertions that output ends with ` UTC`
+- After `dt = datetime.fromisoformat(str(ts))` (line 121), add: `if dt.tzinfo is None: dt = dt.replace(tzinfo=UTC)` — per PR #557, stored values are UTC; treating naive ISO strings as UTC is correct
+- Create `tests/unit/test_valor_session_format_ts.py` with assertions:
+  - `_format_ts(1700000000.0)` ends with ` UTC`
+  - `_format_ts("2026-04-07T05:49:00")` (no offset) ends with ` UTC`
+  - `_format_ts("2026-04-07T05:49:00+00:00")` (with offset) ends with ` UTC`
+  - `_format_ts(None)` returns `"—"`
 
 ### 2. Fix worker logging config in `worker/__main__.py`
 - **Task ID**: build-worker-logging
@@ -212,9 +214,9 @@ No agent integration required — this is a display-only change to CLI output an
 - **Agent Type**: builder
 - **Parallel**: true
 - Add `import time` at top of file
-- Before `logging.basicConfig`, set `logging.Formatter.converter = time.gmtime`
-- Add `datefmt="%Y-%m-%d %H:%M:%S UTC"` to `basicConfig` call
-- Update or add test in `test_worker_entry.py` asserting the configured formatter uses UTC
+- Create a `UTCFormatter(logging.Formatter)` subclass with `converter = staticmethod(time.gmtime)` — do NOT monkey-patch `logging.Formatter.converter` globally
+- In `_configure_logging`, replace `logging.basicConfig(...)` with explicit handler setup: attach `UTCFormatter` with `datefmt="%Y-%m-%d %H:%M:%S"` and `fmt="%(asctime)s UTC %(name)s %(levelname)s %(message)s"` to both handlers
+- Update test in `test_worker_entry.py`: after calling `_configure_logging()`, assert that the root logger's handlers use a formatter with `converter is time.gmtime`
 
 ### 3. Final Validation
 - **Task ID**: validate-all
@@ -232,11 +234,43 @@ No agent integration required — this is a display-only change to CLI output an
 |-------|---------|----------|
 | Tests pass | `pytest tests/unit/ -x -q` | exit code 0 |
 | Format ts has UTC label | `python -c "from tools.valor_session import _format_ts; r = _format_ts(1700000000.0); assert r.endswith(' UTC'), repr(r)"` | exit code 0 |
-| Worker log uses UTC | `python -c "import logging, time; assert logging.Formatter.converter is time.gmtime"` | exit code 0 |
+| Worker log uses UTC | `python -c "import logging, time; from worker.__main__ import _configure_logging; _configure_logging(); h = logging.getLogger().handlers[-1]; assert getattr(h.formatter, 'converter', None) is time.gmtime"` | exit code 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Run**: 2026-04-07
+**Critics**: Skeptic, Operator, Archaeologist, Adversary, Simplifier, User
+**Findings**: 3 total (1 blocker, 1 concern, 1 nit)
+
+### BLOCKER: Naive datetime from `fromisoformat` will be silently mislabeled as UTC
+
+- **Severity**: BLOCKER
+- **Critics**: Skeptic, Adversary
+- **Location**: Solution → Key Elements; Step by Step Tasks → Task 1
+- **Finding**: `datetime.fromisoformat(str(ts))` at `tools/valor_session.py:121` returns a **naive** datetime when the stored ISO string has no timezone offset (e.g., `"2026-04-07T13:03:54"`). The plan's Key Elements section says only to "append ` UTC` to the strftime format string" — but appending ` UTC` to a naive datetime that represents local time would silently mislabel it. Task 1 mentions "(if `dt` is naive, convert to UTC before formatting)" but does not specify whether to assume UTC or detect-and-convert from local time. This is the exact mis-labeling the fix is meant to prevent.
+- **Suggestion**: Explicitly resolve the naive-datetime policy in the plan. The correct approach given the system's UTC-normalized storage (per PR #557) is: if `dt.tzinfo is None`, assume UTC by calling `dt.replace(tzinfo=UTC)` before formatting. Add an explicit test case in `test_valor_session_format_ts.py` for an ISO string input without offset to confirm it is labeled ` UTC` (not local time).
+
+### CONCERN: Task 2 and Solution section contradict each other on worker logging approach
+
+- **Severity**: CONCERN
+- **Critics**: Operator, Skeptic
+- **Location**: Solution → Technical Approach vs. Step by Step Tasks → Task 2
+- **Finding**: The Solution section recommends "a custom Formatter that forces UTC and appends the label, rather than monkey-patching the global `Formatter.converter`" as the cleaner approach. But Task 2 instructs the builder to set `logging.Formatter.converter = time.gmtime` (a global class-level monkey-patch). A builder reading both will be confused about which approach to implement — the plan contradicts itself on the key architectural decision.
+- **Suggestion**: Pick one approach and remove the other. The custom Formatter subclass is safer (doesn't affect other loggers in the process) and should be the canonical choice. Rewrite Task 2 to specify creating a small `UTCFormatter(logging.Formatter)` class with `converter = time.gmtime` and use it in `_configure_logging()`.
+
+### NIT: Verification check 3 is unreliable as written
+
+- **Severity**: NIT
+- **Critics**: Skeptic
+- **Location**: Verification table, row 3
+- **Finding**: `python -c "import logging, time; assert logging.Formatter.converter is time.gmtime"` will pass even if the worker never sets the converter, because the import may execute the worker's module-level setup. It also tests a global class attribute that could be set by any other test or import in the process.
+- **Suggestion**: Replace with a test that instantiates `_configure_logging()` and inspects the handlers directly: `from worker.__main__ import _configure_logging; _configure_logging(); import logging; h = logging.getLogger().handlers[0]; assert getattr(h.formatter, 'converter', None) is time.gmtime`.
+
+## Verdict
+
+**READY TO BUILD** — Blocker resolved in-session (naive datetime policy made explicit, worker logging contradiction resolved in favor of custom UTCFormatter subclass, verification check corrected). No remaining blockers.
+
+*Round 1 verdict was NEEDS REVISION; plan revised and re-evaluated as APPROVED without a second full critic pass since all findings were mechanical and fully addressed.*
 
 ---
 
