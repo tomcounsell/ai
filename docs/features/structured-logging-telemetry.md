@@ -86,7 +86,7 @@ redis-cli HGETALL telemetry:daily:2026-03-10
 
 ### Python API
 
-**Note:** The `monitoring/telemetry.py` module was removed as part of issue #488 (SDLC stage consolidation). The Observer was removed in SDLC Redesign Phase 2, making the telemetry module orphaned. Redis telemetry keys listed above may still exist in Redis but are no longer written to or read by any code.
+**Note:** The `monitoring/telemetry.py` module and `models/telemetry.py` (`ObserverTelemetry` model) were deleted in issue #753 (dead code removal). The Observer telemetry system was never wired into production code paths, making both the model and helper module permanently orphaned. Redis telemetry keys listed above may still exist in Redis but are no longer written to or read by any code.
 
 ## Design Decisions
 

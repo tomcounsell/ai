@@ -11,7 +11,6 @@ Provides fast, queryable Redis models for all persistent data:
 - ReflectionRun: per-day reflection execution state
 - ReflectionIgnore: ignored bug patterns with TTL-based expiry
 - DedupRecord: per-chat message deduplication tracking
-- ObserverTelemetry: observer agent telemetry counters and events
 - Memory: subconscious memory records (human instructions, agent observations)
 - TeammateMetrics: teammate mode classification counters and response times
 """
@@ -27,7 +26,6 @@ from models.reflection import Reflection
 from models.reflections import ReflectionIgnore, ReflectionRun
 from models.teammate_metrics import TeammateMetrics
 from models.telegram import TelegramMessage
-from models.telemetry import ObserverTelemetry
 
 # Backward compatibility alias
 SessionLog = AgentSession
@@ -38,7 +36,6 @@ __all__ = [
     "DedupRecord",
     "DeadLetter",
     "BridgeEvent",
-    "ObserverTelemetry",
     "Reflection",
     "ReflectionIgnore",
     "ReflectionRun",

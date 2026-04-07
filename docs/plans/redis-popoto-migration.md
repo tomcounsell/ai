@@ -18,7 +18,7 @@ Four files create their own `redis.Redis()` or `redis.from_url()` clients and us
 - `monitoring/health.py` creates `redis.Redis(host="localhost", port=6379, ...)` just to ping and read memory info
 - `bridge/dedup.py` creates `redis.from_url()` with a module-level `_redis_client` cache, uses manual `expire()` calls
 - ~~`scripts/issue_poller.py`~~ — removed in #565, no longer needs migration
-- `monitoring/telemetry.py` (exists in worktrees, pending merge) creates `redis.Redis()` for observer telemetry counters and event lists
+- ~~`monitoring/telemetry.py`~~ — removed in #753 as dead code, no longer applicable
 
 **Desired outcome:**
 - All four files use Popoto models or `POPOTO_REDIS_DB` for raw atomics
@@ -40,7 +40,7 @@ Four files create their own `redis.Redis()` or `redis.from_url()` clients and us
 
 3. ~~**`scripts/issue_poller.py`**~~ — removed in #565, no longer needs migration.
 
-4. **`monitoring/telemetry.py`** (worktree): Observer agent calls `record_decision()` / `record_interjection()` -> increments hash counters and appends to capped list -> `get_health()` reads counters for dashboard. All data has daily rollup keys with 7-day TTL.
+4. ~~**`monitoring/telemetry.py`**~~ — removed in #753 as dead code, no longer applicable.
 
 ## Architectural Impact
 
