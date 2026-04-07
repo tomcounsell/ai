@@ -258,6 +258,8 @@ No agent integration required — `AgentSession` is not exposed via MCP and the 
 
 ## Open Questions
 
-1. Should the regression guard be a pytest scan (runs with the test suite) or a pre-commit hook (runs before commit)? The pytest approach is simpler and runs in CI without extra setup; the pre-commit approach catches issues earlier but adds another tool to the install path. **Default: pytest scan** unless you prefer pre-commit.
-2. Should `get_by_id` log a warning itself when no session is found, or stay silent and let callers decide? **Default: stay silent** — callers already know when "not found" is expected vs. an error.
-3. Are there any of the 12 call sites where the silent fallback was intentional (e.g., truly optional lookups)? The build agent will flag any case where the surrounding logic looks deliberate; the human reviews before merging.
+1. **Pytest scan vs pre-commit hook** — Implemented as a pytest scan (`tests/unit/test_agent_session_lookup.py`). Pre-commit adds install overhead with no meaningful benefit here since CI already runs the test suite on every push.
+
+2. **`get_by_id` silent vs logged** — Implemented silent. Every call site already has its own logging or control flow for the not-found case; a second warning from `get_by_id` itself would be noise.
+
+3. **Any intentional silent fallbacks?** — Reviewed all 13 sites. None were intentional. The `ui/data/sdlc.py` site was the most deliberate-looking (it had an explanatory comment and a full table-scan workaround) but was still a bug — it scanned all sessions to work around the broken lookup rather than signaling intent. All sites are now fixed.
