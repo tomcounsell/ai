@@ -2797,31 +2797,6 @@ def record_revival_cooldown(chat_id: str) -> None:
     _save_cooldowns(cooldowns)
 
 
-def maybe_send_revival_prompt(
-    project_key: str,
-    working_dir: str,
-    chat_id: str,
-) -> dict | None:
-    """
-    Thin allowed-surface helper for the bridge.
-
-    Wraps ``check_revival`` + ``record_revival_cooldown`` so the bridge only
-    needs to import this single name instead of the two lower-level functions.
-    Returns the revival_info dict (same shape as ``check_revival``) when there
-    is stale work to prompt the user about, and records the cooldown so the
-    prompt is not repeated until the cooldown expires.  Returns ``None`` when
-    there is nothing to revive or when the project/working_dir is missing.
-
-    This function is part of the documented bridge import allowlist.
-    """
-    if not project_key or not working_dir:
-        return None
-    revival_info = check_revival(project_key, working_dir, chat_id)
-    if revival_info:
-        record_revival_cooldown(chat_id)
-    return revival_info
-
-
 async def queue_revival_agent_session(
     revival_info: dict,
     chat_id: str,
