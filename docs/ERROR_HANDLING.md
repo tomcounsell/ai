@@ -191,6 +191,74 @@ Error codes follow a standardized format:
 6. **Don't Expose Internals**: Hide implementation details from users
 7. **Use Decorators**: Apply error handling decorators to all views
 
+## Perplexity API Error Surfacing
+
+When the Perplexity API returns a non-200 response or an empty 200 response, errors are surfaced
+directly in the artifact content rather than being silently swallowed into a generic skipped state.
+
+### Artifact Prefix Conventions
+
+Two prefixes are used to distinguish intentional degradation from unexpected failures:
+
+| Prefix | Meaning | Example |
+|--------|---------|---------|
+| `[SKIPPED: ...]` | Intentional graceful degradation — the feature is not configured or explicitly unavailable | `[SKIPPED: PERPLEXITY_API_KEY not configured]` |
+| `[FAILED: ...]` | Unexpected error — the API was called but returned an error or empty content | `[FAILED: Perplexity API 429 - rate_limit_exceeded]` |
+
+#### When `[SKIPPED: ...]` is written
+
+- `PERPLEXITY_API_KEY` is not set in the environment — the feature degrades intentionally.
+
+#### When `[FAILED: ...]` is written
+
+- The API returns a non-200 HTTP status (e.g. 401, 429, 500):
+  `[FAILED: Perplexity API {status_code} - {error_type}]`
+  where `{error_type}` is the `error` or `type` field from the JSON response body.
+- The API returns 200 but with empty content:
+  `[FAILED: Perplexity API returned empty content]`
+
+### Error Metadata
+
+When a `[FAILED: ...]` artifact is written, the raw API error message is stored in
+`artifact.metadata["error"]` for debugging:
+
+```python
+# API error case
+metadata = {"error": str(error_body or error_message)}
+
+# Empty content case
+metadata = {"error": "API returned no content"}
+```
+
+### UI Status Resolution
+
+`_resolve_substep_status()` in `apps/podcast/services/workflow_progress.py` parses artifact
+content prefixes to drive UI status indicators:
+
+```python
+if content.startswith("[FAILED:"):
+    # Extracts message between "[FAILED: " and trailing "]"
+    error_msg = content[len("[FAILED: "):].rstrip("]").strip()
+    return ("failed", error_msg)  # UI shows red failed state with error text
+if content.startswith("[SKIPPED:"):
+    return ("skipped", "")        # UI shows grey skipped state (no error shown)
+```
+
+This means:
+- `[FAILED: ...]` artifacts render as **failed** in the workflow UI with the error message visible.
+- `[SKIPPED: ...]` artifacts render as **skipped** — no error is shown, because the skip was expected.
+
+### Implementation
+
+The error surfacing is implemented across two files:
+
+- **`apps/podcast/tools/perplexity_deep_research.py`** — `_handle_error_response()` extracts
+  `_error_status`, `_error_message`, and `_error_body` from the API response and returns them as
+  dict keys instead of returning bare `None`.
+- **`apps/podcast/services/research.py`** — inspects `response_data` for `_error_status` after
+  `run_perplexity_research()` returns `(None, response_data)`, then writes the appropriate
+  `[FAILED: ...]` or `[SKIPPED: ...]` artifact content.
+
 ## Testing Errors
 
 Test error handling with specific test cases:
