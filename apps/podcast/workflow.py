@@ -30,6 +30,8 @@ STEP_TASK_MAP: dict[str, list[str]] = {
     "Targeted Research": [
         "apps.podcast.tasks.step_gpt_research",
         "apps.podcast.tasks.step_gemini_research",
+        "apps.podcast.tasks.step_together_research",
+        "apps.podcast.tasks.step_claude_research",
     ],
     "Cross-Validation": ["apps.podcast.tasks.step_cross_validation"],
     "Master Briefing": ["apps.podcast.tasks.step_master_briefing"],
@@ -131,6 +133,29 @@ def _compute_button_state(episode: Episode, step: int) -> dict:
                     ),
                     "error": "",
                 }
+
+        # Detect stale workflow: running for >10 min with no progress
+        import datetime
+
+        from django.utils import timezone
+
+        stale_threshold = timezone.now() - datetime.timedelta(minutes=10)
+        if wf.modified_at < stale_threshold:
+            return {
+                "show": True,
+                "label": "Retry Step",
+                "color": "red",
+                "icon": "warning",
+                "disabled": False,
+                "loading_text": "Retrying...",
+                "blocked_reason": (
+                    f"Workflow stalled — no progress since "
+                    f"{wf.modified_at:%Y-%m-%d %H:%M} UTC. "
+                    f"Use per-source Restart buttons or retry the whole step."
+                ),
+                "error": "",
+            }
+
         return {
             "show": True,
             "label": "Running...",
@@ -242,14 +267,24 @@ class EpisodeWorkflowView(LoginRequiredMixin, UserPassesTestMixin, MainContentVi
 
         # Check if workflow is actively running (for polling)
         workflow_is_running = False
+        workflow_is_stale = False
         with contextlib.suppress(EpisodeWorkflow.DoesNotExist):
-            workflow_is_running = episode.workflow.status == "running"
+            wf = episode.workflow
+            workflow_is_running = wf.status == "running"
+            if workflow_is_running:
+                import datetime
+
+                from django.utils import timezone
+
+                stale_threshold = timezone.now() - datetime.timedelta(minutes=10)
+                workflow_is_stale = wf.modified_at < stale_threshold
 
         phases = compute_workflow_progress(
             episode,
             artifact_titles,
             artifact_contents=artifact_contents,
             workflow_is_running=workflow_is_running,
+            workflow_is_stale=workflow_is_stale,
         )
         current_phase = phases[step - 1]
 
@@ -266,21 +301,56 @@ class EpisodeWorkflowView(LoginRequiredMixin, UserPassesTestMixin, MainContentVi
         self.context["button_state"] = _compute_button_state(episode, step)
         self.context["phase_artifact"] = phase_artifact
         self.context["auto_expand_artifact"] = auto_expand
-        self.context["workflow_is_running"] = workflow_is_running
+        self.context["workflow_is_running"] = (
+            workflow_is_running and not workflow_is_stale
+        )
+
+        # Build research prompt map for Phase 4 paste modals
+        if step == 4:
+            self.context["research_prompts"] = {
+                a.title.replace("prompt-", ""): a.content
+                for a in artifacts
+                if a.title.startswith("prompt-") and a.content
+            }
+
+        # Build NotebookLM source artifacts list for step 9
+        if step == 9:
+            notebooklm_sources = []
+            source_titles = [
+                ("Episode Brief", "p1-brief"),
+                ("Master Briefing", "p3-briefing"),
+                ("Research Report", None),  # Stored in episode.report_text
+                ("Content Plan", "content_plan"),
+            ]
+            for label, title in source_titles:
+                if title is None:
+                    # report_text lives on Episode, not an artifact
+                    has_content = bool(episode.report_text)
+                    notebooklm_sources.append(
+                        {"label": label, "artifact": None, "has_content": has_content}
+                    )
+                else:
+                    artifact = episode.artifacts.filter(title=title).first()
+                    notebooklm_sources.append(
+                        {
+                            "label": label,
+                            "artifact": artifact,
+                            "has_content": bool(artifact and artifact.content),
+                        }
+                    )
+            self.context["notebooklm_sources"] = notebooklm_sources
 
         return podcast, episode
 
     def _get_phase_artifact(self, episode: Episode, step: int):
-        """Get the artifact for the given workflow phase, if it exists."""
+        """Get the primary artifact for the given workflow phase, if it exists."""
         artifact_map = {
             1: "p1-brief",
-            2: "p2-research",
-            3: "p3-questions",
-            4: "p4-digest",
-            5: "p5-validation",
-            6: "p6-briefing",
-            7: "p7-report",
-            8: "p8-plan",
+            3: "question-discovery",
+            5: "cross-validation",
+            6: "p3-briefing",
+            8: "content_plan",
+            9: "content_plan",  # Show episode plan at Audio Generation step
         }
         title = artifact_map.get(step)
         if not title:
@@ -371,18 +441,24 @@ class EpisodeWorkflowView(LoginRequiredMixin, UserPassesTestMixin, MainContentVi
                 )
 
             elif label == "Retry Step":
-                # Reset failed status and re-enqueue
+                # Reset failed/stalled status and re-enqueue
                 from apps.podcast.services import workflow as wf_service
 
-                wf_service.resume_workflow(episode.pk)
+                wf = episode.workflow
+                if wf.status != "running":
+                    wf_service.resume_workflow(episode.pk)
+                else:
+                    # Stalled workflow — touch modified_at to reset staleness
+                    wf.save(update_fields=["modified_at"])
                 task_paths = STEP_TASK_MAP.get(step_name, [])
                 for path in task_paths:
                     task_fn = _resolve_task(path)
                     task_fn.enqueue(episode_id=episode.pk)
                 logger.info(
-                    "Workflow action: Retry Step '%s' for episode %d",
+                    "Workflow action: Retry Step '%s' for episode %d (status was: %s)",
                     step_name,
                     episode.pk,
+                    wf.status,
                 )
 
         except Exception:
@@ -549,11 +625,20 @@ class WorkflowPollView(LoginRequiredMixin, UserPassesTestMixin, View):
         episode = get_object_or_404(Episode, podcast=podcast, slug=episode_slug)
 
         # Check workflow status
+        is_running = False
+        is_stale = False
         try:
             wf = episode.workflow
             is_running = wf.status == "running"
+            if is_running:
+                import datetime
+
+                from django.utils import timezone
+
+                stale_threshold = timezone.now() - datetime.timedelta(minutes=10)
+                is_stale = wf.modified_at < stale_threshold
         except EpisodeWorkflow.DoesNotExist:
-            is_running = False
+            pass
 
         # Build context with per-source content for Phase 4 status
         artifacts = episode.artifacts.all()
@@ -566,6 +651,7 @@ class WorkflowPollView(LoginRequiredMixin, UserPassesTestMixin, View):
             artifact_titles,
             artifact_contents=artifact_contents,
             workflow_is_running=is_running,
+            workflow_is_stale=is_stale,
         )
         current_phase = phases[step - 1]
 
@@ -595,8 +681,16 @@ class WorkflowPollView(LoginRequiredMixin, UserPassesTestMixin, View):
             "button_state": _compute_button_state(episode, step),
             "phase_artifact": phase_artifact,
             "auto_expand_artifact": step in [6, 8],
-            "workflow_is_running": is_running,
+            "workflow_is_running": is_running and not is_stale,
         }
+
+        # Research prompts for Phase 4 paste modals
+        if step == 4:
+            ctx["research_prompts"] = {
+                a.title.replace("prompt-", ""): a.content
+                for a in artifacts
+                if a.title.startswith("prompt-") and a.content
+            }
 
         # Render sidebar + step content as OOB swaps.
         # The poll URL now derives from window.location (set by hx-push-url),
@@ -617,8 +711,8 @@ class WorkflowPollView(LoginRequiredMixin, UserPassesTestMixin, View):
 
         response = HttpResponse(response_html)
 
-        # Tell HTMX to stop polling when workflow is no longer running
-        if not is_running:
+        # Tell HTMX to stop polling when workflow is no longer running or stale
+        if not is_running or is_stale:
             response.status_code = 286
 
         return response
@@ -635,11 +729,11 @@ _RETRY_SOURCE_MAP: dict[str, tuple[str, str]] = {
 
 
 class RetryResearchSourceView(LoginRequiredMixin, UserPassesTestMixin, View):
-    """Retry a single failed research source in Phase 4 (Targeted Research).
+    """Retry a single research source in Phase 4 (Targeted Research).
 
-    Clears the artifact content (resetting it to empty so it appears as
-    "pending"), sets the workflow back to "running" if paused, and
-    re-enqueues just the one research task.
+    Handles failed, stalled, or empty sources. Clears the artifact content
+    (resetting it to empty so it appears as "pending"), sets the workflow
+    back to "running" if paused, and re-enqueues just the one research task.
     """
 
     def test_func(self) -> bool:
@@ -698,20 +792,25 @@ class RetryResearchSourceView(LoginRequiredMixin, UserPassesTestMixin, View):
             )
             return self._redirect(slug, episode_slug)
 
-        # Resume workflow if paused
+        # Resume workflow if paused; ensure running state for stalled workflows
         if wf.status in ("paused_for_human", "failed"):
             from apps.podcast.services import workflow as wf_service
 
             wf_service.resume_workflow(episode.pk)
+        elif wf.status == "running":
+            # Already running (likely stalled) — touch modified_at so staleness
+            # detection resets for this retry attempt
+            wf.save(update_fields=["modified_at"])
 
         # Re-enqueue just this one task
         task_fn = _resolve_task(task_path)
         task_fn.enqueue(episode_id=episode.pk)
         logger.info(
-            "Retrying source '%s' (task: %s) for episode %d",
+            "Retrying source '%s' (task: %s) for episode %d (workflow status was: %s)",
             source,
             task_path,
             episode.pk,
+            wf.status,
         )
 
         return self._redirect(slug, episode_slug)
@@ -878,3 +977,132 @@ class UploadCoverArtView(LoginRequiredMixin, UserPassesTestMixin, View):
                 kwargs={"slug": slug, "episode_slug": episode_slug, "step": 11},
             )
         )
+
+
+class ArtifactSignedDownloadView(LoginRequiredMixin, UserPassesTestMixin, View):
+    """Upload artifact content to Supabase and return a public URL.
+
+    POST uploads the artifact (or episode report) to the public Supabase bucket
+    as a text file and returns an HTML snippet with the public URL — suitable
+    for pasting directly into NotebookLM's URL import field.
+
+    Special case: artifact_id=0 serves the episode's ``report_text`` field.
+    """
+
+    def test_func(self) -> bool:
+        slug = self.kwargs.get("slug")
+        if not slug:
+            return False
+        podcast = get_object_or_404(Podcast, slug=slug)
+        return self.request.user.is_staff or podcast.owner == self.request.user
+
+    def post(self, request, slug: str, episode_slug: str, artifact_id: int):
+        import json as json_mod
+
+        from django.utils.html import escape
+
+        from apps.common.services.storage import store_file
+
+        podcast = get_object_or_404(Podcast, slug=slug)
+        episode = get_object_or_404(Episode, podcast=podcast, slug=episode_slug)
+
+        if artifact_id == 0:
+            content = episode.report_text or ""
+            filename = "report.md"
+        else:
+            from apps.podcast.models import EpisodeArtifact
+
+            artifact = get_object_or_404(
+                EpisodeArtifact, id=artifact_id, episode=episode
+            )
+            content = artifact.content or ""
+            filename = f"{artifact.title}.md"
+
+        # Upload to Supabase public bucket so NotebookLM can fetch it
+        storage_key = f"podcast/{slug}/{episode_slug}/notebooklm/{filename}"
+        try:
+            url = store_file(
+                storage_key,
+                content.encode("utf-8"),
+                "text/plain; charset=utf-8",
+                public=True,
+            )
+            # LocalFileStorage returns relative paths — make absolute
+            if url.startswith("/"):
+                url = request.build_absolute_uri(url)
+        except Exception:
+            logger.exception(
+                "Failed to upload artifact to storage for episode %d artifact_id %d",
+                episode.pk,
+                artifact_id,
+            )
+            return HttpResponse(
+                '<span class="text-xs text-red-500 font-mono">Upload failed — check storage config</span>'
+            )
+
+        # Return JSON when requested (used by JS clipboard copy)
+        if request.GET.get("json"):
+            return HttpResponse(
+                json_mod.dumps({"url": url}), content_type="application/json"
+            )
+
+        safe_url = escape(url)
+        html = (
+            f'<a href="{safe_url}" target="_blank" rel="noopener noreferrer"'
+            f' class="text-xs font-mono text-blue-600 hover:underline"'
+            f' title="{safe_url}">Open</a>'
+            f' <button type="button"'
+            f' onclick="navigator.clipboard.writeText(\'{url.replace(chr(39), "")}\');this.textContent=\'Copied!\';setTimeout(()=>this.textContent=\'Copy URL\',2000)"'
+            f' class="text-xs font-mono px-2 py-0.5 text-gray-500 border border-gray-200 hover:bg-gray-50">Copy URL</button>'
+        )
+        return HttpResponse(html)
+
+
+class ArtifactSignedFetchView(View):
+    """Public (no login required) endpoint that serves artifact content as a text file.
+
+    Validates the HMAC token from ArtifactSignedDownloadView and serves the
+    content as ``text/plain`` so NotebookLM can import it via URL.
+    """
+
+    MAX_AGE = 3600
+
+    def get(self, request, slug: str, episode_slug: str, artifact_id: int):
+        from django.core import signing
+        from django.http import HttpResponseForbidden
+
+        token = request.GET.get("token", "")
+        if not token:
+            return HttpResponseForbidden("Missing token")
+
+        try:
+            data = signing.loads(token, salt="artifact-download", max_age=self.MAX_AGE)
+        except signing.SignatureExpired:
+            return HttpResponseForbidden("Link expired — generate a new one")
+        except signing.BadSignature:
+            return HttpResponseForbidden("Invalid token")
+
+        podcast = get_object_or_404(Podcast, slug=slug)
+        episode = get_object_or_404(Episode, podcast=podcast, slug=episode_slug)
+
+        if data.get("type") == "report":
+            if data.get("episode_id") != episode.pk:
+                return HttpResponseForbidden("Token mismatch")
+            content = episode.report_text or ""
+            filename = "report.md"
+        else:
+            from django.http import HttpResponseForbidden
+
+            from apps.podcast.models import EpisodeArtifact
+
+            if data.get("artifact_id") != artifact_id:
+                return HttpResponseForbidden("Token mismatch")
+            artifact = get_object_or_404(
+                EpisodeArtifact, id=artifact_id, episode=episode
+            )
+            content = artifact.content or ""
+            filename = f"{artifact.title}.md"
+
+        response = HttpResponse(content, content_type="text/plain; charset=utf-8")
+        response["Content-Disposition"] = f'attachment; filename="{filename}"'
+        return response

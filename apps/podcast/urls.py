@@ -16,7 +16,12 @@ from apps.podcast.views import (
     RegenerateCoverArtView,
     UploadCoverArtView,
 )
-from apps.podcast.workflow import RetryResearchSourceView, WorkflowPollView
+from apps.podcast.workflow import (
+    ArtifactSignedDownloadView,
+    ArtifactSignedFetchView,
+    RetryResearchSourceView,
+    WorkflowPollView,
+)
 
 app_name = "podcast"
 
@@ -50,6 +55,16 @@ urlpatterns = [
         "<slug:slug>/<slug:episode_slug>/artifacts/<int:artifact_id>/",
         ArtifactContentView.as_view(),
         name="artifact_content",
+    ),
+    path(
+        "<slug:slug>/<slug:episode_slug>/artifacts/<int:artifact_id>/sign/",
+        ArtifactSignedDownloadView.as_view(),
+        name="artifact_sign",
+    ),
+    path(
+        "<slug:slug>/<slug:episode_slug>/artifacts/<int:artifact_id>/fetch/",
+        ArtifactSignedFetchView.as_view(),
+        name="artifact_signed_fetch",
     ),
     path(
         "<slug:slug>/<slug:episode_slug>/",

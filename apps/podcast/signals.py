@@ -180,6 +180,13 @@ def check_workflow_progression(sender, instance, **kwargs):
         return
 
     current_step = wf.current_step
+    artifact_title = instance.title or ""
+
+    # Only p2-* artifacts should trigger the Targeted Research fan-in.
+    # Digest artifacts (digest-*) are created *after* research is complete
+    # and must not re-trigger the pause.
+    if current_step == "Targeted Research" and not artifact_title.startswith("p2-"):
+        return
 
     if (
         current_step == "Targeted Research"

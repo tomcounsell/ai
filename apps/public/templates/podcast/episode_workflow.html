@@ -36,7 +36,7 @@
        hx-get="placeholder"
        hx-trigger="every 2s"
        hx-swap="none"
-       hx-on::config-request="event.detail.path = window.location.pathname + 'status/'">
+       hx-on::config-request="if (document.querySelector('dialog[open]')) { event.preventDefault(); return; } event.detail.path = window.location.pathname + 'status/'"
   </div>
   {% endif %}
 </div>

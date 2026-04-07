@@ -19,7 +19,7 @@ class SubStep:
     detail: str = ""
     optional: bool = False
     artifact_key: str = ""
-    status: str = "pending"  # pending | running | complete | failed | skipped
+    status: str = "pending"  # pending | running | stalled | complete | failed | skipped
     error: str = ""
 
 
@@ -64,17 +64,21 @@ def _word_count(text: str) -> int:
 
 
 def _resolve_substep_status(
-    content: str, workflow_is_running: bool = False
+    content: str,
+    workflow_is_running: bool = False,
+    workflow_is_stale: bool = False,
 ) -> tuple[str, str]:
     """Derive sub-step status and error from artifact content.
 
     Returns:
         A ``(status, error)`` tuple where *status* is one of
-        ``"pending"``, ``"running"``, ``"complete"``, ``"failed"``,
-        ``"skipped"`` and *error* is a human-readable message (empty
-        string when not applicable).
+        ``"pending"``, ``"running"``, ``"stalled"``, ``"complete"``,
+        ``"failed"``, ``"skipped"`` and *error* is a human-readable
+        message (empty string when not applicable).
     """
     if not content:
+        if workflow_is_running and workflow_is_stale:
+            return ("stalled", "Task appears stuck — no progress detected")
         return ("running" if workflow_is_running else "pending", "")
     if content.startswith("[FAILED:"):
         # Extract message between "[FAILED: " and trailing "]"
@@ -90,6 +94,7 @@ def compute_workflow_progress(
     artifact_titles: list[str],
     artifact_contents: dict[str, str] | None = None,
     workflow_is_running: bool = False,
+    workflow_is_stale: bool = False,
 ) -> list[Phase]:
     """Compute the 12-phase workflow progress for a podcast episode.
 
@@ -129,6 +134,8 @@ def compute_workflow_progress(
             the actual content (complete, failed, skipped, pending).
         workflow_is_running: If ``True``, empty artifacts are shown as
             "running" rather than "pending" in Phase 4.
+        workflow_is_stale: If ``True`` (and ``workflow_is_running``),
+            empty artifacts are shown as "stalled" instead of "running".
 
     Returns:
         A list of 12 Phase objects ordered by phase number.
@@ -193,7 +200,9 @@ def compute_workflow_progress(
     for label, needle, is_optional in targeted_sources:
         has_art = _has_artifact(artifact_titles, needle)
         content = artifact_contents.get(needle, "")
-        status, error = _resolve_substep_status(content, workflow_is_running)
+        status, error = _resolve_substep_status(
+            content, workflow_is_running, workflow_is_stale
+        )
         # Override: if artifact exists but we have no content data, mark complete
         if has_art and not artifact_contents:
             status = "complete"
