@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: valor
@@ -24,7 +24,7 @@ SDLC stage tracking never advances past the initial state for PM sessions. The d
 - **Issue #563** (closed 2026-03-30): *SDLC pipeline graph routing not wired into runtime* — wired `complete_stage()` / `fail_stage()` into the `subagent_stop` hook for dev-session completions. Same blind spot: only `agent_type == "dev-session"`.
 - **Issue #704** (closed 2026-04-05): *SDLC router must use PipelineStateMachine instead of artifact inference* — fixed the router to read from `stage_states` rather than infer from artifacts. Exposed the underlying write gap: there is nothing writing `stage_states` for Skill-driven stages.
 - **Issue #645** (closed 2026-04-03): *Implicit pipeline stage tracking via observable artifacts* — artifact inference approach, superseded by #704.
-- **`tools/sdlc_stage_marker.py`**: A CLI that writes stage markers via `PipelineStateMachine`. Designed as a direct-invocation fallback for sessions where hooks don't fire. Currently invoked only by skills that explicitly call it (e.g., `do-plan` calls it at the top and bottom of execution). Skills that don't call it produce no stage records.
+- **`tools/sdlc_stage_marker.py`**: A CLI that writes stage markers via `PipelineStateMachine`. Designed as a direct-invocation fallback for sessions where hooks don't fire. 5 of 9 SDLC skills already call it directly (`do-plan`, `do-plan-critique`, `do-pr-review`, `do-docs`, `do-issue`). The hook fills the remaining 4 uncovered stages (`do-build`, `do-test`, `do-patch`, `do-merge`) and safely no-ops on double-writes for the other 5 (since `start_stage()` is idempotent when already `in_progress`).
 
 ## Why Previous Fixes Failed
 
@@ -124,11 +124,11 @@ _SKILL_TO_STAGE: dict[str, str] = {
 
 ## Test Impact
 
-- [ ] `tests/unit/test_pre_tool_use_start_stage.py` — UPDATE: add test class `TestSkillToolStartStage` covering: Skill tool triggers `_start_pipeline_stage`, unknown skill name is ignored, missing skill key is ignored, no session ID skips gracefully.
-- [ ] `tests/unit/test_pre_tool_use_hook.py` — UPDATE: verify the main `pre_tool_use_hook` function dispatches the Skill branch (smoke test for the routing, not the full logic).
+- [ ] `tests/unit/test_pre_tool_use_start_stage.py` — UPDATE: add test class `TestSkillToolStartStage` covering: Skill tool triggers `_start_pipeline_stage`, unknown skill name is ignored, missing skill key is ignored, no session ID skips gracefully. (Imports from `agent.hooks.pre_tool_use`, not `.claude/hooks/pre_tool_use.py`.)
+- `tests/unit/test_pre_tool_use_hook.py` — NO CHANGE: this file tests `.claude/hooks/pre_tool_use.py` (the standalone CLI hook) via `sys.path` manipulation. It does not test `agent/hooks/pre_tool_use.py` and must not be modified.
 
 New test files to create:
-- [ ] `tests/unit/test_post_tool_use_stage_completion.py` — covers `_complete_pipeline_stage()`: skill completion calls `complete_stage()`, unknown skill no-ops, missing session no-ops, exception from `complete_stage()` is swallowed.
+- [ ] `tests/unit/test_post_tool_use_stage_completion.py` — covers `_complete_pipeline_stage()` imported from `agent.hooks.post_tool_use`: skill completion calls `complete_stage()`, unknown skill no-ops, missing session no-ops, exception from `complete_stage()` is swallowed.
 
 ## Rabbit Holes
 
@@ -175,7 +175,7 @@ No agent integration required — this is a bridge-internal hook change. The hoo
 ## Success Criteria
 
 - [ ] When a PM session calls `Skill(skill="do-build")`, the BUILD stage transitions to `in_progress` in Redis
-- [ ] When the `do-build` skill completes, BUILD transitions to `completed`
+- [ ] When the `do-build` skill completes, BUILD transitions to `completed` (known limitation: failures also default to `completed` since `post_tool_use` receives no output to classify — outcome contract wiring is out of scope for this fix)
 - [ ] `AgentSession.stage_states` is non-null after any SDLC skill runs
 - [ ] Dashboard shows correct current stage for a live PM session
 - [ ] Existing dev-session hook path unaffected — `tests/unit/test_pre_tool_use_start_stage.py` passes unchanged
@@ -224,8 +224,8 @@ No agent integration required — this is a bridge-internal hook change. The hoo
 - **Assigned To**: hooks-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Add `_complete_pipeline_stage(session_id)` function in a new helper module or inline in `post_tool_use.py`
-- Extend `post_tool_use.py` to dispatch both watchdog and Skill completion in one hook function
+- Replace the one-liner re-export with `async def post_tool_use_hook(input_data, tool_use_id, context)` that calls both watchdog and the new Skill completion logic. **CRITICAL**: the exported symbol must remain `post_tool_use_hook` — this name is referenced in `agent/hooks/__init__.py`. If renamed, the PostToolUse hook silently stops firing.
+- Add `_complete_pipeline_stage(session_id)` function inline in `post_tool_use.py`
 - Import `_SKILL_TO_STAGE` from `pre_tool_use` to guard non-SDLC Skill calls
 
 ### 3. Write unit tests
@@ -258,6 +258,7 @@ No agent integration required — this is a bridge-internal hook change. The hoo
 | Lint clean | `python -m ruff check agent/hooks/pre_tool_use.py agent/hooks/post_tool_use.py` | exit code 0 |
 | Format clean | `python -m ruff format --check agent/hooks/pre_tool_use.py agent/hooks/post_tool_use.py` | exit code 0 |
 | Skill mapping complete | `python -c "from agent.hooks.pre_tool_use import _SKILL_TO_STAGE; assert 'do-build' in _SKILL_TO_STAGE"` | exit code 0 |
+| PostToolUse hook registered | `python -c "from agent.hooks import build_hooks_config; cfg = build_hooks_config(); print(len(cfg['PostToolUse']))"` | `1` |
 
 ## Critique Results
 
