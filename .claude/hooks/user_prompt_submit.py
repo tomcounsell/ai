@@ -8,6 +8,7 @@ as Memory records via memory_bridge.ingest().
 All operations fail silently -- memory errors never block prompt submission.
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -91,12 +92,16 @@ def main():
 
                 project_key = _get_project_key(cwd)
 
+                # Read SESSION_TYPE from environment to register the correct persona
+                session_type_override = os.environ.get("SESSION_TYPE")
+
                 agent_session = AgentSession.create_local(
                     session_id=local_session_id,
                     project_key=project_key,
                     working_dir=cwd,
                     status="running",
                     message_text=prompt[:500] if prompt else "",
+                    **({"session_type": session_type_override} if session_type_override else {}),
                 )
 
                 sidecar["agent_session_id"] = agent_session.agent_session_id

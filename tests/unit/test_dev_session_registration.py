@@ -127,7 +127,7 @@ class TestCreateLocalFactory:
     """AgentSession.create_local() should create a local CLI session."""
 
     def test_creates_session_with_correct_fields(self):
-        """create_local() sets session_type=dev, status, and required fields."""
+        """create_local() sets session_type=dev by default (no SESSION_TYPE env var), status, and required fields."""
         with patch("models.agent_session.AgentSession.save"):
             from models.agent_session import AgentSession
 
@@ -138,10 +138,38 @@ class TestCreateLocalFactory:
             )
 
             assert session.session_id == "local-abc-123"
-            assert session.session_type == "dev"
+            assert session.session_type == "dev"  # default when SESSION_TYPE env var absent
             assert session.project_key == "dm"
             assert session.working_dir == "/Users/test/src/ai"
             assert session.created_at is not None
+
+    def test_session_type_from_explicit_kwarg(self):
+        """create_local() respects session_type when passed as explicit kwarg."""
+        with patch("models.agent_session.AgentSession.save"):
+            from models.agent_session import AgentSession
+
+            session = AgentSession.create_local(
+                session_id="local-tm-123",
+                project_key="dm",
+                working_dir="/Users/test/src/ai",
+                session_type="teammate",
+            )
+
+            assert session.session_type == "teammate"
+
+    def test_session_type_pm_explicit(self):
+        """create_local() stores pm session_type when explicitly passed."""
+        with patch("models.agent_session.AgentSession.save"):
+            from models.agent_session import AgentSession
+
+            session = AgentSession.create_local(
+                session_id="local-pm-123",
+                project_key="dm",
+                working_dir="/Users/test/src/ai",
+                session_type="pm",
+            )
+
+            assert session.session_type == "pm"
 
     def test_telegram_fields_are_null(self):
         """Local sessions have no Telegram context."""
