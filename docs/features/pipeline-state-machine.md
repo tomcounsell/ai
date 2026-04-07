@@ -31,11 +31,10 @@ The state machine is wired into the Claude Agent SDK hook system. This is the en
 1. **PM dispatches dev-session**: The PM session (PM persona) uses the Agent tool with `type="dev-session"` and a prompt containing the stage assignment (e.g., "Stage: BUILD").
 
 2. **PreToolUse hook fires** (`agent/hooks/pre_tool_use.py`):
-   - `_maybe_start_pipeline_stage()` detects `tool_name == "Agent"` with `type == "dev-session"`
+   - `_maybe_register_dev_session()` detects `tool_name == "Agent"` with `type == "dev-session"`
    - `_extract_stage_from_prompt()` parses the stage name from the prompt text using pattern matching against known SDLC stage names
    - `_start_pipeline_stage()` loads the parent PM session from Redis, creates a `PipelineStateMachine`, and calls `start_stage()` -- marking the stage as `in_progress`
    - Failures are caught and logged but never block the Agent tool call
-   - Note: child Dev session AgentSession creation is **not** done here — the child subprocess self-registers via the `VALOR_PARENT_SESSION_ID` env var (see `pm-dev-session-architecture.md`)
 
 3. **Dev-session executes**: The subagent runs the assigned stage work (e.g., `/do-build`, `/do-test`).
 

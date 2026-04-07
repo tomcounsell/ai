@@ -259,36 +259,6 @@ The memory system MUST work equally across all agent session types — SDK/Teleg
 | `bridge/knowledge_watcher.py` | Filesystem watcher for work-vault changes (watchdog + debounce) |
 | `config/personas/_base.md` | Thought priming instruction for agents |
 
-## Project Key Partitioning
-
-All Memory records carry a `project_key` that scopes them to a specific project. The Telegram agent and Claude Code hook paths both use `project_key` to isolate retrieval queries — a Claude Code session working in `~/src/ai` only sees `"ai"` or `"valor"` partition memories, not unrelated Telegram DMs.
-
-### Key Values
-
-| Value | Source | Description |
-|-------|--------|-------------|
-| `"valor"` | projects.json match | The main `~/src/ai` project (matched by working directory) |
-| `"dm"` | Telegram bridge | Genuine Telegram direct messages. Semantically reserved — must not be used as a fallback for non-DM contexts. |
-| `Path(cwd).name` | cwd basename fallback | Used when projects.json is missing or has no match for the current directory |
-| `"default"` | `DEFAULT_PROJECT_KEY` | Last-resort fallback in `config/memory_defaults.py`. Replaces the previous `"dm"` default to prevent silent mislabeling. |
-
-### Resolution Chain
-
-`_get_project_key(cwd)` in `memory_bridge.py` (Claude Code hooks path):
-
-1. `VALOR_PROJECT_KEY` env var — highest priority, used by CI/SDK-spawned sessions
-2. `projects.json` cwd match — `~/Desktop/Valor/projects.json` entries matched by path prefix
-3. `Path(cwd).name` — directory basename when no projects.json match exists
-4. `DEFAULT_PROJECT_KEY` from `config/memory_defaults.py` — final fallback when cwd is None
-
-The Telegram bridge path writes directly with `project_key="dm"` for human messages and uses `DEFAULT_PROJECT_KEY` from environment/config for agent-extracted observations.
-
-### DEFAULT_PROJECT_KEY Change
-
-Prior to PR #820, `DEFAULT_PROJECT_KEY = "dm"` in `config/memory_defaults.py`. This caused all 2,376 Memory records created by Claude Code hooks between 2026-03-24 and 2026-04-07 to be stored under the Telegram DM partition, making recall completely broken for Claude Code sessions (which queried the `"valor"` partition and found nothing).
-
-The default was changed to `"default"` to ensure misconfigured callers are identifiable rather than silently merging with DM memories. A migration script (`scripts/migrate_memory_project_key.py`) re-keys the mislabeled records — see [Claude Code Memory](claude-code-memory.md) for migration instructions.
-
 ## Configuration
 
 All tuning constants are in `config/memory_defaults.py`. Call `apply_defaults()` before defining the Memory model (this happens automatically on import).
@@ -345,4 +315,3 @@ No schema migrations are involved. Redis keys can be flushed without side effect
 - Metadata-aware recall: [#586](https://github.com/tomcounsell/ai/issues/586) -- category-weighted recall re-ranking, post-merge metadata parity, retrieval recipes
 - Trigger training: [#613](https://github.com/tomcounsell/ai/issues/613) -- LLM-judged outcome detection, outcome history, act rate tracking
 - Downstream: Issue #395 (multi-persona memory partitioning), Issue #393 (behavioral episode memory)
-- Project key isolation: [#811](https://github.com/tomcounsell/ai/issues/811) (PR [#820](https://github.com/tomcounsell/ai/pull/820)) -- DEFAULT_PROJECT_KEY changed from "dm" to "default", cwd threading, migration script

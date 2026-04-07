@@ -149,8 +149,8 @@ The registry also tracks per-session tool activity (tool count and last 3 tool n
 
 **Hook call sites using the registry**:
 - `agent/health_check.py` -- watchdog tool count tracking
-- `agent/hooks/pre_tool_use.py` -- pipeline stage start on dev-session spawn
-- `agent/hooks/subagent_stop.py` -- completion tracking and two-lookup pattern for child AgentSession (two call sites)
+- `agent/hooks/pre_tool_use.py` -- Dev session registration
+- `agent/hooks/subagent_stop.py` -- completion tracking (two call sites)
 
 Note: The `VALOR_SESSION_ID` env var injection in `sdk_client.py` is retained for code running inside the Claude Code subprocess (shell scripts, Python tools via Bash). The registry is only for parent-process hook resolution.
 
