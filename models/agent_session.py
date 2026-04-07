@@ -104,11 +104,6 @@ class AgentSession(Model):
     # back to the most recent session file on disk. See issue #374 Bug 1.
     claude_session_uuid = Field(null=True)
 
-    # === Behavioral episode instrumentation ===
-    # Accumulated during SDLC cycles for cycle-close episode creation
-    tool_sequence = ListField(null=True)  # list of "{stage}:{tool_type}" strings
-    friction_events = ListField(null=True)  # list of "{stage}|{description}|{count}" strings
-
     # === Tracing ===
     correlation_id = Field(null=True)  # End-to-end request tracing ID
 
@@ -318,52 +313,6 @@ class AgentSession(Model):
         """
         progress = self.get_stage_progress()
         return any(status == "failed" for status in progress.values())
-
-    # === Behavioral episode instrumentation helpers ===
-
-    _TOOL_SEQUENCE_MAX = 50
-    _FRICTION_EVENTS_MAX = 20
-
-    def append_tool_event(self, stage: str, tool_type: str) -> None:
-        """Record a tool usage event during an SDLC cycle.
-
-        Args:
-            stage: SDLC stage name (e.g., "BUILD", "TEST")
-            tool_type: Type of tool used (e.g., "edit", "bash", "read")
-        """
-        current = self.tool_sequence if isinstance(self.tool_sequence, list) else []
-        entry = f"{stage}:{tool_type}"
-        current.append(entry)
-        if len(current) > self._TOOL_SEQUENCE_MAX:
-            current = current[-self._TOOL_SEQUENCE_MAX :]
-        self.tool_sequence = current
-        try:
-            self.save()
-        except Exception as e:
-            logger.warning(f"append_tool_event save failed for session {self.session_id}: {e}")
-
-    def append_friction_event(
-        self, stage: str, description: str, repetition_count: int = 1
-    ) -> None:
-        """Record a friction event during an SDLC cycle.
-
-        Friction events indicate retries, failures, or unexpected detours.
-
-        Args:
-            stage: SDLC stage name
-            description: Brief description of the friction
-            repetition_count: Number of repetitions (default 1)
-        """
-        current = self.friction_events if isinstance(self.friction_events, list) else []
-        entry = f"{stage}|{description}|{repetition_count}"
-        current.append(entry)
-        if len(current) > self._FRICTION_EVENTS_MAX:
-            current = current[-self._FRICTION_EVENTS_MAX :]
-        self.friction_events = current
-        try:
-            self.save()
-        except Exception as e:
-            logger.warning(f"append_friction_event save failed for session {self.session_id}: {e}")
 
     # === Queued steering message helpers ===
 

@@ -7,7 +7,7 @@ including plan → build → test → review workflows with unique workflow IDs.
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 
 # Workflow phases
 WorkflowPhase = Literal["plan", "build", "test", "review", "document"]
@@ -45,8 +45,14 @@ class WorkflowStateData(BaseModel):
     status: WorkflowStatus | None = Field(None, description="Current workflow status")
     telegram_chat_id: int | None = Field(None, description="Telegram chat ID for notifications")
     created_at: datetime = Field(
-        default_factory=datetime.now, description="Workflow creation timestamp"
+        default_factory=datetime.utcnow, description="Workflow creation timestamp"
     )
-    updated_at: datetime = Field(default_factory=datetime.now, description="Last update timestamp")
+    updated_at: datetime = Field(
+        default_factory=datetime.utcnow, description="Last update timestamp"
+    )
 
-    model_config = ConfigDict(populate_by_name=True)
+    class Config:
+        """Pydantic model configuration."""
+
+        json_encoders = {datetime: lambda v: v.isoformat()}
+        populate_by_name = True

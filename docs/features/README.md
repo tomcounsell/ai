@@ -7,7 +7,6 @@ Completed feature documentation for the Valor AI system. Each document describes
 | Feature | Description | Status |
 |---------|-------------|--------|
 | [Agent Session Model](agent-session-model.md) | Unified lifecycle model merging RedisJob + SessionLog for agent work tracking | Shipped |
-| [Behavioral Episode Memory](behavioral-episode-memory.md) | Structural memory for SDLC cycles: episode recording, fingerprint classification, pattern crystallization, cross-machine sync | Shipped |
 | [Bridge Message Query](bridge-message-query.md) | CLI tool to fetch Telegram message history via file-based IPC with running bridge | Shipped |
 | [Bridge Module Architecture](bridge-module-architecture.md) | Sub-module organization of the Telegram bridge for maintainability | Shipped |
 | [Bridge Response Improvements](bridge-response-improvements.md) | Enhancements to how the Telegram bridge formats and delivers responses | Shipped |
@@ -24,7 +23,6 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Correlation IDs](correlation-ids.md) | End-to-end request tracing with shared correlation_id from Telegram receipt to response delivery | Shipped |
 | [Deep Plan Analysis](deep-plan-analysis.md) | Prior Art, Data Flow, Failure Analysis, and Architectural Impact investigation sections in /do-plan | Shipped |
 | [Design Review](do-design-review.md) | Review web UI against 10 premium design criteria with severity ratings | Shipped |
-| [Deterministic SDLC Guard](deterministic-sdlc-guard.md) | Phase 1.75 guard in Observer that force-steers SDLC sessions to next pipeline stage without LLM, preventing stalls before later stages | Shipped |
 | [Do Test](do-test.md) | Intelligent test orchestration with parallel dispatch, changed-file detection, structured reporting, and pytest plugin configuration | Shipped |
 | [do-patch Skill](do-patch-skill.md) | Targeted fix skill for test failures and review blockers; called automatically by do-build | Shipped |
 | [Documentation Audit](documentation-audit.md) | Weekly LLM-powered audit of docs/ accuracy against codebase; KEEP / UPDATE / DELETE verdicts, directory and filename enforcement | Shipped |
@@ -36,7 +34,6 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Hooks & Session Logging](hooks-session-logging.md) | Claude Code hooks for session event capture and structured logging | Shipped |
 | [Image Vision Support](image-vision.md) | Ollama LLaVA image descriptions for visual content in Telegram | Shipped |
 | [Intake Classifier](intake-classifier.md) | Haiku-powered message intent triage (interjection/new_work/acknowledgment) for bridge routing | Shipped |
-| [Issue Poller](issue-poller.md) | Automatic SDLC kickoff: polls GitHub issues, dedup via Claude Haiku, auto-creates draft plans | Shipped |
 | [Job Health Monitor](job-health-monitor.md) | Detects and recovers stuck running jobs in the queue | Shipped |
 | [Job Self-Scheduling](job-scheduling.md) | Agent-initiated queue operations: schedule SDLC jobs, deferred execution, 4-tier priority, queue manipulation | Shipped |
 | [Link Content Summarization](link-summarization.md) | Auto-fetch and summarize shared links via Perplexity API | Shipped |
@@ -74,11 +71,11 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Task List Isolation Experiment](task-list-isolation.md) | Experiment results validating CLAUDE_CODE_TASK_LIST_ID behavior | Archived |
 | [Telegram History & Links](telegram-history.md) | Searchable message history and link compilation from Telegram | Shipped |
 | [Telegram Messaging](telegram-messaging.md) | Unified interface for reading and sending Telegram messages via `valor-telegram` CLI | Shipped |
+| [Telegram PM Guide](telegram-pm-guide.md) | PM-facing guide for Telegram interaction patterns, session resumption, and pipeline signals | Shipped |
 | [Test Baseline Verification](test-baseline-verification.md) | Verified classification of test failures as regressions vs pre-existing by running failing tests against main | Shipped |
 | [Test Coverage Standards](test-coverage-standards.md) | Standards and tooling for preventing silent failure classes: exception swallowing, empty output loops, coupled tests, missing error rendering, silent builds | Shipped |
 | [Trace & Verify Protocol](trace-and-verify.md) | Data-driven root cause analysis replacing narrative-only 5 Whys with forward verification | Shipped |
 | [Typed Skill Outcomes](typed-skill-outcomes.md) | Structured outcome contracts for /do-* skills enabling deterministic Observer routing without LLM classification | Shipped |
-| [Workspace Safety Invariants](workspace-safety-invariants.md) | Pre-launch validation of agent working directories with CWD existence, path containment, and slug sanitization | Shipped |
 | [Worktree SDK Compatibility Experiment](worktree-sdk-compatibility.md) | Experiment results for Claude Agent SDK compatibility with git worktrees | Archived |
 | [xfail Hygiene](xfail-hygiene.md) | Three-layer xfail hygiene system preventing stale test markers after bug fixes land | Shipped |
 | [YouTube Transcription](youtube-transcription.md) | Auto-transcribe YouTube videos shared in messages for Claude context | Shipped |

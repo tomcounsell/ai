@@ -28,12 +28,7 @@ Typed Outcome Routing (deterministic, no LLM)
 Stop Reason Routing (deterministic, no LLM)
     |  if stop_reason == "budget_exceeded" → DELIVER with warning
     |  if stop_reason == "rate_limited" → STEER with backoff
-    |  if stop_reason == "end_turn" or None → fall through
-    v
-Deterministic SDLC Guard (deterministic, no LLM)
-    |  if SDLC + stages remain + no blocker → STEER to next /do-* skill
-    |  if failed stage, terminal stop, at cap, or blocker signal → fall through
-    |  see: deterministic-sdlc-guard.md
+    |  if stop_reason == "end_turn" or None → fall through to Observer
     v
 Observer Agent (Sonnet in production, configurable for testing)
     |  reads AgentSession state
@@ -150,7 +145,7 @@ These were removed from the routing path. See [Coaching Loop](coaching-loop.md) 
 | `agent/sdk_client.py` | Captures `stop_reason` from `ResultMessage` in `_session_stop_reasons` registry |
 | `agent/job_queue.py` | `send_to_chat()` wiring -- invokes outcome parser, stage detector, then Observer; threads `stop_reason` |
 | `models/agent_session.py` | `AgentSession` with stage progress, steering queue, links |
-| `tests/test_observer.py` | 60 tests: 33 unit (stage detector, Observer tools, fallback) + 17 integration (real API with Haiku floor test) + 4 deterministic guard + 6 typed outcome merge |
+| `tests/test_observer.py` | 46 tests: 33 unit (stage detector, Observer tools, fallback) + 13 integration (real API with Haiku floor test) |
 | `tests/unit/test_stop_reason_observer.py` | 7 tests for stop_reason routing (budget_exceeded, rate_limited, end_turn, registry) |
 | `tests/unit/test_skill_outcome.py` | 34 unit tests for SkillOutcome parsing, serialization, and edge cases |
 
@@ -167,4 +162,3 @@ Test categories:
 - **Cap enforcement**: SDLC cap (10) and non-SDLC cap (3) both cause delivery
 - **Error/blocker delivery**: unrecoverable errors go to human
 - **Completion delivery**: all-stages-done with evidence goes to human
-- **Deterministic guard** (4 tests): guard fires on clean SDLC, bypassed on failed stage / terminal stop_reason / budget_exceeded — see [Deterministic SDLC Guard](deterministic-sdlc-guard.md)

@@ -12,7 +12,7 @@ if user_site.exists() and str(user_site) not in sys.path:
     sys.path.insert(0, str(user_site))
 
 # Direct import to avoid __init__.py dependency issues
-sdk_client_path = Path(__file__).parent.parent.parent / "agent" / "sdk_client.py"
+sdk_client_path = Path(__file__).parent.parent / "agent" / "sdk_client.py"
 spec = importlib.util.spec_from_file_location("sdk_client", sdk_client_path)
 sdk_client = importlib.util.module_from_spec(spec)
 try:

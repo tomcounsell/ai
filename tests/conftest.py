@@ -79,44 +79,33 @@ def mock_claude_sdk_cleanup():
 
 
 @pytest.fixture(autouse=True)
-def redis_test_db(request):
-    """Switch popoto to a per-worker Redis db for ALL tests, preventing production pollution.
+def redis_test_db():
+    """Switch popoto to Redis db=1 for ALL tests, preventing production pollution.
 
     autouse=True ensures this runs for every test, even those that don't
     explicitly request the fixture. This prevents accidental writes to db=0
     if a test imports a popoto model without requesting isolation.
 
-    Under pytest-xdist, each worker (gw0, gw1, ...) gets its own Redis database
-    (db=1, db=2, ...) to prevent cross-worker contamination from flushdb().
-    Without xdist, uses db=1 as before.
-
     Uses SELECT on the existing connection so that popoto's module-level
     POPOTO_REDIS_DB reference (used by Query, fields, etc.) points at the
     test database without needing to replace the object.
 
-    Also resets the async Redis connection to use the same db, since popoto v1.0.0b2
+    Also resets the async Redis connection to use db=1, since popoto v1.0.0b2
     maintains a separate _POPOTO_ASYNC_REDIS_DB connection.
     """
     import popoto.redis_db as rdb
     import redis.asyncio as aioredis
     from popoto.redis_db import POPOTO_REDIS_DB
 
-    # Determine per-worker db number for xdist isolation
-    worker_id = getattr(request.config, "workerinput", {}).get("workerid", "")
-    if worker_id.startswith("gw"):
-        test_db = int(worker_id[2:]) + 1  # gw0->db1, gw1->db2, etc.
-    else:
-        test_db = 1  # No xdist or master process
-
-    # Switch sync connection to test db and flush before each test
-    POPOTO_REDIS_DB.select(test_db)
+    # Switch sync connection to db=1 and flush before each test
+    POPOTO_REDIS_DB.select(1)
     POPOTO_REDIS_DB.flushdb()
 
-    # Reset async Redis connection to point at the same test db.
+    # Reset async Redis connection to point at db=1.
     # Directly create the aioredis.Redis object (constructor is sync)
     # rather than calling the async set_async_redis_db_settings().
     rdb._POPOTO_ASYNC_REDIS_DB = None
-    rdb._POPOTO_ASYNC_REDIS_DB = aioredis.Redis(db=test_db)
+    rdb._POPOTO_ASYNC_REDIS_DB = aioredis.Redis(db=1)
 
     yield
 

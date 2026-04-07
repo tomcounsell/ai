@@ -182,8 +182,7 @@ class TestBuildValidationIntegration:
         """
         from pathlib import Path
 
-        repo_root = Path(__file__).parent.parent.parent
-        skill_path = repo_root / ".claude" / "skills" / "do-build" / "SKILL.md"
+        skill_path = Path(__file__).parent.parent / ".claude" / "skills" / "do-build" / "SKILL.md"
         if skill_path.exists():
             content = skill_path.read_text()
             # The skill should mention commit verification

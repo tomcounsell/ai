@@ -1,12 +1,12 @@
 # Reflections: Autonomous Maintenance System
 
-The reflections system is an autonomous daily maintenance and self-reflection process. It runs every morning at 6 AM Pacific via macOS launchd, performing cleanup, analysis, reflection, and reporting through 17 sequential steps. All persistence is Redis-backed via Popoto models.
+The reflections system is an autonomous daily maintenance and self-reflection process. It runs every morning at 6 AM Pacific via macOS launchd, performing cleanup, analysis, reflection, and reporting through 14 sequential steps. All persistence is Redis-backed via Popoto models.
 
 ## How It Works
 
 The runner (`scripts/reflections.py`) loads state from Redis, executes each step in order, and checkpoints after every step. If interrupted, the next run resumes from where it left off. Each step is independently failable — a crash in one step does not block the rest.
 
-### 17-Step Pipeline
+### 14-Step Pipeline
 
 | Step | Name | Description | Scope | Failure Mode |
 |------|------|-------------|-------|--------------|
@@ -21,12 +21,9 @@ The runner (`scripts/reflections.py`) loads state from Redis, executes each step
 | 9 | Report Generation | Writes local markdown report to `logs/reflections/report_YYYY-MM-DD.md` | AI repo only | Non-blocking |
 | 10 | GitHub Issue Creation | Posts daily digest issue per project via `gh` CLI; posts summary to Telegram | Per-project | Non-blocking, requires `gh` auth |
 | 11 | Skills Audit | Validates all SKILL.md files against template standards (see [Skills Audit](do-skills-audit.md)) | AI repo only | Non-blocking |
-| 12 | Redis TTL Cleanup | Prunes expired records across all Redis models (including CyclicEpisode 180d, ProceduralPattern 365d) | AI repo only | Non-blocking |
+| 12 | Redis TTL Cleanup | Prunes expired records across all Redis models | AI repo only | Non-blocking |
 | 13 | Redis Data Quality | Surfaces data quality issues: unsummarized links, dead channels, error patterns | AI repo only | Non-blocking |
 | 14 | Branch and Plan Cleanup | Deletes merged branches; ensures plans have open issues; flags completed plans for docs migration | AI repo only | Non-blocking, requires `gh` auth |
-| 15 | Feature Docs Audit | Validates feature documentation: stale references, README.md accuracy, plan-masquerading-as-feature | AI repo only | Non-blocking |
-| 16 | Episode Cycle-Close | Creates CyclicEpisode records from completed SDLC sessions (past 24h); classifies fingerprints via Haiku (see [Behavioral Episode Memory](behavioral-episode-memory.md)) | AI repo only | Non-blocking, requires `ANTHROPIC_API_KEY` |
-| 17 | Pattern Crystallization | Scans episodes for fingerprint clusters with 3+ members; creates/reinforces ProceduralPatterns in shared namespace (see [Behavioral Episode Memory](behavioral-episode-memory.md)) | AI repo only | Non-blocking |
 
 ## State & Persistence
 

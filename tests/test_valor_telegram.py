@@ -7,7 +7,7 @@ from unittest.mock import patch
 import pytest
 
 # Import the module under test
-sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent.parent))
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent))
 from tools.valor_telegram import format_timestamp, parse_since, resolve_chat
 
 

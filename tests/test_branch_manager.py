@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 from agent.branch_manager import (
     get_current_branch,
     sanitize_branch_name,
@@ -81,7 +81,7 @@ class TestGitOperations:
     def test_get_current_branch_real_repo(self):
         """Test get_current_branch on real repo."""
         # Test on this repo
-        repo_root = Path(__file__).parent.parent.parent
+        repo_root = Path(__file__).parent.parent
         result = get_current_branch(repo_root)
         # Should return a valid branch name (not empty)
         assert result

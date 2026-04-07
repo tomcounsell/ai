@@ -64,8 +64,11 @@ class TestFastPathSdlc:
         [
             "issue 123",
             "issue #123",
-            "#42",
-            "#1",
+            "pr 363",
+            "pr #363",
+            "PR 42",
+            "pull request 363",
+            "pull request #1",
         ],
     )
     def test_issue_references_sdlc(self, message):
