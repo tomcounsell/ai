@@ -68,6 +68,7 @@ When three PM sessions were enqueued with `chat_id="0"` (via `python -m tools.va
 - **Global asyncio semaphore:** `_global_session_semaphore = asyncio.Semaphore(MAX_CONCURRENT_SESSIONS)` (configurable via env var, default 3). Every `_worker_loop` acquires this before calling `_execute_agent_session()` and releases after.
 - **`create_local()` UUID fix:** Replace `f"local{int(now.timestamp()) % 10000}"` with the `session_id` parameter (which is the Claude Code UUID), giving each CLI session an isolated queue automatically.
 - **`MAX_CONCURRENT_SESSIONS` config:** Read from env var at module import, default 3. Logged at worker startup.
+- **Fallback path coverage:** The Redis pop lock also wraps `_pop_agent_session_with_fallback()` (the sync drain/exit path) to close the same TOCTOU gap in that code path.
 
 ### Flow
 
@@ -97,7 +98,7 @@ Enqueue session → `_ensure_worker(chat_id)` → `_worker_loop` waits for globa
 
 - [ ] `tests/unit/test_agent_session_queue.py` — UPDATE: add tests for pop lock contention and global semaphore ceiling
 - [ ] `tests/integration/test_worker_concurrency.py` — CREATE: integration test that enqueues 3 sessions with `chat_id="0"` and asserts max 1 running at any point
-- [ ] `tests/unit/test_agent_session.py` — UPDATE: assert `create_local()` uses `session_id` as `chat_id` when no explicit `chat_id` provided
+- [ ] `tests/unit/test_agent_session.py` — CREATE: new test file, add test asserting `create_local()` uses `session_id` as `chat_id` when no explicit `chat_id` provided
 
 ## Rabbit Holes
 
@@ -279,6 +280,7 @@ No agent integration required — this is a worker-internal change. The agent's 
 | Format clean | `python -m black --check agent/agent_session_queue.py models/agent_session.py` | exit code 0 |
 | No timestamp chat_id | `grep -n "timestamp.*10000\|10000.*timestamp" models/agent_session.py` | exit code 1 |
 | Semaphore present | `grep -n "MAX_CONCURRENT_SESSIONS\|_global_session_semaphore" agent/agent_session_queue.py` | output > 0 |
+| Fallback path locked | `grep -n "_acquire_pop_lock\|pop_lock" agent/agent_session_queue.py \| grep -c "fallback\|drain"` | output > 0 |
 
 ## Critique Results
 
@@ -288,5 +290,5 @@ No agent integration required — this is a worker-internal change. The agent's 
 
 ## Open Questions
 
-1. Should `MAX_CONCURRENT_SESSIONS` apply only to PM/Dev sessions or also to child sessions spawned by the agent tool? (Currently all sessions go through `_execute_agent_session`, so the semaphore would apply equally.)
-2. Should the Redis pop lock use a project-scoped key (`worker:pop_lock:{project_key}:{chat_id}`) to avoid cross-project interference, or is `worker:pop_lock:{chat_id}` sufficient given that `chat_id` values are already project-scoped by convention?
+1. ~~Should `MAX_CONCURRENT_SESSIONS` apply only to PM/Dev sessions or also to child sessions spawned by the agent tool?~~ **Resolved:** Yes — all sessions go through `_execute_agent_session`, so the semaphore applies equally to PM, Dev, Teammate, and child sessions. No special-casing needed.
+2. ~~Should the Redis pop lock use a project-scoped key (`worker:pop_lock:{project_key}:{chat_id}`) to avoid cross-project interference?~~ **Resolved:** Use `worker:pop_lock:{chat_id}` (global, not project-scoped). `chat_id` values are already distinct between projects (each project uses a different Telegram chat ID or CLI session UUID), so project-scoped keys would add complexity without benefit.
