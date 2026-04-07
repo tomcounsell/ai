@@ -74,9 +74,64 @@ Because `_ensure_worker()` is a plain synchronous function (no `await`), the che
 1. Added immediately before `asyncio.create_task()`.
 2. Removed synchronously right after the task is registered in `_active_workers` (fast path — clears it before any re-entrant call can see it).
 3. Also removed via a `done_callback` as a safety net in case the task finishes before the synchronous removal runs (degenerate edge case).
-4. Removed in the `except` block if `create_task()` itself raises, so the set never leaks.
+4. Cleared in the `except` block if `create_task()` itself raises, so the set never leaks.
 
 The `_worker_loop` removes itself from `_active_workers` in its `finally` block. After it exits, the next call to `_ensure_worker()` (triggered by the next enqueue or the health check) starts a fresh task.
+
+## Concurrency Controls (issue #810)
+
+### Per-Chat Serialization Guarantee
+
+Sessions belonging to the same `chat_id` always execute **strictly one at a time**. This is enforced by the chat serialization invariant: each `chat_id` has exactly one `_worker_loop` task (see Worker Deduplication above), and that task pops and executes sessions sequentially.
+
+### Global Session Ceiling (`MAX_CONCURRENT_SESSIONS`)
+
+A global asyncio semaphore limits how many sessions can execute simultaneously across **all** `chat_id` values:
+
+```bash
+# Set the ceiling (default: 3)
+MAX_CONCURRENT_SESSIONS=5 python -m worker
+
+# Or in .env
+MAX_CONCURRENT_SESSIONS=3
+```
+
+**Implementation details:**
+- `_global_session_semaphore` is a module-level `asyncio.Semaphore | None` in `agent/agent_session_queue.py`
+- Initialized by `_run_worker()` in `worker/__main__.py` **before** any worker loop is created
+- Clamped to minimum 1 to prevent deadlock (`MAX_CONCURRENT_SESSIONS=0` → 1 with a warning log)
+- The semaphore is acquired **before** `_pop_agent_session()` is called, so `transition_status("running")` never occurs without a slot — the dashboard count stays accurate
+- Released after `_execute_agent_session()` completes (in the `finally` block, via all code paths including `CancelledError`)
+- When `None` (e.g., in tests that don't call `_run_worker()`), no ceiling applies
+
+### Redis Pop Lock (TOCTOU Prevention)
+
+A short-lived Redis lock (`SETNX worker:pop_lock:{chat_id}`) wraps the query→transition block in both pop paths:
+
+| Pop path | Lock coverage |
+|----------|--------------|
+| `_pop_agent_session()` | Wraps `async_filter(status="pending")` + `transition_status("running")` |
+| Sync fallback in `_pop_agent_session_with_fallback()` | Wraps `query.filter(status="pending")` + `transition_status("running")` |
+
+**Properties:**
+- TTL = 5 seconds (well above any realistic Redis write latency; self-heals on crash)
+- If lock is held: returns `None` immediately (caller will retry on next event-loop iteration)
+- Fail-open: if Redis is unreachable, `_acquire_pop_lock()` returns `True` so workers are not blocked
+- The two paths are **not re-entrant**: `_pop_agent_session()` acquires, does its work, and **releases** the lock before returning. The sync fallback branch only runs after `_pop_agent_session()` returns `None` (lock already released), so it acquires a fresh lock — no nesting.
+
+### CLI Session Isolation (`create_local()`)
+
+Local CLI sessions created by `models/agent_session.py:create_local()` now use the **Claude Code session UUID** as `chat_id` instead of a collision-prone modulo timestamp:
+
+```python
+# Before (collision-prone): same chat_id for sessions created within same 2.7-hour window
+chat_id = f"local{int(now.timestamp()) % 10000}"
+
+# After (unique): each CLI session gets its own isolated queue
+chat_id = session_id  # Claude Code UUID (e.g., "abc123-def456-...")
+```
+
+This ensures that multiple CLI sessions (e.g., parallel `/do-build` runs) each get their own worker queue and never serialize with each other.
 
 ## Session Pickup: Fast Path vs Safety Net
 
