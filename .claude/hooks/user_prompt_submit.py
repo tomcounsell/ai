@@ -19,7 +19,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 # Add utils to path
 sys.path.insert(0, str(__file__).rsplit("/", 1)[0])
 
-from hook_utils.constants import read_hook_input
+from hook_utils.constants import read_hook_input  # noqa: E402
 
 
 def main():
@@ -33,11 +33,13 @@ def main():
     if not prompt or not isinstance(prompt, str):
         return
 
+    cwd = hook_input.get("cwd", "")
+
     # Ingest into memory (quality filter and dedup handled inside)
     try:
         from hook_utils.memory_bridge import ingest
 
-        ingest(prompt)
+        ingest(prompt, cwd=cwd)
     except Exception:
         pass  # Silent failure -- never block prompt submission
 
