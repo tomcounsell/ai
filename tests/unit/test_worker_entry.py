@@ -453,6 +453,35 @@ class TestSigtermExitCode:
             "Exit code 1 log line must mention ThrottleInterval for operator clarity"
         )
 
+    def test_configure_logging_uses_utc_formatter(self):
+        """_configure_logging() must attach a UTC-converting formatter to handlers."""
+        import logging
+        import time
+
+        from worker.__main__ import _configure_logging
+
+        # Clear existing handlers so we can inspect what _configure_logging adds
+        root_logger = logging.getLogger()
+        original_handlers = root_logger.handlers[:]
+        root_logger.handlers = []
+
+        try:
+            _configure_logging()
+            handlers = root_logger.handlers
+            assert len(handlers) >= 1, "_configure_logging must attach at least one handler"
+            for handler in handlers:
+                fmt = handler.formatter
+                assert fmt is not None, f"Handler {handler} has no formatter"
+                assert getattr(fmt, "converter", None) is time.gmtime, (
+                    f"Handler {handler} formatter.converter must be time.gmtime (UTC), "
+                    f"got: {getattr(fmt, 'converter', None)}"
+                )
+        finally:
+            # Restore original handlers
+            for h in root_logger.handlers:
+                h.close()
+            root_logger.handlers = original_handlers
+
     def test_launchctl_bootout_in_stop_worker(self):
         """scripts/valor-service.sh stop_worker() must use launchctl bootout not unload."""
         source = (Path(__file__).parent.parent.parent / "scripts" / "valor-service.sh").read_text()
