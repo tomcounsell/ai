@@ -29,6 +29,9 @@ CSRF_TRUSTED_ORIGINS = [
     "https://cuttlefish-ea1h.onrender.com",
     "https://blendedworkforce.ai",
     "https://www.blendedworkforce.ai",
+    "https://bwforce.ai",
+    "https://www.bwforce.ai",
+    "https://app.bwforce.ai",
 ]
 
 # File Storage Service - use Supabase in production
