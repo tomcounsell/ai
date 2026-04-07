@@ -4,6 +4,7 @@ Database and caching settings for the project.
 
 import logging
 import os
+import urllib.parse
 
 import dj_database_url
 
@@ -16,6 +17,28 @@ if database_url:
     DATABASES = {
         "default": dj_database_url.config(),
     }
+
+    # Auto-detect when pointing at a remote (non-local) database and disable
+    # migrations to prevent accidental schema changes against production data.
+    _parsed = urllib.parse.urlparse(database_url)
+    _host = _parsed.hostname or ""
+    if _host not in ("localhost", "127.0.0.1", "::1") and LOCAL:
+        import warnings
+
+        warnings.warn(
+            f"\n\n*** LOCAL DEV POINTING AT REMOTE DATABASE ({_host}) ***\n"
+            "Migrations are DISABLED. Do not run makemigrations or migrate.\n",
+            stacklevel=2,
+        )
+
+        class _DisableMigrations:
+            def __contains__(self, _item):
+                return True
+
+            def __getitem__(self, _item):
+                return None
+
+        MIGRATION_MODULES = _DisableMigrations()
 else:
     # Fallback to individual database settings
     DATABASES = {

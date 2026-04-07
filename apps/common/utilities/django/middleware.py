@@ -83,7 +83,7 @@ class DomainRoutingMiddleware:
     def _get_host(request) -> str:
         """Extract the hostname from the request, stripping port if present."""
         try:
-            host = request.META.get("HTTP_HOST", "")
+            host = request.headers.get("host", "")
             # Strip port number (e.g. "blendedworkforce.ai:8000" -> "blendedworkforce.ai")
             return host.split(":")[0].lower()
         except (AttributeError, TypeError):

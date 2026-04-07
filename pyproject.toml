@@ -48,7 +48,7 @@ dependencies = [
     "django-tailwind-cli>=4.4.2",
     "drf-yasg>=1.21.15",
     "openai>=2.30.0",
-    "pydantic-ai>=1.0.0,<2.0.0",
+    "pydantic-ai>=1.77",
     "mcp>=1.27.0,<2.0.0",
     "django-redis>=6.0.0",
     "cryptography>=46.0.0",
@@ -63,6 +63,7 @@ dependencies = [
     "markdown>=3.10.2",
     "notebooklm-py>=0.3.4",
     "kreuzberg>=4.6.3",
+    "anthropic>=0.88.0",
 ]
 
 [project.optional-dependencies]
