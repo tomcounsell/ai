@@ -58,6 +58,26 @@ The worker's startup sequence is deterministic:
 
 At runtime, the worker processes sessions via `_worker_loop(chat_id)` until the queue is empty, then waits for new enqueue events.
 
+## Chat Serialization and Worker Deduplication
+
+Each `chat_id` has at most one active `_worker_loop` task at any time. This is the **chat serialization invariant**: all sessions belonging to the same chat are processed strictly in FIFO order, never concurrently. The invariant is enforced by `_ensure_worker()` through a dual-guard mechanism:
+
+| Guard | What it covers |
+|-------|---------------|
+| `_active_workers[chat_id]` | **Steady-state**: task exists and `.done()` is False — already running, do nothing. |
+| `_starting_workers` (set) | **Startup race**: `create_task()` has been called but the task has not yet registered itself in `_active_workers`. A second call that arrives in the same event-loop turn sees this flag and returns without spawning another task. |
+
+Because `_ensure_worker()` is a plain synchronous function (no `await`), the check-and-set of both guards is atomic within the cooperative asyncio event loop. This is particularly important during the health-check loop, which may iterate many pending sessions sharing the same `chat_id` and call `_ensure_worker()` for each one before any task is live in `_active_workers`.
+
+**Lifecycle of `_starting_workers`:**
+
+1. Added immediately before `asyncio.create_task()`.
+2. Removed synchronously right after the task is registered in `_active_workers` (fast path — clears it before any re-entrant call can see it).
+3. Also removed via a `done_callback` as a safety net in case the task finishes before the synchronous removal runs (degenerate edge case).
+4. Removed in the `except` block if `create_task()` itself raises, so the set never leaks.
+
+The `_worker_loop` removes itself from `_active_workers` in its `finally` block. After it exits, the next call to `_ensure_worker()` (triggered by the next enqueue or the health check) starts a fresh task.
+
 ## Session Pickup: Fast Path vs Safety Net
 
 The worker uses two mechanisms to discover new sessions:
