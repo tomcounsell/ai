@@ -23,6 +23,10 @@ uv run python manage.py createsuperuser
 # Django development server
 uv run python manage.py runserver
 
+# Run against production database (read-only — migrations auto-disabled)
+ENV_FILE=.env.prod uv run python manage.py runserver
+# or: make runserver-prod
+
 # Background task worker (production only — dev uses ImmediateBackend)
 uv run python manage.py db_worker
 
