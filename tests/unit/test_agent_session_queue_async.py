@@ -104,6 +104,67 @@ class TestPushJobAsyncWrapping:
             assert mock_to_thread.call_count >= 1
 
 
+class TestPushAgentSessionPublish:
+    """Verify _push_agent_session publishes to valor:sessions:new after enqueue."""
+
+    def test_publish_called_after_enqueue(self, mock_agent_session):
+        """Publish to valor:sessions:new should be called after session is written."""
+        from agent.agent_session_queue import _push_agent_session
+
+        mock_agent_session.query.filter.return_value = []
+        mock_agent_session.async_create = AsyncMock(return_value=MagicMock())
+        mock_agent_session.query.async_count = AsyncMock(return_value=1)
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
+            mock_redis.publish = MagicMock(return_value=1)
+            asyncio.run(
+                _push_agent_session(
+                    project_key="test",
+                    session_id="sess-pub",
+                    working_dir="/tmp",
+                    message_text="hello",
+                    sender_name="Test",
+                    chat_id="chat-1",
+                    telegram_message_id=1,
+                )
+            )
+            mock_redis.publish.assert_called_once()
+            args = mock_redis.publish.call_args
+            assert args[0][0] == "valor:sessions:new"
+            import json
+
+            payload = json.loads(args[0][1])
+            assert payload["chat_id"] == "chat-1"
+            assert payload["session_id"] == "sess-pub"
+
+    def test_session_written_even_if_publish_fails(self, mock_agent_session):
+        """Publish failure must not prevent session creation."""
+        from agent.agent_session_queue import _push_agent_session
+
+        mock_agent_session.query.filter.return_value = []
+        mock_agent_session.async_create = AsyncMock(return_value=MagicMock())
+        mock_agent_session.query.async_count = AsyncMock(return_value=1)
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
+            mock_redis.publish = MagicMock(side_effect=Exception("Redis down"))
+            # Should not raise
+            result = asyncio.run(
+                _push_agent_session(
+                    project_key="test",
+                    session_id="sess-fail",
+                    working_dir="/tmp",
+                    message_text="hello",
+                    sender_name="Test",
+                    chat_id="chat-2",
+                    telegram_message_id=2,
+                )
+            )
+            # Session was still created
+            mock_agent_session.async_create.assert_called_once()
+            # Result is a count (not an exception)
+            assert isinstance(result, int)
+
+
 class TestEnqueueContinuationAsyncWrapping:
     """Verify _enqueue_nudge wraps sync filter in asyncio.to_thread."""
 
