@@ -18,7 +18,7 @@ class ParseDocumentTestCase(TestCase):
     """
 
     def test_parse_text_file(self):
-        """Plain .txt files are read directly without kreuzberg."""
+        """Plain .txt files are read directly."""
         with tempfile.NamedTemporaryFile(suffix=".txt", mode="w", delete=False) as f:
             f.write("Hello, world!")
             f.flush()
@@ -27,7 +27,7 @@ class ParseDocumentTestCase(TestCase):
         self.assertEqual(result, "Hello, world!")
 
     def test_parse_markdown_file(self):
-        """Plain .md files are read directly without kreuzberg."""
+        """Plain .md files are read directly."""
         with tempfile.NamedTemporaryFile(suffix=".md", mode="w", delete=False) as f:
             f.write("# Title\n\nSome content.")
             f.flush()
@@ -70,14 +70,13 @@ class ParseDocumentTestCase(TestCase):
         """SUPPORTED_EXTENSIONS contains expected formats."""
         self.assertIn(".pdf", SUPPORTED_EXTENSIONS)
         self.assertIn(".docx", SUPPORTED_EXTENSIONS)
-        self.assertIn(".odt", SUPPORTED_EXTENSIONS)
 
-    @patch("kreuzberg.extract_file_sync")
-    def test_pdf_extraction_uses_kreuzberg(self, mock_extract):
-        """PDF files are passed to kreuzberg's extract_file_sync."""
-        mock_result = MagicMock()
-        mock_result.content = "Extracted PDF text"
-        mock_extract.return_value = mock_result
+    @patch("pypdf.PdfReader")
+    def test_pdf_extraction_uses_pypdf(self, mock_reader_cls):
+        """PDF files are parsed via pypdf.PdfReader."""
+        mock_page = MagicMock()
+        mock_page.extract_text.return_value = "Extracted PDF text"
+        mock_reader_cls.return_value.pages = [mock_page]
 
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
             f.write(b"%PDF-1.4 fake")
@@ -86,14 +85,13 @@ class ParseDocumentTestCase(TestCase):
             result = parse_document(Path(f.name))
 
         self.assertEqual(result, "Extracted PDF text")
-        mock_extract.assert_called_once_with(f.name)
 
     @patch(
-        "kreuzberg.extract_file_sync",
+        "pypdf.PdfReader",
         side_effect=Exception("corrupt file"),
     )
-    def test_kreuzberg_failure_returns_empty(self, mock_extract):
-        """When kreuzberg fails, parse_document returns empty string."""
+    def test_pdf_failure_returns_empty(self, mock_reader_cls):
+        """When pypdf fails, parse_document returns empty string."""
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
             f.write(b"%PDF-1.4 corrupt")
             f.flush()

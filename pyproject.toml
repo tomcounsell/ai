@@ -62,7 +62,8 @@ dependencies = [
     "html2text>=2025.4.15",
     "markdown>=3.10.2",
     "notebooklm-py>=0.3.4",
-    "kreuzberg>=4.6.3",
+    "pypdf>=5.0.0",
+    "griffe>=1.0.0,<2.0.0",
     "anthropic>=0.88.0",
 ]
 

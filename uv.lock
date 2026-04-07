@@ -943,9 +943,9 @@ dependencies = [
     { name = "djangorestframework" },
     { name = "djangorestframework-api-key" },
     { name = "drf-yasg" },
+    { name = "griffe" },
     { name = "gunicorn" },
     { name = "html2text" },
-    { name = "kreuzberg" },
     { name = "markdown" },
     { name = "mcp" },
     { name = "notebooklm-py" },
@@ -953,6 +953,7 @@ dependencies = [
     { name = "pillow" },
     { name = "psycopg2" },
     { name = "pydantic-ai" },
+    { name = "pypdf" },
     { name = "python-dotenv" },
     { name = "requests" },
     { name = "supabase" },
@@ -1047,11 +1048,11 @@ requires-dist = [
     { name = "flake8", marker = "extra == 'dev'" },
     { name = "google-genai", marker = "extra == 'podcast'", specifier = ">=1.70.0" },
     { name = "gpt-researcher", marker = "extra == 'podcast'", specifier = ">=0.14.6" },
+    { name = "griffe", specifier = ">=1.0.0,<2.0.0" },
     { name = "gunicorn", specifier = ">=25.3.0" },
     { name = "html2text", specifier = ">=2025.4.15" },
     { name = "ipython", marker = "extra == 'dev'" },
     { name = "isort", marker = "extra == 'dev'" },
-    { name = "kreuzberg", specifier = ">=4.6.3" },
     { name = "langchain", marker = "extra == 'together-research'", specifier = ">=1.2.10" },
     { name = "langchain-mcp-adapters", marker = "extra == 'podcast'", specifier = ">=0.1.0" },
     { name = "langchain-openai", marker = "extra == 'podcast'", specifier = ">=0.3.0" },
@@ -1069,6 +1070,7 @@ requires-dist = [
     { name = "psycopg2" },
     { name = "pydantic-ai", specifier = ">=1.77" },
     { name = "pydub", marker = "extra == 'podcast'", specifier = ">=0.25.1" },
+    { name = "pypdf", specifier = ">=5.0.0" },
     { name = "pytest", marker = "extra == 'test'" },
     { name = "pytest-asyncio", marker = "extra == 'e2e'", specifier = ">=0.23.0" },
     { name = "pytest-cov", marker = "extra == 'test'" },
@@ -2253,6 +2255,18 @@ wheels = [
 ]
 
 [[package]]
+name = "griffe"
+version = "1.15.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "colorama" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/0d/0c/3a471b6e31951dce2360477420d0a8d1e00dea6cf33b70f3e8c3ab6e28e1/griffe-1.15.0.tar.gz", hash = "sha256:7726e3afd6f298fbc3696e67958803e7ac843c1cfe59734b6251a40cdbfb5eea", size = 424112 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9c/83/3b1d03d36f224edded98e9affd0467630fc09d766c0e56fb1498cbb04a9b/griffe-1.15.0-py3-none-any.whl", hash = "sha256:6f6762661949411031f5fcda9593f586e6ce8340f0ba88921a0f2ef7a81eb9a3", size = 150705 },
+]
+
+[[package]]
 name = "griffelib"
 version = "2.0.2"
 source = { registry = "https://pypi.org/simple" }
@@ -2966,18 +2980,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/99/dd/841e9a66c4715477ea0abc78da039832fbb09dac5c35c58dc4c41a407b8a/kiwisolver-1.4.9-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:aedff62918805fb62d43a4aa2ecd4482c380dc76cd31bd7c8878588a61bd0369", size = 2391835 },
     { url = "https://files.pythonhosted.org/packages/0c/28/4b2e5c47a0da96896fdfdb006340ade064afa1e63675d01ea5ac222b6d52/kiwisolver-1.4.9-cp314-cp314t-win_amd64.whl", hash = "sha256:1fa333e8b2ce4d9660f2cda9c0e1b6bafcfb2457a9d259faa82289e73ec24891", size = 79988 },
     { url = "https://files.pythonhosted.org/packages/80/be/3578e8afd18c88cdf9cb4cffde75a96d2be38c5a903f1ed0ceec061bd09e/kiwisolver-1.4.9-cp314-cp314t-win_arm64.whl", hash = "sha256:4a48a2ce79d65d363597ef7b567ce3d14d68783d2b2263d98db3d9477805ba32", size = 70260 },
-]
-
-[[package]]
-name = "kreuzberg"
-version = "4.6.3"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/98/6e/a04a24f901e772ccdc06920fe3c0b5d366239dd5a11c4ce77c5f6815ca15/kreuzberg-4.6.3.tar.gz", hash = "sha256:eaea80d5395f35761cce9396660cf6cb06d9b94ed20d616b137c736b236c4eb0", size = 2173464 }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/ed/6d/ca7f91c7da9d22841a618350dc085ec0d543e0bc916dab1c905029412e24/kreuzberg-4.6.3-cp310-abi3-macosx_14_0_arm64.whl", hash = "sha256:2a01e9bbdf0d0d316bbc26873fb40a648ce5a2cd60fdcafc62d046cfe1bace4b", size = 51045873 },
-    { url = "https://files.pythonhosted.org/packages/e3/4c/c6a777d3a90e4fb8bb3bc128d15b9767f47dac52fa5fc93b3f86bcfb3390/kreuzberg-4.6.3-cp310-abi3-manylinux_2_39_aarch64.whl", hash = "sha256:c265ebd92e5ce4ab3d90cc6ff74a100abe6de92c067a3cffd7988e75d205e9ca", size = 59278814 },
-    { url = "https://files.pythonhosted.org/packages/6d/cc/87494127d7b991852b3e2e53b975203e1ca6296076d1886448574d526433/kreuzberg-4.6.3-cp310-abi3-manylinux_2_39_x86_64.whl", hash = "sha256:43f3db7ada83f11bf297a14a151769b0d8572e1d0931c7bb6fe20a70c70d26ea", size = 59017388 },
-    { url = "https://files.pythonhosted.org/packages/6d/7a/d8fe90973f1047576832f019d1cc716e8c00be52fee8a48fe89712d299ab/kreuzberg-4.6.3-cp310-abi3-win_amd64.whl", hash = "sha256:fc0afd51f0a22808e87a76351b105bb82f7b352b2e7b3b33cbbc09e4b54e55df", size = 58766457 },
 ]
 
 [[package]]
