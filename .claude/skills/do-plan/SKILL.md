@@ -282,6 +282,22 @@ fi
 
 After linking or creating: update the plan's `tracking:` field and commit.
 
+### Phase 2.6: Propagation Check
+
+After all task steps are written and before committing, verify that task bullets are consistent with the current Technical Approach (or spike findings if no Technical Approach section exists).
+
+1. **Re-read Technical Approach** — or, if the plan has no Technical Approach section, re-read the Spike Results section to get the current implementation findings
+2. **Scan each task bullet** for encoding choices, library selections, function names, and pattern names
+3. **Flag any task bullet that contradicts or predates spike findings** — common signs:
+   - A library name that was ruled out by a spike (e.g., a task still says "msgpack-encoded" after spike-2 confirmed `json.dumps()` is correct)
+   - A function name from a prior design that the spike replaced
+   - A pattern (e.g., `asyncio.to_thread()` vs. direct `await`) that contradicts the current approach
+4. **Update divergent task steps** before committing — the task list must reflect the final spike conclusions, not intermediate assumptions
+
+**Concrete example:** If spike-2 found that `json.dumps()` is the correct encoding method and a task bullet still says "msgpack-encoded payload", update that task bullet to say "json-encoded payload" before committing the plan.
+
+**This step is non-negotiable for plans with spikes.** For plans with no spikes (Small appetite, greenfield), it is a 30-second sanity check — scan once and move on.
+
 ### Phase 2.7: Sync Issue Comments into Plan
 
 Before finalizing, check the tracking issue for comments that contain feedback, scope changes, or new context that should be incorporated into the plan.
