@@ -14,7 +14,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SITE_ROOT = BASE_DIR
 
 # Determine the correct .env file based on environment
-env_file = ".env.local"
+env_file = os.environ.get("ENV_FILE", ".env.local")
 env_path = BASE_DIR / env_file
 load_dotenv(env_path)
 
