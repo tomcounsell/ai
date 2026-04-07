@@ -1,12 +1,12 @@
 ---
 name: sdlc
-description: "Single-stage router for development work. Assesses current state, dispatches ONE sub-skill, then returns. The PM (ChatSession) handles pipeline progression."
+description: "Single-stage router for development work. Assesses current state, dispatches ONE sub-skill, then returns. The PM session handles pipeline progression."
 context: fork
 ---
 
 # SDLC — Single-Stage Router
 
-This skill is a **router**, not an orchestrator. It assesses where work stands, invokes ONE sub-skill, and returns. The PM (ChatSession) handles pipeline progression by re-invoking `/sdlc` after each stage completes.
+This skill is a **router**, not an orchestrator. It assesses where work stands, invokes ONE sub-skill, and returns. The PM session handles pipeline progression by re-invoking `/sdlc` after each stage completes.
 
 You MUST NOT write code, run tests, or create plans directly -- delegate everything to sub-skills.
 
@@ -157,7 +157,7 @@ Do NOT restart from scratch if prior stages are already complete.
 4. **NEVER skip the issue** -- every piece of work needs a GitHub issue
 5. **NEVER skip the plan** -- every code change needs a plan doc first
 6. **NEVER commit to main** -- all code goes to `session/{slug}` branches
-7. **NEVER loop** -- invoke one sub-skill, then return. The PM (ChatSession) handles progression.
+7. **NEVER loop** -- invoke one sub-skill, then return. The PM session handles progression.
 
 ## Pipeline Stages Reference
 

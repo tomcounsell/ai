@@ -18,7 +18,7 @@ Hooks fired by the Claude Agent SDK execute in the **parent bridge process**, no
 - `activity.jsonl` writes to `logs/sessions/{claude-code-uuid}/` instead of `logs/sessions/{bridge-session-id}/`
 - Redis AgentSession tracking (`tool_call_count`, `last_activity`) updates the wrong record
 - Bridge heartbeat shows only `"running Ns, communicated=False"` with no tool-level activity
-- DevSession registration in `pre_tool_use.py` silently skips (VALOR_SESSION_ID is None)
+- Dev session registration in `pre_tool_use.py` silently skips (VALOR_SESSION_ID is None)
 - SubagentStop completion tracking in `subagent_stop.py` silently skips (same reason)
 - A session ran for 7+ minutes with 20+ tool calls and the bridge saw nothing
 
@@ -26,7 +26,7 @@ Hooks fired by the Claude Agent SDK execute in the **parent bridge process**, no
 - All 4 hook call sites resolve the correct bridge session ID
 - `activity.jsonl` writes to the correct path under the bridge session ID
 - Bridge heartbeat includes tool count and last tool name (e.g., `"running 120s, tools=15, last=Bash"`)
-- DevSession registration and SubagentStop completion tracking work correctly
+- Dev session registration and SubagentStop completion tracking work correctly
 
 ## Prior Art
 
@@ -156,7 +156,7 @@ No agent integration required -- this is a bridge-internal change. The registry 
 - [ ] `activity.jsonl` writes to `logs/sessions/{bridge-session-id}/`
 - [ ] Redis AgentSession `tool_call_count` and `last_activity` update the correct record
 - [ ] Bridge heartbeat includes tool count and last tool name
-- [ ] DevSession registration in `pre_tool_use.py` fires correctly
+- [ ] Dev session registration in `pre_tool_use.py` fires correctly
 - [ ] SubagentStop completion tracking in `subagent_stop.py` fires correctly
 - [ ] Concurrent sessions maintain isolated registry entries
 - [ ] Registry entries cleaned up after query completes

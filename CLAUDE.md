@@ -188,7 +188,7 @@ valor-telegram send --chat "Tom" --file ./screenshot.png "Caption"
 - Always aggregate results before reporting
 
 ### 9. SDLC PIPELINE
-- ChatSession (PM persona) orchestrates; DevSession (Dev persona) executes
+- A PM-role AgentSession orchestrates; a Dev-role AgentSession executes
 - Bridge uses nudge loop for output routing (no SDLC awareness in bridge)
 - `/sdlc` is a **single-stage router**: it assesses state, invokes ONE sub-skill, and returns
 - NEVER write code, run tests, or create plans directly -- always delegate through sub-skills
@@ -210,7 +210,7 @@ The standard flow from conversation to shipped feature:
 - If it's a real piece of work: create a GitHub issue
 
 ### Phase 2: SDLC (triggered by work request)
-- ChatSession steers the pipeline, invoking `/sdlc` skills as needed
+- The PM session steers the pipeline, invoking `/sdlc` skills as needed
 - `/sdlc` assesses current state, invokes ONE sub-skill, and returns
 - Stages: Plan -> Critique -> Build -> Test -> Patch -> Review -> Patch -> Docs -> Merge
 - See `.claude/skills/sdlc/SKILL.md` for the ground truth on stage definitions
@@ -224,9 +224,9 @@ The standard flow from conversation to shipped feature:
 - If there is no question -- just a status update -- the summarizer auto-sends "continue"
 - Status updates without questions or signs of completion are NOT stopping points
 - The agent keeps working until the phase is complete or it's genuinely blocked
-- **SDLC sessions**: ChatSession steers pipeline progression between stages
-- **ChatSession** orchestrates DevSession work; all messages route through ChatSession
-- Auto-continue caps are set to 50 as safety backstops (ChatSession manages actual routing)
+- **SDLC sessions**: the PM session steers pipeline progression between stages
+- **The PM session** orchestrates the Dev session's work; all messages route through the PM session
+- Auto-continue caps are set to 50 as safety backstops (the PM session manages actual routing)
 - The auto-continue counter resets when the human sends a new message
 
 ### Session Continuity
@@ -243,8 +243,8 @@ Telegram → Python Bridge (Telethon) → Enqueues AgentSession to Redis (I/O on
 
 Standalone Worker (python -m worker) → Sole session execution engine
               (worker/__main__.py)         → Startup: index rebuild → recovery → orphan cleanup
-                                           → Spawns ChatSession (PM persona, read-only)
-                                               → Spawns DevSession (Dev persona, full permissions)
+                                           → Spawns PM session (AgentSession role=pm, read-only)
+                                               → Spawns Dev session (AgentSession role=dev, full permissions)
                                                    → Claude Agent SDK → Claude API
                                                        (agent/sdk_client.py)
                                            → Uses OutputHandler protocol (agent/output_handler.py)
@@ -255,7 +255,7 @@ See `docs/features/bridge-worker-architecture.md` for the full bridge/worker sep
 **Session Types** (see `docs/features/chat-dev-session-architecture.md`):
 - **PM Session** (`session_type="pm"`) - Orchestrates work, PM persona, read-only
 - **Teammate Session** (`session_type="teammate"`) - Conversational, Teammate persona
-- **DevSession** (`session_type="dev"`) - Does coding work, Dev persona, full permissions
+- **Dev Session** (`session_type="dev"`) - Does coding work, Dev persona, full permissions
 - **Nudge loop** - Bridge output routing (deliver or nudge, no SDLC awareness)
 - **Session Steering** (see `docs/features/session-steering.md`): `AgentSession.queued_steering_messages` is the steering inbox — any process writes messages, worker injects at turn boundary. `agent/output_router.py` contains routing decision logic extracted from executor. Use `valor-session steer --id <id> --message "..."` to steer externally.
 

@@ -174,7 +174,7 @@ No agent integration required. This is a model/enum rename with a migration scri
 ## Documentation
 
 - [x] Update `docs/features/standardized-enums.md` -- replace all SessionType.CHAT references, update enum table, update code examples
-- [x] Update `docs/features/chat-dev-session-architecture.md` -- replace "ChatSession (session_type=SessionType.CHAT)" with PM terminology, add TEAMMATE session description
+- [x] Update `docs/features/chat-dev-session-architecture.md` -- replace "PM session (session_type=SessionType.CHAT)" with PM terminology, add TEAMMATE session description
 - [x] Update `CLAUDE.md` system architecture section if it references session_type="chat"
 
 ## Success Criteria

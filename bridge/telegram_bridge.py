@@ -1249,7 +1249,7 @@ async def main():
                         if guard_sessions:
                             guard_session = guard_sessions[0]
                             # Push to AgentSession's queued_steering_messages
-                            # (Popoto model field) so ChatSession sees it on pickup.
+                            # (Popoto model field) so the PM session sees it on pickup.
                             guard_session.push_steering_message(clean_text)
 
                             # Also push to Redis steering queue so the
@@ -1364,7 +1364,7 @@ async def main():
 
                         if fresh_session:
                             # Push to AgentSession's queued_steering_messages
-                            # for ChatSession to read
+                            # for the PM session to read
                             fresh_session.push_steering_message(clean_text)
                             from bridge.markdown import send_markdown
 
@@ -1528,14 +1528,14 @@ async def main():
                 logger.debug(f"Classification inheritance lookup failed (non-fatal): {e}")
 
         # Determine session_type from config-driven mode, with title-prefix fallback.
-        # "dev" mode → DevSession (full permissions, dev persona)
-        # Everything else → ChatSession (PM persona, orchestrates DevSessions + Teammate)
+        # "dev" mode → Dev session (full permissions, dev persona)
+        # Everything else → PM session (PM persona, orchestrates Dev sessions + Teammate)
         from bridge.routing import resolve_persona
 
         _classification = classification_result.get("type")
         _persona = resolve_persona(project, chat_title, is_dm=is_dm)
         if _persona == PersonaType.DEVELOPER:
-            _session_type = SessionType.DEV  # DevSession — Dev persona, full permissions
+            _session_type = SessionType.DEV  # Dev session — Dev persona, full permissions
             logger.info(
                 f"[{project_name}] Dev mode (config-driven): {chat_title!r} → session_type=dev"
             )
@@ -1553,7 +1553,7 @@ async def main():
         if not (is_reply_to_valor and message.reply_to_msg_id):
             _recent_session_by_chat[telegram_chat_id] = (session_id, time.time())
 
-        # Enqueue: session_type drives ChatSession vs DevSession creation.
+        # Enqueue: session_type drives PM vs Dev session creation.
         # Pass full project config so the session carries it through the pipeline.
         depth = await enqueue_agent_session(
             project_key=project_key,

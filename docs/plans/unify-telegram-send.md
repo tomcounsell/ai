@@ -22,7 +22,7 @@ A single PM send tool that supports both text and file attachments, routed throu
 
 ## Prior Art
 
-- **[PR #527](https://github.com/tomcounsell/ai/pull/527)**: "PM Telegram tool: ChatSession composes its own messages" -- Created `send_telegram.py` as the PM's text tool. Intentionally text-only to keep scope small. Merged 2026-03-25.
+- **[PR #527](https://github.com/tomcounsell/ai/pull/527)**: "PM Telegram tool: PM session composes its own messages" -- Created `send_telegram.py` as the PM's text tool. Intentionally text-only to keep scope small. Merged 2026-03-25.
 - **[Issue #589](https://github.com/tomcounsell/ai/issues/589)**: QA humility -- Added "TOOL USAGE ONLY" warnings to persona prompt after CLI syntax leaked into responses. Addressed the symptom (leaking) but not the root cause (no file-send path for the PM).
 - **[Issue #71](https://github.com/tomcounsell/ai/issues/71)**: Consolidated multiple Telegram skills into `valor-telegram`. Predates the PM tool; established the CLI interface.
 - **[Issue #497](https://github.com/tomcounsell/ai/issues/497)**: Created the PM self-messaging architecture (Redis queue, relay, summarizer bypass). The design deliberately separated PM sends from the direct Telethon path.
@@ -40,14 +40,14 @@ A single PM send tool that supports both text and file attachments, routed throu
 
 ### Current text-only flow (working)
 
-1. **Entry point**: ChatSession calls `python tools/send_telegram.py "message text"`
+1. **Entry point**: PM session calls `python tools/send_telegram.py "message text"`
 2. **send_telegram.py**: Validates env vars, linkifies text, builds JSON payload `{chat_id, reply_to, text, session_id, timestamp}`, pushes to Redis queue `telegram:outbox:{session_id}`
 3. **telegram_relay.py**: Polls Redis, pops message, calls `send_markdown(client, chat_id, text, reply_to=reply_to)`
 4. **Output**: Telegram message delivered. `msg_id` recorded on `AgentSession.pm_sent_message_ids` for summarizer bypass.
 
 ### Proposed file-send flow (new)
 
-1. **Entry point**: ChatSession calls `python tools/send_telegram.py "caption text" --file /path/to/file.png`
+1. **Entry point**: PM session calls `python tools/send_telegram.py "caption text" --file /path/to/file.png`
 2. **send_telegram.py**: Validates env vars AND file existence, builds JSON payload `{chat_id, reply_to, text, file_path, session_id, timestamp}`, pushes to Redis queue
 3. **telegram_relay.py**: Pops message, detects `file_path` field, calls `client.send_file(entity, file_path, caption=text, reply_to=reply_to)` instead of `send_markdown()`
 4. **Output**: Telegram file message delivered. `msg_id` recorded on `AgentSession.pm_sent_message_ids` for summarizer bypass.
@@ -125,8 +125,8 @@ Add explicit note: "Use --file to attach screenshots, images, or documents."
 #### 4. Prompt surface audit
 
 - Verify `config/personas/_base.md` "TOOL USAGE ONLY" warning remains (it prevents `valor-telegram send` leaking, which is correct behavior)
-- Verify `.claude/skills/telegram/SKILL.md` is NOT loaded in ChatSession context (it's `user-invocable: false`, so only DevSessions get it)
-- No changes needed to `valor-telegram` itself -- it remains the DevSession/CLI tool
+- Verify `.claude/skills/telegram/SKILL.md` is NOT loaded in PM session context (it's `user-invocable: false`, so only Dev sessions get it)
+- No changes needed to `valor-telegram` itself -- it remains the Dev session/CLI tool
 
 ## Failure Path Test Strategy
 
@@ -181,12 +181,12 @@ Add explicit note: "Use --file to attach screenshots, images, or documents."
 
 ## No-Gos (Out of Scope)
 
-- Replacing `valor-telegram send` -- it remains the DevSession and manual CLI tool
+- Replacing `valor-telegram send` -- it remains the Dev session and manual CLI tool
 - Adding media-type-specific flags (`--image`, `--audio`) to `send_telegram.py` -- `--file` covers all types
 - Modifying the summarizer bypass logic -- the existing `has_pm_messages()` mechanism works correctly
 - File transfer for remote/multi-machine deployments
 - Response text sanitization (stripping `--` prefixes) -- this is a symptom, not the root cause
-- Changing how `bridge/response.py` handles `<<FILE:>>` markers -- that's the DevSession file path, orthogonal to PM sends
+- Changing how `bridge/response.py` handles `<<FILE:>>` markers -- that's the Dev session file path, orthogonal to PM sends
 
 ## Update System
 
@@ -194,7 +194,7 @@ No update system changes required -- this modifies `tools/send_telegram.py` and 
 
 ## Agent Integration
 
-No MCP server changes required. The PM tool (`tools/send_telegram.py`) is invoked via Bash by the ChatSession, not through MCP. The change is to the tool's CLI interface and the bridge relay's message handling.
+No MCP server changes required. The PM tool (`tools/send_telegram.py`) is invoked via Bash by the PM session, not through MCP. The change is to the tool's CLI interface and the bridge relay's message handling.
 
 The PM prompt injection in `agent/sdk_client.py` must be updated to document the `--file` flag -- this is the only "agent integration" surface, and it's covered in the Solution section.
 

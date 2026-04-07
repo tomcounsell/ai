@@ -25,8 +25,8 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Bridge Workflow Gaps](bridge-workflow-gaps.md) | Auto-continue for status updates, output classification, and session log snapshots | Shipped |
 | [Build Output Verification](build-output-verification.md) | Three-layer verification gates preventing /do-build from silently completing with no code changes | Shipped |
 | [Build Session Reliability](build-session-reliability.md) | Logging propagation, commit-on-exit, worktree isolation, health monitoring | Shipped |
-| [Chat Dev Session Architecture](chat-dev-session-architecture.md) | ChatSession/DevSession split — session type discriminator splitting orchestration from execution | Shipped |
-| [ChatSession Teammate Mode](chatsession-teammate-mode.md) | Haiku-based intent classifier routing informational queries to direct ChatSession response without DevSession spawn | Shipped |
+| [Chat Dev Session Architecture](chat-dev-session-architecture.md) | PM/Dev session split — session type discriminator splitting orchestration from execution | Shipped |
+| [PM session Teammate Mode](chatsession-teammate-mode.md) | Haiku-based intent classifier routing informational queries to direct PM session response without Dev session spawn | Shipped |
 | [Classification](classification.md) | Auto-classification of messages as bug/feature/chore with immutability and reclassify skill | Shipped |
 | [Claude Code Memory](claude-code-memory.md) | Hook-based memory integration for Claude Code CLI sessions: prompt ingestion, tool-call recall with sliding window, deja vu signals, post-session extraction, AgentSession lifecycle tracking, and post-merge learning | Shipped |
 | [Code Impact Finder](code-impact-finder.md) | Semantic search for blast radius analysis during /do-plan | Shipped |
@@ -73,7 +73,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Plan Prerequisites Validation](plan-prerequisites.md) | Declare and validate environment requirements before plan execution | Shipped |
 | [PM Channels](pm-channels.md) | Project manager mode routing Telegram groups to work-vault folders with SDLC bypass | Shipped |
 | [PM SDLC Decision Rules](pm-sdlc-decision-rules.md) | PM outcome parsing (success/partial/fail), auto-merge on clean gates, annotate-rather-than-skip for review findings | Shipped |
-| [PM Telegram Tool](pm-telegram-tool.md) | ChatSession composes and sends its own Telegram messages (text, file attachments, and multi-file albums) via Redis IPC, with summarizer as fallback | Shipped |
+| [PM Telegram Tool](pm-telegram-tool.md) | PM session composes and sends its own Telegram messages (text, file attachments, and multi-file albums) via Redis IPC, with summarizer as fallback | Shipped |
 | [PM Voice Refinement](pm-voice-refinement.md) | Naturalized SDLC language, crash message pool, sentence-aware truncation, milestone-selective emoji for PM output | Shipped |
 | [Popoto Index Hygiene](popoto-index-hygiene.md) | Automated cleanup of orphaned Popoto index entries, Meta.ttl on AgentSession, raw Redis migration to Popoto models, daily rebuild_indexes reflection | Shipped |
 | [Popoto Redis Expansion](popoto-redis-expansion.md) | Migration from JSONL/JSON file state to Redis for atomicity and queries | Shipped |
@@ -112,7 +112,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Skills Reorganization](skills-reorganization.md) | Canonical SKILL.md template, progressive disclosure, command consolidation, hardlink scoping | Shipped |
 | [Stall Retry](stall-retry.md) | Automatic retry of stalled agent sessions with exponential backoff, process cleanup, and Telegram notification on final failure | Shipped |
 | [Standardized Enums](standardized-enums.md) | StrEnum definitions for session types, personas, classifications, and chat modes replacing magic strings | Shipped |
-| [Steering Queue](steering-queue.md) | Mid-execution course correction via Telegram reply threads and parent-child ChatSession-to-DevSession steering | Shipped |
+| [Steering Queue](steering-queue.md) | Mid-execution course correction via Telegram reply threads and parent-child PM session-to-Dev session steering | Shipped |
 | [Structured Logging & Telemetry](structured-logging-telemetry.md) | Redis-backed telemetry counters, structured log lines, and health check integration for Observer Agent observability | Shipped |
 | [Subconscious Memory](subconscious-memory.md) | Automatic and intentional memory with structured metadata (category, file paths, tags), dismissal tracking with importance decay, multi-query decomposition for broader retrieval, and category-weighted recall re-ranking | Shipped |
 | [Summarizer Format](summarizer-format.md) | Structured bullet-point output with SDLC stage progress and markdown links for Telegram delivery | Shipped |

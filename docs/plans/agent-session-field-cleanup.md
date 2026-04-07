@@ -25,7 +25,7 @@ Every field name clearly communicates its purpose. No false deprecation markers.
 
 - **[Issue #295](https://github.com/tomcounsell/ai/issues/295)**: "Strengthen Popoto model relationships and naming" — Introduced TelegramMessage model, trigger_message_id cross-reference, and migration script. Successfully merged via [PR #392](https://github.com/tomcounsell/ai/pull/392). Created the dual-model pattern this cleanup continues.
 - **[Issue #436](https://github.com/tomcounsell/ai/issues/436)**: "Make is_sdlc_job a derived property from stage progress" — Removed stored classification flag in favor of derived property. Precedent for removing redundant fields.
-- **[PR #464](https://github.com/tomcounsell/ai/pull/464)**: "SDLC Redesign: ChatSession/DevSession split" — Added `sdlc_stages` field to DevSession, creating the duplication with `stage_states` that this plan resolves.
+- **[PR #464](https://github.com/tomcounsell/ai/pull/464)**: "SDLC Redesign: PM/Dev session split" — Added `sdlc_stages` field to Dev session, creating the duplication with `stage_states` that this plan resolves.
 - **[PR #180](https://github.com/tomcounsell/ai/pull/180)**: "Unified AgentSession model" — Original model creation that accumulated all fields.
 
 ## Architectural Impact
@@ -107,7 +107,7 @@ Each phase is a separate commit. Phase 2 requires a migration script. Phase 3 re
 - **Renaming `session_id` itself** — The Telegram-derived session identifier format (`tg_project_chatid_msgid`) is confusing but deeply embedded. Not worth touching in this cleanup.
 - **Renaming `job_id` to `id`** — Already has a property alias, and AutoKeyField Redis keys depend on field name. Leave as-is.
 - **Removing `sender` property alias** — Backward compat alias that's low-cost to keep. Not worth the churn.
-- **Restructuring the model into separate ChatSession/DevSession classes** — Popoto doesn't support inheritance. Would require a different ORM or manual key management. Out of scope.
+- **Restructuring the model into separate PM/Dev session classes** — Popoto doesn't support inheritance. Would require a different ORM or manual key management. Out of scope.
 
 ## Risks
 

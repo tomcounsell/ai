@@ -2,12 +2,12 @@
 
 ## Overview
 
-The ChatSession PM persona orchestrates SDLC work by spawning DevSessions for each pipeline stage. DevSessions emit structured `<!-- OUTCOME -->` JSON blocks that encode the stage result. The PM decision rules tell the PM how to interpret these outcomes and route to the next stage automatically.
+The PM session PM persona orchestrates SDLC work by spawning Dev sessions for each pipeline stage. Dev sessions emit structured `<!-- OUTCOME -->` JSON blocks that encode the stage result. The PM decision rules tell the PM how to interpret these outcomes and route to the next stage automatically.
 
 ## Problem Solved
 
 Without explicit decision rules, the PM had no instructions for:
-- Parsing OUTCOME blocks from DevSession output
+- Parsing OUTCOME blocks from Dev session output
 - Mapping status values (success/partial/fail) to next actions
 - Deciding when to auto-merge vs. escalate to human
 - Handling tech debt and nit findings (patch vs. skip)
@@ -46,5 +46,5 @@ This creates a paper trail so the next reviewer does not re-flag the same issue.
 
 ## Related
 
-- [Chat/Dev Session Architecture](chat-dev-session-architecture.md) -- how ChatSession and DevSession interact
+- [Chat/Dev Session Architecture](chat-dev-session-architecture.md) -- how PM session and Dev session interact
 - Issue [#544](https://github.com/tomcounsell/ai/issues/544) -- tracking issue

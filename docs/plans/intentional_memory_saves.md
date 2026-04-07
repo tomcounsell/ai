@@ -34,7 +34,7 @@ The agent can intentionally save project-level learnings using the memory search
 
 1. **Entry point**: User sends correction via Telegram ("no, we do X instead of Y")
 2. **Bridge**: `bridge/telegram_bridge.py` receives message, stores as TelegramMessage and Memory (existing behavior, importance=6.0)
-3. **ChatSession**: Processes message, spawns DevSession if needed
+3. **PM session**: Processes message, spawns Dev session if needed
 4. **Agent session**: Agent reads the correction in conversation context
 5. **Post-session extraction**: `agent/memory_extraction.py` Haiku extraction picks up the correction as an observation (importance=1.0)
 6. **Gap**: The correction is saved at human-message level (6.0) but the *lesson learned* from the correction is only saved at agent-observation level (1.0). The intentional save bridges this gap: the agent calls `memory_search.save()` with the distilled lesson at importance=8.0.

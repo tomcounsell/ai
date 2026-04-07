@@ -86,9 +86,9 @@ OpenAI's [GEPA](https://developers.openai.com/cookbook/examples/partners/self_ev
 
 ### Pattern 1: Q&A Mode (from Citadel's tiered routing)
 
-**Issue:** [#499 — ChatSession Q&A mode](https://github.com/tomcounsell/ai/issues/499)
+**Issue:** [#499 — PM session Q&A mode](https://github.com/tomcounsell/ai/issues/499)
 
-Citadel routes by orchestration overhead, not model tier. We adapted this narrowly: ChatSession answers informational queries directly without spawning DevSession. All real work still goes through full SDLC — no shortcuts.
+Citadel routes by orchestration overhead, not model tier. We adapted this narrowly: PM session answers informational queries directly without spawning Dev session. All real work still goes through full SDLC — no shortcuts.
 
 **What we took:** The concept that not every message needs the same orchestration weight.
 **What we rejected:** Tiers 2-4 (simple fixes, parallel fleet). Risk of bypassing SDLC quality gates too high.
@@ -109,7 +109,7 @@ Sub-agent findings currently evaporate after each block of work. Mem0's consolid
 Multiple frameworks solve parallel execution via worktree isolation. We adapted this as a sequential queue with dependency tracking and automatic branch-session mapping — more valuable for our workflow than true parallelism.
 
 **What we took:** Job dependency graph (`depends_on`), deterministic branch resolution per slug+stage, session pause/resume with branch state.
-**What we rejected:** Parallel DevSessions on same machine. One at a time is fine; PM reorders the queue.
+**What we rejected:** Parallel Dev sessions on same machine. One at a time is fine; PM reorders the queue.
 
 ---
 

@@ -2,7 +2,7 @@
 
 ## Overview
 
-Chat mode resolution determines how the system handles messages from each Telegram group: whether to spawn a DevSession (full permissions), a ChatSession (PM orchestration), or treat the group as a passive teammate listener. Previously, this was inferred solely from chat title prefixes (`Dev:`, `PM:`). Config-driven chat mode adds an explicit `persona` field in `projects.json` group configuration, giving operators direct control over per-group routing without relying on naming conventions.
+Chat mode resolution determines how the system handles messages from each Telegram group: whether to spawn a Dev session (full permissions), a PM session (PM orchestration), or treat the group as a passive teammate listener. Previously, this was inferred solely from chat title prefixes (`Dev:`, `PM:`). Config-driven chat mode adds an explicit `persona` field in `projects.json` group configuration, giving operators direct control over per-group routing without relying on naming conventions.
 
 ## Config Schema
 
@@ -29,9 +29,9 @@ The `persona` field lives inside the `telegram.groups` dictionary of each projec
 
 | Persona | Resolved Persona | Session Type | Behavior |
 |---------|-----------------|--------------|----------|
-| `"developer"` | `PersonaType.DEVELOPER` | DevSession | Full permissions, dev persona, direct execution |
-| `"project-manager"` | `PersonaType.PROJECT_MANAGER` | ChatSession | PM persona, SDLC orchestration, spawns DevSessions |
-| `"teammate"` | `PersonaType.TEAMMATE` | ChatSession | Passive listener -- only responds on @mention or reply-to-Valor |
+| `"developer"` | `PersonaType.DEVELOPER` | Dev session | Full permissions, dev persona, direct execution |
+| `"project-manager"` | `PersonaType.PROJECT_MANAGER` | PM session | PM persona, SDLC orchestration, spawns Dev sessions |
+| `"teammate"` | `PersonaType.TEAMMATE` | PM session | Passive listener -- only responds on @mention or reply-to-Valor |
 
 The mapping is handled by `resolve_persona()` in `bridge/routing.py`, which returns a `PersonaType` directly.
 
@@ -42,7 +42,7 @@ The `resolve_persona()` function in `bridge/routing.py` uses the following prior
 1. **DMs** -- always resolve to `PersonaType.TEAMMATE` (direct teammate mode, no SDLC overhead)
 2. **Config persona** -- if the project has a `telegram.groups` dictionary entry matching the chat title with a valid `persona` field, return the corresponding `PersonaType`
 3. **Title prefix fallback** -- if no persona is configured, `"Dev:"` prefix resolves to `PersonaType.DEVELOPER`, `"PM:"` prefix resolves to `PersonaType.PROJECT_MANAGER`
-4. **None (unconfigured)** -- no persona determined; caller falls through to existing behavior (intent classifier for ChatSessions, respond_to_all/mention logic for response decisions)
+4. **None (unconfigured)** -- no persona determined; caller falls through to existing behavior (intent classifier for PM sessions, respond_to_all/mention logic for response decisions)
 
 This layered approach ensures full backward compatibility: existing groups that rely on title prefixes continue working without any configuration changes.
 
@@ -64,13 +64,13 @@ This is useful for groups where the agent should observe and learn from conversa
 
 The bridge calls `resolve_persona()` when determining session type for a new session:
 
-- If persona is `PersonaType.DEVELOPER` -> creates a DevSession (session_type="dev")
-- **pm or unconfigured** -> creates a PM session (session_type="pm"). The PM session decides whether to spawn a DevSession.
+- If persona is `PersonaType.DEVELOPER` -> creates a Dev session (session_type="dev")
+- **pm or unconfigured** -> creates a PM session (session_type="pm"). The PM session decides whether to spawn a Dev session.
 - **teammate** -> creates a Teammate session (session_type="teammate"). Handles informational queries directly.
 
 ### SDK Client (`agent/sdk_client.py`)
 
-The SDK client calls `resolve_persona()` inside `get_agent_response_sdk()` when routing ChatSession intent:
+The SDK client calls `resolve_persona()` inside `get_agent_response_sdk()` when routing PM session intent:
 
 - If persona is `PersonaType.TEAMMATE` -> skips the Haiku intent classifier, sets `session_mode=PersonaType.TEAMMATE` directly (reducing latency and cost)
 - If persona is `PersonaType.PROJECT_MANAGER` or `PersonaType.DEVELOPER` -> skips the classifier, uses the known persona
