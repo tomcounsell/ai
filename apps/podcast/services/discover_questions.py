@@ -24,14 +24,14 @@ class ToolRecommendation(BaseModel):
 
 
 class QuestionDiscovery(BaseModel):
-    subtopics_found: list[Subtopic]
-    gaps_in_literature: list[str]
-    recent_developments_needed: list[str]
-    contradictions_to_resolve: list[str]
-    industry_questions: list[str]
-    policy_questions: list[str]
-    practitioner_questions: list[str]
-    recommended_tools: list[ToolRecommendation]
+    subtopics_found: list[Subtopic] = []
+    gaps_in_literature: list[str] = []
+    recent_developments_needed: list[str] = []
+    contradictions_to_resolve: list[str] = []
+    industry_questions: list[str] = []
+    policy_questions: list[str] = []
+    practitioner_questions: list[str] = []
+    recommended_tools: list[ToolRecommendation] = []
 
 
 # --- Agent ---
@@ -44,6 +44,7 @@ agent = Agent(
     output_type=QuestionDiscovery,
     system_prompt=_SYSTEM_PROMPT,
     defer_model_check=True,
+    retries=3,
 )
 
 

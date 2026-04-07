@@ -19,7 +19,7 @@ class Chapter(BaseModel):
 
 
 class ChapterList(BaseModel):
-    chapters: list[Chapter]
+    chapters: list[Chapter] = []
 
 
 # --- Agent ---
@@ -32,6 +32,7 @@ agent = Agent(
     output_type=ChapterList,
     system_prompt=_SYSTEM_PROMPT,
     defer_model_check=True,
+    retries=3,
 )
 
 

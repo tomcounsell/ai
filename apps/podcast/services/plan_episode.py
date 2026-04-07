@@ -32,20 +32,20 @@ class StructureEntry(BaseModel):
     primary_mode: str
     duration: str
     purpose: str
-    key_elements: list[str]
+    key_elements: list[str] = []
 
 
 class ModeDefinition(BaseModel):
     mode: str  # "philosophy", "research", "storytelling", "practical", "landing"
-    language_markers: list[str]
+    language_markers: list[str] = []
     duration_allocation: str
 
 
 class SignpostingLanguage(BaseModel):
     opening_preview: str
-    transitions: list[str]
-    progress_markers: list[str]
-    mode_switch_signals: list[str]
+    transitions: list[str] = []
+    progress_markers: list[str] = []
+    mode_switch_signals: list[str] = []
 
 
 class DepthBudgetEntry(BaseModel):
@@ -62,7 +62,7 @@ class CounterpointMoment(BaseModel):
     speaker_a_position: str
     speaker_b_position: str
     tension_type: str
-    language_templates: list[str]
+    language_templates: list[str] = []
 
 
 class EpisodeArc(BaseModel):
@@ -79,24 +79,24 @@ class KeyTerm(BaseModel):
 
 class NotebookLMGuidance(BaseModel):
     opening_instructions: str
-    key_terms: list[KeyTerm]
-    studies_to_emphasize: list[str]
-    stories_to_feature: list[str]
-    counterpoint_execution: list[str]
+    key_terms: list[KeyTerm] = []
+    studies_to_emphasize: list[str] = []
+    stories_to_feature: list[str] = []
+    counterpoint_execution: list[str] = []
     closing_callback: str
     call_to_action: str
 
 
 class EpisodePlan(BaseModel):
-    metadata: EpisodeMetadataBlock
-    toolkit_selections: ToolkitSelections
-    structure_map: list[StructureEntry]
-    mode_switching: list[ModeDefinition]
-    signposting: SignpostingLanguage
-    depth_budget: list[DepthBudgetEntry]
-    counterpoint_moments: list[CounterpointMoment]
-    episode_arc: EpisodeArc
-    notebooklm_guidance: NotebookLMGuidance
+    metadata: EpisodeMetadataBlock | None = None
+    toolkit_selections: ToolkitSelections | None = None
+    structure_map: list[StructureEntry] = []
+    mode_switching: list[ModeDefinition] = []
+    signposting: SignpostingLanguage | None = None
+    depth_budget: list[DepthBudgetEntry] = []
+    counterpoint_moments: list[CounterpointMoment] = []
+    episode_arc: EpisodeArc | None = None
+    notebooklm_guidance: NotebookLMGuidance | None = None
 
 
 # --- Agent ---
@@ -109,6 +109,7 @@ agent = Agent(
     output_type=EpisodePlan,
     system_prompt=_SYSTEM_PROMPT,
     defer_model_check=True,
+    retries=3,
 )
 
 

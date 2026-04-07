@@ -26,10 +26,10 @@ class Resource(BaseModel):
 
 class EpisodeMetadata(BaseModel):
     description: str  # 1-2 sentences plain text
-    what_youll_learn: list[str]  # 3-5 verb-led bullets
-    key_timestamps: list[Timestamp]  # 5-7 major sections
-    keywords: list[str]  # 5-10 episode-specific terms
-    resources: list[Resource]  # 5-10 sources
+    what_youll_learn: list[str] = []  # 3-5 verb-led bullets
+    key_timestamps: list[Timestamp] = []  # 5-7 major sections
+    keywords: list[str] = []  # 5-10 episode-specific terms
+    resources: list[Resource] = []  # 5-10 sources
     primary_cta: str
     voiced_cta: str
 
@@ -44,6 +44,7 @@ agent = Agent(
     output_type=EpisodeMetadata,
     system_prompt=_SYSTEM_PROMPT,
     defer_model_check=True,
+    retries=3,
 )
 
 

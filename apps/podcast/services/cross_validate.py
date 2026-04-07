@@ -19,35 +19,35 @@ class ConflictPosition(BaseModel):
 
 class Claim(BaseModel):
     claim: str
-    sources: list[str]
+    sources: list[str] = []
     confidence: str  # "high", "medium", "low"
 
 
 class Conflict(BaseModel):
     topic: str
-    positions: list[ConflictPosition]
+    positions: list[ConflictPosition] = []
     resolution_suggestion: str
 
 
 class SourceAssessment(BaseModel):
     source: str
-    strengths: list[str]
-    weaknesses: list[str]
-    unique_contributions: list[str]
+    strengths: list[str] = []
+    weaknesses: list[str] = []
+    unique_contributions: list[str] = []
 
 
 class CoverageEntry(BaseModel):
     topic: str
-    sources_covering: list[str]
+    sources_covering: list[str] = []
     depth: str  # "deep", "moderate", "shallow"
 
 
 class CrossValidation(BaseModel):
-    verified_claims: list[Claim]  # confirmed by 2+ sources
-    single_source_claims: list[Claim]  # only one source
-    conflicting_claims: list[Conflict]
-    source_quality: list[SourceAssessment]
-    coverage_map: list[CoverageEntry]
+    verified_claims: list[Claim] = []  # confirmed by 2+ sources
+    single_source_claims: list[Claim] = []  # only one source
+    conflicting_claims: list[Conflict] = []
+    source_quality: list[SourceAssessment] = []
+    coverage_map: list[CoverageEntry] = []
     summary: str
 
 
@@ -61,6 +61,7 @@ agent = Agent(
     output_type=CrossValidation,
     system_prompt=_SYSTEM_PROMPT,
     defer_model_check=True,
+    retries=3,
 )
 
 

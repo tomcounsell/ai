@@ -22,9 +22,9 @@ class Evidence(BaseModel):
 class TopicFindings(BaseModel):
     topic: str
     main_finding: str
-    evidence: list[Evidence]
-    contradictions: list[str]
-    source_quality_notes: list[str]
+    evidence: list[Evidence] = []
+    contradictions: list[str] = []
+    source_quality_notes: list[str] = []
 
 
 class DepthEntry(BaseModel):
@@ -55,18 +55,18 @@ class Counterpoint(BaseModel):
 
 
 class SourceInventory(BaseModel):
-    tier1: list[str]  # meta-analyses, systematic reviews
-    tier2: list[str]  # RCTs, large studies
-    tier3: list[str]  # case studies, reports
+    tier1: list[str] = []  # meta-analyses, systematic reviews
+    tier2: list[str] = []  # RCTs, large studies
+    tier3: list[str] = []  # case studies, reports
 
 
 class MasterBriefing(BaseModel):
-    verified_findings: list[TopicFindings]
-    depth_distribution: list[DepthEntry]
-    practical_audit: list[PracticalStep]
-    story_bank: list[Story]
-    counterpoints: list[Counterpoint]
-    research_gaps: list[str]
+    verified_findings: list[TopicFindings] = []
+    depth_distribution: list[DepthEntry] = []
+    practical_audit: list[PracticalStep] = []
+    story_bank: list[Story] = []
+    counterpoints: list[Counterpoint] = []
+    research_gaps: list[str] = []
     source_inventory: SourceInventory
     synthesis_notes: str  # notes for the synthesis agent
 
@@ -81,6 +81,7 @@ agent = Agent(
     output_type=MasterBriefing,
     system_prompt=_SYSTEM_PROMPT,
     defer_model_check=True,
+    retries=3,
 )
 
 

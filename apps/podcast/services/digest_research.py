@@ -30,8 +30,8 @@ class ResearchDigest(BaseModel):
     statistics: list[str]  # notable data points
     sources: list[Source]  # tiered: tier1/tier2/tier3
     topics: list[str]  # searchable keywords
-    questions_answered: list[str]
-    questions_unanswered: list[str]
+    questions_answered: list[str] = []
+    questions_unanswered: list[str] = []
     contradictions: list[str] = []
 
 
@@ -44,6 +44,7 @@ agent = Agent(
     "anthropic:claude-sonnet-4-6",
     output_type=ResearchDigest,
     system_prompt=_SYSTEM_PROMPT,
+    retries=3,
     defer_model_check=True,
 )
 

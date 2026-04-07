@@ -21,10 +21,10 @@ class ReportSection(BaseModel):
 
 class SynthesisReport(BaseModel):
     title: str
-    sections: list[ReportSection]
+    sections: list[ReportSection] = []
     word_count: int
-    core_takeaways: list[str]  # 1-3 explicit takeaways
-    sources_cited: list[str]
+    core_takeaways: list[str] = []  # 1-3 explicit takeaways
+    sources_cited: list[str] = []
 
 
 # --- Agent ---
@@ -37,6 +37,7 @@ agent = Agent(
     output_type=SynthesisReport,
     system_prompt=_SYSTEM_PROMPT,
     defer_model_check=True,
+    retries=3,
 )
 
 

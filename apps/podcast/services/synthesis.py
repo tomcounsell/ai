@@ -147,11 +147,21 @@ def plan_episode_content(episode_id: int) -> EpisodeArtifact:
             "description": "Structured episode plan for NotebookLM audio generation.",
             "workflow_context": "Synthesis -> Episode Planning",
             "metadata": {
-                "core_question": result.metadata.core_question,
-                "position": result.metadata.position,
-                "evidence_status": result.metadata.evidence_status,
-                "content_density": result.metadata.content_density,
-                "hook_type": result.toolkit_selections.hook_type,
+                "core_question": (
+                    result.metadata.core_question if result.metadata else ""
+                ),
+                "position": result.metadata.position if result.metadata else "",
+                "evidence_status": (
+                    result.metadata.evidence_status if result.metadata else ""
+                ),
+                "content_density": (
+                    result.metadata.content_density if result.metadata else ""
+                ),
+                "hook_type": (
+                    result.toolkit_selections.hook_type
+                    if result.toolkit_selections
+                    else ""
+                ),
                 "counterpoint_count": len(result.counterpoint_moments),
                 "structure_sections": len(result.structure_map),
             },
