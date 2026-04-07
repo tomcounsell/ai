@@ -161,9 +161,9 @@ All four public functions in `memory_bridge.py` accept a `cwd` parameter:
 | Hook function | Called from | cwd source |
 |---------------|-------------|------------|
 | `recall(session_id, tool_name, tool_input, cwd)` | `post_tool_use.py` | `hook_input["cwd"]` |
-| `ingest(session_id, prompt_text, cwd)` | `user_prompt_submit.py` | `hook_input["cwd"]` |
-| `extract(session_id, cwd)` | `stop.py` | `hook_input["cwd"]` (read once, passed to both calls) |
-| `post_merge_extract(session_id, cwd)` | `stop.py` | same `cwd` read above |
+| `ingest(content, cwd)` | `user_prompt_submit.py` | `hook_input["cwd"]` |
+| `extract(session_id, transcript_path, cwd)` | `stop.py` | `hook_input["cwd"]` (read once, passed to both calls) |
+| `post_merge_extract(pr_number, cwd)` | `stop.py` | same `cwd` read above |
 
 `_get_project_key(cwd)` resolves the key using this priority order:
 
