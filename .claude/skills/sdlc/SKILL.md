@@ -12,47 +12,46 @@ You MUST NOT write code, run tests, or create plans directly -- delegate everyth
 
 ## Cross-Repo Resolution
 
-For cross-project SDLC work, two environment variables are automatically set by `sdk_client.py`:
-
-- `GH_REPO` (e.g., `tomcounsell/popoto`) — The `gh` CLI natively respects this, so all `gh` commands automatically target the correct repository.
-- `SDLC_TARGET_REPO` (e.g., `/Users/valorengels/src/popoto`) — The absolute path to the target project's repo root. Use this for all local filesystem and git operations instead of assuming cwd is the target repo.
-
-**When `SDLC_TARGET_REPO` is set, you MUST use it** for plan lookups, branch listings, and any git commands. The orchestrator's cwd is the ai/ repo, NOT the target project.
-
-## Step 1: Resolve the Issue or PR
-
-Determine whether the input is an issue reference or a PR reference:
-
-- **Issue reference** (e.g., `issue 123`, `issue #123`): Fetch with `gh issue view {number}`
-- **PR reference** (e.g., `PR 363`, `pr #363`): Fetch with `gh pr view {number}` to get the branch name, review state, and check status. Then extract the linked issue number from the PR body (look for `Closes #N` or `Fixes #N`).
+When working on a non-ai project (e.g., popoto), the worker runs with `cwd=ai/` but the target repo is different. To ensure `gh` commands resolve against the correct repo, extract the `GITHUB:` line from the prompt context injected by `sdk_client.py`.
 
 ```bash
-# For issue references:
-gh issue view {number}
-
-# For PR references — get structured state for assessment:
-gh pr view {number} --json number,title,state,headRefName,reviewDecision,statusCheckRollup,body
+# Extract the target repo from prompt context (e.g., "GITHUB: tomcounsell/popoto")
+# Look for a line like "GITHUB: org/repo" in the enriched message you received.
+# If found, use --repo for ALL gh commands in this skill.
+# If not found (local ai repo work), omit --repo (defaults to cwd repo).
+REPO_FLAG=""
+# Example: GITHUB_REPO="tomcounsell/popoto" extracted from context
+if [ -n "$GITHUB_REPO" ]; then
+  REPO_FLAG="--repo $GITHUB_REPO"
+fi
 ```
 
-**PR state informs Step 2 assessment**: When a PR is provided, its current state (checks passing/failing, review approved/changes-requested, etc.) tells you which pipeline stage to resume from. Skip stages that are already complete -- do not restart from scratch.
+**CRITICAL**: Always use `$REPO_FLAG` with every `gh` command below. Without it, cross-project SDLC work silently resolves issues and PRs against the wrong repository.
 
-If NO issue or PR number was provided (just a feature description), invoke `/do-issue` to create a quality issue. Do not proceed without an issue number.
+## Step 1: Resolve the Issue
+
+If an issue number was provided, fetch it:
+```bash
+gh issue view {number} $REPO_FLAG
+```
+
+After fetching, **verify the issue belongs to the target project**: check that the issue URL contains the expected org/repo. If it resolves to a different repo, you have a cross-repo mismatch -- stop and report the error.
+
+If NO issue number was provided (just a feature description), invoke `/do-issue` to create a quality issue. Do not proceed without an issue number.
 
 ## Step 2: Assess Current State
 
-Check what already exists for this issue. Use `$SDLC_TARGET_REPO` for local operations (defaults to `.` for same-repo work):
+Check what already exists for this issue:
 
 ```bash
-REPO="${SDLC_TARGET_REPO:-.}"
-
 # Check if a plan doc references this issue
-grep -r "#{issue_number}" "$REPO/docs/plans/" 2>/dev/null
+grep -r "#{issue_number}" docs/plans/ 2>/dev/null
 
-# Check if a feature branch exists (in the target repo)
-git -C "$REPO" branch -a | grep session/
+# Check if a feature branch exists
+git branch -a | grep session/
 
-# Check if a PR already exists (gh uses GH_REPO automatically)
-gh pr list --search "#{issue_number}" --state open
+# Check if a PR already exists
+gh pr list --search "#{issue_number}" --state open $REPO_FLAG
 
 # Check test status (if branch/PR exists)
 # Check review status (if PR exists)
@@ -67,14 +66,11 @@ Based on the assessment, invoke exactly ONE sub-skill and return.
 |-------|--------|--------|
 | No plan exists | `/do-plan {slug}` | Cannot build without a plan |
 | Plan exists, no branch/PR | `/do-build` with plan path | Plan is ready, implement it |
-| Branch exists, no PR | `/do-build` with plan path | Build must create the PR — resume build |
 | Tests failing | `/do-patch` then `/do-test` | Fix what is broken |
-| PR exists, no review | `/do-pr-review {pr_number}` | Code is ready for review |
+| Tests passing, no PR review | `/do-pr-review` | Code is ready for review |
 | PR review has blockers or nits | `/do-patch` | Address review feedback |
 | Review clean, docs not updated | `/do-docs` | Last step before merge |
 | All stages complete | Report done | Observer delivers to human |
-
-**CRITICAL**: Before dispatching `/do-pr-review`, verify a PR actually exists by checking the output of `gh pr list`. If no PR exists for this branch, dispatch `/do-build` instead — it handles PR creation. Never send `/do-pr-review` without a real PR number.
 
 Do NOT restart from scratch if prior stages are already complete.
 
@@ -90,24 +86,16 @@ Do NOT restart from scratch if prior stages are already complete.
 
 ## Pipeline Stages Reference
 
-The canonical pipeline graph is defined in `bridge/pipeline_graph.py`. All routing
-derives from that module. The table below is for human readability only.
-
 ```
-Happy path: ISSUE -> PLAN -> BUILD -> TEST -> REVIEW -> DOCS -> MERGE
-Cycles:     TEST(fail) -> PATCH -> TEST
-            REVIEW(fail|partial) -> PATCH -> TEST -> REVIEW
+1. ISSUE  — /do-issue (or already exists)
+2. PLAN   — /do-plan {slug}
+3. BUILD  — /do-build {plan or issue}
+4. TEST   — /do-test
+5. PATCH  — /do-patch (fix test failures)
+6. REVIEW — /do-pr-review
+7. PATCH  — /do-patch (fix review blockers)
+8. DOCS   — /do-docs
+9. MERGE  — Human decision (Observer reports completion)
 ```
-
-| Stage | Skill | Notes |
-|-------|-------|-------|
-| ISSUE | /do-issue | Or already exists |
-| PLAN | /do-plan {slug} | |
-| BUILD | /do-build {plan or issue} | |
-| TEST | /do-test | |
-| PATCH | /do-patch | Routing-only; not a display stage |
-| REVIEW | /do-pr-review | |
-| DOCS | /do-docs | |
-| MERGE | — | Human decision (Observer reports completion) |
 
 This list is for reference only. This skill does NOT advance through stages -- it picks the right one and returns.

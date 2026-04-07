@@ -40,6 +40,50 @@ def _now_iso() -> str:
     return datetime.now().isoformat()
 
 
+def _infer_current_stage(session) -> str:
+    """Infer the current SDLC stage from session history.
+
+    Walks history entries in reverse to find the most recent [stage] entry
+    that is in_progress. Falls back to "UNKNOWN" if no active stage is found.
+    """
+    from models.agent_session import SDLC_STAGES
+
+    progress = session.get_stage_progress()
+    # Return the first in-progress stage
+    for stage in SDLC_STAGES:
+        if progress.get(stage) == "in_progress":
+            return stage
+    # If none in-progress, find the last pending stage (pipeline advancing)
+    for stage in SDLC_STAGES:
+        if progress.get(stage) == "pending":
+            return stage
+    return "UNKNOWN"
+
+
+def record_friction_event(session_id: str, description: str) -> None:
+    """Record a friction event on the active session.
+
+    Called when errors, retries, or unexpected detours occur during
+    SDLC execution. The friction events are accumulated on the AgentSession
+    and later copied into CyclicEpisode records by the Reflections pipeline.
+
+    Args:
+        session_id: Session identifier.
+        description: Brief description of the friction (e.g., "sdk_error_retry").
+    """
+    from models.agent_session import AgentSession
+
+    try:
+        sessions = list(AgentSession.query.filter(session_id=session_id))
+        if sessions:
+            s = sessions[0]
+            if s.is_sdlc_job():
+                stage = _infer_current_stage(s)
+                s.append_friction_event(stage, description)
+    except Exception as e:
+        logger.debug(f"Failed to record friction event for {session_id}: {e}")
+
+
 def start_transcript(
     session_id: str,
     project_key: str,
@@ -228,7 +272,7 @@ def append_tool_result(
     except Exception as e:
         logger.debug(f"Failed to append tool result to transcript {session_id}: {e}")
 
-    # Increment tool_call_count in SessionLog
+    # Increment tool_call_count and record tool event for episode instrumentation
     try:
         sessions = list(AgentSession.query.filter(session_id=session_id))
         if sessions:
@@ -236,6 +280,16 @@ def append_tool_result(
             s.tool_call_count = (s.tool_call_count or 0) + 1
             s.last_activity = time.time()
             s.save()
+
+            # Record tool event for behavioral episode memory.
+            # Infer current SDLC stage from session history; default to "UNKNOWN".
+            if s.is_sdlc_job():
+                stage = _infer_current_stage(s)
+                tool_type = "tool_result"
+                try:
+                    s.append_tool_event(stage, tool_type)
+                except Exception as te:
+                    logger.debug(f"Failed to append tool event for {session_id}: {te}")
     except Exception as e:
         logger.debug(f"Failed to update SessionLog tool_call_count for {session_id}: {e}")
 

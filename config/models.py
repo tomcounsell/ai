@@ -77,20 +77,6 @@ IMAGE_ASPECT_RATIOS = {
     "21:9": (1536, 672),  # Ultrawide/cinematic
 }
 
-# -----------------------------------------------------------------------------
-# ULTRA-CHEAP EXPERIMENT MODELS (via OpenRouter)
-# For autonomous prompt optimization — hypothesis generation at ~$0.001/call
-# -----------------------------------------------------------------------------
-
-# Kimi K2.5 - Strong reasoning at ultra-low cost
-OPENROUTER_KIMI_K2_5 = "moonshotai/kimi-k2.5"
-
-# Qwen3 32B - Good code understanding, ultra-cheap
-OPENROUTER_QWEN3_32B = "qwen/qwen3-32b"
-
-# Gemma 3 27B - Free tier option
-OPENROUTER_GEMMA3_FREE = "google/gemma-3-27b-it:free"
-
 
 # =============================================================================
 # USE-CASE SPECIFIC ALIASES
@@ -112,9 +98,6 @@ MODEL_VISION_ALT = OPENROUTER_GEMINI_VISION  # Best overall vision model
 
 # Image generation (Nano Banana style)
 MODEL_IMAGE_GEN = OPENROUTER_GEMINI_IMAGE_GEN
-
-# Experiment hypothesis generation (ultra-cheap, ~$0.001/call)
-MODEL_EXPERIMENT = OPENROUTER_KIMI_K2_5
 
 # Highest quality tasks (rarely needed, expensive)
 MODEL_BEST = OPUS
@@ -177,22 +160,6 @@ MODEL_INFO = {
             "Nuanced analysis",
             "Creative writing",
             "Difficult edge cases",
-        ],
-    },
-    OPENROUTER_KIMI_K2_5: {
-        "name": "Kimi K2.5 (via OpenRouter)",
-        "tier": "experiment",
-        "vision": False,
-        "context_window": 128_000,
-        "strengths": [
-            "Ultra-low cost (~$0.001/call)",
-            "Strong reasoning for price point",
-            "Good at prompt analysis and rewriting",
-        ],
-        "use_cases": [
-            "Experiment hypothesis generation",
-            "Prompt optimization proposals",
-            "Cheap bulk evaluation",
         ],
     },
 }

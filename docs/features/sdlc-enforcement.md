@@ -149,11 +149,9 @@ Every agent session started by `ValorAgent` receives the mandatory pipeline rule
 The system prompt structure assembled by `load_system_prompt()`:
 
 ```
-[WORKER_RULES — safety rails for the worker, FIRST — takes precedence]
+[SOUL.md — persona, attitude, purpose, communication style]
 ---
-[Persona prompt — base + developer overlay from config/personas/]
----
-[Principal Context — condensed mission/goals/priorities from PRINCIPAL.md]
+[SDLC_WORKFLOW — mandatory pipeline rules, hardcoded in sdk_client.py]
 ---
 [Work Completion Criteria — from CLAUDE.md]
 ```
@@ -254,18 +252,10 @@ The merger adds these entries (if not already present):
 | PostToolUse | Edit | sdlc_reminder.py | 10s |
 | Stop | (all) | validate_sdlc_on_stop.py | 15s |
 
-## Merge Guard
-
-A PreToolUse hook (`.claude/hooks/validators/validate_merge_guard.py`) blocks `gh pr merge` commands in Bash tool calls. PR merges require human authorization through the `/do-merge` skill, which validates prerequisites (TEST, REVIEW, DOCS completed) before presenting the PR for merge approval.
-
-MERGE is a formal pipeline stage routed after DOCS completes. See [SDLC Pipeline Integrity](sdlc-pipeline-integrity.md) for full details.
-
 ## Related
 
-- [SDLC Pipeline Integrity](sdlc-pipeline-integrity.md) — session hardening, URL validation, merge guard, MERGE stage
 - [do-patch Skill](do-patch-skill.md) — repair loop invoked on test failure or review blockers
 - `.claude/hooks/validators/validate_commit_message.py` — commit message validation (blocks co-author trailers and empty messages)
-- `.claude/hooks/validators/validate_merge_guard.py` — merge guard hook (blocks `gh pr merge`)
 - `agent/pipeline_state.py` — pipeline state read/write module
 - `.claude/hooks/validators/validate_sdlc_on_stop.py` — stop hook source
 - `agent/sdk_client.py` — `SDLC_WORKFLOW` constant, `load_system_prompt()`, `_check_no_direct_main_push()`

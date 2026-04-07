@@ -63,7 +63,6 @@ def sdlc_session(redis_test_db):
     s.append_history("stage", "TEST completed ☑")
     s.append_history("stage", "REVIEW completed ☑")
     s.append_history("stage", "DOCS completed ☑")
-    s.append_history("stage", "MERGE completed ☑")
     s.set_link("issue", "https://github.com/tomcounsell/ai/issues/177")
     s.set_link("plan", "https://github.com/tomcounsell/ai/blob/main/docs/plans/summarizer.md")
     s.set_link("pr", "https://github.com/tomcounsell/ai/pull/180")
@@ -177,7 +176,6 @@ class TestStageProgress:
         assert progress["TEST"] == "pending"
         assert progress["REVIEW"] == "pending"
         assert progress["DOCS"] == "pending"
-        assert progress["MERGE"] == "pending"
 
     def test_non_stage_entries_ignored(self, session):
         session.append_history("user", "SDLC 177")
@@ -693,12 +691,11 @@ class TestSDLCLifecycle:
         s.set_link("issue", "https://github.com/org/repo/issues/177")
         s.set_link("plan", "https://example.com/plan.md")
 
-        # 5. Complete build, test, review, docs, merge
+        # 5. Complete build, test, review, docs
         s.append_history("stage", "BUILD completed ☑")
         s.append_history("stage", "TEST completed ☑")
         s.append_history("stage", "REVIEW completed ☑")
         s.append_history("stage", "DOCS completed ☑")
-        s.append_history("stage", "MERGE completed ☑")
         s.set_link("pr", "https://github.com/org/repo/pull/180")
 
         # 6. Compose structured summary
@@ -745,8 +742,8 @@ class TestSDLCClassificationTypeLifecycle:
             classification_type="sdlc",
         )
 
-        # Verify is_sdlc works via classification_type alone
-        assert s.is_sdlc is True
+        # Verify is_sdlc_job works via classification_type alone
+        assert s.is_sdlc_job() is True
 
         # Add stage progress and links
         s.append_history("stage", "ISSUE completed ☑")
@@ -795,8 +792,8 @@ class TestSDLCClassificationTypeLifecycle:
         )
 
         # The continuation session starts fresh but has classification_type
-        assert s.is_sdlc is True
-        # Even without stage history, is_sdlc returns True via classification_type
+        assert s.is_sdlc_job() is True
+        # Even without stage history, is_sdlc_job returns True via classification_type
         assert s._get_history_list() == []
 
         # Add stage progress as the session progresses
@@ -806,7 +803,6 @@ class TestSDLCClassificationTypeLifecycle:
         s.append_history("stage", "TEST completed ☑")
         s.append_history("stage", "REVIEW completed ☑")
         s.append_history("stage", "DOCS completed ☑")
-        s.append_history("stage", "MERGE completed ☑")
         s.set_link("issue", "https://github.com/valorengels/ai/issues/276")
         s.set_link("pr", "https://github.com/valorengels/ai/pull/277")
 

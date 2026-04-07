@@ -94,5 +94,5 @@ If a steering message arrives just as the agent finishes, `pop_all_steering_mess
 ## Related Documentation
 
 - [Steering Queue](steering-queue.md) -- Original implementation plan and design decisions
-- [Bridge Workflow Gaps](bridge-workflow-gaps.md) -- Auto-continue and output classification that interacts with session status
+- [Coaching Loop](coaching-loop.md) -- Auto-continue and output classification that interacts with session status
 - [Agent Session Model](agent-session-model.md) -- Session lifecycle and status transitions

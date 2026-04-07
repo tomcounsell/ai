@@ -51,19 +51,19 @@ class TestLoadLocalProjects:
             with patch("scripts.reflections.load_local_projects.__wrapped__", create=True):
                 pass
 
-        # Point PROJECTS_CONFIG_PATH to the temp config
-        import os
+        # Call directly with monkeypatched config file
+        import scripts.reflections as dmod
 
-        config_path.write_text(json.dumps(config))
-        orig_env = os.environ.get("PROJECTS_CONFIG_PATH")
-        os.environ["PROJECTS_CONFIG_PATH"] = str(config_path)
+        orig_ai_root = dmod.AI_ROOT
+        dmod.AI_ROOT = tmp_path
         try:
+            # Also need to create a projects.json in the patched root
+            config_dir = tmp_path / "config"
+            config_dir.mkdir(exist_ok=True)
+            (config_dir / "projects.json").write_text(json.dumps(config))
             projects = load_local_projects()
         finally:
-            if orig_env is None:
-                os.environ.pop("PROJECTS_CONFIG_PATH", None)
-            else:
-                os.environ["PROJECTS_CONFIG_PATH"] = orig_env
+            dmod.AI_ROOT = orig_ai_root
 
         slugs = [p["slug"] for p in projects]
         assert "proj-a" in slugs
@@ -85,19 +85,17 @@ class TestLoadLocalProjects:
             }
         }
 
-        import os
+        import scripts.reflections as dmod
 
-        config_path = tmp_path / "projects.json"
-        config_path.write_text(json.dumps(config))
-        orig_env = os.environ.get("PROJECTS_CONFIG_PATH")
-        os.environ["PROJECTS_CONFIG_PATH"] = str(config_path)
+        orig_ai_root = dmod.AI_ROOT
+        dmod.AI_ROOT = tmp_path
         try:
+            config_dir = tmp_path / "config"
+            config_dir.mkdir(exist_ok=True)
+            (config_dir / "projects.json").write_text(json.dumps(config))
             projects = load_local_projects()
         finally:
-            if orig_env is None:
-                os.environ.pop("PROJECTS_CONFIG_PATH", None)
-            else:
-                os.environ["PROJECTS_CONFIG_PATH"] = orig_env
+            dmod.AI_ROOT = orig_ai_root
 
         assert len(projects) == 1
         assert projects[0]["slug"] == "my-slug"
@@ -105,8 +103,6 @@ class TestLoadLocalProjects:
 
     def test_returns_empty_list_when_no_projects_exist(self, tmp_path):
         """Returns empty list when no configured projects have existing dirs."""
-        import os
-
         from scripts.reflections import load_local_projects
 
         config = {
@@ -118,17 +114,17 @@ class TestLoadLocalProjects:
             }
         }
 
-        config_path = tmp_path / "projects.json"
-        config_path.write_text(json.dumps(config))
-        orig_env = os.environ.get("PROJECTS_CONFIG_PATH")
-        os.environ["PROJECTS_CONFIG_PATH"] = str(config_path)
+        import scripts.reflections as dmod
+
+        orig_ai_root = dmod.AI_ROOT
+        dmod.AI_ROOT = tmp_path
         try:
+            config_dir = tmp_path / "config"
+            config_dir.mkdir(exist_ok=True)
+            (config_dir / "projects.json").write_text(json.dumps(config))
             projects = load_local_projects()
         finally:
-            if orig_env is None:
-                os.environ.pop("PROJECTS_CONFIG_PATH", None)
-            else:
-                os.environ["PROJECTS_CONFIG_PATH"] = orig_env
+            dmod.AI_ROOT = orig_ai_root
 
         assert projects == []
 

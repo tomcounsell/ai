@@ -8,7 +8,6 @@ Reads criteria from CLAUDE.md as single source of truth.
 import logging
 import re
 import subprocess
-import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -178,7 +177,7 @@ def check_code_quality(working_dir: Path) -> CompletionCheck:
 
         # Run ruff check for linting
         result = subprocess.run(
-            [sys.executable, "-m", "ruff", "check", "--quiet", "."],
+            ["python", "-m", "ruff", "check", "--quiet", "."],
             cwd=working_dir,
             capture_output=True,
             text=True,

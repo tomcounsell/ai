@@ -17,8 +17,8 @@ Every skill now has proper frontmatter fields:
 - `context: fork` on skills that spawn parallel work (do-build, do-pr-review, do-docs-audit)
 
 ### Commands Consolidated
-- **Thin wrapper commands deleted**: `do-build.md`, `do-plan.md`, `do-test.md`, `do-docs.md`, `do-pr-review.md`, `update.md` — skills handle `replace with concrete examples like `/do-plan`, `/do-build`, etc. or clarify as a pattern placeholder` invocation directly
-- **Substantial commands converted to skills**: `setup.md`, `prepare_app.md`, `prime.md`, `add-feature.md`, `pthread.md`, `audit-next-tool.md`, `sdlc.md` — each now has a proper `this is a template pattern; either keep with explicit note that `{name}` is a placeholder or replace with concrete example like `.claude/skills/do-plan/SKILL.md` with frontmatter
+- **Thin wrapper commands deleted**: `do-build.md`, `do-plan.md`, `do-test.md`, `do-docs.md`, `do-pr-review.md`, `update.md` — skills handle `/slash-command` invocation directly
+- **Substantial commands converted to skills**: `setup.md`, `prepare_app.md`, `prime.md`, `add-feature.md`, `pthread.md`, `audit-next-tool.md`, `sdlc.md` — each now has a proper `.claude/skills/{name}/SKILL.md` with frontmatter
 - **`.claude/commands/` is now empty** — all functionality migrated to skills
 
 ### Generic New-Skill Extracted
@@ -26,7 +26,7 @@ Every skill now has proper frontmatter fields:
 - Refactored `new-valor-skill` to be a thin Valor-flavored wrapper
 
 ### Hardlink System Updated
-- `PROJECT_ONLY_SKILLS` set prevents project-specific skills from syncing to `verify and clarify the hardlink destination path; if this directory doesn't exist in the codebase, remove reference or explain it as an external installation target`
+- `PROJECT_ONLY_SKILLS` set prevents project-specific skills from syncing to `~/.claude/skills/`
 - Project-only: telegram, reading-sms-messages, checking-system-logs, google-workspace
 - Retired commands added to `RENAMED_REMOVALS` for cleanup on update
 

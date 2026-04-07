@@ -175,7 +175,7 @@ def ensure_global_hook(project_dir: Path) -> CalendarHookResult:
 
 def generate_calendar_config(project_dir: Path) -> CalendarConfigResult:
     """Generate Google Calendar config by matching projects to calendars."""
-    base_dir = Path.home() / "Desktop" / "Valor"
+    base_dir = Path.home() / "Desktop" / "claude_code"
     config_path = base_dir / "calendar_config.json"
     token_path = base_dir / "google_token.json"
 

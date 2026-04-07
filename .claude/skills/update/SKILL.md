@@ -9,25 +9,16 @@ Pull the latest changes from the remote repository, sync dependencies, and resta
 
 ## Instructions
 
-**PREREQUISITE: Must be on latest main branch before running.**
-
-```bash
-cd ~/src/ai && git checkout main && git pull
-```
-
-If there are local changes, stash them first: `git stash`. The update orchestrator also handles this, but being on main is required.
-
 Run the full update orchestrator and report the results:
 
 ```bash
-cd ~/src/ai && .venv/bin/python scripts/update/run.py --full
+cd /Users/valorengels/src/ai && .venv/bin/python scripts/update/run.py --full
 ```
 
 The orchestrator will:
 - Pull latest changes (with automatic stash/unstash)
 - Sync `.claude` hardlinks and audit skill hooks
 - Check for pending critical dependency upgrades
-- **Verify machine identity** — reads `scutil --get ComputerName`, matches against `machine` field in `~/Desktop/Valor/projects.json`, reports which projects this machine handles
 - Sync dependencies if pyproject.toml changed
 - Verify critical dependency versions
 - Check/pull Ollama summarizer model
@@ -37,47 +28,6 @@ The orchestrator will:
 - Check MCP server configuration
 
 After running, report the result. If there are warnings or errors, list each one clearly.
-
-### Stale Session & Job Audit
-
-After the orchestrator completes, audit Redis for stale or abandoned sessions/jobs. An `/update` implies a soft reset — anything stuck should be surfaced.
-
-```bash
-cd ~/src/ai && .venv/bin/python -c "
-import time
-from models.agent_session import AgentSession
-
-now = time.time()
-STALE_THRESHOLD = 30 * 60  # 30 minutes
-
-sessions = AgentSession.objects.all()
-stale = []
-for s in sessions:
-    status = getattr(s, 'status', None) or 'unknown'
-    if status in ('completed', 'delivered'):
-        continue
-    sid = getattr(s, 'session_id', None) or 'unknown'
-    last = getattr(s, 'last_activity', None) or getattr(s, 'created_at', None)
-    age_sec = (now - float(last)) if last else 0
-    project = getattr(s, 'project_key', None) or ''
-    if age_sec > STALE_THRESHOLD:
-        stale.append((sid, status, project, int(age_sec / 60)))
-
-if not stale:
-    print('No stale sessions found.')
-else:
-    print(f'Found {len(stale)} stale session(s):')
-    for sid, status, project, age_min in stale:
-        print(f'  {status:12s} | {project:12s} | {sid[:50]} | {age_min}m old')
-    print()
-    print('To clean up, set status to abandoned:')
-    print('  python -c \"from models.agent_session import AgentSession; s = AgentSession.objects.get(session_id=\\\"SESSION_ID\\\"); s.status = \\\"abandoned\\\"; s.save()\"')
-"
-```
-
-Report findings:
-- **Clean**: "No stale sessions or jobs"
-- **Stale found**: List each with session ID, status, project, and age. Ask whether to mark them as abandoned.
 
 ### Auto-Bump Critical Dependencies
 
@@ -101,37 +51,25 @@ When `pyproject.toml` changes via git pull with critical dep version changes (te
 If `data/upgrade-pending` exists:
 ```bash
 # Check what's pending
-cat ~/src/ai/data/upgrade-pending
+cat /Users/valorengels/src/ai/data/upgrade-pending
 
 # After /update applies the upgrade and verifies the bridge starts:
-rm ~/src/ai/data/upgrade-pending
+rm /Users/valorengels/src/ai/data/upgrade-pending
 ```
 
 ### Verification Only
 
 To check the environment without making changes:
 ```bash
-cd ~/src/ai
+cd /Users/valorengels/src/ai
 .venv/bin/python scripts/update/run.py --verify
 ```
-
-### Reinstall Launchd Services
-
-After update, reinstall launchd plists to pick up any template changes:
-
-```bash
-cd ~/src/ai
-./scripts/install_reflections.sh
-./scripts/install_issue_poller.sh
-```
-
-The install scripts substitute `__PROJECT_DIR__` and `__HOME_DIR__` placeholders with the current machine's paths. This ensures plists work on any machine without hardcoded usernames.
 
 ## Troubleshooting
 
 ### Virtual environment issues
 ```bash
-cd ~/src/ai
+cd /Users/valorengels/src/ai
 rm -rf .venv
 uv venv
 uv sync --all-extras
@@ -139,33 +77,25 @@ uv sync --all-extras
 
 ### Missing dependencies after update
 ```bash
-cd ~/src/ai
+cd /Users/valorengels/src/ai
 uv sync --all-extras --reinstall
 ```
 
 ### Calendar integration not working
-1. Check OAuth token: `ls ~/Desktop/Valor/google_token.json`
+1. Check OAuth token: `ls ~/Desktop/claude_code/google_token.json`
 2. Re-run OAuth: `valor-calendar test`
 3. Check deps: `.venv/bin/python -c "import google_auth_oauthlib; print('OK')"`
-
-### Wrong projects active (machine identity mismatch)
-
-The bridge derives active projects from `scutil --get ComputerName` matched against the `machine` field in `~/Desktop/Valor/projects.json`. If the wrong projects are active:
-
-1. Check the machine name: `scutil --get ComputerName`
-2. Check the config: `python -c "import json; [print(f'{k}: {v.get(\"machine\")}') for k,v in json.load(open('$HOME/Desktop/Valor/projects.json')).get('projects',{}).items()]"`
-3. Fix: ensure the `machine` value in projects.json matches the ComputerName exactly (case-insensitive)
 
 ### Bridge won't start
 ```bash
 # Check logs
-tail -50 ~/src/ai/logs/bridge.error.log
+tail -50 /Users/valorengels/src/ai/logs/bridge.error.log
 
 # Manual restart
-~/src/ai/scripts/valor-service.sh restart
+/Users/valorengels/src/ai/scripts/valor-service.sh restart
 
 # Check status
-~/src/ai/scripts/valor-service.sh status
+/Users/valorengels/src/ai/scripts/valor-service.sh status
 ```
 
 ## Module Details

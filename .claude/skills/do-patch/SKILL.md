@@ -10,7 +10,7 @@ You are a **focused fixer**. You apply targeted, surgical edits to resolve a spe
 
 ## Cross-Repo Resolution
 
-For cross-project work, the `GH_REPO` environment variable is automatically set by `sdk_client.py`. The `gh` CLI natively respects this env var, so all `gh` commands automatically target the correct repository. No `--repo` flags or manual parsing needed.
+When invoked for a non-ai project, extract the `GITHUB:` line from the prompt context (e.g., `GITHUB: tomcounsell/popoto`). If present, use `--repo $GITHUB_REPO` with all `gh` commands below (e.g., `gh issue view`). If not present, omit `--repo` (defaults to cwd repo).
 
 ## When This Skill Is Invoked
 
@@ -43,16 +43,6 @@ The patch agent is re-entering the build loop. It needs the **same context** tha
 3. **Working directory** — Confirm CWD (worktree path if invoked by do-build, repo root if direct)
 4. **What was already built** — Run `git log --oneline main..HEAD` to see what the build has done so far
 5. **Relevant file paths** — From the plan's "Relevant Files" section, so the builder knows where to look
-6. **PR review comments** (for review blockers) — **MANDATORY** when fixing review feedback:
-   ```bash
-   # Find the PR for the current branch
-   PR_NUMBER=$(gh pr list --head "$(git rev-parse --abbrev-ref HEAD)" --json number -q '.[0].number')
-
-   # Fetch ALL review comments — these are the authoritative blockers
-   gh api repos/{owner}/{repo}/pulls/${PR_NUMBER}/reviews --jq '.[] | select(.state != "APPROVED") | {user: .user.login, state: .state, body: .body}'
-   gh api repos/{owner}/{repo}/pulls/${PR_NUMBER}/comments --jq '.[] | {path: .path, line: .line, body: .body, user: .user.login}'
-   ```
-   Do NOT rely solely on the PATCH_ARG text — it may be a summary that misses specific blockers. The PR review comments are the ground truth. Include the full review comment text in the builder prompt.
 
 **If no plan exists** (e.g., user-invoked hotfix), proceed with failure context alone — but note this in the fix report.
 
@@ -71,8 +61,6 @@ If `PATCH_ARG` is empty, read the most recent failure from session context:
 Parse the input to classify the fix type:
 - **Test failure**: pytest output with `FAILED`, `ERROR`, or traceback lines
 - **Review blocker**: prose describing a code issue, race condition, logic bug, or style violation
-
-**If the fix type is "review blocker"**: You MUST fetch the actual PR review comments from GitHub (see Build Context Recovery step 6 above). The PATCH_ARG may be a summary that omits specific blockers. The PR comments are the authoritative source of what needs fixing.
 
 #### Root Cause Analysis: Trace & Verify
 
@@ -114,9 +102,6 @@ BUILD HISTORY (commits so far on this branch):
 FAILURE TO FIX:
 [full PATCH_ARG content or failure text from context]
 
-PR REVIEW COMMENTS (if fixing review blockers):
-[full review comments from gh api — include path, line number, and comment body for each]
-
 YOUR JOB:
 1. Read the failure output carefully. Identify the root cause.
 2. Review the plan context and build history to understand what was intended.
@@ -154,9 +139,28 @@ Parse the results:
 
 Report the test summary (passed/failed/skipped counts) before proceeding.
 
-### Step 4: Report Completion
+### Step 4: Advance Pipeline State (on success)
 
-When tests pass, report success. Pipeline stage advancement is handled by the Observer/SDLC router -- do-patch does not determine or advance pipeline stages.
+When tests pass, advance the pipeline to the appropriate next stage.
+
+**Determine the slug** from context:
+- Check the current git branch: `git rev-parse --abbrev-ref HEAD`
+- If branch is `session/{slug}`, extract `{slug}`
+- If no slug can be determined, skip pipeline state update (log a warning)
+
+**Determine the next stage** from the fix context:
+- If fixing a **test failure**: advance to `review`
+- If fixing a **review blocker**: advance to `document`
+
+```bash
+python -c "
+from agent.pipeline_state import advance_stage
+advance_stage('{slug}', '{next_stage}')
+print('Pipeline advanced to: {next_stage}')
+"
+```
+
+If `pipeline_state` raises `FileNotFoundError` (no state file for slug), skip silently — the pipeline may not have been initialized (e.g., user invoked directly).
 
 ### Step 5: Handle Failure — Retry or Report Stuck
 
@@ -199,19 +203,10 @@ Lint and formatting are handled automatically -- agents should never waste itera
 - **Never run manual lint checks**: Do NOT run `ruff check .` or `ruff format --check .` as a separate validation step. The pre-commit hook handles this automatically on final commits.
 - **PostToolUse hook**: The `format_file.py` hook runs `ruff check --fix` + `ruff format` on individual files after every Write/Edit, so files stay clean as agents work.
 
-## Commit and Push Rules
-
-After tests pass, always commit and push the fix:
-
-```bash
-git add -A && git commit -m "Fix: [one-line summary of what was fixed]" && git push
-```
-
-This skill owns its full lifecycle — no parent skill handles commits on its behalf.
-
 ## Critical Rules
 
 - NEVER create a PR — that is `do-build`'s responsibility
+- NEVER commit changes — builders make edits; `do-build` handles commits at the appropriate stage
 - NEVER touch the Document or PR pipeline stages
 - NEVER create new worktrees — work in the CWD/worktree already active
 - NEVER refactor unrelated code — targeted fixes only
@@ -272,4 +267,6 @@ Files modified:
 - [file2.py] — [brief description of change]
 
 Test result: ALL TESTS PASSED
+
+Pipeline stage advanced to: [next_stage]  (or "N/A — no pipeline state")
 ```

@@ -5,7 +5,7 @@
 
 set -e
 
-LOCKDIR="$HOME/Desktop/Valor"
+LOCKDIR="$HOME/Desktop/claude_code"
 STAMPFILE="$LOCKDIR/.calendar_hook_stamp"
 SESSIONFILE="$LOCKDIR/.calendar_hook_session"
 SLUGFILE="$LOCKDIR/.calendar_hook_slug"
@@ -22,29 +22,22 @@ if echo "$PROMPT" | grep -qE '^\s*/[a-zA-Z0-9_-]+\s*$'; then
     exit 0
 fi
 
-# Only track projects that have a calendar mapping (allowlist via calendar_config.json)
-PROJECTS_JSON="${PROJECTS_CONFIG_PATH:-$HOME/Desktop/Valor/projects.json}"
-CALENDAR_JSON="$HOME/Desktop/Valor/calendar_config.json"
+# Skip excluded projects (too noisy for calendar tracking)
+EXCLUDED_PROJECTS="valor"
+PROJECTS_JSON="$HOME/src/ai/config/projects.json"
 CURRENT_PROJECT=""
 if [ -f "$PROJECTS_JSON" ]; then
-    CURRENT_PROJECT=$(jq -r --arg cwd "$PWD" --arg home "$HOME" '
+    CURRENT_PROJECT=$(jq -r --arg cwd "$PWD" '
         .projects | to_entries[]
-        | select((.value.working_directory | gsub("^~"; $home)) == $cwd)
+        | select(.value.working_directory == $cwd)
         | .key
     ' "$PROJECTS_JSON" 2>/dev/null || true)
 fi
-# Skip if project not in calendar_config.json
-if [ -z "$CURRENT_PROJECT" ]; then
-    exit 0
-fi
-if [ -f "$CALENDAR_JSON" ]; then
-    HAS_CALENDAR=$(jq -r --arg proj "$CURRENT_PROJECT" '.calendars[$proj] // empty' "$CALENDAR_JSON" 2>/dev/null || true)
-    if [ -z "$HAS_CALENDAR" ]; then
+for excluded in $EXCLUDED_PROJECTS; do
+    if [ "$CURRENT_PROJECT" = "$excluded" ]; then
         exit 0
     fi
-else
-    exit 0
-fi
+done
 
 # Rate limit: skip if same session and called within the last INTERVAL seconds
 # A new session always bypasses the rate limit
@@ -78,12 +71,12 @@ fi
 
 # Resolve project key from projects.json (matches working_directory to key)
 # Falls back to directory basename if no match found
-PROJECTS_JSON="${PROJECTS_CONFIG_PATH:-$HOME/Desktop/Valor/projects.json}"
+PROJECTS_JSON="$HOME/src/ai/config/projects.json"
 PROJECT=$(basename "$PWD")
 if [ -f "$PROJECTS_JSON" ]; then
-    MATCH=$(jq -r --arg cwd "$PWD" --arg home "$HOME" '
+    MATCH=$(jq -r --arg cwd "$PWD" '
         .projects | to_entries[]
-        | select((.value.working_directory | gsub("^~"; $home)) == $cwd)
+        | select(.value.working_directory == $cwd)
         | .key
     ' "$PROJECTS_JSON" 2>/dev/null || true)
     if [ -n "$MATCH" ]; then

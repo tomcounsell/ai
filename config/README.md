@@ -4,45 +4,28 @@ This directory contains configuration files for the Valor AI system.
 
 ## Files
 
-### `projects.example.json` (Template)
-Canonical template with complete field documentation. Copy this to create your private projects.json:
+### `projects.json` (Required)
+Main configuration file that defines which projects Valor monitors and how it responds to messages.
+
+**IMPORTANT**: This file is git-ignored because it contains machine-specific paths and settings.
+
+### `projects.json.example` (Template)
+Template file with complete field documentation. Copy this to create your `projects.json`:
 
 ```bash
-mkdir -p ~/Desktop/Valor
-cp config/projects.example.json ~/Desktop/Valor/projects.json
-# Edit ~/Desktop/Valor/projects.json with your settings
+cp config/projects.json.example config/projects.json
+# Edit config/projects.json with your settings
 ```
 
-### `personas/_base.md` (Shared identity)
-Base persona file that gets prepended to all persona overlays. Contains shared identity, values, communication style, and philosophy. This stays in the repo because it is not private.
-
-Persona overlay files (developer.md, project-manager.md, teammate.md) live in `~/Desktop/Valor/personas/` (iCloud-synced, private).
-
-### `secrets/` (Git-ignored)
-Directory for sensitive credentials (Google OAuth tokens, etc.). Created automatically by the settings system.
-
 ### `SOUL.md`
-Base persona definition (fallback when persona overlay files are missing).
-
-## Private Configuration (~/Desktop/Valor/)
-
-The following files live outside the repo in `~/Desktop/Valor/` (iCloud-synced):
-
-| File | Purpose |
-|------|---------|
-| `projects.json` | Project configs, chat IDs, machine names |
-| `personas/developer.md` | Developer persona overlay |
-| `personas/project-manager.md` | PM persona overlay |
-| `personas/teammate.md` | Teammate persona overlay |
-
-Override the projects.json path with the `PROJECTS_CONFIG_PATH` env var.
+Valor's persona definition and system prompt.
 
 ## Required Fields
 
 Every project configuration MUST include:
 
-- **`working_directory`**: Path to the project directory where the agent operates
-  - Example: `"~/src/popoto"` (tilde is expanded at runtime)
+- **`working_directory`**: Absolute path to the project directory where the agent operates
+  - Example: `"/Users/yourname/src/popoto"`
   - This is where the agent will run commands, read/write files, and execute work
   - Missing this field will cause Path(None) errors
 
@@ -50,22 +33,21 @@ Every project configuration MUST include:
 
 1. **Copy the example file**:
    ```bash
-   mkdir -p ~/Desktop/Valor
-   cp config/projects.example.json ~/Desktop/Valor/projects.json
+   cp config/projects.json.example config/projects.json
    ```
 
 2. **Edit working directories**:
-   Update all `working_directory` fields with your actual paths (tilde `~` is expanded at runtime):
+   Update all `working_directory` fields with your actual paths:
    ```json
    {
      "projects": {
        "my-project": {
-         "working_directory": "~/src/my-project",
+         "working_directory": "/Users/yourname/src/my-project",
          ...
        }
      },
      "defaults": {
-       "working_directory": "~/src/ai"
+       "working_directory": "/Users/yourname/src/ai"
      }
    }
    ```
@@ -74,19 +56,12 @@ Every project configuration MUST include:
    Set which Telegram groups each project monitors:
    ```json
    "telegram": {
-     "groups": {
-       "Dev: My Project": {"persona": "developer"}
-     }
+     "groups": ["Dev: My Project"]
    }
    ```
+   Note: `respond_to_all` defaults to `true` if not specified.
 
-4. **Create persona overlays**:
-   ```bash
-   mkdir -p ~/Desktop/Valor/personas
-   # Create developer.md, project-manager.md, teammate.md
-   ```
-
-5. **Set active projects** in `.env`:
+4. **Set active projects** in `.env`:
    ```bash
    ACTIVE_PROJECTS=project1,project2
    ```
@@ -109,7 +84,20 @@ tail -f logs/bridge.log
 
 **Cause**: A project is missing the `working_directory` field.
 
-**Fix**: Add `working_directory` to the project or set a default in `~/Desktop/Valor/projects.json`.
+**Fix**: Add `working_directory` to the project or set a default:
+```json
+{
+  "projects": {
+    "my-project": {
+      "working_directory": "/absolute/path/to/project",
+      ...
+    }
+  },
+  "defaults": {
+    "working_directory": "/fallback/path"
+  }
+}
+```
 
 ### Configuration not taking effect
 
@@ -120,4 +108,4 @@ Restart the bridge after editing `projects.json`:
 
 ## Example Configuration
 
-See `projects.example.json` for a complete, documented example with all available fields.
+See `projects.json.example` for a complete, documented example with all available fields.

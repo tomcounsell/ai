@@ -368,11 +368,6 @@ class TestCheckAllSessionsModelException:
 
         assert session.status == "failed"
         assert "failed" in save_calls
-        # Error summary must be populated so reflections can produce actionable reports
-        assert session.summary is not None
-        assert "ModelException" in session.summary
-        assert "Unique constraint violated" in session.summary
-        assert session.summary.startswith("Watchdog: ")
 
     @pytest.mark.asyncio
     async def test_generic_exception_not_caught_as_model_exception(self, monkeypatch):

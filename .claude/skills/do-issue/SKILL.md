@@ -27,7 +27,7 @@ This isn't optional politeness — it's functional. The `/do-plan` skill reads t
 
 ## Cross-Repo Resolution
 
-For cross-project work, the `GH_REPO` environment variable is automatically set by `sdk_client.py`. The `gh` CLI natively respects this env var, so all `gh` commands automatically target the correct repository. No `--repo` flags or manual parsing needed.
+When invoked for a non-ai project, extract the `GITHUB:` line from the prompt context (e.g., `GITHUB: tomcounsell/popoto`). If present, use `--repo $GITHUB_REPO` with all `gh` commands below. If not present, omit `--repo` (defaults to cwd repo).
 
 ## When to Use
 
@@ -49,11 +49,11 @@ Read the user's description. Identify:
 Before writing, gather context so the issue is grounded in reality:
 
 ```bash
-# Search for related closed issues
-gh issue list --state closed --search "KEYWORDS" --limit 5 --json number,title,url
+# Search for related closed issues (use --repo if GITHUB: context line is present)
+gh issue list --state closed --search "KEYWORDS" --limit 5 --json number,title,url $REPO_FLAG
 
 # Search for related merged PRs
-gh pr list --state merged --search "KEYWORDS" --limit 5 --json number,title,url
+gh pr list --state merged --search "KEYWORDS" --limit 5 --json number,title,url $REPO_FLAG
 
 # Check if relevant docs exist
 grep -rl "KEYWORD" docs/features/ docs/plans/ 2>/dev/null | head -5
@@ -80,9 +80,14 @@ Load `CHECKLIST.md` and verify every item before creating the issue.
 ### Step 5: Create the Issue
 
 ```bash
+REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
 TYPE="feature"  # or "bug" or "chore"
 
+# Use GITHUB_REPO from context if available, otherwise resolve from git
+REPO="${GITHUB_REPO:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
+
 gh issue create \
+  --repo "$REPO" \
   --title "Brief, specific title" \
   --label "$TYPE" \
   --body "$(cat /tmp/issue_body.md)"

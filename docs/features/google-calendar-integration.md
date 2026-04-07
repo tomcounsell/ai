@@ -19,7 +19,7 @@ Examples:
 
 ## How It Works
 
-1. Maps the slug to a Google Calendar ID via `~/Desktop/Valor/calendar_config.json`
+1. Maps the slug to a Google Calendar ID via `~/Desktop/claude_code/calendar_config.json`
 2. Searches today's events for one matching the slug summary
 3. If no match: creates a new event rounded to the current 30-minute segment
 4. If match exists and already covers current segment: no-op
@@ -33,7 +33,7 @@ Examples:
 
 ### Offline Queue
 
-On auth/network failure, entries are queued to `~/Desktop/Valor/calendar_queue.jsonl`. On next successful call, queued entries are replayed (entries >24h old are skipped).
+On auth/network failure, entries are queued to `~/Desktop/claude_code/calendar_queue.jsonl`. On next successful call, queued entries are replayed (entries >24h old are skipped).
 
 ## Automatic Heartbeats
 
@@ -66,7 +66,7 @@ Calls are fire-and-forget subprocesses — they never block agent work.
 
 ## Configuration
 
-### Calendar Config (`~/Desktop/Valor/calendar_config.json`)
+### Calendar Config (`~/Desktop/claude_code/calendar_config.json`)
 
 ```json
 {
@@ -82,8 +82,8 @@ Slugs not in the config fall back to the `default` entry (or `primary` if no def
 
 ### OAuth Credentials
 
-- Credentials: `~/Desktop/Valor/google_credentials.json` (from Google Cloud Console)
-- Token: `~/Desktop/Valor/google_token.json` (auto-generated on first run)
+- Credentials: `~/Desktop/claude_code/google_credentials.json` (from Google Cloud Console)
+- Token: `~/Desktop/claude_code/google_token.json` (auto-generated on first run)
 - Scopes: `https://www.googleapis.com/auth/calendar`
 
 ## Setup & Validation

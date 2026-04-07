@@ -63,11 +63,9 @@ if [ ! -f ".env" ]; then
     exit 1
 fi
 
-PROJECTS_JSON="${PROJECTS_CONFIG_PATH:-$HOME/Desktop/Valor/projects.json}"
-if [ ! -f "$PROJECTS_JSON" ]; then
-    echo "ERROR: projects.json not found at $PROJECTS_JSON"
-    echo "  mkdir -p ~/Desktop/Valor"
-    echo "  cp config/projects.example.json ~/Desktop/Valor/projects.json"
+if [ ! -f "config/projects.json" ]; then
+    echo "ERROR: config/projects.json not found."
+    echo "  cp config/projects.json.example config/projects.json"
     echo "  # Then edit with your project settings"
     exit 1
 fi

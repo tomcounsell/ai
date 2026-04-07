@@ -522,9 +522,9 @@ class TestStageToSkillMapping:
         assert "REVIEW" in STAGE_TO_SKILL
         assert "DOCS" in STAGE_TO_SKILL
 
-    def test_issue_stage_is_mapped(self):
-        """ISSUE stage is mapped to /do-issue in pipeline_graph."""
-        assert STAGE_TO_SKILL["ISSUE"] == "/do-issue"
+    def test_issue_stage_not_mapped(self):
+        """ISSUE stage has no corresponding skill (it's a manual step)."""
+        assert "ISSUE" not in STAGE_TO_SKILL
 
     def test_skill_names_are_correct(self):
         """Skill names match the actual /do-* commands."""

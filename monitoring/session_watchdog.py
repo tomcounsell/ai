@@ -42,9 +42,6 @@ ABANDON_THRESHOLD = 1800  # 30 minutes silent = auto-abandon
 STALL_THRESHOLD_PENDING = 300  # 5 minutes
 STALL_THRESHOLD_RUNNING = 2700  # 45 minutes
 # STALL_TIMEOUT_SECONDS env var overrides the default active session stall threshold
-# Note: activity-based stall detection (SDK_INACTIVITY_TIMEOUT_SECONDS in sdk_client.py)
-# takes precedence for sessions with activity tracking. This threshold is a fallback
-# for sessions without activity data.
 STALL_THRESHOLD_ACTIVE = int(os.environ.get("STALL_TIMEOUT_SECONDS", 600))  # 10 min default
 
 STALL_THRESHOLDS = {
@@ -180,9 +177,6 @@ async def check_all_sessions() -> None:
             # on it every cycle. See docs/features/coaching-loop.md "Related Guards".
             try:
                 session.status = "failed"
-                # Capture exception details so the reflections system can produce
-                # actionable bug reports instead of "empty error summary" issues.
-                session.summary = f"Watchdog: {type(e).__name__}: {e}"[:500]
                 session.save()
                 logger.warning(
                     "[watchdog] Marked stale session %s as failed (%s)",
@@ -260,20 +254,6 @@ def check_stalled_sessions() -> list[dict]:
                 # For active sessions, use last_activity as reference
                 if status_val == "active":
                     last_activity = session.last_activity
-
-                    # Also check in-memory activity tracking from sdk_client,
-                    # which is updated on every tool call and log output.
-                    # Use whichever timestamp is more recent.
-                    try:
-                        from agent.sdk_client import get_session_last_activity
-
-                        inmem_activity = get_session_last_activity(session_id)
-                        if inmem_activity is not None:
-                            if last_activity is None or inmem_activity > last_activity:
-                                last_activity = inmem_activity
-                    except ImportError:
-                        pass
-
                     if last_activity is not None:
                         # If last_activity is recent, session is not stalled
                         activity_age = now - last_activity
@@ -342,16 +322,11 @@ def check_stalled_sessions() -> list[dict]:
 
 
 async def _recover_stalled_pending(stalled: list[dict]) -> None:
-    """Recover stalled pending sessions by killing stuck workers and retrying.
+    """Recover stalled pending sessions by ensuring a worker exists.
 
-    When a pending session is stalled, the worker may be alive but stuck
-    processing a different job. Simply calling _ensure_worker() is a no-op
-    in that case. Instead, we kill the stuck worker, apply exponential backoff,
-    and re-enqueue the session for retry. After STALL_MAX_RETRIES exhausted,
-    the session is abandoned with a Telegram notification.
-
-    This mirrors the recovery logic in fix_unhealthy_session() for active
-    sessions but applies it to the pending stall path.
+    When a pending session is stalled, the most likely cause is that the worker
+    exited before picking up the continuation (Race 2 in issue #342). The fix
+    is to call _ensure_worker() which starts a new worker if none is running.
 
     For non-pending stalled sessions, this function is a no-op — those are
     handled by fix_unhealthy_session() in check_all_sessions().
@@ -359,23 +334,17 @@ async def _recover_stalled_pending(stalled: list[dict]) -> None:
     Args:
         stalled: List of stalled session dicts from check_stalled_sessions().
     """
+    from agent.job_queue import _ensure_worker
+
     pending_stalls = [s for s in stalled if s["status"] == "pending"]
     if not pending_stalls:
         return
-
-    # Threshold for orphan push-* sessions with no history (1 hour)
-    orphan_push_threshold = 3600
 
     for stall_info in pending_stalls:
         project_key = stall_info.get("project_key", "?")
         session_id = stall_info.get("session_id", "unknown")
 
-        # Coerce project_key to plain string for safe dict lookups
-        # (push-* sessions may have plain string project_key instead of DB_key)
-        if project_key is not None and project_key != "?":
-            project_key = str(project_key)
-
-        if not project_key or project_key == "?":
+        if project_key == "?":
             logger.warning(
                 "[watchdog] Cannot recover stalled pending session %s — no project_key available",
                 session_id,
@@ -383,94 +352,18 @@ async def _recover_stalled_pending(stalled: list[dict]) -> None:
             continue
 
         try:
-            # Load full session from Redis to check retry state
-            session = AgentSession.query.get(session_id)
-            if session is None:
-                logger.warning(
-                    "[watchdog] Stalled pending session %s no longer exists in Redis — skipping",
-                    session_id,
-                )
-                continue
-
-            # Guard: if session status changed since stall detection, skip recovery
-            current_status = getattr(session, "status", None)
-            if current_status and current_status != "pending":
-                logger.info(
-                    "[watchdog] Session %s status changed to %s since stall detection — skipping",
-                    session_id,
-                    current_status,
-                )
-                continue
-
-            # Orphan push-* cleanup: sessions stuck >1 hour with no history
-            duration = stall_info.get("duration", 0)
-            last_history = stall_info.get("last_history", "no history")
-            if (
-                session_id.startswith("push-")
-                and duration > orphan_push_threshold
-                and last_history == "no history"
-            ):
-                saved = _safe_abandon_session(
-                    session,
-                    f"watchdog: orphan push-* session stuck for {duration:.0f}s with no history",
-                )
-                logger.warning(
-                    "[watchdog] Abandoned orphan push-* session %s (stuck %ds, saved=%s)",
-                    session_id,
-                    int(duration),
-                    saved,
-                )
-                await _notify_stall_failure(
-                    session,
-                    f"orphan push-* session stuck for {int(duration)}s with no history",
-                )
-                continue
-
-            retry_count = int(session.retry_count or 0)
-            stall_reason = (
-                f"pending stall: session {session_id} stuck for "
-                f"{stall_info.get('duration', 0):.0f}s (project={project_key})"
+            _ensure_worker(project_key)
+            logger.info(
+                "[watchdog] Ensured worker exists for stalled pending session %s "
+                "(project=%s, stalled %.0fs)",
+                session_id,
+                project_key,
+                stall_info.get("duration", 0),
             )
-
-            if retry_count < STALL_MAX_RETRIES:
-                # Kill the stuck worker, backoff, then re-enqueue
-                killed = await _kill_stalled_worker(project_key)
-                backoff = _compute_stall_backoff(retry_count)
-                logger.info(
-                    "[watchdog] Pending stall recovery for session %s: "
-                    "killed=%s, backoff=%.0fs, retry %d/%d",
-                    session_id,
-                    killed,
-                    backoff,
-                    retry_count + 1,
-                    STALL_MAX_RETRIES,
-                )
-                await asyncio.sleep(backoff)
-                retried = await _enqueue_stall_retry(session, stall_reason)
-                if not retried:
-                    logger.error(
-                        "[watchdog] Failed to re-enqueue stalled pending session %s",
-                        session_id,
-                    )
-            else:
-                # Retries exhausted — abandon and notify
-                saved = _safe_abandon_session(
-                    session,
-                    f"watchdog: {stall_reason} (retries exhausted)",
-                )
-                logger.warning(
-                    "[watchdog] Abandoned stalled pending session %s after %d/%d retries "
-                    "(saved=%s)",
-                    session_id,
-                    retry_count,
-                    STALL_MAX_RETRIES,
-                    saved,
-                )
-                await _notify_stall_failure(session, stall_reason)
-
         except Exception as e:
             logger.error(
-                "[watchdog] Failed to recover stalled pending session %s (project=%s): %s",
+                "[watchdog] Failed to ensure worker for stalled pending session %s "
+                "(project=%s): %s",
                 session_id,
                 project_key,
                 e,
@@ -754,36 +647,19 @@ def _compute_stall_backoff(retry_count: int) -> float:
     return min(delay, STALL_BACKOFF_MAX)
 
 
-async def _kill_stalled_worker(project_key: str | Any) -> bool:
-    """Kill the worker task and its subprocess for a stalled session's project.
+async def _kill_stalled_worker(project_key: str) -> bool:
+    """Kill the worker task for a stalled session's project.
 
-    Cancels the asyncio task from _active_workers AND kills the underlying
-    Claude Code CLI subprocess. The asyncio cancel alone is insufficient
-    because the subprocess can survive task cancellation.
+    Cancels the asyncio task from _active_workers, which should terminate
+    the SDK subprocess. Waits briefly for cleanup.
 
     Args:
         project_key: The project key whose worker should be killed.
-            May be a plain string, a Popoto DB_key object, or None.
-            Coerced to str() for safe dict lookups.
 
     Returns:
         True if a worker was found and cancelled, False otherwise.
     """
-    import signal as _signal
-    import subprocess as _subprocess
-
     from agent.job_queue import _active_workers
-    from agent.sdk_client import _active_clients
-
-    # Guard: handle None, empty string, and non-string project_key values
-    if project_key is None:
-        logger.info("[stall-retry] Cannot kill worker: project_key is None")
-        return False
-    # Coerce to plain string to avoid AttributeError on Popoto DB_key objects
-    project_key = str(project_key)
-    if not project_key or project_key == "?":
-        logger.info("[stall-retry] Cannot kill worker: project_key is empty or unknown")
-        return False
 
     worker = _active_workers.get(project_key)
     if worker is None or worker.done():
@@ -793,69 +669,7 @@ async def _kill_stalled_worker(project_key: str | Any) -> bool:
         )
         return False
 
-    # First, kill any SDK subprocess associated with this project's sessions
-    # by finding active clients and terminating their transport processes
-    killed_pids = []
-    for sid, client in list(_active_clients.items()):
-        try:
-            transport = getattr(client, "_transport", None)
-            if transport is None:
-                continue
-            proc = getattr(transport, "_process", None)
-            if proc is None or proc.returncode is not None:
-                continue
-            pid = proc.pid
-            logger.info(
-                "[stall-retry] Killing SDK subprocess PID %d for session %s",
-                pid,
-                sid,
-            )
-            proc.terminate()
-            # Give it 3 seconds to exit gracefully
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=3.0)
-            except TimeoutError:
-                logger.warning(
-                    "[stall-retry] Subprocess PID %d didn't exit, sending SIGKILL",
-                    pid,
-                )
-                proc.kill()
-            killed_pids.append(pid)
-        except Exception as e:
-            logger.debug("[stall-retry] Error killing subprocess for %s: %s", sid, e)
-
-    # Also scan for orphaned claude processes owned by this bridge
-    try:
-        result = _subprocess.run(
-            ["pgrep", "-P", str(os.getpid()), "-f", "claude_agent_sdk/_bundled/claude"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            for pid_str in result.stdout.strip().split("\n"):
-                try:
-                    pid = int(pid_str.strip())
-                    if pid not in killed_pids:
-                        logger.info("[stall-retry] Killing orphaned child Claude PID %d", pid)
-                        os.kill(pid, _signal.SIGTERM)
-                        await asyncio.sleep(1)
-                        try:
-                            os.kill(pid, 0)
-                            os.kill(pid, _signal.SIGKILL)
-                        except ProcessLookupError:
-                            pass
-                        killed_pids.append(pid)
-                except (ValueError, ProcessLookupError, PermissionError):
-                    pass
-    except Exception:
-        pass  # Best-effort
-
-    logger.info(
-        "[stall-retry] Cancelling worker task for project %s (killed %d subprocess(es))",
-        project_key,
-        len(killed_pids),
-    )
+    logger.info("[stall-retry] Cancelling worker task for project %s", project_key)
     worker.cancel()
 
     # Wait briefly for the task to clean up
@@ -1024,9 +838,6 @@ async def fix_unhealthy_session(session: AgentSession, assessment: dict[str, Any
     # Get current retry count (treat None as 0 for legacy sessions)
     retry_count = int(session.retry_count or 0)
 
-    # Coerce project_key to str for safe use in dict lookups
-    project_key = str(getattr(session, "project_key", "?"))
-
     # Most common case: session is stuck/silent
     if silence_duration > ABANDON_THRESHOLD:
         stall_reason = f"silent for {int(silence_duration / 60)}min"
@@ -1034,7 +845,7 @@ async def fix_unhealthy_session(session: AgentSession, assessment: dict[str, Any
         # Attempt retry if retries remain
         if retry_count < STALL_MAX_RETRIES:
             # Kill the stalled worker before retrying
-            await _kill_stalled_worker(project_key)
+            await _kill_stalled_worker(session.project_key)
 
             # Compute and wait for backoff
             backoff = _compute_stall_backoff(retry_count)
@@ -1074,7 +885,7 @@ async def fix_unhealthy_session(session: AgentSession, assessment: dict[str, Any
 
         # Attempt retry if retries remain
         if retry_count < STALL_MAX_RETRIES:
-            await _kill_stalled_worker(project_key)
+            await _kill_stalled_worker(session.project_key)
             backoff = _compute_stall_backoff(retry_count)
             logger.info(
                 "[stall-retry] Backing off %.1fs before retry %d/%d for session %s",

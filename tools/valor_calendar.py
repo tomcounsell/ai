@@ -3,7 +3,7 @@
 Usage: valor-calendar [--project PROJECT] <session-slug>
 
 Routes to the correct Google Calendar by project name using
-config/calendar_config.json. Falls back to "default" calendar
+~/Desktop/claude_code/calendar_config.json. Falls back to "default" calendar
 when no project is specified or no mapping exists.
 Creates or extends events using 30-minute segment rounding.
 Falls back to offline queue on auth failure.
@@ -16,13 +16,10 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from config.paths import DATA_DIR
-
-# Calendar config lives in ~/Desktop/Valor/, queue/cache in data/
-CALENDAR_CONFIG_PATH = Path.home() / "Desktop" / "Valor" / "calendar_config.json"
-
-QUEUE_PATH = DATA_DIR / "calendar_queue.jsonl"
-EVENT_ID_CACHE_PATH = DATA_DIR / "calendar_event_ids.json"
+CONFIG_DIR = Path.home() / "Desktop" / "claude_code"
+CALENDAR_CONFIG_PATH = CONFIG_DIR / "calendar_config.json"
+QUEUE_PATH = CONFIG_DIR / "calendar_queue.jsonl"
+EVENT_ID_CACHE_PATH = CONFIG_DIR / "calendar_event_ids.json"
 
 
 def load_calendar_config() -> dict:
@@ -32,16 +29,14 @@ def load_calendar_config() -> dict:
     return json.loads(CALENDAR_CONFIG_PATH.read_text())
 
 
-def get_calendar_id(project: str | None, config: dict) -> str | None:
-    """Resolve a project name to a Google Calendar ID.
-
-    Returns None if the project has no calendar mapping — callers should
-    skip event creation rather than falling back to a default calendar.
-    """
+def get_calendar_id(project: str | None, config: dict) -> str:
+    """Resolve a project name to a Google Calendar ID."""
     calendars = config.get("calendars", {})
     if project:
-        return calendars.get(project)
-    return None
+        cal_id = calendars.get(project)
+        if cal_id:
+            return cal_id
+    return calendars.get("default", "primary")
 
 
 def round_down_30(dt: datetime) -> datetime:
@@ -201,9 +196,6 @@ def replay_queue(service, config: dict, now: datetime) -> int:
         slug = entry["slug"]
         project = entry.get("project")
         calendar_id = get_calendar_id(project, config)
-        if not calendar_id:
-            skipped += 1
-            continue
         process_calendar_event(service, calendar_id, slug, entry_time)
         replayed += 1
 
@@ -263,9 +255,12 @@ def main() -> None:
     now = datetime.now().astimezone()
     config = load_calendar_config()
     calendar_id = get_calendar_id(project, config)
-    if not calendar_id:
-        print(f"No calendar mapping for project '{project}'. Skipping.")
-        sys.exit(0)
+
+    # When using the default calendar, prepend project name so events are
+    # distinguishable across projects sharing the same calendar.
+    default_id = config.get("calendars", {}).get("default", "primary")
+    if project and calendar_id == default_id:
+        slug = f"{project}: {slug}"
 
     try:
         from tools.google_workspace.auth import get_service

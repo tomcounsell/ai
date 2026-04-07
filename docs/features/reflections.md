@@ -1,87 +1,12 @@
 # Reflections: Autonomous Maintenance System
 
-The reflections system is a unified framework for all recurring non-issue work. A single lightweight scheduler (`agent/reflection_scheduler.py`) reads from a declarative registry (`config/reflections.yaml`), tracks state in Redis, and executes reflections on schedule. This replaces the previously scattered scheduling mechanisms (launchd plists, asyncio loops, startup hooks).
+The reflections system is an autonomous daily maintenance and self-reflection process. It runs every morning at 6 AM Pacific via macOS launchd, performing cleanup, analysis, reflection, and reporting through 17 sequential steps. All persistence is Redis-backed via Popoto models.
 
-## Unified Reflection Scheduler
+## How It Works
 
-All recurring tasks are declared in `config/reflections.yaml` and managed by a single scheduler that runs as an asyncio task inside the bridge worker loop.
+The runner (`scripts/reflections.py`) loads state from Redis, executes each step in order, and checkpoints after every step. If interrupted, the next run resumes from where it left off. Each step is independently failable — a crash in one step does not block the rest.
 
-### Architecture
-
-```
-Bridge startup
-  -> ReflectionScheduler.start()
-    -> Tick every 60 seconds
-      -> For each reflection in registry:
-        -> Check if due (last_run + interval < now)
-        -> Check skip-if-running guard
-        -> Execute: function (direct callable) or agent (subprocess)
-        -> Update state in Redis (Reflection model)
-```
-
-### Registry Format (`config/reflections.yaml`)
-
-```yaml
-reflections:
-  - name: health-check
-    description: "Check running jobs for liveness and timeout"
-    interval: 300       # 5 minutes
-    priority: high
-    execution_type: function
-    callable: "agent.job_queue._job_health_check"
-    enabled: true
-```
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `name` | string | Unique identifier (used as Redis key) |
-| `interval` | int | Seconds between runs |
-| `priority` | string | `urgent`, `high`, `normal`, or `low` |
-| `execution_type` | string | `function` (direct callable) or `agent` (subprocess) |
-| `callable` | string | Dotted Python path (for function type) |
-| `command` | string | Shell command (for agent type) |
-| `enabled` | bool | Whether this reflection is active (default: true) |
-
-### Registered Reflections
-
-| Name | Interval | Priority | Type | Description |
-|------|----------|----------|------|-------------|
-| `health-check` | 5 min | high | function | Check running jobs for liveness, recover stuck ones |
-| `orphan-recovery` | 30 min | normal | function | Recover stranded AgentSession objects |
-| `stale-branch-cleanup` | daily | low | function | Clean up session branches older than 72 hours |
-| `daily-maintenance` | daily | low | function | Full 16-step maintenance pipeline |
-
-### State Model (`models/reflection.py`)
-
-Each reflection gets a `Reflection` record in Redis tracking execution state:
-
-| Field | Type | Purpose |
-|-------|------|---------|
-| `name` | KeyField | Unique identifier matching registry |
-| `last_run` | Field(float) | Unix timestamp of last execution start |
-| `next_due` | Field(float) | Unix timestamp when next scheduled |
-| `run_count` | IntField | Total number of executions |
-| `last_status` | Field | `pending`, `running`, `success`, `error`, `skipped` |
-| `last_error` | Field | Error message from last failure |
-| `last_duration` | Field(float) | Duration of last run in seconds |
-
-### Skip-if-Running Guard
-
-Before enqueuing a reflection, the scheduler checks if it's already running. If a reflection with the same name has `last_status == "running"`, it's skipped. If a reflection has been running for more than 2x its interval, it's considered stuck and reset to `error` status.
-
-### Observability
-
-Reflection status is available via `ReflectionScheduler.format_status()`, showing each reflection's state, time until next run, last duration, and run count. This can be wired to `/queue-status` for Telegram visibility.
-
-### Bridge Watchdog (External)
-
-The bridge watchdog (`com.valor.bridge-watchdog`) is intentionally NOT in the reflection registry. It must run as an external launchd service because it monitors the bridge process itself -- running it inside the process it monitors defeats its purpose.
-
-## Daily Maintenance Pipeline (16-Step)
-
-The `daily-maintenance` reflection runs the full pipeline from `scripts/reflections.py`. The runner loads state from Redis, executes each step in order, and checkpoints after every step. If interrupted, the next run resumes from where it left off. Each step is independently failable — a crash in one step does not block the rest.
-
-### 16-Step Pipeline
+### 17-Step Pipeline
 
 | Step | Name | Description | Scope | Failure Mode |
 |------|------|-------------|-------|--------------|
@@ -96,11 +21,12 @@ The `daily-maintenance` reflection runs the full pipeline from `scripts/reflecti
 | 9 | Report Generation | Writes local markdown report to `logs/reflections/report_YYYY-MM-DD.md` | AI repo only | Non-blocking |
 | 10 | GitHub Issue Creation | Posts daily digest issue per project via `gh` CLI; posts summary to Telegram | Per-project | Non-blocking, requires `gh` auth |
 | 11 | Skills Audit | Validates all SKILL.md files against template standards (see [Skills Audit](do-skills-audit.md)) | AI repo only | Non-blocking |
-| 12 | Redis TTL Cleanup | Prunes expired records across all Redis models | AI repo only | Non-blocking |
+| 12 | Redis TTL Cleanup | Prunes expired records across all Redis models (including CyclicEpisode 180d, ProceduralPattern 365d) | AI repo only | Non-blocking |
 | 13 | Redis Data Quality | Surfaces data quality issues: unsummarized links, dead channels, error patterns | AI repo only | Non-blocking |
 | 14 | Branch and Plan Cleanup | Deletes merged branches; ensures plans have open issues; flags completed plans for docs migration | AI repo only | Non-blocking, requires `gh` auth |
-| 15 | Feature Docs Audit | Checks for stale references, README accuracy, plan-masquerading-as-feature, stub docs | AI repo only | Non-blocking |
-| 16 | Disk Space Check | Checks free disk space on project volume; finding if below 10 GB (see [Adding Reflection Tasks](adding-reflection-tasks.md)) | AI repo only | Non-blocking |
+| 15 | Feature Docs Audit | Validates feature documentation: stale references, README.md accuracy, plan-masquerading-as-feature | AI repo only | Non-blocking |
+| 16 | Episode Cycle-Close | Creates CyclicEpisode records from completed SDLC sessions (past 24h); classifies fingerprints via Haiku (see [Behavioral Episode Memory](behavioral-episode-memory.md)) | AI repo only | Non-blocking, requires `ANTHROPIC_API_KEY` |
+| 17 | Pattern Crystallization | Scans episodes for fingerprint clusters with 3+ members; creates/reinforces ProceduralPatterns in shared namespace (see [Behavioral Episode Memory](behavioral-episode-memory.md)) | AI repo only | Non-blocking |
 
 ## State & Persistence
 
@@ -113,7 +39,7 @@ One record per calendar date. Acts as the primary state checkpoint for resumabil
 | Field | Type | Purpose |
 |-------|------|---------|
 | `date` | UniqueKeyField | YYYY-MM-DD, one run per day |
-| `current_step` | IntField | Next step to execute (1-16) |
+| `current_step` | IntField | Next step to execute (1-14) |
 | `completed_steps` | ListField | Steps already finished, e.g. `[1, 2, 3]` |
 | `daily_report` | ListField | Human-readable log lines per step |
 | `findings` | DictField | `{category: [finding_strings]}` |
@@ -229,14 +155,14 @@ python scripts/reflections.py --ignore "pattern text here" --reason "Intentional
 
 ## Multi-Repo Support
 
-Reflections reads `~/Desktop/Valor/projects.json`, filters to repos present on the current machine via `load_local_projects()`, and runs per-project analysis. A machine with only `ai` checked out analyzes only `ai`; a machine with four repos analyzes all four.
+Reflections reads `config/projects.json`, filters to repos present on the current machine via `load_local_projects()`, and runs per-project analysis. A machine with only `ai` checked out analyzes only `ai`; a machine with four repos analyzes all four.
 
 **Per-project steps**: 2 (Log Review), 4 (Task Cleanup), 11 (GitHub Issues + Telegram)
 **AI-only steps**: Everything else runs once from the AI repo root
 
 ### Configuration
 
-Each project entry in `~/Desktop/Valor/projects.json`:
+Each project entry in `config/projects.json`:
 
 ```json
 {
@@ -322,42 +248,35 @@ Prunes expired records to keep Redis lean:
 
 ### Scheduling
 
-The reflection scheduler starts automatically as part of the bridge worker loop. No separate launchd plist is needed for scheduling -- the scheduler ticks every 60 seconds and checks which reflections are due.
-
 | Component | Detail |
 |-----------|--------|
-| Scheduler | `agent/reflection_scheduler.py` (asyncio task in bridge) |
-| Registry | `config/reflections.yaml` |
-| State | Redis via `models/reflection.py` |
-| Tick interval | 60 seconds |
-| Legacy plist | `com.valor.reflections.plist` (deprecated, bridge scheduler replaces it) |
+| Plist | `com.valor.reflections.plist` |
+| Schedule | Daily at 6:00 AM Pacific |
+| Location | `~/Library/LaunchAgents/com.valor.reflections.plist` |
+| Stdout | `logs/reflections.log` |
+| Stderr | `logs/reflections_error.log` |
+| Environment | Sources `.env` before execution (all API keys available) |
 
-### Adding a New Reflection
+Install: `./scripts/install_reflections.sh`
 
-Add an entry to `config/reflections.yaml`:
-
-```yaml
-  - name: my-new-task
-    description: "What this task does"
-    interval: 3600  # every hour
-    priority: low
-    execution_type: function
-    callable: "my_module.my_function"
-    enabled: true
+Reload after changes:
+```bash
+launchctl bootout gui/$(id -u)/com.valor.reflections
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.valor.reflections.plist
 ```
-
-The scheduler picks it up on the next tick. No code changes or service restarts required (the registry is read at scheduler startup; restart bridge to pick up new entries).
 
 ### Quick Commands
 
 | Command | Description |
 |---------|-------------|
-| `python scripts/reflections.py` | Run daily maintenance manually |
-| `python scripts/reflections.py --dry-run` | Run without side effects |
+| `python scripts/reflections.py` | Run all 14 steps manually |
+| `python scripts/reflections.py --dry-run` | Run without side effects (no PRs, no Telegram) |
 | `python scripts/reflections.py --ignore "pattern"` | Suppress auto-fix for pattern for 14 days |
 | `python scripts/reflections.py --ignore "pattern" --reason "why"` | Suppress with reason |
-| `tail -f logs/bridge.log` | Stream bridge logs (includes reflection scheduler output) |
+| `./scripts/install_reflections.sh` | Install/update launchd schedule |
+| `tail -f logs/reflections.log` | Stream reflections logs |
 | `python -c "from models.reflections import ReflectionIgnore; [print(f'{e.pattern} (expires {e.expires_at})') for e in ReflectionIgnore.get_active()]"` | View active ignore entries |
+| `launchctl list \| grep reflections` | Check launchd status |
 
 ### Output Locations
 
@@ -370,28 +289,31 @@ The scheduler picks it up on the next tick. No code changes or service restarts 
 
 | File | Purpose |
 |------|---------|
-| `agent/reflection_scheduler.py` | Unified scheduler: registry loader, schedule evaluator, executor |
-| `config/reflections.yaml` | Declarative registry of all reflections |
-| `models/reflection.py` | Reflection state model (per-reflection Redis tracking) |
-| `models/reflections.py` | Legacy models (ReflectionRun for daily pipeline, ReflectionIgnore) |
-| `scripts/reflections.py` | Daily maintenance 15-step runner |
+| `scripts/reflections.py` | Main 14-step runner |
 | `scripts/reflections_report.py` | GitHub issue creation module |
-| `scripts/install_reflections.sh` | launchd installation script (legacy, kept for migration) |
-| `com.valor.reflections.plist` | launchd schedule definition (legacy, kept for migration) |
-| `~/Desktop/Valor/projects.json` | Multi-repo project registry |
+| `models/reflections.py` | Redis models (ReflectionRun, ReflectionIgnore) |
+| `scripts/install_reflections.sh` | launchd installation script |
+| `com.valor.reflections.plist` | Schedule definition |
+| `config/projects.json` | Multi-repo project registry |
 | `logs/reflections/` | Local report output directory |
-| `tests/unit/test_reflection_scheduler.py` | Scheduler and registry tests |
+| `tests/test_reflections.py` | Core reflections tests |
+| `tests/test_reflections_scheduling.py` | Scheduling tests |
+| `tests/test_reflections_multi_repo.py` | Multi-repo tests |
+| `tests/test_reflections_report.py` | Report generation tests |
+| `tests/test_reflections_redis.py` | Redis model tests |
 
 ## Dependencies
 
 | Dependency | Used By | Required |
 |------------|---------|----------|
-| Redis (Popoto ORM) | All reflections | Yes — state persistence |
-| PyYAML | Registry loader | Yes — reads `config/reflections.yaml` |
-| `ANTHROPIC_API_KEY` | Daily maintenance steps 5, 7 | Conditional — LLM reflection and docs audit |
-| `gh` CLI (authenticated) | Daily maintenance steps 4, 8, 10, 14 | Conditional — task cleanup, bug issues |
-| `telethon` | Daily maintenance step 10 | Conditional — Telegram notifications |
-| `~/Desktop/Valor/projects.json` | Multi-repo reflections | Optional — defaults to AI repo only |
+| Redis (Popoto ORM) | All steps | Yes — all state persistence |
+| `ANTHROPIC_API_KEY` | Steps 5, 7 | Conditional — LLM reflection and docs audit |
+| `gh` CLI (authenticated) | Steps 4, 8, 10, 14 | Conditional — task cleanup, bug issues, daily issues, plan checks |
+| `telethon` | Step 10 | Conditional — Telegram notifications |
+| `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` | Step 10 | Conditional — Telegram auth |
+| `data/valor.session` | Step 10 | Conditional — Telegram session file |
+| `REFLECTIONS_AUTO_FIX_ENABLED` | Step 8 | Env var, default `true` |
+| `config/projects.json` | Multi-repo | Optional — defaults to AI repo only |
 
 ## Troubleshooting
 

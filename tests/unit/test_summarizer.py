@@ -622,63 +622,6 @@ class TestClassifyWithHeuristics:
         assert result.output_type == OutputType.QUESTION
 
 
-class TestEmptyPromiseDetection:
-    """Tests for empty promise detection in heuristic classifier."""
-
-    def test_bare_acknowledgment_is_empty_promise(self):
-        """'Got it' + commitment without evidence = empty promise."""
-        result = _classify_with_heuristics("Got it. Will report final results and blockers only.")
-        assert result.output_type == OutputType.STATUS_UPDATE
-        assert result.coaching_message is not None
-        assert (
-            "empty" in result.coaching_message.lower()
-            or "evidence" in result.coaching_message.lower()
-        )
-
-    def test_understood_without_evidence_is_empty_promise(self):
-        """'Understood' without a concrete change = empty promise."""
-        result = _classify_with_heuristics(
-            "Understood. I'll adjust my communication style going forward."
-        )
-        assert result.output_type == OutputType.STATUS_UPDATE
-        assert result.coaching_message is not None
-
-    def test_noted_without_evidence_is_empty_promise(self):
-        """'Noted' with a vague commitment = empty promise."""
-        result = _classify_with_heuristics("Noted. You'll see the difference in my next output.")
-        assert result.output_type == OutputType.STATUS_UPDATE
-        assert result.coaching_message is not None
-
-    def test_acknowledgment_with_commit_is_not_empty(self):
-        """Acknowledgment WITH a commit hash = real action, not empty."""
-        result = _classify_with_heuristics(
-            "Got it. Updated the summarizer prompt. Committed abc1234."
-        )
-        # Should be classified as completion (has commit evidence)
-        assert result.output_type == OutputType.COMPLETION
-
-    def test_acknowledgment_with_file_path_is_not_empty(self):
-        """Acknowledgment WITH a file edit = real action, not empty."""
-        result = _classify_with_heuristics(
-            "Understood. Saved memory to feedback_no_plans.md with this rule."
-        )
-        assert result.output_type != OutputType.STATUS_UPDATE or result.coaching_message is None
-
-    def test_normal_status_not_flagged(self):
-        """Regular status updates should not trigger empty promise detection."""
-        result = _classify_with_heuristics("Running tests now, found 3 issues so far.")
-        assert (
-            result.coaching_message is None
-            or "empty" not in (result.coaching_message or "").lower()
-        )
-
-    def test_will_do_without_evidence(self):
-        """'Will do' without proof = empty promise."""
-        result = _classify_with_heuristics("Will do. I'll change my approach from now on.")
-        assert result.output_type == OutputType.STATUS_UPDATE
-        assert result.coaching_message is not None
-
-
 class TestApplyHeuristicConfidenceGate:
     """Tests for _apply_heuristic_confidence_gate."""
 
@@ -1081,7 +1024,7 @@ class TestNoMessageEcho:
         ]
         session.message_text = "continue"
         session.status = "running"
-        session.is_sdlc = True
+        session.is_sdlc_job.return_value = True
 
         result = _compose_structured_summary(
             "• Built the bypass\n• Tests passing", session=session, is_completion=True
@@ -1213,7 +1156,6 @@ class TestRenderStageProgress:
             "TEST": "completed",
             "REVIEW": "completed",
             "DOCS": "completed",
-            "MERGE": "completed",
         }
         session.get_links.return_value = {}
         result = _render_stage_progress(session)
@@ -1222,7 +1164,6 @@ class TestRenderStageProgress:
         assert "▶" not in result  # No in-progress stages
         assert "☑ PLAN" in result
         assert "☑ DOCS" in result
-        assert "☑ MERGE" in result
 
     def test_issue_number_embedded_in_label(self):
         """ISSUE stage shows the issue number when available in session links."""
@@ -1419,11 +1360,11 @@ class TestSummarizationBypass:
         from unittest.mock import MagicMock
 
         session = MagicMock()
-        session.is_sdlc = False
+        session.is_sdlc_job.return_value = False
 
         # Simulate the bypass logic from response.py
         text = "Update complete. 3 packages updated."
-        is_sdlc = hasattr(session, "is_sdlc") and session.is_sdlc
+        is_sdlc = hasattr(session, "is_sdlc_job") and session.is_sdlc_job()
         should_summarize = text and (is_sdlc or len(text) >= 500)
 
         assert not should_summarize
@@ -1436,10 +1377,10 @@ class TestSummarizationBypass:
         from unittest.mock import MagicMock
 
         session = MagicMock()
-        session.is_sdlc = True
+        session.is_sdlc_job.return_value = True
 
         text = "Done."
-        is_sdlc = hasattr(session, "is_sdlc") and session.is_sdlc
+        is_sdlc = hasattr(session, "is_sdlc_job") and session.is_sdlc_job()
         should_summarize = text and (is_sdlc or len(text) >= 500)
 
         assert should_summarize
@@ -1451,10 +1392,10 @@ class TestSummarizationBypass:
         from unittest.mock import MagicMock
 
         session = MagicMock()
-        session.is_sdlc = False
+        session.is_sdlc_job.return_value = False
 
         text = "x" * 600
-        is_sdlc = hasattr(session, "is_sdlc") and session.is_sdlc
+        is_sdlc = hasattr(session, "is_sdlc_job") and session.is_sdlc_job()
         should_summarize = text and (is_sdlc or len(text) >= 500)
 
         assert should_summarize
@@ -1466,7 +1407,7 @@ class TestSummarizationBypass:
         """When session is None, the bypass uses length threshold only."""
         session = None
         text = "Short reply."
-        is_sdlc = session and hasattr(session, "is_sdlc") and session.is_sdlc
+        is_sdlc = session and hasattr(session, "is_sdlc_job") and session.is_sdlc_job()
         should_summarize = text and (is_sdlc or len(text) >= 500)
 
         assert not should_summarize
@@ -1477,10 +1418,10 @@ class TestSummarizationBypass:
         from unittest.mock import MagicMock
 
         session = MagicMock()
-        session.is_sdlc = True
+        session.is_sdlc_job.return_value = True
 
         text = ""
-        is_sdlc = session and hasattr(session, "is_sdlc") and session.is_sdlc
+        is_sdlc = session and hasattr(session, "is_sdlc_job") and session.is_sdlc_job()
         should_summarize = text and (is_sdlc or len(text) >= 500)
 
         assert not should_summarize
@@ -1785,7 +1726,7 @@ class TestErrorStateRendering:
         ]
         session.message_text = "continue"
         session.status = "failed"
-        session.is_sdlc = True
+        session.is_sdlc_job.return_value = True
         session.session_id = "test-error-rendering"
         session.get_stage_progress.return_value = {
             "ISSUE": "completed",
@@ -1854,7 +1795,7 @@ class TestErrorStateRendering:
         session.message_text = "continue"
         session.status = "failed"
         session.session_id = "test-failed-stage"
-        session.is_sdlc = True
+        session.is_sdlc_job.return_value = True
         session.get_stage_progress.return_value = {
             "ISSUE": "completed",
             "PLAN": "completed",
@@ -1916,7 +1857,7 @@ class TestErrorStateRendering:
         session.message_text = "continue"
         session.status = "failed"
         session.session_id = "test-failed-links"
-        session.is_sdlc = True
+        session.is_sdlc_job.return_value = True
         session.get_stage_progress.return_value = {
             "ISSUE": "completed",
             "PLAN": "completed",

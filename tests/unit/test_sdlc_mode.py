@@ -15,7 +15,7 @@ from models.agent_session import AgentSession
 
 
 class TestIsSdlcJobClassificationType:
-    """is_sdlc should return True when classification_type is 'sdlc'."""
+    """is_sdlc_job() should return True when classification_type is 'sdlc'."""
 
     def test_classification_type_sdlc_returns_true(self):
         """Sessions classified as 'sdlc' should be detected as SDLC jobs."""
@@ -24,7 +24,7 @@ class TestIsSdlcJobClassificationType:
             project_key="test",
             classification_type="sdlc",
         )
-        assert session.is_sdlc is True
+        assert session.is_sdlc_job() is True
 
     def test_classification_type_none_with_no_history_returns_false(self):
         """Sessions with no classification and no history are not SDLC."""
@@ -32,7 +32,7 @@ class TestIsSdlcJobClassificationType:
             session_id="test_chat_246",
             project_key="test",
         )
-        assert session.is_sdlc is False
+        assert session.is_sdlc_job() is False
 
     def test_classification_type_chat_returns_false(self):
         """Non-SDLC classifications should not be SDLC jobs."""
@@ -41,7 +41,7 @@ class TestIsSdlcJobClassificationType:
             project_key="test",
             classification_type="chat",
         )
-        assert session.is_sdlc is False
+        assert session.is_sdlc_job() is False
 
     def test_stage_history_still_works(self):
         """Legacy path: [stage] entries in history should still trigger SDLC."""
@@ -50,7 +50,7 @@ class TestIsSdlcJobClassificationType:
             project_key="test",
             history=["[stage] PLAN in_progress"],
         )
-        assert session.is_sdlc is True
+        assert session.is_sdlc_job() is True
 
     def test_classification_takes_priority_over_empty_history(self):
         """classification_type=sdlc should work even with empty history."""
@@ -60,13 +60,13 @@ class TestIsSdlcJobClassificationType:
             classification_type="sdlc",
             history=[],
         )
-        assert session.is_sdlc is True
+        assert session.is_sdlc_job() is True
 
     def test_sdlc_mode_activated_entry(self):
-        """The SDLC_MODE activated entry should make is_sdlc return True."""
+        """The SDLC_MODE activated entry should make is_sdlc_job return True."""
         session = AgentSession(
             session_id="test_activated_246",
             project_key="test",
             history=["[user] SDLC issue 246", "[stage] SDLC_MODE activated"],
         )
-        assert session.is_sdlc is True
+        assert session.is_sdlc_job() is True

@@ -50,7 +50,7 @@ For active sessions, `last_activity` is checked first — if recent activity exi
 When a stall is detected:
 - A `LIFECYCLE_STALL` warning is logged with session ID, status, duration, and last history entry
 - The stalled session info is returned for potential alerting
-- **Pending stalls** (#342, #402): `_recover_stalled_pending()` kills the stuck worker via `_kill_stalled_worker()`, applies exponential backoff, and re-enqueues via `_enqueue_stall_retry()`. After `STALL_MAX_RETRIES` exhausted, the session is abandoned with a Telegram notification. See [stall-retry.md](stall-retry.md) for full details.
+- **Pending stalls** (#342): `_recover_stalled_pending()` calls `_ensure_worker()` to spawn a worker if none is running, recovering sessions stuck after auto-continue
 
 ### Stale Save Guard (#342)
 
@@ -97,23 +97,8 @@ Constants in `monitoring/session_watchdog.py`:
 | `monitoring/session_status.py` | CLI session status report |
 | `tests/test_lifecycle_transition.py` | Integration tests for lifecycle logging |
 | `tests/unit/test_stall_detection.py` | Unit tests for stall detection |
-| `tests/unit/test_pending_recovery.py` | Tests for stale save guard, pending recovery, and kill+retry (#342) |
+| `tests/test_session_stuck_pending.py` | Tests for stale save guard and pending recovery (#342) |
 | `tests/unit/test_session_status.py` | Unit tests for CLI report |
-
-## Error Summary Enforcement (#434)
-
-When sessions fail, the `summary` field on `AgentSession` is now populated with error context from the exception that caused the failure. This ensures the reflections system (`scripts/reflections.py`) receives actionable data instead of empty strings.
-
-**Failure paths that capture error summaries:**
-
-| Caller | Summary format | Example |
-|--------|---------------|---------|
-| `agent/sdk_client.py` crash guard | `{ExceptionType}: {message}` | `ConnectionError: Redis refused` |
-| `monitoring/session_watchdog.py` ModelException handler | `Watchdog: {ExceptionType}: {message}` | `Watchdog: ModelException: unique constraint` |
-
-**Reflections guard:** `scripts/reflections.py` skips failed sessions with empty summaries (logging a warning), preventing vague "empty error summary" issues from being auto-filed.
-
-Summaries are truncated to 500 characters at capture time. The `AgentSession.summary` field supports up to 50,000 characters, but concise one-line summaries are preferred since full tracebacks are available in `bridge.log`.
 
 ## Related
 

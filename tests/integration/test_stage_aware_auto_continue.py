@@ -26,19 +26,19 @@ from models.agent_session import AgentSession
 
 
 class TestIsSDLCJob:
-    """Tests for AgentSession.is_sdlc property."""
+    """Tests for AgentSession.is_sdlc_job()."""
 
     def test_no_history_returns_false(self):
         """Session with no history is not an SDLC job."""
         session = AgentSession()
         session.history = None
-        assert session.is_sdlc is False
+        assert session.is_sdlc_job() is False
 
     def test_empty_history_returns_false(self):
         """Session with empty history is not an SDLC job."""
         session = AgentSession()
         session.history = []
-        assert session.is_sdlc is False
+        assert session.is_sdlc_job() is False
 
     def test_non_stage_history_returns_false(self):
         """Session with only non-stage history entries is not SDLC."""
@@ -47,33 +47,33 @@ class TestIsSDLCJob:
             "[user] Hello world",
             "[system] Processing request",
         ]
-        assert session.is_sdlc is False
+        assert session.is_sdlc_job() is False
 
     def test_classification_type_sdlc_returns_true(self):
         """Session with classification_type='sdlc' is an SDLC job (primary check).
 
         This tests the fix for issue #276 Bug 1: the classifier now outputs
-        'sdlc' as a valid type, and is_sdlc uses classification_type
+        'sdlc' as a valid type, and is_sdlc_job() uses classification_type
         as the primary signal before falling back to history checks.
         """
         session = AgentSession()
         session.history = []  # No stage history
         session.classification_type = "sdlc"
-        assert session.is_sdlc is True
+        assert session.is_sdlc_job() is True
 
     def test_classification_type_feature_with_no_stages_returns_false(self):
         """Session classified as 'feature' with no stage history is not SDLC."""
         session = AgentSession()
         session.history = ["[user] Add a feature"]
         session.classification_type = "feature"
-        assert session.is_sdlc is False
+        assert session.is_sdlc_job() is False
 
     def test_classification_type_sdlc_overrides_empty_history(self):
         """classification_type='sdlc' is sufficient even with no history at all."""
         session = AgentSession()
         session.history = None
         session.classification_type = "sdlc"
-        assert session.is_sdlc is True
+        assert session.is_sdlc_job() is True
 
     def test_stage_entry_returns_true(self):
         """Session with a [stage] entry is an SDLC job (fallback check)."""
@@ -82,13 +82,13 @@ class TestIsSDLCJob:
             "[user] /sdlc 178",
             "[stage] ISSUE COMPLETED",
         ]
-        assert session.is_sdlc is True
+        assert session.is_sdlc_job() is True
 
     def test_case_insensitive_stage_detection(self):
         """Stage detection is case-insensitive."""
         session = AgentSession()
         session.history = ["[Stage] BUILD IN_PROGRESS"]
-        assert session.is_sdlc is True
+        assert session.is_sdlc_job() is True
 
     def test_mixed_history_with_stage_returns_true(self):
         """Session with mixed entries including a stage is SDLC."""
@@ -99,7 +99,7 @@ class TestIsSDLCJob:
             "[stage] PLAN COMPLETED",
             "[summary] Plan phase done",
         ]
-        assert session.is_sdlc is True
+        assert session.is_sdlc_job() is True
 
 
 class TestHasRemainingStages:
@@ -121,7 +121,6 @@ class TestHasRemainingStages:
             "[stage] TEST COMPLETED",
             "[stage] REVIEW COMPLETED",
             "[stage] DOCS COMPLETED",
-            "[stage] MERGE COMPLETED",
         ]
         assert session.has_remaining_stages() is False
 
@@ -158,7 +157,6 @@ class TestHasRemainingStages:
             "[stage] TEST FAILED",
             "[stage] REVIEW COMPLETED",
             "[stage] DOCS COMPLETED",
-            "[stage] MERGE COMPLETED",
         ]
         # TEST is failed, all others completed — no remaining (pending/in_progress)
         assert session.has_remaining_stages() is False
@@ -228,7 +226,7 @@ class TestStageAwareDecisionMatrix:
             "[stage] BUILD IN_PROGRESS",
         ]
 
-        assert session.is_sdlc is True
+        assert session.is_sdlc_job() is True
         assert session.has_remaining_stages() is True
         assert session.has_failed_stage() is False
 
@@ -237,7 +235,7 @@ class TestStageAwareDecisionMatrix:
         effective_max = MAX_AUTO_CONTINUES_SDLC
 
         should_auto_continue = (
-            session.is_sdlc
+            session.is_sdlc_job()
             and session.has_remaining_stages()
             and not session.has_failed_stage()
             and auto_continue_count < effective_max
@@ -254,16 +252,17 @@ class TestStageAwareDecisionMatrix:
             "[stage] TEST COMPLETED",
             "[stage] REVIEW COMPLETED",
             "[stage] DOCS COMPLETED",
-            "[stage] MERGE COMPLETED",
         ]
 
-        assert session.is_sdlc is True
+        assert session.is_sdlc_job() is True
         assert session.has_remaining_stages() is False
         assert session.has_failed_stage() is False
 
         # Decision: fall through to classifier (all stages done)
         should_use_stage_routing = (
-            session.is_sdlc and session.has_remaining_stages() and not session.has_failed_stage()
+            session.is_sdlc_job()
+            and session.has_remaining_stages()
+            and not session.has_failed_stage()
         )
         assert should_use_stage_routing is False
 
@@ -276,11 +275,11 @@ class TestStageAwareDecisionMatrix:
             "[stage] BUILD FAILED",
         ]
 
-        assert session.is_sdlc is True
+        assert session.is_sdlc_job() is True
         assert session.has_failed_stage() is True
 
         # Decision: deliver to user (failed stage)
-        should_deliver = session.is_sdlc and session.has_failed_stage()
+        should_deliver = session.is_sdlc_job() and session.has_failed_stage()
         assert should_deliver is True
 
     def test_non_sdlc_uses_classifier(self):
@@ -291,7 +290,7 @@ class TestStageAwareDecisionMatrix:
             "[system] Processing casual question",
         ]
 
-        assert session.is_sdlc is False
+        assert session.is_sdlc_job() is False
 
         # Decision: use classifier (not an SDLC job)
         effective_max = MAX_AUTO_CONTINUES  # Non-SDLC gets lower cap
@@ -305,7 +304,7 @@ class TestStageAwareDecisionMatrix:
             "[stage] PLAN IN_PROGRESS",
         ]
 
-        assert session.is_sdlc is True
+        assert session.is_sdlc_job() is True
         assert session.has_remaining_stages() is True
 
         # Simulate having hit the SDLC safety cap
@@ -313,7 +312,7 @@ class TestStageAwareDecisionMatrix:
         effective_max = MAX_AUTO_CONTINUES_SDLC
 
         should_auto_continue = (
-            session.is_sdlc
+            session.is_sdlc_job()
             and session.has_remaining_stages()
             and not session.has_failed_stage()
             and auto_continue_count < effective_max
@@ -394,7 +393,7 @@ class TestStageAwareWithEmoji:
         """☑ emoji marks stage as completed."""
         session = AgentSession()
         session.history = ["[stage] ☑ ISSUE"]
-        assert session.is_sdlc is True
+        assert session.is_sdlc_job() is True
         progress = session.get_stage_progress()
         assert progress["ISSUE"] == "completed"
 
@@ -414,7 +413,7 @@ class TestEffectiveMaxSelection:
         """SDLC jobs should use MAX_AUTO_CONTINUES_SDLC."""
         session = AgentSession()
         session.history = ["[stage] ISSUE COMPLETED"]
-        is_sdlc = session.is_sdlc
+        is_sdlc = session.is_sdlc_job()
         effective_max = MAX_AUTO_CONTINUES_SDLC if is_sdlc else MAX_AUTO_CONTINUES
         assert effective_max == MAX_AUTO_CONTINUES_SDLC
 
@@ -422,7 +421,7 @@ class TestEffectiveMaxSelection:
         """Non-SDLC jobs should use MAX_AUTO_CONTINUES."""
         session = AgentSession()
         session.history = ["[user] Hello"]
-        is_sdlc = session.is_sdlc
+        is_sdlc = session.is_sdlc_job()
         effective_max = MAX_AUTO_CONTINUES_SDLC if is_sdlc else MAX_AUTO_CONTINUES
         assert effective_max == MAX_AUTO_CONTINUES
 

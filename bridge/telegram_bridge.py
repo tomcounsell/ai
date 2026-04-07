@@ -225,90 +225,6 @@ def _cleanup_session_locks() -> int:
     return killed
 
 
-def _cleanup_orphaned_claude_processes() -> int:
-    """Kill orphaned Claude Code CLI subprocesses from prior bridge runs.
-
-    On bridge restart, SDK subprocesses from the old bridge may still be alive
-    because the Python bridge only cancels asyncio tasks (not OS processes).
-    These zombies block new workers via _ensure_worker's .done() check and
-    consume resources.
-
-    Finds all 'claude' processes whose parent is PID 1 (orphaned) or whose
-    parent is the current bridge process (leftover from prior exec), then
-    kills them with SIGTERM/SIGKILL.
-
-    Returns the number of processes killed.
-    """
-    logger = logging.getLogger(__name__)
-    killed = 0
-    current_pid = os.getpid()
-
-    try:
-        result = subprocess.run(
-            ["pgrep", "-f", "claude_agent_sdk/_bundled/claude"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode != 0 or not result.stdout.strip():
-            return 0
-
-        pids = result.stdout.strip().split("\n")
-        for pid_str in pids:
-            try:
-                pid = int(pid_str.strip())
-                if pid == current_pid:
-                    continue
-
-                # Check parent PID — if PPID is 1 (orphaned) or our PID
-                # (child of current bridge from a prior run), it's stale
-                ppid_result = subprocess.run(
-                    ["ps", "-o", "ppid=", "-p", str(pid)],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                )
-                if ppid_result.returncode != 0:
-                    continue
-
-                ppid = int(ppid_result.stdout.strip())
-
-                # Only kill if orphaned (PPID=1) or child of current bridge
-                if ppid not in (1, current_pid):
-                    continue
-
-                logger.warning(
-                    "[cleanup] Killing orphaned Claude subprocess PID %d (PPID=%d)",
-                    pid,
-                    ppid,
-                )
-                os.kill(pid, signal.SIGTERM)
-                # Wait up to 3 seconds for graceful exit
-                for _ in range(6):
-                    time.sleep(0.5)
-                    try:
-                        os.kill(pid, 0)
-                    except ProcessLookupError:
-                        break
-                else:
-                    logger.warning("[cleanup] Force-killing Claude subprocess PID %d", pid)
-                    try:
-                        os.kill(pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                killed += 1
-
-            except (ValueError, ProcessLookupError, PermissionError) as e:
-                logger.debug("[cleanup] Could not kill PID %s: %s", pid_str, e)
-
-    except subprocess.TimeoutExpired:
-        logger.warning("[cleanup] Timeout scanning for orphaned Claude processes")
-    except Exception as e:
-        logger.debug("[cleanup] Error scanning for orphaned processes: %s", e)
-
-    return killed
-
-
 # Configuration (environment already loaded at top of file)
 API_ID = int(os.getenv("TELEGRAM_API_ID", "0"))
 API_HASH = os.getenv("TELEGRAM_API_HASH", "")
@@ -316,48 +232,11 @@ PHONE = os.getenv("TELEGRAM_PHONE", "")
 PASSWORD = os.getenv("TELEGRAM_PASSWORD", "")
 SESSION_NAME = os.getenv("TELEGRAM_SESSION_NAME", "valor_bridge")
 
-# Active projects: derived from machine field in projects.json matched against hostname.
-# Each project is handled by exactly one machine — the config is the single source of truth.
-
-
-def _get_active_projects() -> list[str]:
-    """Determine active projects for this machine from config."""
-    from bridge.routing import _resolve_config_path
-
-    config_path = _resolve_config_path()
-    if not config_path.exists():
-        return ["valor"]
-
-    with open(config_path) as f:
-        config = json.load(f)
-
-    # Get this machine's name (e.g. "Valor the Captain")
-    try:
-        hostname = subprocess.check_output(["scutil", "--get", "ComputerName"], text=True).strip()
-    except Exception:
-        hostname = ""
-
-    hostname_normalized = hostname.lower()
-
-    # Match projects where machine field matches this hostname
-    matched = []
-    for key, project in config.get("projects", {}).items():
-        machine = project.get("machine", "")
-        if machine.lower() == hostname_normalized:
-            matched.append(key.lower())
-
-    if matched:
-        return matched
-
-    # Fallback to env var if no machine matches (e.g. dev/test)
-    env_val = os.getenv("ACTIVE_PROJECTS", "")
-    if env_val:
-        return [p.strip().lower() for p in env_val.split(",") if p.strip()]
-
-    return ["valor"]
-
-
-ACTIVE_PROJECTS = _get_active_projects()
+# Active projects on this machine (comma-separated)
+# Example: ACTIVE_PROJECTS=valor,popoto,django-project-template
+ACTIVE_PROJECTS = [
+    p.strip().lower() for p in os.getenv("ACTIVE_PROJECTS", "valor").split(",") if p.strip()
+]
 
 # =============================================================================
 # Logging Configuration
@@ -444,12 +323,11 @@ RESPOND_TO_DMS = any(
 )
 
 # DM whitelist - only respond to DMs from these Telegram user IDs
-# Loaded from ~/Desktop/Valor/dm_whitelist.json
-# Falls back to TELEGRAM_DM_WHITELIST env var
+# Loaded from ~/Desktop/claude_code/dm_whitelist.json, falls back to TELEGRAM_DM_WHITELIST env var
 # Format: {"users": {"123456": {"name": "Name", "permissions": "full|qa_only"}}}
 DM_WHITELIST: set[int] = set()
 DM_WHITELIST_CONFIG: dict[int, dict] = {}  # Full config per user for permissions lookup
-_dm_whitelist_path = Path.home() / "Desktop" / "Valor" / "dm_whitelist.json"
+_dm_whitelist_path = Path.home() / "Desktop" / "claude_code" / "dm_whitelist.json"
 if _dm_whitelist_path.exists():
     try:
         _wl_config = json.loads(_dm_whitelist_path.read_text())
@@ -511,6 +389,9 @@ from bridge.agents import (  # noqa: E402
     RETRY_DELAYS,  # noqa: F401
     _detect_issue_number,  # noqa: F401
     _get_github_repo_url,  # noqa: F401
+    _get_running_jobs_info,  # noqa: F401
+    _handle_force_update_command,
+    _handle_update_command,
     _match_plan_by_name,  # noqa: F401
     attempt_self_healing,  # noqa: F401
     create_failure_plan,  # noqa: F401
@@ -518,10 +399,6 @@ from bridge.agents import (  # noqa: E402
     detect_tracked_work,  # noqa: F401
     get_agent_response,  # noqa: F401
     get_agent_response_with_retry,
-)
-from bridge.update import (  # noqa: E402
-    handle_force_update_command,
-    handle_update_command,
 )
 
 
@@ -674,9 +551,9 @@ async def main():
                     logger.debug("Ignoring /update from DM - DMs disabled on this instance")
                     return
             if _raw_text in ("/update --force", "/update \u2014force"):
-                await handle_force_update_command(client, event)
+                await _handle_force_update_command(client, event)
             else:
-                await handle_update_command(client, event)
+                await _handle_update_command(client, event)
             return
 
         # Get message details
@@ -696,8 +573,6 @@ async def main():
         sender_id = getattr(sender, "id", None)
 
         # Store ALL incoming messages for history (regardless of whether we respond)
-        _early_project_key = project.get("_key", "dm") if project else "dm"
-        stored_msg_id = None  # Track for trigger_message_id cross-reference
         try:
             store_result = store_message(
                 chat_id=str(event.chat_id),
@@ -706,13 +581,8 @@ async def main():
                 message_id=message.id,
                 timestamp=message.date,
                 message_type=("text" if not message.media else get_media_type(message) or "media"),
-                project_key=_early_project_key,
-                has_media=bool(message.media),
-                media_type=get_media_type(message) if message.media else None,
-                reply_to_msg_id=message.reply_to_msg_id,
             )
             if store_result.get("stored"):
-                stored_msg_id = store_result.get("id")
                 logger.debug(f"Stored message {message.id} from {sender_name}")
                 # Register chat mapping for CLI lookup
                 if chat_title:
@@ -721,7 +591,6 @@ async def main():
                         chat_id=str(event.chat_id),
                         chat_name=chat_title,
                         chat_type=chat_type,
-                        project_key=_early_project_key,
                     )
             elif store_result.get("error"):
                 logger.warning(f"Failed to store message: {store_result['error']}")
@@ -739,7 +608,6 @@ async def main():
                         chat_id=str(event.chat_id),
                         message_id=message.id,
                         timestamp=message.date,
-                        project_key=_early_project_key,
                     )
                     if link_result.get("stored"):
                         logger.info(f"Stored link from {sender_name}: {url[:50]}...")
@@ -1243,23 +1111,6 @@ async def main():
             yt_urls_json = json.dumps(youtube_urls) if youtube_urls else None
             non_yt_urls_json = json.dumps(non_youtube_urls) if non_youtube_urls else None
 
-            # Update TelegramMessage with URL/classification metadata
-            # (has_media, media_type, reply_to_msg_id were set at store_message time)
-            if stored_msg_id and (yt_urls_json or non_yt_urls_json):
-                try:
-                    from models.telegram import TelegramMessage
-
-                    stored_msgs = list(TelegramMessage.query.filter(msg_id=stored_msg_id))
-                    if stored_msgs:
-                        tm = stored_msgs[0]
-                        if yt_urls_json:
-                            tm.youtube_urls = yt_urls_json
-                        if non_yt_urls_json:
-                            tm.non_youtube_urls = non_yt_urls_json
-                        tm.save()
-                except Exception as e:
-                    logger.debug(f"Failed to update TelegramMessage with URL metadata: {e}")
-
             # Generate correlation ID for end-to-end request tracing
             correlation_id = uuid.uuid4().hex[:12]
             logger.info(
@@ -1312,7 +1163,6 @@ async def main():
                 chat_id_for_enrichment=telegram_chat_id,
                 classification_type=classification_result.get("type"),
                 correlation_id=correlation_id,
-                trigger_message_id=stored_msg_id,
             )
             if depth > 1:
                 from bridge.markdown import send_markdown
@@ -1408,16 +1258,9 @@ async def main():
         loop.call_soon_threadsafe(lambda: asyncio.ensure_future(_graceful_shutdown(client)))
 
     async def _graceful_shutdown(tg_client):
-        """Reset in-flight jobs, kill SDK subprocesses, and disconnect."""
+        """Reset in-flight jobs and disconnect."""
         if USE_CLAUDE_SDK:
-            from agent.job_queue import _active_workers, _reset_running_jobs
-
-            # Cancel all worker asyncio tasks
-            for _pkey, worker_task in list(_active_workers.items()):
-                if worker_task and not worker_task.done():
-                    worker_task.cancel()
-                    logger.info(f"[{_pkey}] Cancelled worker task")
-            _active_workers.clear()
+            from agent.job_queue import _reset_running_jobs
 
             for _pkey in ACTIVE_PROJECTS:
                 try:
@@ -1426,12 +1269,6 @@ async def main():
                         logger.info(f"[{_pkey}] Reset {reset} running job(s) to pending")
                 except Exception as e:
                     logger.error(f"[{_pkey}] Failed to reset running jobs: {e}")
-
-            # Kill SDK subprocesses so they don't survive as orphans
-            orphans = _cleanup_orphaned_claude_processes()
-            if orphans:
-                logger.info(f"Killed {orphans} SDK subprocess(es) during shutdown")
-
         logger.info("Waiting 2s for in-flight tasks to finish...")
         await asyncio.sleep(2)
         logger.info("Disconnecting Telegram client...")
@@ -1444,11 +1281,6 @@ async def main():
     killed = _cleanup_session_locks()
     if killed:
         logger.info(f"Cleaned up {killed} stale process(es) holding session locks")
-
-    # Kill orphaned Claude Code CLI subprocesses from prior bridge runs
-    orphans_killed = _cleanup_orphaned_claude_processes()
-    if orphans_killed:
-        logger.info(f"Killed {orphans_killed} orphaned Claude Code subprocess(es)")
 
     # Start the client (retry on SQLite session lock with exponential backoff)
     # Backoff: 2s, 5s, 10s (with jitter added by cleanup function)
@@ -1642,24 +1474,15 @@ async def main():
     except Exception as e:
         logger.error(f"Failed to start session watchdog: {e}")
 
-    # Start unified reflection scheduler (subsumes job health monitor and all recurring tasks)
+    # Start job health monitor (detects stuck running jobs)
     if USE_CLAUDE_SDK:
         try:
-            from agent.reflection_scheduler import ReflectionScheduler
+            from agent.job_queue import _job_health_loop
 
-            _reflection_scheduler = ReflectionScheduler()
-            asyncio.create_task(_reflection_scheduler.start())
-            logger.info("Reflection scheduler started (replaces standalone health monitor)")
+            asyncio.create_task(_job_health_loop())
+            logger.info("Job health monitor started")
         except Exception as e:
-            logger.error(f"Failed to start reflection scheduler: {e}")
-            # Fall back to standalone health monitor
-            try:
-                from agent.job_queue import _job_health_loop
-
-                asyncio.create_task(_job_health_loop())
-                logger.info("Fell back to standalone job health monitor")
-            except Exception as e2:
-                logger.error(f"Failed to start fallback health monitor: {e2}")
+            logger.error(f"Failed to start job health monitor: {e}")
 
     # Start message query polling loop
     async def message_query_loop():

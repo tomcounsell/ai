@@ -330,60 +330,36 @@ async def transcribe_voice(filepath: Path) -> str | None:
 
 async def describe_image(filepath: Path) -> str | None:
     """
-    Describe an image using Claude Haiku 4.5 vision.
+    Describe an image using Ollama LLaVA vision model.
 
     Returns image description text, or None if description failed.
+    Falls back gracefully if Ollama or LLaVA is not available.
     """
-    import anthropic
-
-    from config.models import HAIKU
-
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        logger.warning("ANTHROPIC_API_KEY not set for image vision")
+    try:
+        import ollama
+    except ImportError:
+        logger.warning("ollama library not installed for image vision")
         return None
 
     try:
-        import base64
-        import mimetypes
+        # Run the synchronous ollama.chat in a thread pool to not block the event loop
+        loop = asyncio.get_event_loop()
 
-        # Read and encode image
-        image_data = filepath.read_bytes()
-        base64_image = base64.standard_b64encode(image_data).decode("utf-8")
-
-        # Detect media type
-        mime_type, _ = mimetypes.guess_type(str(filepath))
-        if mime_type not in ("image/jpeg", "image/png", "image/gif", "image/webp"):
-            mime_type = "image/jpeg"  # safe default
-
-        client = anthropic.Anthropic(api_key=api_key)
-        response = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: client.messages.create(
-                model=HAIKU,
-                max_tokens=300,
+        def _describe():
+            response = ollama.chat(
+                model="llama3.2-vision:11b",
                 messages=[
                     {
                         "role": "user",
-                        "content": [
-                            {
-                                "type": "image",
-                                "source": {
-                                    "type": "base64",
-                                    "media_type": mime_type,
-                                    "data": base64_image,
-                                },
-                            },
-                            {
-                                "type": "text",
-                                "text": "Describe this image in detail. What do you see?",
-                            },
-                        ],
+                        "content": "Describe this image in detail. What do you see?",
+                        "images": [str(filepath)],
                     }
                 ],
-            ),
-        )
-        return response.content[0].text.strip() if response.content else None
+            )
+            return response["message"]["content"]
+
+        description = await loop.run_in_executor(None, _describe)
+        return description.strip() if description else None
 
     except Exception as e:
         logger.error(f"Image description failed: {e}")

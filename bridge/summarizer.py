@@ -30,7 +30,6 @@ from pathlib import Path
 import anthropic
 import httpx
 
-from bridge.message_quality import PROCESS_NARRATION_PATTERNS as _PROCESS_NARRATION_PATTERNS
 from config.models import MODEL_FAST, OPENROUTER_HAIKU
 from utils.api_keys import get_anthropic_api_key
 
@@ -46,6 +45,26 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 # Classification confidence threshold — below this, default to QUESTION
 # (conservative: pauses for human input rather than auto-continuing)
 CLASSIFICATION_CONFIDENCE_THRESHOLD = 0.80
+
+# Process narration patterns — stripped before summarization
+_PROCESS_NARRATION_PATTERNS = [
+    re.compile(r"^Let me (check|look|read|examine|review|investigate|search|explore)"),
+    re.compile(r"^Now let me (check|look|read|examine|review|investigate|search)"),
+    re.compile(r"^I'll (start|begin|proceed|continue|check|look|read|examine) "),
+    re.compile(r"^First,? (?:let me|I'll) (check|look|read|examine|review)"),
+    re.compile(r"^Good\.$"),
+    re.compile(r"^Now I (need to |will |'ll )?(check|look|read|examine|review)"),
+    re.compile(r"^Looking at (the |this |that )"),
+    re.compile(r"^Alright,? (let me|I'll)"),
+    re.compile(r"^Sure,? (let me|I'll)"),
+    re.compile(r"^OK,? (let me|I'll)"),
+    # Plan-sharing and approach narration — PM wants results, not plans
+    re.compile(r"^Here'?s? (my |the )?(plan|approach|strategy)", re.IGNORECASE),
+    re.compile(r"^My (plan|approach|strategy) (is|will be|would be)", re.IGNORECASE),
+    re.compile(r"^I('ll| will| am going to| plan to) (approach|tackle|handle|address) "),
+    re.compile(r"^(Step|Phase) \d+[.:] ", re.IGNORECASE),
+    re.compile(r"^\d+\.\s+(First|Then|Next|Finally|After that)", re.IGNORECASE),
+]
 
 
 def _extract_open_questions(text: str) -> list[str]:
@@ -402,37 +421,6 @@ Output: {"type": "completion", "confidence": 0.93, \
 Input: "Let me investigate the logs to find out what happened..."
 Output: {"type": "status", "confidence": 0.90, \
 "reason": "Agent describing planned investigation, not yet answering", \
-"coaching_message": null, "has_workarounds": false}
-
-Few-shot examples of EMPTY PROMISES (must be classified as status with coaching):
-
-CRITICAL CONTEXT: By the time a response reaches Telegram, the agent's session is OVER. \
-There is no future execution. The agent cannot "will do" anything — it has already finished. \
-Any "I will", "I'll", "going forward", "from now on", "next time" language is an empty promise \
-UNLESS the agent already made the change in this session and shows evidence. \
-The only exception is scheduling/queuing a job that will execute later AND report back \
-via Telegram (e.g., "I've queued a build job — you'll get a message when it completes"). \
-Otherwise the only honest responses are: "I did X (proof)" or "I didn't do X (why)."
-
-Input: "Will do. I'll update the config next time."
-Output: {"type": "status", "confidence": 0.95, \
-"reason": "Empty promise — agent says 'will do' but session is ending, there is no next time", \
-"coaching_message": "You said 'will do' but your session is about to end — there is no \
-future execution to fulfill this promise. Either make the change NOW (edit a file, save a \
-memory, update a config) and show evidence, or be honest that you didn't do it.", \
-"has_workarounds": false}
-
-Input: "Noted. I'll adjust my approach going forward."
-Output: {"type": "status", "confidence": 0.95, \
-"reason": "Empty promise — 'going forward' implies future action but session is ending", \
-"coaching_message": "You said 'going forward' but this session is ending. There is no \
-'going forward' unless you made a durable change right now. What did you actually change? \
-Show a commit hash, file path, or memory entry — or admit no change was made.", \
-"has_workarounds": false}
-
-Input: "Updated bridge/summarizer.py to reject empty promises. Committed abc1234."
-Output: {"type": "completion", "confidence": 0.90, \
-"reason": "Concrete action taken with evidence — file path and commit hash", \
 "coaching_message": null, "has_workarounds": false}"""
 
 # False question detection explained:
@@ -458,49 +446,6 @@ def _detect_workarounds(text_lower: str) -> bool:
         r"\b(?:warning|warn)\b.*\b(?:found|discovered|detected)\b",
     ]
     return any(re.search(p, text_lower) for p in workaround_patterns)
-
-
-def _detect_empty_promise(text_lower: str) -> bool:
-    """Detect if the agent acknowledged feedback without concrete evidence.
-
-    An empty promise is an acknowledgment of behavioral feedback (e.g. "Got it",
-    "Understood", "Noted") combined with a commitment to change behavior, but
-    WITHOUT any evidence of a durable change (commit hash, file path, memory
-    entry, config edit).
-
-    Returns True if the text looks like an empty promise — acknowledged feedback
-    with no proof of concrete action.
-    """
-    # Acknowledgment patterns — agent is agreeing to feedback
-    acknowledgment_patterns = [
-        r"\b(?:got it|understood|noted|will do|roger|acknowledged|fair point)\b",
-        r"\b(?:you're right|good point|makes sense|point taken)\b",
-        r"\b(?:i'll update|i'll change|i'll fix|i'll adjust|i'll modify)\b",
-        r"\b(?:won't happen again|will remember|going forward)\b",
-        r"\byou'll see the difference\b",
-    ]
-
-    has_acknowledgment = any(re.search(p, text_lower) for p in acknowledgment_patterns)
-    if not has_acknowledgment:
-        return False
-
-    # Evidence patterns — concrete proof that a change was made
-    evidence_patterns = [
-        r"\b[0-9a-f]{7,40}\b",  # commit hash
-        r"\bcommit(?:ted)?\b.*\b[0-9a-f]{7}\b",  # "committed abc1234"
-        # file paths (saved/wrote/created/updated to some/file.ext)
-        r"(?:saved|wrote|created|updated|edited|modified)\s+(?:to\s+)?[`'\"]?[\w/]+\.\w+",
-        r"\bmemory\b.*\b(?:saved|written|created|updated)\b",  # memory writes
-        r"\b(?:saved|written|created)\b.*\bmemory\b",
-        r"https?://github\.com/.+/commit/",  # GitHub commit URLs
-        r"\brestarted?\b.*\b(?:bridge|service)\b",  # service restart
-        r"\b(?:scheduled|queued)\b.*\bjob[_-]?[a-f0-9]{6,}\b",  # job ID
-    ]
-
-    has_evidence = any(re.search(p, text_lower) for p in evidence_patterns)
-
-    # Empty promise = acknowledgment WITHOUT evidence
-    return not has_evidence
 
 
 def _classify_with_heuristics(text: str) -> ClassificationResult:
@@ -551,20 +496,6 @@ def _classify_with_heuristics(text: str) -> ClassificationResult:
                 confidence=0.85,
                 reason="Detected direct question pattern",
             )
-
-    # Check for empty promises — agent acknowledged feedback without evidence
-    if _detect_empty_promise(text_lower):
-        return ClassificationResult(
-            output_type=OutputType.STATUS_UPDATE,
-            confidence=0.90,
-            reason="Empty promise — session is ending, 'will do' has no future execution",
-            coaching_message=(
-                "Your session is about to end. You cannot 'will do' anything — "
-                "there is no future execution. Make the change NOW (edit a file, "
-                "save a memory, update a config) and show evidence, or honestly "
-                "say you didn't make the change."
-            ),
-        )
 
     # Check for error indicators
     error_patterns = [
@@ -855,34 +786,21 @@ def _parse_classification_response(raw: str) -> ClassificationResult | None:
 
 
 def _render_stage_progress(session) -> str | None:
-    """Render SDLC stage progress line from session state.
-
-    Uses PipelineStateMachine when stage_states is available, falls back
-    to legacy get_stage_progress() for sessions without state machine data.
+    """Render SDLC stage progress line from session history.
 
     Returns two lines like:
         ISSUE 243 → ☑ PLAN → ▶ BUILD
         ☐ TEST → ☐ REVIEW → ☐ DOCS
-    Returns None if no stage data is available.
+    ISSUE has no checkbox (just label + number). Other stages show ☑ when completed,
+    ▶ when in-progress, ☐ when pending. Returns None if no stage data is available.
     """
     if not session:
         return None
 
-    # Use state machine when stage_states is available (must be a str or dict)
-    stage_states = getattr(session, "stage_states", None)
-    if stage_states and isinstance(stage_states, str | dict):
-        try:
-            from bridge.pipeline_state import PipelineStateMachine
+    progress = session.get_stage_progress()
 
-            sm = PipelineStateMachine(session)
-            progress = sm.get_display_progress()
-        except Exception:
-            progress = session.get_stage_progress()
-    else:
-        progress = session.get_stage_progress()
-
-    # Only render if at least one stage has progressed beyond pending/ready
-    if all(v in ("pending", "ready") for v in progress.values()):
+    # Only render if at least one stage has progressed
+    if all(v == "pending" for v in progress.values()):
         return None
 
     from models.agent_session import SDLC_STAGES
@@ -914,10 +832,7 @@ def _render_stage_progress(session) -> str | None:
             parts.append(f"☑ {label}")
         elif status == "in_progress":
             parts.append(f"▶ {label}")
-        elif status == "failed":
-            parts.append(f"✗ {label}")
         else:
-            # pending or ready
             parts.append(f"☐ {label}")
 
     line1 = " → ".join(parts[:3])
@@ -1160,9 +1075,6 @@ FORMAT RULES for the **response** field (adaptive based on content type):
 GENERAL RULES:
 - NEVER include the agent's plan, approach, or strategy. The PM wants RESULTS, not plans.
   If work is in progress, report what has been DONE so far, not what will be done next.
-- NEVER send empty promises. If the agent acknowledged feedback with "Got it", "Understood", \
-"Noted", "Will do" but made no concrete change (no commit, no file edit, no config update, \
-no memory write), flag it with ⚠️ and note that the promise lacks evidence.
 - Lead with the outcome, not the process
 - Preserve commit hashes inline (e.g., `abc1234`)
 - Flag with ⚠️ ONLY for genuinely external blockers (missing credentials, need third-party \
@@ -1414,7 +1326,7 @@ def _compose_structured_summary(summary_text: str, session=None, is_completion: 
             f"Rendered stage progress for session "
             f"{session.session_id if session else 'N/A'}: {stage_line}"
         )
-    elif session and hasattr(session, "is_sdlc") and session.is_sdlc:
+    elif session and hasattr(session, "is_sdlc_job") and session.is_sdlc_job():
         logger.warning(f"SDLC session {session.session_id} has no stage progress to render")
 
     # Summary text (bullets or prose)

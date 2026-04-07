@@ -7,12 +7,7 @@ Queue-phase fields: priority, message_text, auto_continue_count, etc.
 Session-phase fields: turn_count, tool_call_count, log_path, summary, tags
 New fields: history (lifecycle events), issue_url, plan_url, pr_url
 
-Cross-references TelegramMessage via trigger_message_id. Message metadata
-(media, URLs, classification) lives on TelegramMessage; this model references
-it for enrichment during job execution.
-
-Status lifecycle:
-  pending -> running -> active -> dormant -> completed | failed | waiting_for_children
+Status lifecycle: pending -> running -> active -> dormant -> completed | failed
 """
 
 import logging
@@ -34,7 +29,7 @@ MSG_MAX_CHARS = 20_000
 HISTORY_MAX_ENTRIES = 20
 
 # SDLC stages in pipeline order
-SDLC_STAGES = ["ISSUE", "PLAN", "BUILD", "TEST", "REVIEW", "DOCS", "MERGE"]
+SDLC_STAGES = ["ISSUE", "PLAN", "BUILD", "TEST", "REVIEW", "DOCS"]
 
 
 class AgentSession(Model):
@@ -44,26 +39,18 @@ class AgentSession(Model):
     (models/session_log.py). All fields from both models are carried
     forward, plus new history and link tracking fields.
 
-    References TelegramMessage via trigger_message_id for message
-    metadata (media, URLs, classification). The job worker resolves
-    this reference to get enrichment parameters.
-
     Status values:
         pending  - Queued, waiting for worker
         running  - Worker picked up, agent executing
         active   - Session in progress (transcript tracking)
         dormant  - Paused on open question
-        waiting_for_children - Parent job waiting for child jobs to complete
         completed - Work finished successfully
         failed   - Work failed
     """
 
     # === Identity ===
     job_id = AutoKeyField()
-    session_id = Field()  # Telegram-derived session identifier (e.g., tg_project_chatid_msgid)
-    claude_code_session_id = Field(
-        null=True
-    )  # Claude Code's session identifier (renamed from session_id overlap)
+    session_id = Field()
     project_key = KeyField()
     status = KeyField(default="pending")
 
@@ -83,9 +70,6 @@ class AgentSession(Model):
     workflow_id = Field(null=True)
     work_item_slug = Field(null=True)
     task_list_id = Field(null=True)
-    # === Message metadata (deprecated - now lives on TelegramMessage) ===
-    # These fields are retained for backward compatibility during migration.
-    # New code should read from TelegramMessage via trigger_message_id.
     has_media = Field(type=bool, default=False)
     media_type = Field(null=True)
     youtube_urls = Field(null=True)
@@ -94,17 +78,12 @@ class AgentSession(Model):
     chat_id_for_enrichment = Field(null=True)
     classification_type = Field(null=True)
     auto_continue_count = Field(type=int, default=0)
-    started_at = Field(type=float, null=True)  # Cannot be SortedField because it starts as None
-
-    # === Cross-reference to TelegramMessage ===
-    trigger_message_id = Field(
-        null=True
-    )  # msg_id of the TelegramMessage that triggered this session
+    started_at = Field(type=float, null=True)
 
     # === Session fields (from SessionLog) ===
     last_activity = Field(type=float, null=True)
     completed_at = Field(type=float, null=True)
-    last_transition_at = Field(type=float, null=True)  # Deprecated: derive from history instead
+    last_transition_at = Field(type=float, null=True)
     turn_count = IntField(default=0)
     tool_call_count = IntField(default=0)
     log_path = Field(null=True, max_length=1000)
@@ -119,16 +98,16 @@ class AgentSession(Model):
     plan_url = Field(null=True)
     pr_url = Field(null=True)
 
-    # === Pipeline state machine ===
-    # JSON-serialized dict of stage -> status managed by PipelineStateMachine.
-    # Replaces the [stage] history entry parsing approach.
-    stage_states = Field(null=True)
-
     # === Claude Code identity mapping ===
     # Stores the Claude Code session UUID (from transcript filename) so that
     # continuation sessions can resume the correct transcript instead of falling
     # back to the most recent session file on disk. See issue #374 Bug 1.
     claude_session_uuid = Field(null=True)
+
+    # === Behavioral episode instrumentation ===
+    # Accumulated during SDLC cycles for cycle-close episode creation
+    tool_sequence = ListField(null=True)  # list of "{stage}:{tool_type}" strings
+    friction_events = ListField(null=True)  # list of "{stage}|{description}|{count}" strings
 
     # === Tracing ===
     correlation_id = Field(null=True)  # End-to-end request tracing ID
@@ -145,23 +124,7 @@ class AgentSession(Model):
     # Buffered human replies during active pipelines
     queued_steering_messages = ListField(null=True)
 
-    # === Job hierarchy fields ===
-    # Links child jobs to their parent for job decomposition (issue #359).
-    # When set, this job is a child of the referenced parent job.
-    # Parent tracks aggregate progress via get_children() / get_completion_progress().
-    parent_job_id = KeyField(null=True)
-
     # === Compatibility ===
-
-    @property
-    def id(self) -> str | None:
-        """Alias for job_id. Provides a cleaner name for the primary key.
-
-        Cannot rename job_id directly because AutoKeyField generates Redis
-        keys from the field name -- renaming would make existing records
-        inaccessible.
-        """
-        return self.job_id
 
     @property
     def sender(self) -> str | None:
@@ -307,102 +270,43 @@ class AgentSession(Model):
 
     # === Stage-aware auto-continue helpers ===
 
-    @property
-    def is_sdlc(self) -> bool:
-        """Whether this session is an SDLC pipeline job.
+    def is_sdlc_job(self) -> bool:
+        """Check if this session is an SDLC pipeline job.
 
-        Derives SDLC status from observable state (single source of truth)
-        rather than a stored classification flag. Checks in priority order:
+        Returns True if:
+        1. The session was classified as "sdlc" at input routing time, OR
+        2. The session's history contains at least one [stage] entry
 
-        1. stage_states — if any stage is in_progress/completed/failed
-        2. History [stage] entries — legacy fallback
-        3. classification_type == "sdlc" — tertiary for fresh sessions
+        The classification_type check (added for issue #246) is the primary
+        signal — it's set at classification time and cannot be lost. The
+        history check is the legacy fallback for sessions that have stage
+        entries from session_progress calls.
+
+        Used by the auto-continue logic to choose between stage-aware
+        routing (for SDLC jobs) and classifier-based routing (for
+        casual/ad-hoc jobs).
         """
-        # Primary: check stage_states for any non-pending stage
-        if self.stage_states:
-            try:
-                import json
-
-                states = (
-                    json.loads(self.stage_states)
-                    if isinstance(self.stage_states, str)
-                    else self.stage_states
-                )
-                if isinstance(states, dict) and any(
-                    v not in ("pending", "ready") for v in states.values()
-                ):
-                    return True
-            except (json.JSONDecodeError, TypeError, AttributeError):
-                pass
-
-        # Secondary: check for [stage] entries in history
+        # Primary: classification_type set at input routing time
+        if self.classification_type == "sdlc":
+            return True
+        # Fallback: check for [stage] entries in history
         for entry in self._get_history_list():
             if isinstance(entry, str) and "[stage]" in entry.lower():
                 return True
-
-        # Tertiary: classification_type for freshly-classified sessions
-        if self.classification_type == "sdlc":
-            return True
-
         return False
 
     def has_remaining_stages(self) -> bool:
         """Check if any SDLC stages are not yet completed.
 
-        Uses the pipeline graph to determine remaining stages rather than
-        a flat check. Finds the last completed/failed stage and calls
-        get_next_stage() to see if a non-terminal next stage exists.
-
-        Returns True if pipeline progression should continue.
-        Returns False when the pipeline is complete (MERGE reached or
-        no graph transitions remain).
+        Returns True if at least one stage in the pipeline is still
+        'pending' or 'in_progress'. Returns False when all stages
+        are 'completed' (or 'failed').
 
         Used by stage-aware auto-continue to decide whether to keep
         going (stages remain) or consult the classifier (all done).
         """
-        from bridge.pipeline_graph import get_next_stage
-
         progress = self.get_stage_progress()
-
-        # Find the last completed or failed stage in pipeline order
-        last_completed = None
-        last_outcome = "success"
-        for stage in SDLC_STAGES:
-            status = progress.get(stage, "pending")
-            if status == "completed":
-                last_completed = stage
-                last_outcome = "success"
-            elif status == "failed":
-                last_completed = stage
-                last_outcome = "fail"
-
-        # If no stage has completed, there are definitely remaining stages
-        if last_completed is None:
-            return True
-
-        # Use the graph to check if a next stage exists
-        next_info = get_next_stage(last_completed, last_outcome)
-        if next_info is None:
-            # No transition from current stage — pipeline is complete (MERGE terminal)
-            return False
-
-        # Walk the graph forward from the last completed stage.
-        # If every reachable stage is already completed, the pipeline is done.
-        current = last_completed
-        outcome = last_outcome
-        while True:
-            next_info = get_next_stage(current, outcome)
-            if next_info is None:
-                # Reached terminal (MERGE) — no remaining stages
-                return False
-            next_stage = next_info[0]
-            next_status = progress.get(next_stage, "pending")
-            if next_status != "completed":
-                # Found a stage that still needs work
-                return True
-            # This stage is done, keep walking
-            current = next_stage
-            outcome = "success"
+        return any(status in ("pending", "in_progress") for status in progress.values())
 
     def has_failed_stage(self) -> bool:
         """Check if any SDLC stage has failed.
@@ -414,6 +318,52 @@ class AgentSession(Model):
         """
         progress = self.get_stage_progress()
         return any(status == "failed" for status in progress.values())
+
+    # === Behavioral episode instrumentation helpers ===
+
+    _TOOL_SEQUENCE_MAX = 50
+    _FRICTION_EVENTS_MAX = 20
+
+    def append_tool_event(self, stage: str, tool_type: str) -> None:
+        """Record a tool usage event during an SDLC cycle.
+
+        Args:
+            stage: SDLC stage name (e.g., "BUILD", "TEST")
+            tool_type: Type of tool used (e.g., "edit", "bash", "read")
+        """
+        current = self.tool_sequence if isinstance(self.tool_sequence, list) else []
+        entry = f"{stage}:{tool_type}"
+        current.append(entry)
+        if len(current) > self._TOOL_SEQUENCE_MAX:
+            current = current[-self._TOOL_SEQUENCE_MAX :]
+        self.tool_sequence = current
+        try:
+            self.save()
+        except Exception as e:
+            logger.warning(f"append_tool_event save failed for session {self.session_id}: {e}")
+
+    def append_friction_event(
+        self, stage: str, description: str, repetition_count: int = 1
+    ) -> None:
+        """Record a friction event during an SDLC cycle.
+
+        Friction events indicate retries, failures, or unexpected detours.
+
+        Args:
+            stage: SDLC stage name
+            description: Brief description of the friction
+            repetition_count: Number of repetitions (default 1)
+        """
+        current = self.friction_events if isinstance(self.friction_events, list) else []
+        entry = f"{stage}|{description}|{repetition_count}"
+        current.append(entry)
+        if len(current) > self._FRICTION_EVENTS_MAX:
+            current = current[-self._FRICTION_EVENTS_MAX :]
+        self.friction_events = current
+        try:
+            self.save()
+        except Exception as e:
+            logger.warning(f"append_friction_event save failed for session {self.session_id}: {e}")
 
     # === Queued steering message helpers ===
 
@@ -455,46 +405,6 @@ class AgentSession(Model):
         except Exception as e:
             logger.warning(f"Failed to clear steering messages for session {self.session_id}: {e}")
         return messages
-
-    # === Job hierarchy helpers ===
-
-    def get_parent(self) -> "AgentSession | None":
-        """Return the parent AgentSession if this is a child job.
-
-        Returns None if parent_job_id is not set or parent not found.
-        """
-        if not self.parent_job_id:
-            return None
-        try:
-            parent = AgentSession.query.get(self.parent_job_id)
-            return parent
-        except Exception:
-            logger.warning(f"Parent job {self.parent_job_id} not found for child {self.job_id}")
-            return None
-
-    def get_children(self) -> list["AgentSession"]:
-        """Return all child AgentSessions linked to this job via parent_job_id.
-
-        Returns an empty list if no children exist.
-        """
-        try:
-            return list(AgentSession.query.filter(parent_job_id=self.job_id))
-        except Exception as e:
-            logger.warning(f"Failed to query children for job {self.job_id}: {e}")
-            return []
-
-    def get_completion_progress(self) -> tuple[int, int, int]:
-        """Compute aggregate completion status of child jobs.
-
-        Returns:
-            (completed_count, total_count, failed_count) tuple.
-            All zeros if no children exist.
-        """
-        children = self.get_children()
-        total = len(children)
-        completed = sum(1 for c in children if c.status == "completed")
-        failed = sum(1 for c in children if c.status == "failed")
-        return completed, total, failed
 
     # === Cleanup ===
 

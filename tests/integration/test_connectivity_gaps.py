@@ -260,7 +260,7 @@ class TestNoDualSessionCreation:
 # TestValorSessionIdEnvVar removed — tested _find_session from
 # tools/session_progress.py which was deleted (Observer Agent, issue #309).
 # Session resolution for stage progress is now handled by the deterministic
-# PipelineStateMachine in bridge/pipeline_state.py.
+# stage detector in bridge/stage_detector.py.
 
 
 # ── Fix 4a: SDK client env var injection ─────────────────────────────────────

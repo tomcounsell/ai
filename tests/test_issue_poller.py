@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from scripts.issue_dedup import (
     DUPLICATE_THRESHOLD,
@@ -18,6 +21,7 @@ from scripts.issue_poller import (
     load_projects,
     process_issue,
 )
+
 
 # --- Dedup Engine Tests ---
 
@@ -124,10 +128,7 @@ class TestHasSufficientContext:
 
     def test_good_issue(self):
         assert has_sufficient_context(
-            {
-                "title": "Add dark mode",
-                "body": "We need a dark mode toggle in settings to support user preference.",
-            }
+            {"title": "Add dark mode", "body": "We need a dark mode toggle in settings to support user preference."}
         )
 
     def test_empty_body(self):
@@ -140,9 +141,7 @@ class TestHasSufficientContext:
         assert not has_sufficient_context({"title": "Fix bug", "body": "Fix it"})
 
     def test_no_title(self):
-        assert not has_sufficient_context(
-            {"title": "", "body": "Long description here that should be enough"}
-        )
+        assert not has_sufficient_context({"title": "", "body": "Long description here that should be enough"})
 
     def test_body_at_threshold(self):
         # Exactly 20 chars
@@ -242,11 +241,7 @@ class TestProcessIssue:
             r,
             "org",
             "repo",
-            {
-                "number": 1,
-                "title": "New feature",
-                "body": "Detailed description of the new feature we need",
-            },
+            {"number": 1, "title": "New feature", "body": "Detailed description of the new feature we need"},
             [],
             [],
         )
@@ -258,7 +253,9 @@ class TestProcessIssue:
     @patch("scripts.issue_poller.apply_label")
     @patch("scripts.issue_poller.send_telegram_notification")
     @patch("scripts.issue_poller.check_existing_plan")
-    def test_flags_insufficient_context(self, mock_existing, mock_notify, mock_label, mock_comment):
+    def test_flags_insufficient_context(
+        self, mock_existing, mock_notify, mock_label, mock_comment
+    ):
         r = MagicMock()
         mock_existing.return_value = False
 

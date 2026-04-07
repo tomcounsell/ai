@@ -17,34 +17,50 @@ How to extend the Valor system with new capabilities.
 
 ## Adding a Claude Code Skill
 
-Skills live in `.claude/skills/<skill>/SKILL.md`:
+Skills live in `.claude/commands/<skill>.md`:
 
 ```markdown
 ---
-name: skill-name
-description: "Use when [trigger condition]. Also use when [secondary trigger]."
-allowed-tools: Read, Write, Edit, Bash
+description: One-line description for skill registry
+argument-hint: <optional-arg>        # If skill takes arguments
+model: sonnet                        # Optional: sonnet, opus, haiku
+disallowed-tools: Write, Edit        # Optional: restrict tools
 ---
 
 # Skill Name
 
-## What this skill does
 Description of what this skill does.
 
-## When to load sub-files
-- [Condition A] -> read [SUB_FILE_A.md](SUB_FILE_A.md)
+## When to Use
 
-## Quick start
-Step-by-step instructions for the most common use of this skill.
+- Trigger condition 1
+- Trigger condition 2
+
+## Variables
+
+SOME_VAR: $1  # First argument passed to skill
+
+**If SOME_VAR is empty or literally `$1`**: The skill argument substitution
+did not run. Look at the user's original message — they invoked this as
+`/skill-name <argument>`. Extract the argument from there. Do NOT stop or
+report an error.
+
+## Instructions
+
+[Step-by-step instructions for Claude Code to follow]
+
+## Notes
+
+[Additional context, edge cases, integration points]
 ```
 
-### Examples (in `.claude/skills/`)
+### Examples
 
-- `prime/SKILL.md` - Codebase onboarding
-- `pthread/SKILL.md` - Parallel thread execution
-- `sdlc/SKILL.md` - Autonomous dev workflow
-- `do-pr-review/SKILL.md` - PR review and implementation validation
-- `setup/SKILL.md` - New machine configuration
+- `/prime` - Codebase onboarding
+- `/pthread` - Parallel thread execution
+- `/sdlc` - Autonomous dev workflow
+- `/do-pr-review` - PR review and implementation validation
+- `/setup` - New machine configuration
 
 ## Adding to the Telegram Bridge
 
@@ -200,4 +216,4 @@ Before marking a new feature complete:
 
 - Run `/prime` for codebase orientation
 - See `docs/tools-reference.md` for tool documentation
-- Check `.claude/skills/` for skill examples
+- Check `.claude/commands/` for skill examples

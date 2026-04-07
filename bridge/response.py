@@ -393,7 +393,7 @@ async def send_response_with_files(
         except Exception:
             pass  # Fall back to existing session object
 
-    is_sdlc = session and hasattr(session, "is_sdlc") and session.is_sdlc
+    is_sdlc = session and hasattr(session, "is_sdlc_job") and session.is_sdlc_job()
     should_summarize = text and (is_sdlc or len(text) >= 200)
     if should_summarize:
         try:

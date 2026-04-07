@@ -25,9 +25,9 @@ if launchctl list | grep -q "$LABEL"; then
     launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
 fi
 
-# Copy plist to LaunchAgents with path substitution
+# Copy plist to LaunchAgents
 echo "Installing plist to $PLIST_DST..."
-sed "s|__PROJECT_DIR__|$PROJECT_DIR|g; s|__HOME_DIR__|$HOME|g" "$PLIST_SRC" > "$PLIST_DST"
+cp "$PLIST_SRC" "$PLIST_DST"
 
 # Load new version
 echo "Loading $LABEL..."

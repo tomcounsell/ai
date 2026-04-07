@@ -324,30 +324,6 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             else:
                 log("Ollama not installed, skipping", v)
 
-    # Step 4.5: Machine identity verification
-    log("Verifying machine identity...", v)
-    machine_check = verify.check_machine_identity(project_dir)
-    if machine_check.get("error"):
-        log(f"WARN: {machine_check['error']}", v, always=True)
-        result.warnings.append(machine_check["error"])
-    elif machine_check.get("projects"):
-        log(
-            f"Machine: {machine_check['hostname']} -> "
-            f"projects: {', '.join(machine_check['projects'])}",
-            v,
-            always=True,
-        )
-    else:
-        log(
-            f"WARN: No projects assigned to machine '{machine_check.get('hostname', 'unknown')}'",
-            v,
-            always=True,
-        )
-        result.warnings.append(
-            f"No projects in config for machine '{machine_check.get('hostname')}'. "
-            "Check 'machine' field in ~/Desktop/Valor/projects.json"
-        )
-
     # Step 5: Service management
     if config.do_service_restart:
         log("Installing/restarting services...", v)
@@ -412,23 +388,12 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         )
 
         # Report system tools
-        # claude CLI is optional — bridge uses SDK directly
-        optional_tools = {"claude"}
         for tool in result.verification.system_tools:
             status = "OK" if tool.available else "MISSING"
             log(f"  {tool.name}: {status}", v)
             if not tool.available and tool.error:
                 log(f"    {tool.error}", v, always=True)
-                if tool.name not in optional_tools:
-                    result.warnings.append(f"{tool.name}: {tool.error}")
-
-        # Migrate legacy Desktop/claude_code paths in settings.json
-        log("Migrating settings.json paths...", v)
-        settings_migration = verify.migrate_settings_json_paths()
-        if settings_migration.get("migrated"):
-            log(f"  Settings: {settings_migration.get('reason')}", v, always=True)
-        else:
-            log(f"  Settings: {settings_migration.get('reason')}", v)
+                result.warnings.append(f"{tool.name}: {tool.error}")
 
         # Sync Claude OAuth credentials
         log("Syncing Claude OAuth credentials...", v)

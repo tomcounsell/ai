@@ -10,7 +10,7 @@ Review a pull request by analyzing its changes against the plan, checking code q
 
 ## Cross-Repo Resolution
 
-For cross-project work, the `GH_REPO` environment variable is automatically set by `sdk_client.py`. The `gh` CLI natively respects this env var, so all `gh` commands automatically target the correct repository. No `--repo` flags or manual parsing needed.
+When invoked for a non-ai project, extract the `GITHUB:` line from the prompt context (e.g., `GITHUB: tomcounsell/popoto`). If present, use `--repo $GITHUB_REPO` with all `gh` commands below. If not present, omit `--repo` (defaults to cwd repo).
 
 ## When to Use
 
@@ -22,33 +22,6 @@ For cross-project work, the `GH_REPO` environment variable is automatically set 
 ## Variables
 
 - `pr_number` (required): The PR number to review (e.g., `42` or `#42`)
-
-## SDLC Context Variables (auto-injected)
-
-When running in the SDLC pipeline, these environment variables are pre-resolved
-by `sdk_client.py` from the `AgentSession` (issue #420):
-
-| Variable | Description | Fallback |
-|----------|-------------|----------|
-| `$SDLC_PR_NUMBER` | PR number | Extract from args or `gh pr list` |
-| `$SDLC_PR_BRANCH` | PR head branch | `gh pr view --json headRefName` |
-| `$SDLC_SLUG` | Work item slug | Derive from branch name |
-| `$SDLC_PLAN_PATH` | Path to plan doc | Derive from slug |
-| `$SDLC_ISSUE_NUMBER` | Tracking issue | Extract from PR body |
-| `$SDLC_REPO` | GitHub repo (org/name) | `$GH_REPO` |
-
-**Usage:** Prefer `$SDLC_PR_NUMBER` over `$PR_NUMBER` when available.
-Fall back to manual resolution if the env var is unset.
-
-## Sub-Skills
-
-This skill is decomposed into focused sub-skills in `sub-skills/`:
-- `checkout.md` — Mechanical: clean git state, checkout PR branch
-- `code-review.md` — Judgment: read files, analyze diff, classify findings
-- `screenshot.md` — Mechanical: start app, capture UI screenshots
-- `post-review.md` — Mechanical: format findings, post review to GitHub
-
-Each sub-skill has a single responsibility and receives pre-resolved context.
 
 ## Session Progress Tracking
 
@@ -94,47 +67,23 @@ Follow this review process to validate a pull request:
 
 ### 1. PR Context Gathering
 
-**Resolve context variables** (prefer env vars, fall back to manual resolution):
+**Fetch PR details** (use `--repo` if `GITHUB:` context line is present):
 ```bash
-PR_NUMBER="${SDLC_PR_NUMBER:-$PR_NUMBER}"
-REPO="${SDLC_REPO:-${GH_REPO:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}}"
-PLAN_PATH="${SDLC_PLAN_PATH:-}"
-SLUG="${SDLC_SLUG:-}"
-
-# If PLAN_PATH not set, derive from slug or branch
-if [ -z "$PLAN_PATH" ] && [ -n "$SLUG" ]; then
-  PLAN_PATH="docs/plans/${SLUG}.md"
-fi
+gh pr view {pr_number} --json title,body,headRefName,baseRefName,files,additions,deletions $REPO_FLAG
 ```
-
-**Fetch PR details:**
-```bash
-gh pr view $PR_NUMBER --json title,body,headRefName,baseRefName,files,additions,deletions
-```
-
-**Checkout the PR branch (mandatory before any file reads):**
-```bash
-# Ensure clean git state before switching branches
-python -c "from agent.worktree_manager import ensure_clean_git_state; from pathlib import Path; ensure_clean_git_state(Path('.'))"
-
-gh pr checkout $PR_NUMBER
-```
-This ensures all subsequent `Read` calls see the PR's actual code, not whatever branch the parent conversation had checked out. Without this, the reviewer reads stale files that contradict the diff — producing hallucinated findings.
-
-> **Worktree isolation:** When spawning this skill via the Agent tool, use `isolation: "worktree"` so the checkout doesn't disrupt the parent conversation's working directory.
 
 **Get the full diff:**
 ```bash
-gh pr diff $PR_NUMBER
+gh pr diff {pr_number} $REPO_FLAG
 ```
 
 **Get changed files:**
 ```bash
-gh pr diff $PR_NUMBER --name-only
+gh pr diff {pr_number} --name-only $REPO_FLAG
 ```
 
 **Find and read the associated plan and issue:**
-- Check PR body for `Closes #N` — run `gh issue view N` to get the tracking issue context
+- Check PR body for `Closes #N` — run `gh issue view N $REPO_FLAG` to get the tracking issue context
 - Extract slug from the head branch name and read `docs/plans/{slug}.md`
 - The plan contains acceptance criteria, no-gos, and requirements to validate against
 - Keep the plan summary in mind throughout the entire review
@@ -166,13 +115,19 @@ gh pr diff $PR_NUMBER --name-only
 
 ```bash
 # Prepare screenshot directory
-mkdir -p generated_images/pr-$PR_NUMBER
+mkdir -p generated_images/pr-{pr_number}
 
-# PR branch was already checked out in Step 1.
-# Use /prepare_app to ensure app is running, then capture with agent-browser:
+# Ensure clean git state before switching branches (aborts in-progress merges/rebases)
+python -c "from agent.worktree_manager import ensure_clean_git_state; from pathlib import Path; ensure_clean_git_state(Path('.'))"
+
+# Checkout the PR branch locally
+gh pr checkout {pr_number}
+
+# Use /prepare_app to ensure app is running
+# Then capture with agent-browser:
 agent-browser open http://localhost:8000
 agent-browser snapshot -i
-agent-browser screenshot generated_images/pr-$PR_NUMBER/01_main_view.png
+agent-browser screenshot generated_images/pr-{pr_number}/01_main_view.png
 ```
 
 **Screenshot naming convention:**
@@ -199,7 +154,7 @@ If the plan document has a `## Verification` section with a machine-readable tab
 python -c "
 from agent.verification_parser import parse_verification_table, run_checks, format_results
 from pathlib import Path
-plan = Path('${SDLC_PLAN_PATH}').read_text()
+plan = Path('{PLAN_PATH}').read_text()
 checks = parse_verification_table(plan)
 if checks:
     results = run_checks(checks)
@@ -266,7 +221,7 @@ This step exists because of issue #181: a prior review hallucinated two "blocker
 
 **First, detect if this is a self-authored PR:**
 ```bash
-PR_AUTHOR=$(gh pr view $PR_NUMBER --json author --jq .author.login)
+PR_AUTHOR=$(gh pr view {pr_number} --json author --jq .author.login)
 CURRENT_USER=$(gh api user --jq .login)
 SELF_AUTHORED=$( [ "$PR_AUTHOR" = "$CURRENT_USER" ] && echo "true" || echo "false" )
 ```
@@ -293,9 +248,9 @@ EOF
 )"
 
 if [ "$SELF_AUTHORED" = "true" ]; then
-  gh pr comment $PR_NUMBER --body "$REVIEW_BODY"
+  gh pr comment {pr_number} $REPO_FLAG --body "$REVIEW_BODY"
 else
-  gh pr review $PR_NUMBER --request-changes --body "$REVIEW_BODY"
+  gh pr review {pr_number} $REPO_FLAG --request-changes --body "$REVIEW_BODY"
 fi
 ```
 
@@ -321,9 +276,9 @@ EOF
 )"
 
 if [ "$SELF_AUTHORED" = "true" ]; then
-  gh pr comment $PR_NUMBER --body "$REVIEW_BODY"
+  gh pr comment {pr_number} $REPO_FLAG --body "$REVIEW_BODY"
 else
-  gh pr review $PR_NUMBER --approve --body "$REVIEW_BODY"
+  gh pr review {pr_number} $REPO_FLAG --approve --body "$REVIEW_BODY"
 fi
 ```
 
@@ -332,25 +287,25 @@ fi
 **Always verify the review or comment exists after posting:**
 ```bash
 # Check for formal reviews
-REVIEW_COUNT=$(gh api repos/$REPO/pulls/$PR_NUMBER/reviews --jq length)
+REVIEW_COUNT=$(gh api repos/{owner}/{repo}/pulls/{pr_number}/reviews --jq length)
 
 # Check for comments (used for self-authored PRs)
-COMMENT_COUNT=$(gh api repos/$REPO/issues/$PR_NUMBER/comments --jq '[.[] | select(.body | startswith("## Review:"))] | length')
+COMMENT_COUNT=$(gh api repos/{owner}/{repo}/issues/{pr_number}/comments --jq '[.[] | select(.body | startswith("## Review:"))] | length')
 
 if [ "$REVIEW_COUNT" -eq 0 ] && [ "$COMMENT_COUNT" -eq 0 ]; then
   echo "WARNING: Review was not posted. Retrying as comment..."
-  gh pr comment $PR_NUMBER --body "$REVIEW_BODY"
+  gh pr comment {pr_number} --body "$REVIEW_BODY"
 fi
 ```
 
 **After verification, fetch the review URL:**
 ```bash
 # Try formal review URL first
-REVIEW_URL=$(gh api repos/$REPO/pulls/$PR_NUMBER/reviews --jq '.[-1].html_url // empty')
+REVIEW_URL=$(gh api repos/{owner}/{repo}/pulls/{pr_number}/reviews --jq '.[-1].html_url // empty')
 
 # Fall back to comment URL
 if [ -z "$REVIEW_URL" ]; then
-  REVIEW_URL=$(gh api repos/$REPO/issues/$PR_NUMBER/comments --jq '.[-1].html_url // empty')
+  REVIEW_URL=$(gh api repos/{owner}/{repo}/issues/{pr_number}/comments --jq '.[-1].html_url // empty')
 fi
 ```
 Save this URL as `{review_url}` for the output summary.
@@ -371,7 +326,7 @@ Save this URL as `{review_url}` for the output summary.
 - **Tech Debt: {count}**
 - **Nits: {count}**
 
-**Screenshots: {count}** captured -> `generated_images/pr-$PR_NUMBER/`
+**Screenshots: {count}** captured -> `generated_images/pr-{pr_number}/`
 
 ## Integration Notes
 
@@ -382,35 +337,14 @@ Save this URL as `{review_url}` for the output summary.
 - `gh` CLI - Fetches PR data and posts reviews
 
 **Screenshot storage:**
-- Saved to `generated_images/pr-$PR_NUMBER/` directory
+- Saved to `generated_images/pr-{pr_number}/` directory
 - Auto-detected and sent via Telegram bridge
 - Bridge uses RELATIVE_PATH_PATTERN to auto-detect generated_images/ files
-
-## Outcome Contract
-
-After posting the review and verifying it was posted (Steps 6-6.5), emit a typed outcome as the **very last line** of output.
-
-**Success (no blockers, no tech_debt, no nits):**
-```
-<!-- OUTCOME {"status":"success","stage":"REVIEW","artifacts":{"review_url":"{review_url}","blockers":0,"tech_debt":0,"nits":0},"notes":"Approved with no findings.","next_skill":"/do-docs"} -->
-```
-
-**Partial (no blockers, but has tech_debt and/or nits that need patching):**
-```
-<!-- OUTCOME {"status":"partial","stage":"REVIEW","artifacts":{"review_url":"{review_url}","blockers":0,"tech_debt":2,"nits":1},"notes":"Approved with 2 tech_debt and 1 nit findings. Routing to /do-patch.","next_skill":"/do-patch"} -->
-```
-
-**Fail (blockers found):**
-```
-<!-- OUTCOME {"status":"fail","stage":"REVIEW","artifacts":{"review_url":"{review_url}","blockers":2,"tech_debt":1,"nits":0},"notes":"Changes requested: 2 blockers found.","failure_reason":"2 blockers must be fixed before merge","next_skill":"/do-patch"} -->
-```
-
-**Important**: The outcome block uses HTML comment syntax (`<!-- ... -->`) so it's invisible in rendered markdown but parseable by the pipeline. Always emit it as the very last line of output. Use `"partial"` — not `"success"` — whenever tech_debt or non-subjective nit findings exist. This ensures the pipeline routes to `/do-patch` before advancing to `/do-docs`.
 
 ## Hard Rules
 
 1. **Reviews MUST be posted on GitHub.** A review that only exists in agent output is NOT a review. Use `gh pr review` to post, or `gh pr comment` for self-authored PRs. Step 6.5 verifies posting succeeded. The SDLC dispatcher checks for both reviews and comments before advancing.
-2. **Tech debt and nits get patched.** `/do-patch` fixes all tech debt and non-subjective nits. Only purely subjective nits may be skipped — and that requires human approval.
+2. **Tech debt and nits get patched.** After review, `/do-patch` fixes all tech debt and non-subjective nits before proceeding to docs/merge. Only purely subjective nits may be skipped — and that requires human approval.
 3. **Never approve and skip issues.** If you found tech debt or nits, they appear in the review body. The pipeline will patch them. Don't omit findings to make the review look clean.
 
 ## Best Practices

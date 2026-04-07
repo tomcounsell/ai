@@ -32,7 +32,7 @@ For worktree paths only: the slug component (the directory name under `.worktree
 
 **Why last**: This is the most specific check and only applies to worktree paths. Regular project paths like `/Users/valorengels/src/ai` contain characters that wouldn't pass slug validation, so this check is gated behind the `is_worktree` flag.
 
-**Why only worktrees**: Worktree slugs are derived from user input (issue titles, branch names) and flow into filesystem paths. Regular project directories are defined in `~/Desktop/Valor/projects.json` by the system operator and don't need runtime slug validation.
+**Why only worktrees**: Worktree slugs are derived from user input (issue titles, branch names) and flow into filesystem paths. Regular project directories are defined in `config/projects.json` by the system operator and don't need runtime slug validation.
 
 ## Fallback Behavior
 

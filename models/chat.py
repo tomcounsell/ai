@@ -2,7 +2,7 @@
 
 import time
 
-from popoto import Field, KeyField, Model, SortedField, UniqueKeyField
+from popoto import KeyField, Model, SortedField, UniqueKeyField
 
 
 class Chat(Model):
@@ -11,15 +11,11 @@ class Chat(Model):
     Replaces the SQLite chats table. UniqueKeyField on chat_id
     ensures one record per chat. SortedField on updated_at enables
     time-sorted listing.
-
-    project_key enables direct project association, preparing for
-    multi-chat-per-project routing.
     """
 
     chat_id = UniqueKeyField()
     chat_name = KeyField()
     chat_type = KeyField(null=True)  # private, group, supergroup, channel
-    project_key = Field(null=True)  # Field (not KeyField) to avoid delete-and-recreate on change
     updated_at = SortedField(type=float)
 
     @classmethod

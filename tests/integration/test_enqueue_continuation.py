@@ -11,7 +11,7 @@ Tests use Redis db=1 via the autouse redis_test_db fixture in conftest.py.
 """
 
 import time
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -285,8 +285,8 @@ class TestMetadataPreservation:
         assert sessions[0].expectations == "Waiting for test results from CI"
 
     @pytest.mark.asyncio
-    async def test_is_sdlc_works_after_continuation(self, redis_test_db):
-        """is_sdlc returns True on the reused session."""
+    async def test_is_sdlc_job_works_after_continuation(self, redis_test_db):
+        """is_sdlc_job() returns True on the reused session."""
         session = _create_session(redis_test_db, classification_type="sdlc")
         session.append_history("stage", "ISSUE completed")
         job = _make_mock_job(
@@ -303,7 +303,7 @@ class TestMetadataPreservation:
         )
 
         sessions = list(AgentSession.query.filter(session_id=session.session_id))
-        assert sessions[0].is_sdlc is True
+        assert sessions[0].is_sdlc_job() is True
 
     @pytest.mark.asyncio
     async def test_stage_progress_works_after_continuation(self, redis_test_db):
@@ -334,48 +334,26 @@ class TestFallbackBehavior:
     """Tests for fallback behavior when session is not found."""
 
     @pytest.mark.asyncio
-    async def test_fallback_preserves_metadata_when_no_session(self, redis_test_db):
-        """When no session exists, fallback recreates from Job._rj metadata."""
-        # Create a session to use as the Job's underlying AgentSession,
-        # then delete it so the query finds nothing — simulating Redis expiry
-        original = _create_session(
-            redis_test_db,
-            session_id="fallback-session",
-            classification_type="sdlc",
-        )
-        original.context_summary = "Building feature X"
-        original.issue_url = "https://github.com/org/repo/issues/99"
-        original.pr_url = "https://github.com/org/repo/pull/100"
-        original.save()
+    async def test_fallback_to_enqueue_job_when_no_session(self, redis_test_db):
+        """When no session exists, falls back to enqueue_job."""
+        job = _make_mock_job(session_id="nonexistent-session")
 
-        # Create a real Job wrapping this session
-        from agent.job_queue import Job
+        with patch(
+            "agent.job_queue.enqueue_job",
+            new_callable=AsyncMock,
+        ) as mock_enqueue:
+            await _enqueue_continuation(
+                job=job,
+                branch_name="session/test",
+                task_list_id="tl",
+                auto_continue_count=1,
+                output_msg="msg",
+            )
 
-        job = Job(original)
-
-        # Delete the session from Redis to simulate expiry
-        original.delete()
-        assert list(AgentSession.query.filter(session_id="fallback-session")) == []
-
-        # Run continuation — should recreate from Job._rj metadata
-        await _enqueue_continuation(
-            job=job,
-            branch_name="session/test",
-            task_list_id="tl",
-            auto_continue_count=1,
-            output_msg="msg",
-        )
-
-        # Verify the recreated session preserves metadata
-        sessions = list(AgentSession.query.filter(session_id="fallback-session"))
-        assert len(sessions) == 1
-        recreated = sessions[0]
-        assert recreated.classification_type == "sdlc"
-        assert recreated.context_summary == "Building feature X"
-        assert recreated.issue_url == "https://github.com/org/repo/issues/99"
-        assert recreated.pr_url == "https://github.com/org/repo/pull/100"
-        assert recreated.status == "pending"
-        assert recreated.priority == "high"
+        mock_enqueue.assert_called_once()
+        call_kwargs = mock_enqueue.call_args[1]
+        assert call_kwargs["session_id"] == "nonexistent-session"
+        assert call_kwargs["classification_type"] is None
 
 
 class TestNoDuplicateRecords:
@@ -404,16 +382,13 @@ class TestNoDuplicateRecords:
     @pytest.mark.asyncio
     async def test_no_duplicates_after_multiple_continuations(self, redis_test_db):
         """Multiple auto-continues still produce exactly one record."""
-        from agent.job_queue import Job
-
         session = _create_session(redis_test_db, classification_type="sdlc")
 
         for i in range(5):
-            # Re-fetch the session each iteration so job._rj points to the
-            # current record (delete-and-recreate changes the underlying object)
-            sessions = list(AgentSession.query.filter(session_id=session.session_id))
-            current = sessions[0] if sessions else session
-            job = Job(current)
+            job = _make_mock_job(
+                session_id=session.session_id,
+                classification_type="sdlc",
+            )
             await _enqueue_continuation(
                 job=job,
                 branch_name="session/test",

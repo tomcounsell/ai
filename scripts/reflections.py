@@ -18,10 +18,6 @@ A long-running process that performs daily self-directed maintenance tasks:
 13. Redis data quality checks (unsummarized links, dead channels)
 14. Branch and plan cleanup (stale branches, orphaned/completed/duplicate plans)
 15. Feature docs audit (stale refs, README.md accuracy, plan-masquerading-as-feature)
-16. Episode cycle-close (CyclicEpisode records from completed SDLC sessions)
-17. Pattern crystallization (ProceduralPatterns from episode clusters)
-18. Principal context staleness (PRINCIPAL.md age check)
-19. Disk space check (project volume free space, finding if <10GB)
 
 All persistence is Redis-backed via Popoto models (see models/ directory).
 State: ReflectionRun | Ignore patterns: ReflectionIgnore
@@ -36,7 +32,6 @@ import json
 import logging
 import os
 import re
-import shutil
 import subprocess
 import sys
 from datetime import datetime, timedelta
@@ -160,31 +155,20 @@ THRASH_RATIO_THRESHOLD = 0.5
 
 
 def load_local_projects() -> list[dict]:
-    """Load projects from projects.json, filtered to those present on this machine.
-
-    Loads from ~/Desktop/Valor/projects.json (iCloud-synced, private).
-    Falls back to legacy in-repo config path if the Desktop path doesn't exist.
+    """Load projects from config/projects.json, filtered to those present on this machine.
 
     Returns:
         List of project dicts, each including a 'slug' key derived from the
         projects.json key. Only projects whose working_directory exists on disk
         are returned.
     """
-    config_path = Path(
-        os.environ.get(
-            "PROJECTS_CONFIG_PATH",
-            str(Path.home() / "Desktop" / "Valor" / "projects.json"),
-        )
-    )
-    if not config_path.exists():
-        # Legacy fallback
-        config_path = AI_ROOT / "config" / "projects.json"
+    config_path = AI_ROOT / "config" / "projects.json"
     data = json.loads(config_path.read_text())
     projects = []
     for slug, cfg in data.get("projects", {}).items():
-        wd = Path(cfg.get("working_directory", "")).expanduser()
+        wd = Path(cfg.get("working_directory", ""))
         if wd.exists():
-            projects.append({"slug": slug, **cfg, "working_directory": str(wd)})
+            projects.append({"slug": slug, **cfg})
     return projects
 
 
@@ -266,21 +250,11 @@ def analyze_sessions_from_redis(target_date: str) -> dict[str, Any]:
 
             # Check for failed sessions
             if session.status == "failed":
-                summary_text = (session.summary or "")[:200]
-                if not summary_text.strip():
-                    # Skip failed sessions with empty summaries -- these produce
-                    # vague, unactionable reflections. Log a warning so we can
-                    # track if code paths still produce empty summaries.
-                    logger.warning(
-                        "Skipping failed session %s with empty summary",
-                        session_id,
-                    )
-                    continue
                 result["error_patterns"].append(
                     {
                         "session_id": session_id,
                         "status": "failed",
-                        "summary": summary_text,
+                        "summary": (session.summary or "")[:200],
                     }
                 )
 
@@ -496,7 +470,6 @@ class ReflectionRunner:
             (16, "Episode Cycle-Close", self.step_episode_cycle_close),
             (17, "Pattern Crystallization", self.step_pattern_crystallization),
             (18, "Principal Context Staleness", self.step_principal_staleness),
-            (19, "Disk Space Check", self.step_disk_space_check),
         ]
 
     def _load_state(self) -> ReflectionsState:
@@ -1210,7 +1183,9 @@ class ReflectionRunner:
             from models.agent_session import AgentSession
             from models.bridge_event import BridgeEvent
             from models.chat import Chat
+            from models.cyclic_episode import CyclicEpisode
             from models.link import Link
+            from models.procedural_pattern import ProceduralPattern
             from models.reflections import (
                 ReflectionIgnore,
                 ReflectionRun,
@@ -1224,6 +1199,8 @@ class ReflectionRunner:
             event_deleted = BridgeEvent.cleanup_old(max_age_seconds=7 * 86400)
             run_deleted = ReflectionRun.cleanup_expired(max_age_days=30)
             ignore_deleted = ReflectionIgnore.cleanup_expired()
+            episode_deleted = CyclicEpisode.cleanup_expired(max_age_days=180)
+            pattern_deleted = ProceduralPattern.cleanup_expired(max_age_days=365)
 
             total = (
                 msg_deleted
@@ -1233,13 +1210,16 @@ class ReflectionRunner:
                 + event_deleted
                 + run_deleted
                 + ignore_deleted
+                + episode_deleted
+                + pattern_deleted
             )
             logger.info(
                 f"Redis TTL cleanup: {total} records deleted "
                 f"(msgs={msg_deleted}, links={link_deleted}, "
                 f"chats={chat_deleted}, sessions={session_deleted}, "
                 f"events={event_deleted}, runs={run_deleted}, "
-                f"ignores={ignore_deleted})"
+                f"ignores={ignore_deleted}, "
+                f"episodes={episode_deleted}, patterns={pattern_deleted})"
             )
             self.state.daily_report.append(f"Redis cleanup: {total} expired records removed")
         except Exception as e:
@@ -1736,9 +1716,8 @@ class ReflectionRunner:
         """
         import time as _time
 
-        from models.cyclic_episode import CyclicEpisode
-
         from models.agent_session import AgentSession
+        from models.cyclic_episode import CyclicEpisode
         from scripts.fingerprint_classifier import classify_session
 
         cutoff = _time.time() - 86400  # past 24 hours
@@ -1761,7 +1740,7 @@ class ReflectionRunner:
                 continue
 
             # Skip non-SDLC sessions
-            if not session.is_sdlc:
+            if not session.is_sdlc_job():
                 sessions_skipped += 1
                 continue
 
@@ -1879,7 +1858,7 @@ class ReflectionRunner:
         from models.cyclic_episode import CyclicEpisode
         from models.procedural_pattern import ProceduralPattern
 
-        crystallization_threshold = 3  # minimum episodes to form a pattern
+        CRYSTALLIZATION_THRESHOLD = 3  # minimum episodes to form a pattern
 
         try:
             all_episodes = CyclicEpisode.query.all()
@@ -1900,7 +1879,7 @@ class ReflectionRunner:
         patterns_reinforced = 0
 
         for (topology, layer), episodes in clusters.items():
-            if len(episodes) < crystallization_threshold:
+            if len(episodes) < CRYSTALLIZATION_THRESHOLD:
                 continue
 
             # Compute cluster stats
@@ -2036,45 +2015,6 @@ class ReflectionRunner:
             "threshold": staleness_threshold,
         }
 
-    async def step_disk_space_check(self) -> None:
-        """Step 19: Check available disk space on the project volume.
-
-        This is the canonical template step — use it as a reference when adding
-        new reflection steps. It demonstrates:
-
-        1. Method signature: ``async def step_<key>(self) -> None``
-        2. Local ``findings: list[str]`` for collecting issues
-        3. ``self.state.add_finding("<key>", text)`` to persist each finding
-        4. ``self.state.step_progress["<key>"] = {...}`` for metrics
-        5. Top-level try/except so a single step failure never halts the run
-
-        The check uses :func:`shutil.disk_usage` on ``PROJECT_ROOT`` and records
-        a finding when free space drops below 10 GB.
-        """
-        findings: list[str] = []
-
-        try:
-            usage = shutil.disk_usage(PROJECT_ROOT)
-            free_gb = usage.free / (1024**3)
-            total_gb = usage.total / (1024**3)
-
-            if free_gb < 10:
-                finding = (
-                    f"Low disk space: {free_gb:.1f} GB free "
-                    f"of {total_gb:.1f} GB total on project volume"
-                )
-                findings.append(finding)
-                self.state.add_finding("disk_space_check", finding)
-                logger.warning(finding)
-            else:
-                logger.info(f"Disk space OK: {free_gb:.1f} GB free of {total_gb:.1f} GB total")
-        except Exception:
-            logger.exception("Failed to check disk space")
-
-        self.state.step_progress["disk_space_check"] = {
-            "findings": len(findings),
-        }
-
     async def step_post_to_telegram(self, project: dict, issue_url: str = "") -> None:
         """Post reflections summary to project's Telegram chat.
 
@@ -2181,12 +2121,6 @@ class ReflectionsState:
         if category not in self.findings:
             self.findings[category] = []
         self.findings[category].append(finding)
-
-
-async def run_reflections_async() -> None:
-    """Run the full reflections pipeline. Called by the reflection scheduler."""
-    runner = ReflectionRunner()
-    await runner.run()
 
 
 async def main() -> None:

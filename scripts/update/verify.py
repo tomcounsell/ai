@@ -158,14 +158,13 @@ def check_python_alias() -> ToolCheck:
         except Exception:
             pass
 
-    # python not found but python3 exists — acceptable, all our scripts use python3
-    python3_version = ""
-    try:
-        r = run_cmd([python3_path, "--version"], timeout=5)
-        python3_version = r.stdout.strip()
-    except Exception:
-        pass
-    return ToolCheck(name="python", available=True, version=python3_version or "python3")
+    # python not found but python3 exists
+    return ToolCheck(
+        name="python",
+        available=False,
+        error="'python' not found but python3 exists. "
+        "Fix: brew install python@3.12 && brew link python@3.12",
+    )
 
 
 def check_system_tools() -> list[ToolCheck]:
@@ -268,7 +267,7 @@ def check_valor_tools(project_dir: Path) -> list[ToolCheck]:
     return results
 
 
-def check_ollama(model: str = "qwen3:1.7b") -> ToolCheck:
+def check_ollama(model: str = "qwen3:4b") -> ToolCheck:
     """Check if Ollama is available and has the required model."""
     if not shutil.which("ollama"):
         return ToolCheck(name="ollama", available=False, error="Not installed")
@@ -291,7 +290,7 @@ def check_ollama(model: str = "qwen3:1.7b") -> ToolCheck:
         return ToolCheck(name="ollama", available=False, error=str(e))
 
 
-def pull_ollama_model(model: str = "qwen3:1.7b") -> bool:
+def pull_ollama_model(model: str = "qwen3:4b") -> bool:
     """Pull an Ollama model. Returns True if successful."""
     if not shutil.which("ollama"):
         return False
@@ -329,10 +328,10 @@ def check_sdk_auth(project_dir: Path) -> dict[str, bool]:
 
 
 def sync_claude_oauth(project_dir: Path) -> dict[str, str | bool]:
-    """Sync Claude OAuth token from Desktop Valor dir to Claude Desktop config.
+    """Sync Claude OAuth token from Desktop claude_code dir to Claude Desktop config.
 
     The source of truth for OAuth credentials is:
-        ~/Desktop/Valor/claude_oauth_config.json
+        ~/Desktop/claude_code/claude_oauth_config.json
     The target (where Claude CLI reads auth) is:
         ~/Library/Application Support/Claude/config.json
 
@@ -343,7 +342,7 @@ def sync_claude_oauth(project_dir: Path) -> dict[str, str | bool]:
     """
     import json
 
-    source = Path.home() / "Desktop" / "Valor" / "claude_oauth_config.json"
+    source = Path.home() / "Desktop" / "claude_code" / "claude_oauth_config.json"
     target = Path.home() / "Library" / "Application Support" / "Claude" / "config.json"
 
     result: dict[str, str | bool] = {
@@ -353,7 +352,7 @@ def sync_claude_oauth(project_dir: Path) -> dict[str, str | bool]:
     }
 
     if not source.exists():
-        result["reason"] = "No source credentials at ~/Desktop/Valor/claude_oauth_config.json"
+        result["reason"] = "No source credentials at ~/Desktop/claude_code/claude_oauth_config.json"
         return result
 
     try:
@@ -407,53 +406,6 @@ def sync_claude_oauth(project_dir: Path) -> dict[str, str | bool]:
         result["reason"] = "Copied oauth:tokenCache to Claude Desktop config"
     except OSError as e:
         result["reason"] = f"Failed to write target config: {e}"
-
-    return result
-
-
-def migrate_settings_json_paths() -> dict[str, str | bool]:
-    """Migrate legacy Desktop/claude_code paths in ~/.claude/settings.json to Desktop/Valor.
-
-    Reads the global Claude settings file and replaces any occurrence of
-    'Desktop/claude_code' with 'Desktop/Valor' in the serialized JSON.
-    This handles the statusline command path and any other references.
-
-    Returns dict with: migrated (bool), reason (str)
-    """
-    import json
-
-    settings_path = Path.home() / ".claude" / "settings.json"
-    result: dict[str, str | bool] = {"migrated": False, "reason": ""}
-
-    if not settings_path.exists():
-        result["reason"] = "No ~/.claude/settings.json found"
-        return result
-
-    try:
-        content = settings_path.read_text()
-    except OSError as e:
-        result["reason"] = f"Failed to read settings.json: {e}"
-        return result
-
-    if "Desktop/claude_code" not in content:
-        result["reason"] = "No legacy paths found — already migrated or never present"
-        return result
-
-    updated = content.replace("Desktop/claude_code", "Desktop/Valor")
-
-    # Validate JSON before writing
-    try:
-        json.loads(updated)
-    except json.JSONDecodeError as e:
-        result["reason"] = f"Updated content is not valid JSON: {e}"
-        return result
-
-    try:
-        settings_path.write_text(updated)
-        result["migrated"] = True
-        result["reason"] = "Replaced Desktop/claude_code with Desktop/Valor in settings.json"
-    except OSError as e:
-        result["reason"] = f"Failed to write settings.json: {e}"
 
     return result
 
@@ -647,7 +599,7 @@ def verify_environment(project_dir: Path, check_ollama_model: bool = True) -> Ve
     result.valor_tools = check_valor_tools(project_dir)
 
     if check_ollama_model:
-        ollama_model = os.getenv("OLLAMA_SUMMARIZER_MODEL", "qwen3:1.7b")
+        ollama_model = os.getenv("OLLAMA_SUMMARIZER_MODEL", "qwen3:4b")
         result.ollama = check_ollama(ollama_model)
 
     result.sdk_auth = check_sdk_auth(project_dir)
@@ -655,44 +607,3 @@ def verify_environment(project_dir: Path, check_ollama_model: bool = True) -> Ve
     result.gitignore_issues = check_gitignore_issues()
 
     return result
-
-
-def check_machine_identity(project_dir: Path) -> dict:
-    """Verify this machine's identity against projects.json config.
-
-    Reads ComputerName via scutil, matches against the 'machine' field
-    in ~/Desktop/Valor/projects.json, and returns the matched projects.
-    """
-    import json
-
-    # Get this machine's name
-    try:
-        hostname = subprocess.check_output(["scutil", "--get", "ComputerName"], text=True).strip()
-    except Exception as e:
-        return {"error": f"Could not read ComputerName: {e}"}
-
-    # Find projects.json
-    config_path = Path.home() / "Desktop" / "Valor" / "projects.json"
-    if not config_path.exists():
-        config_path = project_dir / "config" / "projects.json"
-    if not config_path.exists():
-        return {"error": "projects.json not found", "hostname": hostname}
-
-    try:
-        config = json.loads(config_path.read_text())
-    except Exception as e:
-        return {"error": f"Failed to read projects.json: {e}", "hostname": hostname}
-
-    # Match projects by machine field
-    hostname_lower = hostname.lower()
-    matched = []
-    for key, project in config.get("projects", {}).items():
-        machine = project.get("machine", "")
-        if machine.lower() == hostname_lower:
-            matched.append(key)
-
-    return {
-        "hostname": hostname,
-        "projects": matched,
-        "config_path": str(config_path),
-    }

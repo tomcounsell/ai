@@ -2,7 +2,7 @@
 Claude Agent SDK client wrapper for Valor.
 
 This module provides a wrapper around ClaudeSDKClient configured for Valor's use case:
-- Loads system prompt via the configurable persona system
+- Loads system prompt from SOUL.md
 - Configures permission mode for autonomous operation
 - Handles session management
 - Extracts text response from message stream
@@ -21,7 +21,6 @@ Authentication strategy (subscription-first):
       programmatic control. Fewer built-in tools but subscription-native.
 """
 
-import asyncio
 import logging
 import os
 import time
@@ -41,8 +40,6 @@ from agent.hooks import build_hooks_config
 from agent.workflow_state import WorkflowState
 from agent.workflow_types import WorkflowStateData
 from agent.worktree_manager import WORKTREES_DIR, validate_workspace
-from utils.github_patterns import ISSUE_NUMBER_RE as _ISSUE_NUMBER_RE
-from utils.github_patterns import PR_NUMBER_RE as _PR_NUMBER_RE
 
 logger = logging.getLogger(__name__)
 
@@ -60,47 +57,10 @@ _active_clients: dict[str, "ClaudeSDKClient"] = {}
 # In-memory only — cleared when the session finishes.
 _session_stop_reasons: dict[str, str] = {}
 
-# === Activity Tracking ===
-# Tracks the timestamp of the last tool call or log output for each session.
-# Used by the watchdog heartbeat for activity-based stall detection instead
-# of hard wall-clock timeouts. Updated on each tool call callback and log output.
-# In-memory only — reset on crash/reboot (new sessions start fresh).
-_last_activity_timestamps: dict[str, float] = {}
-
-# Configurable inactivity threshold (seconds). Sessions idle longer than this
-# are considered stalled. Active sessions producing tool calls/logs are never
-# interrupted regardless of total runtime.
-SDK_INACTIVITY_TIMEOUT_SECONDS = int(os.environ.get("SDK_INACTIVITY_TIMEOUT_SECONDS", 300))
-
 
 def get_stop_reason(session_id: str) -> str | None:
     """Get and consume the stop_reason for a completed session query."""
     return _session_stop_reasons.pop(session_id, None)
-
-
-def record_session_activity(session_id: str) -> None:
-    """Record that a session produced activity (text output or result message).
-
-    Called on text block output and result messages during SDK query execution.
-    The watchdog uses this to detect stalls based on inactivity rather than
-    wall-clock duration.
-    """
-    _last_activity_timestamps[session_id] = time.time()
-
-
-def get_session_last_activity(session_id: str) -> float | None:
-    """Get the timestamp of the last activity for a session.
-
-    Returns:
-        Unix timestamp of last tool call or log output, or None if
-        no activity has been recorded for this session.
-    """
-    return _last_activity_timestamps.get(session_id)
-
-
-def clear_session_activity(session_id: str) -> None:
-    """Remove activity tracking for a completed/abandoned session."""
-    _last_activity_timestamps.pop(session_id, None)
 
 
 def _get_prior_session_uuid(session_id: str) -> str | None:
@@ -187,87 +147,6 @@ def _store_claude_session_uuid(session_id: str, claude_uuid: str) -> None:
         )
 
 
-def _extract_sdlc_env_vars(session_id: str, gh_repo: str | None = None) -> dict[str, str]:
-    """Extract SDLC context variables from an AgentSession for env injection.
-
-    Reads the AgentSession from Redis and maps its fields to SDLC_* env vars.
-    Only returns vars for fields that are non-None and non-empty, ensuring
-    skills never see "None" as a value (issue #420).
-
-    Args:
-        session_id: The bridge/Telegram session ID.
-        gh_repo: Optional GH_REPO already set on the agent.
-
-    Returns:
-        Dict of SDLC_* env var name -> value. Empty dict if session not found.
-    """
-    env: dict[str, str] = {}
-    try:
-        from models.agent_session import AgentSession
-
-        sessions = list(AgentSession.query.filter(session_id=session_id))
-        if not sessions:
-            return env
-        # Pick the newest active session
-        active = [s for s in sessions if s.status in ("running", "active", "pending")]
-        candidates = active if active else sessions
-        candidates.sort(key=lambda s: s.created_at or 0, reverse=True)
-        session = candidates[0]
-
-        # PR URL -> SDLC_PR_NUMBER and SDLC_PR_BRANCH
-        # Use isinstance(str) guards to prevent TypeError from non-string
-        # ORM field values (e.g. Popoto proxy objects).
-        pr_url = getattr(session, "pr_url", None)
-        if isinstance(pr_url, str) and pr_url:
-            pr_match = _PR_NUMBER_RE.search(pr_url)
-            if pr_match:
-                env["SDLC_PR_NUMBER"] = pr_match.group(1)
-
-        # Branch name
-        branch = getattr(session, "branch_name", None)
-        if isinstance(branch, str) and branch:
-            env["SDLC_PR_BRANCH"] = branch
-
-        # Work item slug
-        slug = getattr(session, "work_item_slug", None)
-        if isinstance(slug, str) and slug:
-            env["SDLC_SLUG"] = slug
-
-        # Plan URL -> SDLC_PLAN_PATH (convert URL to local path)
-        plan_url = getattr(session, "plan_url", None)
-        if isinstance(plan_url, str) and plan_url:
-            # plan_url is typically a GitHub URL or a local path
-            # Extract the path portion (docs/plans/...)
-            if "docs/plans/" in plan_url:
-                plan_path = "docs/plans/" + plan_url.split("docs/plans/")[-1]
-                env["SDLC_PLAN_PATH"] = plan_path
-            else:
-                env["SDLC_PLAN_PATH"] = plan_url
-
-        # Issue URL -> SDLC_ISSUE_NUMBER
-        issue_url = getattr(session, "issue_url", None)
-        if isinstance(issue_url, str) and issue_url:
-            issue_match = _ISSUE_NUMBER_RE.search(issue_url)
-            if issue_match:
-                env["SDLC_ISSUE_NUMBER"] = issue_match.group(1)
-
-        # Repo (complement GH_REPO, don't replace it)
-        if gh_repo:
-            env["SDLC_REPO"] = gh_repo
-
-        if env:
-            logger.info(
-                f"SDLC env vars for session {session_id}: "
-                f"{', '.join(f'{k}={v}' for k, v in sorted(env.items()))}"
-            )
-    except Exception:
-        logger.warning(
-            f"_extract_sdlc_env_vars({session_id!r}) failed, skipping SDLC vars",
-            exc_info=True,
-        )
-    return env
-
-
 def get_active_client(session_id: str) -> ClaudeSDKClient | None:
     """Get the live SDK client for a running session, if any.
 
@@ -286,18 +165,14 @@ def get_all_active_sessions() -> dict[str, "ClaudeSDKClient"]:
 # Root of the ai/ repository (used as cwd for SDLC-routed requests)
 AI_REPO_ROOT = str(Path(__file__).parent.parent)
 
-# Path to SOUL.md system prompt (legacy fallback)
+# Path to SOUL.md system prompt
 SOUL_PATH = Path(__file__).parent.parent / "config" / "SOUL.md"
-
-# Path to persona base file (stays in repo — not private)
-PERSONAS_BASE_DIR = Path(__file__).parent.parent / "config" / "personas"
-
-# Path to persona overlay files (private, iCloud-synced)
-# Overlays live in ~/Desktop/Valor/personas/ — falls back to config/personas/ for dev
-PERSONAS_OVERLAY_DIR = Path.home() / "Desktop" / "Valor" / "personas"
 
 # Path to PRINCIPAL.md — supervisor's operating context for strategic decisions
 PRINCIPAL_PATH = Path(__file__).parent.parent / "config" / "PRINCIPAL.md"
+
+# Log a warning when a single query's equivalent API cost exceeds this
+_COST_WARN_THRESHOLD = float(os.getenv("SDK_COST_WARN_THRESHOLD", "0.50"))
 
 # Worker safety rails injected into every agent session.
 # The Observer Agent (bridge/observer.py) is the sole pipeline controller —
@@ -424,16 +299,19 @@ def load_principal_context(condensed: bool = True) -> str:
     # This keeps the worker prompt lean while providing strategic context.
     import re
 
-    sections_to_extract = ["Mission", r"Goals[^\n]*", r"Projects[^\n]*"]
+    sections_to_extract = ["Mission", "Goals.*", "Projects.*"]
     extracted = []
     for pattern in sections_to_extract:
         match = re.search(
-            rf"^(## {pattern})\n\n(.*?)(?=\n---|\n## |\Z)",
+            rf"^## {pattern}\n\n(.*?)(?=\n---|\n## |\Z)",
             content,
             re.MULTILINE | re.DOTALL,
         )
         if match:
-            extracted.append(f"{match.group(1)}\n\n{match.group(2).strip()}")
+            # Include the section header for clarity
+            header_match = re.search(rf"^(## {pattern})", content, re.MULTILINE)
+            header = header_match.group(1) if header_match else ""
+            extracted.append(f"{header}\n\n{match.group(1).strip()}")
 
     if not extracted:
         # Fallback: return first 500 chars if section extraction fails
@@ -442,85 +320,13 @@ def load_principal_context(condensed: bool = True) -> str:
     return "\n\n".join(extracted)
 
 
-def _resolve_overlay_path(persona: str) -> Path:
-    """Resolve persona overlay file path.
-
-    Checks ~/Desktop/Valor/personas/{persona}.md first (private, iCloud-synced),
-    then falls back to config/personas/{persona}.md (in-repo, for development).
-    """
-    overlay_path = PERSONAS_OVERLAY_DIR / f"{persona}.md"
-    if overlay_path.exists():
-        return overlay_path
-
-    # Fallback: in-repo overlay (for development or when Desktop/Valor not available)
-    return PERSONAS_BASE_DIR / f"{persona}.md"
-
-
-def load_persona_prompt(persona: str = "developer") -> str:
-    """Load persona prompt from base + overlay files.
-
-    Base is read from config/personas/_base.md (in-repo, shared).
-    Overlays are read from ~/Desktop/Valor/personas/{persona}.md (private, iCloud-synced).
-    Falls back to config/SOUL.md if persona files are missing.
-
-    Args:
-        persona: Persona name — one of "developer", "project-manager", "teammate".
-            Defaults to "developer".
-
-    Returns:
-        Combined persona prompt (base + overlay).
-
-    Raises:
-        FileNotFoundError: If _base.md is missing (base is required).
-    """
-    base_path = PERSONAS_BASE_DIR / "_base.md"
-
-    # Base is required — fail loudly if missing
-    if not base_path.exists():
-        raise FileNotFoundError(
-            f"Persona base file not found at {base_path}. "
-            "The _base.md file is required for the persona system."
-        )
-
-    base_content = base_path.read_text()
-
-    # Resolve overlay: ~/Desktop/Valor/personas/ first, then config/personas/
-    overlay_path = _resolve_overlay_path(persona)
-
-    # Overlay is optional — fall back to SOUL.md if missing
-    if overlay_path.exists():
-        overlay_content = overlay_path.read_text()
-        logger.info(f"Loaded persona '{persona}' from {overlay_path}")
-        return f"{base_content}\n\n---\n\n{overlay_content}"
-
-    # Invalid persona name — fall back to developer with warning
-    if persona not in ("developer", "project-manager", "teammate"):
-        logger.warning(f"Unknown persona '{persona}', falling back to developer persona")
-        developer_path = _resolve_overlay_path("developer")
-        if developer_path.exists():
-            return f"{base_content}\n\n---\n\n{developer_path.read_text()}"
-
-    # Persona overlay missing — fall back to SOUL.md
-    logger.warning(
-        f"Persona overlay '{persona}' not found at {overlay_path}, falling back to SOUL.md"
-    )
-    if SOUL_PATH.exists():
-        return SOUL_PATH.read_text()
-
-    logger.warning(f"SOUL.md not found at {SOUL_PATH}, using default prompt")
-    return "You are Valor, an AI coworker. Be direct, concise, and helpful."
-
-
 def load_system_prompt() -> str:
-    """Load developer system prompt with worker rules and completion criteria.
-
-    Wraps load_persona_prompt("developer") with WORKER_RULES and additional context.
-    This is the default prompt for AgentSDK coding subprocesses.
+    """Load Valor's system prompt from SOUL.md with worker rules and completion criteria.
 
     System prompt structure:
         [WORKER_RULES — safety rails for the worker, FIRST — takes precedence]
         ---
-        [Persona prompt — base + developer overlay]
+        [SOUL.md — persona, attitude, purpose, communication style]
         ---
         [Principal Context — condensed mission/goals/priorities from PRINCIPAL.md]
         ---
@@ -529,15 +335,12 @@ def load_system_prompt() -> str:
     The Observer Agent (bridge/observer.py) handles pipeline orchestration.
     The worker only receives safety rails — no pipeline stages or /sdlc references.
     """
-    try:
-        persona_prompt = load_persona_prompt("developer")
-    except FileNotFoundError:
-        # Fallback to legacy SOUL.md if persona system not set up
-        logger.warning("Persona system not available, falling back to SOUL.md")
-        if SOUL_PATH.exists():
-            persona_prompt = SOUL_PATH.read_text()
-        else:
-            persona_prompt = "You are Valor, an AI coworker. Be direct, concise, and helpful."
+    soul_prompt = ""
+    if SOUL_PATH.exists():
+        soul_prompt = SOUL_PATH.read_text()
+    else:
+        logger.warning(f"SOUL.md not found at {SOUL_PATH}, using default prompt")
+        soul_prompt = "You are Valor, an AI coworker. Be direct, concise, and helpful."
 
     # Append completion criteria
     criteria = load_completion_criteria()
@@ -548,46 +351,7 @@ def load_system_prompt() -> str:
     principal_section = f"\n\n---\n\n## Principal Context\n\n{principal}" if principal else ""
 
     # Worker rules FIRST — safety rails take precedence over persona
-    return f"{WORKER_RULES}\n\n---\n\n{persona_prompt}{principal_section}{criteria_section}"
-
-
-def load_pm_system_prompt(working_directory: str) -> str:
-    """Load system prompt for PM (Project Manager) mode channels.
-
-    Uses the project-manager persona (base + PM overlay). PM mode skips
-    WORKER_RULES (no branch safety rails) and loads the project-specific
-    CLAUDE.md from the work vault directory if it exists.
-
-    System prompt structure:
-        [Persona prompt — base + project-manager overlay]
-        ---
-        [Work-vault CLAUDE.md — PM-specific instructions for this project]
-
-    Args:
-        working_directory: Path to the work-vault project folder.
-
-    Returns:
-        Combined system prompt for PM mode.
-    """
-    try:
-        persona_prompt = load_persona_prompt("project-manager")
-    except FileNotFoundError:
-        # Fallback to legacy SOUL.md if persona system not set up
-        logger.warning("Persona system not available for PM, falling back to SOUL.md")
-        if SOUL_PATH.exists():
-            persona_prompt = SOUL_PATH.read_text()
-        else:
-            persona_prompt = "You are Valor, an AI coworker. Be direct, concise, and helpful."
-
-    # Try to load project-specific CLAUDE.md from work-vault directory
-    project_claude_path = Path(working_directory) / "CLAUDE.md"
-    if project_claude_path.exists():
-        project_instructions = project_claude_path.read_text()
-        logger.info(f"Loaded PM instructions from {project_claude_path}")
-        return f"{persona_prompt}\n\n---\n\n{project_instructions}"
-
-    logger.info(f"No CLAUDE.md found at {project_claude_path}, using persona only for PM mode")
-    return persona_prompt
+    return f"{WORKER_RULES}\n\n---\n\n{soul_prompt}{principal_section}{criteria_section}"
 
 
 def _is_code_file(file_path: str) -> bool:
@@ -774,12 +538,10 @@ class ValorAgent:
         permission_mode: str = "bypassPermissions",
         workflow_id: str | None = None,
         task_list_id: str | None = None,
+        max_budget_usd: float | None = None,
         chat_id: str | None = None,
         project_key: str | None = None,
         message_id: int | None = None,
-        job_id: str | None = None,
-        gh_repo: str | None = None,
-        target_repo: str | None = None,
     ):
         """
         Initialize ValorAgent.
@@ -791,19 +553,14 @@ class ValorAgent:
             workflow_id: Optional workflow ID for multi-phase workflow tracking.
             task_list_id: Optional task list ID to scope sub-agent Task storage
                 via CLAUDE_CODE_TASK_LIST_ID environment variable.
+            max_budget_usd: Maximum budget in USD for a single agent session.
+                Defaults to SDK_MAX_BUDGET_USD env var or 5.00.
             chat_id: Optional chat ID for routing context injection.
             project_key: Optional project key for routing context injection.
             message_id: Optional message ID for routing context injection.
-            job_id: Optional job ID injected as JOB_ID env var for child job spawning.
-            gh_repo: Optional GitHub repo (org/repo) to set as GH_REPO env var.
-                When set, all `gh` CLI commands in the subprocess automatically
-                target this repo without needing explicit --repo flags.
-            target_repo: Absolute path to the target project's repo root. For
-                cross-repo SDLC builds this differs from working_dir (the
-                orchestrator). Defaults to working_dir when not specified.
         """
         default_dir = Path(__file__).parent.parent
-        allowed_root = Path.home() / "src"
+        allowed_root = Path("/Users/valorengels/src")
         raw_path = Path(working_dir) if working_dir else default_dir
         is_wt = WORKTREES_DIR in str(raw_path)
         self.working_dir = validate_workspace(raw_path, allowed_root, is_worktree=is_wt)
@@ -811,12 +568,10 @@ class ValorAgent:
         self.permission_mode = permission_mode
         self.workflow_id = workflow_id
         self.task_list_id = task_list_id
+        self.max_budget_usd = max_budget_usd or float(os.getenv("SDK_MAX_BUDGET_USD", "5.00"))
         self.chat_id = chat_id
         self.project_key = project_key
         self.message_id = message_id
-        self.job_id = job_id
-        self.gh_repo = gh_repo or None  # Normalize empty string to None
-        self.target_repo = target_repo
         self.workflow_state: WorkflowState | None = None
 
         # Load workflow state if workflow_id provided
@@ -940,26 +695,6 @@ class ValorAgent:
         if session_id:
             env["VALOR_SESSION_ID"] = session_id
 
-        # Pass job_id so the agent can reference its own job when spawning children
-        # via `schedule_job --parent-job $JOB_ID` (issue #359)
-        if self.job_id:
-            env["JOB_ID"] = self.job_id
-
-        # Cross-repo gh resolution: set GH_REPO so all `gh` CLI commands in the
-        # subprocess automatically target the correct repo (issue #375). This is
-        # the deterministic fix -- SKILL.md --repo instructions remain as a safety net.
-        if self.gh_repo:
-            env["GH_REPO"] = self.gh_repo
-        if self.target_repo:
-            env["SDLC_TARGET_REPO"] = str(self.target_repo)
-
-        # SDLC context injection: pre-resolve session fields as env vars so
-        # skills can reference $SDLC_PR_NUMBER etc. instead of guessing (issue #420).
-        # Only set vars when the field is non-None and non-empty.
-        if session_id:
-            sdlc_env = _extract_sdlc_env_vars(session_id, self.gh_repo)
-            env.update(sdlc_env)
-
         # Build system prompt with workflow context if workflow_id is present
         system_prompt = self.system_prompt
         if self.workflow_id and self.workflow_state and self.workflow_state.data:
@@ -989,6 +724,7 @@ class ValorAgent:
             env=env,
             hooks=build_hooks_config(),
             agents=get_agent_definitions(),
+            max_budget_usd=self.max_budget_usd,
         )
 
     async def query(self, message: str, session_id: str | None = None, max_retries: int = 2) -> str:
@@ -1024,105 +760,104 @@ class ValorAgent:
         _log_system_resources("SDK-init-pre")
 
         try:
-            # Safety ceiling timeout: prevents query from blocking a worker
-            # forever if the SDK subprocess hangs. Set high (1 hour) because
-            # the watchdog's activity-based stall detection handles real stalls.
-            # This is only a backstop for truly hung processes.
-            query_timeout = int(os.environ.get("SDK_QUERY_TIMEOUT_SECONDS", 3600))
+            async with ClaudeSDKClient(options) as client:
+                # Log successful initialization
+                init_elapsed = time.time() - init_start
+                logger.info(f"[SDK-init] SDK initialized successfully in {init_elapsed:.2f}s")
+                _log_system_resources("SDK-init-post")
+                # Register client for steering access
+                if session_id:
+                    _active_clients[session_id] = client
+                    logger.debug(f"Registered active client for session {session_id}")
 
-            async with asyncio.timeout(query_timeout):
-                async with ClaudeSDKClient(options) as client:
-                    # Log successful initialization
-                    init_elapsed = time.time() - init_start
-                    logger.info(f"[SDK-init] SDK initialized successfully in {init_elapsed:.2f}s")
-                    _log_system_resources("SDK-init-post")
-                    # Register client for steering access
-                    if session_id:
-                        _active_clients[session_id] = client
-                        logger.debug(f"Registered active client for session {session_id}")
+                await client.query(message)
 
-                    # Record initial activity when query starts
-                    if session_id:
-                        record_session_activity(session_id)
+                while True:
+                    async for msg in client.receive_response():
+                        if isinstance(msg, AssistantMessage):
+                            for block in msg.content:
+                                if isinstance(block, TextBlock):
+                                    response_parts.append(block.text)
+                        elif isinstance(msg, ResultMessage):
+                            # Bug 1 fix (issue #374): Store Claude Code session UUID
+                            # so continuation sessions resume the correct transcript.
+                            if msg.session_id and session_id:
+                                _store_claude_session_uuid(session_id, msg.session_id)
+                            # Capture stop_reason for Observer routing decisions
+                            if msg.stop_reason and session_id:
+                                _session_stop_reasons[session_id] = msg.stop_reason
+                                logger.info(
+                                    f"SDK stop_reason={msg.stop_reason} for session {session_id}"
+                                )
 
-                    await client.query(message)
-
-                    while True:
-                        async for msg in client.receive_response():
-                            if isinstance(msg, AssistantMessage):
-                                for block in msg.content:
-                                    if isinstance(block, TextBlock):
-                                        response_parts.append(block.text)
-                                        # Record activity on each text output
-                                        if session_id:
-                                            record_session_activity(session_id)
-                            elif isinstance(msg, ResultMessage):
-                                # Record activity on result messages
-                                if session_id:
-                                    record_session_activity(session_id)
-                                # Bug 1 fix (issue #374): Store Claude Code session UUID
-                                # so continuation sessions resume the correct transcript.
-                                if msg.session_id and session_id:
-                                    _store_claude_session_uuid(session_id, msg.session_id)
-                                # Capture stop_reason for Observer routing decisions
-                                if msg.stop_reason and session_id:
-                                    _session_stop_reasons[session_id] = msg.stop_reason
-                                    logger.info(
-                                        "SDK stop_reason=%s for session %s",
-                                        msg.stop_reason,
-                                        session_id,
-                                    )
-
-                                if msg.total_cost_usd is not None:
-                                    cost = msg.total_cost_usd
-                                    turns = msg.num_turns
-                                    duration = msg.duration_ms
-                                    # Always log at debug; warn if equivalent
-                                    # cost exceeds threshold (sanity check even
-                                    # on subscription — tracks what we'd pay on API)
-                                    summary = (
-                                        f"Query completed: {turns} turns, "
-                                        f"${cost:.4f} equivalent, "
-                                        f"{duration}ms"
-                                    )
+                            if msg.total_cost_usd is not None:
+                                cost = msg.total_cost_usd
+                                turns = msg.num_turns
+                                duration = msg.duration_ms
+                                # Always log at debug; warn if equivalent
+                                # cost exceeds threshold (sanity check even
+                                # on subscription — tracks what we'd pay on API)
+                                summary = (
+                                    f"Query completed: {turns} turns, "
+                                    f"${cost:.4f} equivalent, "
+                                    f"{duration}ms"
+                                )
+                                if cost >= _COST_WARN_THRESHOLD:
+                                    logger.warning(f"High cost query: {summary}")
+                                else:
                                     logger.info(summary)
-                                if msg.is_error and retries < max_retries:
-                                    retries += 1
-                                    error_text = msg.result or "(empty)"
-                                    recovery_msg = _build_error_recovery_message(error_text)
-                                    logger.warning(
-                                        f"Agent error (attempt {retries}/{max_retries}), "
-                                        f"feeding error back: {error_text}"
-                                    )
-                                    response_parts.clear()
-                                    await client.query(recovery_msg)
-                                    break  # Re-enter receive_response() loop
-                                elif msg.is_error:
-                                    result_text = msg.result or ""
-                                    if _is_auth_error(result_text):
-                                        logger.error(
-                                            f"Auth failure after {retries} retries: {result_text}\n"
-                                            "Subscription fallback may be patched. "
-                                            "Set USE_API_BILLING=true or see module docstring."
+                            if msg.is_error and retries < max_retries:
+                                retries += 1
+                                error_text = msg.result or "(empty)"
+                                recovery_msg = _build_error_recovery_message(error_text)
+                                logger.warning(
+                                    f"Agent error (attempt {retries}/{max_retries}), "
+                                    f"feeding error back: {error_text}"
+                                )
+                                # Record friction event for behavioral episode tracking
+                                if session_id:
+                                    try:
+                                        from bridge.session_transcript import (
+                                            record_friction_event,
                                         )
-                                    else:
-                                        logger.error(
-                                            f"Agent error after {retries} retries: {result_text}"
-                                        )
-                        else:
-                            # async for completed without break — done
-                            break
 
-        except TimeoutError:
-            elapsed = time.time() - init_start
-            logger.error(
-                "[SDK-timeout] Query timed out after %.0fs for session %s "
-                "(limit=%ds). Subprocess may be hung.",
-                elapsed,
-                session_id,
-                query_timeout,
-            )
-            raise
+                                        record_friction_event(
+                                            session_id,
+                                            f"sdk_error_retry_{retries}",
+                                        )
+                                    except Exception:
+                                        pass  # instrumentation must not break the retry path
+                                response_parts.clear()
+                                await client.query(recovery_msg)
+                                break  # Re-enter receive_response() loop
+                            elif msg.is_error:
+                                result_text = msg.result or ""
+                                # Record terminal error as friction event
+                                if session_id:
+                                    try:
+                                        from bridge.session_transcript import (
+                                            record_friction_event,
+                                        )
+
+                                        record_friction_event(
+                                            session_id,
+                                            "sdk_error_terminal",
+                                        )
+                                    except Exception:
+                                        pass
+                                if _is_auth_error(result_text):
+                                    logger.error(
+                                        f"Auth failure after {retries} retries: {result_text}\n"
+                                        "Subscription fallback may be patched. "
+                                        "Set USE_API_BILLING=true or see module docstring."
+                                    )
+                                else:
+                                    logger.error(
+                                        f"Agent error after {retries} retries: {result_text}"
+                                    )
+                    else:
+                        # async for completed without break — done
+                        break
 
         except Exception as e:
             error_str = str(e)
@@ -1190,8 +925,6 @@ class ValorAgent:
             # Always unregister client from registry
             if session_id:
                 _active_clients.pop(session_id, None)
-                # Clean up activity tracking — session is done
-                clear_session_activity(session_id)
                 # Note: _session_stop_reasons is NOT cleaned here — it's consumed
                 # by get_stop_reason() in job_queue after query returns. The pop()
                 # in get_stop_reason() handles cleanup. If the Observer never runs
@@ -1262,55 +995,6 @@ def _build_error_recovery_message(error_text: str) -> str:
     )
 
 
-def _resolve_persona(
-    project: dict | None,
-    chat_title: str | None,
-    is_dm: bool = False,
-) -> str:
-    """Resolve the persona name from project config, chat title, and DM status.
-
-    Resolution order:
-    1. DMs: use project's dm_persona config (default: "teammate")
-    2. Group chats: look up persona from project's telegram.groups[chat_title]
-    3. PM mode projects: "project-manager"
-    4. Default: "developer"
-
-    Args:
-        project: Project configuration dict from projects.json.
-        chat_title: Telegram chat/group title, or None for DMs.
-        is_dm: Whether this is a direct message.
-
-    Returns:
-        Persona name string (e.g., "developer", "project-manager", "teammate").
-    """
-    if not project:
-        return "teammate" if is_dm else "developer"
-
-    telegram_config = project.get("telegram", {})
-
-    # DMs use the dm_persona config
-    if is_dm:
-        return telegram_config.get("dm_persona", "teammate")
-
-    # PM mode projects always use project-manager persona
-    project_mode = project.get("mode", "dev")
-    if project_mode == "pm":
-        return "project-manager"
-
-    # Group chats: look up persona from the groups dict
-    if chat_title:
-        groups = telegram_config.get("groups", {})
-        if isinstance(groups, dict):
-            for group_name, group_config in groups.items():
-                if group_name.lower() in chat_title.lower():
-                    if isinstance(group_config, dict):
-                        persona = group_config.get("persona")
-                        if persona:
-                            return persona
-
-    return "developer"
-
-
 async def get_agent_response_sdk(
     message: str,
     session_id: str,
@@ -1322,7 +1006,6 @@ async def get_agent_response_sdk(
     workflow_id: str | None = None,
     task_list_id: str | None = None,
     correlation_id: str | None = None,
-    job_id: str | None = None,
 ) -> str:
     """
     Get agent response using Claude Agent SDK.
@@ -1341,7 +1024,6 @@ async def get_agent_response_sdk(
         workflow_id: Optional 8-char workflow identifier for tracked work
         task_list_id: Optional task list ID to scope sub-agent Task storage
         correlation_id: Optional end-to-end tracing ID from the bridge
-        job_id: Optional job ID for child job spawning (issue #359)
 
     Returns:
         The assistant's response text
@@ -1361,56 +1043,20 @@ async def get_agent_response_sdk(
     if not project_working_dir:
         project_working_dir = AI_REPO_ROOT
 
-    # Check project mode: "pm" channels bypass SDLC classification entirely
-    project_mode = project.get("mode", "dev") if project else "dev"
-    # Treat any unrecognized mode as "dev" (safe default)
-    if project_mode not in ("dev", "pm"):
-        logger.warning(f"[{request_id}] Unknown project mode '{project_mode}', treating as 'dev'")
-        project_mode = "dev"
+    # Classify: SDLC work → orchestrator in ai/, Q&A → direct in target project
+    from bridge.routing import classify_work_request
 
-    if project_mode == "pm":
-        # PM mode: skip classification, always use "question", work in project dir
-        classification = "question"
-        working_dir = project_working_dir
-        logger.info(f"[{request_id}] PM mode: cwd={working_dir}, skipping SDLC classification")
+    classification = classify_work_request(message)
+    if classification == "sdlc" and project_working_dir != AI_REPO_ROOT:
+        working_dir = AI_REPO_ROOT
+        logger.info(
+            f"[{request_id}] SDLC routed: orchestrator in ai/, target={project_working_dir}"
+        )
     else:
-        # Dev mode: classify and route as before
-        from bridge.routing import classify_work_request
-
-        classification = classify_work_request(message)
-        # If message references an issue number, mark ISSUE stage complete.
-        # This is the single source of truth for is_sdlc — stage_states.
-        if classification == "sdlc" and session_id:
-            import re as _issue_re
-
-            if _issue_re.search(r"(?:issue|#)\s*(\d+)", message, _issue_re.IGNORECASE):
-                try:
-                    from bridge.pipeline_state import PipelineState
-                    from models.agent_session import AgentSession
-
-                    sessions = list(AgentSession.query.filter(session_id=session_id))
-                    if sessions:
-                        ps = PipelineState(sessions[0])
-                        issue_state = ps.states.get("ISSUE", "pending")
-                        if issue_state in ("pending", "ready"):
-                            ps.start_stage("ISSUE")
-                            ps.complete_stage("ISSUE")
-                            logger.info(
-                                f"[{request_id}] Marked ISSUE stage complete "
-                                f"(issue reference in message)"
-                            )
-                except Exception as e:
-                    logger.debug(f"ISSUE stage upsert failed (non-fatal): {e}")
-        if classification == "sdlc" and project_working_dir != AI_REPO_ROOT:
-            working_dir = AI_REPO_ROOT
-            logger.info(
-                f"[{request_id}] SDLC routed: orchestrator in ai/, target={project_working_dir}"
-            )
-        else:
-            working_dir = project_working_dir
-            logger.info(
-                f"[{request_id}] Direct routed: cwd={working_dir} (classification={classification})"
-            )
+        working_dir = project_working_dir
+        logger.info(
+            f"[{request_id}] Direct routed: cwd={working_dir} (classification={classification})"
+        )
 
     logger.info(f"[{request_id}] SDK query for {project_name}")
     logger.debug(f"[{request_id}] Working directory: {working_dir}")
@@ -1434,8 +1080,8 @@ async def get_agent_response_sdk(
         "work initiated in this specific session. Do not include work, PRs, or "
         "requests from other sessions, other senders, or prior conversation threads."
     )
-    # For SDLC-routed requests, inject target repo context (never for PM mode)
-    if project_mode != "pm" and classification == "sdlc" and project_working_dir != AI_REPO_ROOT:
+    # For SDLC-routed requests, inject target repo context
+    if classification == "sdlc" and project_working_dir != AI_REPO_ROOT:
         github_config = project.get("github", {}) if project else {}
         github_org = github_config.get("org", "")
         github_repo = github_config.get("repo", "")
@@ -1449,17 +1095,13 @@ async def get_agent_response_sdk(
 
     # Log prompt summary before sending to agent
     has_workflow = bool(workflow_id)
-    has_worker_rules = project_mode != "pm"
     logger.info(
         f"[{request_id}] Sending to agent: {len(enriched_message)} chars, "
         f"classification={classification}, has_workflow={has_workflow}, "
-        f"task_list={task_list_id or 'none'}, mode={project_mode}"
+        f"task_list={task_list_id or 'none'}"
     )
-    wr_label = "yes" if has_worker_rules else "no (pm mode)"
-    is_dm = chat_title is None
-    persona = _resolve_persona(project, chat_title, is_dm=is_dm)
     logger.info(
-        f"[{request_id}] Context: persona={persona}, worker_rules={wr_label}, "
+        f"[{request_id}] Context: soul=yes, worker_rules=yes, "
         f"workflow_context={'yes' if has_workflow else 'no'}, "
         f"session_id={session_id}"
     )
@@ -1470,51 +1112,13 @@ async def get_agent_response_sdk(
         # Extract message_id from the job context (passed through _execute_job)
         _message_id = None  # message_id not available at this layer
 
-        logger.info(f"[{request_id}] Resolved persona: {persona}")
-
-        # Build system prompt based on persona and project mode
-        custom_system_prompt = None
-        if project_mode == "pm":
-            # PM mode: use PM system prompt (no WORKER_RULES, loads work-vault CLAUDE.md)
-            custom_system_prompt = load_pm_system_prompt(working_dir)
-        elif persona == "teammate":
-            # Teammate persona: casual mode, no WORKER_RULES
-            try:
-                custom_system_prompt = load_persona_prompt("teammate")
-            except FileNotFoundError:
-                logger.warning("Teammate persona not available, falling back to default")
-        # Developer persona uses default (load_system_prompt via ValorAgent.__init__)
-
-        # Determine gh_repo for cross-repo SDLC requests (issue #375).
-        # When classification is "sdlc" and the project targets a non-ai repo,
-        # set GH_REPO so all gh commands automatically target the correct repo.
-        _gh_repo = None
-        is_cross_repo_sdlc = (
-            project_mode != "pm"
-            and classification == "sdlc"
-            and project_working_dir != AI_REPO_ROOT
-        )
-        if is_cross_repo_sdlc:
-            _github_config = project.get("github", {}) if project else {}
-            _gh_org = _github_config.get("org", "")
-            _gh_name = _github_config.get("repo", "")
-            if _gh_org and _gh_name:
-                _gh_repo = f"{_gh_org}/{_gh_name}"
-
-        if _gh_repo:
-            logger.info(f"[{request_id}] Cross-repo: GH_REPO={_gh_repo}")
-
         agent = ValorAgent(
             working_dir=working_dir,
-            system_prompt=custom_system_prompt,
             workflow_id=workflow_id,
             task_list_id=task_list_id,
             chat_id=chat_id,
             project_key=_project_key,
             message_id=_message_id,
-            job_id=job_id,
-            gh_repo=_gh_repo,
-            target_repo=project_working_dir,
         )
         response = await agent.query(enriched_message, session_id=session_id)
 
@@ -1533,10 +1137,7 @@ async def get_agent_response_sdk(
         try:
             from bridge.session_transcript import complete_transcript
 
-            # Capture exception details so the reflections system can produce
-            # actionable bug reports instead of "empty error summary" issues.
-            error_summary = f"{type(e).__name__}: {e}"[:500]
-            complete_transcript(session_id, status="failed", summary=error_summary)
+            complete_transcript(session_id, status="failed")
         except Exception:
             pass  # Best-effort cleanup
         return (

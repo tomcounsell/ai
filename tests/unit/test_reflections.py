@@ -144,14 +144,6 @@ class TestTaskCleanup:
 
         runner = ReflectionRunner()
         runner.state.findings = {}
-        # Ensure at least one project has github config
-        runner.projects = [
-            {
-                "slug": "test-project",
-                "working_directory": "/tmp",
-                "github": {"org": "test-org", "repo": "test-repo"},
-            }
-        ]
         await runner.step_clean_tasks()
 
         # Should have called gh
@@ -784,68 +776,3 @@ class TestBranchPlanCleanup:
         assert progress["findings"] == 1
         cleanup_findings = runner.state.findings.get("branch_plan_cleanup", [])
         assert any("Orphaned plan" in f for f in cleanup_findings)
-
-
-# --- Disk Space Check Tests (Step 16) ---
-
-
-class TestDiskSpaceCheck:
-    """Tests for the disk space check step (step 16)."""
-
-    @pytest.mark.asyncio
-    async def test_plenty_of_space_no_findings(self):
-        """No findings when free space is above 10GB."""
-        from scripts.reflections import ReflectionRunner
-
-        runner = ReflectionRunner()
-
-        # Mock disk_usage to return plenty of space (50 GB free of 500 GB)
-        fake_usage = MagicMock()
-        fake_usage.free = 50 * (1024**3)
-        fake_usage.total = 500 * (1024**3)
-
-        with patch("scripts.reflections.shutil.disk_usage", return_value=fake_usage):
-            await runner.step_disk_space_check()
-
-        progress = runner.state.step_progress.get("disk_space_check", {})
-        assert progress["findings"] == 0
-        assert "disk_space_check" not in runner.state.findings
-
-    @pytest.mark.asyncio
-    async def test_low_space_creates_finding(self):
-        """Creates a finding when free space is below 10GB."""
-        from scripts.reflections import ReflectionRunner
-
-        runner = ReflectionRunner()
-
-        # Mock disk_usage to return low space (5 GB free of 500 GB)
-        fake_usage = MagicMock()
-        fake_usage.free = 5 * (1024**3)
-        fake_usage.total = 500 * (1024**3)
-
-        with patch("scripts.reflections.shutil.disk_usage", return_value=fake_usage):
-            await runner.step_disk_space_check()
-
-        progress = runner.state.step_progress.get("disk_space_check", {})
-        assert progress["findings"] == 1
-        findings = runner.state.findings.get("disk_space_check", [])
-        assert len(findings) == 1
-        assert "Low disk space" in findings[0]
-        assert "5.0 GB free" in findings[0]
-
-    @pytest.mark.asyncio
-    async def test_exception_handled_gracefully(self):
-        """Exceptions are caught and logged, not propagated."""
-        from scripts.reflections import ReflectionRunner
-
-        runner = ReflectionRunner()
-
-        with patch(
-            "scripts.reflections.shutil.disk_usage",
-            side_effect=OSError("Permission denied"),
-        ):
-            # Should NOT raise
-            await runner.step_disk_space_check()
-
-        progress = runner.state.step_progress.get("disk_space_check", {})
-        assert progress["findings"] == 0

@@ -7,7 +7,7 @@ context: fork
 
 # Documentation Audit Skill
 
-Systematically audits every documentation file in `docs/` against the actual codebase. Works on any repository. Verifies concrete references (file paths, class names, function names, CLI commands, env vars, packages) exist in the codebase. Issues verdicts of KEEP, UPDATE, or DELETE for each file, applies the changes, sweeps index files for broken links, enforces canonical directory structure, then commits with a concise summary of actual changes (routing large audits to GitHub issues instead of bloated commit messages).
+Systematically audits every documentation file in `docs/` against the actual codebase. Works on any repository. Verifies concrete references (file paths, class names, function names, CLI commands, env vars, packages) exist in the codebase. Issues verdicts of KEEP, UPDATE, or DELETE for each file, applies the changes, sweeps index files for broken links, enforces canonical directory structure, then commits with a detailed summary.
 
 ## When to Use
 
@@ -235,98 +235,23 @@ List each relocated file:
 
 ---
 
-## Step 6.5: Threshold Router — Decide Commit Strategy
+## Step 7: Commit with Detailed Summary
 
-Before committing, count how many files were actually changed (UPDATE + DELETE + RELOCATED). This count determines the commit strategy.
-
-**If 0 changes** (all verdicts were KEEP): Skip the commit entirely. Report "No changes needed — all docs are accurate." and proceed to the Output Report.
-
-**If <=5 changes**: Use the **Hotfix Path** (Step 7A below). Commit directly with a concise message listing each changed file.
-
-**If >5 changes**: Use the **Report Path** (Step 7B below). Create a GitHub issue with the full audit report, then commit with a short summary referencing the issue.
-
----
-
-## Step 7A: Hotfix Path (<=5 changes)
-
-Stage all changes and commit with a concise message listing only files that were actually modified:
+Stage all changes and commit with a message that lists each file's verdict and rationale:
 
 ```bash
 git add -A docs/ CLAUDE.md
 git commit -m "$(cat <<'EOF'
-Docs audit: fix {N} documentation issues
+Docs audit: remove stale, correct outdated references
 
-Changes:
-{for each CHANGED file only: "- {VERDICT} {path}: {one-line rationale}"}
+Results:
+{for each file: "- {VERDICT} {path}: {rationale}"}
+{for each relocation: "- RELOCATED {old} -> {new}"}
 
-Kept: {K} | Updated: {U} | Deleted: {D} | Relocated: {R}
+Kept: {N} | Updated: {N} | Deleted: {N} | Relocated: {N}
 EOF
 )"
 ```
-
-**IMPORTANT**: The commit message must list ONLY files where changes were actually made (UPDATE, DELETE, RELOCATED). Never include KEEP verdicts or files that weren't modified. The message should be short — one line per changed file.
-
----
-
-## Step 7B: Report Path (>5 changes)
-
-### 7B.1: Create GitHub Issue with Full Report
-
-Before committing, create a GitHub issue containing the complete audit report.
-Note: For cross-repo work, the `GH_REPO` env var is set automatically by sdk_client.py.
-
-```bash
-gh issue create \
-  --title "Docs audit: {N} issues found across documentation" \
-  --body "$(cat <<'EOF'
-## Documentation Audit Report
-
-**Scanned**: {total} files
-**Updated**: {U} | **Deleted**: {D} | **Relocated**: {R} | **Kept**: {K}
-
-### Files Changed
-
-{for each UPDATE file: "- **UPDATE** `{path}`: {rationale} — corrections: {list corrections}"}
-{for each DELETE file: "- **DELETE** `{path}`: {rationale}"}
-{for each RELOCATED file: "- **RELOCATED** `{old}` → `{new}`"}
-
-### Files Kept (no changes needed)
-
-{for each KEEP file: "- `{path}`"}
-EOF
-)"
-```
-
-**Before creating a new issue**, first check for an existing open docs audit issue:
-```bash
-gh issue list --search "Docs audit" --state open --limit 1
-```
-If one exists, append to it as a comment instead of creating a new issue.
-
-### 7B.2: Commit with Issue Reference
-
-```bash
-git add -A docs/ CLAUDE.md
-git commit -m "$(cat <<'EOF'
-Docs audit: fix {N} documentation issues
-
-See #{issue_number} for full audit report.
-
-Summary: Updated {U} | Deleted {D} | Relocated {R} | Kept {K}
-EOF
-)"
-```
-
-**IMPORTANT**: The commit message must NOT contain the full per-file audit report. Only reference the issue number and include summary counts. If the GitHub issue creation fails, fall back to the Hotfix Path (Step 7A) format — list only actually changed files inline.
-
----
-
-### Commit Message Rules (applies to both paths)
-
-1. **Never list KEEP verdicts** in commit messages — they represent no change
-2. **Never dump the full audit report** into a commit message
-3. **Only reference files that were actually modified** in the working tree
-4. **Keep commit messages under 50 lines** — use the GitHub issue for details
 
 ---
 

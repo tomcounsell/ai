@@ -27,11 +27,9 @@ class ReflectionRun(Model):
 
     The date field is a UniqueKeyField so only one run exists per date.
     State is checkpointed after each step for resumability.
-    project_key scopes runs to a specific project.
     """
 
     date = UniqueKeyField()  # YYYY-MM-DD, one run per day
-    project_key = KeyField(null=True)
     current_step = IntField(default=1)
     completed_steps = ListField(null=True)
     daily_report = ListField(null=True)
@@ -67,7 +65,6 @@ class ReflectionRun(Model):
         """Save current state. Delete and recreate for KeyField safety."""
         data = {
             "date": self.date,
-            "project_key": self.project_key,
             "current_step": self.current_step,
             "completed_steps": self.completed_steps or [],
             "daily_report": self.daily_report or [],

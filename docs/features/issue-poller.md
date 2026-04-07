@@ -5,7 +5,7 @@ Automatic SDLC kickoff for new GitHub issues. Polls configured repositories on a
 ## How It Works
 
 1. **Cron fires** every 5 minutes via launchd (`com.valor.issue-poller.plist`)
-2. **Polls** `gh issue list` for each project in `~/Desktop/Valor/projects.json` that has a `github` key
+2. **Polls** `gh issue list` for each project in `config/projects.json` that has a `github` key
 3. **Filters** out already-seen issues using a Redis set (`issue_poller:seen:{org}/{repo}`)
 4. **Validates** issue context (title + body length), flagging thin issues as `needs-review`
 5. **Dedup check** using Claude Haiku to score semantic similarity against other open issues
@@ -18,7 +18,7 @@ Automatic SDLC kickoff for new GitHub issues. Polls configured repositories on a
 ```
 launchd (5 min) → scripts/issue_poller.py
                     ├── Redis lock (prevent concurrent runs)
-                    ├── ~/Desktop/Valor/projects.json (multi-project iteration)
+                    ├── config/projects.json (multi-project iteration)
                     ├── gh CLI (fetch issues, apply labels, add comments)
                     ├── scripts/issue_dedup.py (Claude Haiku similarity scoring)
                     └── claude -p (dispatch /do-plan for new issues)
@@ -52,7 +52,7 @@ The poller filters out automated comments from the `/do-docs` cascade (Agent D) 
 
 ## Configuration
 
-Projects are loaded from `~/Desktop/Valor/projects.json`. Only entries with a `github` key are polled:
+Projects are loaded from `config/projects.json`. Only entries with a `github` key are polled:
 
 ```json
 {

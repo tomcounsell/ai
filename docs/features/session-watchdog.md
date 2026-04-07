@@ -76,7 +76,7 @@ Fires when `time.time() - session.started_at > DURATION_THRESHOLD`. Most tasks s
 
 ### ModelException Handling (Crash Guard)
 
-When the watchdog encounters a `popoto.exceptions.ModelException` while processing a session (e.g. unique constraint violations from duplicate Redis keys, or other ORM errors from corrupted state), it marks that session as `failed` instead of logging the error and retrying every cycle. This prevents infinite retry loops caused by stale sessions left over from SDK crashes. See [Bridge Workflow Gaps](bridge-workflow-gaps.md) for the full crash guard mechanism.
+When the watchdog encounters a `popoto.exceptions.ModelException` while processing a session (e.g. unique constraint violations from duplicate Redis keys, or other ORM errors from corrupted state), it marks that session as `failed` instead of logging the error and retrying every cycle. This prevents infinite retry loops caused by stale sessions left over from SDK crashes. See [Coaching Loop — Error Crash Guard](coaching-loop.md) for the full crash guard mechanism.
 
 ## Remediation
 
@@ -116,7 +116,7 @@ Runs for the lifetime of the bridge process. No separate service or process mana
 
 **Relationship to PostToolUse health check**: The existing health check fires every 20 tool calls and can kill sessions. The watchdog is complementary — it catches sessions that go *silent* (no tool calls happening), which the PostToolUse hook cannot detect.
 
-**Stall detection**: The watchdog also runs `check_stalled_sessions()` each cycle, which flags sessions stuck in transitional states (pending >5min, running >45min, active with no recent activity). For active sessions, stall detection is activity-based: the watchdog checks both the Redis `last_activity` field and in-memory timestamps from `sdk_client.get_session_last_activity()`, using whichever is more recent. Sessions producing tool calls or log output are never interrupted regardless of total runtime. See [Session Watchdog Reliability](session-watchdog-reliability.md) for the activity-based detection system and [Session Lifecycle Diagnostics](session-lifecycle-diagnostics.md) for logging details.
+**Stall detection**: The watchdog also runs `check_stalled_sessions()` each cycle, which flags sessions stuck in transitional states (pending >5min, running >45min, active >10min with no activity). See [Session Lifecycle Diagnostics](session-lifecycle-diagnostics.md) for details.
 
 ## Files
 

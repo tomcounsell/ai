@@ -8,22 +8,22 @@
     <array>
         <string>/bin/bash</string>
         <string>-c</string>
-        <string>set -a; source __PROJECT_DIR__/.env; set +a; exec __PROJECT_DIR__/.venv/bin/python __PROJECT_DIR__/scripts/issue_poller.py</string>
+        <string>set -a; source /Users/valorengels/src/ai/.env; set +a; exec /Users/valorengels/src/ai/.venv/bin/python /Users/valorengels/src/ai/scripts/issue_poller.py</string>
     </array>
     <key>WorkingDirectory</key>
-    <string>__PROJECT_DIR__</string>
+    <string>/Users/valorengels/src/ai</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/usr/sbin:/bin</string>
         <key>HOME</key>
-        <string>__HOME_DIR__</string>
+        <string>/Users/valorengels</string>
     </dict>
     <key>StartInterval</key>
     <integer>300</integer>
     <key>StandardOutPath</key>
-    <string>__PROJECT_DIR__/logs/issue_poller.log</string>
+    <string>/Users/valorengels/src/ai/logs/issue_poller.log</string>
     <key>StandardErrorPath</key>
-    <string>__PROJECT_DIR__/logs/issue_poller_error.log</string>
+    <string>/Users/valorengels/src/ai/logs/issue_poller_error.log</string>
 </dict>
 </plist>

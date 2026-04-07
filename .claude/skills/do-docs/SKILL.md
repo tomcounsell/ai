@@ -44,7 +44,7 @@ When plan context is available, use it to:
 
 ## Cross-Repo Resolution
 
-For cross-project work, the `GH_REPO` environment variable is automatically set by `sdk_client.py`. The `gh` CLI natively respects this env var, so all `gh` commands automatically target the correct repository. No `--repo` flags or manual parsing needed.
+When invoked for a non-ai project, extract the `GITHUB:` line from the prompt context (e.g., `GITHUB: tomcounsell/popoto`). If present, use `--repo $GITHUB_REPO` with all `gh` commands below. If not present, omit `--repo` (defaults to cwd repo).
 
 ## Principles
 
@@ -191,7 +191,7 @@ Steps:
    - Does this change introduce new capabilities the issue could leverage?
 
 3. For each affected issue, post a comment (do NOT edit the issue body):
-   gh issue comment <number> --body "$(cat <<'COMMENT'
+   gh issue comment <number> $REPO_FLAG --body "$(cat <<'COMMENT'
    **Upstream change notice** — a related change just landed that may affect this issue.
 
    **What changed:** [1-2 sentence summary of the relevant change]
@@ -310,7 +310,7 @@ After all edits are complete:
 3. **Flag conflicts for human review:**
    If any document has contradictory information that cannot be resolved from the code alone (e.g., a plan doc describes future work that may or may not still be valid), create a GitHub issue:
    ```bash
-   gh issue create --title "Doc conflict: <filepath> may need human review" \
+   gh issue create $REPO_FLAG --title "Doc conflict: <filepath> may need human review" \
      --body "The /do-docs cascade found a potential conflict in <filepath> after <change description>. The doc references <X> but the code now does <Y>. Human judgment needed to resolve."
    ```
 
@@ -335,31 +335,6 @@ After all edits are complete:
 
    **No changes needed**: (list if applicable)
    ```
-
-5. **Commit and push changes:**
-   ```bash
-   git add -A && git commit -m "Docs: cascade updates for <brief change description>" && git push
-   ```
-   Documentation changes must be persisted. If this fails (e.g., nothing to commit), that's fine — report "no changes needed."
-
-## Plan Status Update
-
-After documentation is created/updated and committed, update the plan's `status:` frontmatter from "Ready" or "In Progress" to "Complete". This signals to the pipeline that the DOCS stage is done:
-
-```bash
-# Find the plan file for the current slug
-SLUG=$(git branch --show-current | sed 's|session/||')
-PLAN_PATH="docs/plans/${SLUG}.md"
-
-if [ -f "$PLAN_PATH" ]; then
-    # Update status in frontmatter
-    sed -i '' 's/^status: .*/status: Complete/' "$PLAN_PATH"
-    git add "$PLAN_PATH"
-    git commit -m "Mark plan status as Complete after docs update"
-fi
-```
-
-This ensures the DOCS goal gate can verify documentation was completed by the pipeline.
 
 ## Edge Cases
 

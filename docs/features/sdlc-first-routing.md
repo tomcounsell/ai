@@ -37,7 +37,7 @@ Based on classification result:
 | `sdlc` | `ai/` repo root | Full SDLC pipeline access, TARGET_REPO context injected |
 | `question` | Target project dir | Direct project context, no SDLC overhead |
 
-For SDLC-routed requests, a `TARGET_REPO` context block is injected into the system prompt so the agent knows which project to dispatch workers to. The subprocess environment includes `GH_REPO=org/repo` so all `gh` CLI commands automatically target the correct repository. A `GITHUB: org/repo` line in the prompt context serves as a secondary safety net.
+For SDLC-routed requests, a `TARGET_REPO` context block is injected into the system prompt so the agent knows which project to dispatch workers to. Skills also receive a `GITHUB: org/repo` line in their prompt context, which they parse to construct `--repo` flags for `gh` commands — ensuring GitHub CLI operations resolve against the correct repository rather than the CWD's repo.
 
 ### System Prompt Ordering
 
@@ -57,35 +57,27 @@ The Anthropic client used for Haiku fallback classification is instantiated lazi
 
 When SDLC is invoked for a non-ai project (e.g., popoto), the worker runs with `cwd=ai/` (the orchestrator repo). All `gh` commands (issue view, pr list, etc.) resolve against the cwd repo by default, which causes cross-project SDLC work to silently target the wrong repository.
 
-### Primary Mechanism: `GH_REPO` Environment Variable
+### The `GITHUB:` Context Line
 
-The `gh` CLI supports a `GH_REPO` environment variable that automatically applies to all commands in the subprocess. This is the deterministic fix -- it requires no LLM cooperation.
+The SDK client (`agent/sdk_client.py`) already injects a `GITHUB: org/repo` line into the enriched prompt for cross-project requests, sourced from `config/projects.json`. Skills extract this line and pass `--repo org/repo` to every `gh` command.
 
-When `get_agent_response_sdk()` detects a cross-repo SDLC request (classification is "sdlc", project working directory differs from the ai repo root, and project mode is not "pm"), it:
+```bash
+# Extract repo from context
+GITHUB_REPO="tomcounsell/popoto"  # parsed from "GITHUB: tomcounsell/popoto" in prompt
 
-1. Extracts `github.org` and `github.repo` from the project config in `~/Desktop/Valor/projects.json`
-2. Passes `gh_repo="org/repo"` to `ValorAgent.__init__()`
-3. `ValorAgent._create_options()` sets `env["GH_REPO"] = self.gh_repo` in the subprocess environment
-
-All `gh` commands in the subprocess then automatically target the correct repository without needing explicit `--repo` flags.
-
-```python
-# In get_agent_response_sdk():
-if project_mode != "pm" and classification == "sdlc" and project_working_dir != AI_REPO_ROOT:
-    _github_config = project.get("github", {})
-    _gh_org = _github_config.get("org", "")
-    _gh_name = _github_config.get("repo", "")
-    if _gh_org and _gh_name:
-        _gh_repo = f"{_gh_org}/{_gh_name}"
-
-agent = ValorAgent(..., gh_repo=_gh_repo)
+# Use --repo to target the correct repository
+gh issue view 179 --repo "$GITHUB_REPO"
+gh pr list --search "#179" --state open --repo "$GITHUB_REPO"
 ```
 
-### Safety Net: `GITHUB:` Context Line and `--repo` Instructions
+### Updated Skills
 
-As a belt-and-suspenders fallback, the SDK client also injects a `GITHUB: org/repo` line into the enriched prompt text. Skills include instructions to parse this line and add `--repo` flags to `gh` commands. This is a secondary mechanism -- the `GH_REPO` env var is the primary fix.
+All `/do-*` skills and the `/sdlc` router include a **Cross-Repo Resolution** section with instructions to:
+1. Extract the `GITHUB:` line from the prompt context
+2. Set `REPO_FLAG="--repo $GITHUB_REPO"` if present
+3. Append `$REPO_FLAG` to every `gh` command
 
-Skills with `--repo` instructions: `/sdlc`, `/do-issue`, `/do-plan`, `/do-pr-review`, `/do-docs`, `/do-patch`.
+Skills that received this update: `/sdlc`, `/do-issue`, `/do-plan`, `/do-pr-review`, `/do-docs`, `/do-patch`.
 
 ### Verification
 
@@ -104,4 +96,4 @@ After fetching an issue, the SDLC skill verifies the issue URL matches the expec
 
 - [SDLC Enforcement](sdlc-enforcement.md) -- Quality gates and pipeline stage model
 - [Summarizer Format](summarizer-format.md) -- Process narration stripping added alongside routing
-- [Observer Agent](observer-agent.md) -- Output classification and routing decisions
+- [Coaching Loop](coaching-loop.md) -- Output classification (distinct from input classification)

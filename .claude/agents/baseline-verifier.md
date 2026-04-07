@@ -77,11 +77,9 @@ if [ -f .env ]; then
   cp .env "$BASELINE_DIR/.env"
 fi
 
-# Copy projects.json from ~/Desktop/Valor/ (iCloud-synced, private) into baseline
-PROJECTS_SRC=~/Desktop/Valor/projects.json
-if [ -f "$PROJECTS_SRC" ]; then
-  mkdir -p "$BASELINE_DIR/config"
-  cp "$PROJECTS_SRC" "$BASELINE_DIR/config/" 2>/dev/null || true
+# Copy any other essential config (add more as discovered)
+if [ -f config/projects.json ]; then
+  cp config/projects.json "$BASELINE_DIR/config/projects.json" 2>/dev/null || true
 fi
 ```
 

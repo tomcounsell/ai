@@ -87,6 +87,28 @@ python -c "from agent.worktree_manager import resolve_repo_root; print(resolve_r
 
 If `TARGET_REPO == ORCHESTRATOR_REPO`, this is a same-repo build and no special handling is needed (all existing behavior works as-is).
 
+## Session Progress Tracking
+
+Extract the session ID from the conversation context. The bridge injects `SESSION_ID: {id}` into enriched messages. Look for this pattern and store it:
+
+```bash
+# Extract SESSION_ID from context
+# Look for a line like "SESSION_ID: abc123" in the message you received
+# Store in variable: SESSION_ID="abc123"
+
+# Mark BUILD stage as in_progress at the start
+python -m tools.session_progress --session-id "$SESSION_ID" --stage BUILD --status in_progress 2>/dev/null || true
+```
+
+After the PR is successfully created (Step 7):
+
+```bash
+# Mark BUILD stage complete and set PR link
+python -m tools.session_progress --session-id "$SESSION_ID" --stage BUILD --status completed --pr-url "$PR_URL" 2>/dev/null || true
+```
+
+Where `$PR_URL` is the full GitHub PR URL returned by `gh pr create`.
+
 ## Instructions
 
 1. **Resolve the plan path** using the Plan Resolution logic above
@@ -191,7 +213,7 @@ Lint and formatting are handled automatically -- agents should never waste itera
 - **Validators wait for builders** - A `validate-*` task always waits for its corresponding `build-*` task
 - **No temporary files** - Agents must not create temporary documentation, test results, or scratch files in the repo. Use /tmp for any temporary work. Only create files that are part of the deliverable.
 - **Never cd into worktrees** - The orchestrator's CWD must stay in the main repo. Use `git -C $TARGET_REPO/.worktrees/{slug}` for git commands, subshells `(cd $TARGET_REPO/.worktrees/{slug} && ...)` when Python scripts need worktree CWD, and `--head session/{slug}` for `gh pr create`. For cross-repo builds, use `--repo $TARGET_GH_REPO` with `gh pr create`. Only subagents (Task tool) should have bare `cd` into worktrees — their shell sessions are independent and disposable. If the orchestrator's CWD ends up inside a worktree and that worktree is deleted, the shell breaks permanently and cannot recover.
-- **SDLC enforcement** - All builder agents follow Plan → Branch → Implement → Test → Review → Document → PR with fix-and-retry loops at Test and Review stages (up to 5 iterations)
+- **SDLC enforcement** - All builder agents follow Plan → Branch → Implement → Test → Review → Document → PR with patch loops at Test and Review stages (up to 5 iterations)
 - **Definition of Done** - Tasks are complete only when: Built (code working), Tested (tests pass), Reviewed (review passes), Documented (docs created after review), Quality (lint/format pass)
 - **Commits at logical checkpoints** - Commits happen at logical checkpoints throughout Implement — not batched at end. The commit message hook enforces hygiene at each commit.
 
@@ -297,7 +319,7 @@ python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}
 
 If any criterion is not met, report the issue and do NOT proceed to the Document stage.
 
-**Note**: Documentation validation happens AFTER review passes — see Step 6. The canonical pipeline order is: Plan → Branch → Implement → Test → Review → Document → PR. Fix-and-retry loops re-enter at Test (for test failures) or Review (for review failures).
+**Note**: Documentation validation happens AFTER review passes — see Step 6. The canonical pipeline order is: Plan → Branch → Implement → Test → Review → Document → PR. The patch loop re-enters at Test (for test failures) or Review (for review failures).
 
 ### Step 5.1: Run Verification Checks from Plan
 
@@ -320,7 +342,7 @@ else:
 ```
 
 - **Exit 0**: All verification checks passed, proceed
-- **Exit 1**: Some checks failed -- fix the specific failures (check name, command, expected vs actual) and re-run verification
+- **Exit 1**: Some checks failed -- trigger `/do-patch` with the specific failure context (check name, command, expected vs actual)
 - If the plan has no `## Verification` section, this step is a no-op
 
 ### Step 5.5: CWD Safety Reset
@@ -568,6 +590,45 @@ If a task fails:
 2. Decide: retry, skip, or abort
 3. For validators: if validation fails, report what's wrong
 4. Don't proceed past blocking failures
+
+## Outcome Contract
+
+When the build completes (successfully or not), emit a typed `SkillOutcome` block as the **last line** of your output. This enables deterministic routing by the Observer without LLM classification.
+
+### Status Values
+
+| Status | Meaning |
+|--------|---------|
+| `success` | Build complete, PR created, all checks passed |
+| `fail` | Build failed, unrecoverable error |
+| `partial` | Some tasks completed but build is incomplete |
+| `retry` | Transient failure, worth retrying |
+
+### Expected Artifacts (on success)
+
+| Key | Description | Example |
+|-----|-------------|---------|
+| `pr_url` | GitHub PR URL | `https://github.com/org/repo/pull/42` |
+| `branch` | Session branch name | `session/my-feature` |
+| `plan_path` | Path to the plan document | `docs/plans/my-feature.md` |
+| `issue_number` | Tracking issue number | `42` |
+| `commits` | Number of commits on branch | `5` |
+
+### Emission Template
+
+After your final report, emit this block (replace values):
+
+```
+<!-- OUTCOME {"status":"success","stage":"BUILD","artifacts":{"pr_url":"https://github.com/org/repo/pull/42","branch":"session/my-feature","plan_path":"docs/plans/my-feature.md"},"notes":"PR created with 5 commits, all tests passing","next_skill":"/do-test"} -->
+```
+
+On failure:
+
+```
+<!-- OUTCOME {"status":"fail","stage":"BUILD","artifacts":{},"notes":"Build failed","failure_reason":"3 tasks failed: build-api, build-frontend, validate-api"} -->
+```
+
+**Important**: The outcome block uses HTML comment syntax (`<!-- ... -->`) so it's invisible in rendered markdown but parseable by the pipeline. Always emit it as the very last line of output.
 
 ## Notes
 

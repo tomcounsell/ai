@@ -25,7 +25,7 @@ Creates structured feature plans in `docs/plans/` following Shape Up principles:
 
 ## Cross-Repo Resolution
 
-For cross-project work, the `GH_REPO` environment variable is automatically set by `sdk_client.py`. The `gh` CLI natively respects this env var, so all `gh` commands automatically target the correct repository. No `--repo` flags or manual parsing needed.
+When invoked for a non-ai project, extract the `GITHUB:` line from the prompt context (e.g., `GITHUB: tomcounsell/popoto`). If present, use `--repo $GITHUB_REPO` with all `gh` commands below. If not present, omit `--repo` (defaults to cwd repo).
 
 ## When to Use
 
@@ -34,6 +34,30 @@ For cross-project work, the `GH_REPO` environment variable is automatically set 
 - User says "make a plan", "plan this out", "flesh out the idea"
 - Scoping unclear or large requests
 - Before starting significant implementation work
+
+## Session Progress Tracking
+
+Extract the session ID from the conversation context. The bridge injects `SESSION_ID: {id}` into enriched messages. Look for this pattern and store it:
+
+```bash
+# Extract SESSION_ID from context
+# Look for a line like "SESSION_ID: abc123" in the message you received
+# Store in variable: SESSION_ID="abc123"
+
+# Mark PLAN stage as in_progress at the start
+python -m tools.session_progress --session-id "$SESSION_ID" --stage PLAN --status in_progress 2>/dev/null || true
+```
+
+After the plan is committed and tracking issue is linked:
+
+```bash
+# Mark PLAN stage complete and set links
+python -m tools.session_progress --session-id "$SESSION_ID" --stage PLAN --status completed --issue-url "$ISSUE_URL" --plan-url "$PLAN_URL" 2>/dev/null || true
+```
+
+Where:
+- `$ISSUE_URL` is the full GitHub issue URL (e.g., `https://github.com/owner/repo/issues/42`)
+- `$PLAN_URL` is the full plan document URL (e.g., `https://github.com/owner/repo/blob/main/docs/plans/{slug}.md`)
 
 ## Quick Start Workflow
 
@@ -58,10 +82,10 @@ For cross-project work, the `GH_REPO` environment variable is automatically set 
    proposing solutions that have already been tried (and failed) or re-solving problems that
    already have working implementations.
    ```bash
-   # Search closed issues for related keywords
-   gh issue list --state closed --search "KEYWORDS_HERE" --limit 10 --json number,title,closedAt,url
+   # Search closed issues for related keywords (use --repo if GITHUB: context line is present)
+   gh issue list --state closed --search "KEYWORDS_HERE" --limit 10 --json number,title,closedAt,url $REPO_FLAG
    # Search merged PRs for related work
-   gh pr list --state merged --search "KEYWORDS_HERE" --limit 10 --json number,title,mergedAt,url
+   gh pr list --state merged --search "KEYWORDS_HERE" --limit 10 --json number,title,mergedAt,url $REPO_FLAG
    ```
    Use results to fill the **Prior Art** section in the plan. If multiple prior attempts
    addressed the same problem, also fill the **Why Previous Fixes Failed** section.
@@ -82,15 +106,6 @@ For cross-project work, the `GH_REPO` environment variable is automatically set 
    assertions — so they silently pass even after the bug is fixed. These are invisible to pytest's
    XPASS detection and MUST be explicitly listed as conversion targets in the plan.
    **Skip if:** Not a bug fix, or no xfail tests found related to this bug.
-
-4.7. **Infrastructure scan** - Scan `docs/infra/` for existing infrastructure constraints relevant to this work.
-   ```bash
-   # Check for existing infra docs that might contain relevant constraints
-   ls docs/infra/*.md 2>/dev/null | head -20
-   ```
-   Review any relevant INFRA docs for rate limits, API quotas, deployment constraints, or tool rules
-   that should inform the plan. Reference findings in the Solution and Risks sections.
-   **Skip if:** `docs/infra/` doesn't exist or contains no relevant docs.
 
 5. **Data flow trace** - For changes involving multi-component interactions, trace the data
    flow end-to-end through the system. Start from the entry point (user action, API call,
@@ -121,33 +136,6 @@ For cross-project work, the `GH_REPO` environment variable is automatically set 
    be established before dependent operations read it, and how the implementation prevents races.
    Skip if the change is purely synchronous and single-threaded.
 
-### Phase 1.5: Spike Resolution
-
-Before writing the plan, resolve verifiable assumptions through time-boxed investigations.
-
-1. **Identify assumptions** - Review the research from Phase 1 and list assumptions that could be validated by agents (prototyping, web research, code exploration)
-2. **Enumerate spike tasks** - For each verifiable assumption, create a spike task:
-   ```markdown
-   ### spike-N: [Description of what to verify]
-   - **Assumption**: "[The assumption being tested]"
-   - **Method**: web-research | prototype | code-read
-   - **Agent Type**: Explore (code-read), general-purpose (web-research), builder in worktree (prototype)
-   - **Time cap**: 5 minutes agent time
-   - **Result**: [filled after spike completes]
-   - **Confidence**: [high | medium | low]
-   - **Impact if false**: [what changes in the plan]
-   ```
-3. **Dispatch spikes in parallel** - Use the P-Thread pattern (parallel Agent sub-agents) to run all spikes concurrently
-4. **Appetite limits**:
-   - Small appetite: max 2 spikes
-   - Medium appetite: max 4 spikes
-   - Large appetite: uncapped
-5. **Prototype isolation** - Prototype spikes MUST use `isolation: "worktree"` to avoid repo pollution. Each spike returns a yes/no/finding — no committed code, no half-implementations
-6. **Collect results** - Aggregate spike findings into the `## Spike Results` section of the plan
-7. **Filter Open Questions** - Only assumptions that spikes couldn't resolve go into Open Questions for the human
-
-**Skip if:** No verifiable assumptions identified, or all assumptions require human judgment (business decisions, priority calls).
-
 ### Phase 2: Write Initial Plan
 
 **Classification is mandatory** - every plan MUST include a `type:` field (bug, feature, or chore).
@@ -156,52 +144,41 @@ Before writing the plan, resolve verifiable assumptions through time-boxed inves
 
 Create `docs/plans/{slug}.md` using the template from `PLAN_TEMPLATE.md`.
 
-**Conditional INFRA doc creation:** If the plan introduces new dependencies, services, external API calls, or deployment changes, create `docs/infra/{slug}.md` using this structure:
-
-```markdown
-# {Feature Name} — Infrastructure
-
-## Current State
-- [What infra exists today relevant to this work]
-
-## New Requirements
-- [New deps, services, API keys, config this plan adds]
-- [Resource estimates: API quotas, storage, compute]
-
-## Rules & Constraints
-- [Rate limits, cost ceilings, API quotas]
-- [Deployment topology requirements]
-
-## Rollback Plan
-- [How to revert infra changes if the feature is rolled back]
-```
-
-INFRA docs are NOT archived when plans ship — they accumulate in `docs/infra/` as durable infrastructure knowledge. Skip if the plan involves no infrastructure changes.
-
 ### Phase 2.5: Link or Create Tracking Issue
 
-After writing the plan, **resolve the tracking issue first**, then push.
-
-#### Step 1: Resolve repo and tracking issue
+After writing the plan, **push it to main first**, then link it to an existing issue OR create a new one.
 
 ```bash
+# Resolve repo identity from git
 REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
+
+# Push plan to main before linking
+git add docs/plans/{slug}.md && git commit -m "Plan: {Feature Name}" && git push
 ```
 
-**Check for existing issue first!** If the plan was created in response to an existing GitHub issue (e.g., "make a plan for issue #42"), do NOT create a new issue. Instead, get its title and link the plan:
+**Check for existing issue first!** If the plan was created in response to an existing GitHub issue (e.g., "make a plan for issue #42"), do NOT create a new issue. Instead:
+
+1. Add the "plan" label and prepend the plan link to the issue body
+2. Update the plan frontmatter `tracking:` field with the existing issue URL
 
 ```bash
 EXISTING_ISSUE=42
-ISSUE_TITLE=$(gh issue view $EXISTING_ISSUE --json title -q .title)
-gh issue edit $EXISTING_ISSUE --add-label "plan"
+gh issue edit $EXISTING_ISSUE --add-label "plan" $REPO_FLAG
+EXISTING_BODY=$(gh issue view $EXISTING_ISSUE --json body -q .body $REPO_FLAG)
+PLAN_LINK="https://github.com/${REPO}/blob/main/docs/plans/{slug}.md"
+gh issue edit $EXISTING_ISSUE $REPO_FLAG --body "**Plan:** ${PLAN_LINK}
+
+${EXISTING_BODY}"
 ```
 
 **Only create a NEW issue if** the plan was initiated from scratch (not from an existing issue).
 
-Before creating, check `~/Desktop/Valor/projects.json` for the current project:
+Before creating, check `config/projects.json` for the current project:
 - If `notion` key exists -> create a Notion task (use Notion MCP tools)
 - If only `github` key exists -> create a GitHub issue (use `gh` CLI)
 - If neither -> skip tracking, just use the plan doc
+
+Extract `type:` from plan frontmatter before creating:
 
 ```bash
 TYPE=$(grep '^type:' docs/plans/{slug}.md | sed 's/type: *//' | tr -d ' ')
@@ -210,62 +187,23 @@ if [ -z "$TYPE" ]; then
   exit 1
 fi
 
-ISSUE_TITLE="{Feature Name}"
+# Use GITHUB_REPO from context if available, otherwise resolve from git
+REPO="${GITHUB_REPO:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
+
 gh issue create \
-  --title "$ISSUE_TITLE" \
+  --repo ${REPO} \
+  --title "[Plan] {Feature Name}" \
   --label "plan" \
   --label "$TYPE" \
   --body "$(cat <<EOF
+**Plan:** https://github.com/${REPO}/blob/main/docs/plans/{slug}.md
+
 **Type:** {type} | **Appetite:** {appetite} | **Status:** Planning
 
 ---
 This issue is for tracking and discussion. The plan document is the source of truth.
 EOF
 )"
-```
-
-#### Step 2: Push the plan
-
-```bash
-git add docs/plans/{slug}.md && git commit -m "Plan: $ISSUE_TITLE"
-if git push 2>/dev/null; then
-  PLAN_BRANCH="main"
-else
-  # Main is protected — create a branch and PR for the entire SDLC lifecycle
-  PLAN_BRANCH="plan/{slug}"
-  git checkout -b "$PLAN_BRANCH"
-  git push -u origin "$PLAN_BRANCH"
-  # This PR is reused for the full SDLC (plan → build → test → review → merge).
-  # Title MUST match the tracking issue title.
-  # Do NOT reference the tracking issue with closing keywords (Closes, Fixes, Resolves).
-  gh pr create --title "$ISSUE_TITLE" --body "Adds plan document for {slug}. Implementation will follow on this branch." --label "plan"
-  # Switch back to main for subsequent work
-  git checkout main
-fi
-```
-
-**Protected branch handling:** If pushing directly to main fails (common with protected branches), the skill automatically creates a `plan/{slug}` branch and opens a PR. This PR is reused for the entire SDLC — do-build pushes implementation commits to the same branch rather than creating a new PR. The PR title matches the tracking issue title.
-
-**CRITICAL: Plan PRs must NOT close the tracking issue.** The tracking issue stays open until the *implementation* PR merges with `Closes #N`. Never use closing keywords (Closes, Fixes, Resolves) when referencing the tracking issue in the plan PR body.
-
-#### Step 3: Link plan to tracking issue
-
-```bash
-PLAN_LINK="https://github.com/${REPO}/blob/${PLAN_BRANCH}/docs/plans/{slug}.md"
-
-if [ -n "$EXISTING_ISSUE" ]; then
-  # Prepend plan link to existing issue body
-  EXISTING_BODY=$(gh issue view $EXISTING_ISSUE --json body -q .body)
-  gh issue edit $EXISTING_ISSUE --body "**Plan:** ${PLAN_LINK}
-
-${EXISTING_BODY}"
-else
-  # Update the newly created issue with the plan link
-  ISSUE_NUM=$(gh issue list --state open --search "$ISSUE_TITLE" --json number -q '.[0].number')
-  gh issue edit $ISSUE_NUM --body "**Plan:** ${PLAN_LINK}
-
-$(gh issue view $ISSUE_NUM --json body -q .body)"
-fi
 ```
 
 For Notion tasks, use MCP tools to create a page with Title, Status, Type, and link to the plan document.
@@ -302,29 +240,6 @@ fi
 
 **If no tracking issue or no comments**: Skip this step.
 
-### Phase 2.8: RFC Review
-
-After the plan is drafted, spawn specialist critic agents to review it for structural flaws.
-
-1. **Select critics** based on plan characteristics:
-   - All plans: `code-reviewer` (always included)
-   - Async/concurrent work: `async-specialist`
-   - External API integration: `api-integration-specialist`
-   - Security-sensitive changes: `security-reviewer`
-   - Data model changes: `data-architect`
-2. **Dispatch critics in parallel** - Each critic receives the full plan document and returns structured feedback:
-   ```
-   - BLOCKER: [must change before build — architectural flaw, missing error path, etc.]
-   - CONCERN: [worth reconsidering — tradeoff the plan didn't acknowledge]
-   - QUESTION: [ambiguity the plan doesn't address]
-   ```
-3. **Aggregate feedback**:
-   - BLOCKERs: Incorporate into the plan immediately (update Solution, add Risks, etc.)
-   - CONCERNs: Add to the `## RFC Feedback` section for the human to weigh in on
-   - QUESTIONs: Merge into Open Questions
-
-**Skip if:** Small appetite plans — the overhead of RFC review exceeds the value for small changes.
-
 ### Phase 3: Critique and Enumerate Questions
 
 1. **Review assumptions** - What did I assume that might be wrong?
@@ -332,8 +247,8 @@ After the plan is drafted, spawn specialist critic agents to review it for struc
 3. **Enumerate questions** - List all questions needing supervisor input
 4. **Add questions to plan** - Append to "Open Questions" section
 5. **Pre-send checklist**:
-   - [ ] Plan committed AND pushed (to `main` or `plan/{slug}` branch if main is protected)
-   - [ ] GitHub issue has `**Plan:** https://github.com/${REPO}/blob/${PLAN_BRANCH}/docs/plans/{slug}.md`
+   - [ ] Plan committed AND pushed to `main`
+   - [ ] GitHub issue has `**Plan:** https://github.com/${REPO}/blob/main/docs/plans/{slug}.md`
    - [ ] Plan frontmatter has `tracking:` set to the issue URL
 6. **Send reply**:
 
@@ -377,7 +292,7 @@ Use snake_case for slugs: `async_meeting_reschedule.md`, `dark_mode_toggle.md`, 
 
 ## Branch Workflow
 
-**Plans are pushed to main when possible.** If the main branch is protected (push rejected), the skill automatically creates a `plan/{slug}` branch and opens a PR for the plan document.
+**Plans are written directly on the main branch.** The plan document itself is just a document -- no feature branch needed.
 
 When the plan is *executed* (via `/do-build`), the build skill creates a feature branch, does the work there, and opens a PR.
 
@@ -400,5 +315,4 @@ Update status as work progresses. Keep all tracking in the plan document itself.
 
 **Tracking issue lifecycle:**
 - When plan status changes to `Ready` or `In Progress`, update the GitHub issue / Notion task status accordingly
-- Issues are closed automatically when the **implementation PR** merges (via `Closes #N` in the do-build PR body) — do NOT close issues manually
-- **Plan PRs (on protected branches) must NEVER close the tracking issue** — only the implementation PR should
+- Issues are closed automatically when the PR merges (via `Closes #N` in PR body) — do NOT close issues manually

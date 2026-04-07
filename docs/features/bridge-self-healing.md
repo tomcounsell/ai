@@ -51,31 +51,16 @@ A separate process that monitors bridge health and executes recovery. Runs via l
 - Process running (`pgrep -f telegram_bridge.py`)
 - Logs fresh (written within 5 minutes)
 - No crash pattern detected
-- Zombie process detection (claude/pyright processes idle > 2 hours)
-- Concurrent instance count (warns when exceeding soft limit of 5)
-
-**Zombie Process Detection**:
-
-Claude Code CLI subprocesses can become orphaned when their parent session ends abnormally (timeout, crash, network disconnect). These zombie processes persist indefinitely, accumulating memory pressure. The watchdog detects them using `ps -eo pid,etime,rss,command` and classifies processes as zombies when their elapsed time exceeds `ZOMBIE_THRESHOLD_SECONDS` (default: 7200 = 2 hours).
-
-- `_enumerate_claude_processes()` scans for all `claude` and `pyright` processes system-wide
-- `classify_zombies()` separates zombies from active processes based on elapsed time
-- `kill_zombie_processes()` uses SIGTERM with 3-second grace period, escalating to SIGKILL
-- Active instance count is tracked; a warning is logged when it exceeds `SOFT_INSTANCE_LIMIT` (default: 5)
-
-The `--check-only` output includes zombie count, PIDs, memory usage, and active instance count.
 
 **5-Level Recovery Escalation**:
 
 | Level | Condition | Action |
 |-------|-----------|--------|
 | 1 | Process not running | Simple restart (launchd) |
-| 2 | Process running but logs stale | Kill stale + kill zombies + restart |
-| 3 | Lock files present | Kill stale + kill zombies + clear locks + restart |
-| 4 | Crash pattern detected | Kill stale + kill zombies + revert HEAD + restart (if enabled) |
+| 2 | Process running but logs stale | Kill stale + restart |
+| 3 | Lock files present | Clear locks + restart |
+| 4 | Crash pattern detected | Revert HEAD + restart (if enabled) |
 | 5 | Recovery exhausted | Alert human via Telegram |
-
-Zombie cleanup is integrated into recovery levels 2+ to free memory before restarting.
 
 **Auto-Revert** (Level 4):
 - Disabled by default

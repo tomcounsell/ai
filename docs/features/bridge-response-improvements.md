@@ -83,7 +83,7 @@ When user asks status questions like "what are you working on?", injects recent 
 
 Added `working_directory` to project config and pass to agent subprocess.
 
-**Location**: `~/Desktop/Valor/projects.json` and `bridge/telegram_bridge.py:get_agent_response()`
+**Location**: `config/projects.json` and `bridge/telegram_bridge.py:get_agent_response()`
 
 ---
 
