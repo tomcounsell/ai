@@ -87,7 +87,6 @@ def main():
                 from models.agent_session import AgentSession
 
                 local_session_id = f"local-{session_id}"
-                cwd = hook_input.get("cwd", "")
 
                 # Resolve project key from cwd
                 from hook_utils.memory_bridge import _get_project_key
@@ -97,6 +96,13 @@ def main():
                 # Read SESSION_TYPE from environment to register the correct persona
                 session_type_override = os.environ.get("SESSION_TYPE")
 
+                # Read VALOR_PARENT_SESSION_ID so child subprocess sessions link back to the
+                # parent PM/Teammate AgentSession (issue #808). The env var carries the parent's
+                # agent_session_id UUID (agt_xxx), which is the canonical FK stored in
+                # parent_agent_session_id. When absent (non-child sessions), create_local()
+                # behaves identically to before.
+                parent_agent_session_id = os.environ.get("VALOR_PARENT_SESSION_ID")
+
                 agent_session = AgentSession.create_local(
                     session_id=local_session_id,
                     project_key=project_key,
@@ -104,6 +110,11 @@ def main():
                     status="running",
                     message_text=prompt[:500] if prompt else "",
                     **({"session_type": session_type_override} if session_type_override else {}),
+                    **(
+                        {"parent_agent_session_id": parent_agent_session_id}
+                        if parent_agent_session_id
+                        else {}
+                    ),
                 )
 
                 sidecar["agent_session_id"] = agent_session.agent_session_id

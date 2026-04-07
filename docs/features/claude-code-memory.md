@@ -240,3 +240,4 @@ Both paths write to the same Redis Memory model. Memories created in Claude Code
 - Prerequisite: [Subconscious Memory](subconscious-memory.md) (PR #515)
 - Related: [Memory Search Tool](memory-search-tool.md) (issue #518)
 - Observability and parity: [#552](https://github.com/tomcounsell/ai/issues/552) (PR [#560](https://github.com/tomcounsell/ai/pull/560)) -- AgentSession lifecycle tracking for local sessions, deja vu parity, post-merge learning
+- Project key isolation fix: [#811](https://github.com/tomcounsell/ai/issues/811) (PR [#820](https://github.com/tomcounsell/ai/pull/820)) -- cwd threading through hook entry points, DEFAULT_PROJECT_KEY changed from "dm" to "default", migration script

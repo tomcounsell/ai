@@ -57,23 +57,26 @@ class TestPreToolUseDevDetection:
         self, mock_hook_context, parent_session_registry
     ):
         """When tool_name=Agent and tool_input contains type=dev-session,
-        creates an AgentSession with session_type=dev and correct parent."""
+        the hook starts the pipeline stage but does NOT create a dev-* AgentSession.
+
+        Child subprocess self-registers via VALOR_PARENT_SESSION_ID env var (issue #808).
+        """
         from agent.hooks.pre_tool_use import pre_tool_use_hook
 
-        input_data = self._make_agent_input()
+        input_data = self._make_agent_input(prompt="Stage: BUILD\nBuild the feature")
 
         with patch("models.agent_session.AgentSession.create_child") as mock_create:
-            mock_create.return_value = MagicMock(agent_session_id="dev-session-1")
+            with patch("agent.hooks.pre_tool_use._start_pipeline_stage") as mock_start_stage:
+                result = asyncio.run(pre_tool_use_hook(input_data, "tool-use-123", mock_hook_context))
 
-            result = asyncio.run(pre_tool_use_hook(input_data, "tool-use-123", mock_hook_context))
+                # create_child should NOT be called — child self-registers (issue #808)
+                mock_create.assert_not_called()
 
-            # Should have called create_dev with parent linkage
-            mock_create.assert_called_once()
-            call_kwargs = mock_create.call_args[1]
-            assert call_kwargs["parent_session_id"] == "parent-chat-session-abc"
+                # Pipeline stage should be started for the parent session
+                mock_start_stage.assert_called_once_with("parent-chat-session-abc", "BUILD")
 
-            # Should not block the tool call
-            assert result.get("decision") != "block"
+                # Should not block the tool call
+                assert result.get("decision") != "block"
 
     def test_ignores_agent_tool_with_non_dev_session_type(
         self, mock_hook_context, parent_session_env
@@ -172,7 +175,8 @@ class TestCreateLocalFactory:
             assert session.session_type == "pm"
 
     def test_telegram_fields_are_null(self):
-        """Local sessions have no Telegram context."""
+        """Local sessions have no Telegram context, and parent_agent_session_id is None
+        when VALOR_PARENT_SESSION_ID env var is absent (non-child sessions)."""
         with patch("models.agent_session.AgentSession.save"):
             from models.agent_session import AgentSession
 
@@ -186,6 +190,26 @@ class TestCreateLocalFactory:
             assert session.telegram_message_id is None
             assert session.sender_name is None
             assert session.parent_session_id is None
+            assert session.parent_agent_session_id is None
+
+    def test_accepts_parent_session_id_from_env(self, monkeypatch):
+        """When VALOR_PARENT_SESSION_ID is set, create_local() stores it as
+        parent_agent_session_id, linking the child local-* session to the
+        parent PM AgentSession (issue #808)."""
+        monkeypatch.setenv("VALOR_PARENT_SESSION_ID", "agt_parent_uuid_123")
+
+        with patch("models.agent_session.AgentSession.save"):
+            from models.agent_session import AgentSession
+
+            parent_id = "agt_parent_uuid_123"
+            session = AgentSession.create_local(
+                session_id="local-child-abc",
+                project_key="dm",
+                working_dir="/tmp",
+                parent_agent_session_id=parent_id,
+            )
+
+            assert session.parent_agent_session_id == "agt_parent_uuid_123"
 
     def test_accepts_kwargs(self):
         """create_local() passes extra kwargs to the model."""

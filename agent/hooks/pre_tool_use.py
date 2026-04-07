@@ -196,14 +196,18 @@ def _handle_skill_tool_start(tool_input: dict[str, Any], claude_uuid: str | None
     _start_pipeline_stage(session_id, stage)
 
 
-def _maybe_register_dev_session(tool_input: dict[str, Any], claude_uuid: str | None = None) -> None:
-    """Register a Dev session in Redis when the Agent tool spawns a dev-session.
+def _maybe_start_pipeline_stage(tool_input: dict[str, Any], claude_uuid: str | None = None) -> None:
+    """Start an SDLC pipeline stage when the Agent tool spawns a dev-session.
+
+    The child subprocess now self-registers its AgentSession via user_prompt_submit.py
+    reading VALOR_PARENT_SESSION_ID (issue #808). This function no longer creates a
+    dev-* AgentSession record — it only wires PipelineStateMachine.start_stage() so
+    subagent_stop can later find the in_progress stage and mark it completed.
 
     Uses the session registry to resolve the bridge session ID from the
     Claude Code UUID (issue #597). Falls back gracefully if not found.
     """
     from agent.hooks.session_registry import resolve
-    from models.agent_session import AgentSession
 
     subagent_type = tool_input.get("type", "")
     if subagent_type != "dev-session":
@@ -212,26 +216,9 @@ def _maybe_register_dev_session(tool_input: dict[str, Any], claude_uuid: str | N
     parent_session_id = resolve(claude_uuid)
     if not parent_session_id:
         logger.debug(
-            "[pre_tool_use] No bridge session in registry, skipping Dev session registration"
+            "[pre_tool_use] No bridge session in registry, skipping pipeline stage start"
         )
         return
-
-    try:
-        prompt_text = tool_input.get("prompt", "")[:200] or "dev-session"
-        dev_session = AgentSession.create_child(
-            role="dev",
-            session_id=f"dev-{parent_session_id}",
-            project_key="default",
-            working_dir=os.getcwd(),
-            parent_session_id=parent_session_id,
-            message_text=prompt_text,
-        )
-        logger.info(
-            f"[pre_tool_use] Registered Dev session "
-            f"{dev_session.agent_session_id} parent={parent_session_id}"
-        )
-    except Exception as e:
-        logger.warning(f"[pre_tool_use] Failed to register Dev session: {e}")
 
     # Wire PipelineStateMachine.start_stage() so subagent_stop can later
     # find the in_progress stage and mark it completed.
@@ -247,6 +234,10 @@ def _maybe_register_dev_session(tool_input: dict[str, Any], claude_uuid: str | N
             )
     except Exception as e:
         logger.warning(f"[pre_tool_use] Failed to start pipeline stage: {e}")
+
+
+# Backward-compatible alias so existing callers and tests can use either name.
+_maybe_register_dev_session = _maybe_start_pipeline_stage
 
 
 async def pre_tool_use_hook(
@@ -266,7 +257,7 @@ async def pre_tool_use_hook(
     # Detect Agent tool spawning a dev-session
     if tool_name == "Agent":
         claude_uuid = input_data.get("session_id")
-        _maybe_register_dev_session(tool_input, claude_uuid=claude_uuid)
+        _maybe_start_pipeline_stage(tool_input, claude_uuid=claude_uuid)
         return {}
 
     # Detect Skill tool invocations and map to pipeline stage start

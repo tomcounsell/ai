@@ -221,13 +221,13 @@ class TestMaybeRegisterDevStartStage:
         mock_start.assert_not_called()
         assert "No SDLC stage found" in caplog.text
 
-    def test_start_stage_failure_does_not_block_registration(self, monkeypatch, caplog):
-        """start_stage failure should not prevent Dev session registration from completing."""
-        mock_dev = MagicMock()
-        mock_dev.agent_session_id = "session-101"
-        mock_as_mod = MagicMock()
-        mock_as_mod.AgentSession.create_child.return_value = mock_dev
+    def test_start_stage_failure_does_not_raise(self, monkeypatch, caplog):
+        """start_stage failure is caught and logged; the hook always returns normally.
 
+        With issue #808, _maybe_register_dev_session/_maybe_start_pipeline_stage no longer
+        calls create_child(). It only starts the pipeline stage. A _start_pipeline_stage
+        error is wrapped in try/except and logged as a warning — it never propagates.
+        """
         tool_input = {
             "type": "dev-session",
             "prompt": "Stage: BUILD\nDo the build",
@@ -235,26 +235,17 @@ class TestMaybeRegisterDevStartStage:
 
         with (
             patch("agent.hooks.session_registry.resolve", return_value="parent-session-12"),
-            patch.dict("sys.modules", {"models.agent_session": mock_as_mod}),
             patch(
                 "agent.hooks.pre_tool_use._start_pipeline_stage",
                 side_effect=RuntimeError("unexpected"),
             ),
-            caplog.at_level(logging.INFO),
+            caplog.at_level(logging.WARNING),
         ):
-            # The RuntimeError from _start_pipeline_stage propagates because
-            # it is called AFTER the try/except block for registration.
-            # But _start_pipeline_stage itself catches all exceptions internally,
-            # so we test that the mock side_effect doesn't prevent registration.
-            # Note: since we mock at the function level, the side_effect does raise.
-            # The real _start_pipeline_stage never raises.
-            try:
-                _maybe_register_dev_session(tool_input, claude_uuid="test-uuid")
-            except RuntimeError:
-                pass
+            # Should not raise — start_stage errors are caught in the try/except block
+            _maybe_register_dev_session(tool_input, claude_uuid="test-uuid")
 
-        # Registration should have happened before start_stage was called
-        mock_as_mod.AgentSession.create_child.assert_called_once()
+        # Warning should have been logged
+        assert "Failed to start pipeline stage" in caplog.text
 
     def test_skips_entirely_for_non_dev_session(self, monkeypatch):
         monkeypatch.setenv("VALOR_SESSION_ID", "parent-session-13")
