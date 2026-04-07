@@ -18,15 +18,14 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Autoexperiment](autoexperiment.md) | Autonomous overnight prompt optimization using ultra-cheap LLMs via OpenRouter | Shipped |
 | [Bridge Message Query](bridge-message-query.md) | CLI tool to fetch Telegram message history via file-based IPC with running bridge | Shipped |
 | [Bridge Module Architecture](bridge-module-architecture.md) | Sub-module organization of the Telegram bridge for maintainability | Shipped |
-| [Bridge/Worker Architecture](bridge-worker-architecture.md) | Bridge/worker process separation: bridge as pure I/O adapter, worker as sole session executor, Redis contract, operator CLI | Shipped |
 | [Bridge Resilience](bridge-resilience.md) | Circuit breaker, unified recovery loop, degraded mode, structured logging | Shipped |
 | [Bridge Response Improvements](bridge-response-improvements.md) | Enhancements to how the Telegram bridge formats and delivers responses | Shipped |
 | [Bridge Self-Healing](bridge-self-healing.md) | Automatic crash recovery with session lock cleanup, watchdog, escalation, flood-backoff persistence, and dynamic catchup lookback | Shipped |
 | [Bridge Workflow Gaps](bridge-workflow-gaps.md) | Auto-continue for status updates, output classification, and session log snapshots | Shipped |
+| [Bridge/Worker Architecture](bridge-worker-architecture.md) | Bridge/worker process separation: bridge as pure I/O adapter, worker as sole session executor, Redis contract, operator CLI. Includes per-chat serialization, global `MAX_CONCURRENT_SESSIONS` semaphore, Redis pop lock (TOCTOU prevention), and CLI session UUID isolation. | Shipped |
 | [Build Output Verification](build-output-verification.md) | Three-layer verification gates preventing /do-build from silently completing with no code changes | Shipped |
 | [Build Session Reliability](build-session-reliability.md) | Logging propagation, commit-on-exit, worktree isolation, health monitoring | Shipped |
 | [Chat Dev Session Architecture](pm-dev-session-architecture.md) | PM/Dev session split — session type discriminator splitting orchestration from execution | Shipped |
-| [PM session Teammate Mode](pm-teammate-mode.md) | Haiku-based intent classifier routing informational queries to direct PM session response without Dev session spawn | Shipped |
 | [Classification](classification.md) | Auto-classification of messages as bug/feature/chore with immutability and reclassify skill | Shipped |
 | [Claude Code Memory](claude-code-memory.md) | Hook-based memory integration for Claude Code CLI sessions: prompt ingestion, tool-call recall with sliding window, deja vu signals, post-session extraction, AgentSession lifecycle tracking, and post-merge learning | Shipped |
 | [Code Impact Finder](code-impact-finder.md) | Semantic search for blast radius analysis during /do-plan | Shipped |
@@ -74,6 +73,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Plan Prerequisites Validation](plan-prerequisites.md) | Declare and validate environment requirements before plan execution | Shipped |
 | [PM Channels](pm-channels.md) | Project manager mode routing Telegram groups to work-vault folders with SDLC bypass | Shipped |
 | [PM SDLC Decision Rules](pm-sdlc-decision-rules.md) | PM outcome parsing (success/partial/fail), auto-merge on clean gates, annotate-rather-than-skip for review findings | Shipped |
+| [PM session Teammate Mode](pm-teammate-mode.md) | Haiku-based intent classifier routing informational queries to direct PM session response without Dev session spawn | Shipped |
 | [PM Telegram Tool](pm-telegram-tool.md) | PM session composes and sends its own Telegram messages (text, file attachments, and multi-file albums) via Redis IPC, with summarizer as fallback | Shipped |
 | [PM Voice Refinement](pm-voice-refinement.md) | Naturalized SDLC language, crash message pool, sentence-aware truncation, milestone-selective emoji for PM output | Shipped |
 | [Popoto Index Hygiene](popoto-index-hygiene.md) | Automated cleanup of orphaned Popoto index entries, Meta.ttl on AgentSession, raw Redis migration to Popoto models, daily rebuild_indexes reflection | Shipped |
@@ -87,7 +87,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Review Workflow Screenshots](review-workflow-screenshots.md) | Screenshot capture during review for visual validation | Shipped |
 | [Scale Agent Session Queue (Popoto + Worktrees)](scale-agent-session-queue-with-popoto-and-worktrees.md) | Redis persistence and git worktrees for parallel build execution | Shipped |
 | [SDK Modernization](sdk-modernization.md) | Upgrade to SDK v0.1.35 with programmatic agents and expanded hooks | Shipped |
-| [SDLC Critique Stage](sdlc-critique-stage.md) | Automated plan validation between PLAN and BUILD stages with parallel war-room critics, Implementation Note enforcement, concern-triggered revision pass, and propagation check | Shipped |
+| [SDLC Critique Stage](sdlc-critique-stage.md) | Automated plan validation between PLAN and BUILD stages with parallel war-room critics and inline source file verification | Shipped |
 | [SDLC Enforcement](sdlc-enforcement.md) | Quality gates for code sessions: user-level hooks, pipeline stage model, settings merger, cross-repo enforcement | Shipped |
 | [SDLC Observer](sdlc-observer.md) | Web dashboard for real-time SDLC pipeline tracking with stage indicators, event timelines, and artifact links at `/sdlc/` | Shipped |
 | [SDLC Pipeline Integrity](sdlc-pipeline-integrity.md) | Session continuation hardening, deterministic URL construction, merge guard hook, and MERGE pipeline stage | Shipped |
@@ -98,11 +98,11 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Semantic Session Routing](semantic-session-routing.md) | Semantic matching of unthreaded messages to active sessions with declared expectations via structured summarizer output | Shipped |
 | [Session Health Check](session-health-check.md) | PostToolUse watchdog hook monitoring agent sessions for stuck loops using a Haiku judge with enriched tool summaries, activity stats, and pattern guidance | Shipped |
 | [Session Isolation](session-isolation.md) | Two-tier task list scoping and git worktrees for parallel session isolation | Shipped |
-| [Session Steering](session-steering.md) | Externalized steering via `AgentSession.queued_steering_messages` — any process can steer a running session; worker injects messages at turn boundaries; `valor-session` CLI for create/steer/status/list/kill | Shipped |
 | [Session Lifecycle](session-lifecycle.md) | Consolidated lifecycle module (`models/session_lifecycle.py`) with `finalize_session()` and `transition_status()` for all 11 session states, side effect consolidation, zombie loop prevention, stale cleanup via `_active_workers` liveness check, and Redis re-read in `_complete_agent_session` to capture accumulated `stage_states` | Shipped |
 | [Session Lifecycle Diagnostics](session-lifecycle-diagnostics.md) | Structured LIFECYCLE logging at every state transition with stall detection and CLI status report | Shipped |
 | [Session Management](session-management.md) | Reply-chain root resolution ensuring all replies in a thread map to one canonical session_id | Shipped |
 | [Session Recovery Mechanisms](session-recovery-mechanisms.md) | Catalogue of all 7 recovery mechanisms with terminal status safety audit, guards, race condition analysis, and regression tests | Shipped |
+| [Session Steering](session-steering.md) | Externalized steering via `AgentSession.queued_steering_messages` — any process can steer a running session; worker injects messages at turn boundaries; `valor-session` CLI for create/steer/status/list/kill | Shipped |
 | [Session Tagging](session-tagging.md) | Auto-tagging and CRUD for session categorization based on activity, classification, and transcript patterns | Shipped |
 | [Session Transcripts](session-transcripts.md) | Append-only session transcript files with AgentSession Redis model for metadata | Shipped |
 | [Session Watchdog](session-watchdog.md) | Active session monitoring with proper cleanup and state management | Shipped |
@@ -129,7 +129,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Test Reliability: Flaky Filter](test-reliability-flaky-filter.md) | Branch-side retry for flaky tests, deterministic junitxml baseline parsing, and completeness validation for test classification | Shipped |
 | [Tools Standard](tools-standard.md) | Tool compliance standard, audit checks, and remediation results for the tools/ directory | Shipped |
 | [Trace & Verify Protocol](trace-and-verify.md) | Data-driven root cause analysis replacing narrative-only 5 Whys with forward verification | Shipped |
-| [UTC Timestamps](utc-timestamps.md) | All timestamps normalized to tz-aware UTC with `bridge/utc.py` utilities; local conversion only at display boundary | Shipped |
+| [UTC Timestamps](utc-timestamps.md) | All timestamps normalized to tz-aware UTC; CLI/log surfaces show explicit UTC labels, conversational surfaces convert to local time | Shipped |
 | [Web Dashboard](web-dashboard.md) | Session table with SDLC stage pills, project metadata popovers, history-based stage inference, and configurable retention via DASHBOARD_RETENTION_HOURS | Shipped |
 | [Web UI](web-ui.md) | Localhost FastAPI web application at port 8500 serving observability dashboards with HTMX interactivity and dark theme | Shipped |
 | [Worker Service](worker-service.md) | Standalone worker process for AgentSession processing without Telegram, OutputHandler protocol, FileOutputHandler fallback, launchd service | Shipped |

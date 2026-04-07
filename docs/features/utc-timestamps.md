@@ -44,7 +44,9 @@ The `StructuredJsonFormatter` in `bridge/log_format.py` emits UTC timestamps wit
 
 ## Display Layer
 
-When presenting timestamps to humans (Telegram messages, UI), use `to_local()`:
+Display surfaces fall into two categories:
+
+**Conversational output** (Telegram messages, UI relative times): convert to local time with `to_local()`:
 
 ```python
 from bridge.utc import utc_now, to_local
@@ -53,7 +55,17 @@ ts = utc_now()  # Store this
 display = to_local(ts).strftime("%H:%M")  # Show this to humans
 ```
 
-The principle: **store UTC, display local -- never the reverse**.
+**CLI and log output** (operator-facing tools): display UTC explicitly with a ` UTC` label so operators can safely compare timestamps from different sources without timezone confusion:
+
+```
+# python -m tools.valor_session status
+Created:  2026-04-07 05:49:00 UTC
+
+# logs/worker.log
+2026-04-07 13:03:54 UTC worker INFO ...
+```
+
+The CLI uses `_format_ts()` in `tools/valor_session.py` (appends ` UTC` to all outputs). The worker uses `_UTCFormatter` with `converter = time.gmtime` so log lines always reflect UTC regardless of the machine's local timezone.
 
 ## Migration Notes
 
@@ -65,5 +77,7 @@ The principle: **store UTC, display local -- never the reverse**.
 
 ## Related
 
-- Issue: [#542](https://github.com/tomcounsell/ai/issues/542)
+- Issue: [#542](https://github.com/tomcounsell/ai/issues/542) — UTC normalization (internal storage)
+- Issue: [#792](https://github.com/tomcounsell/ai/issues/792) — Timestamp display labels (CLI/log surfaces)
 - Plan: `docs/plans/542-utc-timestamp-normalization.md`
+- Plan: `docs/plans/timestamp-timezone-labels.md`
