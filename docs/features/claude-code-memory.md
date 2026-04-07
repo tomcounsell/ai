@@ -152,6 +152,48 @@ Sidecar files are cleaned up by the Stop hook after extraction. Cross-session co
 | `models/agent_session.py` | AgentSession model; `create_local()` factory for local CLI sessions (accepts `session_type` kwarg, defaults to `"dev"`) |
 | `.claude/settings.json` | Hook registration (UserPromptSubmit entry) |
 
+## Project Key Resolution
+
+Every memory record is stored under a `project_key` partition that scopes it to a specific project. The `_get_project_key(cwd)` function in `memory_bridge.py` resolves the key using the following priority chain:
+
+1. **`VALOR_PROJECT_KEY` env var** — if set, always wins (highest priority). Injected by `sdk_client.py` when spawning Dev sessions so CI and automated flows use the correct partition.
+2. **`projects.json` cwd match** — reads `~/Desktop/Valor/projects.json`, iterates all `projects[key].working_directory` entries, and returns the first key whose path is a prefix of `cwd`. This handles multi-project machines automatically.
+3. **`Path(cwd).name` fallback** — if `projects.json` is missing or no entry matches, the basename of the current working directory is used as the project key (e.g., `~/src/ai` → `"ai"`).
+4. **`DEFAULT_PROJECT_KEY`** — final fallback when `cwd` is None or empty. Comes from `config/memory_defaults.py` (currently `"default"`). This value is intentionally not `"dm"` — that key is semantically reserved for Telegram direct messages and must not be used as a fallback for non-DM contexts.
+
+The `cwd` value flows through every public hook entry point:
+
+| Hook entry point | Where cwd comes from | How it's passed |
+|-----------------|----------------------|-----------------|
+| `recall(session_id, tool_name, tool_input, cwd)` | `hook_input.get("cwd")` in `post_tool_use.py` | Keyword argument |
+| `ingest(content, cwd)` | `hook_input.get("cwd")` in `user_prompt_submit.py` | Keyword argument |
+| `extract(session_id, transcript_path, cwd)` | `hook_input.get("cwd")` in `stop.py` | Keyword argument |
+| `post_merge_extract(pr_number, pr_title, diff_summary, cwd)` | `hook_input.get("cwd")` in `stop.py` | Keyword argument |
+
+All four functions default to `cwd=None` for backwards compatibility. Callers that do not pass `cwd` fall through to `DEFAULT_PROJECT_KEY`.
+
+### Migration Note
+
+All Memory records created between 2026-03-24 and 2026-04-07 have `project_key="dm"` due to a bug where hooks called `_get_project_key()` with no `cwd` argument, falling through to the then-default `DEFAULT_PROJECT_KEY="dm"`. This is fixed in PR #820.
+
+To re-key existing mislabeled records, run the migration script:
+
+```bash
+# Preview what would be migrated (safe, no changes)
+python scripts/migrate_memory_project_key.py --dry-run
+
+# Apply the migration
+python scripts/migrate_memory_project_key.py --apply
+```
+
+The script:
+- Scans all `Memory:*:dm:*` Redis keys
+- Classifies each record: genuine Telegram DMs (source=human AND agent_id=dm) are preserved; all others are re-keyed to `"valor"`
+- Renames keys atomically via Redis RENAME, updates hash fields, and rebuilds Popoto indexes
+- Is idempotent — safe to run multiple times
+
+See `scripts/migrate_memory_project_key.py` for full documentation.
+
 ## Configuration
 
 Constants in `memory_bridge.py`:
@@ -204,3 +246,4 @@ Both paths write to the same Redis Memory model. Memories created in Claude Code
 - Prerequisite: [Subconscious Memory](subconscious-memory.md) (PR #515)
 - Related: [Memory Search Tool](memory-search-tool.md) (issue #518)
 - Observability and parity: [#552](https://github.com/tomcounsell/ai/issues/552) (PR [#560](https://github.com/tomcounsell/ai/pull/560)) -- AgentSession lifecycle tracking for local sessions, deja vu parity, post-merge learning
+- Project key isolation fix: [#811](https://github.com/tomcounsell/ai/issues/811) (PR [#820](https://github.com/tomcounsell/ai/pull/820)) -- cwd threading through hook entry points, DEFAULT_PROJECT_KEY changed from "dm" to "default", migration script
