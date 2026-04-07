@@ -83,6 +83,26 @@ The resolver never blocks message delivery:
 
 Two rapid replies both derive the same root session_id before either is processed. This is handled by `enqueue_agent_session()`'s same-session_id supersede logic (lines 318–336 of `telegram_bridge.py`). No shared mutable state in the chain walk.
 
+## Timestamp Display Format
+
+All timestamp displays in the session CLI include an explicit UTC label to prevent ambiguity when comparing timestamps across sources.
+
+**`python -m tools.valor_session status`** output:
+```
+Created:  2026-04-07 05:49:00 UTC
+Started:  2026-04-07 06:04:28 UTC
+Updated:  2026-04-07 06:34:12 UTC
+```
+
+**`logs/worker.log`** entries:
+```
+2026-04-07 13:03:54 UTC worker INFO ...
+```
+
+Both surfaces use UTC. The `_format_ts()` helper in `tools/valor_session.py` appends ` UTC` to all formatted timestamps and treats naive ISO strings as UTC (matching internal storage per PR #557). The worker logger uses a `_UTCFormatter` subclass with `converter = time.gmtime` so log lines never show local time.
+
+This avoids the 7-hour offset error that occurs when mixing `valor_session status` (which stores UTC) with worker.log lines that previously used local time (UTC+7).
+
 ## Related Features
 
 - [Mid-Session Steering](mid-session-steering.md) — Steering check that routes replies to running sessions uses the same canonical session_id.
