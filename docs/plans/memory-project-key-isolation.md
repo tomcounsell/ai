@@ -57,9 +57,14 @@ The bug exists in two code paths that both call `_get_project_key()` with no `cw
 2. `memory_bridge.extract()` calls `extract_observations_async(session_id, text)` with no `project_key`
 3. `agent/memory_extraction.py:134` falls through to `DEFAULT_PROJECT_KEY` from env or config
 
+**Post-merge extract path (do-merge hook):**
+1. Caller invokes `post_merge_extract()` — no `cwd` passed
+2. `memory_bridge.post_merge_extract()` calls `_get_project_key()` with no argument (`memory_bridge.py:505`)
+3. Falls through to `DEFAULT_PROJECT_KEY = "dm"`, saving post-merge learnings under wrong partition
+
 ## Architectural Impact
 
-- **Interface changes**: `ingest(content)` gains optional `cwd: str | None = None` parameter; `extract(session_id, transcript_path)` gains optional `cwd: str | None = None` parameter; `recall(session_id, tool_name, tool_input)` gains optional `cwd: str | None = None` parameter.
+- **Interface changes**: `ingest(content)` gains optional `cwd: str | None = None` parameter; `extract(session_id, transcript_path)` gains optional `cwd: str | None = None` parameter; `recall(session_id, tool_name, tool_input)` gains optional `cwd: str | None = None` parameter; `post_merge_extract()` gains optional `cwd: str | None = None` parameter.
 - **New dependencies**: None.
 - **Coupling**: No new coupling — the cwd is available in hook_input and just needs to be threaded through.
 - **Data ownership**: No change — Memory model owns data, project_key partitioning logic unchanged.
@@ -88,9 +93,9 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/memory-project
 
 ### Key Elements
 
-- **Fix 1 — DEFAULT_PROJECT_KEY**: Change `"dm"` → `"default"` in `config/memory_defaults.py:42`. The value `"dm"` is semantically wrong as a fallback; `"default"` makes silent fallbacks visible and distinguishable.
-- **Fix 2 — Thread cwd through hook entry points**: `recall()`, `ingest()`, and `extract()` each gain an optional `cwd` parameter. The caller (hook scripts) reads `cwd` from `hook_input` and passes it through. `_get_project_key(cwd)` already handles the resolution correctly once given a cwd.
-- **Fix 3 — Migration script**: `scripts/migrate_memory_project_key.py` scans all `Memory:*` Redis keys where `project_key="dm"`, classifies each as agent-sourced (migrate to `"valor"`) or Telegram DM-sourced (keep as `"dm"`), renames keys via `Redis RENAME`, updates field values, rebuilds Popoto indexes. Dry-run flag required.
+- **Fix 1 — DEFAULT_PROJECT_KEY**: Change `"dm"` → `"default"` in `config/memory_defaults.py:42`. Also patch the hardcoded `return "dm"` at `memory_bridge.py:169` (bare `except Exception` fallback inside `_get_project_key()`) → `return "default"`. Both lines must be changed — the config import may silently fail and fall through to the hardcoded string.
+- **Fix 2 — Thread cwd through hook entry points**: `recall()`, `ingest()`, `extract()`, and `post_merge_extract()` each gain an optional `cwd` parameter (four call sites). The caller (hook scripts) reads `cwd` from `hook_input` and passes it through. `_get_project_key(cwd)` already handles the resolution correctly once given a cwd.
+- **Fix 3 — Migration script**: `scripts/migrate_memory_project_key.py` scans all `Memory:*` Redis keys where `project_key="dm"`, unconditionally migrates all records to `"valor"` (since no Telegram bridge runs on this machine, every `"dm"` record was created by Claude Code hooks), renames keys via `Redis RENAME`, updates field values, rebuilds Popoto indexes. Dry-run flag required. Optional `--filter-source SOURCE` argument wired for future cross-machine use.
 
 ### Flow
 
@@ -100,19 +105,24 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/memory-project
 
 `stop.py reads cwd from hook_input` → `passes cwd to extract(session_id, transcript_path, cwd)` → `extract_observations_async(session_id, text, project_key="valor")` → observations saved under `"valor"`
 
-`migrate script runs` → scans `Memory:*:dm:*` keys → classifies by source field → renames agent-sourced keys to `"valor"` → rebuilds indexes → before/after stats printed
+`do-merge hook calls post_merge_extract(cwd=cwd)` → `_get_project_key(cwd) resolves "valor"` → post-merge learnings saved under `"valor"`
+
+`migrate script runs` → scans `Memory:*:dm:*` keys → unconditionally renames ALL to `":valor:"` → rebuilds indexes → before/after stats printed
 
 ### Technical Approach
 
-- Add `cwd: str | None = None` to `recall()`, `ingest()`, `extract()` in `memory_bridge.py`
-- Inside each function, replace the no-arg `_get_project_key()` call with `_get_project_key(cwd)`
-- In `post_tool_use.py::_run_memory_recall()`, extract `cwd = hook_input.get("cwd", "")` and pass to `recall()`
-- In `user_prompt_submit.py::main()`, pass the already-read `cwd` to `ingest(prompt, cwd)`
-- In `stop.py::_run_memory_extraction()`, extract `cwd` from `hook_input` and pass to `extract()`
 - Change `DEFAULT_PROJECT_KEY = "dm"` → `DEFAULT_PROJECT_KEY = "default"` in `config/memory_defaults.py`
-- Migration script classifies records: `source == SOURCE_AGENT or source == SOURCE_SYSTEM` → migrate; `source == SOURCE_HUMAN and agent_id` looks like a Telegram user (not a project key) → keep as `"dm"`; rely on the `source` field as the primary discriminator since Claude Code hooks save with `SOURCE_HUMAN` for prompts and `SOURCE_AGENT` for observations — but all are currently mislabeled `"dm"`.
+- Patch hardcoded `return "dm"` at `memory_bridge.py:169` (bare `except Exception` inside `_get_project_key()`) → `return "default"` — both lines must match
+- Add `cwd: str | None = None` to `recall()`, `ingest()`, `extract()`, and `post_merge_extract()` in `memory_bridge.py` (four call sites)
+- Inside each function, replace the no-arg `_get_project_key()` call with `_get_project_key(cwd)`
+- Guard against empty string cwd: in `_get_project_key()`, treat `cwd = cwd.strip() if cwd else None` before use
+- In `post_tool_use.py::_run_memory_recall()`, extract `cwd = hook_input.get("cwd", "")` and pass to `recall(..., cwd=cwd)`
+- In `user_prompt_submit.py::main()`, pass already-read `cwd` to `ingest(prompt, cwd=cwd)`
+- In `stop.py::_run_memory_extraction()`, extract `cwd = hook_input.get("cwd", "")` and pass to `extract(..., cwd=cwd)`
+- In the do-merge hook caller of `post_merge_extract()`, pass `cwd` through
+- Migration script unconditionally migrates ALL `"dm"` records to `"valor"`; optional `--filter-source SOURCE` argument wired for future cross-machine use
 
-**Migration classification strategy**: Since ALL current `"dm"` records came from Claude Code hooks (no Telegram bridge on this machine), they can all safely be migrated to `"valor"`. The migration script will scan for `source` field and treat all records as needing migration on this machine, with a note in the script that future cross-machine runs should filter by `agent_id` / `source` patterns.
+**Migration classification strategy**: Since ALL current `"dm"` records came from Claude Code hooks (no Telegram bridge on this machine), migrate ALL records unconditionally to `"valor"`. Do not attempt to classify by `source` field — that adds complexity with no benefit on this machine. The optional `--filter-source` flag is wired up for future cross-machine use but not exercised here.
 
 ## Failure Path Test Strategy
 
@@ -139,7 +149,7 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/memory-project
 - [ ] New test: `tests/unit/test_memory_bridge.py::TestGetProjectKey::test_default_project_key_is_not_dm` — ADD: assert `DEFAULT_PROJECT_KEY != "dm"`
 - [ ] New test: `tests/unit/test_memory_bridge.py::TestGetProjectKey::test_empty_cwd_treated_as_none` — ADD: `_get_project_key("")` should not return `""`
 - [ ] New test: `tests/unit/test_memory_bridge.py::TestExtract::test_extract_passes_cwd_to_project_key` — ADD: verify cwd threading
-- [ ] New script test: `tests/unit/test_migrate_memory_project_key.py` — ADD: dry-run mode with mock Redis, verify rename logic, verify Telegram DM records preserved
+- [ ] New script test: `tests/unit/test_migrate_memory_project_key.py` — ADD: dry-run mode with mock Redis, verify rename logic, verify unconditional migration behavior
 
 ## Rabbit Holes
 
@@ -189,7 +199,7 @@ python -m tools.memory_search inspect --stats           # verify "valor" partiti
 
 No MCP server changes required. The memory recall system operates via Claude Code hooks (`.claude/hooks/`), not via MCP tools. The fix is entirely within:
 - `config/memory_defaults.py` — constant change
-- `.claude/hooks/hook_utils/memory_bridge.py` — parameter threading
+- `.claude/hooks/hook_utils/memory_bridge.py` — hardcoded fallback patch + parameter threading (four functions)
 - `.claude/hooks/post_tool_use.py` — cwd extraction and pass-through
 - `.claude/hooks/user_prompt_submit.py` — cwd pass-through to ingest
 - `.claude/hooks/stop.py` — cwd extraction and pass-through to extract
@@ -206,11 +216,12 @@ No `.mcp.json` changes, no MCP server changes, no bridge changes.
 ## Success Criteria
 
 - [ ] `DEFAULT_PROJECT_KEY` no longer evaluates to `"dm"` for non-DM contexts (`config/memory_defaults.py:42` reads `"default"`)
+- [ ] Hardcoded fallback at `memory_bridge.py:169` reads `return "default"` not `return "dm"`
 - [ ] New memories created in `~/src/ai` have `project_key="valor"` (verified via `python -m tools.memory_search inspect --stats`)
 - [ ] Migration script runs cleanly: `python scripts/migrate_memory_project_key.py --dry-run` shows 2000+ records to migrate; live run completes with 0 errors
 - [ ] `python -m tools.memory_search inspect --stats` shows records under `"valor"` partition after migration
 - [ ] Memory recall works in Claude Code sessions (PostToolUse thoughts injected — verifiable by running a few tool calls and seeing `<thought>` blocks in session context)
-- [ ] Telegram DM memories remain under `"dm"` (N/A on this machine; migration script preserves `source=SOURCE_HUMAN` records with DM-pattern `agent_id`)
+- [ ] Telegram DM memories remain under `"dm"` (N/A on this machine; unconditional migration is safe since no DM records exist here)
 - [ ] All new and updated tests pass (`pytest tests/unit/test_memory_bridge.py tests/unit/test_migrate_memory_project_key.py -v`)
 - [ ] `_get_project_key("")` returns `"default"` not `""` (empty cwd guard)
 
@@ -220,7 +231,7 @@ No `.mcp.json` changes, no MCP server changes, no bridge changes.
 
 - **Builder (memory-fix)**
   - Name: memory-fix-builder
-  - Role: Implement the three code fixes (DEFAULT_PROJECT_KEY, cwd threading, migration script) and update tests
+  - Role: Implement the three code fixes (DEFAULT_PROJECT_KEY + hardcoded fallback, cwd threading for four call sites, migration script) and update tests
   - Agent Type: builder
   - Resume: true
 
@@ -250,11 +261,13 @@ See plan template for full list.
 - **Agent Type**: builder
 - **Parallel**: false
 - Change `DEFAULT_PROJECT_KEY = "dm"` → `DEFAULT_PROJECT_KEY = "default"` in `config/memory_defaults.py:42`
-- Add `cwd: str | None = None` parameter to `recall()`, `ingest()`, `extract()` in `.claude/hooks/hook_utils/memory_bridge.py`; pass `cwd` to `_get_project_key(cwd)` inside each function
+- Patch hardcoded `return "dm"` at `memory_bridge.py:169` (bare `except Exception` inside `_get_project_key()`) → `return "default"`
+- Add `cwd: str | None = None` parameter to `recall()`, `ingest()`, `extract()`, and `post_merge_extract()` in `.claude/hooks/hook_utils/memory_bridge.py`; pass `cwd` to `_get_project_key(cwd)` inside each function (four call sites total)
 - Guard against empty string cwd: in `_get_project_key()`, treat `cwd = cwd.strip() if cwd else None` before use
 - In `post_tool_use.py::_run_memory_recall()`, extract `cwd = hook_input.get("cwd", "")` and pass to `recall(..., cwd=cwd)`
 - In `user_prompt_submit.py::main()`, pass already-read `cwd` to `ingest(prompt, cwd=cwd)`
 - In `stop.py::_run_memory_extraction()`, extract `cwd = hook_input.get("cwd", "")` and pass to `extract(..., cwd=cwd)`
+- In the do-merge hook caller of `post_merge_extract()`, pass `cwd` through
 - Update existing tests and add new tests per Test Impact section
 
 ### 2. Write migration script
@@ -267,10 +280,12 @@ See plan template for full list.
 - Create `scripts/migrate_memory_project_key.py` following the pattern in `scripts/migrate_session_type_chat_to_pm.py`
 - SCAN all `Memory:*` keys (skip index keys)
 - For each key containing `:dm:` segment: RENAME to replace `:dm:` with `:valor:`; update `project_key` hash field
+- Unconditionally migrate all `"dm"` records — no source-field classification needed on this machine (no Telegram bridge); add comment explaining this decision
+- Accept optional `--filter-source SOURCE` argument for future cross-machine use; document that it is not required on this machine
 - Call `Memory.rebuild_indexes()` after all renames
 - Support `--dry-run` flag; print before/after counts
 - Idempotent: skip keys already having `:valor:`
-- Write unit test with mocked Redis verifying rename logic and dry-run mode
+- Write unit test with mocked Redis verifying rename logic, dry-run mode, and unconditional migration
 
 ### 3. Validate and run migration
 - **Task ID**: validate-migration
@@ -278,9 +293,10 @@ See plan template for full list.
 - **Assigned To**: memory-fix-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run `python scripts/migrate_memory_project_key.py --dry-run` and verify expected counts
+- Run `python scripts/migrate_memory_project_key.py --dry-run` and verify expected counts (should show 2000+ records)
 - Run `python scripts/migrate_memory_project_key.py` (live)
-- Run `python -m tools.memory_search inspect --stats` and confirm `"valor"` partition has records
+- Run automated validation command: `python -c "import sys; sys.path.insert(0, '/Users/tomcounsell/src/ai'); from tools.memory_search import get_stats; s = get_stats(); assert s.get('valor', 0) > 0, f'valor partition empty: {s}'; assert s.get('dm', 0) == 0, f'dm partition still has records: {s}'; print('PASS:', s)"` — exits 0 on success, prints partition counts
+- Run `python -m tools.memory_search inspect --stats` (human-readable confirmation)
 - Run `pytest tests/unit/test_memory_bridge.py tests/unit/test_migrate_memory_project_key.py -v` and confirm all pass
 
 ### 4. Documentation
@@ -309,7 +325,7 @@ See plan template for full list.
 | Tests pass | `pytest tests/unit/test_memory_bridge.py tests/unit/test_migrate_memory_project_key.py -v` | exit code 0 |
 | DEFAULT_PROJECT_KEY not dm | `python -c "from config.memory_defaults import DEFAULT_PROJECT_KEY; assert DEFAULT_PROJECT_KEY != 'dm', DEFAULT_PROJECT_KEY"` | exit code 0 |
 | valor partition has records | `python -m tools.memory_search inspect --stats 2>&1 \| grep -i valor` | output contains valor |
-| Empty cwd guard | `python -c "from .claude.hooks.hook_utils.memory_bridge import _get_project_key; r = _get_project_key(''); assert r != ''"` | exit code 0 |
+| Empty cwd guard | `python -c "import sys; sys.path.insert(0, '.claude/hooks'); from hook_utils.memory_bridge import _get_project_key; r = _get_project_key(''); assert r != '', f'empty string returned: {r!r}'"` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 
 ## Critique Results
