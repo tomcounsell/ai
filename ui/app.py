@@ -151,54 +151,6 @@ def create_app() -> FastAPI:
             {"sessions": sessions},
         )
 
-    def _get_bridge_health() -> dict:
-        """Check bridge health from last_connected file freshness."""
-        import time
-
-        last_connected_file = Path(__file__).parent.parent / "data" / "last_connected"
-        try:
-            if last_connected_file.exists():
-                mtime = last_connected_file.stat().st_mtime
-                age_s = round(time.time() - mtime)
-                # Bridge writes last_connected every ~5min in heartbeat loop
-                if age_s < 360:
-                    return {"status": "ok", "age_s": age_s}
-                elif age_s < 600:
-                    return {"status": "running", "age_s": age_s}
-                else:
-                    return {"status": "error", "age_s": age_s}
-        except OSError:
-            pass
-        return {"status": "error", "age_s": None}
-
-    @app.get("/health")
-    def health_status():
-        """Health JSON endpoint for programmatic access."""
-        from fastapi.responses import JSONResponse
-
-        bridge = _get_bridge_health()
-        return JSONResponse(
-            {
-                "webserver": "ok",
-                "bridge": bridge["status"],
-                "bridge_last_seen_s": bridge["age_s"],
-            }
-        )
-
-    @app.get("/_partials/health/", response_class=HTMLResponse)
-    def partial_health(request: Request):
-        """HTMX partial: health indicator badges."""
-        bridge = _get_bridge_health()
-        bridge_label = "bridge: ok"
-        if bridge["status"] == "running":
-            bridge_label = f"bridge: slow ({bridge['age_s']}s)"
-        elif bridge["status"] == "error":
-            bridge_label = "bridge: down"
-        return HTMLResponse(
-            f'<span class="badge badge-{bridge["status"]}">{bridge_label}</span>'
-            f'<span class="badge badge-ok">web: ok</span>'
-        )
-
     # Exception handler for Redis connection failures
     @app.exception_handler(Exception)
     async def generic_exception_handler(request: Request, exc: Exception):

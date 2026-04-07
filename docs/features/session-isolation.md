@@ -94,8 +94,7 @@ Experiments validated the approach before implementation:
 |------|---------|
 | `agent/worktree_manager.py` | Git worktree create/remove/list/prune/cleanup operations |
 | `scripts/post_merge_cleanup.py` | CLI script for post-merge worktree and branch cleanup |
-| `agent/hooks/session_registry.py` | Maps Claude Code UUIDs to bridge session IDs for hook-side resolution |
-| `agent/sdk_client.py` | Injects `CLAUDE_CODE_TASK_LIST_ID` into SDK environment; registers/unregisters sessions in the hook registry |
+| `agent/sdk_client.py` | Injects `CLAUDE_CODE_TASK_LIST_ID` into SDK environment |
 | `agent/job_queue.py` | Computes task list ID in `_execute_job()` and passes to SDK |
 | `models/agent_session.py` | `AgentSession` model with `work_item_slug` field |
 | `docs/features/task-list-isolation.md` | Experiment results for CLAUDE_CODE_TASK_LIST_ID behavior |
@@ -124,33 +123,11 @@ The session continuation gate was extended to fix three compounding bugs that ca
 
 1. **Session identity mapping**: `AgentSession` now has a `claude_session_uuid` field that stores the Claude Code transcript UUID (from `ResultMessage.session_id`). The `resume` parameter in `_create_options()` uses this stored UUID instead of the Telegram session ID. This prevents Claude Code from falling back to the most recent unrelated session file on disk. The function `_get_prior_session_uuid()` replaces the boolean `_has_prior_session()` check with a UUID lookup, and `_store_claude_session_uuid()` persists the mapping after each query.
 
-2. **Watchdog count scoping**: The health check hook (`agent/health_check.py`) uses the session registry (see below) for tool count tracking instead of Claude Code's internal session ID. A `reset_session_count()` function is called at the start of each SDK query to clear stale counts from prior runs. This prevents continuation sessions from inheriting inflated tool counts that trigger premature health check kills.
+2. **Watchdog count scoping**: The health check hook (`agent/health_check.py`) now uses the `VALOR_SESSION_ID` environment variable for tool count tracking instead of Claude Code's internal session ID. A `reset_session_count()` function is called at the start of each SDK query to clear stale counts from prior runs. This prevents continuation sessions from inheriting inflated tool counts that trigger premature health check kills.
 
 3. **Deterministic record selection**: When re-reading `AgentSession` records (in both `job_queue.py` and `bridge/observer.py`), the code now filters by active statuses (`running`, `active`, `pending`) first, then falls back to all records, sorted by `created_at` descending. This ensures the newest relevant record is always selected when duplicates exist. Additionally, `_push_job()` marks old completed records as `superseded` to prevent ambiguity.
 
 The `claude_session_uuid` field is included in `_JOB_FIELDS` so it is preserved across the delete-and-recreate pattern used by `_enqueue_continuation()`.
-
-### Hook Session Registry (Issue #597)
-
-Hooks fired by the Claude Agent SDK execute in the **parent bridge process**, not inside the Claude Code subprocess. The `VALOR_SESSION_ID` env var (injected into the subprocess at `sdk_client.py`) is invisible to hooks because they run in a different process context. This caused all hook-side session lookups to fall back to Claude Code's internal UUID, breaking activity logging, Redis session tracking, heartbeat enrichment, and DevSession registration.
-
-The fix is a **module-level registry** (`agent/hooks/session_registry.py`) that maps Claude Code UUIDs to bridge session IDs within the parent process. The registry uses a two-phase registration pattern:
-
-1. **Pre-registration**: `SDKAgentClient.query()` calls `register_pending(bridge_session_id)` before starting the SDK query. At this point the Claude Code UUID is not yet known.
-2. **Promotion**: The first hook callback calls `complete_registration(claude_uuid)` (or `resolve()` which auto-promotes) using the UUID from `input_data["session_id"]`. This promotes the pending entry to a full UUID-keyed mapping.
-3. **Lookup**: All subsequent hook calls use `resolve(claude_uuid)` to look up the bridge session ID. This replaces the previous `os.environ.get("VALOR_SESSION_ID")` calls.
-4. **Cleanup**: `SDKAgentClient.query()` calls `unregister(claude_uuid)` in its `finally` block.
-
-The registry also tracks per-session tool activity (tool count and last 3 tool names) via `record_tool_use()` and `get_activity()`. The bridge watchdog (`BackgroundTask._watchdog()` in `agent/messenger.py`) reads this data to enrich heartbeat logs with tool-level progress (e.g., `"running 120s, tools=15, last=Bash"`).
-
-**Thread safety**: The bridge is single-threaded asyncio, so dict operations on distinct keys are safe without locking. A TTL-based sweep (`cleanup_stale()`) removes entries older than 30 minutes as a safety net for entries not cleaned up due to uncaught exceptions.
-
-**Hook call sites using the registry**:
-- `agent/health_check.py` -- watchdog tool count tracking
-- `agent/hooks/pre_tool_use.py` -- DevSession registration
-- `agent/hooks/subagent_stop.py` -- completion tracking (two call sites)
-
-Note: The `VALOR_SESSION_ID` env var injection in `sdk_client.py` is retained for code running inside the Claude Code subprocess (shell scripts, Python tools via Bash). The registry is only for parent-process hook resolution.
 
 ## History Truncation Warning
 

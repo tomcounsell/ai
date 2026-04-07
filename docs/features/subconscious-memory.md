@@ -19,8 +19,8 @@ Human Message (Telegram)                    Agent Session
         |                            _cluster_keywords()
   Haiku Extraction  <---+             (multi-query split)
   JSON -> metadata       |                   |
-  importance=AGENT (1.0) |     BM25 + RRF fusion per cluster
-        |                |      (keyword + relevance + confidence)
+  importance=AGENT (1.0) |           ContextAssembler x N
+        |                |            (per cluster query)
         v                |                   |
   Outcome Detection -----+                   v
   (bigram overlap)                    <thought> blocks
@@ -44,7 +44,7 @@ Telegram messages are saved as Memory records immediately on receipt in `bridge/
 2. `store_message()` saves to TelegramMessage (existing behavior)
 3. `Memory.safe_save()` creates a Memory record with `InteractionWeight.HUMAN` (6.0) importance
 4. ExistenceFilter bloom index is updated automatically on save
-5. Memory is immediately available for future BM25 + RRF retrieval queries
+5. Memory is immediately available for future ContextAssembler queries
 
 Empty text, bot messages, and media-only messages are skipped.
 
@@ -57,7 +57,7 @@ The PostToolUse hook in `agent/health_check.py` checks for relevant memories on 
 3. Every 3rd call, topic keywords are extracted from the buffer
 4. `ExistenceFilter.might_exist()` does an O(1) bloom check
 5. If positive and >5 unique keywords: `_cluster_keywords()` splits keywords into topical clusters (max 3 clusters of ~3-5 keywords each); otherwise uses a single query
-6. `retrieve_memories()` runs per cluster using BM25 + RRF fusion (keyword match, temporal relevance, confidence), results are merged and deduplicated by `memory_id`
+6. `ContextAssembler.assemble()` runs per cluster, results are merged and deduplicated by `memory_id`
 7. Results are formatted as `<thought>content</thought>` blocks (max 3)
 8. Returned via `additionalContext` in the hook response
 9. Injected thoughts are tracked for later outcome detection
@@ -98,35 +98,14 @@ Agents can deliberately persist high-level concepts using `python -m tools.memor
 
 **Importance tier hierarchy** (lower to higher):
 1. Generic agent observations: 1.0 (Flow 3 default for patterns/surprises)
-2. Knowledge document companions: 3.0 (Flow 6 indexer)
-3. Enhanced extraction corrections/decisions: 4.0 (Flow 3 categorized)
-4. Human Telegram messages: 6.0 (Flow 1)
-5. Agent-identified architectural decisions: 7.0 (Flow 5 intentional)
-6. Human-directed saves (corrections, explicit requests): 8.0 (Flow 5 intentional)
+2. Enhanced extraction corrections/decisions: 4.0 (Flow 3 categorized)
+3. Human Telegram messages: 6.0 (Flow 1)
+4. Agent-identified architectural decisions: 7.0 (Flow 5 intentional)
+5. Human-directed saves (corrections, explicit requests): 8.0 (Flow 5 intentional)
 
-### Flow 6: Knowledge Document Ingestion
+### Flow 6: Post-Merge Learning Extraction
 
-The knowledge document integration system indexes work-vault files as companion memories. See [Knowledge Document Integration](knowledge-document-integration.md) for full details.
-
-1. `KnowledgeWatcher` (bridge thread) detects file changes in `~/work-vault/` via watchdog
-2. `index_file()` reads content, resolves project scope, upserts `KnowledgeDocument` (Redis + filesystem)
-3. Haiku summarizes the document content (fallback: first 500 chars)
-4. Companion Memory records are created with `source="knowledge"`, `importance=3.0`, and a `reference` JSON pointer to the source file
-5. Companion memories enter the bloom filter and surface as `<thought>` blocks during related work
-6. The agent reads the full file on demand using the reference pointer
-
-**Importance tier:** Knowledge memories sit at 3.0 -- above agent observations (1.0) but below human messages (6.0). Large documents (>2000 words) are split by top-level headings, producing one companion memory per section.
-
-**Reference pointer format:**
-```json
-{"tool": "read_file", "params": {"file_path": "/path/to/doc.md"}}
-```
-
-### Flow 7: Post-Merge Learning Extraction
-
-After a PR merges, `extract_post_merge_learning()` in `agent/memory_extraction.py` distills the single most important project-level takeaway from the PR title, body, and diff summary. The learning is saved as a Memory with importance 7.0 and structured metadata (category, tags, file_paths) matching the post-session extraction schema. This captures architectural decisions and conventions established by shipped code.
-
-The extraction prompt requests structured JSON output. If Haiku returns valid JSON, the observation, category, tags, and file_paths are parsed and passed as metadata to `Memory.safe_save()`. If Haiku returns non-JSON (plain text), the text is saved with a default metadata of `{"category": "decision"}`. This ensures all memory creation paths produce consistent metadata.
+After a PR merges, `extract_post_merge_learning()` in `agent/memory_extraction.py` distills the single most important project-level takeaway from the PR title, body, and diff summary. The learning is saved as a Memory with importance 7.0. This captures architectural decisions and conventions established by shipped code.
 
 The function is designed to be called from the SDLC merge stage or a post-merge script. It returns None gracefully if no meaningful takeaway is found or if the API call fails.
 
@@ -143,31 +122,6 @@ The memory system also runs in Claude Code CLI sessions via hooks. See [Claude C
 
 Both paths (Telegram agent and Claude Code hooks) write to the same Redis Memory model. Memories are shared across all session types. All memory capabilities (ingestion, recall, deja vu signals, extraction, outcome detection, post-merge learning, multi-query decomposition) now have feature parity across both paths.
 
-## Category-Weighted Recall
-
-After RRF fusion returns scored results, `_apply_category_weights()` re-ranks them by multiplying each record's RRF score by a category-specific weight before sorting. This ensures that corrections and decisions -- higher-signal memory types -- surface preferentially over patterns and surprises when scores are similar.
-
-**Weight table** (from `CATEGORY_RECALL_WEIGHTS` in `config/memory_defaults.py`):
-
-| Category | Weight | Effect |
-|----------|--------|--------|
-| `correction` | 1.5 | Boosted -- past mistakes should be top of mind |
-| `decision` | 1.3 | Boosted -- architectural choices are high-value context |
-| `pattern` | 1.0 | Neutral -- general observations keep existing rank |
-| `surprise` | 1.0 | Neutral |
-| `default` | 1.0 | Fallback for records with missing or unknown category |
-
-**Mechanism:**
-1. `retrieve_memories()` fuses BM25 keyword match, temporal relevance, and confidence via RRF
-2. `_apply_category_weights(records)` reads `metadata.category` from each record
-3. Effective score = `record.score * category_weight` (where score is the RRF fusion score)
-4. Records are re-sorted by effective score descending
-5. Top `MAX_THOUGHTS` records are formatted as `<thought>` blocks
-
-**Fail-safe:** If metadata is None, not a dict, or missing the category key, the default weight (1.0) is used. If `CATEGORY_RECALL_WEIGHTS` cannot be imported, records are returned in their original order.
-
-Both `check_and_inject()` (SDK/Telegram path) and `recall()` (Claude Code hooks path) apply the same re-ranking. The bridge imports `_apply_category_weights` from `agent.memory_hook`.
-
 ## Structured Metadata
 
 Memory records carry an optional `metadata` DictField with structured data from extraction and outcome tracking. Old records without metadata return `{}` (no migration needed).
@@ -183,8 +137,6 @@ Memory records carry an optional `metadata` DictField with structured data from 
 | `dismissal_count` | `int` | Outcome tracking | Consecutive dismissals before last reset |
 | `last_outcome` | `str` | Outcome tracking | `"acted"` or `"dismissed"` |
 
-Additionally, the Memory model has a top-level `reference` StringField (not inside metadata) for actionable pointers. Knowledge-sourced memories use this to store a JSON tool call pointing to the source file. See [Knowledge Document Integration](knowledge-document-integration.md).
-
 **Querying by metadata:** The `memory_search` CLI supports post-retrieval filtering:
 
 ```bash
@@ -192,7 +144,7 @@ python -m tools.memory_search search "query" --category correction
 python -m tools.memory_search search "query" --tag redis
 ```
 
-Metadata filtering happens after retrieval returns results. The `inspect` command displays metadata when present.
+Metadata filtering happens after ContextAssembler returns results (ContextAssembler does not support field-level filtering). The `inspect` command displays metadata when present.
 
 ## Dismissal Tracking
 
@@ -213,7 +165,7 @@ When the keyword buffer produces more than 5 unique keywords, `_cluster_keywords
 
 **Mechanism:**
 1. `_cluster_keywords(keywords, max_clusters=3)` divides the list into chunks of ~3-5 keywords
-2. Each cluster is queried separately via `retrieve_memories()` (BM25 + RRF fusion)
+2. Each cluster is queried separately via `ContextAssembler.assemble()`
 3. Results are merged and deduplicated by `memory_id`
 4. Tiny trailing clusters (<2 keywords) are merged into the previous cluster
 5. For <=5 keywords, a single query is used (no decomposition)
@@ -230,16 +182,17 @@ The memory system MUST work equally across all agent session types — SDK/Teleg
 
 | Capability | Claude Code | SDK/Agent | Action |
 |-----------|-------------|-----------|--------|
+| Deja vu signals (vague recognition, novel territory) | Yes | No | Port to `agent/memory_hook.py` |
 | Prompt ingestion (auto-save user input) | Yes (UserPromptSubmit hook) | No (Telegram messages only) | Add ingestion hook or equivalent to SDK path |
+| Post-merge learning extraction | No | Yes (SDLC merge stage) | Port to Claude Code Stop hook or post-merge script |
 
 ## Key Files
 
 | File | Purpose |
 |------|---------|
-| `models/memory.py` | Memory model (Level 3 popoto: decay, confidence, BM25, write filter, access tracker, bloom, DictField metadata, reference pointer) |
-| `config/memory_defaults.py` | Tuned Defaults overrides for popoto constants, RRF tuning, and dismissal tracking thresholds |
+| `models/memory.py` | Memory model (Level 3 popoto: decay, confidence, write filter, access tracker, bloom, DictField metadata) |
+| `config/memory_defaults.py` | Tuned Defaults overrides for popoto constants and dismissal tracking thresholds |
 | `agent/memory_hook.py` | PostToolUse thought injection with sliding window rate limiting, multi-query decomposition via `_cluster_keywords()` (Telegram agent path) |
-| `agent/memory_retrieval.py` | BM25 + RRF fusion retrieval: `retrieve_memories()`, `rrf_fuse()`, ranked signal accessors |
 | `agent/memory_extraction.py` | Post-session JSON extraction with line-based fallback, bigram outcome detection, dismissal tracking via `_persist_outcome_metadata()`, post-merge learning extraction |
 | `agent/health_check.py` | Integration point: `watchdog_hook()` calls `check_and_inject()` |
 | `agent/messenger.py` | Integration point: `_run_work()` calls `run_post_session_extraction()` |
@@ -248,10 +201,6 @@ The memory system MUST work equally across all agent session types — SDK/Teleg
 | `.claude/hooks/user_prompt_submit.py` | Claude Code prompt ingestion hook and AgentSession creation |
 | `.claude/hooks/post_tool_use.py` | Claude Code PostToolUse hook with memory recall and AgentSession activity tracking |
 | `.claude/hooks/stop.py` | Claude Code Stop hook with extraction, AgentSession completion, and post-merge learning |
-| `models/knowledge_document.py` | KnowledgeDocument model for indexed work-vault files |
-| `tools/knowledge/indexer.py` | Knowledge indexer pipeline (index, delete, full scan, companion memories) |
-| `tools/knowledge/scope_resolver.py` | File path to project scope resolution via projects.json |
-| `bridge/knowledge_watcher.py` | Filesystem watcher for work-vault changes (watchdog + debounce) |
 | `config/personas/_base.md` | Thought priming instruction for agents |
 
 ## Configuration
@@ -266,7 +215,7 @@ All tuning constants are in `config/memory_defaults.py`. Call `apply_defaults()`
 | `MEMORY_INITIAL_CONFIDENCE` | 0.5 | Starting confidence (neutral) |
 | `MEMORY_ACTED_SIGNAL` | 0.85 | Confidence boost when agent acts on a memory |
 | `MEMORY_CONTRADICTED_SIGNAL` | 0.15 | Confidence penalty when agent contradicts a memory |
-| `RRF_K` | 60 | Reciprocal Rank Fusion constant: higher = more uniform blending across signal lists |
+| `MEMORY_SURFACING_THRESHOLD` | 0.4 | Minimum score for ContextAssembler to surface a memory |
 | `MAX_THOUGHTS_PER_INJECTION` | 3 | Maximum thought blocks per injection event |
 | `INJECTION_WINDOW_SIZE` | 3 | Tool calls per sliding window |
 | `INJECTION_BUFFER_SIZE` | 9 | Total tool calls in rolling buffer |
@@ -275,7 +224,6 @@ All tuning constants are in `config/memory_defaults.py`. Call `apply_defaults()`
 | `DISMISSAL_DECAY_THRESHOLD` | 3 | Consecutive dismissals before importance decays |
 | `DISMISSAL_IMPORTANCE_DECAY` | 0.7 | Importance multiplier on threshold breach |
 | `MIN_IMPORTANCE_FLOOR` | 0.2 | Minimum importance after decay (never drops below this) |
-| `CATEGORY_RECALL_WEIGHTS` | `{correction: 1.5, decision: 1.3, pattern: 1.0, surprise: 1.0, default: 1.0}` | Post-query re-ranking multipliers by category |
 
 ## Error Handling
 
@@ -306,5 +254,4 @@ No schema migrations are involved. Redis keys can be flushed without side effect
 - Intentional saves: [#521](https://github.com/tomcounsell/ai/issues/521) (PR [#524](https://github.com/tomcounsell/ai/pull/524))
 - Prior art: Issue #394 (original agent memory integration layer)
 - Retrieval enhancement: [#583](https://github.com/tomcounsell/ai/issues/583) (PR [#584](https://github.com/tomcounsell/ai/pull/584)) -- structured metadata, dismissal tracking, multi-query decomposition
-- Metadata-aware recall: [#586](https://github.com/tomcounsell/ai/issues/586) -- category-weighted recall re-ranking, post-merge metadata parity, retrieval recipes
 - Downstream: Issue #395 (multi-persona memory partitioning), Issue #393 (behavioral episode memory)

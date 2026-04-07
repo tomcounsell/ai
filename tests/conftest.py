@@ -80,7 +80,7 @@ def mock_claude_sdk_cleanup():
 
 @pytest.fixture(autouse=True)
 def redis_test_db(request):
-    """Switch popoto to a dedicated test Redis client for ALL tests.
+    """Switch popoto to a per-worker Redis db for ALL tests, preventing production pollution.
 
     autouse=True ensures this runs for every test, even those that don't
     explicitly request the fixture. This prevents accidental writes to db=0
@@ -90,18 +90,16 @@ def redis_test_db(request):
     (db=1, db=2, ...) to prevent cross-worker contamination from flushdb().
     Without xdist, uses db=1 as before.
 
-    CRITICAL: We replace the POPOTO_REDIS_DB object with a new Redis client
-    pointed at the test db, rather than using SELECT on the production connection.
-    SELECT is unsafe with connection pools — if the pool recycles a connection,
-    the new connection defaults back to db=0 and flushdb() wipes production data.
+    Uses SELECT on the existing connection so that popoto's module-level
+    POPOTO_REDIS_DB reference (used by Query, fields, etc.) points at the
+    test database without needing to replace the object.
 
     Also resets the async Redis connection to use the same db, since popoto v1.0.0b2
     maintains a separate _POPOTO_ASYNC_REDIS_DB connection.
     """
-    import redis
-    import redis.asyncio as aioredis
-
     import popoto.redis_db as rdb
+    import redis.asyncio as aioredis
+    from popoto.redis_db import POPOTO_REDIS_DB
 
     # Determine per-worker db number for xdist isolation
     worker_id = getattr(request.config, "workerinput", {}).get("workerid", "")
@@ -110,25 +108,24 @@ def redis_test_db(request):
     else:
         test_db = 1  # No xdist or master process
 
-    # Save original connections
-    original_sync = rdb.POPOTO_REDIS_DB
-    original_async = getattr(rdb, "_POPOTO_ASYNC_REDIS_DB", None)
-
-    # Create a NEW Redis client pointed at the test db (not SELECT on the pool)
-    test_client = redis.Redis(db=test_db)
-    rdb.POPOTO_REDIS_DB = test_client
-    test_client.flushdb()
+    # Switch sync connection to test db and flush before each test
+    POPOTO_REDIS_DB.select(test_db)
+    POPOTO_REDIS_DB.flushdb()
 
     # Reset async Redis connection to point at the same test db.
+    # Directly create the aioredis.Redis object (constructor is sync)
+    # rather than calling the async set_async_redis_db_settings().
+    rdb._POPOTO_ASYNC_REDIS_DB = None
     rdb._POPOTO_ASYNC_REDIS_DB = aioredis.Redis(db=test_db)
 
     yield
 
-    # Flush test db and restore original production connections
-    test_client.flushdb()
-    test_client.close()
-    rdb.POPOTO_REDIS_DB = original_sync
-    rdb._POPOTO_ASYNC_REDIS_DB = original_async
+    # Flush test db and switch back to production db=0
+    POPOTO_REDIS_DB.flushdb()
+    POPOTO_REDIS_DB.select(0)
+
+    # Reset async connection back to default (lazy-init on next use)
+    rdb._POPOTO_ASYNC_REDIS_DB = None
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +161,7 @@ FEATURE_MAP = {
     "skill_outcome": "sdlc",
     "skills_audit": "sdlc",
     "steering": "sdlc",
+    "issue_poller": "sdlc",
     "cross_repo_build": "sdlc",
     "session_status": "sessions",
     "session_stuck": "sessions",

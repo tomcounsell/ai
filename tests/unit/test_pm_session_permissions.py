@@ -202,11 +202,8 @@ class TestPMPermissionMode:
         sdk_path = Path(__file__).parent.parent.parent / "agent" / "sdk_client.py"
         source = sdk_path.read_text()
 
-        # Extract the chat session block (handles both enum and string forms)
-        if "if _session_type == SessionType.CHAT:" in source:
-            chat_block = source.split("if _session_type == SessionType.CHAT:")[1].split("elif")[0]
-        else:
-            chat_block = source.split('if _session_type == "chat":')[1].split("elif")[0]
+        # Extract the chat session block
+        chat_block = source.split('if _session_type == "chat":')[1].split("elif")[0]
         assert '"plan"' not in chat_block, (
             "ChatSession should not use plan permission mode. "
             "PM needs bypassPermissions with hook-based write restrictions."

@@ -145,10 +145,10 @@ def build_coaching_message(
 def _build_sdlc_stage_coaching(stage_progress: dict) -> str | None:
     """Build SDLC pipeline coaching with explicit next-stage instruction.
 
-    Uses PipelineStateMachine and the pipeline graph to determine the next
-    stage, respecting failure edges and cycle counts. Infers the outcome
-    from stage statuses: if any stage has status "failed", passes outcome="fail"
-    to next_stage(); otherwise passes "success".
+    Parses the stage progress dict to determine which stages are done and
+    which stage should be invoked next. Returns None if there are no
+    remaining stages (all completed or all pending with no progress),
+    allowing the caller to fall through to lower-priority coaching tiers.
 
     Args:
         stage_progress: Dict mapping stage names (e.g. "PLAN", "BUILD")
@@ -163,71 +163,40 @@ def _build_sdlc_stage_coaching(stage_progress: dict) -> str | None:
 
     completed = [s for s in DISPLAY_STAGES if stage_progress.get(s) == "completed"]
     in_progress = [s for s in DISPLAY_STAGES if stage_progress.get(s) == "in_progress"]
-    failed = [s for s in DISPLAY_STAGES if stage_progress.get(s) == "failed"]
 
-    # If nothing is completed and nothing is in progress and nothing failed, no useful coaching
-    if not completed and not in_progress and not failed:
+    # If nothing is completed and nothing is in progress, no useful coaching
+    if not completed and not in_progress:
         return None
 
-    # Use pipeline graph to determine the next stage
-    try:
-        from bridge.pipeline_graph import get_next_stage as _get_next_stage
+    # Find the next stage to invoke: first pending stage in pipeline order
+    next_stage = None
+    for stage in DISPLAY_STAGES:
+        if stage_progress.get(stage) == "pending":
+            next_stage = stage
+            break
 
-        # When a stage has failed, route from the failed stage with "fail" outcome.
-        # When no failures, route from the last completed stage with "success" outcome.
-        if failed:
-            # Use the most recent failed stage (latest in pipeline order)
-            from bridge.pipeline_state import ALL_STAGES
+    # If no pending stages remain, all stages are done or in progress
+    if next_stage is None:
+        return None
 
-            last_failed = None
-            for stage in ALL_STAGES:
-                if stage_progress.get(stage) == "failed":
-                    last_failed = stage
-            # Extract cycle counts from progress dict if present
-            patch_cycles = stage_progress.get("_patch_cycle_count", 0)
-            critique_cycles = stage_progress.get("_critique_cycle_count", 0)
-            next_info = _get_next_stage(last_failed, "fail", patch_cycles, critique_cycles)
-        else:
-            # Find the last completed stage in pipeline order
-            from bridge.pipeline_state import ALL_STAGES
-
-            last_completed = None
-            for stage in ALL_STAGES:
-                if stage_progress.get(stage) == "completed":
-                    last_completed = stage
-            if last_completed is None:
-                return None
-            patch_cycles = stage_progress.get("_patch_cycle_count", 0)
-            critique_cycles = stage_progress.get("_critique_cycle_count", 0)
-            next_info = _get_next_stage(last_completed, "success", patch_cycles, critique_cycles)
-
-        if next_info is None:
-            # Pipeline complete or escalation needed
-            return None
-
-        next_stage, skill_name = next_info
-    except Exception as e:
-        logger.warning(f"Graph-based coach routing failed: {e}. Falling back to linear scan.")
-        # Fallback: find first pending stage with a skill mapping
-        next_stage = None
-        skill_name = None
+    # Build the coaching message
+    skill_name = STAGE_TO_SKILL.get(next_stage)
+    if not skill_name:
+        # ISSUE stage has no corresponding skill — skip to the next pending
         for stage in DISPLAY_STAGES:
-            if stage_progress.get(stage) in ("pending", "ready") and stage in STAGE_TO_SKILL:
+            if stage_progress.get(stage) == "pending" and stage in STAGE_TO_SKILL:
                 next_stage = stage
                 skill_name = STAGE_TO_SKILL[next_stage]
                 break
-        if not next_stage or not skill_name:
+        if not skill_name:
             return None
 
     completed_str = ", ".join(completed) if completed else "none yet"
     in_progress_str = ", ".join(in_progress) if in_progress else ""
-    failed_str = ", ".join(failed) if failed else ""
 
     parts = [
         f"[System Coach] The SDLC pipeline has completed: {completed_str}.",
     ]
-    if failed_str:
-        parts.append(f" Failed: {failed_str}.")
     if in_progress_str:
         parts.append(f" In progress: {in_progress_str}.")
     parts.append(
@@ -353,7 +322,7 @@ def _detect_active_skill(message_text: str | None) -> dict | None:
     skill's metadata dict if found, None otherwise.
 
     Only matches the four SDLC skills (/do-plan, /do-build, /do-test,
-    /do-docs). Non-SDLC messages (general chat, informational queries, exploration)
+    /do-docs). Non-SDLC messages (general chat, Q&A, exploration)
     return None and the coach falls back to plain "continue".
     """
     if not message_text:

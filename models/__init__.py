@@ -11,6 +11,7 @@ Provides fast, queryable Redis models for all persistent data:
 - ReflectionRun: per-day reflection execution state
 - ReflectionIgnore: ignored bug patterns with TTL-based expiry
 - DedupRecord: per-chat message deduplication tracking
+- SeenIssue: GitHub issue poller seen-issue tracking
 - ObserverTelemetry: observer agent telemetry counters and events
 - Memory: subconscious memory records (human instructions, agent observations)
 """
@@ -24,6 +25,7 @@ from models.link import Link
 from models.memory import Memory
 from models.reflection import Reflection
 from models.reflections import ReflectionIgnore, ReflectionRun
+from models.seen_issue import SeenIssue
 from models.telegram import TelegramMessage
 from models.telemetry import ObserverTelemetry
 
@@ -40,6 +42,7 @@ __all__ = [
     "Reflection",
     "ReflectionIgnore",
     "ReflectionRun",
+    "SeenIssue",
     "TelegramMessage",
     "Chat",
     "Link",

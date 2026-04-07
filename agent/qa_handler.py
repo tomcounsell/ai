@@ -1,7 +1,7 @@
-"""Teammate handler for ChatSession direct responses.
+"""Q&A handler for ChatSession direct responses.
 
 When the intent classifier identifies a message as an informational query,
-this module provides Teammate-specific instructions that replace the PM dispatch
+this module provides Q&A-specific instructions that replace the PM dispatch
 block. The ChatSession answers directly using read-only tools without
 spawning a DevSession.
 """
@@ -12,12 +12,12 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Reduced nudge cap for Teammate sessions (vs 50 for normal sessions)
-TEAMMATE_MAX_NUDGE_COUNT = 10
+# Reduced nudge cap for Q&A sessions (vs 50 for normal sessions)
+QA_MAX_NUDGE_COUNT = 10
 
 
-def build_teammate_instructions() -> str:
-    """Build Teammate-specific instructions to replace PM dispatch block.
+def build_qa_instructions() -> str:
+    """Build Q&A-specific instructions to replace PM dispatch block.
 
     These instructions guide the ChatSession to answer directly and
     conversationally, using only read-only tools.
@@ -38,9 +38,6 @@ def build_teammate_instructions() -> str:
         "- Back up claims with evidence from the codebase, memory, or docs\n"
         "- Use read-only tools: Bash (git log, git status, gh issue view, "
         "gh pr list, cat, grep, find), Read, Glob, Grep\n"
-        "- EXCEPTION: You MAY create GitHub issues when explicitly asked "
-        "by invoking the /do-issue skill. Issue creation "
-        "is a lightweight action that does not modify the codebase.\n"
         "- Do NOT write files, create branches, run tests, or modify code\n"
         "- Do NOT use the Agent tool to spawn sub-agents\n"
         "- If the question requires actual work (fixes, changes, deployments), "

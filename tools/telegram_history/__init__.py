@@ -145,11 +145,9 @@ def store_message(
         dict with storage result: {"stored": True, "id": msg_id, "chat_id": chat_id}
     """
     from models.telegram import TelegramMessage
-    from tools.field_utils import log_large_field
 
     ts = _parse_ts(timestamp)
     direction = "out" if sender and sender.lower() == "valor" else "in"
-    log_large_field("TelegramMessage.content", content)
 
     try:
         msg = TelegramMessage.create(

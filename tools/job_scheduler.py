@@ -1,7 +1,7 @@
 """
 Job Scheduler - Agent-initiated queue operations.
 
-Allows the agent to programmatically schedule SDLC runs, Teammate jobs,
+Allows the agent to programmatically schedule SDLC runs, Q&A jobs,
 and manage queue state mid-conversation.
 
 Usage:
@@ -29,8 +29,6 @@ import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-
-from config.enums import SessionType
 
 logger = logging.getLogger(__name__)
 
@@ -250,7 +248,7 @@ def cmd_schedule(args: argparse.Namespace) -> int:
     priority = args.priority or "normal"
 
     # Session type: explicit flag > default (chat for issue-based work)
-    session_type = getattr(args, "session_type", None) or SessionType.CHAT
+    session_type = getattr(args, "session_type", None) or "chat"
 
     # Parent job inheritance
     parent_job_id = getattr(args, "parent_job", None)
@@ -1004,7 +1002,7 @@ def main():
     sched.add_argument("--after", help="Defer execution until this ISO 8601 datetime")
     sched.add_argument(
         "--session-type",
-        choices=[SessionType.CHAT, SessionType.DEV],
+        choices=["chat", "dev"],
         help="Session type: chat (PM orchestrates) or dev (direct execution). "
         "Default: chat for issue/PR work, dev for hotfixes.",
     )

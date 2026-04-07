@@ -222,13 +222,21 @@ class TestRecall:
         mock_memory_cls = MagicMock()
         mock_memory_cls._meta.fields.get.return_value = mock_bloom
 
+        mock_result = MagicMock()
+        mock_result.records = []  # No strong results
+
+        mock_assembler_instance = MagicMock()
+        mock_assembler_instance.assemble.return_value = mock_result
+
+        mock_assembler_cls = MagicMock(return_value=mock_assembler_instance)
+
         with (
             patch(
                 "agent.memory_hook.extract_topic_keywords",
                 return_value=keywords,
             ),
             patch("models.memory.Memory", mock_memory_cls),
-            patch("agent.memory_retrieval.retrieve_memories", return_value=[]),
+            patch("popoto.ContextAssembler", mock_assembler_cls),
             patch("hook_utils.memory_bridge._get_project_key", return_value="test"),
         ):
             for i in range(WINDOW_SIZE - 1):
@@ -237,54 +245,6 @@ class TestRecall:
 
         assert result is not None
         assert "encountered something related" in result
-
-
-class TestRecallCategoryReranking:
-    """Test that recall() applies category re-ranking via _apply_category_weights."""
-
-    def test_recall_calls_apply_category_weights(self, tmp_path, monkeypatch):
-        """Recall calls _apply_category_weights on results before formatting."""
-        from hook_utils.memory_bridge import WINDOW_SIZE, recall
-
-        monkeypatch.setattr(
-            "hook_utils.memory_bridge._get_sidecar_dir",
-            lambda sid: tmp_path / sid,
-        )
-
-        keywords = ["memory", "recall", "weights", "category", "test"]
-
-        mock_bloom = MagicMock()
-        mock_bloom.might_exist = MagicMock(return_value=True)
-
-        mock_memory_cls = MagicMock()
-        mock_memory_cls._meta.fields.get.return_value = mock_bloom
-
-        # Create mock records with content and score (as set by retrieve_memories)
-        mock_record = MagicMock()
-        mock_record.memory_id = "rec-1"
-        mock_record.content = "test memory content for recall"
-        mock_record.metadata = {"category": "correction"}
-        mock_record.score = 0.8
-
-        with (
-            patch("agent.memory_hook.extract_topic_keywords", return_value=keywords),
-            patch("models.memory.Memory", mock_memory_cls),
-            patch("agent.memory_retrieval.retrieve_memories", return_value=[mock_record]),
-            patch("hook_utils.memory_bridge._get_project_key", return_value="test"),
-            patch(
-                "agent.memory_hook._apply_category_weights",
-                wraps=lambda records: records,
-            ) as mock_rerank,
-        ):
-            for i in range(WINDOW_SIZE - 1):
-                recall("test-session", "Read", {"file_path": f"f{i}.py"})
-            result = recall("test-session", "Read", {"file_path": "final.py"})
-
-        # Verify _apply_category_weights was called
-        mock_rerank.assert_called_once()
-        # Verify we got thought output
-        assert result is not None
-        assert "<thought>" in result
 
 
 class TestIngest:

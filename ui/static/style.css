@@ -168,7 +168,7 @@ h3 {
     text-transform: lowercase;
 }
 
-.badge-ok, .badge-success {
+.badge-success {
     color: var(--green);
     background: var(--green-bg);
 }
@@ -616,26 +616,12 @@ a:hover {
     to { transform: rotate(360deg); }
 }
 
-/* Page header with health indicator */
-.page-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 24px;
-}
-
-.health-bar {
-    display: flex;
-    gap: 6px;
-    align-items: center;
-}
-
 /* Page title (no nav) */
 .page-title {
     font-size: 20px;
     font-weight: 600;
     color: var(--text-secondary);
-    margin-bottom: 0;
+    margin-bottom: 24px;
     font-family: var(--font-mono);
 }
 

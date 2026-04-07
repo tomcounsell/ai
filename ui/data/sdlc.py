@@ -15,8 +15,6 @@ import time
 
 from pydantic import BaseModel
 
-from config.enums import PersonaType
-
 logger = logging.getLogger(__name__)
 
 # SDLC stages in pipeline order (matches models/agent_session.py)
@@ -192,24 +190,14 @@ def _get_project_metadata(project_key: str | None) -> tuple[str | None, dict | N
 
 
 def _infer_stages_from_history(history_list: list | None) -> list["StageState"]:
-    """DEPRECATED: Infer SDLC stage states from session history entries.
+    """Infer SDLC stage states from session history entries.
 
-    This fallback exists for in-flight sessions created before stage_states
-    was eagerly initialized at session creation (pre-#563). It will be removed
-    in a future release once all existing sessions have stage_states populated.
-
-    New sessions get stage_states initialized in _push_job() when
-    classification_type is "sdlc", so this path should only fire for
-    legacy sessions.
+    Fallback for sessions created before stage_states was populated (pre-#492).
+    Scans history for [stage] entries and marks referenced stages as completed
+    (assuming sequential pipeline progression).
 
     Returns empty list if no stage info found in history.
     """
-    logger.warning(
-        "DEPRECATED: _infer_stages_from_history() called. "
-        "This session lacks stage_states -- it was created before eager initialization (#563). "
-        "This fallback will be removed in a future release."
-    )
-
     if not history_list or not isinstance(history_list, list):
         return []
 
@@ -317,46 +305,31 @@ def _parse_history(history_list: list | None) -> list[PipelineEvent]:
     return events
 
 
-def _resolve_persona_display(session) -> str | None:
-    """Map session_mode and session_type into a dashboard display persona.
+def _resolve_session_type(session) -> str | None:
+    """Map session_type + qa_mode into a dashboard display type.
 
-    session_mode takes priority when set:
-      session_mode="teammate"         → "Teammate"
-      session_mode="project-manager"  → "Project Manager"
-      session_mode="developer"        → "Developer"
-
-    Fallback from session_type:
-      session_type="dev"              → "Developer"
-      session_type="chat"             → "Project Manager"
+    chat + qa_mode=True  → "Q&A"
+    chat + qa_mode=False → "PM"
+    dev                  → "dev"
     """
-    mode = getattr(session, "session_mode", None)
-    if mode == PersonaType.TEAMMATE:
-        return "Teammate"
-    if mode == PersonaType.PROJECT_MANAGER:
-        return "Project Manager"
-    if mode == PersonaType.DEVELOPER:
-        return "Developer"
-
     raw = getattr(session, "session_type", None)
-    if raw is None:
-        return None
-    if raw == "dev":
-        return "Developer"
     if raw == "chat":
-        return "Project Manager"
+        if getattr(session, "qa_mode", False):
+            return "Q&A"
+        return "PM"
     return _safe_str(raw)
 
 
 def _safe_str(val, default: str | None = None) -> str | None:
     """Return val as a string if it's a real value, else default."""
-    if val is None or not isinstance(val, str | int | float | bool):
+    if val is None or not isinstance(val, (str, int, float, bool)):
         return default
     return str(val)
 
 
 def _safe_float(val) -> float | None:
     """Return val as a float if it's a real number, else None."""
-    if isinstance(val, int | float):
+    if isinstance(val, (int, float)):
         return float(val)
     if isinstance(val, str):
         try:
@@ -393,7 +366,7 @@ def _session_to_pipeline(session) -> PipelineProgress:
     return PipelineProgress(
         job_id=_safe_str(session.job_id) or "",
         session_id=_safe_str(session.session_id),
-        session_type=_resolve_persona_display(session),
+        session_type=_resolve_session_type(session),
         status=_safe_str(session.status),
         slug=slug,
         message_text=_safe_str(session.message_text),

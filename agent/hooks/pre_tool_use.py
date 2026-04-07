@@ -9,8 +9,6 @@ from typing import Any
 
 from claude_agent_sdk import HookContext, PreToolUseHookInput
 
-from config.enums import SessionType
-
 logger = logging.getLogger(__name__)
 
 # Known SDLC stages for extraction from dev-session prompts
@@ -54,7 +52,7 @@ SENSITIVE_FRAGMENTS = (
 
 def _is_pm_session() -> bool:
     """Check if the current session is a PM (ChatSession)."""
-    return os.environ.get("SESSION_TYPE") == SessionType.CHAT
+    return os.environ.get("SESSION_TYPE") == "chat"
 
 
 def _is_pm_allowed_write(file_path: str) -> bool:
@@ -150,24 +148,23 @@ def _start_pipeline_stage(parent_session_id: str, stage: str) -> None:
         )
 
 
-def _maybe_register_dev_session(tool_input: dict[str, Any], claude_uuid: str | None = None) -> None:
+def _maybe_register_dev_session(tool_input: dict[str, Any]) -> None:
     """Register a DevSession in Redis when the Agent tool spawns a dev-session.
 
-    Uses the session registry to resolve the bridge session ID from the
-    Claude Code UUID (issue #597). Falls back gracefully if not found.
+    Reads VALOR_SESSION_ID from env to find the parent ChatSession.
+    Creates an AgentSession record with session_type=dev and parent linkage.
     """
-    from agent.hooks.session_registry import resolve
+    import os
+
     from models.agent_session import AgentSession
 
     subagent_type = tool_input.get("type", "")
     if subagent_type != "dev-session":
         return
 
-    parent_session_id = resolve(claude_uuid)
+    parent_session_id = os.environ.get("VALOR_SESSION_ID")
     if not parent_session_id:
-        logger.debug(
-            "[pre_tool_use] No bridge session in registry, skipping DevSession registration"
-        )
+        logger.debug("[pre_tool_use] VALOR_SESSION_ID not set, skipping DevSession registration")
         return
 
     try:
@@ -217,8 +214,7 @@ async def pre_tool_use_hook(
 
     # Detect Agent tool spawning a dev-session
     if tool_name == "Agent":
-        claude_uuid = input_data.get("session_id")
-        _maybe_register_dev_session(tool_input, claude_uuid=claude_uuid)
+        _maybe_register_dev_session(tool_input)
         return {}
 
     # Only inspect write-capable tools

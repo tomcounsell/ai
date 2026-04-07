@@ -8,6 +8,8 @@ import time
 
 from popoto import AutoKeyField, Field, KeyField, Model, SortedField
 
+MSG_MAX_CHARS = 50_000  # Full responses, no artificial cap
+
 
 class TelegramMessage(Model):
     """Source of truth for incoming/outgoing Telegram messages in Redis.
@@ -25,7 +27,7 @@ class TelegramMessage(Model):
     message_id = KeyField(null=True)  # Telegram's message ID (KeyField enables O(1) filter lookup)
     direction = KeyField()  # "in" | "out"
     sender = KeyField()
-    content = Field()
+    content = Field(max_length=MSG_MAX_CHARS)
     timestamp = SortedField(type=float, partition_by="chat_id")
     message_type = KeyField(default="text")  # text, media, response, acknowledgment
     session_id = Field(null=True)

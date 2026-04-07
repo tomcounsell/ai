@@ -1,6 +1,6 @@
 """Memory bridge for Claude Code hooks.
 
-Wraps Memory model imports and BM25+RRF retrieval calls for use from
+Wraps Memory model imports and ContextAssembler calls for use from
 hook scripts. Hooks are standalone scripts that run in fresh processes;
 this module handles sys.path setup and import boilerplate.
 
@@ -180,7 +180,7 @@ def recall(
 
     Accumulates tool calls in a JSON sidecar file. Every WINDOW_SIZE
     calls, extracts keywords, checks bloom filter, and queries
-    via BM25+RRF fusion. Returns additionalContext string or None.
+    ContextAssembler. Returns additionalContext string or None.
 
     This is the hook-side equivalent of agent/memory_hook.check_and_inject().
     All exceptions are caught -- returns None on any failure.
@@ -248,13 +248,21 @@ def recall(
                 )
             return None
 
-        # Multi-query decomposition -- cluster keywords and retrieve via BM25+RRF
+        # Multi-query decomposition -- cluster keywords and query each cluster
         import time
 
         from agent.memory_hook import _cluster_keywords
-        from agent.memory_retrieval import retrieve_memories
 
         project_key = _get_project_key()
+
+        from popoto import ContextAssembler
+
+        assembler = ContextAssembler(
+            model_class=Memory,
+            score_weights={"relevance": 0.6, "confidence": 0.3},
+            max_items=MAX_THOUGHTS,
+            max_tokens=1000,
+        )
 
         clusters = _cluster_keywords(unique_keywords)
         all_records = []
@@ -262,13 +270,12 @@ def recall(
 
         query_start = time.monotonic()
         for cluster in clusters:
-            cluster_query = " ".join(cluster[:5])
-            records = retrieve_memories(
-                query_text=cluster_query,
-                project_key=project_key,
-                limit=MAX_THOUGHTS,
+            result = assembler.assemble(
+                query_cues={"topic": " ".join(cluster[:5])},
+                agent_id=project_key,
+                partition_filters={"project_key": project_key},
             )
-            for record in records:
+            for record in result.records or []:
                 rid = str(getattr(record, "memory_id", "") or "")
                 if rid and rid not in seen_ids:
                     seen_ids.add(rid)
@@ -291,14 +298,6 @@ def recall(
                     f"{topic_hint} before, but the details are unclear.</thought>"
                 )
             return None
-
-        # Re-rank by category weights (corrections/decisions surface higher)
-        try:
-            from agent.memory_hook import _apply_category_weights
-
-            all_records = _apply_category_weights(all_records)
-        except Exception:
-            pass  # fail silent -- use unranked order
 
         # Format as thought blocks
         thoughts: list[str] = []

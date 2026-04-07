@@ -118,7 +118,7 @@ No prerequisites -- this work uses existing config infrastructure (`projects.jso
 
 - **Adding a third session type ("qa")**: Q&A is currently a boolean flag (`qa_mode`) within ChatSession, not a session type. Introducing a third session type would require changes throughout the job queue, session model, and agent dispatch. Keep Q&A as a routing decision within ChatSession.
 - **Refactoring the entire routing pipeline**: The current `should_respond_async()` has accumulated complexity (Ollama classification, team chat detection, respond_to_all flags). Tempting to rewrite but out of scope -- only add the persona-aware branch.
-- **Per-user mode overrides**: Individual users having different modes within the same group. Interesting but a separate concern. All DM users now get uniform qa_only access (the per-user `get_user_permissions()` function was removed in PR #595).
+- **Per-user mode overrides**: Individual users having different modes within the same group. Interesting but a separate concern. The `get_user_permissions()` function already handles per-user qa_only restrictions.
 - **Removing the intent classifier entirely**: Even with config-driven mode, the classifier is still valuable for unconfigured groups. Do not remove it.
 
 ## Risks

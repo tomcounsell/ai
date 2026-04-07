@@ -120,32 +120,3 @@ The script:
 | `telegram_message_id` | Telegram message ID (integer) | Renamed from `message_id` for clarity |
 | `telegram_message_key` | Popoto key to TelegramMessage | Renamed from `trigger_message_id` for clarity |
 | `claude_session_uuid` | Claude Code transcript UUID | Used for continuation sessions |
-
-## Field Type Semantics: KeyField vs IndexedField
-
-Popoto field types have different implications for how records behave on mutation:
-
-- **KeyField**: Part of the Redis key. Changing a KeyField value changes the record's identity, creating a new record and orphaning the old one. Code that needs to change a KeyField value must use the **delete-and-recreate** pattern (delete old record, create new one with all fields copied).
-- **IndexedField**: Maintains a secondary index for `.filter()` queries but is NOT part of the Redis key. Mutating an IndexedField and calling `.save()` updates the record in place and correctly updates the secondary index. No delete-and-recreate needed.
-- **Field**: Plain data field with no indexing. Mutate and save freely.
-
-### AgentSession Key Fields
-
-| Field | Type | Mutable? | Notes |
-|-------|------|----------|-------|
-| `job_id` | AutoKeyField | Never | Primary key, auto-generated |
-| `session_type` | KeyField | No | Set once at creation ("chat" or "dev") |
-| `project_key` | KeyField | No | Set once at creation |
-| `chat_id` | KeyField | No | Set once at creation |
-| `parent_chat_session_id` | KeyField | No | Set once at creation (DevSession only) |
-| `parent_job_id` | KeyField | No | Set once at creation (child jobs only) |
-| `stable_job_id` | KeyField | No | Set once at creation, never changes |
-| `status` | IndexedField | Yes | Mutate and save directly; no delete-and-recreate |
-
-The `status` field was changed from KeyField to IndexedField (popoto >= 1.4.3) to eliminate the delete-and-recreate overhead on every lifecycle transition (pending -> running -> active -> completed). This removed the primary source of duplicate session records in the dashboard.
-
-### Where Delete-and-Recreate Is Still Needed
-
-With `status` as an IndexedField, the delete-and-recreate pattern is no longer needed for status transitions. All status transitions (job pickup, completion, failure, recovery, watchdog marking, nudge re-enqueue) use direct field mutation and `.save()`.
-
-The delete-and-recreate pattern remains in `agent/job_queue.py` only in the `_JOB_FIELDS` list, which defines the fields to copy if a record ever needs to be re-created for KeyField changes. In practice, no current code path changes a KeyField value after creation -- the `bridge/session_transcript.py` module guards against `chat_id` mutation by logging a warning and skipping the write if the value would change.

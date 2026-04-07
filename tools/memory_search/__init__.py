@@ -34,7 +34,7 @@ def search(
     category: str | None = None,
     tag: str | None = None,
 ) -> dict[str, Any]:
-    """Search memories by query string using BM25 + RRF fusion.
+    """Search memories by query string using ContextAssembler.
 
     Args:
         query: The search query text.
@@ -77,20 +77,26 @@ def search(
             if not has_relevant:
                 return {"results": [], "error": None}
 
-        # Retrieve via BM25 + RRF fusion
-        from agent.memory_retrieval import retrieve_memories
+        # Full assembly via ContextAssembler
+        from popoto import ContextAssembler
 
-        all_records = retrieve_memories(
-            query_text=query,
-            project_key=project_key,
-            limit=limit,
+        assembler = ContextAssembler(
+            model_class=Memory,
+            score_weights={"relevance": 0.6, "confidence": 0.3},
+            max_items=limit,
+            max_tokens=2000,
+        )
+        result = assembler.assemble(
+            query_cues={"topic": query},
+            agent_id=project_key,
+            partition_filters={"project_key": project_key},
         )
 
-        if not all_records:
+        if not result.records:
             return {"results": [], "error": None}
 
         # Post-retrieval metadata filtering
-        filtered_records = all_records
+        filtered_records = result.records
         if category:
             filtered_records = [
                 r
@@ -110,7 +116,7 @@ def search(
             results.append(
                 {
                     "content": getattr(record, "content", ""),
-                    "score": getattr(record, "score", 0.0),
+                    "score": getattr(record, "relevance", 0.0),
                     "confidence": getattr(record, "confidence", 0.0),
                     "source": getattr(record, "source", ""),
                     "access_count": getattr(record, "access_count", 0),

@@ -6,8 +6,6 @@ Verifies that the bridge handler correctly routes messages to create_chat()
 
 from pathlib import Path
 
-from config.enums import ClassificationType, SessionType
-
 
 class TestBridgeSessionTypeRouting:
     """Verify bridge handler sets session_type correctly."""
@@ -15,39 +13,39 @@ class TestBridgeSessionTypeRouting:
     def test_sdlc_classification_creates_chat_session(self):
         """SDLC classification should produce session_type='chat'."""
         # The bridge handler now routes all messages to ChatSession
-        _classification = ClassificationType.SDLC
-        _session_type = SessionType.CHAT  # All messages go to ChatSession
-        assert _session_type == SessionType.CHAT
+        _classification = "sdlc"
+        _session_type = "chat"  # All messages go to ChatSession
+        assert _session_type == "chat"
 
     def test_question_classification_creates_chat_session(self):
         """Question classification should also produce session_type='chat'."""
-        _classification = ClassificationType.QUESTION
-        _session_type = SessionType.CHAT  # All messages go to ChatSession
-        assert _session_type == SessionType.CHAT
+        _classification = "question"
+        _session_type = "chat"  # All messages go to ChatSession
+        assert _session_type == "chat"
 
     def test_none_classification_creates_chat_session(self):
         """No classification (None) should produce session_type='chat'."""
         _classification = None
-        _session_type = SessionType.CHAT  # All messages go to ChatSession
-        assert _session_type == SessionType.CHAT
+        _session_type = "chat"  # All messages go to ChatSession
+        assert _session_type == "chat"
 
     def test_dev_group_routing(self):
         """'Dev: X' chat title prefix should produce session_type='dev'."""
         chat_title = "Dev: Valor"
         if chat_title and chat_title.startswith("Dev:"):
-            _session_type = SessionType.DEV
+            _session_type = "dev"
         else:
-            _session_type = SessionType.CHAT
-        assert _session_type == SessionType.DEV
+            _session_type = "chat"
+        assert _session_type == "dev"
 
     def test_non_dev_group_routing(self):
         """Non-dev chat title should produce session_type='chat'."""
         chat_title = "PM: PsyOptimal"
         if chat_title and chat_title.startswith("Dev:"):
-            _session_type = SessionType.DEV
+            _session_type = "dev"
         else:
-            _session_type = SessionType.CHAT
-        assert _session_type == SessionType.CHAT
+            _session_type = "chat"
+        assert _session_type == "chat"
 
 
 class TestFactoryMethodsExist:

@@ -1,20 +1,19 @@
-"""Unit tests for resolve_persona() in bridge/routing.py."""
+"""Unit tests for resolve_chat_mode() in bridge/routing.py."""
 
-from bridge.routing import resolve_persona
-from config.enums import PersonaType
+from bridge.routing import resolve_chat_mode
 
 # =============================================================================
-# DM tests -- always Teammate regardless of project config
+# DM tests -- always Q&A regardless of project config
 # =============================================================================
 
 
-class TestDMAlwaysTeammate:
+class TestDMAlwaysQA:
     def test_dm_with_no_project(self):
-        assert resolve_persona(None, None, is_dm=True) == PersonaType.TEAMMATE
+        assert resolve_chat_mode(None, None, is_dm=True) == "qa"
 
     def test_dm_with_project(self):
         project = {"telegram": {"groups": {}}}
-        assert resolve_persona(project, None, is_dm=True) == PersonaType.TEAMMATE
+        assert resolve_chat_mode(project, None, is_dm=True) == "qa"
 
     def test_dm_with_developer_project(self):
         """DM overrides any project-level config."""
@@ -23,38 +22,38 @@ class TestDMAlwaysTeammate:
                 "groups": {"Dev: MyProject": {"persona": "developer"}},
             }
         }
-        assert resolve_persona(project, None, is_dm=True) == PersonaType.TEAMMATE
+        assert resolve_chat_mode(project, None, is_dm=True) == "qa"
 
 
 # =============================================================================
-# Persona resolution from projects.json
+# Persona-to-mode mapping from projects.json
 # =============================================================================
 
 
 class TestPersonaMapping:
-    def test_teammate_persona_resolves(self):
+    def test_teammate_persona_maps_to_qa(self):
         project = {
             "telegram": {
                 "groups": {"Team Chat": {"persona": "teammate"}},
             }
         }
-        assert resolve_persona(project, "Team Chat", is_dm=False) == PersonaType.TEAMMATE
+        assert resolve_chat_mode(project, "Team Chat", is_dm=False) == "qa"
 
-    def test_project_manager_persona_resolves(self):
+    def test_project_manager_persona_maps_to_pm(self):
         project = {
             "telegram": {
                 "groups": {"PM: MyProject": {"persona": "project-manager"}},
             }
         }
-        assert resolve_persona(project, "PM: MyProject", is_dm=False) == PersonaType.PROJECT_MANAGER
+        assert resolve_chat_mode(project, "PM: MyProject", is_dm=False) == "pm"
 
-    def test_developer_persona_resolves(self):
+    def test_developer_persona_maps_to_dev(self):
         project = {
             "telegram": {
                 "groups": {"Dev: MyProject": {"persona": "developer"}},
             }
         }
-        assert resolve_persona(project, "Dev: MyProject", is_dm=False) == PersonaType.DEVELOPER
+        assert resolve_chat_mode(project, "Dev: MyProject", is_dm=False) == "dev"
 
     def test_case_insensitive_group_matching(self):
         project = {
@@ -62,7 +61,7 @@ class TestPersonaMapping:
                 "groups": {"team chat": {"persona": "teammate"}},
             }
         }
-        assert resolve_persona(project, "Team Chat", is_dm=False) == PersonaType.TEAMMATE
+        assert resolve_chat_mode(project, "Team Chat", is_dm=False) == "qa"
 
     def test_partial_group_name_matching(self):
         """Group name is a substring of chat title."""
@@ -71,10 +70,7 @@ class TestPersonaMapping:
                 "groups": {"MyProject": {"persona": "teammate"}},
             }
         }
-        assert (
-            resolve_persona(project, "Team: MyProject Discussion", is_dm=False)
-            == PersonaType.TEAMMATE
-        )
+        assert resolve_chat_mode(project, "Team: MyProject Discussion", is_dm=False) == "qa"
 
 
 # =============================================================================
@@ -83,22 +79,22 @@ class TestPersonaMapping:
 
 
 class TestTitlePrefixFallback:
-    def test_dev_prefix_returns_developer(self):
-        assert resolve_persona(None, "Dev: MyProject", is_dm=False) == PersonaType.DEVELOPER
+    def test_dev_prefix_returns_dev(self):
+        assert resolve_chat_mode(None, "Dev: MyProject", is_dm=False) == "dev"
 
-    def test_pm_prefix_returns_project_manager(self):
-        assert resolve_persona(None, "PM: MyProject", is_dm=False) == PersonaType.PROJECT_MANAGER
+    def test_pm_prefix_returns_pm(self):
+        assert resolve_chat_mode(None, "PM: MyProject", is_dm=False) == "pm"
 
     def test_no_prefix_no_config_returns_none(self):
-        assert resolve_persona(None, "Random Group", is_dm=False) is None
+        assert resolve_chat_mode(None, "Random Group", is_dm=False) is None
 
     def test_dev_prefix_with_empty_project(self):
         project = {"telegram": {"groups": {}}}
-        assert resolve_persona(project, "Dev: MyProject", is_dm=False) == PersonaType.DEVELOPER
+        assert resolve_chat_mode(project, "Dev: MyProject", is_dm=False) == "dev"
 
     def test_pm_prefix_with_empty_project(self):
         project = {"telegram": {"groups": {}}}
-        assert resolve_persona(project, "PM: MyProject", is_dm=False) == PersonaType.PROJECT_MANAGER
+        assert resolve_chat_mode(project, "PM: MyProject", is_dm=False) == "pm"
 
 
 # =============================================================================
@@ -108,7 +104,7 @@ class TestTitlePrefixFallback:
 
 class TestUnconfigured:
     def test_no_project_no_prefix(self):
-        assert resolve_persona(None, "General Chat", is_dm=False) is None
+        assert resolve_chat_mode(None, "General Chat", is_dm=False) is None
 
     def test_project_without_matching_group(self):
         project = {
@@ -116,10 +112,10 @@ class TestUnconfigured:
                 "groups": {"Other Group": {"persona": "developer"}},
             }
         }
-        assert resolve_persona(project, "Unrelated Chat", is_dm=False) is None
+        assert resolve_chat_mode(project, "Unrelated Chat", is_dm=False) is None
 
     def test_no_chat_title_not_dm(self):
-        assert resolve_persona(None, None, is_dm=False) is None
+        assert resolve_chat_mode(None, None, is_dm=False) is None
 
 
 # =============================================================================
@@ -135,17 +131,17 @@ class TestEdgeCases:
                 "groups": {"Dev: MyProject": {"persona": ""}},
             }
         }
-        # Empty persona -> ValueError -> falls through to title prefix
-        assert resolve_persona(project, "Dev: MyProject", is_dm=False) == PersonaType.DEVELOPER
+        # Empty persona -> no PERSONA_TO_MODE match -> falls through to title prefix
+        assert resolve_chat_mode(project, "Dev: MyProject", is_dm=False) == "dev"
 
     def test_unknown_persona_falls_through(self):
-        """Unknown persona value not in PersonaType -> fall through."""
+        """Unknown persona value not in PERSONA_TO_MODE -> fall through."""
         project = {
             "telegram": {
                 "groups": {"SomeGroup": {"persona": "unknown-role"}},
             }
         }
-        assert resolve_persona(project, "SomeGroup", is_dm=False) is None
+        assert resolve_chat_mode(project, "SomeGroup", is_dm=False) is None
 
     def test_group_config_is_not_dict(self):
         """Legacy format where group config is just a string."""
@@ -154,7 +150,7 @@ class TestEdgeCases:
                 "groups": {"SomeGroup": "developer"},
             }
         }
-        assert resolve_persona(project, "SomeGroup", is_dm=False) is None
+        assert resolve_chat_mode(project, "SomeGroup", is_dm=False) is None
 
     def test_groups_is_list_not_dict(self):
         """Groups as list (old format) -- no persona lookup possible."""
@@ -163,11 +159,11 @@ class TestEdgeCases:
                 "groups": ["Group A", "Group B"],
             }
         }
-        assert resolve_persona(project, "Group A", is_dm=False) is None
+        assert resolve_chat_mode(project, "Group A", is_dm=False) is None
 
     def test_no_telegram_config(self):
         project = {}
-        assert resolve_persona(project, "SomeGroup", is_dm=False) is None
+        assert resolve_chat_mode(project, "SomeGroup", is_dm=False) is None
 
     def test_persona_config_takes_priority_over_title_prefix(self):
         """If a Dev: group has teammate persona, persona wins."""
@@ -176,4 +172,4 @@ class TestEdgeCases:
                 "groups": {"Dev: MyProject": {"persona": "teammate"}},
             }
         }
-        assert resolve_persona(project, "Dev: MyProject", is_dm=False) == PersonaType.TEAMMATE
+        assert resolve_chat_mode(project, "Dev: MyProject", is_dm=False) == "qa"

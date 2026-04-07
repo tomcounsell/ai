@@ -2,38 +2,36 @@
 Telegram user lookup utilities.
 
 Provides functions to load whitelisted users and resolve usernames to user IDs.
-Reads from the dms.whitelist array in projects.json.
 """
 
 import json
 from pathlib import Path
 
-# Canonical config location (iCloud-synced)
-PROJECTS_PATH = Path.home() / "Desktop" / "Valor" / "projects.json"
+# Canonical whitelist location
+WHITELIST_PATH = Path.home() / "Desktop" / "Valor" / "dm_whitelist.json"
 
 
 def get_whitelisted_users() -> dict[str, int]:
     """
-    Load whitelisted Telegram users from projects.json dms.whitelist.
+    Load whitelisted Telegram users from config file.
 
     Returns:
-        Dictionary mapping lowercase names to user IDs.
+        Dictionary mapping lowercase usernames to user IDs.
         Example: {"tom": 179144806, "kevin": 577036901}
 
     Raises:
-        FileNotFoundError: If projects.json doesn't exist
+        FileNotFoundError: If whitelist config file doesn't exist
         json.JSONDecodeError: If config file is invalid JSON
     """
-    with open(PROJECTS_PATH) as f:
+    with open(WHITELIST_PATH) as f:
         config = json.load(f)
 
-    # Build name -> user_id mapping (case-insensitive)
+    # Build username -> user_id mapping (case-insensitive)
     users = {}
-    for entry in config.get("dms", {}).get("whitelist", []):
-        if isinstance(entry, dict) and "id" in entry:
-            name = entry.get("name", "").lower()
-            if name:
-                users[name] = int(entry["id"])
+    for user_id_str, user_data in config.get("users", {}).items():
+        username = user_data.get("name", "").lower()
+        if username:
+            users[username] = int(user_id_str)
 
     return users
 

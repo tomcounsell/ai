@@ -344,11 +344,13 @@ class TestReorderJob:
         job.job_id = "old-id"
         mock_agent_session.query.get.return_value = job
 
+        new_job = MagicMock()
+        new_job.job_id = "new-id"
+        mock_agent_session.create.return_value = new_job
+
         result = reorder_job("old-id", "urgent")
         assert result is True
-        # priority is a regular Field — reorder now mutates in place (no delete-and-recreate)
-        assert job.priority == "urgent"
-        job.save.assert_called_once()
+        job.delete.assert_called_once()
 
     def test_reorder_invalid_priority(self, mock_agent_session):
         from agent.job_queue import reorder_job
@@ -379,11 +381,14 @@ class TestCancelJob:
         job.stable_job_id = "stable-1"
         mock_agent_session.query.get.return_value = job
 
+        new_job = MagicMock()
+        new_job.job_id = "new-id"
+        new_job.stable_job_id = "stable-1"
+        mock_agent_session.create.return_value = new_job
+
         result = cancel_job("old-id")
         assert result is True
-        # status is an IndexedField — cancel now mutates in place (no delete-and-recreate)
-        assert job.status == "cancelled"
-        job.save.assert_called_once()
+        job.delete.assert_called_once()
 
     def test_cancel_running_fails(self, mock_agent_session):
         from agent.job_queue import cancel_job
@@ -582,12 +587,14 @@ class TestPopJobDependencyFiltering:
         unblocked_job.priority = "normal"
         unblocked_job.created_at = 1000.0
         unblocked_job.session_id = "sess-1"
-        # _pop_job now uses direct mutation + async_save (status is IndexedField)
-        unblocked_job.async_save = AsyncMock()
+        unblocked_job.async_delete = AsyncMock()
+
+        new_job = MagicMock()
+        new_job.job_id = "new-unblocked"
+        new_job.session_id = "sess-1"
 
         mock_agent_session.query.async_filter = AsyncMock(return_value=[unblocked_job])
+        mock_agent_session.async_create = AsyncMock(return_value=new_job)
 
         result = asyncio.run(_pop_job("chat-1"))
         assert result is not None
-        assert unblocked_job.status == "running"
-        unblocked_job.async_save.assert_called_once()

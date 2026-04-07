@@ -192,10 +192,9 @@ This is a parallel path to the Telegram agent memory system, not a replacement:
 | Deja vu signals | `check_and_inject()` emits vague recognition and novel territory thoughts | `recall()` emits identical signals |
 | Post-merge learning | `extract_post_merge_learning()` in merge stage | `post_merge_extract()` triggered from Stop hook on `gh pr merge` detection |
 | Session tracking | AgentSession created by bridge handler (`create_chat()`/`create_dev()`) | AgentSession created by UserPromptSubmit hook (`create_local()`) |
-| Category re-ranking | `_apply_category_weights()` in `check_and_inject()` | `_apply_category_weights()` imported from `agent.memory_hook` in `recall()` |
-| Shared code | `extract_topic_keywords()`, `_apply_category_weights()`, `extract_observations_async()`, `detect_outcomes_async()` | Same functions imported from `agent/` |
+| Shared code | `extract_topic_keywords()`, `extract_observations_async()`, `detect_outcomes_async()` | Same functions imported from `agent/` |
 
-Both paths write to the same Redis Memory model. Memories created in Claude Code sessions are visible to Telegram agent sessions and vice versa. Deja vu thresholds and category recall weights are shared via `config/memory_defaults.py`.
+Both paths write to the same Redis Memory model. Memories created in Claude Code sessions are visible to Telegram agent sessions and vice versa. Deja vu thresholds are shared via `config/memory_defaults.py`.
 
 ## Tracking
 

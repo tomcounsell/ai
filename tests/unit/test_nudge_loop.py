@@ -91,7 +91,7 @@ class TestObserverRemoval:
 
 
 class TestNonSdlcDelivery:
-    """Verify non-SDLC Teammate messages deliver via classify_nudge_action without nudging.
+    """Verify non-SDLC Q&A messages deliver via classify_nudge_action without nudging.
 
     Tests the actual classify_nudge_action function from job_queue.py rather than
     replicating send_to_chat logic inline. This ensures tests stay in sync with
@@ -99,7 +99,7 @@ class TestNonSdlcDelivery:
     """
 
     def test_end_turn_delivers(self):
-        """Teammate message with stop_reason='end_turn' should deliver, not nudge."""
+        """Q&A message with stop_reason='end_turn' should deliver, not nudge."""
         action = classify_nudge_action(
             msg="Here is the answer to your question about Python decorators.",
             stop_reason="end_turn",
@@ -110,7 +110,7 @@ class TestNonSdlcDelivery:
         assert action == "deliver"
 
     def test_end_turn_does_not_nudge(self):
-        """Teammate completion should return deliver, not any nudge action."""
+        """Q&A completion should return deliver, not any nudge action."""
         action = classify_nudge_action(
             msg="The answer is 42.",
             stop_reason="end_turn",

@@ -6,14 +6,14 @@ requires-python = ">=3.11"
 dependencies = [
     "telethon==1.42.0", # CRITICAL — pin exact, upgrade via /update only
     "anthropic==0.86.0", # CRITICAL — pin exact, upgrade via /update only
-    "claude-agent-sdk==0.1.53", # CRITICAL — pin exact, upgrade via /update only
+    "claude-agent-sdk==0.1.52", # CRITICAL — pin exact, upgrade via /update only
     "mcp>=1.8.0", # Required by claude-agent-sdk for ToolAnnotations (see issue #235)
     "python-dotenv>=1.0.0",
     "httpx>=0.27.0",
     "requests>=2.31.0", # Required for Google API requests transport
     "ollama>=0.3.0", # Local LLM fallback for summarization
     "yt-dlp>=2024.1.0", # YouTube audio download for transcription
-    "popoto>=1.4.4", # Redis ORM — agent memory primitives (requires long filename fix)
+    "popoto>=1.4.2", # Redis ORM — agent memory primitives (requires tokenized bloom + confidence fix)
     "google-auth-oauthlib>=1.2.0", # Google OAuth for Workspace APIs
     "google-auth-httplib2>=0.2.0", # Google Auth HTTP transport
     "google-api-python-client>=2.100.0", # Google API client
@@ -25,7 +25,6 @@ dependencies = [
     "pyyaml>=6.0.3",
     "rich>=13.0.0", # Required by pydantic logfire plugin
     "sentry-sdk>=2.0.0", # Error monitoring and performance tracing
-    "watchdog>=4.0.0", # Filesystem watcher for knowledge document indexing
     "fastapi>=0.115.0", # Web UI framework
     "uvicorn[standard]>=0.34.0", # ASGI server for web UI
     "jinja2>=3.1.0", # Template engine for web UI
@@ -41,6 +40,7 @@ dev = [
 ]
 
 [project.scripts]
+valor-history = "tools.telegram_history.cli:main"
 valor-telegram = "tools.valor_telegram:main"
 valor-calendar = "tools.valor_calendar:main"
 valor-image-gen = "tools.image_gen:main"

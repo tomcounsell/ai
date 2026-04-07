@@ -1,4 +1,4 @@
-"""Teammate mode metrics tracking.
+"""Q&A mode metrics tracking.
 
 Redis-backed counters for intent classification distribution and response
 times. All operations are fire-and-forget -- metrics failures must never
@@ -10,12 +10,12 @@ from __future__ import annotations
 import logging
 import time
 
-from agent.intent_classifier import TEAMMATE_CONFIDENCE_THRESHOLD
+from agent.intent_classifier import QA_CONFIDENCE_THRESHOLD
 
 logger = logging.getLogger(__name__)
 
-# Redis key prefix for teammate metrics
-_PREFIX = "teammate_metrics"
+# Redis key prefix for Q&A metrics
+_PREFIX = "qa_metrics"
 
 # Module-level lazy singleton for Redis connection
 _redis_client = None
@@ -28,7 +28,6 @@ def _get_redis():
         return _redis_client
     try:
         import redis
-
         from config.redis_config import get_redis_url
 
         _redis_client = redis.Redis.from_url(get_redis_url(), decode_responses=True)
@@ -41,7 +40,7 @@ def record_classification(intent: str, confidence: float) -> None:
     """Record an intent classification result.
 
     Args:
-        intent: "teammate" or "work"
+        intent: "qa" or "work"
         confidence: Classification confidence (0.0-1.0)
     """
     try:
@@ -49,23 +48,23 @@ def record_classification(intent: str, confidence: float) -> None:
         if not r:
             return
 
-        if intent == "teammate" and confidence >= TEAMMATE_CONFIDENCE_THRESHOLD:
-            r.incr(f"{_PREFIX}:teammate_classified_count")
-        elif intent == "teammate":
-            r.incr(f"{_PREFIX}:teammate_low_confidence_count")
+        if intent == "qa" and confidence >= QA_CONFIDENCE_THRESHOLD:
+            r.incr(f"{_PREFIX}:qa_classified_count")
+        elif intent == "qa":
+            r.incr(f"{_PREFIX}:qa_low_confidence_count")
         else:
             r.incr(f"{_PREFIX}:work_classified_count")
 
-        logger.debug(f"[teammate_metrics] Recorded classification: {intent} ({confidence:.2f})")
+        logger.debug(f"[qa_metrics] Recorded classification: {intent} ({confidence:.2f})")
     except Exception as e:
-        logger.debug(f"[teammate_metrics] Failed to record classification: {e}")
+        logger.debug(f"[qa_metrics] Failed to record classification: {e}")
 
 
 def record_response_time(mode: str, elapsed_seconds: float) -> None:
-    """Record response time for a teammate or work session.
+    """Record response time for a Q&A or work session.
 
     Args:
-        mode: "teammate" or "work"
+        mode: "qa" or "work"
         elapsed_seconds: Time from message receipt to response delivery.
     """
     try:
@@ -79,13 +78,13 @@ def record_response_time(mode: str, elapsed_seconds: float) -> None:
         # Keep only last 1000 entries
         r.zremrangebyrank(key, 0, -1001)
 
-        logger.debug(f"[teammate_metrics] Recorded {mode} response time: {elapsed_seconds:.2f}s")
+        logger.debug(f"[qa_metrics] Recorded {mode} response time: {elapsed_seconds:.2f}s")
     except Exception as e:
-        logger.debug(f"[teammate_metrics] Failed to record response time: {e}")
+        logger.debug(f"[qa_metrics] Failed to record response time: {e}")
 
 
 def get_stats() -> dict:
-    """Get current teammate metrics summary.
+    """Get current Q&A metrics summary.
 
     Returns:
         Dict with classification counts and average response times.
@@ -95,16 +94,16 @@ def get_stats() -> dict:
         if not r:
             return {}
 
-        teammate_count = int(r.get(f"{_PREFIX}:teammate_classified_count") or 0)
+        qa_count = int(r.get(f"{_PREFIX}:qa_classified_count") or 0)
         work_count = int(r.get(f"{_PREFIX}:work_classified_count") or 0)
-        low_conf_count = int(r.get(f"{_PREFIX}:teammate_low_confidence_count") or 0)
+        low_conf_count = int(r.get(f"{_PREFIX}:qa_low_confidence_count") or 0)
 
         return {
-            "teammate_classified": teammate_count,
+            "qa_classified": qa_count,
             "work_classified": work_count,
-            "teammate_low_confidence": low_conf_count,
-            "total": teammate_count + work_count + low_conf_count,
+            "qa_low_confidence": low_conf_count,
+            "total": qa_count + work_count + low_conf_count,
         }
     except Exception as e:
-        logger.debug(f"[teammate_metrics] Failed to get stats: {e}")
+        logger.debug(f"[qa_metrics] Failed to get stats: {e}")
         return {}

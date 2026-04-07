@@ -61,7 +61,7 @@ This will:
   - Job queue (popoto, redis)
   - Summarization (ollama)
   - Dev tools (pytest, ruff, mypy)
-- Register CLI tools (`valor-calendar`, `valor-telegram`)
+- Register CLI tools (`valor-calendar`, `valor-history`)
 
 Verify key imports work:
 
@@ -95,6 +95,7 @@ Edit `.env` and ensure these are set:
 | `TELEGRAM_PHONE` | Yes | With country code, e.g. `+1234567890` |
 | `TELEGRAM_PASSWORD` | If 2FA on | Telegram 2FA password |
 | `TELEGRAM_SESSION_NAME` | No | Defaults to `valor_bridge` |
+| `TELEGRAM_DM_WHITELIST` | No | Comma-separated names, e.g. `Tom` |
 
 If any required values are placeholder/missing, ask the user to provide them. The shared API keys file at `~/src/.env` may have `ANTHROPIC_API_KEY` and other keys -- check there first.
 
@@ -311,6 +312,23 @@ launchctl list | grep com.valor.reflections
 ```
 
 If the output shows the `com.valor.reflections` label, the scheduler is installed. It will run `scripts/reflections.py` daily at 6 AM, performing log review, session analysis, LLM reflection, and memory consolidation.
+
+## Step 8b: Install Issue Poller
+
+Install the issue poller plist (polls GitHub every 5 minutes):
+
+```bash
+cd ~/src/ai
+./scripts/install_issue_poller.sh
+```
+
+Verify it loaded:
+
+```bash
+launchctl list | grep com.valor.issue-poller
+```
+
+**Note:** All plist templates use `__PROJECT_DIR__` and `__HOME_DIR__` placeholders. The install scripts substitute these with the actual paths for the current machine via `sed`. This means plists work on any machine without hardcoded usernames.
 
 ## Step 9: Start the Bridge
 

@@ -112,9 +112,9 @@ class TestEnqueueContinuationAsyncWrapping:
 
         # Return a session from filter
         existing_session = MagicMock()
-        # _enqueue_nudge now uses direct mutation + async_save (status is IndexedField)
-        existing_session.async_save = AsyncMock()
+        existing_session.async_delete = AsyncMock()
         mock_agent_session.query.filter.return_value = [existing_session]
+        mock_agent_session.async_create = AsyncMock(return_value=MagicMock())
 
         with patch("agent.job_queue.asyncio.to_thread", wraps=asyncio.to_thread) as mock_to_thread:
             with patch("agent.job_queue._ensure_worker"):

@@ -89,17 +89,7 @@ def start_transcript(
             if classification_type:
                 s.classification_type = classification_type
             if chat_id is not None:
-                # chat_id is a KeyField — mutating it after creation silently
-                # creates a new Redis record (orphaning the old one).  Only set
-                # it when the existing value is empty (initial population).
-                if not s.chat_id:
-                    s.chat_id = str(chat_id)
-                elif str(s.chat_id) != str(chat_id):
-                    logger.warning(
-                        f"chat_id mismatch for session {session_id}: "
-                        f"existing={s.chat_id}, incoming={chat_id} — "
-                        f"skipping mutation (KeyField is immutable after creation)"
-                    )
+                s.chat_id = str(chat_id)
             if correlation_id:
                 s.correlation_id = correlation_id
             s.save()
@@ -297,12 +287,36 @@ def complete_transcript(
             except Exception:
                 pass
 
-            # status is an IndexedField — direct mutation is safe
-            s.status = status
-            s.completed_at = time.time()
-            s.last_activity = time.time()
-            if summary:
-                s.summary = summary
-            s.save()
+            # status is a KeyField — delete and recreate if changed
+            if s.status != status:
+                # Re-read after lifecycle log (it saved history)
+                sessions = list(AgentSession.query.filter(session_id=session_id))
+                s = sessions[0] if sessions else s
+
+                # Dynamically extract ALL fields to avoid dropping data.
+                # Uses Popoto's _meta.fields registry instead of hardcoding
+                # a subset. This prevents future field additions from being
+                # silently dropped during status transitions.
+                skip_fields = {"status", "job_id"}
+                old_data = {
+                    name: getattr(s, name)
+                    for name in AgentSession._meta.fields
+                    if name not in skip_fields and getattr(s, name, None) is not None
+                }
+
+                # Override specific fields for the transition
+                old_data["last_activity"] = time.time()
+                old_data["completed_at"] = time.time()
+                if summary:
+                    old_data["summary"] = summary
+
+                s.delete()
+                AgentSession.create(status=status, **old_data)
+            else:
+                s.completed_at = time.time()
+                s.last_activity = time.time()
+                if summary:
+                    s.summary = summary
+                s.save()
     except Exception as e:
         logger.warning(f"Failed to update SessionLog completion for {session_id}: {e}")

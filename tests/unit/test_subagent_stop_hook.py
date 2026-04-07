@@ -8,10 +8,8 @@ import pytest
 
 from agent.hooks.subagent_stop import (
     _extract_outcome_summary,
-    _extract_output_tail,
     _get_stage_states,
     _post_stage_comment_on_completion,
-    _record_stage_on_parent,
     _register_dev_session_completion,
     _resolve_tracking_issue,
     subagent_stop_hook,
@@ -61,6 +59,8 @@ class TestRegisterDevSessionCompletion:
 
     def test_marks_dev_session_completed(self, monkeypatch):
         """Should mark pending dev sessions as completed."""
+        monkeypatch.setenv("VALOR_SESSION_ID", "parent-session-1")
+
         mock_dev = MagicMock()
         mock_dev.status = "running"
         mock_dev.job_id = "job-42"
@@ -68,19 +68,21 @@ class TestRegisterDevSessionCompletion:
         mock_query = MagicMock()
         mock_query.filter.return_value = [mock_dev]
 
-        with (
-            patch("agent.hooks.session_registry.resolve", return_value="parent-session-1"),
-            patch("agent.hooks.subagent_stop.AgentSession", create=True) as mock_as,
-            patch.dict("sys.modules", {"models.agent_session": MagicMock(AgentSession=mock_as)}),
-        ):
-            mock_as.query = mock_query
-            _register_dev_session_completion("agent-1", claude_uuid="test-uuid")
+        with patch("agent.hooks.subagent_stop.AgentSession", create=True) as mock_as:
+            # Patch the import inside the function
+            with patch.dict(
+                "sys.modules", {"models.agent_session": MagicMock(AgentSession=mock_as)}
+            ):
+                mock_as.query = mock_query
+                _register_dev_session_completion("agent-1")
 
         assert mock_dev.status == "completed"
         mock_dev.save.assert_called_once()
 
     def test_skips_already_completed_sessions(self, monkeypatch):
         """Should not overwrite sessions that are already completed or failed."""
+        monkeypatch.setenv("VALOR_SESSION_ID", "parent-session-2")
+
         mock_dev_completed = MagicMock()
         mock_dev_completed.status = "completed"
 
@@ -90,13 +92,12 @@ class TestRegisterDevSessionCompletion:
         mock_query = MagicMock()
         mock_query.filter.return_value = [mock_dev_completed, mock_dev_failed]
 
-        with (
-            patch("agent.hooks.session_registry.resolve", return_value="parent-session-2"),
-            patch("agent.hooks.subagent_stop.AgentSession", create=True) as mock_as,
-            patch.dict("sys.modules", {"models.agent_session": MagicMock(AgentSession=mock_as)}),
-        ):
-            mock_as.query = mock_query
-            _register_dev_session_completion("agent-1", claude_uuid="test-uuid")
+        with patch("agent.hooks.subagent_stop.AgentSession", create=True) as mock_as:
+            with patch.dict(
+                "sys.modules", {"models.agent_session": MagicMock(AgentSession=mock_as)}
+            ):
+                mock_as.query = mock_query
+                _register_dev_session_completion("agent-1")
 
         # Neither should have save called since both are terminal
         mock_dev_completed.save.assert_not_called()
@@ -104,25 +105,23 @@ class TestRegisterDevSessionCompletion:
 
     def test_handles_import_error(self, monkeypatch, caplog):
         """Should log warning if AgentSession import fails."""
-        with (
-            patch("agent.hooks.session_registry.resolve", return_value="parent-session-3"),
-            patch.dict("sys.modules", {"models.agent_session": None}),
-            caplog.at_level(logging.WARNING),
-        ):
-            _register_dev_session_completion("agent-1", claude_uuid="test-uuid")
+        monkeypatch.setenv("VALOR_SESSION_ID", "parent-session-3")
+
+        with patch.dict("sys.modules", {"models.agent_session": None}):
+            with caplog.at_level(logging.WARNING):
+                _register_dev_session_completion("agent-1")
         assert "Failed to register DevSession completion" in caplog.text
 
     def test_handles_query_error(self, monkeypatch, caplog):
         """Should log warning if Redis query raises."""
+        monkeypatch.setenv("VALOR_SESSION_ID", "parent-session-4")
+
         mock_module = MagicMock()
         mock_module.AgentSession.query.filter.side_effect = RuntimeError("Redis down")
 
-        with (
-            patch("agent.hooks.session_registry.resolve", return_value="parent-session-4"),
-            patch.dict("sys.modules", {"models.agent_session": mock_module}),
-            caplog.at_level(logging.WARNING),
-        ):
-            _register_dev_session_completion("agent-1", claude_uuid="test-uuid")
+        with patch.dict("sys.modules", {"models.agent_session": mock_module}):
+            with caplog.at_level(logging.WARNING):
+                _register_dev_session_completion("agent-1")
         assert "Failed to register DevSession completion" in caplog.text
 
 
@@ -312,8 +311,9 @@ class TestSubagentStopHookDevSession:
     @pytest.mark.asyncio
     async def test_injects_stage_states_for_dev_session(self, monkeypatch):
         """Should inject pipeline state into reason field for dev-sessions."""
+        monkeypatch.setenv("VALOR_SESSION_ID", "pm-session-1")
+
         with (
-            patch("agent.hooks.session_registry.resolve", return_value="pm-session-1"),
             patch("agent.hooks.subagent_stop._register_dev_session_completion") as mock_reg,
             patch(
                 "agent.hooks.subagent_stop._get_stage_states",
@@ -324,15 +324,16 @@ class TestSubagentStopHookDevSession:
             input_data = {"agent_type": "dev-session", "agent_id": "dev-1"}
             result = await subagent_stop_hook(input_data, None, None)
 
-        mock_reg.assert_called_once_with("dev-1", input_data=input_data, claude_uuid=None)
+        mock_reg.assert_called_once_with("dev-1")
         assert "reason" in result
         assert "Pipeline state" in result["reason"]
 
     @pytest.mark.asyncio
-    async def test_no_injection_when_session_id_not_resolved(self, monkeypatch):
-        """Should not inject stages when session registry has no mapping."""
+    async def test_no_injection_when_session_id_not_set(self, monkeypatch):
+        """Should not inject stages when VALOR_SESSION_ID is not set."""
+        monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
+
         with (
-            patch("agent.hooks.session_registry.resolve", return_value=None),
             patch("agent.hooks.subagent_stop._register_dev_session_completion"),
             patch("agent.hooks.subagent_stop._post_stage_comment_on_completion"),
         ):
@@ -344,8 +345,9 @@ class TestSubagentStopHookDevSession:
     @pytest.mark.asyncio
     async def test_no_injection_when_no_stage_data(self, monkeypatch):
         """Should return empty dict when no SDLC stage data exists."""
+        monkeypatch.setenv("VALOR_SESSION_ID", "pm-session-2")
+
         with (
-            patch("agent.hooks.session_registry.resolve", return_value="pm-session-2"),
             patch("agent.hooks.subagent_stop._register_dev_session_completion"),
             patch("agent.hooks.subagent_stop._get_stage_states", return_value=None),
             patch("agent.hooks.subagent_stop._post_stage_comment_on_completion"),
@@ -358,8 +360,9 @@ class TestSubagentStopHookDevSession:
     @pytest.mark.asyncio
     async def test_posts_stage_comment_on_completion(self, monkeypatch):
         """Should call _post_stage_comment_on_completion for dev-sessions."""
+        monkeypatch.setenv("VALOR_SESSION_ID", "pm-session-3")
+
         with (
-            patch("agent.hooks.session_registry.resolve", return_value="pm-session-3"),
             patch("agent.hooks.subagent_stop._register_dev_session_completion"),
             patch("agent.hooks.subagent_stop._get_stage_states", return_value=None),
             patch("agent.hooks.subagent_stop._post_stage_comment_on_completion") as mock_post,
@@ -372,194 +375,3 @@ class TestSubagentStopHookDevSession:
             await subagent_stop_hook(input_data, None, None)
 
         mock_post.assert_called_once()
-
-
-class TestExtractOutputTail:
-    """Tests for _extract_output_tail helper."""
-
-    def test_reads_transcript_file_tail(self, tmp_path):
-        """Should read the last N chars from transcript file."""
-        transcript = tmp_path / "transcript.txt"
-        content = "A" * 200 + "TAIL_MARKER_END"
-        transcript.write_text(content)
-        result = _extract_output_tail({"agent_transcript_path": str(transcript)}, max_chars=50)
-        assert "TAIL_MARKER_END" in result
-        assert len(result) <= 50
-
-    def test_falls_back_to_outcome_summary(self):
-        """Should fall back to _extract_outcome_summary when no transcript."""
-        result = _extract_output_tail({"result": "Build completed successfully"})
-        assert "Build completed" in result
-
-    def test_handles_missing_transcript_file(self):
-        """Should not crash when transcript file does not exist."""
-        result = _extract_output_tail({"agent_transcript_path": "/nonexistent/path.txt"})
-        assert "completed" in result
-
-    def test_empty_input(self):
-        """Should return default when input_data is empty."""
-        result = _extract_output_tail({})
-        assert "completed" in result
-
-
-class TestRecordStageOnParentWithClassification:
-    """Tests for _record_stage_on_parent with classify_outcome integration.
-
-    Regression tests for issue #563: ensure REVIEW with failure patterns
-    triggers fail_stage() and routes to PATCH via PIPELINE_EDGES.
-    """
-
-    def _make_parent_session(self, stage_states_dict):
-        """Create a mock parent session with given stage_states."""
-        mock = MagicMock()
-        mock.session_id = "parent-1"
-        mock.stage_states = json.dumps(stage_states_dict)
-        mock.save = MagicMock()
-        return mock
-
-    def test_review_changes_requested_triggers_fail(self):
-        """REVIEW with 'changes requested' in output_tail triggers fail_stage -> PATCH."""
-        states = {
-            "ISSUE": "completed",
-            "PLAN": "completed",
-            "CRITIQUE": "completed",
-            "BUILD": "completed",
-            "TEST": "completed",
-            "REVIEW": "in_progress",
-            "DOCS": "pending",
-            "MERGE": "pending",
-            "PATCH": "pending",
-        }
-        mock_parent = self._make_parent_session(states)
-
-        mock_module = MagicMock()
-        mock_module.AgentSession.query.filter.return_value = [mock_parent]
-
-        with patch.dict("sys.modules", {"models.agent_session": mock_module}):
-            _record_stage_on_parent(
-                "parent-1",
-                stop_reason=None,
-                output_tail="PR review: changes requested. Please fix the test coverage.",
-            )
-
-        # Verify the saved stage_states has REVIEW=failed and PATCH=ready
-        saved = json.loads(mock_parent.stage_states)
-        assert saved["REVIEW"] == "failed"
-        assert saved["PATCH"] == "ready"
-
-    def test_review_approved_triggers_complete(self):
-        """REVIEW with 'approved' in output_tail triggers complete_stage -> DOCS."""
-        states = {
-            "ISSUE": "completed",
-            "PLAN": "completed",
-            "CRITIQUE": "completed",
-            "BUILD": "completed",
-            "TEST": "completed",
-            "REVIEW": "in_progress",
-            "DOCS": "pending",
-            "MERGE": "pending",
-            "PATCH": "pending",
-        }
-        mock_parent = self._make_parent_session(states)
-
-        mock_module = MagicMock()
-        mock_module.AgentSession.query.filter.return_value = [mock_parent]
-
-        with patch.dict("sys.modules", {"models.agent_session": mock_module}):
-            _record_stage_on_parent(
-                "parent-1",
-                stop_reason=None,
-                output_tail="Review passed. PR approved and ready to merge.",
-            )
-
-        saved = json.loads(mock_parent.stage_states)
-        assert saved["REVIEW"] == "completed"
-        assert saved["DOCS"] == "ready"
-
-    def test_test_failed_triggers_fail(self):
-        """TEST with 'failed' in output_tail triggers fail_stage -> PATCH."""
-        states = {
-            "ISSUE": "completed",
-            "PLAN": "completed",
-            "CRITIQUE": "completed",
-            "BUILD": "completed",
-            "TEST": "in_progress",
-            "REVIEW": "pending",
-            "DOCS": "pending",
-            "MERGE": "pending",
-            "PATCH": "pending",
-        }
-        mock_parent = self._make_parent_session(states)
-
-        mock_module = MagicMock()
-        mock_module.AgentSession.query.filter.return_value = [mock_parent]
-
-        with patch.dict("sys.modules", {"models.agent_session": mock_module}):
-            _record_stage_on_parent(
-                "parent-1",
-                stop_reason=None,
-                output_tail="3 failed, 2 passed. ERRORS detected in test suite.",
-            )
-
-        saved = json.loads(mock_parent.stage_states)
-        assert saved["TEST"] == "failed"
-        assert saved["PATCH"] == "ready"
-
-    def test_ambiguous_outcome_defaults_to_complete(self):
-        """Ambiguous outcome defaults to complete_stage (safe default)."""
-        states = {
-            "ISSUE": "completed",
-            "PLAN": "completed",
-            "CRITIQUE": "completed",
-            "BUILD": "in_progress",
-            "TEST": "pending",
-            "REVIEW": "pending",
-            "DOCS": "pending",
-            "MERGE": "pending",
-            "PATCH": "pending",
-        }
-        mock_parent = self._make_parent_session(states)
-
-        mock_module = MagicMock()
-        mock_module.AgentSession.query.filter.return_value = [mock_parent]
-
-        with patch.dict("sys.modules", {"models.agent_session": mock_module}):
-            _record_stage_on_parent(
-                "parent-1",
-                stop_reason=None,
-                output_tail="some random output with no clear pattern",
-            )
-
-        saved = json.loads(mock_parent.stage_states)
-        assert saved["BUILD"] == "completed"
-        assert saved["TEST"] == "ready"
-
-    def test_classify_outcome_error_defaults_to_complete(self):
-        """If classify_outcome raises, default to complete_stage."""
-        states = {
-            "ISSUE": "completed",
-            "PLAN": "completed",
-            "CRITIQUE": "completed",
-            "BUILD": "in_progress",
-            "TEST": "pending",
-            "REVIEW": "pending",
-            "DOCS": "pending",
-            "MERGE": "pending",
-            "PATCH": "pending",
-        }
-        mock_parent = self._make_parent_session(states)
-
-        mock_module = MagicMock()
-        mock_module.AgentSession.query.filter.return_value = [mock_parent]
-
-        with (
-            patch.dict("sys.modules", {"models.agent_session": mock_module}),
-            patch(
-                "bridge.pipeline_state.PipelineStateMachine.classify_outcome",
-                side_effect=RuntimeError("unexpected"),
-            ),
-        ):
-            _record_stage_on_parent("parent-1", stop_reason=None, output_tail="anything")
-
-        saved = json.loads(mock_parent.stage_states)
-        assert saved["BUILD"] == "completed"

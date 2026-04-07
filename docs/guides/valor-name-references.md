@@ -49,6 +49,8 @@ References where "Valor" is the **persona** that users interact with — the nam
 | `config/projects.example.json` | 9 | `"Dev: Valor"` group name | Telegram group |
 | `config/SOUL.md` | 268-274 | `"Dev: Valor"` in CLI examples | Documentation |
 | `tools/valor_telegram.py` | 6-11 | `"Dev: Valor"` in usage | CLI help text |
+| `tools/telegram_history/cli.py` | 8-12 | `"Dev: Valor"` in usage | CLI help text |
+| `tools/telegram_history/README.md` | 33-47 | `"Dev: Valor"` in examples | Documentation |
 
 **Total Category A: ~35 references across ~15 files**
 **Configurability effort: MEDIUM** — mostly reads from a few constants/config values. A `persona.name` config key + updating ~5 source-of-truth locations would cascade to most of these.
@@ -64,7 +66,7 @@ References where "Valor" is a **brand/product name** for the tooling itself — 
 | File | Line(s) | Reference | Notes |
 |------|---------|-----------|-------|
 | `pyproject.toml` | 2 | `name = "valor-bridge"` | Package name |
-| `pyproject.toml` | 39-45 | `valor-telegram`, `valor-calendar`, `valor-image-gen`, `valor-image-analyze`, `valor-search`, `valor-fetch` | 6 CLI binary names |
+| `pyproject.toml` | 39-45 | `valor-history`, `valor-telegram`, `valor-calendar`, `valor-image-gen`, `valor-image-analyze`, `valor-search`, `valor-fetch` | 7 CLI binary names |
 
 ### B2. Tool Source Files (CLI branding)
 
@@ -72,6 +74,7 @@ References where "Valor" is a **brand/product name** for the tooling itself — 
 |------|-----------|-------|
 | `tools/valor_telegram.py` | Filename, `prog="valor-telegram"`, usage strings | CLI tool |
 | `tools/valor_calendar.py` | Filename, `valor-calendar` in docstring/usage | CLI tool |
+| `tools/telegram_history/cli.py` | `prog="valor-history"`, usage strings | CLI tool |
 | `tools/web/__init__.py` | `valor-search`, `valor-fetch` in usage | CLI tool |
 | `tools/image_gen/__init__.py` | `valor-image-gen`, `"X-Title": "Valor Image Gen"` | CLI + HTTP header |
 | `tools/image_analysis/__init__.py` | `valor-image-analyze`, `"X-Title": "Valor Image Analysis"` | CLI + HTTP header |
@@ -85,10 +88,12 @@ References where "Valor" is a **brand/product name** for the tooling itself — 
 | File | Service Labels |
 |------|---------------|
 | `com.valor.reflections.plist` | `com.valor.reflections` |
+| `com.valor.issue-poller.plist` | `com.valor.issue-poller` |
 | `scripts/valor-service.sh` | `com.valor.bridge`, `com.valor.update`, `com.valor.bridge-watchdog` |
 | `scripts/update/service.py` | `com.valor.reflections`, `com.valor.daydream` (old), `com.valor.caffeinate` |
 | `monitoring/bridge_watchdog.py` | `com.valor.bridge` |
 | `scripts/install_reflections.sh` | `com.valor.reflections`, `com.valor.daydream` |
+| `scripts/install_issue_poller.sh` | `com.valor.issue-poller` |
 | `scripts/remote-update.sh` | `com.valor.reflections`, `com.valor.daydream` |
 
 ### B4. Data Paths
@@ -108,6 +113,7 @@ References where "Valor" is a **brand/product name** for the tooling itself — 
 | `scripts/auto-revert.sh` | `valor-service.sh` reference |
 | `scripts/calendar_hook.sh` | `EXCLUDED_PROJECTS="valor"`, `valor-calendar` |
 | `scripts/calendar_prompt_hook.sh` | `EXCLUDED_PROJECTS="valor"`, `valor-calendar` |
+| `scripts/issue_poller.py` | `valor-telegram` CLI call |
 | `scripts/update/verify.py` | `valor-calendar` path checks |
 | `scripts/update/run.py` | `com.valor.reflections.plist` |
 | `scripts/update/__init__.py` | `"Modular update system for Valor"` |

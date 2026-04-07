@@ -1,6 +1,6 @@
-"""Binary intent classifier for ChatSession Teammate mode.
+"""Binary intent classifier for ChatSession Q&A mode.
 
-Uses Haiku to classify incoming messages as informational queries (Teammate)
+Uses Haiku to classify incoming messages as informational queries (Q&A)
 or work requests. Conservative threshold (0.90) ensures ambiguous messages
 default to the full DevSession pipeline.
 
@@ -17,32 +17,32 @@ from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
-# Classification threshold: only route to Teammate if confidence exceeds this
-TEAMMATE_CONFIDENCE_THRESHOLD = 0.90
+# Classification threshold: only route to Q&A if confidence exceeds this
+QA_CONFIDENCE_THRESHOLD = 0.90
 
 CLASSIFIER_PROMPT = """\
 You are a binary intent classifier. Classify the user message as either \
-"teammate" (informational query) or "work" (action/work request).
+"qa" (informational query) or "work" (action/work request).
 
 RULES:
-- "teammate" = the user wants information, explanation, status, or lookup
+- "qa" = the user wants information, explanation, status, or lookup
 - "work" = the user wants something created, fixed, changed, deployed, or built
 
 EXAMPLES:
 
-teammate examples:
-- "What's the status of feature X?" -> teammate 0.98
-- "How does the bridge work?" -> teammate 0.97
-- "Where is the observer prompt?" -> teammate 0.99
-- "What's broken in the bridge?" -> teammate 0.92
-- "Show me the recent PRs" -> teammate 0.95
-- "What tests are failing?" -> teammate 0.93
-- "Who worked on the memory system?" -> teammate 0.96
-- "When was the last deployment?" -> teammate 0.97
-- "Explain the nudge loop" -> teammate 0.98
-- "What's in the .env file?" -> teammate 0.95
-- "How many open issues do we have?" -> teammate 0.96
-- "What model does the classifier use?" -> teammate 0.97
+qa examples:
+- "What's the status of feature X?" -> qa 0.98
+- "How does the bridge work?" -> qa 0.97
+- "Where is the observer prompt?" -> qa 0.99
+- "What's broken in the bridge?" -> qa 0.92
+- "Show me the recent PRs" -> qa 0.95
+- "What tests are failing?" -> qa 0.93
+- "Who worked on the memory system?" -> qa 0.96
+- "When was the last deployment?" -> qa 0.97
+- "Explain the nudge loop" -> qa 0.98
+- "What's in the .env file?" -> qa 0.95
+- "How many open issues do we have?" -> qa 0.96
+- "What model does the classifier use?" -> qa 0.97
 
 work examples:
 - "Fix the bridge" -> work 0.99
@@ -62,27 +62,27 @@ work examples:
 Respond with EXACTLY one line in the format:
 INTENT confidence REASONING
 
-Where INTENT is "teammate" or "work", confidence is a float between 0.0 and 1.0, \
+Where INTENT is "qa" or "work", confidence is a float between 0.0 and 1.0, \
 and REASONING is a brief explanation.
 
-Example response: teammate 0.97 User is asking for information about system architecture"""
+Example response: qa 0.97 User is asking for information about system architecture"""
 
 
 @dataclass(frozen=True)
 class IntentResult:
     """Result of intent classification."""
 
-    intent: str  # "teammate" or "work"
+    intent: str  # "qa" or "work"
     confidence: float
     reasoning: str
 
     @property
-    def is_teammate(self) -> bool:
-        return self.intent == "teammate" and self.confidence >= TEAMMATE_CONFIDENCE_THRESHOLD
+    def is_qa(self) -> bool:
+        return self.intent == "qa" and self.confidence >= QA_CONFIDENCE_THRESHOLD
 
     @property
     def is_work(self) -> bool:
-        return self.intent == "work" or self.confidence < TEAMMATE_CONFIDENCE_THRESHOLD
+        return self.intent == "work" or self.confidence < QA_CONFIDENCE_THRESHOLD
 
 
 def _parse_classifier_response(raw: str) -> IntentResult:
@@ -94,7 +94,7 @@ def _parse_classifier_response(raw: str) -> IntentResult:
         return IntentResult(intent="work", confidence=0.0, reasoning="unparseable response")
 
     intent_str = parts[0].lower().strip()
-    if intent_str not in ("teammate", "work"):
+    if intent_str not in ("qa", "work"):
         logger.warning(f"[intent_classifier] Unknown intent: {intent_str!r}")
         return IntentResult(
             intent="work", confidence=0.0, reasoning=f"unknown intent: {intent_str}"
@@ -114,7 +114,7 @@ async def classify_intent(
     message: str,
     context: dict | None = None,
 ) -> IntentResult:
-    """Classify a message as Teammate or work request using Haiku.
+    """Classify a message as Q&A or work request using Haiku.
 
     Args:
         message: The incoming user message text.

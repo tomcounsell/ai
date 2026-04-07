@@ -6,7 +6,6 @@ import logging
 import re
 from pathlib import Path
 
-from config.enums import ClassificationType, PersonaType
 from utils.api_keys import get_anthropic_api_key
 
 logger = logging.getLogger(__name__)
@@ -22,6 +21,7 @@ ALL_MONITORED_GROUPS = []
 ACTIVE_PROJECTS = []
 RESPOND_TO_DMS = True
 DM_WHITELIST = set()
+DM_WHITELIST_CONFIG = {}
 
 # =============================================================================
 # Constants
@@ -180,18 +180,25 @@ def is_team_chat(chat_title: str | None) -> bool:
 # Config-Driven Chat Mode Resolution
 # =============================================================================
 
+# Mapping from persona field values in projects.json to mode strings.
+PERSONA_TO_MODE = {
+    "teammate": "qa",
+    "project-manager": "pm",
+    "developer": "dev",
+}
 
-def resolve_persona(
+
+def resolve_chat_mode(
     project: dict | None,
     chat_title: str | None,
     is_dm: bool = False,
 ) -> str | None:
-    """Resolve the effective persona from config, title prefix, or DM status.
+    """Resolve the effective chat mode from config, title prefix, or DM status.
 
     Resolution order:
-    1. DMs -> always PersonaType.TEAMMATE
-    2. Group persona field in projects.json -> return PersonaType directly
-    3. Title prefix "Dev:" -> PersonaType.DEVELOPER, "PM:" -> PersonaType.PROJECT_MANAGER
+    1. DMs -> always "qa"
+    2. Group persona field in projects.json -> map to mode
+    3. Title prefix "Dev:" -> "dev", "PM:" -> "pm"
     4. None (unconfigured -- fall through to existing classifier behavior)
 
     Args:
@@ -200,11 +207,11 @@ def resolve_persona(
         is_dm: Whether this is a direct message.
 
     Returns:
-        PersonaType member or None (unconfigured).
+        "qa", "pm", "dev", or None (unconfigured).
     """
-    # DMs are always Teammate
+    # DMs are always Q&A
     if is_dm:
-        return PersonaType.TEAMMATE
+        return "qa"
 
     # Look up persona from group config in projects.json
     if project and chat_title:
@@ -214,24 +221,42 @@ def resolve_persona(
             for group_name, group_config in groups.items():
                 if group_name.lower() in chat_title.lower():
                     if isinstance(group_config, dict):
-                        persona_str = group_config.get("persona", "")
-                        try:
-                            persona = PersonaType(persona_str)
-                            logger.debug(f"resolve_persona: persona={persona!r} for {chat_title!r}")
-                            return persona
-                        except ValueError:
-                            pass  # Unknown persona value, fall through
+                        persona = group_config.get("persona", "")
+                        mode = PERSONA_TO_MODE.get(persona)
+                        if mode:
+                            logger.debug(
+                                f"resolve_chat_mode: persona={persona!r} -> mode={mode!r} "
+                                f"for {chat_title!r}"
+                            )
+                            return mode
                     break  # Found matching group but no valid persona
 
     # Title prefix fallback
     if chat_title:
         if chat_title.startswith("Dev:"):
-            return PersonaType.DEVELOPER
+            return "dev"
         if chat_title.startswith("PM:"):
-            return PersonaType.PROJECT_MANAGER
+            return "pm"
 
     # Unconfigured -- caller should fall through to existing behavior
     return None
+
+
+# =============================================================================
+# User Permissions
+# =============================================================================
+
+
+def get_user_permissions(sender_id: int | None) -> str:
+    """Get the permission level for a whitelisted user.
+
+    Returns:
+        "full" - Can do anything (default)
+        "qa_only" - Q&A only, no code changes allowed
+    """
+    if not sender_id or sender_id not in DM_WHITELIST_CONFIG:
+        return "full"
+    return DM_WHITELIST_CONFIG[sender_id].get("permissions", "full")
 
 
 # =============================================================================
@@ -419,7 +444,7 @@ def classify_work_request(message: str) -> str:
 
     Returns:
         "sdlc" - Work request -> orchestrator in ai/, prepend SDLC directive
-        "question" - informational query -> direct in target project, pass through as-is
+        "question" - Q&A -> direct in target project, pass through as-is
         "passthrough" - Already has skill invocation or is conversational
     """
     if not message or not message.strip():
@@ -441,7 +466,7 @@ def classify_work_request(message: str) -> str:
         r"^#\d+$", text_lower
     ):
         logger.info(f"[routing] Classified as sdlc (issue/PR reference): {text[:120]}")
-        return ClassificationType.SDLC
+        return "sdlc"
 
     # Fast path: short acknowledgments / continuation commands
     first_word = text_lower.split()[0] if text_lower.split() else ""
@@ -458,7 +483,7 @@ def classify_work_request(message: str) -> str:
         logger.warning(f"Work request classification failed: {e}")
         # Conservative default: treat as question (no SDLC overhead)
         logger.info(f"[routing] Classified as question (fallback): {text[:120]}")
-        return ClassificationType.QUESTION
+        return "question"
 
 
 def _get_principal_priorities_for_classification() -> str:
@@ -515,9 +540,9 @@ def _classify_work_request_llm(text: str) -> str:
         )
         result = response["message"]["content"].strip().lower()
         if "sdlc" in result:
-            return ClassificationType.SDLC
+            return "sdlc"
         if "question" in result:
-            return ClassificationType.QUESTION
+            return "question"
         logger.debug(f"Ollama returned ambiguous classification: {result}")
     except Exception as e:
         logger.debug(f"Ollama classification failed, trying Haiku: {e}")
@@ -529,7 +554,7 @@ def _classify_work_request_llm(text: str) -> str:
         client = _get_anthropic_client()
         if not client:
             logger.debug("No API key for Haiku classification fallback")
-            return ClassificationType.QUESTION
+            return "question"
 
         response = client.messages.create(
             model=MODEL_FAST,
@@ -538,11 +563,11 @@ def _classify_work_request_llm(text: str) -> str:
         )
         result = response.content[0].text.strip().lower()
         if "sdlc" in result:
-            return ClassificationType.SDLC
-        return ClassificationType.QUESTION
+            return "sdlc"
+        return "question"
     except Exception as e:
         logger.debug(f"Haiku classification fallback also failed: {e}")
-        return ClassificationType.QUESTION
+        return "question"
 
 
 async def classify_work_request_async(message: str) -> str:
@@ -692,16 +717,16 @@ async def should_respond_async(
 
     Returns (should_respond, is_reply_to_valor) tuple.
 
-    Uses config-driven persona resolution (resolve_persona) as the first
-    routing gate. When a group resolves to Teammate persona (via "teammate"
-    persona in projects.json), the group becomes a passive listener: messages
-    are stored but the agent only responds on @mention or reply-to-Valor.
-    This skips Ollama classification entirely for those groups, reducing
-    latency and preventing unwanted responses in observation-only channels.
+    Uses config-driven chat mode resolution (resolve_chat_mode) as the first
+    routing gate. When a group resolves to "qa" mode (via "teammate" persona in
+    projects.json), the group becomes a passive listener: messages are stored
+    but the agent only responds on @mention or reply-to-Valor. This skips
+    Ollama classification entirely for those groups, reducing latency and
+    preventing unwanted responses in observation-only channels.
 
-    Decision logic after persona resolution:
+    Decision logic after mode resolution:
     - Reply to Valor -> always respond (continue session, checked before mode)
-    - Teammate persona group -> @mention only (passive listener)
+    - Q&A mode group -> @mention only (passive listener)
     - Team chat (no Dev:/PM: prefix) -> @mention only
     - respond_to_all -> always respond
     - respond_to_unaddressed -> Ollama classifies need
@@ -741,16 +766,16 @@ async def should_respond_async(
         except Exception as e:
             logger.debug(f"Could not check replied message: {e}")
 
-    # Config-driven Teammate groups: passive listener (mention/reply only, skip Ollama)
-    persona = resolve_persona(project, chat_title, is_dm=False)
-    if persona == PersonaType.TEAMMATE:
+    # Config-driven Q&A groups: passive listener (mention/reply only, skip Ollama)
+    chat_mode = resolve_chat_mode(project, chat_title, is_dm=False)
+    if chat_mode == "qa":
         mentions = telegram_config.get("mention_triggers", DEFAULT_MENTIONS)
         text_lower = text.lower()
         if any(mention.lower() in text_lower for mention in mentions):
-            logger.debug("Teammate-persona group: @mention detected - responding")
+            logger.debug("Q&A-mode group: @mention detected - responding")
             return True, False
         # Completely silent -- no response, no reaction
-        logger.debug(f"Teammate-persona group: silent storage for {chat_title!r}")
+        logger.debug(f"Q&A-mode group: silent storage for {chat_title!r}")
         return False, False
 
     # Team chats (no Dev:/PM: prefix) are mention-only

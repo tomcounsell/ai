@@ -36,7 +36,7 @@ def _mock_session_with_stages(stage_dict, links=None):
     session.issue_url = (links or {}).get("issue")
     session.plan_url = (links or {}).get("plan")
     session.pr_url = (links or {}).get("pr")
-    session.session_mode = None  # Default: not a Teammate session
+    session.qa_mode = False  # Default: not a Q&A session
     return session
 
 
@@ -1085,12 +1085,12 @@ class TestComposeStructuredSummary:
         result = _compose_structured_summary("• Working on it", session=None, is_completion=False)
         assert "⏳" in result
 
-    def test_teammate_mode_returns_prose_without_emoji(self):
-        """Teammate sessions bypass structured formatting -- return prose directly."""
+    def test_qa_mode_returns_prose_without_emoji(self):
+        """Q&A sessions bypass structured formatting — return prose directly."""
         from unittest.mock import MagicMock
 
         session = MagicMock()
-        session.session_mode = "teammate"
+        session.qa_mode = True
         session.session_id = None  # Skip Redis refresh
 
         result = _compose_structured_summary(
@@ -1104,12 +1104,12 @@ class TestComposeStructuredSummary:
         # Prose preserved as-is
         assert "bridge uses Telethon" in result
 
-    def test_non_teammate_mode_still_gets_structured(self):
-        """Non-Teammate sessions with session_mode=None still get structured formatting."""
+    def test_qa_mode_false_still_gets_structured(self):
+        """Non-Q&A sessions with qa_mode=False still get structured formatting."""
         from unittest.mock import MagicMock
 
         session = MagicMock()
-        session.session_mode = None
+        session.qa_mode = False
         session.session_id = None
         session.status = "completed"
 
@@ -1138,7 +1138,7 @@ class TestNoMessageEcho:
         session.message_text = "continue"
         session.status = "running"
         session.is_sdlc = True
-        session.session_mode = None
+        session.qa_mode = False
 
         result = _compose_structured_summary(
             "• Built the bypass\n• Tests passing", session=session, is_completion=True
@@ -1156,7 +1156,7 @@ class TestNoMessageEcho:
         session._get_history_list.return_value = ["[user] What time is it?"]
         session.message_text = "What time is it?"
         session.status = "completed"
-        session.session_mode = None
+        session.qa_mode = False
         session.get_links.return_value = {}
 
         result = _compose_structured_summary("It's 3pm UTC+7", session=session, is_completion=True)
@@ -1277,10 +1277,10 @@ class TestComposeStructuredSummaryWithSession:
         first_line = result.split("\n")[0].strip()
         assert first_line in ("\u2705", "\u23f3", "\u274c", "") or len(first_line) > 0
 
-    def test_teammate_mode_session_returns_prose(self):
-        """Teammate session bypasses all structured formatting."""
+    def test_qa_mode_session_returns_prose(self):
+        """Q&A session bypasses all structured formatting."""
         session = _mock_session_with_stages({})
-        session.session_mode = "teammate"
+        session.qa_mode = True
         session.session_id = None  # Skip Redis refresh
         session.message_text = "How does the bridge work?"
         session.status = "completed"
@@ -2076,6 +2076,57 @@ class TestNormalizeQuestionPrefix:
 
         result = _normalize_question_prefix("Normal text here")
         assert result == "Normal text here"
+
+
+class TestCrashMessagePool:
+    """Tests for the crash message pool in sdk_client.py."""
+
+    def test_pool_has_minimum_variants(self):
+        from agent.sdk_client import CRASH_MESSAGE_POOL
+
+        assert len(CRASH_MESSAGE_POOL) >= 4
+
+    def test_get_crash_message_returns_string(self):
+        from agent.sdk_client import _get_crash_message
+
+        msg = _get_crash_message()
+        assert isinstance(msg, str)
+        assert len(msg) > 10
+
+    def test_no_consecutive_repeats(self):
+        """Crash messages should not repeat consecutively."""
+        import agent.sdk_client as mod
+        from agent.sdk_client import _get_crash_message
+
+        mod._last_crash_message = None
+
+        messages = [_get_crash_message() for _ in range(20)]
+        for i in range(1, len(messages)):
+            assert messages[i] != messages[i - 1], f"Consecutive repeat at index {i}: {messages[i]}"
+
+    def test_first_call_no_previous(self):
+        """First call with no previous message should work."""
+        import agent.sdk_client as mod
+        from agent.sdk_client import _get_crash_message
+
+        mod._last_crash_message = None
+        msg = _get_crash_message()
+        assert msg in mod.CRASH_MESSAGE_POOL
+
+    def test_all_variants_include_next_step(self):
+        """Each crash message includes next-step language."""
+        from agent.sdk_client import CRASH_MESSAGE_POOL
+
+        next_step_words = [
+            "retry",
+            "try again",
+            "re-trigger",
+            "re-send",
+            "check back",
+        ]
+        for msg in CRASH_MESSAGE_POOL:
+            has_next = any(w in msg.lower() for w in next_step_words)
+            assert has_next, f"Missing next-step language: {msg}"
 
 
 class TestSentenceAwareTruncation:

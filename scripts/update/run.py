@@ -58,7 +58,6 @@ class UpdateConfig:
         return cls(
             do_git_pull=True,
             do_dep_sync=True,
-            force_dep_sync=True,
             do_service_restart=True,
             do_verify=True,
             do_calendar=True,
@@ -73,7 +72,6 @@ class UpdateConfig:
         return cls(
             do_git_pull=True,
             do_dep_sync=True,
-            force_dep_sync=True,
             do_service_restart=False,  # Use restart flag for graceful restart
             do_verify=True,
             do_calendar=True,
@@ -364,16 +362,6 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             "Check 'machine' field in ~/Desktop/Valor/projects.json"
         )
 
-    # Step 4.5: Telegram auth check (critical — bridge is useless without it)
-    if config.do_service_restart:
-        log("Checking Telegram session...", v)
-        telegram_check = verify.check_telegram_session(project_dir)
-        if telegram_check.available:
-            log(f"  Telegram: {telegram_check.version or 'OK'}", v)
-        else:
-            log(f"ERROR: Telegram session not authorized: {telegram_check.error}", v, always=True)
-            result.errors.append(f"Telegram auth: {telegram_check.error}")
-
     # Step 5: Service management
     if config.do_service_restart:
         log("Installing/restarting services...", v)
@@ -409,15 +397,17 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         if result.service_status.running:
             log(f"Bridge running (PID: {result.service_status.pid})", v)
         else:
-            log("ERROR: Bridge not running after restart", v, always=True)
-            result.errors.append("Bridge not running after restart")
+            log("WARN: Bridge not running after restart", v)
+            result.warnings.append("Bridge not running after restart")
 
-        # Always restart web UI to pick up code/dep changes
-        if service.restart_webui(project_dir):
-            log("Web UI restarted (port 8500)", v)
+        # Restart web UI if it was running
+        if service.is_webui_running():
+            if service.restart_webui(project_dir):
+                log("Web UI restarted (port 8500)", v)
+            else:
+                result.warnings.append("Web UI restart failed")
         else:
-            log("ERROR: Web UI failed to start", v, always=True)
-            result.errors.append("Web UI failed to start")
+            log("Web UI not running, skipping", v)
 
         # Check update cron
         if service.is_update_cron_installed():

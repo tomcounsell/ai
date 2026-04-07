@@ -1,6 +1,6 @@
 """Memory model for the subconscious memory system.
 
-Level 3 popoto model with DecayingSortedField, ConfidenceField, BM25Field,
+Level 3 popoto model with DecayingSortedField, ConfidenceField,
 WriteFilterMixin, AccessTrackerMixin, and ExistenceFilter.
 
 Memories are partitioned by project_key for per-project isolation.
@@ -8,7 +8,7 @@ Human messages are saved with high importance (InteractionWeight.HUMAN = 6.0),
 agent observations with low importance (InteractionWeight.AGENT = 1.0).
 
 The ExistenceFilter fingerprints on content, enabling O(1) bloom checks
-for topic relevance before running the BM25 + RRF fusion retrieval.
+for topic relevance before running the full ContextAssembler query.
 """
 
 import logging
@@ -21,7 +21,6 @@ apply_defaults()
 from popoto import (  # noqa: E402
     AccessTrackerMixin,
     AutoKeyField,
-    BM25Field,
     ConfidenceField,
     DecayingSortedField,
     DictField,
@@ -39,7 +38,6 @@ logger = logging.getLogger(__name__)
 SOURCE_HUMAN = "human"
 SOURCE_AGENT = "agent"
 SOURCE_SYSTEM = "system"
-SOURCE_KNOWLEDGE = "knowledge"
 
 
 class Memory(WriteFilterMixin, AccessTrackerMixin, Model):
@@ -54,11 +52,7 @@ class Memory(WriteFilterMixin, AccessTrackerMixin, Model):
         project_key: Project partition key for isolation.
         content: The memory content text (max ~500 chars for efficiency).
         importance: Numeric importance score. Human=6.0, Agent=1.0.
-        source: Origin type — "human", "agent", "system", or "knowledge".
-        reference: Generic JSON pointer for actionable next steps. Used by
-            knowledge-sourced memories to point to the source file, e.g.
-            {"tool": "read_file", "params": {"file_path": "/path/to/doc.md"}}.
-            Empty string for memories without a reference.
+        source: Origin type — "human", "agent", or "system".
         metadata: Optional structured metadata dict with keys:
             category (str): "correction", "decision", "pattern", "surprise"
             file_paths (list[str]): Referenced file paths
@@ -68,7 +62,6 @@ class Memory(WriteFilterMixin, AccessTrackerMixin, Model):
             last_outcome (str): "acted" or "dismissed"
         relevance: Decay-sorted index, partitioned by project_key.
         confidence: Bayesian confidence, updated by ObservationProtocol.
-        bm25: BM25 keyword search index on content for ranked retrieval.
         bloom: ExistenceFilter for O(1) topic pre-checks.
     """
 
@@ -77,10 +70,7 @@ class Memory(WriteFilterMixin, AccessTrackerMixin, Model):
     project_key = KeyField()
     content = StringField(default="")
     importance = FloatField(default=1.0)
-    source = StringField(
-        default=SOURCE_AGENT
-    )  # SOURCE_HUMAN, SOURCE_AGENT, SOURCE_SYSTEM, SOURCE_KNOWLEDGE
-    reference = StringField(default="")  # Generic JSON pointer (e.g. tool call, URL, entity)
+    source = StringField(default=SOURCE_AGENT)  # SOURCE_HUMAN, SOURCE_AGENT, SOURCE_SYSTEM
     metadata = DictField(default=dict)
 
     relevance = DecayingSortedField(
@@ -88,7 +78,6 @@ class Memory(WriteFilterMixin, AccessTrackerMixin, Model):
         partition_by="project_key",
     )
     confidence = ConfidenceField(initial_confidence=0.5)
-    bm25 = BM25Field(source="content")
     bloom = ExistenceFilter(
         error_rate=0.01,
         capacity=100_000,

@@ -135,6 +135,8 @@ start_bridge() {
     # rotate actively-written files. This runs on every service start/restart.
     rotate_log "$LOG_DIR/bridge.error.log"
     rotate_log "$LOG_DIR/bridge.log"
+    rotate_log "$LOG_DIR/issue_poller_error.log"
+    rotate_log "$LOG_DIR/issue_poller.log"
     rotate_log "$LOG_DIR/watchdog.log"
     rotate_log "$LOG_DIR/reflections.log"
     rotate_log "$LOG_DIR/reflections_error.log"

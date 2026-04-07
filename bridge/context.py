@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 CONFIG = {}
 DEFAULTS = {}
+DM_WHITELIST_CONFIG = {}
 _BRIDGE_PROJECT_DIR = None
 
 
@@ -118,6 +119,23 @@ def filter_tool_logs(response: str) -> str:
 
 
 # =============================================================================
+# User Permissions
+# =============================================================================
+
+
+def get_user_permissions(sender_id: int | None) -> str:
+    """Get the permission level for a whitelisted user.
+
+    Returns:
+        "full" - Can do anything (default)
+        "qa_only" - Q&A only, no code changes allowed
+    """
+    if not sender_id or sender_id not in DM_WHITELIST_CONFIG:
+        return "full"
+    return DM_WHITELIST_CONFIG[sender_id].get("permissions", "full")
+
+
+# =============================================================================
 # Context Building
 # =============================================================================
 
@@ -126,14 +144,14 @@ def build_context_prefix(project: dict | None, is_dm: bool, sender_id: int | Non
     """Build project context to inject into agent prompt."""
     context_parts = []
 
-    # All DM users get uniform read-only Teammate access - no per-user permission levels
-    if is_dm:
+    # Check user permissions - Q&A restrictions only apply to DMs
+    permissions = get_user_permissions(sender_id)
+    if permissions == "qa_only" and is_dm:
         context_parts.append(
-            "RESTRICTION: This user has read-only Teammate access. "
+            "RESTRICTION: This user has Q&A-only access. "
             "Do NOT make any code changes, file edits, git commits, or run destructive commands. "
             "Answer questions, explain code, and provide guidance only. "
-            "If they ask you to make changes, politely explain you can only help with "
-            "informational queries for them."
+            "If they ask you to make changes, politely explain you can only help with Q&A for them."
         )
 
     if not project:
@@ -236,7 +254,7 @@ def build_conversation_history(chat_id: str, limit: int = 5) -> str:
     """
     Build recent conversation history for context.
 
-    NOTE: This is NOT called by default. The agent should use the valor-telegram
+    NOTE: This is NOT called by default. The agent should use the valor-history
     CLI tool to fetch relevant history when context cues suggest prior messages
     may be relevant (e.g., "what do you think of these", "as I mentioned",
     references to recent discussions, etc.). For explicit threading, users

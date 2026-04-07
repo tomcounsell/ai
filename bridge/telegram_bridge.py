@@ -98,6 +98,7 @@ from bridge.routing import (  # noqa: E402
     classify_needs_response_async,  # noqa: F401
     extract_at_mentions,  # noqa: F401
     find_project_for_chat,
+    get_user_permissions,  # noqa: F401
     get_valor_usernames,  # noqa: F401
     is_message_for_others,  # noqa: F401
     is_message_for_valor,  # noqa: F401
@@ -105,7 +106,6 @@ from bridge.routing import (  # noqa: E402
     should_respond_async,
     should_respond_sync,  # noqa: F401
 )
-from config.enums import PersonaType, SessionType  # noqa: E402
 from tools.link_analysis import (  # noqa: E402
     extract_urls,
     extract_youtube_urls,
@@ -129,8 +129,6 @@ _BRIDGE_PROJECT_DIR = Path(__file__).parent.parent
 # Flood-backoff and last-connected file paths
 _FLOOD_BACKOFF_FILE = _BRIDGE_PROJECT_DIR / "data" / "flood-backoff"
 _LAST_CONNECTED_FILE = _BRIDGE_PROJECT_DIR / "data" / "last_connected"
-_bridge_was_connected = False  # Set True after successful Telegram auth
-_catchup_last_connected = None  # Captured before overwrite for catchup lookback
 
 # Staleness threshold: ignore flood-backoff files older than 24 hours
 _FLOOD_BACKOFF_MAX_AGE_SECONDS = 24 * 3600
@@ -581,13 +579,35 @@ RESPOND_TO_DMS = any(
 )
 
 # DM whitelist - only respond to DMs from these Telegram user IDs
-# Loaded from projects.json dms.whitelist array
-# All DM users get uniform qa_only access (no per-user permission levels)
+# Loaded from ~/Desktop/Valor/dm_whitelist.json
+# Falls back to TELEGRAM_DM_WHITELIST env var
+# Format: {"users": {"123456": {"name": "Name", "permissions": "full|qa_only"}}}
 DM_WHITELIST: set[int] = set()
-_whitelist_entries = CONFIG.get("dms", {}).get("whitelist", [])
-for _entry in _whitelist_entries:
-    if isinstance(_entry, dict) and "id" in _entry:
-        DM_WHITELIST.add(int(_entry["id"]))
+DM_WHITELIST_CONFIG: dict[int, dict] = {}  # Full config per user for permissions lookup
+_dm_whitelist_path = Path.home() / "Desktop" / "Valor" / "dm_whitelist.json"
+if _dm_whitelist_path.exists():
+    try:
+        _wl_config = json.loads(_dm_whitelist_path.read_text())
+        _users = _wl_config.get("users", {})
+        for uid, user_info in _users.items():
+            uid_int = int(uid)
+            DM_WHITELIST.add(uid_int)
+            # Handle both old format (string name) and new format (dict with permissions)
+            if isinstance(user_info, str):
+                DM_WHITELIST_CONFIG[uid_int] = {
+                    "name": user_info,
+                    "permissions": "full",
+                }
+            else:
+                DM_WHITELIST_CONFIG[uid_int] = user_info
+    except (json.JSONDecodeError, ValueError, OSError) as e:
+        logger.warning(f"Failed to load DM whitelist from {_dm_whitelist_path}: {e}")
+if not DM_WHITELIST:
+    for _id in os.getenv("TELEGRAM_DM_WHITELIST", "").split(","):
+        _id = _id.strip()
+        if _id.isdigit():
+            DM_WHITELIST.add(int(_id))
+            DM_WHITELIST_CONFIG[int(_id)] = {"permissions": "full"}
 
 # Propagate config to routing module so imported functions work correctly
 _routing_module.CONFIG = CONFIG
@@ -596,6 +616,7 @@ _routing_module.GROUP_TO_PROJECT = GROUP_TO_PROJECT
 _routing_module.ALL_MONITORED_GROUPS = ALL_MONITORED_GROUPS
 _routing_module.RESPOND_TO_DMS = RESPOND_TO_DMS
 _routing_module.DM_WHITELIST = DM_WHITELIST
+_routing_module.DM_WHITELIST_CONFIG = DM_WHITELIST_CONFIG
 _routing_module.DEFAULT_MENTIONS = DEFAULTS.get("telegram", {}).get(
     "mention_triggers", ["@valor", "valor", "hey valor"]
 )
@@ -607,6 +628,7 @@ import bridge.context as _context_module  # noqa: E402
 
 _context_module.CONFIG = CONFIG
 _context_module.DEFAULTS = DEFAULTS
+_context_module.DM_WHITELIST_CONFIG = DM_WHITELIST_CONFIG
 _context_module._BRIDGE_PROJECT_DIR = _BRIDGE_PROJECT_DIR
 
 # Re-export LINK_COLLECTORS from context module (used by handler)
@@ -833,8 +855,9 @@ async def main():
         # Save to subconscious memory (non-fatal, never crashes bridge)
         try:
             if text and text.strip() and not getattr(sender, "bot", False):
-                from models.memory import Memory
                 from popoto import InteractionWeight
+
+                from models.memory import Memory
 
                 Memory.safe_save(
                     agent_id=sender_name or "unknown",
@@ -1406,18 +1429,18 @@ async def main():
 
         # Determine session_type from config-driven mode, with title-prefix fallback.
         # "dev" mode → DevSession (full permissions, dev persona)
-        # Everything else → ChatSession (PM persona, orchestrates DevSessions + Teammate)
-        from bridge.routing import resolve_persona
+        # Everything else → ChatSession (PM persona, orchestrates DevSessions + Q&A)
+        from bridge.routing import resolve_chat_mode
 
         _classification = classification_result.get("type")
-        _persona = resolve_persona(project, chat_title, is_dm=is_dm)
-        if _persona == PersonaType.DEVELOPER:
-            _session_type = SessionType.DEV  # DevSession — Dev persona, full permissions
+        _chat_mode = resolve_chat_mode(project, chat_title, is_dm=is_dm)
+        if _chat_mode == "dev":
+            _session_type = "dev"  # DevSession — Dev persona, full permissions
             logger.info(
                 f"[{project_name}] Dev mode (config-driven): {chat_title!r} → session_type=dev"
             )
         else:
-            _session_type = SessionType.CHAT  # ChatSession — PM persona, handles SDLC and Teammate
+            _session_type = "chat"  # ChatSession — PM persona, handles both SDLC and Q&A
 
         # Enqueue: session_type drives ChatSession vs DevSession creation.
         depth = await enqueue_job(
@@ -1444,9 +1467,6 @@ async def main():
         from bridge.dedup import record_message_processed
 
         await record_message_processed(event.chat_id, message.id)
-
-    # Mutable ref for knowledge watcher (populated later, read by shutdown handler)
-    _knowledge_watcher_ref: list = [None]
 
     # Register signal handlers for graceful shutdown
     loop = asyncio.get_event_loop()
@@ -1480,18 +1500,8 @@ async def main():
         if orphans:
             logger.info(f"Killed {orphans} SDK subprocess(es) during shutdown")
 
-        # Stop knowledge watcher if running
-        try:
-            if _knowledge_watcher_ref and _knowledge_watcher_ref[0] is not None:
-                _knowledge_watcher_ref[0].stop()
-        except Exception:
-            pass
-
         # Write final last-connected timestamp before shutting down
-        # Only if we actually connected successfully (don't poison catchup
-        # lookback when bridge exits due to auth failure)
-        if _bridge_was_connected:
-            _write_last_connected()
+        _write_last_connected()
 
         logger.info("Waiting 2s for in-flight tasks to finish...")
         await asyncio.sleep(2)
@@ -1575,12 +1585,7 @@ async def main():
                 _cleanup_session_locks()
             await asyncio.sleep(wait_time)
     logger.info("Connected to Telegram")
-    global _bridge_was_connected
-    _bridge_was_connected = True
     _clear_flood_backoff()
-    # Read last_connected BEFORE writing new timestamp so catchup gets the real gap
-    global _catchup_last_connected
-    _catchup_last_connected = _read_last_connected()
     _write_last_connected()
 
     # Replay any dead-lettered messages from previous session
@@ -1736,10 +1741,9 @@ async def main():
             from agent.job_queue import enqueue_job as _enqueue_job
             from bridge.catchup import scan_for_missed_messages
 
-            # Use the last_connected value captured BEFORE we wrote the new
-            # timestamp at connect time, so we get the real downtime gap
+            # Compute dynamic lookback from last_connected timestamp
             lookback = None
-            last_connected = _catchup_last_connected
+            last_connected = _read_last_connected()
             if last_connected is not None:
                 lookback = datetime.now(UTC) - last_connected
                 logger.info(
@@ -1764,24 +1768,6 @@ async def main():
             logger.error(f"Catchup scan failed: {e}", exc_info=True)
 
     asyncio.create_task(_run_catchup())
-
-    # Start message reconciler (detects live-session gaps)
-    try:
-        from agent.job_queue import enqueue_job as _reconciler_enqueue
-        from bridge.reconciler import reconciler_loop
-
-        asyncio.create_task(
-            reconciler_loop(
-                client=client,
-                monitored_groups=ALL_MONITORED_GROUPS,
-                should_respond_fn=should_respond_async,
-                enqueue_job_fn=_reconciler_enqueue,
-                find_project_fn=find_project_for_chat,
-            )
-        )
-        logger.info("Message reconciler started")
-    except Exception as e:
-        logger.error(f"Failed to start message reconciler: {e}")
 
     # Start session watchdog
     try:
@@ -1809,29 +1795,6 @@ async def main():
             logger.info("Fell back to standalone job health monitor")
         except Exception as e2:
             logger.error(f"Failed to start fallback health monitor: {e2}")
-
-    # Start knowledge document watcher (monitors ~/work-vault/ for file changes)
-    try:
-        from bridge.knowledge_watcher import KnowledgeWatcher
-
-        # Configure popoto embedding provider before starting watcher
-        try:
-            import popoto
-            from popoto.embeddings.openai import OpenAIProvider
-
-            popoto.configure(embedding_provider=OpenAIProvider())
-            logger.info("Configured popoto OpenAI embedding provider")
-        except Exception as e:
-            logger.warning(f"Failed to configure embedding provider: {e}")
-
-        _kw = KnowledgeWatcher()
-        if _kw.start():
-            _knowledge_watcher_ref[0] = _kw
-            logger.info("Knowledge document watcher started")
-        else:
-            logger.warning("Knowledge document watcher failed to start")
-    except Exception as e:
-        logger.error(f"Failed to start knowledge watcher: {e}")
 
     # Start message query polling loop
     async def message_query_loop():
@@ -1907,21 +1870,6 @@ async def main():
                         )
                 except Exception as e:
                     logger.debug(f"[heartbeat] Zombie cleanup error: {e}")
-
-            # Knowledge watcher liveness check every 60s (piggyback on heartbeat)
-            if _knowledge_watcher_ref[0] is not None:
-                try:
-                    _kw = _knowledge_watcher_ref[0]
-                    if not _kw.is_healthy():
-                        logger.warning("[heartbeat] Knowledge watcher unhealthy, restarting...")
-                        _kw.stop()
-                        if _kw.start():
-                            logger.info("[heartbeat] Knowledge watcher restarted successfully")
-                        else:
-                            logger.error("[heartbeat] Knowledge watcher restart failed")
-                            _knowledge_watcher_ref[0] = None
-                except Exception as e:
-                    logger.debug(f"[heartbeat] Knowledge watcher check error: {e}")
 
             # Log heartbeat every 4th tick (~2min) for watchdog
             if uptime_min > 0 and uptime_min % 2 == 0:

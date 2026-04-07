@@ -103,8 +103,8 @@ Found 5 messages:
 - Cleans up IPC files
 
 **2. User Lookup** (`tools/telegram_users.py`)
-- Loads whitelist from the `dms.whitelist` array in `projects.json`
-- Maps names to Telegram user IDs (case-insensitive)
+- Loads whitelist from `~/Desktop/Valor/dm_whitelist.json`
+- Maps usernames to Telegram user IDs (case-insensitive)
 - Provides validation before making requests
 
 **3. Bridge Handler** (`bridge/telegram_bridge.py::check_message_query_request()`)
@@ -182,7 +182,7 @@ Available usernames:
   - tom
 ```
 
-**Fix**: Use a valid name from the whitelist (`dms.whitelist` in `projects.json`)
+**Fix**: Use a valid username from the whitelist (`~/Desktop/Valor/dm_whitelist.json`)
 
 ### Bridge Not Running
 
@@ -266,8 +266,8 @@ Media messages show empty text; future enhancement could add media type indicato
 ### Whitelist Configuration
 
 The tool uses the existing DM whitelist system:
-- **Location**: `dms.whitelist` array in `~/Desktop/Valor/projects.json`
-- **Format**: Array of objects with `id`, `name`, and `username` fields
+- **Location**: `~/Desktop/Valor/dm_whitelist.json`
+- **Format**: Same as bridge whitelist
 - **Shared**: Both bridge and CLI use `tools/telegram_users.py`
 
 ### Data Directory

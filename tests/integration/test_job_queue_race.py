@@ -205,7 +205,7 @@ class TestDrainGuard:
 
     def test_drain_timeout_is_configurable_constant(self):
         """DRAIN_TIMEOUT should be a module-level constant, not hardcoded."""
-        assert isinstance(DRAIN_TIMEOUT, int | float)
+        assert isinstance(DRAIN_TIMEOUT, (int, float))
         assert DRAIN_TIMEOUT > 0
 
     @pytest.mark.asyncio

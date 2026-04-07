@@ -44,7 +44,7 @@ class Reflection(Model):
     next_due = Field(type=float, null=True)
     run_count = IntField(default=0)
     last_status = Field(default="pending")  # pending | running | success | error | skipped
-    last_error = Field(null=True)
+    last_error = Field(null=True, max_length=1000)
     last_duration = Field(type=float, null=True)
     run_history = ListField(default=[])  # List of run dicts, capped at 200
 

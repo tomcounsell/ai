@@ -85,7 +85,6 @@ class TestCatchupRedisDedup:
 
         mock_dialog = MagicMock()
         mock_dialog.entity = mock_entity
-        mock_dialog.id = -5051653062
 
         mock_client.get_dialogs = AsyncMock(return_value=[mock_dialog])
 

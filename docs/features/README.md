@@ -19,7 +19,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Build Output Verification](build-output-verification.md) | Three-layer verification gates preventing /do-build from silently completing with no code changes | Shipped |
 | [Build Session Reliability](build-session-reliability.md) | Logging propagation, commit-on-exit, worktree isolation, health monitoring | Shipped |
 | [Chat Dev Session Architecture](chat-dev-session-architecture.md) | ChatSession/DevSession split — session type discriminator splitting orchestration from execution | Shipped |
-| [ChatSession Teammate Mode](chatsession-teammate-mode.md) | Haiku-based intent classifier routing informational queries to direct ChatSession response without DevSession spawn | Shipped |
+| [ChatSession Q&A Mode](chatsession-qa-mode.md) | Haiku-based intent classifier routing informational queries to direct ChatSession response without DevSession spawn | Shipped |
 | [Classification](classification.md) | Auto-classification of messages as bug/feature/chore with immutability and reclassify skill | Shipped |
 | [Claude Code Memory](claude-code-memory.md) | Hook-based memory integration for Claude Code CLI sessions: prompt ingestion, tool-call recall with sliding window, deja vu signals, post-session extraction, AgentSession lifecycle tracking, and post-merge learning | Shipped |
 | [Code Impact Finder](code-impact-finder.md) | Semantic search for blast radius analysis during /do-plan | Shipped |
@@ -44,17 +44,16 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Hooks & Session Logging](hooks-session-logging.md) | Claude Code hooks for session event capture and structured logging | Shipped |
 | [Image Vision Support](image-vision.md) | Ollama LLaVA image descriptions for visual content in Telegram | Shipped |
 | [Intake Classifier](intake-classifier.md) | Haiku-powered message intent triage (interjection/new_work/acknowledgment) for bridge routing | Shipped |
+| [Issue Poller](issue-poller.md) | Automatic SDLC kickoff: polls GitHub issues, dedup via Claude Haiku, auto-creates draft plans | Shipped |
 | [Job Dependency Tracking](job-dependency-tracking.md) | Sibling dependency graph, branch-session mapping, checkpoint/restore, PM controls, session observability | Shipped |
 | [Job Health Monitor](job-health-monitor.md) | Detects and recovers stuck running jobs in the queue | Shipped |
 | [Job Hierarchy](job-scheduling.md#parent-child-job-hierarchy) | Parent-child job decomposition with completion propagation, progress tracking, and orphan/stuck parent self-healing | Shipped |
 | [Job Queue Reliability](job-queue.md) | KeyField index fixes, Event-based drain guard, delete-and-recreate pattern, orphan recovery | Shipped |
 | [Job Self-Scheduling](job-scheduling.md) | Agent-initiated queue operations: schedule SDLC jobs, deferred execution, 4-tier priority, queue manipulation | Shipped |
-| [Knowledge Document Integration](knowledge-document-integration.md) | Indexes work-vault markdown/text files into the memory system with project-scoped isolation, filesystem watching, and companion memories for subconscious recall | Shipped |
 | [Link Content Summarization](link-summarization.md) | Auto-fetch and summarize shared links via Perplexity API | Shipped |
 | [Lint Auto-Fix](lint-auto-fix.md) | Automatic lint/format fixing via pre-commit hook and PostToolUse hook, eliminating agent churn loops | Shipped |
 | [Memory Search Tool](memory-search-tool.md) | Direct interface for searching, saving, inspecting, and forgetting memories from the Memory model | Shipped |
 | [Message Pipeline](message-pipeline.md) | Deferred enrichment pipeline for fast message acknowledgment and zero-loss restarts | Shipped |
-| [Message Reconciler](message-reconciler.md) | Periodic background scan detecting and recovering Telegram messages missed during live bridge connections | Shipped |
 | [Mid-Session Steering](mid-session-steering.md) | End-to-end steering flow for injecting reply-to messages into running agent sessions | Shipped |
 | [Observer Agent](observer-agent.md) | Deterministic SDLC steer/deliver router — no LLM calls, rules-based pipeline progression | Shipped |
 | [OOP Audit](do-oop-audit.md) | Prompt-only audit skill scanning Python classes for 14 structural anti-patterns with framework detection and severity grouping | Shipped |
@@ -71,8 +70,8 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Popoto Redis Expansion](popoto-redis-expansion.md) | Migration from JSONL/JSON file state to Redis for atomicity and queries | Shipped |
 | [Race Condition Analysis](race-condition-analysis.md) | Structured concurrency analysis section in plan template with soft validator for async code | Shipped |
 | [Reaction Semantics](reaction-semantics.md) | Emoji reaction protocol for message delivery feedback and silent loss prevention | Shipped |
-| [Redis Model Relationships](redis-models.md) | Cross-references between Popoto models, project_key on all models, enrichment metadata ownership on TelegramMessage, field type semantics (KeyField vs IndexedField) | Shipped |
-| [Reflections](reflections.md) | Unified reflection scheduler with declarative YAML registry, Redis state tracking, skip-if-running guard; subsumes health check, orphan recovery, branch cleanup, and 15-unit daily maintenance pipeline (including PR review audit) | Shipped |
+| [Redis Model Relationships](redis-models.md) | Cross-references between Popoto models, project_key on all models, enrichment metadata ownership on TelegramMessage | Shipped |
+| [Reflections](reflections.md) | Unified reflection scheduler with declarative YAML registry, Redis state tracking, skip-if-running guard; subsumes health check, orphan recovery, branch cleanup, and 14-unit daily maintenance pipeline | Shipped |
 | [Reflections Dashboard](reflections-dashboard.md) | Web dashboard for monitoring reflection scheduler execution, run history, and ignore patterns at `/reflections/` | Shipped |
 | [Remote Update](remote-update.md) | Telegram command and cron for remote system updates across machines | Shipped |
 | [Review Workflow Screenshots](review-workflow-screenshots.md) | Screenshot capture during review for visual validation | Shipped |
@@ -83,7 +82,6 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [SDLC Observer](sdlc-observer.md) | Web dashboard for real-time SDLC pipeline tracking with stage indicators, event timelines, and artifact links at `/sdlc/` | Shipped |
 | [SDLC Pipeline Integrity](sdlc-pipeline-integrity.md) | Session continuation hardening, deterministic URL construction, merge guard hook, and MERGE pipeline stage | Shipped |
 | [SDLC Stage Handoff](sdlc-stage-handoff.md) | Structured GitHub issue comments for cross-stage context relay -- each stage posts findings on completion and reads prior stage context on start | Shipped |
-| [Standardized Enums](standardized-enums.md) | StrEnum definitions for session types, personas, classifications, and chat modes replacing magic strings | Shipped |
 | [SDLC-First Routing](sdlc-first-routing.md) | Automatic work request classification (Ollama/Haiku) and orchestrator routing for SDLC vs conversational requests, with cross-repo `gh` resolution via `GH_REPO` env var | Shipped |
 | [Semantic Doc Impact Finder](semantic-doc-impact-finder.md) | Two-stage semantic search (embedding recall + LLM reranking) for finding docs affected by code changes | Shipped |
 | [Semantic Session Routing](semantic-session-routing.md) | Semantic matching of unthreaded messages to active sessions with declared expectations via structured summarizer output | Shipped |
@@ -101,7 +99,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Stall Retry](stall-retry.md) | Automatic retry of stalled agent sessions with exponential backoff, process cleanup, and Telegram notification on final failure | Shipped |
 | [Steering Queue](steering-queue.md) | Mid-execution course correction via Telegram reply threads and parent-child ChatSession-to-DevSession steering | Shipped |
 | [Structured Logging & Telemetry](structured-logging-telemetry.md) | Redis-backed telemetry counters, structured log lines, and health check integration for Observer Agent observability | Shipped |
-| [Subconscious Memory](subconscious-memory.md) | Automatic and intentional memory with structured metadata (category, file paths, tags), dismissal tracking with importance decay, multi-query decomposition for broader retrieval, and category-weighted recall re-ranking | Shipped |
+| [Subconscious Memory](subconscious-memory.md) | Automatic and intentional memory with structured metadata (category, file paths, tags), dismissal tracking with importance decay, and multi-query decomposition for broader retrieval | Shipped |
 | [Summarizer Format](summarizer-format.md) | Structured bullet-point output with SDLC stage progress and markdown links for Telegram delivery | Shipped |
 | [SuperWhisper Transcription](superwhisper-transcription.md) | Dual-backend audio transcription with local SuperWhisper primary and OpenAI Whisper API fallback | Shipped |
 | [System Overview](system-overview.md) | High-level architecture and design principles | Archived |

@@ -1,7 +1,7 @@
 """Subconscious memory thought injection for PostToolUse hook.
 
-Checks ExistenceFilter for topic relevance, retrieves memories via
-BM25 + RRF fusion, and returns <thought> blocks via additionalContext.
+Checks ExistenceFilter for topic relevance, assembles context via
+ContextAssembler, and returns <thought> blocks via additionalContext.
 
 Rate-limited via sliding window: every WINDOW_SIZE tool calls, extracts
 topic keywords from the current window plus previous windows in the buffer.
@@ -155,56 +155,6 @@ def _cluster_keywords(keywords: list[str], max_clusters: int = 3) -> list[list[s
     return clusters[:max_clusters]
 
 
-def _apply_category_weights(records: list) -> list:
-    """Re-rank memory records by applying category-based weight multipliers.
-
-    After RRF fusion returns scored results, multiply each record's
-    effective score by its category weight, then re-sort descending.
-    Records with missing or malformed metadata get the default weight (1.0).
-
-    Args:
-        records: List of Memory records with `score` attribute (RRF score).
-
-    Returns:
-        Re-sorted list of records (same objects, new order).
-    """
-    if not records:
-        return records
-
-    try:
-        from config.memory_defaults import CATEGORY_RECALL_WEIGHTS
-
-        default_weight = CATEGORY_RECALL_WEIGHTS.get("default", 1.0)
-
-        def _get_weight(record: Any) -> float:
-            try:
-                meta = getattr(record, "metadata", None)
-                if not isinstance(meta, dict):
-                    return default_weight
-                category = meta.get("category", "")
-                if not isinstance(category, str):
-                    return default_weight
-                return CATEGORY_RECALL_WEIGHTS.get(category, default_weight)
-            except Exception:
-                return default_weight
-
-        def _get_score(record: Any) -> float:
-            try:
-                return float(getattr(record, "score", 0.0) or 0.0)
-            except (TypeError, ValueError):
-                return 0.0
-
-        # Sort by weighted score descending
-        return sorted(
-            records,
-            key=lambda r: _get_score(r) * _get_weight(r),
-            reverse=True,
-        )
-    except Exception:
-        # Fail silent -- return unmodified order
-        return records
-
-
 def check_and_inject(
     session_id: str,
     tool_name: str,
@@ -279,10 +229,17 @@ def check_and_inject(
                 )
             return None
 
-        # Multi-query decomposition — cluster keywords and retrieve via BM25 + RRF
+        # Multi-query decomposition — cluster keywords and query each cluster
         import time
 
-        from agent.memory_retrieval import retrieve_memories
+        from popoto import ContextAssembler
+
+        assembler = ContextAssembler(
+            model_class=Memory,
+            score_weights={"relevance": 0.6, "confidence": 0.3},
+            max_items=MAX_THOUGHTS,
+            max_tokens=1000,
+        )
 
         clusters = _cluster_keywords(unique_keywords)
         all_records = []
@@ -290,13 +247,12 @@ def check_and_inject(
 
         query_start = time.monotonic()
         for cluster in clusters:
-            cluster_query = " ".join(cluster[:5])
-            records = retrieve_memories(
-                query_text=cluster_query,
-                project_key=project_key,
-                limit=MAX_THOUGHTS,
+            result = assembler.assemble(
+                query_cues={"topic": " ".join(cluster[:5])},
+                agent_id=project_key,
+                partition_filters={"project_key": project_key},
             )
-            for record in records:
+            for record in result.records or []:
                 rid = str(getattr(record, "memory_id", "") or "")
                 if rid and rid not in seen_ids:
                     seen_ids.add(rid)
@@ -318,9 +274,6 @@ def check_and_inject(
                     f"{topic_hint} before, but the details are unclear.</thought>"
                 )
             return None
-
-        # Re-rank by category weights (corrections/decisions surface higher)
-        all_records = _apply_category_weights(all_records)
 
         # Format as <thought> blocks
         thoughts: list[str] = []

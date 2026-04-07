@@ -92,8 +92,9 @@ class TestTelegramMessageEnrichmentFields:
 
     def test_project_key_is_key_field(self):
         """TelegramMessage.project_key should be a KeyField for querying."""
-        from models.telegram import TelegramMessage
         from popoto import KeyField
+
+        from models.telegram import TelegramMessage
 
         pk_field = TelegramMessage._meta.fields["project_key"]
         assert isinstance(pk_field, KeyField)
@@ -310,8 +311,9 @@ class TestProjectKeyPresence:
 
     def test_chat_project_key_is_regular_field(self):
         """Chat.project_key is a regular Field (not KeyField) to avoid delete-and-recreate."""
-        from models.chat import Chat
         from popoto import Field, KeyField
+
+        from models.chat import Chat
 
         pk_field = Chat._meta.fields["project_key"]
         assert isinstance(pk_field, Field)

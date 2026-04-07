@@ -26,19 +26,6 @@ def parent_session_env(monkeypatch):
     monkeypatch.setenv("VALOR_SESSION_ID", "parent-chat-session-abc")
 
 
-@pytest.fixture
-def parent_session_registry():
-    """Register a session in the session registry to simulate a parent ChatSession."""
-    from agent.hooks import session_registry
-
-    session_registry._reset_for_testing()
-    # Pre-register and promote so resolve("sdk-session-1") returns the bridge session ID
-    session_registry.register_pending("parent-chat-session-abc")
-    session_registry.complete_registration("sdk-session-1")
-    yield
-    session_registry._reset_for_testing()
-
-
 class TestPreToolUseDevSessionDetection:
     """PreToolUse hook should detect Agent tool calls spawning dev-sessions."""
 
@@ -53,9 +40,7 @@ class TestPreToolUseDevSessionDetection:
             "tool_use_id": "tool-use-123",
         }
 
-    def test_detects_agent_tool_with_dev_session_type(
-        self, mock_hook_context, parent_session_registry
-    ):
+    def test_detects_agent_tool_with_dev_session_type(self, mock_hook_context, parent_session_env):
         """When tool_name=Agent and tool_input contains type=dev-session,
         creates an AgentSession with session_type=dev and correct parent."""
         from agent.hooks.pre_tool_use import pre_tool_use_hook
@@ -108,12 +93,11 @@ class TestPreToolUseDevSessionDetection:
 
             mock_create.assert_not_called()
 
-    def test_no_parent_session_id_skips_registration(self, mock_hook_context):
-        """When no session is in the registry, DevSession registration is skipped."""
-        from agent.hooks import session_registry
-        from agent.hooks.pre_tool_use import pre_tool_use_hook
+    def test_no_parent_session_id_skips_registration(self, mock_hook_context, monkeypatch):
+        """When VALOR_SESSION_ID is not set, DevSession registration is skipped."""
+        monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
 
-        session_registry._reset_for_testing()
+        from agent.hooks.pre_tool_use import pre_tool_use_hook
 
         input_data = self._make_agent_input()
 
@@ -213,9 +197,7 @@ class TestSubagentStopDevSessionCompletion:
         with patch("agent.hooks.subagent_stop._register_dev_session_completion") as mock_register:
             result = asyncio.run(subagent_stop_hook(input_data, None, mock_hook_context))
 
-            mock_register.assert_called_once_with(
-                "dev-agent-xyz", input_data=input_data, claude_uuid="sdk-session-1"
-            )
+            mock_register.assert_called_once_with("dev-agent-xyz")
             assert result == {}
 
     def test_ignores_non_dev_session_agents(self, mock_hook_context):

@@ -29,8 +29,6 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel, field_validator
-
 from bridge.pipeline_graph import (
     DISPLAY_STAGES,
     PIPELINE_EDGES,
@@ -47,54 +45,6 @@ ALL_STAGES = ["ISSUE", "PLAN", "CRITIQUE", "BUILD", "TEST", "PATCH", "REVIEW", "
 
 # Valid status values
 VALID_STATUSES = frozenset({"pending", "ready", "in_progress", "completed", "failed"})
-
-# Set of known stage names for fast lookup
-_ALL_STAGES_SET = frozenset(ALL_STAGES)
-
-
-class StageStates(BaseModel):
-    """Validated container for stage_states JSON data.
-
-    Enforces that stage names are from ALL_STAGES and status values are
-    from VALID_STATUSES. Unknown stage names are dropped. Unknown status
-    values default to 'pending' for backward compatibility.
-
-    Used at read/write boundaries in PipelineStateMachine to ensure data
-    integrity of stage_states persisted in Redis.
-    """
-
-    stages: dict[str, str]
-
-    @field_validator("stages", mode="before")
-    @classmethod
-    def validate_stages(cls, v: dict) -> dict:
-        """Drop unknown stage names; coerce unknown statuses to 'pending'."""
-        if not isinstance(v, dict):
-            return {}
-        validated = {}
-        for stage, status in v.items():
-            # Skip internal metadata keys (e.g. _patch_cycle_count)
-            if stage.startswith("_"):
-                continue
-            if stage not in _ALL_STAGES_SET:
-                logger.debug(f"StageStates: dropping unknown stage {stage!r}")
-                continue
-            if status not in VALID_STATUSES:
-                logger.debug(
-                    f"StageStates: unknown status {status!r} for {stage}, defaulting to 'pending'"
-                )
-                status = "pending"
-            validated[stage] = status
-        return validated
-
-    @classmethod
-    def from_dict(cls, data: dict) -> StageStates:
-        """Create StageStates from a raw dict, filtering out metadata keys."""
-        return cls(stages=data)
-
-    def to_dict(self) -> dict[str, str]:
-        """Return the validated stages dict."""
-        return dict(self.stages)
 
 
 class PipelineStateMachine:
@@ -155,26 +105,7 @@ class PipelineStateMachine:
             self.states["ISSUE"] = "ready"
 
     def _save(self) -> None:
-        """Persist state back to the session.
-
-        Validates stage_states via the StageStates Pydantic model before
-        serializing. Validation errors log a warning but do not crash --
-        the data is still saved to avoid losing progress.
-        """
-        # Validate states before saving
-        try:
-            validated = StageStates.from_dict(self.states)
-            self.states = validated.to_dict()
-            # Re-add any missing stages as pending after validation
-            for stage in ALL_STAGES:
-                if stage not in self.states:
-                    self.states[stage] = "pending"
-        except Exception as e:
-            logger.warning(
-                f"StageStates validation failed for session "
-                f"{getattr(self.session, 'session_id', '?')}: {e}. Saving anyway."
-            )
-
+        """Persist state back to the session."""
         data = dict(self.states)
         data["_patch_cycle_count"] = self.patch_cycle_count
         data["_critique_cycle_count"] = self.critique_cycle_count

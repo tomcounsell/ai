@@ -1,86 +1,86 @@
-"""Tests for Teammate reduced nudge cap in the nudge loop."""
+"""Tests for Q&A reduced nudge cap in the nudge loop."""
 
 from agent.job_queue import MAX_NUDGE_COUNT, classify_nudge_action
-from agent.teammate_handler import TEAMMATE_MAX_NUDGE_COUNT
+from agent.qa_handler import QA_MAX_NUDGE_COUNT
 
 
-class TestTeammateNudgeCap:
-    def test_teammate_cap_is_lower_than_default(self):
-        assert TEAMMATE_MAX_NUDGE_COUNT < MAX_NUDGE_COUNT
+class TestQaNudgeCap:
+    def test_qa_cap_is_lower_than_default(self):
+        assert QA_MAX_NUDGE_COUNT < MAX_NUDGE_COUNT
 
-    def test_empty_output_nudges_within_teammate_cap(self):
-        """Within Teammate cap, empty output should still nudge."""
+    def test_empty_output_nudges_within_qa_cap(self):
+        """Within Q&A cap, empty output should still nudge."""
         action = classify_nudge_action(
             msg="",
             stop_reason=None,
             auto_continue_count=5,
-            max_nudge_count=TEAMMATE_MAX_NUDGE_COUNT,
+            max_nudge_count=QA_MAX_NUDGE_COUNT,
         )
         assert action == "nudge_empty"
 
-    def test_empty_output_delivers_at_teammate_cap(self):
-        """At Teammate cap, empty output should deliver fallback."""
+    def test_empty_output_delivers_at_qa_cap(self):
+        """At Q&A cap, empty output should deliver fallback."""
         action = classify_nudge_action(
             msg="",
             stop_reason=None,
-            auto_continue_count=TEAMMATE_MAX_NUDGE_COUNT,
-            max_nudge_count=TEAMMATE_MAX_NUDGE_COUNT,
+            auto_continue_count=QA_MAX_NUDGE_COUNT,
+            max_nudge_count=QA_MAX_NUDGE_COUNT,
         )
         assert action == "deliver_fallback"
 
     def test_normal_cap_still_allows_more_nudges(self):
-        """At Teammate cap count, normal cap should still allow nudges."""
+        """At Q&A cap count, normal cap should still allow nudges."""
         action = classify_nudge_action(
             msg="",
             stop_reason=None,
-            auto_continue_count=TEAMMATE_MAX_NUDGE_COUNT,
+            auto_continue_count=QA_MAX_NUDGE_COUNT,
             max_nudge_count=MAX_NUDGE_COUNT,
         )
         assert action == "nudge_empty"
 
 
-class TestTeammateReactionClearing:
-    """Tests for Teammate reaction clearing behavior (issue #541)."""
+class TestQaReactionClearing:
+    """Tests for Q&A reaction clearing behavior (issue #541)."""
 
-    def test_teammate_session_gets_none_reaction(self):
-        """Teammate sessions should clear the processing reaction (None) on success."""
+    def test_qa_session_gets_none_reaction(self):
+        """Q&A sessions should clear the processing reaction (None) on success."""
         from unittest.mock import MagicMock
 
         session = MagicMock()
-        session.session_mode = "teammate"
+        session.qa_mode = True
 
-        # The reaction logic in job_queue.py checks session_mode and returns None
-        # for successful Teammate sessions. We test the conditional directly.
+        # The reaction logic in job_queue.py checks qa_mode and returns None
+        # for successful Q&A sessions. We test the conditional directly.
         task_error = False
-        if session and getattr(session, "session_mode", None) == "teammate" and not task_error:
+        if session and getattr(session, "qa_mode", False) and not task_error:
             emoji = None
         else:
             emoji = "completion"
         assert emoji is None
 
     def test_work_session_gets_completion_reaction(self):
-        """Non-Teammate sessions should still get a completion emoji."""
+        """Non-Q&A sessions should still get a completion emoji."""
         from unittest.mock import MagicMock
 
         session = MagicMock()
-        session.session_mode = None
+        session.qa_mode = False
 
         task_error = False
-        if session and getattr(session, "session_mode", None) == "teammate" and not task_error:
+        if session and getattr(session, "qa_mode", False) and not task_error:
             emoji = None
         else:
             emoji = "completion"
         assert emoji == "completion"
 
-    def test_teammate_error_gets_error_reaction(self):
-        """Teammate sessions with errors should still get error reaction."""
+    def test_qa_error_gets_error_reaction(self):
+        """Q&A sessions with errors should still get error reaction."""
         from unittest.mock import MagicMock
 
         session = MagicMock()
-        session.session_mode = "teammate"
+        session.qa_mode = True
 
         task_error = True
-        if session and getattr(session, "session_mode", None) == "teammate" and not task_error:
+        if session and getattr(session, "qa_mode", False) and not task_error:
             emoji = None
         else:
             emoji = "error"

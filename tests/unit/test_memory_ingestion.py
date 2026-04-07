@@ -5,8 +5,9 @@ class TestMemoryIngestion:
     """Test Memory.save() for Telegram messages."""
 
     def test_human_message_creates_memory(self):
-        from models.memory import Memory
         from popoto import InteractionWeight
+
+        from models.memory import Memory
 
         m = Memory.safe_save(
             agent_id="test-user",
@@ -84,6 +85,6 @@ class TestSystemPromptPriming:
 
         content = base_md.read_text()
         # Memory sections should be at the end of the file
-        last_section = content[-3500:]
+        last_section = content[-2500:]
         assert "Subconscious Memory" in last_section
         assert "Intentional Memory" in last_section

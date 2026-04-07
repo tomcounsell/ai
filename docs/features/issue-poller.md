@@ -1,0 +1,142 @@
+# Issue Poller
+
+Automatic SDLC kickoff for new GitHub issues. Polls configured repositories on a 5-minute schedule, detects new issues, runs deduplication checks, and auto-creates draft plans.
+
+## How It Works
+
+1. **Cron fires** every 5 minutes via launchd (`com.valor.issue-poller.plist`)
+2. **Polls** `gh issue list` for each project in `~/Desktop/Valor/projects.json` that has a `github` key
+3. **Filters** out already-seen issues using the `SeenIssue` Popoto model (`models/seen_issue.py`)
+4. **Validates** issue context (title + body length), flagging thin issues as `needs-review`
+5. **Dedup check** using Claude Haiku to score semantic similarity against other open issues
+6. **Dispatches** plan creation via `claude -p` for valid unique issues
+7. **Labels** issues on GitHub: `auto-planned`, `possible-duplicate`, or `needs-review`
+8. **Notifies** via Telegram for all automated actions
+
+## Architecture
+
+```
+launchd (5 min) → scripts/issue_poller.py
+                    ├── Redis lock (prevent concurrent runs)
+                    ├── SeenIssue model (Popoto, tracks processed issues per repo)
+                    ├── ~/Desktop/Valor/projects.json (multi-project iteration)
+                    ├── gh CLI (fetch issues, apply labels, add comments)
+                    ├── scripts/issue_dedup.py (Claude Haiku similarity scoring)
+                    └── claude -p (dispatch /do-plan for new issues)
+```
+
+## State Management
+
+The poller uses a mix of Popoto models and raw Redis keys:
+
+### Popoto Models
+
+| Model | Key | Purpose |
+|-------|-----|---------|
+| `SeenIssue` (`models/seen_issue.py`) | `repo_key` (org/repo) | Tracks processed issue numbers per repository via a `SetField` |
+
+### Raw Redis Keys
+
+| Redis Key | Type | Purpose |
+|-----------|------|---------|
+| `issue_poller:lock` | String (TTL) | Distributed lock preventing concurrent runs |
+| `issue_poller:consecutive_failures` | Counter | Tracks consecutive cycle failures for alerting |
+
+## Deduplication
+
+The dedup engine (`scripts/issue_dedup.py`) uses Claude Haiku to score semantic similarity between issues:
+
+| Score Range | Classification | Action |
+|-------------|----------------|--------|
+| >= 0.8 | `duplicate` | Label `possible-duplicate`, comment with suspected original, notify |
+| 0.5 - 0.8 | `related` | Note in plan as dependency, proceed with planning |
+| < 0.5 | `unique` | Proceed with plan creation |
+
+Dedup is **best-effort**: if the Claude API fails, planning proceeds without dedup rather than blocking.
+
+## Agent D Comment Filtering
+
+The poller filters out automated comments from the `/do-docs` cascade (Agent D) when evaluating issue activity. Comments containing the signature `_Auto-posted by /do-docs cascade_` are excluded from:
+- Latest comment ID tracking (for plan freshness gates)
+- New activity evaluation (to prevent false re-processing)
+
+## Cross-Repo Dispatch
+
+When an issue belongs to a project other than the ai repo, the poller correctly targets that project's working directory instead of the ai repo. This prevents foreign-repo branches from being created inside the ai repo (which would wipe out ai files and corrupt git state).
+
+**How it works:**
+
+1. `poll_project()` extracts `working_directory` from the project dict
+2. `process_issue()` forwards it to `dispatch_plan_creation()`
+3. `dispatch_plan_creation()` runs `claude -p` with:
+   - `cwd=working_directory` (target project, not ai repo)
+   - `GH_REPO={org}/{repo}` env var (so the agent targets the right repo)
+   - `SDLC_TARGET_REPO={working_directory}` env var (for cross-repo plan file placement)
+
+For the ai repo itself (`working_directory == _project_root`), no new env vars are injected and behavior is unchanged.
+
+**Fallback:** If `working_directory` is empty or points to a non-existent path, a warning is logged and the ai repo root is used instead.
+
+This mirrors the pattern established in `agent/sdk_client.py` (PR #396) for Telegram-routed SDLC work.
+
+## Configuration
+
+Projects are loaded from `~/Desktop/Valor/projects.json`. Only entries with a `github` key are polled:
+
+```json
+{
+  "projects": {
+    "my-project": {
+      "github": {"org": "myorg", "repo": "myrepo"},
+      "working_directory": "~/src/my-project",
+      "telegram": {"groups": ["Dev: MyProject"]}
+    }
+  }
+}
+```
+
+The `working_directory` field is required for cross-repo dispatch to work correctly. If omitted, the poller falls back to the ai repo root and logs a warning.
+
+## Installation
+
+```bash
+# Install the launchd service
+./scripts/install_issue_poller.sh
+
+# Check status
+launchctl list | grep issue-poller
+
+# Run manually
+python scripts/issue_poller.py
+
+# Unload service
+launchctl bootout gui/$(id -u)/com.valor.issue-poller
+```
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| Poller not running | launchd not loaded | `./scripts/install_issue_poller.sh` |
+| "lock held" in logs | Previous cycle still running or crashed | Lock auto-expires after 5 min; or `redis-cli DEL issue_poller:lock` |
+| Issues not detected | Issue already in SeenIssue model | Check via `python -c "from models.seen_issue import SeenIssue; print(SeenIssue.get_or_create('org','repo').issue_numbers)"` |
+| Dedup always skipped | `ANTHROPIC_API_KEY` missing | Ensure key is in `.env` |
+| No notifications | `valor-telegram` CLI not available | Check bridge is running; falls back to logging |
+
+## Logs
+
+- **Main log**: `logs/issue_poller.log` — auto-rotated via `RotatingFileHandler` (10MB max, 5 backups)
+- **Error log**: `logs/issue_poller_error.log` — rotated by `rotate_log()` in `valor-service.sh` on bridge startup (10MB, 3 backups) + newsyslog hourly safety net
+- **Alert threshold**: 3+ consecutive failures triggers a Telegram notification
+
+## Files
+
+| File | Purpose |
+|------|---------|
+| `scripts/issue_poller.py` | Main polling loop and orchestration |
+| `scripts/issue_dedup.py` | LLM-based similarity scoring engine |
+| `models/seen_issue.py` | Popoto model tracking processed issues per repo |
+| `com.valor.issue-poller.plist` | launchd service definition (5-min interval) |
+| `scripts/install_issue_poller.sh` | launchd installation script |
+| `tests/test_issue_poller.py` | Integration tests |
+| `tests/unit/test_seen_issue.py` | Unit tests for SeenIssue model |

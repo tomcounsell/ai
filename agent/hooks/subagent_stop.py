@@ -18,62 +18,16 @@ from claude_agent_sdk import HookContext, SubagentStopHookInput
 logger = logging.getLogger(__name__)
 
 
-def _extract_output_tail(input_data: dict, max_chars: int = 500) -> str:
-    """Extract the last N chars of output for classify_outcome().
-
-    Tries two sources in order:
-    1. agent_transcript_path -- reads the last max_chars from the transcript file
-    2. _extract_outcome_summary() -- falls back to the 200-char summary
-
-    Args:
-        input_data: The SubagentStopHookInput dict.
-        max_chars: Maximum characters to extract from the tail.
-
-    Returns:
-        Output tail string (may be shorter than max_chars).
-    """
-    # Try reading transcript file tail
-    transcript_path = input_data.get("agent_transcript_path")
-    if transcript_path:
-        try:
-            with open(transcript_path, "rb") as f:
-                # Seek to the last max_chars bytes (approximate for UTF-8)
-                f.seek(0, 2)  # Seek to end
-                file_size = f.tell()
-                read_size = min(file_size, max_chars * 2)  # Over-read for UTF-8
-                f.seek(max(0, file_size - read_size))
-                raw = f.read()
-                text = raw.decode("utf-8", errors="replace")
-                return text[-max_chars:]
-        except OSError as e:
-            logger.debug(f"[subagent_stop] Could not read transcript tail: {e}")
-
-    # Fallback to outcome summary
-    return _extract_outcome_summary(input_data)
-
-
-def _register_dev_session_completion(
-    agent_id: str, input_data: dict | None = None, claude_uuid: str | None = None
-) -> None:
+def _register_dev_session_completion(agent_id: str) -> None:
     """Mark a DevSession as completed in Redis and record SDLC stage completion.
 
     Looks up the DevSession by parent ChatSession and updates its status.
     Also records stage completion via PipelineStateMachine if a stage is in_progress.
-    Uses classify_outcome() to determine success/fail before routing.
-
-    Args:
-        agent_id: The agent ID of the completing dev-session.
-        input_data: The SubagentStopHookInput dict, used to extract output_tail
-            for outcome classification.
-        claude_uuid: The Claude Code session UUID for registry lookup (issue #597).
+    Logs the parent -> child completion linkage for observability.
     """
-    from agent.hooks.session_registry import resolve
-
-    parent_session_id = resolve(claude_uuid)
+    parent_session_id = os.environ.get("VALOR_SESSION_ID")
     if not parent_session_id:
-        logger.debug(
-            "[subagent_stop] No bridge session in registry, skipping DevSession completion"
-        )
+        logger.debug("[subagent_stop] VALOR_SESSION_ID not set, skipping DevSession completion")
         return
 
     try:
@@ -91,30 +45,18 @@ def _register_dev_session_completion(
                 )
 
         # Record SDLC stage completion on the parent ChatSession.
-        # Extract output tail for outcome classification.
-        output_tail = _extract_output_tail(input_data or {})
-        _record_stage_on_parent(parent_session_id, stop_reason=None, output_tail=output_tail)
+        # The parent session's stage_states tracks which pipeline stage is in_progress.
+        # When the dev-session completes successfully, mark that stage as completed.
+        _record_stage_on_parent(parent_session_id)
     except Exception as e:
         logger.warning(f"[subagent_stop] Failed to register DevSession completion: {e}")
 
 
-def _record_stage_on_parent(
-    parent_session_id: str,
-    stop_reason: str | None = None,
-    output_tail: str = "",
-) -> None:
+def _record_stage_on_parent(parent_session_id: str) -> None:
     """Record stage completion on the parent ChatSession's PipelineStateMachine.
 
-    Finds the current in_progress stage, classifies the outcome using
-    classify_outcome(), and routes to complete_stage() or fail_stage()
-    accordingly. This wires the full outcome classification pipeline into
-    the SDLC skill completion path.
-
-    Args:
-        parent_session_id: The parent ChatSession's session_id.
-        stop_reason: SDK stop reason (e.g. 'end_turn', 'timeout'). None when
-            not available from SubagentStopHookInput (which lacks this field).
-        output_tail: Last ~500 chars of worker output for pattern matching.
+    Finds the current in_progress stage and marks it completed. This wires
+    PipelineStateMachine.complete_stage() into the SDLC skill completion path.
     """
     try:
         from bridge.pipeline_state import PipelineStateMachine
@@ -130,29 +72,11 @@ def _record_stage_on_parent(
         current = sm.current_stage()
 
         if current:
-            # Classify outcome before deciding complete vs fail
-            try:
-                outcome = sm.classify_outcome(current, stop_reason, output_tail)
-            except Exception as e:
-                logger.warning(
-                    f"[subagent_stop] classify_outcome failed for {current}: {e}. "
-                    f"Defaulting to complete_stage."
-                )
-                outcome = "ambiguous"
-
-            if outcome in ("fail", "partial"):
-                sm.fail_stage(current)
-                logger.info(
-                    f"[subagent_stop] Recorded stage failure: {current} "
-                    f"(outcome={outcome}) on session {parent_session_id}"
-                )
-            else:
-                # "success" or "ambiguous" -> complete (safe default)
-                sm.complete_stage(current)
-                logger.info(
-                    f"[subagent_stop] Recorded stage completion: {current} "
-                    f"(outcome={outcome}) on session {parent_session_id}"
-                )
+            sm.complete_stage(current)
+            logger.info(
+                f"[subagent_stop] Recorded stage completion: {current} "
+                f"on session {parent_session_id}"
+            )
         else:
             logger.debug(
                 f"[subagent_stop] No in_progress stage on {parent_session_id}, "
@@ -305,15 +229,11 @@ async def subagent_stop_hook(
 
     # Register DevSession completion in Redis for parent ChatSession tracking
     if agent_type == "dev-session":
-        # Issue #597: Use session registry instead of os.environ for bridge session ID
-        from agent.hooks.session_registry import resolve
-
-        claude_uuid = input_data.get("session_id")
-        _register_dev_session_completion(agent_id, input_data=input_data, claude_uuid=claude_uuid)
+        _register_dev_session_completion(agent_id)
 
         # Resolve current stage before it gets marked complete
         current_stage = None
-        session_id = resolve(claude_uuid)
+        session_id = os.environ.get("VALOR_SESSION_ID")
         if session_id:
             stages_str = _get_stage_states(session_id)
             if stages_str:

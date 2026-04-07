@@ -18,11 +18,9 @@ import json as _json
 import logging
 import time
 
-from config.enums import ClassificationType, SessionType
 from popoto import (
     AutoKeyField,
     Field,
-    IndexedField,
     IntField,
     KeyField,
     ListField,
@@ -32,15 +30,16 @@ from popoto import (
 
 logger = logging.getLogger(__name__)
 
+MSG_MAX_CHARS = 20_000
 HISTORY_MAX_ENTRIES = 20
 STEERING_QUEUE_MAX = 10  # Max buffered steering messages per session
 
 # SDLC stages in pipeline order
 SDLC_STAGES = ["ISSUE", "PLAN", "CRITIQUE", "BUILD", "TEST", "REVIEW", "DOCS", "MERGE"]
 
-# Backward-compatible aliases (import from config.enums for new code)
-SESSION_TYPE_CHAT = SessionType.CHAT
-SESSION_TYPE_DEV = SessionType.DEV
+# Valid session types
+SESSION_TYPE_CHAT = "chat"
+SESSION_TYPE_DEV = "dev"
 
 
 class AgentSession(Model):
@@ -71,7 +70,7 @@ class AgentSession(Model):
     session_id = Field()  # Telegram-derived session identifier (e.g., tg_project_chatid_msgid)
     session_type = KeyField(null=True)  # "chat" or "dev" — discriminator
     project_key = KeyField()
-    status = IndexedField(default="pending")  # Non-key field with secondary index for .filter()
+    status = KeyField(default="pending")
 
     # === Queue fields (from RedisJob) ===
     priority = Field(default="normal")  # urgent | high | normal | low
@@ -79,13 +78,13 @@ class AgentSession(Model):
     scheduling_depth = Field(type=int, default=0)  # Self-scheduling chain depth (cap at 3)
     created_at = SortedField(type=float, partition_by="project_key")
     working_dir = Field()
-    message_text = Field()
+    message_text = Field(max_length=MSG_MAX_CHARS)
     sender_name = Field(null=True)
     sender_id = Field(type=int, null=True)
     chat_id = KeyField(null=True)
     telegram_message_id = Field(type=int, null=True)
     chat_title = Field(null=True)
-    revival_context = Field(null=True)
+    revival_context = Field(null=True, max_length=MSG_MAX_CHARS)
     work_item_slug = Field(null=True)
     task_list_id = Field(null=True)
     classification_type = Field(null=True)  # Actively used by is_sdlc, session_tags, job_scheduler
@@ -103,8 +102,8 @@ class AgentSession(Model):
 
     turn_count = IntField(default=0)
     tool_call_count = IntField(default=0)
-    log_path = Field(null=True)
-    summary = Field(null=True)
+    log_path = Field(null=True, max_length=1000)
+    summary = Field(null=True, max_length=50_000)
     branch_name = Field(null=True)
     tags = ListField(null=True)
     classification_confidence = Field(type=float, null=True)  # Paired with classification_type
@@ -129,24 +128,29 @@ class AgentSession(Model):
     # === Tracing ===
     correlation_id = Field(null=True)  # End-to-end request tracing ID
 
+    # === Stall retry fields ===
+    retry_count = Field(type=int, default=0)  # Stall retry attempt count
+    last_stall_reason = Field(null=True)  # Diagnostic context from last stall
+
     # === Watchdog fields ===
     watchdog_unhealthy = Field(null=True)  # Reason string when flagged unhealthy, None when healthy
 
-    # === Session mode ===
-    # Stores PersonaType enum value ("teammate", "project-manager", "developer")
-    # to indicate the resolved persona for this session.
-    session_mode = Field(null=True)
+    # === Q&A mode flag ===
+    # Set to True when intent classifier routes to Q&A mode. Separate from
+    # classification_type (which holds the bridge's original classification
+    # like "question", "bug", etc.) to avoid dual-purposing that field.
+    qa_mode = Field(type=bool, null=True)
 
     # === Semantic routing fields ===
-    context_summary = Field(null=True)  # What this session is about
-    expectations = Field(null=True)  # What the agent needs from the human
+    context_summary = Field(null=True, max_length=200)  # What this session is about
+    expectations = Field(null=True, max_length=500)  # What the agent needs from the human
 
     # === Steering fields ===
     # Buffered human replies during active pipelines
     queued_steering_messages = ListField(null=True)
 
     # === ChatSession delivery field ===
-    result_text = Field(null=True)  # What was delivered to Telegram
+    result_text = Field(null=True, max_length=MSG_MAX_CHARS)  # What was delivered to Telegram
 
     # === PM self-messaging ===
     # Telegram message IDs sent by the PM via send_telegram tool during this session.
@@ -157,6 +161,8 @@ class AgentSession(Model):
     # === DevSession fields (null when session_type="chat") ===
     parent_chat_session_id = KeyField(null=True)  # Logical FK -> ChatSession
     slug = Field(null=True)  # Derives branch, plan path, worktree
+    artifacts = Field(null=True)  # JSON: {issue_url, plan_url, pr_url, ...}
+
     # === Job hierarchy fields ===
     # Links child jobs to their parent for job decomposition (issue #359).
     # When set, this job is a child of the referenced parent job.
@@ -560,7 +566,7 @@ class AgentSession(Model):
             return True
 
         # Secondary: classification_type for freshly-classified sessions
-        if self.classification_type == ClassificationType.SDLC:
+        if self.classification_type == "sdlc":
             return True
 
         return False

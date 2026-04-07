@@ -30,7 +30,6 @@ from agent.branch_manager import (
 from agent.worktree_manager import WORKTREES_DIR, validate_workspace
 from bridge.response import REACTION_COMPLETE, REACTION_ERROR, REACTION_SUCCESS
 from bridge.session_logs import save_session_snapshot
-from config.enums import ClassificationType, PersonaType, SessionType
 from models.agent_session import AgentSession
 
 logger = logging.getLogger(__name__)
@@ -95,6 +94,8 @@ def classify_nudge_action(
 
 # Backward compatibility alias
 RedisJob = AgentSession
+
+MSG_MAX_CHARS = 20_000  # ~5k tokens — reasonable context limit for agent input
 
 # Nudge loop: single nudge model for bridge output routing.
 # The bridge has ONE response to any non-completion: nudge.
@@ -197,8 +198,7 @@ class Job:
 # Excludes job_id (AutoKeyField, auto-generated on create).
 _JOB_FIELDS = [
     "project_key",
-    # status is an IndexedField (not KeyField), so it does not affect the Redis key
-    # and does not need delete-and-recreate — just mutate and save.
+    "status",
     "priority",
     "scheduled_after",
     "scheduling_depth",
@@ -235,6 +235,9 @@ _JOB_FIELDS = [
     # Semantic routing fields — must be preserved across delete-and-recreate
     "context_summary",
     "expectations",
+    # Stall retry fields — must be preserved across delete-and-recreate
+    "retry_count",
+    "last_stall_reason",
     # Steering fields — must be preserved across delete-and-recreate
     "queued_steering_messages",
     # Tracing fields — must be preserved across delete-and-recreate
@@ -252,6 +255,7 @@ _JOB_FIELDS = [
     "result_text",
     "parent_chat_session_id",
     "slug",
+    "artifacts",
     # === PM self-messaging fields ===
     "pm_sent_message_ids",
 ]
@@ -291,7 +295,7 @@ async def _push_job(
     scheduling_depth: int = 0,
     parent_job_id: str | None = None,
     telegram_message_key: str | None = None,
-    session_type: str = SessionType.CHAT,
+    session_type: str = "chat",
     depends_on: list[str] | None = None,
 ) -> int:
     """Create a job in Redis and return the pending queue depth for this chat.
@@ -359,25 +363,6 @@ async def _push_job(
         depends_on=depends_on,
     )
 
-    # Initialize stage_states for SDLC sessions so the dashboard shows
-    # pipeline progress from the start (not just after a dev-session runs).
-    if classification_type == ClassificationType.SDLC:
-        try:
-
-            def _init_stage_states():
-                from bridge.pipeline_state import PipelineStateMachine
-
-                sessions = list(AgentSession.query.filter(session_id=session_id, status="pending"))
-                if sessions and not sessions[0].stage_states:
-                    sm = PipelineStateMachine(sessions[0])
-                    # PipelineStateMachine.__init__ already sets ISSUE=ready, rest=pending
-                    sm._save()
-                    logger.info(f"Initialized stage_states for SDLC session {session_id}")
-
-            await asyncio.to_thread(_init_stage_states)
-        except Exception as e:
-            logger.warning(f"Failed to initialize stage_states for {session_id}: {e}")
-
     # Log lifecycle transition for newly created pending job
     try:
 
@@ -400,7 +385,7 @@ def resolve_branch_for_stage(slug: str | None, stage: str | None) -> tuple[str, 
     implicit branch resolution that previously relied on skill context.
 
     Args:
-        slug: The work item slug (e.g., 'auth-feature'). None for non-SDLC.
+        slug: The work item slug (e.g., 'auth-feature'). None for Q&A/non-SDLC.
         stage: The SDLC stage (e.g., 'PLAN', 'BUILD', 'TEST'). None for non-SDLC.
 
     Returns:
@@ -655,8 +640,10 @@ async def _pop_job(chat_id: str) -> Job | None:
     - Missing stable_job_id (deleted from Redis) is treated as blocked (conservative).
     - Empty or None depends_on is treated as no dependencies.
 
-    Status is an IndexedField (not KeyField), so mutating and saving is safe --
-    no delete-and-recreate needed for status transitions.
+    Uses delete-and-recreate instead of field mutation to avoid KeyField
+    index corruption. Popoto's KeyField.on_save() only ADDs to the new
+    status index set but never REMOVEs from the old one, so mutating
+    status and calling save() leaves a stale entry in the pending index.
     """
     pending = await AgentSession.query.async_filter(chat_id=chat_id, status="pending")
     if not pending:
@@ -681,23 +668,29 @@ async def _pop_job(chat_id: str) -> Job | None:
     eligible.sort(key=sort_key)
     chosen = eligible[0]
 
-    # Direct field mutation -- status is an IndexedField, not a KeyField,
-    # so save() correctly updates the secondary index.
+    # Delete-and-recreate to avoid KeyField index corruption.
+    # Both sides are logged so a crash between delete and create is diagnosable.
+    fields = _extract_job_fields(chosen)
     logger.info(
-        f"[chat:{chat_id}] Transitioning job {chosen.job_id} (session {chosen.session_id}) "
-        f"pending->running"
+        f"[chat:{chat_id}] Deleting job {chosen.job_id} (session {chosen.session_id}) "
+        f"for status change pending->running"
     )
-    chosen.status = "running"
-    chosen.started_at = time.time()
-    await chosen.async_save()
+    await chosen.async_delete()
+    fields["status"] = "running"
+    fields["started_at"] = time.time()
+    new_job = await AgentSession.async_create(**fields)
+    logger.info(
+        f"[chat:{chat_id}] Recreated job as {new_job.job_id} (session {new_job.session_id}) "
+        f"with status=running"
+    )
 
     # Log lifecycle transition for job starting execution
     try:
-        chosen.log_lifecycle_transition("running", "worker picked up job")
+        new_job.log_lifecycle_transition("running", "worker picked up job")
     except Exception as e:
-        logger.warning(f"Failed to log lifecycle transition for job {chosen.job_id}: {e}")
+        logger.warning(f"Failed to log lifecycle transition for job {new_job.job_id}: {e}")
 
-    return Job(chosen)
+    return Job(new_job)
 
 
 async def _pop_job_with_fallback(chat_id: str) -> "Job | None":
@@ -739,21 +732,27 @@ async def _pop_job_with_fallback(chat_id: str) -> "Job | None":
         eligible.sort(key=sort_key)
         chosen = eligible[0]
 
-        # Direct field mutation -- status is an IndexedField, not a KeyField.
+        # Delete-and-recreate for status transition (same pattern as _pop_job)
+        fields = _extract_job_fields(chosen)
         logger.info(
-            f"[chat:{chat_id}] Sync fallback: transitioning job {chosen.job_id} "
-            f"(session {chosen.session_id}) pending->running"
+            f"[chat:{chat_id}] Sync fallback: deleting job {chosen.job_id} "
+            f"(session {chosen.session_id}) for status change pending->running"
         )
-        chosen.status = "running"
-        chosen.started_at = time.time()
-        await chosen.async_save()
+        await chosen.async_delete()
+        fields["status"] = "running"
+        fields["started_at"] = time.time()
+        new_job = await AgentSession.async_create(**fields)
+        logger.info(
+            f"[chat:{chat_id}] Sync fallback: recreated job as {new_job.job_id} "
+            f"(session {new_job.session_id}) with status=running"
+        )
 
         try:
-            chosen.log_lifecycle_transition("running", "worker picked up job (sync fallback)")
+            new_job.log_lifecycle_transition("running", "worker picked up job (sync fallback)")
         except Exception as e:
-            logger.warning(f"Failed to log lifecycle transition for job {chosen.job_id}: {e}")
+            logger.warning(f"Failed to log lifecycle transition for job {new_job.job_id}: {e}")
 
-        return Job(chosen)
+        return Job(new_job)
     except Exception:
         logger.exception(f"[chat:{chat_id}] Sync fallback query failed, falling through to exit")
         return None
@@ -777,6 +776,8 @@ async def _remove_by_session(chat_id: str, session_id: str) -> bool:
 
 def reorder_job(job_id: str, new_priority: str) -> bool:
     """Change the priority of a pending job.
+
+    Uses delete-and-recreate to avoid KeyField index corruption.
 
     Args:
         job_id: The job_id (AutoKeyField) of the job to reorder.
@@ -802,9 +803,13 @@ def reorder_job(job_id: str, new_priority: str) -> bool:
         )
         return False
 
-    job.priority = new_priority
-    job.save()
-    logger.info(f"[pm-controls] Reordered job {job_id} (priority={new_priority})")
+    fields = _extract_job_fields(job)
+    job.delete()
+    fields["priority"] = new_priority
+    new_job = AgentSession.create(**fields)
+    logger.info(
+        f"[pm-controls] Reordered job {job_id} -> {new_job.job_id} (priority={new_priority})"
+    )
     return True
 
 
@@ -813,6 +818,8 @@ def cancel_job(job_id: str) -> bool:
 
     Cancelled jobs block their dependents (same as failed). PM is notified
     and decides whether to cancel or unblock dependent jobs.
+
+    Uses delete-and-recreate to avoid KeyField index corruption.
 
     Args:
         job_id: The job_id of the job to cancel.
@@ -833,10 +840,15 @@ def cancel_job(job_id: str) -> bool:
         )
         return False
 
-    job.status = "cancelled"
-    job.completed_at = time.time()
-    job.save()
-    logger.info(f"[pm-controls] Cancelled job {job_id} (stable_job_id={job.stable_job_id})")
+    fields = _extract_job_fields(job)
+    job.delete()
+    fields["status"] = "cancelled"
+    fields["completed_at"] = time.time()
+    new_job = AgentSession.create(**fields)
+    logger.info(
+        f"[pm-controls] Cancelled job {job_id} -> {new_job.job_id} "
+        f"(stable_job_id={new_job.stable_job_id})"
+    )
     return True
 
 
@@ -894,9 +906,8 @@ def retry_job(stable_job_id: str) -> AgentSession | None:
                 deps = pending.depends_on
                 if not deps or stable_job_id not in deps:
                     continue
-                # Delete-and-recreate required: depends_on is a ListField whose
-                # contents are used in filter queries.  Popoto does not update
-                # secondary indexes on in-place list mutation.
+                # Replace old stable_job_id with new one using delete-and-recreate
+                # (ListField values require recreating the object to update indexes)
                 updated_deps = [new_stable_id if d == stable_job_id else d for d in deps]
                 pending_fields = _extract_job_fields(pending)
                 pending.delete()
@@ -1105,19 +1116,47 @@ async def _finalize_parent(
 
 
 def _transition_parent(parent: AgentSession, new_status: str) -> None:
-    """Transition a parent job to a new status.
+    """Transition a parent job to a new status using delete-and-recreate.
 
-    Status is an IndexedField, so direct mutation and save is safe.
-    No delete-and-recreate needed, which means job_id stays the same
-    and children's parent_job_id references remain valid.
+    Uses the same pattern as _pop_job() to avoid KeyField index corruption.
+    After creating the new parent, updates all children's parent_job_id
+    references to point to the new job_id (since delete-and-recreate
+    generates a new job_id).
+
+    Note: This is a sync function called from both sync (cmd_schedule) and
+    async (_finalize_parent) contexts. The delete-and-recreate generates a
+    new job_id for the parent. Currently safe because workers are per-project
+    and sequential, so concurrent _finalize_parent calls for the same parent
+    cannot occur. If concurrency changes, consider propagating new job_id
+    to children defensively or using a stable identifier.
     """
-    parent.status = new_status
+    old_job_id = parent.job_id
+    children = parent.get_children()
+    fields = _extract_job_fields(parent)
+    parent.delete()
+    fields["status"] = new_status
     # Only set completed_at for terminal statuses, not for waiting_for_children
     if new_status in ("completed", "failed"):
-        parent.completed_at = time.time()
-    parent.save()
+        fields["completed_at"] = time.time()
+    new_parent = AgentSession.create(**fields)
 
-    logger.info(f"[job-hierarchy] Parent {parent.job_id} transitioned to status={new_status}")
+    # Update children's parent_job_id to point to the new parent.
+    # parent_job_id is a KeyField, so we must use delete-and-recreate
+    # to avoid index corruption (same pattern as _pop_job).
+    if new_parent.job_id != old_job_id and children:
+        for child in children:
+            try:
+                child_fields = _extract_job_fields(child)
+                child.delete()
+                child_fields["parent_job_id"] = new_parent.job_id
+                AgentSession.create(**child_fields)
+            except Exception as e:
+                logger.warning(
+                    f"[job-hierarchy] Failed to update child {child.job_id} "
+                    f"parent_job_id to {new_parent.job_id}: {e}"
+                )
+
+    logger.info(f"[job-hierarchy] Parent {old_job_id} -> {new_parent.job_id} (status={new_status})")
 
 
 def _get_pending_jobs_sync(project_key: str) -> list[AgentSession]:
@@ -1131,7 +1170,7 @@ def _recover_interrupted_jobs_startup() -> int:
     At startup, all running jobs are by definition orphaned from the previous
     process. This runs synchronously before the event loop processes messages.
 
-    Status is an IndexedField, so direct mutation and save is safe.
+    Uses delete-and-recreate to avoid KeyField index corruption.
     Returns the number of recovered jobs.
     """
     running_jobs = list(AgentSession.query.filter(status="running"))
@@ -1140,19 +1179,22 @@ def _recover_interrupted_jobs_startup() -> int:
 
     count = len(running_jobs)
     for job in running_jobs:
+        old_id = job.job_id
         chat_id = job.chat_id or job.project_key
         logger.warning(
             "[startup-recovery] Recovering interrupted job %s (session=%s, chat=%s, msg=%.80r...)",
-            job.job_id,
+            old_id,
             job.session_id,
             chat_id,
             job.message_text or "",
         )
-        job.status = "pending"
-        job.priority = "high"
-        job.started_at = None
-        job.save()
-        logger.info("[startup-recovery] Recovered job %s", job.job_id)
+        fields = _extract_job_fields(job)
+        job.delete()
+        fields["status"] = "pending"
+        fields["priority"] = "high"
+        fields["started_at"] = None
+        new_job = AgentSession.create(**fields)
+        logger.info("[startup-recovery] Recovered job %s -> %s", old_id, new_job.job_id)
 
     logger.warning("[startup-recovery] Recovered %d interrupted job(s)", count)
     return count
@@ -1187,9 +1229,9 @@ async def _job_health_check() -> None:
     4. If no live worker for job.chat_id AND pending > JOB_HEALTH_MIN_RUNNING:
        start a worker. This replaces the old _recover_stalled_pending mechanism.
 
-    Recovery resets status to 'pending' via direct mutation and save.
-    Status is an IndexedField, so no delete-and-recreate is needed.
-    Only jobs whose worker is confirmed dead are touched.
+    Recovery uses delete-and-recreate (required by Popoto KeyField) but ONLY
+    for jobs whose worker is confirmed dead. Jobs with a live worker on the
+    same chat_id are never touched.
     """
     now = time.time()
     checked = 0
@@ -1242,13 +1284,16 @@ async def _job_health_check() -> None:
                 job.session_id,
                 reason,
             )
-            job.status = "pending"
-            job.priority = "high"
-            job.started_at = None
-            job.save()
+            fields = _extract_job_fields(job)
+            job.delete()
+            fields["status"] = "pending"
+            fields["priority"] = "high"
+            fields["started_at"] = None
+            new_job = AgentSession.create(**fields)
             logger.info(
-                "[job-health] Recovered job %s (chat=%s)",
+                "[job-health] Recovered job %s -> %s (chat=%s)",
                 job.job_id,
+                new_job.job_id,
                 worker_key,
             )
             _ensure_worker(worker_key)
@@ -1315,8 +1360,7 @@ async def _job_hierarchy_health_check() -> None:
                     child.job_id,
                     child.parent_job_id,
                 )
-                # Delete-and-recreate required: parent_job_id is a KeyField,
-                # so mutating it directly would corrupt the index.
+                # Use delete-and-recreate to safely clear the KeyField
                 fields = _extract_job_fields(child)
                 child.delete()
                 fields["parent_job_id"] = None
@@ -1493,6 +1537,18 @@ def register_callbacks(
         _response_callbacks[project_key] = response_callback
 
 
+def _truncate_to_limit(text: str, label: str) -> str:
+    """Truncate text to MSG_MAX_CHARS, keeping the tail (most recent context)."""
+    if len(text) <= MSG_MAX_CHARS:
+        return text
+    original_len = len(text)
+    text = "...[truncated]\n" + text[-(MSG_MAX_CHARS - 15) :]
+    logger.warning(
+        f"Truncated {label}: {original_len} -> {len(text)} chars (kept last {MSG_MAX_CHARS} chars)"
+    )
+    return text
+
+
 # === Restart Flag (written by remote-update.sh) ===
 
 _RESTART_FLAG = Path(__file__).parent.parent / "data" / "restart-requested"
@@ -1559,17 +1615,15 @@ async def enqueue_job(
     scheduling_depth: int = 0,
     parent_job_id: str | None = None,
     telegram_message_key: str | None = None,
-    session_type: str = SessionType.CHAT,
+    session_type: str = "chat",
 ) -> int:
     """
     Add a job to Redis and ensure worker is running.
     Returns queue depth after push.
     """
-    from tools.field_utils import log_large_field
-
-    log_large_field("message_text", message_text)
+    message_text = _truncate_to_limit(message_text, "message_text")
     if revival_context:
-        log_large_field("revival_context", revival_context)
+        revival_context = _truncate_to_limit(revival_context, "revival_context")
 
     depth = await _push_job(
         project_key=project_key,
@@ -1874,13 +1928,21 @@ async def _enqueue_nudge(
 
     session = sessions[0]
 
-    # Direct mutation -- status is an IndexedField, no delete-and-recreate needed.
-    session.status = "pending"
-    session.message_text = coaching_message
-    session.auto_continue_count = auto_continue_count
-    session.priority = "high"
-    session.task_list_id = task_list_id
-    await session.async_save()
+    # Extract all fields from the existing session, preserving everything
+    fields = _extract_job_fields(session)
+
+    # Delete the old record (first half of delete-and-recreate)
+    await session.async_delete()
+
+    # Update only the fields that change for continuation
+    fields["status"] = "pending"
+    fields["message_text"] = coaching_message
+    fields["auto_continue_count"] = auto_continue_count
+    fields["priority"] = "high"
+    fields["task_list_id"] = task_list_id
+
+    # Recreate with all original metadata intact
+    await AgentSession.async_create(**fields)
 
     _ensure_worker(job.chat_id)
     logger.info(
@@ -2045,13 +2107,13 @@ async def _execute_job(job: Job) -> None:
                 f"[{job.project_key}] Watchdog flagged session unhealthy: {unhealthy_reason}"
             )
 
-        # Use reduced nudge cap for Teammate sessions
+        # Use reduced nudge cap for Q&A sessions
         _effective_nudge_cap = MAX_NUDGE_COUNT
         if agent_session:
-            if getattr(agent_session, "session_mode", None) == PersonaType.TEAMMATE:
-                from agent.teammate_handler import TEAMMATE_MAX_NUDGE_COUNT
+            if getattr(agent_session, "qa_mode", False):
+                from agent.qa_handler import QA_MAX_NUDGE_COUNT
 
-                _effective_nudge_cap = TEAMMATE_MAX_NUDGE_COUNT
+                _effective_nudge_cap = QA_MAX_NUDGE_COUNT
 
         action = classify_nudge_action(
             msg=msg,
@@ -2324,12 +2386,8 @@ async def _execute_job(job: Job) -> None:
     # Set reaction based on result and delivery state
     # Skip if a continuation job was enqueued (defer reaction to that job)
     if react_cb and not chat_state.defer_reaction:
-        # Teammate sessions: clear the processing reaction instead of setting completion emoji
-        if (
-            agent_session
-            and getattr(agent_session, "session_mode", None) == PersonaType.TEAMMATE
-            and not task.error
-        ):
+        # Q&A sessions: clear the processing reaction instead of setting completion emoji
+        if agent_session and getattr(agent_session, "qa_mode", False) and not task.error:
             emoji = None  # Clear reaction
         elif task.error:
             emoji = REACTION_ERROR
@@ -2725,12 +2783,18 @@ def _cli_flush_job(job_id: str) -> None:
 
 
 def _cli_recover_single_job(job: AgentSession) -> None:
-    """Recover a stuck job by resetting it to pending."""
-    job.status = "pending"
-    job.priority = "high"
-    job.started_at = None
-    job.save()
-    print(f"  Re-enqueued as pending (id: {job.job_id})")
+    """Delete a stuck job and recreate as pending."""
+    fields = _extract_job_fields(job)
+
+    # Delete the stuck job
+    job.delete()
+
+    # Re-create as pending with high priority
+    fields["status"] = "pending"
+    fields["priority"] = "high"
+    fields["started_at"] = None
+    new_job = AgentSession.create(**fields)
+    print(f"  Re-enqueued as pending (new id: {new_job.job_id})")
 
 
 def _cli_main() -> None:
