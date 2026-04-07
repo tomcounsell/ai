@@ -1169,18 +1169,12 @@ class AgentSession(Model):
             links["pr"] = self.pr_url
         return links
 
-    def get_stage_progress(self, slug: str | None = None) -> dict[str, str]:
-        """Return SDLC stage completion status via PipelineStateMachine.
-
-        Args:
-            slug: Optional work item slug for artifact-based inference.
-                  When provided, fills in pending/ready gaps by checking
-                  observable artifacts (plan file, PR, review status).
-        """
+    def get_stage_progress(self) -> dict[str, str]:
+        """Return SDLC stage completion status via PipelineStateMachine."""
         from bridge.pipeline_state import PipelineStateMachine
 
         sm = PipelineStateMachine(self)
-        return sm.get_display_progress(slug=slug)
+        return sm.get_display_progress()
 
     # === Stage-aware auto-continue helpers ===
 
