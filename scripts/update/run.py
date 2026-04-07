@@ -563,7 +563,11 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         if telegram_check.available:
             log(f"  Telegram: {telegram_check.version or 'OK'}", v)
         else:
-            log(f"ERROR: Telegram session not authorized: {telegram_check.error}", v, always=True)
+            log(
+                f"ERROR: Telegram session not authorized: {telegram_check.error}",
+                v,
+                always=True,
+            )
             result.errors.append(f"Telegram auth: {telegram_check.error}")
 
     # Step 5: Service management

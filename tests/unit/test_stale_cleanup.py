@@ -245,7 +245,10 @@ class TestCleanupUsesLifecycleLayer:
 
         with (
             patch("models.agent_session.AgentSession") as mock_as_class,
-            patch("models.session_lifecycle.finalize_session", side_effect=finalize_side_effect),
+            patch(
+                "models.session_lifecycle.finalize_session",
+                side_effect=finalize_side_effect,
+            ),
         ):
             mock_as_class.query.filter.side_effect = mock_filter
 

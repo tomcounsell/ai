@@ -995,7 +995,9 @@ def _transition_parent(parent: AgentSession, new_status: str) -> None:
     # intentional. The function is private in the lifecycle module because it's
     # a specialized parent-transition helper, not a general-purpose API. This
     # wrapper exists to keep the import localized to one place.
-    from models.session_lifecycle import _transition_parent as _lifecycle_transition_parent
+    from models.session_lifecycle import (
+        _transition_parent as _lifecycle_transition_parent,
+    )
 
     _lifecycle_transition_parent(parent, new_status)
 
@@ -2131,7 +2133,9 @@ async def _enqueue_nudge(
     session.priority = "high"
     session.task_list_id = task_list_id
     transition_status(
-        session, "pending", reason=f"nudge re-enqueue (auto_continue_count={auto_continue_count})"
+        session,
+        "pending",
+        reason=f"nudge re-enqueue (auto_continue_count={auto_continue_count})",
     )
 
     _ensure_worker(session.chat_id)
@@ -2193,7 +2197,11 @@ def steer_session(session_id: str, message: str) -> dict:
         dict with keys: success (bool), session_id (str), error (str | None)
     """
     if not message or not message.strip():
-        return {"success": False, "session_id": session_id, "error": "Empty message rejected"}
+        return {
+            "success": False,
+            "session_id": session_id,
+            "error": "Empty message rejected",
+        }
 
     try:
         sessions = list(AgentSession.query.filter(session_id=session_id))
