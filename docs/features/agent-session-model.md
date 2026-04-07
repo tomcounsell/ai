@@ -22,7 +22,7 @@ The `cancelled` status is a terminal state set explicitly by the PM via `cancel_
 
 **Lifecycle:** `session_events` (ListField of `SessionEvent` dicts), `issue_url`, `plan_url`, `pr_url`
 
-**Parent-Child:** `parent_session_id` (KeyField), `parent_agent_session_id` (KeyField), `role` (DataField — "pm", "dev", or null), `slug`
+**Parent-Child:** `parent_agent_session_id` (KeyField — canonical parent reference), `parent_session_id` and `parent_chat_session_id` (deprecated `@property` aliases delegating to `parent_agent_session_id`), `role` (DataField — "pm", "dev", or null), `slug`
 
 All timestamp fields use Popoto `DatetimeField` or `SortedField(type=datetime)` with proper UTC datetime objects. Float timestamps are auto-converted via `__setattr__`.
 

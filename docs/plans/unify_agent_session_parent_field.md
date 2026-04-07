@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor
@@ -148,13 +148,13 @@ alias). Bottleneck is careful migration of call sites and Redis data, not design
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] No broad `except Exception: pass` blocks in the touched scope. The `scheduling_depth`
+- [x] No broad `except Exception: pass` blocks in the touched scope. The `scheduling_depth`
   walker catches exceptions per-step — add a test that a missing parent terminates the
   walk cleanly.
 
 ### Empty/Invalid Input Handling
-- [ ] Test: `parent_session_id=None` kwarg stays `None` on both fields.
-- [ ] Test: setting `parent_session_id` to empty string is coerced to `None` (current
+- [x] Test: `parent_session_id=None` kwarg stays `None` on both fields.
+- [x] Test: setting `parent_session_id` to empty string is coerced to `None` (current
   behavior of `KeyField`).
 
 ### Error State Rendering
@@ -163,14 +163,14 @@ alias). Bottleneck is careful migration of call sites and Redis data, not design
 
 ## Test Impact
 
-- [ ] `tests/unit/test_agent_session_hierarchy.py` — UPDATE: add cases asserting that
+- [x] `tests/unit/test_agent_session_hierarchy.py` — UPDATE: add cases asserting that
   `create_child()` populates `parent_agent_session_id` and that the `parent_session_id`
   alias reads through.
-- [ ] `tests/unit/test_steer_child.py` — UPDATE: verify `get_child_sessions()` finds
+- [x] `tests/unit/test_steer_child.py` — UPDATE: verify `get_child_sessions()` finds
   children created via both `create_child()` and `enqueue_session()`.
-- [ ] `tests/integration/test_session_zombie_health_check.py` — UPDATE: add a case where
+- [x] `tests/integration/test_session_zombie_health_check.py` — UPDATE: add a case where
   a `create_child()`-spawned session is correctly recognized as non-orphan.
-- [ ] Any test that constructs `AgentSession(parent_session_id=...)` directly — VERIFY
+- [x] Any test that constructs `AgentSession(parent_session_id=...)` directly — VERIFY
   still works via the kwarg alias mapping.
 
 ## Rabbit Holes
@@ -233,35 +233,35 @@ No MCP server, `.mcp.json`, or bridge imports are affected. The agent never refe
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/chat-dev-session-architecture.md` to note that
+- [x] Update `docs/features/chat-dev-session-architecture.md` to note that
   `parent_agent_session_id` is the single canonical parent field and that
   `parent_session_id` is a deprecated alias.
-- [ ] Add a short entry to the AgentSession model section explaining the alias chain
+- [x] Add a short entry to the AgentSession model section explaining the alias chain
   (`parent_chat_session_id` -> `parent_session_id` -> `parent_agent_session_id`).
 
 ### Inline Documentation
-- [ ] Docstring on the new `parent_session_id` property noting it is a deprecated alias.
-- [ ] Update the `create_child()` docstring to note it writes `parent_agent_session_id`.
+- [x] Docstring on the new `parent_session_id` property noting it is a deprecated alias.
+- [x] Update the `create_child()` docstring to note it writes `parent_agent_session_id`.
 
 ## Success Criteria
 
-- [ ] `AgentSession` has exactly one `KeyField` for parent reference:
+- [x] `AgentSession` has exactly one `KeyField` for parent reference:
   `parent_agent_session_id`.
-- [ ] `parent_session_id` exists as a `@property` alias with getter + setter.
-- [ ] `create_child()` and `create_dev()` populate `parent_agent_session_id`.
-- [ ] `get_parent_session()` / `get_child_sessions()` read `parent_agent_session_id`.
-- [ ] `scheduling_depth` correctly reports non-zero depth for bridge-spawned Dev
+- [x] `parent_session_id` exists as a `@property` alias with getter + setter.
+- [x] `create_child()` and `create_dev()` populate `parent_agent_session_id`.
+- [x] `get_parent_session()` / `get_child_sessions()` read `parent_agent_session_id`.
+- [x] `scheduling_depth` correctly reports non-zero depth for bridge-spawned Dev
   sessions.
-- [ ] The zombie health check recognizes bridge-spawned children as non-orphan.
-- [ ] Dashboard UI shows parent-child relationships for both `create_child()`- and
+- [x] The zombie health check recognizes bridge-spawned children as non-orphan.
+- [x] Dashboard UI shows parent-child relationships for both `create_child()`- and
   `enqueue_session()`-spawned sessions.
-- [ ] `scripts/migrate_unify_parent_session_field.py` exists and reports zero
+- [x] `scripts/migrate_unify_parent_session_field.py` exists and reports zero
   unmigrated records after `--apply`.
-- [ ] `tests/unit/test_agent_session_hierarchy.py`, `tests/unit/test_steer_child.py`,
+- [x] `tests/unit/test_agent_session_hierarchy.py`, `tests/unit/test_steer_child.py`,
   and `tests/integration/test_session_zombie_health_check.py` pass.
-- [ ] `grep -rn 'parent_session_id = KeyField' models/` returns nothing.
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] `grep -rn 'parent_session_id = KeyField' models/` returns nothing.
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
