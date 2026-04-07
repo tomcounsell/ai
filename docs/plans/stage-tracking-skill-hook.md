@@ -261,7 +261,35 @@ No agent integration required — this is a bridge-internal hook change. The hoo
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Verdict: NEEDS REVISION** — 1 blocker must be resolved before build.
+
+### BLOCKER: Task 2 underspecifies the `post_tool_use_hook` replacement
+
+**Location**: Solution — Task 2 / Technical Approach  
+**Critics**: Skeptic, Adversary  
+**Finding**: `agent/hooks/post_tool_use.py` currently exports `watchdog_hook` via a one-liner re-export (`from agent.health_check import watchdog_hook as post_tool_use_hook`). Task 2 says "extend post_tool_use.py to dispatch both watchdog and Skill completion" but does not call out that the exported symbol `post_tool_use_hook` must stay that name (to match `agent/hooks/__init__.py`). If the builder forgets to update `__init__.py` or renames the symbol, the PostToolUse hook silently stops firing entirely.  
+**Fix**: Amend Task 2 to explicitly state: replace the one-liner with `async def post_tool_use_hook(input_data, tool_use_id, context)` that calls both watchdog and the new Skill completion logic. Add to the Verification table: `python -c "from agent.hooks import build_hooks_config; cfg = build_hooks_config(); print(len(cfg['PostToolUse']))"` → expected `1`.
+
+### CONCERN: Test Impact conflates two different `pre_tool_use.py` files
+
+**Location**: Test Impact  
+**Critics**: Archaeologist, Skeptic  
+**Finding**: There are two files named `pre_tool_use.py`: `agent/hooks/pre_tool_use.py` (SDK hook, targets bridge PM sessions) and `.claude/hooks/pre_tool_use.py` (standalone CLI script, targets local Claude Code). The existing `tests/unit/test_pre_tool_use_hook.py` tests `.claude/hooks/pre_tool_use.py` (imports via `sys.path` manipulation), not the `agent/hooks/` module. The new `TestSkillToolStartStage` should go into `test_pre_tool_use_start_stage.py` only. Adding it to `test_pre_tool_use_hook.py` would test the wrong file and fail to import `_SKILL_TO_STAGE`.  
+**Fix**: Remove `tests/unit/test_pre_tool_use_hook.py` from Test Impact (no changes needed). Clarify in Task 3 that `test_post_tool_use_stage_completion.py` imports from `agent.hooks.post_tool_use`, not `.claude/hooks/post_tool_use.py`.
+
+### CONCERN: Success Criteria don't reflect that Skill failures default to `completed`
+
+**Location**: Success Criteria  
+**Critics**: Operator, Skeptic  
+**Finding**: "When the `do-build` skill completes, BUILD transitions to `completed`" is accurate but misleading — it applies even when the skill fails, since `post_tool_use` receives no output to classify. This means a failed build will show as `completed` on the dashboard. The Rabbit Holes section acknowledges this but the Success Criteria don't.  
+**Fix**: Amend to: "BUILD transitions to `completed` (a known limitation: failures default to completed until OUTCOME contract wiring is added in a follow-up issue)."
+
+### NIT: Prior Art section contradicts issue body on `sdlc_stage_marker.py` callers
+
+**Location**: Prior Art  
+**Critics**: Archaeologist  
+**Finding**: Issue body says `sdlc_stage_marker.py` "has zero callers." Plan's Prior Art says it's "invoked only by skills that explicitly call it." Confirmed: `do-plan`, `do-plan-critique`, `do-pr-review`, `do-docs`, `do-issue` all call it. `do-build`, `do-test`, `do-patch`, `do-merge` do not. The hook will add coverage for those 4 uncovered stages. `start_stage()` is idempotent when already `in_progress`, so double-write for the 5 covered stages is safe.  
+**Fix**: Update Prior Art to reflect reality: "5 of 9 SDLC skills already call `sdlc_stage_marker` directly; the hook fills the remaining 4 (do-build, do-test, do-patch, do-merge) and safely no-ops on double-writes for the other 5."
 
 ---
 
