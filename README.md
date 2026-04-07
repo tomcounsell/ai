@@ -1,53 +1,68 @@
-# Valor AI System
+# Valor
 
-An AI coworker powered by the Claude Agent SDK that runs autonomously on its own Mac.
+An autonomous AI coworker. Not an assistant, not a chatbot — a colleague that owns its own machine and does real work.
 
 ## What Is This?
 
-Valor is an AI coworker - not an assistant, not a tool, but a colleague with its own Mac, its own work, and its own agency. The supervisor assigns work and provides direction. Valor executes autonomously, reaching out via Telegram when necessary.
+Valor wraps agent harnesses (like Claude Code) and bridges them to the comms channels humans actually use (Telegram, Email, LinkedIn, and more). The supervisor assigns work and provides direction. Valor executes autonomously on its own Mac, reaching out when necessary.
 
-## Current Status
+## How It Works
 
-| Component | Status | Notes |
-|-----------|--------|-------|
-| Claude Agent SDK | **Active** | Agent backend (v0.1.20) |
-| Telegram Integration | **Working** | User account via Telethon, responds to @valor mentions |
-| Self-Management | **Working** | Can restart himself, survives reboots |
-| MCP Skills | **Working** | Sentry, Notion (MCP); GitHub via `gh` CLI |
-| Reflections (Cron) | **Working** | Daily autonomous maintenance at 6 AM Pacific |
+Three layers:
+
+- **Comms layer** — bridges to the channels where work actually happens: Telegram, Email, LinkedIn, etc. Messages come in, replies go out, session context survives across conversations.
+- **Harness layer** — wraps agent harnesses like Claude Code, giving Valor tools, memory, skills, and a full SDLC workflow.
+- **Execution layer** — a standalone worker service runs sessions against the configured harness. Sessions come in three flavors: **PM** (orchestrates work), **Dev** (writes code), and **Teammate** (conversational).
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         Telegram                                 │
-│                    (User sends message)                          │
-└─────────────────────────┬───────────────────────────────────────┘
-                          │
-                          ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    Python Bridge                                 │
-│              (bridge/telegram_bridge.py)                         │
-│                                                                  │
-│  • Telethon client (user account, not bot)                       │
-│  • Listens for @valor mentions and DMs                           │
-│  • Maintains session continuity per chat                         │
-└─────────────────────────┬───────────────────────────────────────┘
-                          │
-                          ▼
-┌───────────────────────────────────────┐
-│  Claude Agent SDK                     │
-│                                       │
-│  • agent/sdk_client.py                │
-│  • Same tools as Claude Code CLI      │
-└───────────────────┬───────────────────┘
-                    │
-                    ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                       Claude API                                 │
-│                  (anthropic/claude-sonnet-4)                     │
-└─────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│   Comms  (Telegram · Email · LinkedIn · …)                   │
+└──────────────────────────┬───────────────────────────────────┘
+                           │
+                           ▼
+┌──────────────────────────────────────────────────────────────┐
+│   Bridge   (I/O only — enqueues sessions, routes output)     │
+└──────────────────────────┬───────────────────────────────────┘
+                           │    Redis queue
+                           ▼
+┌──────────────────────────────────────────────────────────────┐
+│   Worker   (sole session execution engine)                   │
+│     ├── ChatSession  (PM — orchestrates the SDLC pipeline)   │
+│     │     └── DevSession  (Dev — writes, tests, ships code)  │
+│     └── Teammate    (conversational)                         │
+└──────────────────────────┬───────────────────────────────────┘
+                           │
+                           ▼
+┌──────────────────────────────────────────────────────────────┐
+│   Agent Harness  (Claude Code / Agent SDK) + MCP tools       │
+└──────────────────────────────────────────────────────────────┘
 ```
+
+See [`docs/features/bridge-worker-architecture.md`](docs/features/bridge-worker-architecture.md) for the full design.
+
+## The SDLC Pipeline
+
+Valor ships real features through a structured pipeline, each stage a skill the agent invokes:
+
+```
+Plan → Critique → Build → Test → Patch → Review → Docs → Merge
+```
+
+ChatSession (PM persona) steers the pipeline and delegates coding work to DevSession (Dev persona). See [`.claude/skills/sdlc/SKILL.md`](.claude/skills/sdlc/SKILL.md) for the ground truth on stage definitions.
+
+## Subsystems
+
+| Subsystem | Purpose |
+|-----------|---------|
+| **Subconscious memory** | Long-term memory with bloom-filter recall, intentional saves, and post-session extraction |
+| **Reflections** | Daily autonomous maintenance pipeline (log review, audits, cleanup, reporting) |
+| **Autoexperiment** | Nightly prompt optimization for observer/summarizer targets |
+| **Self-healing** | Watchdog service with crash tracking and automatic recovery |
+| **Session steering** | Inject guidance into running sessions from any process |
+| **Worktree isolation** | Per-feature git worktrees for parallel work without collisions |
+| **Dashboard** | Web UI showing sessions, health, reflections, and machine state |
 
 ## Quick Start
 
@@ -57,105 +72,56 @@ pip install -e .
 
 # 2. Configure environment
 cp .env.example .env
-# Edit .env with your API keys and Telegram credentials
+# Edit .env with your API keys and comms credentials
 
-# 3. Start the bridge
+# 3. Start the bridge and worker
 ./scripts/start_bridge.sh
+./scripts/valor-service.sh worker-start
 ```
-
-See [docs/setup.md](docs/setup.md) for detailed setup instructions.
-
-## Configuration
-
-### Agent Backend
-
-The system uses the Claude Agent SDK as its agent backend, providing the same capabilities as Claude Code CLI.
-
-### Key Files
-
-| File | Purpose |
-|------|---------|
-| `agent/sdk_client.py` | Claude Agent SDK wrapper |
-| `bridge/telegram_bridge.py` | Telegram ↔ Agent bridge |
-| `config/SOUL.md` | Valor persona definition |
-| `.env` | Environment variables and API keys |
 
 ## Service Management
 
 ```bash
-./scripts/valor-service.sh status   # Check if running
-./scripts/valor-service.sh restart  # Restart after code changes
-./scripts/valor-service.sh logs     # View logs
-./scripts/valor-service.sh health   # Health check
+./scripts/valor-service.sh status          # Bridge status
+./scripts/valor-service.sh restart         # Restart bridge after code changes
+./scripts/valor-service.sh worker-status   # Worker status
+./scripts/valor-service.sh worker-restart  # Restart worker
+tail -f logs/bridge.log                    # Stream logs
 ```
 
-## Repository Structure
+## Repository Layout
 
 ```
 ai/
-├── agent/                  # Claude Agent SDK integration
-│   ├── __init__.py
-│   └── sdk_client.py       # SDK wrapper (ValorAgent class)
-├── bridge/                 # Telegram-Agent bridge
-│   └── telegram_bridge.py  # Main bridge with routing logic
-├── tools/                  # Local Python tools
-│   ├── telegram_history/   # Chat history storage
-│   └── link_analysis/      # URL analysis
-├── config/
-│   ├── SOUL.md             # Valor persona definition
-│   └── projects.json       # Multi-project configuration
-├── scripts/
-│   ├── valor-service.sh    # Service management
-│   └── start_bridge.sh     # Quick start script
-├── docs/
-│   ├── setup.md            # Setup guide
-│   └── plans/              # Migration and planning docs
-├── logs/                   # Runtime logs
-├── data/                   # Session files, state
-├── CLAUDE.md               # Development guide
-└── README.md               # This file
+├── agent/               # Session queue, SDK client, output routing
+├── bridge/              # Comms bridges (Telegram, etc.) and nudge loop
+├── worker/              # Standalone worker service (python -m worker)
+├── tools/               # Local Python tools
+├── ui/                  # Dashboard web UI
+├── monitoring/          # Watchdog, crash tracker, health checks
+├── .claude/
+│   ├── skills/          # SDLC and utility skills
+│   ├── commands/        # Slash commands
+│   └── agents/          # Subagent definitions
+├── config/              # SOUL.md persona, projects.json
+├── scripts/             # Service management, setup, deployment
+├── docs/features/       # Feature-level documentation
+└── tests/               # Unit, integration, e2e
 ```
-
-## Documentation
-
-| Document | Purpose |
-|----------|---------|
-| [CLAUDE.md](CLAUDE.md) | Development principles and architecture |
-| [docs/setup.md](docs/setup.md) | Local setup guide |
-| [docs/plans/claude-agent-sdk-migration.md](docs/plans/claude-agent-sdk-migration.md) | SDK migration plan and status |
-
-## MCP Skills
-
-Skills are available via MCP servers registered in `.mcp.json`:
-
-| Skill | Purpose |
-|-------|---------|
-| Sentry | Error monitoring, performance analysis |
-| GitHub | Repository operations, PRs, issues |
-| Reflections | Daily autonomous maintenance |
-
-## Reflections (Daily Maintenance)
-
-Valor runs autonomous maintenance daily at 6 AM Pacific via a 16-unit pipeline with string-keyed state tracking:
-
-**Independent units** (13): `legacy_code_scan`, `log_review`, `task_management`, `documentation_audit`, `skills_audit`, `hooks_audit`, `redis_ttl_cleanup`, `redis_data_quality`, `branch_plan_cleanup`, `feature_docs_audit`, `principal_staleness`, `disk_space_check`, `pr_review_audit`
-
-**Merged pipelines** (3): `session_intelligence` (analysis → reflection → auto-fix), `behavioral_learning` (episode close → pattern crystallization), `daily_report_and_notify` (produce report → create GitHub issue)
 
 ## Development
 
-### Running Tests
-
 ```bash
-pytest tests/ -v
+pytest tests/unit/ -n auto     # Fast unit tests in parallel
+pytest tests/                  # Full suite
+python -m ruff format .        # Format
 ```
 
-### Code Quality
+## See Also
 
-```bash
-black . && ruff check . && mypy . --strict
-```
-
-## Contact
-
-Valor Engels
+| Resource | Purpose |
+|----------|---------|
+| [CLAUDE.md](CLAUDE.md) | Development principles and working guide |
+| [docs/features/README.md](docs/features/README.md) | Feature index — how things work |
+| [config/SOUL.md](config/SOUL.md) | Valor persona and philosophy |
+| [tests/README.md](tests/README.md) | Test suite index and contribution guide |
