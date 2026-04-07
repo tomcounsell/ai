@@ -29,7 +29,7 @@ The watchdog fixes problems automatically — marking stuck sessions as abandone
 ## Detection Heuristics
 
 ### Silence Detection
-Fires when `time.time() - session.updated_at > SILENCE_THRESHOLD`. Indicates the agent may have stalled. The `updated_at` field (a `DatetimeField` with `auto_now=True`, renamed from `last_activity`) is compared using `_to_timestamp()` which handles both datetime and float values.
+Fires when `time.time() - session.updated_at > SILENCE_THRESHOLD`. Indicates the agent may have stalled. The `updated_at` field (a `DatetimeField` with `auto_now=True`, renamed from `last_activity`) is compared using `_to_timestamp()` which handles both datetime and float values. Naive datetimes (as deserialized from Popoto `SortedField`) are assumed to represent UTC — this prevents a false-stall inflation of one full UTC offset on non-UTC machines (fix: issue #777).
 
 | Setting | Value |
 |---------|-------|
