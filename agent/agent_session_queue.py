@@ -2717,6 +2717,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
     await task.run(do_work(), send_result=True)
 
     # Wait for the background task to complete, with periodic calendar heartbeats
+    # and updated_at writes to keep the session alive during long Claude API calls.
     async def _heartbeat_loop():
         while not task._task.done():
             await asyncio.sleep(CALENDAR_HEARTBEAT_INTERVAL)
@@ -2724,6 +2725,17 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 asyncio.create_task(
                     _calendar_heartbeat(session.project_key, project=session.project_key)
                 )
+                # Write updated_at heartbeat so stale cleanup doesn't kill this session
+                if agent_session:
+                    try:
+                        agent_session.updated_at = datetime.now(tz=UTC)
+                        agent_session.save()
+                    except Exception as hb_err:
+                        logger.warning(
+                            "[%s] updated_at heartbeat save failed: %s",
+                            session.session_id,
+                            hb_err,
+                        )
 
     heartbeat = asyncio.create_task(_heartbeat_loop())
     try:

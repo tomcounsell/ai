@@ -125,13 +125,17 @@ When a nudge (auto-continue) is enqueued during session execution, the session s
 
 `_cleanup_stale_sessions()` in `scripts/update/run.py` runs during every `/update` deploy and terminates `running` or `pending` sessions that have no live process. It is a safety net for sessions that were never finalized due to a crash or abrupt restart.
 
-**Liveness check (authoritative when available):** Before checking age, the function imports `_active_workers` from `agent.agent_session_queue`. Any session whose `chat_id` maps to a not-done asyncio Task is unconditionally skipped — the worker is still running.
+**Primary liveness check — `updated_at` recency (30-minute window):** The function first checks each session's `updated_at` timestamp. If `updated_at` is within the last 30 minutes, the session is considered live and unconditionally skipped. The worker writes a periodic `updated_at` heartbeat every 25 minutes via `_heartbeat_loop` in `agent/agent_session_queue.py`, so even sessions blocked on a long Claude API call stay fresh in Redis. Sessions skipped for recent activity are counted and reported in the `/update` log as "Skipped N live session(s) (recent heartbeat)".
 
-**Age threshold:** 120 minutes (raised from the original 30 to reduce false positives). When the update script runs as a standalone subprocess and `_active_workers` is empty, this threshold is the sole guard.
+**Fallback liveness check — `created_at` age (120-minute threshold):** When `updated_at` is `None` (sessions created before the heartbeat feature was added), the function falls back to checking `created_at` age. Sessions younger than 120 minutes are skipped. This preserves the original safety margin for legacy sessions.
+
+**Secondary defense — `_active_workers` registry:** Before either timestamp check, any session whose `chat_id` maps to a not-done asyncio Task in `_active_workers` is unconditionally skipped. This registry is only populated during in-process invocations and is always empty when the update script runs as a CLI subprocess.
+
+**Return value:** The function returns `(killed_count, skipped_live)` — both the number of sessions killed and the number skipped due to recent heartbeat activity.
 
 **Lifecycle routing:** All terminal transitions go through `finalize_session(session, "killed", reason="stale cleanup (no live process)", skip_checkpoint=True)`. This fires all lifecycle hooks (lifecycle log, auto-tag, parent finalization) while skipping the branch checkpoint, which is unavailable outside the normal worker context.
 
-**In-process vs. standalone:** When the update script runs inside the same process as the queue (bridge in-process update), `_active_workers` is populated and fully authoritative. When it runs as a CLI subprocess, `_active_workers` will always be empty and the function logs a warning before falling back to age-threshold-only cleanup.
+**In-process vs. standalone:** When the update script runs inside the same process as the queue (bridge in-process update), `_active_workers` is populated and fully authoritative. When it runs as a CLI subprocess, `_active_workers` will always be empty and the function logs a warning before relying on the `updated_at` recency check.
 
 ## Design Constraints
 

@@ -140,22 +140,32 @@ def log(msg: str, verbose: bool = True, always: bool = False) -> None:
         print(line)
 
 
-def _cleanup_stale_sessions(project_dir: Path, age_minutes: int = 120) -> int:
+RECENT_ACTIVITY_WINDOW = (
+    30 * 60
+)  # 30 minutes — session considered live if updated_at within this window
+
+
+def _cleanup_stale_sessions(project_dir: Path, age_minutes: int = 120) -> tuple[int, int]:
     """Kill running/pending sessions with no live process.
 
-    Age threshold is 120 minutes (raised from 30) to reduce false positives.
-    Sessions whose chat_id has a live entry in _active_workers are always skipped
-    regardless of age — the worker registry is authoritative for in-process liveness.
+    Primary liveness check: ``updated_at`` recency. Sessions whose ``updated_at``
+    timestamp is within ``RECENT_ACTIVITY_WINDOW`` (30 min) are skipped — they have
+    recent heartbeat activity and are considered live regardless of ``created_at`` age.
 
-    NOTE: _active_workers is only populated when the update script runs inside the
-    same process as the queue (e.g., bridge in-process update). When the update script
-    runs as a standalone subprocess (e.g., CLI invocation), _active_workers will be
-    empty — the 120-minute age threshold acts as the sole guard in that case.
+    Fallback liveness check: ``created_at`` age. When ``updated_at`` is None the
+    session falls back to the old 120-minute ``created_at`` threshold so that very
+    old sessions created before the heartbeat feature existed are still cleaned up.
+
+    Secondary defense: sessions whose ``chat_id`` has a live entry in
+    ``_active_workers`` are always skipped (in-process invocations only; the registry
+    is empty when the update script runs as a standalone subprocess).
 
     Terminal sessions (killed/abandoned/failed/completed) are preserved
     for reflections to analyze — reflections handles its own 90-day expiry.
 
-    Returns the number of sessions transitioned to 'killed'.
+    Returns:
+        (killed_count, skipped_live) — number of sessions killed and number skipped
+        because they had recent heartbeat activity.
     """
     import time
     from datetime import datetime
@@ -172,24 +182,47 @@ def _cleanup_stale_sessions(project_dir: Path, age_minutes: int = 120) -> int:
 
         logging.getLogger(__name__).warning(
             "[update] Could not import _active_workers from agent_session_queue — "
-            "falling back to age-threshold-only cleanup (120 min)"
+            "falling back to recency-threshold-only cleanup"
         )
         active_workers_registry = {}
 
     now = time.time()
     threshold = age_minutes * 60
     killed_count = 0
+    skipped_live = 0
 
     for status in ("running", "pending"):
         sessions = list(AgentSession.query.filter(status=status))
         for s in sessions:
-            # Skip sessions with a live worker in the registry
+            # Secondary defense: skip sessions with a live worker in the registry
             chat_id = getattr(s, "chat_id", None)
             if chat_id and chat_id in active_workers_registry:
                 worker = active_workers_registry[chat_id]
                 if worker is not None and not worker.done():
                     continue  # live worker exists — do not kill
 
+            # Primary liveness check: updated_at recency
+            updated = getattr(s, "updated_at", None)
+            if updated is not None:
+                if isinstance(updated, datetime):
+                    recency = now - updated.timestamp()
+                elif isinstance(updated, str):
+                    try:
+                        dt = datetime.fromisoformat(updated.replace("Z", "+00:00"))
+                        recency = now - dt.timestamp()
+                    except (ValueError, TypeError):
+                        recency = None
+                else:
+                    try:
+                        recency = now - float(updated)
+                    except (TypeError, ValueError):
+                        recency = None
+
+                if recency is not None and recency < RECENT_ACTIVITY_WINDOW:
+                    skipped_live += 1
+                    continue  # recent heartbeat activity — session is live
+
+            # Fallback liveness check: created_at age (for sessions without updated_at)
             created = s.created_at
             if not created:
                 continue
@@ -231,7 +264,7 @@ def _cleanup_stale_sessions(project_dir: Path, age_minutes: int = 120) -> int:
                     exc,
                 )
 
-    return killed_count
+    return killed_count, skipped_live
 
 
 def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
@@ -563,7 +596,11 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         if telegram_check.available:
             log(f"  Telegram: {telegram_check.version or 'OK'}", v)
         else:
-            log(f"ERROR: Telegram session not authorized: {telegram_check.error}", v, always=True)
+            log(
+                f"ERROR: Telegram session not authorized: {telegram_check.error}",
+                v,
+                always=True,
+            )
             result.errors.append(f"Telegram auth: {telegram_check.error}")
 
     # Step 5: Service management
@@ -660,15 +697,14 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     except Exception as e:
         log(f"WARN: Corrupted session cleanup failed: {e}", v)
 
-    # TODO: stale session cleanup disabled — kills healthy sessions because
-    # _active_workers registry is empty when update runs out-of-process.
-    # See: https://github.com/tomcounsell/ai/issues (stale cleanup issue)
-    # try:
-    #     stale_killed = _cleanup_stale_sessions(project_dir)
-    #     if stale_killed > 0:
-    #         log(f"Cleaned up {stale_killed} stale session(s)", v)
-    # except Exception as e:
-    #     log(f"WARN: Session cleanup failed: {e}", v)
+    try:
+        stale_killed, skipped_live = _cleanup_stale_sessions(project_dir)
+        if stale_killed > 0:
+            log(f"Cleaned up {stale_killed} stale session(s)", v)
+        if skipped_live > 0:
+            log(f"Skipped {skipped_live} live session(s) (recent heartbeat)", v)
+    except Exception as e:
+        log(f"WARN: Session cleanup failed: {e}", v)
 
     # Step 6: Environment verification
     if config.do_verify:
