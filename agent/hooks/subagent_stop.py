@@ -89,7 +89,8 @@ def _register_dev_session_completion(
         from models.agent_session import AgentSession
         from models.session_lifecycle import finalize_session
 
-        # Two-lookup pattern: resolve bridge session_id → parent AgentSession → agent_session_id UUID.
+        # Two-lookup pattern: resolve bridge session_id → parent AgentSession
+        # → agent_session_id UUID.
         # Child local-* records store the parent's agent_session_id UUID in parent_agent_session_id,
         # not the bridge session_id, so we must look up the parent record first.
         parent_agent_uuid: str | None = None
