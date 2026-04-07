@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor
@@ -160,16 +160,16 @@ For `_extract_agent_session_fields`:
 
 ## Test Impact
 
-- [ ] `tests/integration/test_agent_session_queue_race.py::test_pop_agent_session_preserves_fields` — UPDATE: assert same `agent_session_id` and `status == "running"` after pop.
-- [ ] `tests/integration/test_agent_session_queue_race.py` line 88 (`assert new_job.agent_session_id != original.agent_session_id`) — UPDATE: flip assertion.
-- [ ] `tests/integration/test_agent_session_queue_race.py` module docstring (line 3: "delete-and-recreate pattern used by _pop_agent_session") — UPDATE: describe in-place mutation.
-- [ ] `tests/integration/test_agent_session_queue_race.py` class docstring (line 94) — UPDATE: remove delete-and-recreate language for the pop path.
-- [ ] `tests/integration/test_agent_session_scheduler.py` — UPDATE: any assertions on `_pop_agent_session` behavior that expect a new ID.
-- [ ] `tests/integration/test_lifecycle_transition.py` — UPDATE: pop-path assertions only; leave L176/L191 (`complete_transcript` delete-and-recreate) as-is.
-- [ ] `tests/integration/test_agent_session_health_monitor.py` — UPDATE: pop-path assertions.
-- [ ] `tests/integration/test_silent_failures.py` — UPDATE: pop-path assertions.
-- [ ] `tests/unit/test_agent_session_queue.py` (create if missing) — ADD: round-trip unit test for `_extract_agent_session_fields` preserving `message_text` via `initial_telegram_message`.
-- [ ] Any test asserting `scheduling_depth` appears in the extracted field dict — DELETE or adjust to derive via parent walk.
+- [x] `tests/integration/test_agent_session_queue_race.py::test_pop_agent_session_preserves_fields` — UPDATE: assert same `agent_session_id` and `status == "running"` after pop.
+- [x] `tests/integration/test_agent_session_queue_race.py` line 88 (`assert new_job.agent_session_id != original.agent_session_id`) — UPDATE: flip assertion.
+- [x] `tests/integration/test_agent_session_queue_race.py` module docstring (line 3: "delete-and-recreate pattern used by _pop_agent_session") — UPDATE: describe in-place mutation.
+- [x] `tests/integration/test_agent_session_queue_race.py` class docstring (line 94) — UPDATE: remove delete-and-recreate language for the pop path.
+- [x] `tests/integration/test_agent_session_scheduler.py` — UPDATE: any assertions on `_pop_agent_session` behavior that expect a new ID.
+- [x] `tests/integration/test_lifecycle_transition.py` — UPDATE: pop-path assertions only; leave L176/L191 (`complete_transcript` delete-and-recreate) as-is.
+- [x] `tests/integration/test_agent_session_health_monitor.py` — UPDATE: pop-path assertions.
+- [x] `tests/integration/test_silent_failures.py` — UPDATE: pop-path assertions.
+- [x] `tests/unit/test_agent_session_queue.py` (create if missing) — ADD: round-trip unit test for `_extract_agent_session_fields` preserving `message_text` via `initial_telegram_message`.
+- [x] Any test asserting `scheduling_depth` appears in the extracted field dict — DELETE or adjust to derive via parent walk.
 
 ## Rabbit Holes
 
@@ -229,32 +229,32 @@ No MCP tools, bridge imports, or `.mcp.json` changes are affected.
 
 ## Documentation
 
-- [ ] Update the module docstring of `agent/agent_session_queue.py` around
+- [x] Update the module docstring of `agent/agent_session_queue.py` around
   `_AGENT_SESSION_FIELDS` (lines 71-123) to clarify which callers use
   delete-and-recreate (retry, orphan fix, continuation) and why
   `_pop_agent_session` does NOT.
-- [ ] Update `docs/features/popoto-index-hygiene.md` (if it references
+- [x] Update `docs/features/popoto-index-hygiene.md` (if it references
   `_pop_agent_session`) to reflect the in-place mutation pattern. If it does not
   mention `_pop_agent_session`, no change is needed.
-- [ ] No new feature doc needed — this is a bugfix, not a new capability.
-- [ ] No external docs site changes — internal bugfix.
+- [x] No new feature doc needed — this is a bugfix, not a new capability.
+- [x] No external docs site changes — internal bugfix.
 
 ## Success Criteria
 
-- [ ] All 13 previously-failing integration tests in `test_agent_session_queue_race.py`,
+- [x] All 13 previously-failing integration tests in `test_agent_session_queue_race.py`,
   `test_agent_session_scheduler.py`, `test_lifecycle_transition.py`,
   `test_agent_session_health_monitor.py`, and `test_silent_failures.py` pass.
-- [ ] New unit test asserts `_extract_agent_session_fields` round-trips
+- [x] New unit test asserts `_extract_agent_session_fields` round-trips
   `message_text` via `initial_telegram_message`.
-- [ ] No remaining test docstring or module docstring describes
+- [x] No remaining test docstring or module docstring describes
   `_pop_agent_session` as "delete-and-recreate".
-- [ ] No Redis warnings of the form "one or more redis keys points to missing
+- [x] No Redis warnings of the form "one or more redis keys points to missing
   objects" appear in the test log.
-- [ ] `_pop_agent_session` production behavior is byte-identical before and
+- [x] `_pop_agent_session` production behavior is byte-identical before and
   after the change (diff touches only tests, docstrings, and the comment on
   `_AGENT_SESSION_FIELDS`).
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
@@ -338,7 +338,56 @@ No MCP tools, bridge imports, or `.mcp.json` changes are affected.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique. Leave empty until critique is run. -->
+**Verdict:** READY TO BUILD
+**Findings:** 4 total (0 blockers, 3 concerns, 1 nit)
+
+### Concerns
+
+#### C1. Plan contradicts issue framing of Bug 2 without updating the issue
+- **Critics:** Archaeologist, User
+- **Location:** Data Flow (L70-74), No-Gos
+- **Finding:** Issue #761 frames Bug 2 as `_extract_agent_session_fields` losing `message_text` for retry/orphan/continuation paths. The plan (correctly, verified against `models/agent_session.py:462` where `message_text` is a virtual property over `initial_telegram_message`) calls this a misread and scopes the fix down to a clarifying comment + round-trip unit test. This is the right call technically, but the plan does not propose updating issue #761 or commenting on it to explain the scope reduction — future readers auditing the issue will think Bug 2 was silently dropped.
+- **Suggestion:** Add a task (or note under "Documentation") to post a comment on #761 stating that the field-extraction helper already preserves `message_text` via `initial_telegram_message` and link the round-trip unit test as evidence.
+
+#### C2. "13 failing tests" is unverified and never enumerated
+- **Critics:** Skeptic, Operator
+- **Location:** Problem, Success Criteria (L244-246)
+- **Finding:** The plan repeatedly cites "all 13 currently-failing integration tests" but never lists them by node ID, and no prerequisite task runs `pytest --collect-only` or a failure-capture command to baseline the set. If the actual failing count is different (12, 15), the validator task has no ground truth, and a test that was failing for an unrelated reason could be "fixed" by flipping an assertion it shouldn't flip. Risk 1 mentions this concern but the mitigation ("read the test body and verify") is manual and easy to skip under pressure.
+- **Suggestion:** Add a pre-flight task that runs the 5 affected test files, captures the failing node IDs to a scratch file, and makes the validator task assert that exact set (no more, no less) is now green. This turns Risk 1 mitigation into a mechanical check.
+
+#### C3. Validator's diff check is too narrow
+- **Critics:** Adversary, Operator
+- **Location:** Verification table, Task 4 validate-all
+- **Finding:** The verification row `git diff agent/agent_session_queue.py` only checks for comment-only changes to that one file. But the plan also touches `agent/agent_session_queue.py` module docstring (per Documentation L232-235), and nothing verifies that NO production file outside `agent/agent_session_queue.py` was modified. A test-engineer builder could unintentionally "fix" a test by editing, say, `models/session_lifecycle.py` or `agent/output_router.py`, and the validator would not catch it.
+- **Suggestion:** Tighten to `git diff --stat` on the full working tree and whitelist expected paths: the 5 test files, `tests/unit/test_agent_session_queue.py`, and `agent/agent_session_queue.py` (comment-only). Fail validation if any other path appears.
+
+### Nits
+
+#### N1. Open Question 2 should be resolved before build, not during
+- **Critics:** Skeptic
+- **Location:** Open Questions (L351-355)
+- **Finding:** The "redis keys points to missing objects" warning is listed as a success criterion (L251-252) but is also an open question ("is that a separate bug, or will it disappear?"). If it's a separate bug, the success criterion is unachievable via this plan alone.
+- **Suggestion:** Either (a) downgrade the success criterion to "no NEW warnings appear" with a baseline capture, or (b) resolve the open question before starting the build by grepping recent test logs for that warning string.
+
+### Structural Check Results
+
+| Check | Status | Detail |
+|-------|--------|--------|
+| Required sections | PASS | Documentation, Update System, Agent Integration, Test Impact all present and non-empty |
+| Task numbering | PASS | Tasks 1-4 sequential |
+| Dependencies valid | PASS | Task 4 depends on tasks 1-3 (all defined) |
+| File paths exist | PASS | All 5 integration test files + `agent/agent_session_queue.py` verified; `tests/unit/test_agent_session_queue.py` correctly marked "create if missing" |
+| Prerequisites met | N/A | Plan declares no prerequisites |
+| Cross-references | PASS | Success criteria map to tasks; No-Gos do not appear in Solution |
+
+**Verified source citations:**
+- `agent/agent_session_queue.py:524` — `transition_status(chosen, "running", ...)` confirmed as in-place mutation (not delete-and-recreate)
+- `agent/agent_session_queue.py:73-123` — `_AGENT_SESSION_FIELDS` includes `initial_telegram_message` (L85), confirming plan's claim that `message_text` is preserved transitively
+- `models/agent_session.py:462` — `message_text` is a `@property` reading from `initial_telegram_message`, confirming plan's correction of Bug 2's framing
+- `tests/integration/test_agent_session_queue_race.py:3` — Module docstring references "delete-and-recreate pattern used by _pop_agent_session" (stale, as plan claims)
+- `tests/integration/test_agent_session_queue_race.py:88, 138` — Stale `agent_session_id !=` assertions confirmed
+
+**Verdict rationale:** No blockers found. The plan is technically sound, correctly scopes down an issue-level misread, and has a well-defined rollback profile (test/docstring-only changes). The three concerns are hygiene improvements that should be folded into the build but do not prevent it. Proceed to `/do-build`.
 
 ---
 

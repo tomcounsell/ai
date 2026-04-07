@@ -260,8 +260,13 @@ class TestJobQueueLifecycleLogging:
         lifecycle_entries = [h for h in history if "[lifecycle]" in h]
         assert any("running" in entry for entry in lifecycle_entries)
 
-    def test_session_fields_includes_history(self):
-        """_AGENT_SESSION_FIELDS includes history for lifecycle entry preservation."""
+    def test_session_fields_includes_session_events(self):
+        """_AGENT_SESSION_FIELDS includes session_events for lifecycle entry preservation.
+
+        The legacy 'history' field was replaced by the structured session_events
+        ListField. Delete-and-recreate callers preserve lifecycle entries by
+        copying session_events.
+        """
         from agent.agent_session_queue import _AGENT_SESSION_FIELDS
 
-        assert "history" in _AGENT_SESSION_FIELDS
+        assert "session_events" in _AGENT_SESSION_FIELDS

@@ -118,6 +118,22 @@ def redis_test_db(request):
     rdb.POPOTO_REDIS_DB = test_client
     test_client.flushdb()
 
+    # Popoto submodules use `from ..redis_db import POPOTO_REDIS_DB`, which
+    # captures the binding at import time. Assigning rdb.POPOTO_REDIS_DB above
+    # does not update those local bindings, so we must patch every popoto
+    # module that has a local POPOTO_REDIS_DB symbol. Without this, sync
+    # reads/writes route to whichever db was active at import (often
+    # production), and async vs. sync reads diverge.
+    import sys as _sys
+
+    _patched_popoto_modules: list[tuple[object, object]] = []
+    for _modname, _mod in list(_sys.modules.items()):
+        if _mod is None or not _modname.startswith("popoto"):
+            continue
+        if hasattr(_mod, "POPOTO_REDIS_DB"):
+            _patched_popoto_modules.append((_mod, _mod.POPOTO_REDIS_DB))
+            _mod.POPOTO_REDIS_DB = test_client
+
     # Reset async Redis connection to point at the same test db.
     rdb._POPOTO_ASYNC_REDIS_DB = aioredis.Redis(db=test_db)
 
@@ -128,6 +144,8 @@ def redis_test_db(request):
     test_client.close()
     rdb.POPOTO_REDIS_DB = original_sync
     rdb._POPOTO_ASYNC_REDIS_DB = original_async
+    for _mod, _orig in _patched_popoto_modules:
+        _mod.POPOTO_REDIS_DB = _orig
 
 
 # ---------------------------------------------------------------------------

@@ -69,7 +69,24 @@ AGENT_SESSION_HEALTH_MIN_RUNNING = (
 
 
 # Fields to extract from AgentSession for delete-and-recreate pattern.
-# Excludes agent_session_id (AutoKeyField, auto-generated on create).
+# Used by callers that legitimately need a fresh AutoKeyField-generated ID:
+# retry, orphan fix, and the continuation fallback in _enqueue_nudge. The pop
+# path (_pop_agent_session) does NOT use this — it mutates in place via
+# transition_status() because status is an IndexedField, not a KeyField, and
+# the secondary index is updated correctly on save().
+#
+# Preservation notes for fields that look missing but aren't:
+#   * message_text / sender_name / sender_id / telegram_message_id / chat_title
+#     are virtual properties over initial_telegram_message (DictField). Copying
+#     initial_telegram_message preserves them transitively.
+#   * revival_context / classification_type are virtual properties over
+#     extra_context (DictField), preserved transitively via extra_context.
+#   * scheduling_depth is a derived @property that walks the
+#     parent_agent_session_id chain at read time; it must NOT be listed here
+#     because it is read-only and cannot be set at create time. Callers that
+#     want the depth of the new record walk the chain via the property.
+#   * agent_session_id / id are AutoKeyField and intentionally omitted so
+#     the recreated record gets a fresh auto-generated ID.
 _AGENT_SESSION_FIELDS = [
     "project_key",
     # status is an IndexedField (not KeyField), so it does not affect the Redis key.
@@ -1885,9 +1902,13 @@ async def _enqueue_nudge(
     # expectations, and all other metadata that would be lost if we called
     # enqueue_agent_session() (which creates a brand new AgentSession record).
     #
-    # Uses the same delete-and-recreate pattern as _pop_agent_session() to work
-    # around Popoto's KeyField index corruption bug (on_save() adds to
-    # new index set but never removes from old one).
+    # Uses delete-and-recreate to work around Popoto's KeyField index corruption
+    # bug (on_save() adds to new index set but never removes from old one).
+    # Note: _pop_agent_session no longer uses delete-and-recreate -- it mutates
+    # status in place via transition_status() because status is an IndexedField,
+    # not a KeyField. This fallback path must recreate because it may need to
+    # rewrite other dict-backed fields (e.g., initial_telegram_message) and to
+    # guarantee a fresh AutoKeyField id for observability.
     sessions = await asyncio.to_thread(
         lambda: list(AgentSession.query.filter(session_id=session.session_id))
     )
@@ -2085,8 +2106,11 @@ async def _execute_agent_session(session: AgentSession) -> None:
             sessions = list(AgentSession.query.filter(session_id=session.session_id))
             if sessions:
                 stage = sessions[0].current_stage
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(
+                f"[{project_key}] current_stage lookup failed for "
+                f"{session.session_id} (non-fatal): {e}"
+            )
         resolved_branch, needs_wt = resolve_branch_for_stage(slug, stage)
         branch_name = resolved_branch
         # If branch resolution says we need a worktree and working_dir isn't one
@@ -2445,8 +2469,11 @@ async def _execute_agent_session(session: AgentSession) -> None:
 
             _all_projects = _load_projects_config().get("projects", {})
             project_config = _all_projects.get(session.project_key, {})
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(
+                f"Failed to load project config for {session.project_key} "
+                f"from projects.json (non-fatal): {e}"
+            )
     if not project_config:
         project_config = {
             "_key": session.project_key,
