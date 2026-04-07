@@ -44,7 +44,7 @@ No external prerequisites. `validate_build.py` already runs and exits 0 before t
 
 ### Key Elements
 
-- **New evaluator script**: `scripts/evaluate_build.py` — takes plan path and optional `--diff` flag as inputs, reads `## Acceptance Criteria`, runs AI evaluation, outputs structured JSON verdicts.
+- **New evaluator script**: `scripts/evaluate_build.py` — takes plan path as input, reads `## Acceptance Criteria`, runs AI evaluation, outputs structured JSON verdicts.
 - **SKILL.md insertion**: Add step 16c to `.claude/skills/do-build/SKILL.md`, between step 16b (`validate_build.py`) and step 17 (advance to review stage). The step invokes `evaluate_build.py` and handles verdict routing.
 - **Verdict structure**: Each criterion gets `{"criterion": str, "verdict": "PASS"|"PARTIAL"|"FAIL", "evidence": str}`. Exit code 0 = all PASS/PARTIAL, exit code 2 = at least one FAIL, exit code 3 = no `## Acceptance Criteria` section found (skip with warning), exit code 1 = unexpected error (non-blocking).
 - **FAIL routing**: Exit code 2 routes to `/do-patch` with the FAIL verdict evidence as the patch arg. Max 2 re-evaluation cycles. If still FAIL after 2 iterations, log and proceed (non-blocking fallback).
@@ -62,9 +62,12 @@ validate_build.py exits 0
         PARTIAL verdicts: log as warnings in pipeline output
         Proceed to advance_stage('review')
     → exit 2 (one or more FAIL):
-        Call /do-patch with FAIL verdict evidence (iteration 1)
+        Bundle ALL FAIL verdicts into a single /do-patch call as a structured list (not one call per FAIL)
+        Call /do-patch with the full FAIL list as patch description (iteration 1)
+        Log: "[AI Evaluator] FAIL on N criteria — routing to patch cycle (attempt 1/2)"
           → re-run evaluate_build.py
-          → still FAIL: call /do-patch again (iteration 2)
+          → still FAIL: bundle remaining FAILs, call /do-patch again (iteration 2)
+            Log: "[AI Evaluator] FAIL on N criteria — routing to patch cycle (attempt 2/2)"
             → still FAIL: log "AI evaluator: 2 iterations reached, proceeding to review"
             → Proceed to advance_stage('review')
           → exit 0 or 3: Proceed to advance_stage('review')
@@ -92,9 +95,30 @@ Exit codes:
 The script:
 1. Parses `## Acceptance Criteria` from the plan (using the same `extract_section()` pattern as `validate_build.py`)
 2. Runs `git diff main..HEAD` to capture the full diff
-3. Calls the Anthropic API (Claude Haiku for speed) with a structured prompt asking for per-criterion verdicts
+3. Calls the Anthropic API (Claude Haiku for speed) using **JSON mode** (`response_format={"type": "json_object"}`) with a structured prompt asking for per-criterion verdicts
 4. Outputs JSON to stdout: `{"verdicts": [{"criterion": ..., "verdict": ..., "evidence": ...}]}`
 5. Exits with the appropriate code
+
+**Evaluator prompt template:**
+
+```
+You are a build acceptance evaluator. Given a list of acceptance criteria and a git diff, assess each criterion.
+
+For each criterion output:
+- verdict: "PASS" if clearly met, "PARTIAL" if partially met or uncertain, "FAIL" if not met
+- evidence: one sentence explaining what you found (or didn't find) in the diff
+
+Acceptance Criteria:
+{criteria_text}
+
+Git Diff (main..HEAD):
+{diff_text}
+
+Respond with valid JSON only:
+{"verdicts": [{"criterion": "<text>", "verdict": "PASS|PARTIAL|FAIL", "evidence": "<sentence>"}]}
+```
+
+**JSON parse error path**: If the API response is not valid JSON (despite JSON mode), catch `json.JSONDecodeError`, print a warning to stderr, and exit 1 (non-blocking — same as API error path).
 
 **SKILL.md step 16c insertion:**
 
@@ -104,8 +128,8 @@ The script:
     (cd $TARGET_REPO/.worktrees/{slug} && python scripts/evaluate_build.py $PLAN_PATH)
     ```
     - Exit code 0: all criteria PASS or PARTIAL — log PARTIAL verdicts as warnings, proceed to step 17
-    - Exit code 2: one or more FAIL verdicts — invoke `/do-patch` with the FAIL evidence (max 2 iterations), then re-run evaluate_build.py
-    - Exit code 3: no `## Acceptance Criteria` section — log "AI evaluator: no Acceptance Criteria section found, skipping" and proceed to step 17
+    - Exit code 2: FAIL verdicts found — bundle ALL FAIL verdicts into a single `/do-patch` call (not one call per FAIL); log `[AI Evaluator] FAIL on N criteria — routing to patch cycle (attempt X/2)` before each patch invocation; max 2 iterations; if FAIL persists after 2 iterations, log "AI evaluator: 2 iterations reached, proceeding to review" and proceed to step 17
+    - Exit code 3: no `## Acceptance Criteria` section or empty diff — log "AI evaluator: no Acceptance Criteria section, skipping" (or "empty diff, skipping") and proceed to step 17
     - Exit code 1 or any error: log "AI evaluator failed (non-blocking): {error}" and proceed to step 17
 ```
 
@@ -114,17 +138,23 @@ The script:
 ### Exception Handling Coverage
 - `evaluate_build.py`: Anthropic API errors, timeouts → catch all exceptions, print warning to stderr, exit 1 (non-blocking)
 - `evaluate_build.py`: Missing `## Acceptance Criteria` section → exit 3 immediately with a warning message
-- `evaluate_build.py`: Empty diff (no changes) → handle gracefully, pass all criteria with "no diff to evaluate" evidence
+- `evaluate_build.py`: Empty diff (no changes) → exit 3 (same as missing AC section — no code to evaluate, skip with warning "AI evaluator: empty diff, skipping")
 - SKILL.md step 16c: if `evaluate_build.py` itself is not found (missing file) → treated as exit 1 (non-blocking)
 
 ### Empty/Invalid Input Handling
 - Plan with no `## Acceptance Criteria`: exit 3, logged warning, pipeline continues
 - Plan with empty `## Acceptance Criteria` section (header present, no content): exit 3 (treat same as missing)
-- Diff is empty string (no changes): evaluator should note this as evidence and likely emit FAIL/PARTIAL for most criteria
+- Diff is empty string (no changes): exit 3 with warning "AI evaluator: empty diff, skipping" — consistent with non-blocking design, same as missing AC section
 
 ### Error State Rendering
 - All FAIL verdict evidence is included in the `/do-patch` arg so the patcher has actionable context
 - PARTIAL warnings are emitted as numbered lines: `WARNING: AC criterion PARTIAL — {criterion}: {evidence}`
+
+### Logging Destination
+- Evaluator events (verdicts, skip reasons, errors) log to `logs/evaluate_build.log` (same directory as `logs/bridge.log`, `logs/reflections.log`, and other service logs)
+- FAIL verdicts and errors log at `WARNING` level
+- PASS/PARTIAL verdicts log at `INFO` level
+- The build log (stdout) also receives the `[AI Evaluator]` visible messages for patch cycle routing
 
 ## Test Impact
 
@@ -168,9 +198,11 @@ No race conditions — the evaluator is a sequential step in a single-orchestrat
 
 ## Update System
 
-`scripts/evaluate_build.py` is a new file that ships with the codebase. No update script changes needed — `git pull` will pull it automatically. No new dependencies beyond what is already in `requirements.txt` (Anthropic SDK already present).
+`scripts/evaluate_build.py` is a new file that ships with the codebase. No update script changes needed — `git pull` will pull it automatically. No new dependencies beyond what is already declared in `pyproject.toml` (Anthropic SDK already present).
 
 No migration steps for existing installations. The new step is additive; existing builds without `## Acceptance Criteria` sections will receive exit code 3 (skip) and proceed unaffected.
+
+The Anthropic SDK is already declared as a dependency in `pyproject.toml`. No new packages needed.
 
 ## Agent Integration
 
@@ -235,11 +267,11 @@ builder, validator
 
 ### 1. Create scripts/evaluate_build.py
 - **Task ID**: build-evaluator-script
-- **Depends On**: none
+- **Depends On**: none (independent — can run in parallel with build-evaluator-tests)
 - **Validates**: `python scripts/evaluate_build.py --help` exits 0
 - **Assigned To**: script-builder
 - **Agent Type**: builder
-- **Parallel**: false
+- **Parallel**: true
 - Create `scripts/evaluate_build.py` with:
   - `extract_section()` to pull `## Acceptance Criteria` from plan text (same pattern as `validate_build.py`)
   - `get_git_diff()` to run `git diff main..HEAD` and return output string
@@ -249,26 +281,27 @@ builder, validator
   - 60-second timeout on API call; catch all exceptions → exit 1 with warning to stderr
   - CLI: `python scripts/evaluate_build.py <plan-path>` with `--help` flag
   - `--dry-run` flag: parse criteria and diff but skip API call, output mock verdicts for testing
-- Use `anthropic` SDK already in requirements (same import pattern as other tools)
+- Use `anthropic` SDK already in `pyproject.toml` (same import pattern as other tools)
+- Use model `HAIKU = "claude-haiku-4-5-20251001"` from `config/models.py` (import `from config.models import HAIKU`)
 
 ### 2. Write unit tests for evaluate_build.py
 - **Task ID**: build-evaluator-tests
-- **Depends On**: build-evaluator-script
+- **Depends On**: none (independent of Task 1 — can run in parallel with build-evaluator-script)
 - **Validates**: `pytest tests/unit/test_evaluate_build.py -v` exits 0
 - **Assigned To**: script-builder
 - **Agent Type**: builder
-- **Parallel**: false
+- **Parallel**: true
 - Create `tests/unit/test_evaluate_build.py` with:
   - `test_extract_section_with_ac_section`: parses criteria from a plan with `## Acceptance Criteria`
   - `test_extract_section_without_ac_section`: returns empty string when section is absent
   - `test_exit_code_3_on_missing_ac_section`: runs evaluate_build.py on a temp plan file without AC section, asserts exit code 3
   - `test_exit_code_0_on_mock_pass`: uses `--dry-run` flag, asserts exit code 0
-  - `test_exit_code_1_on_missing_plan`: runs evaluate_build.py on a nonexistent file path, asserts exit code 1 or prints usage
+  - `test_exit_code_1_on_missing_plan`: runs evaluate_build.py on a nonexistent file path, asserts exit code 1
   - Mock the Anthropic API call (do not make real API calls in unit tests)
 
 ### 3. Insert step 16c into SKILL.md
 - **Task ID**: update-skill-md
-- **Depends On**: build-evaluator-tests
+- **Depends On**: build-evaluator-script, build-evaluator-tests (both Tasks 1 and 2 must complete first)
 - **Validates**: `grep "evaluate_build.py" .claude/skills/do-build/SKILL.md` returns a match
 - **Assigned To**: skill-updater
 - **Agent Type**: builder
@@ -281,7 +314,7 @@ builder, validator
       (cd $TARGET_REPO/.worktrees/{slug} && python scripts/evaluate_build.py $PLAN_PATH)
       ```
       - Exit code 0: all criteria PASS or PARTIAL — log any PARTIAL verdicts as warnings, proceed to step 17
-      - Exit code 2: FAIL verdicts found — invoke `/do-patch` with the FAIL evidence as the patch description (max 2 iterations), then re-run evaluate_build.py; if FAIL persists after 2 iterations, log "AI evaluator: 2 iterations reached, proceeding to review" and proceed to step 17
+      - Exit code 2: FAIL verdicts found — bundle ALL FAIL verdicts into a single `/do-patch` call (not one call per FAIL); log `[AI Evaluator] FAIL on N criteria — routing to patch cycle (attempt X/2)` before each invocation; max 2 iterations; if FAIL persists after 2 iterations, log "AI evaluator: 2 iterations reached, proceeding to review" and proceed to step 17
       - Exit code 3: no `## Acceptance Criteria` section — log "AI evaluator: no Acceptance Criteria section, skipping" and proceed to step 17
       - Exit code 1 or any error: log "AI evaluator failed (non-blocking): {error}" and proceed to step 17
   ```
@@ -332,10 +365,22 @@ builder, validator
 <!-- Populated by /do-plan-critique (war room). -->
 | Severity | Critic | Finding | Status |
 |----------|--------|---------|--------|
+| BLOCKER | Adversary | Empty diff behavior contradictory — "likely emit FAIL/PARTIAL" conflicts with non-blocking design | Resolved — empty diff → exit 3 (skip, same as missing AC section) |
+| CONCERN | Skeptic | AI prompt unspecified — no template, no JSON mode, no parse error path | Resolved — prompt template added to Technical Approach; JSON mode specified; parse error → exit 1 |
+| CONCERN | Skeptic | `requirements.txt` doesn't exist; project uses `pyproject.toml`; model ID not specified | Resolved — references updated to `pyproject.toml`; model ID `claude-haiku-4-5-20251001` from `config/models.py` |
+| CONCERN | Adversary | Multiple FAIL verdicts bundling behavior for `/do-patch` undefined | Resolved — all FAILs bundled into single `/do-patch` call; specified in Flow, SKILL.md insertion, and Task 3 |
+| CONCERN | Operator | Logging destination for evaluator warnings/errors not specified | Resolved — logs to `logs/evaluate_build.log`; FAILs at WARNING, PASS/PARTIAL at INFO |
+| CONCERN | Simplifier | Task 3 depends on Task 2 unnecessarily; SKILL.md update can run in parallel with tests | Resolved — Tasks 1 and 2 marked Parallel:true (independent); Task 3 depends on both |
+| CONCERN | User | No user-visible evaluator progress summary in build output | Resolved — `[AI Evaluator] FAIL on N criteria — routing to patch cycle (attempt X/2)` added to Flow and SKILL.md step |
+| NIT | Skeptic | `--diff` flag mentioned in Key Elements but absent from Task 1 spec and SKILL.md step 16c | Open (minor: `--diff` flag removed from Key Elements to match actual spec) |
+| NIT | Operator | No process-level `timeout 90` wrapper on step 16c invocation | Open (60s internal timeout sufficient; process-level wrapper out of scope) |
+| NIT | Archaeologist | `scripts/autoexperiment.py` AI judge pattern not listed in Prior Art | Open (acknowledged; not blocking) |
+| NIT | Archaeologist | EVALUATOR.md sub-file approach from issue not explained/rejected in plan | Open (plan uses inline prompt template instead; sufficient) |
+| NIT | Adversary | `test_exit_code_1_on_missing_plan` test has ambiguous "or prints usage" assertion | Open (builder to assert exit code 1 only; "or prints usage" language removed from Task 2) |
+| NIT | User | Open Question 1 (Haiku vs Sonnet) is already answered; should be moved to Solution | Resolved — Haiku decision moved to Solution (model ID specified in Task 1) |
 
 ---
 
 ## Open Questions
 
-1. Should the evaluator use Claude Haiku or Sonnet? Haiku is faster and cheaper; Sonnet has better reasoning. Recommendation: start with Haiku (same model tier as other scripts). Can upgrade if evaluation quality is insufficient.
-2. Should PARTIAL verdicts be counted and reported as a build metric? Out of scope for this plan — warnings only.
+1. Should PARTIAL verdicts be counted and reported as a build metric? Out of scope for this plan — warnings only.
