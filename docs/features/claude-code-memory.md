@@ -98,13 +98,13 @@ The Stop hook has a 10-second timeout. Haiku extraction typically completes in 2
 
 Local Claude Code sessions create AgentSession records in Redis, providing dashboard observability on par with Telegram-originated sessions. The lifecycle is managed across three hooks using a sidecar file to share the AgentSession `agent_session_id`:
 
-1. **UserPromptSubmit hook**: On the first prompt of a session, creates an AgentSession via `AgentSession.create(session_type="dev", ...)` with `status="running"` and `session_id=f"local-{claude_session_id}"`. The `agent_session_id` is persisted to `data/sessions/{session_id}/agent_session.json`.
+1. **UserPromptSubmit hook**: On the first prompt of a session, creates an AgentSession via `AgentSession.create_local(session_type=<from env>, ...)` with `status="running"` and `session_id=f"local-{claude_session_id}"`. The `session_type` defaults to `"dev"` but is overridden by the `SESSION_TYPE` environment variable injected by `sdk_client.py` when spawning Teammate or PM subprocesses. The `agent_session_id` is persisted to `data/sessions/{session_id}/agent_session.json`.
 2. **PostToolUse hook**: On every tool call, reads `agent_session_id` from the sidecar and updates `updated_at` timestamp and increments `tool_call_count` on the AgentSession record.
 3. **Stop hook**: Reads `agent_session_id` from the sidecar, sets `completed_at`, and marks status as `completed` (or `failed` if `stop_reason` is "error" or "crash").
 
 The dashboard at `localhost:8500` picks up local sessions automatically via `AgentSession.query` -- no dashboard code changes were needed. Local sessions appear alongside Telegram sessions with correct status, timestamps, and project key.
 
-The `AgentSession.create(session_type="dev", ...)` call requires only `session_id`, `project_key`, and `working_dir`. It sets `session_type="dev"` and omits all Telegram-specific fields (no `chat_id` or `parent_chat_session_id`).
+The `AgentSession.create_local(...)` call requires only `session_id`, `project_key`, and `working_dir`. It sets `session_type` from the `SESSION_TYPE` env var (defaulting to `"dev"`) and omits all Telegram-specific fields (no `chat_id` or `parent_chat_session_id`).
 
 ## State Management
 
