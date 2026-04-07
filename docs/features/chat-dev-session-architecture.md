@@ -216,8 +216,9 @@ Hook returns {"reason": "Pipeline state: {stage_states}"}
 
 | Component | File | Role |
 |-----------|------|------|
-| `pre_tool_use_hook()` | `agent/hooks/pre_tool_use.py` | Registers DevSession, starts pipeline stage |
-| `subagent_stop_hook()` | `agent/hooks/subagent_stop.py` | Completes DevSession, classifies outcome, records stage result |
+| `pre_tool_use_hook()` | `agent/hooks/pre_tool_use.py` | Registers DevSession, starts pipeline stage (both dev-session and Skill paths) |
+| `post_tool_use_hook()` | `agent/hooks/post_tool_use.py` | Completes pipeline stage for Skill path; always runs watchdog health check |
+| `subagent_stop_hook()` | `agent/hooks/subagent_stop.py` | Completes DevSession, classifies outcome, records stage result (dev-session path) |
 | `session_registry` | `agent/hooks/session_registry.py` | Maps Claude Code UUIDs to bridge session IDs (see [Session Isolation](session-isolation.md)) |
 | `PipelineStateMachine` | `bridge/pipeline_state.py` | Manages stage_states on the parent AgentSession |
 | `_extract_stage_from_prompt()` | `agent/hooks/pre_tool_use.py` | Parses "Stage: BUILD" patterns from dev-session prompts |
