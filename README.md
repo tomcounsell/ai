@@ -16,31 +16,11 @@ Three layers:
 
 ## Architecture
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│   Comms  (Telegram · Email · LinkedIn · …)                   │
-└──────────────────────────┬───────────────────────────────────┘
-                           │
-                           ▼
-┌──────────────────────────────────────────────────────────────┐
-│   Bridge   (I/O only — enqueues sessions, routes output)     │
-└──────────────────────────┬───────────────────────────────────┘
-                           │    Redis queue
-                           ▼
-┌──────────────────────────────────────────────────────────────┐
-│   Worker   (sole session execution engine)                   │
-│     ├── ChatSession  (PM — orchestrates the SDLC pipeline)   │
-│     │     └── DevSession  (Dev — writes, tests, ships code)  │
-│     └── Teammate    (conversational)                         │
-└──────────────────────────┬───────────────────────────────────┘
-                           │
-                           ▼
-┌──────────────────────────────────────────────────────────────┐
-│   Agent Harness  (Claude Code / Agent SDK) + MCP tools       │
-└──────────────────────────────────────────────────────────────┘
-```
+<p align="center">
+  <img src="docs/assets/architecture.png" alt="Valor architecture: Comms → Bridge → Worker (ChatSession / DevSession / Teammate) → Agent Harness" width="500">
+</p>
 
-See [`docs/features/bridge-worker-architecture.md`](docs/features/bridge-worker-architecture.md) for the full design.
+See [`docs/features/bridge-worker-architecture.md`](docs/features/bridge-worker-architecture.md) for the full design. Source: [`docs/assets/architecture.excalidraw`](docs/assets/architecture.excalidraw).
 
 ## The SDLC Pipeline
 
