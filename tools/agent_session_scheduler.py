@@ -141,12 +141,9 @@ def _get_parent_session(parent_id: str):
 
     Returns the parent session or None if not found.
     """
-    try:
-        from models.agent_session import AgentSession
+    from models.agent_session import AgentSession
 
-        return AgentSession.query.get(parent_id)
-    except Exception:
-        return None
+    return AgentSession.get_by_id(parent_id)
 
 
 # --- Persona gate ---
@@ -655,7 +652,7 @@ def cmd_children(args: argparse.Namespace) -> int:
     from models.agent_session import AgentSession
 
     try:
-        parent = AgentSession.query.get(args.agent_session_id)
+        parent = AgentSession.get_by_id(args.agent_session_id)
         if parent is None:
             _output({"status": "error", "message": f"Session {args.agent_session_id} not found."})
             return 1

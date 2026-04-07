@@ -698,12 +698,7 @@ def reorder_agent_session(agent_session_id: str, new_priority: str) -> bool:
         logger.warning(f"[pm-controls] Invalid priority: {new_priority}")
         return False
 
-    try:
-        session = AgentSession.query.get(agent_session_id)
-    except Exception:
-        logger.warning(f"[pm-controls] Session {agent_session_id} not found for reorder")
-        return False
-
+    session = AgentSession.get_by_id(agent_session_id)
     if session is None or session.status != "pending":
         logger.warning(
             f"[pm-controls] Session {agent_session_id} not pending "
@@ -729,12 +724,7 @@ def cancel_agent_session(agent_session_id: str) -> bool:
     Returns:
         True if the session was cancelled, False if not found or not pending.
     """
-    try:
-        session = AgentSession.query.get(agent_session_id)
-    except Exception:
-        logger.warning(f"[pm-controls] Session {agent_session_id} not found for cancel")
-        return False
-
+    session = AgentSession.get_by_id(agent_session_id)
     if session is None or session.status != "pending":
         logger.warning(
             f"[pm-controls] Session {agent_session_id} not pending "
@@ -760,9 +750,8 @@ def retry_agent_session(agent_session_id: str) -> AgentSession | None:
     Returns:
         The new AgentSession if retried, None if not found or not terminal.
     """
-    try:
-        session = AgentSession.query.get(agent_session_id)
-    except Exception:
+    session = AgentSession.get_by_id(agent_session_id)
+    if session is None:
         logger.warning(f"[pm-controls] agent_session_id {agent_session_id} not found for retry")
         return None
 
@@ -3212,11 +3201,7 @@ def _cli_flush_agent_session(agent_session_id: str) -> None:
     """Recover a specific session by ID."""
     import sys
 
-    try:
-        session = AgentSession.query.get(agent_session_id)
-    except Exception:
-        session = None
-
+    session = AgentSession.get_by_id(agent_session_id)
     if not session:
         print(f"Session {agent_session_id} not found.")
         sys.exit(1)
