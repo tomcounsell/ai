@@ -1719,7 +1719,7 @@ async def _worker_loop(chat_id: str, event: asyncio.Event) -> None:
                     # deleted by the nudge fallback path, skip completion to avoid
                     # overwriting the nudge's status back to "completed".
                     try:
-                        fresh = AgentSession.query.get(session.agent_session_id)
+                        fresh = AgentSession.query.get(redis_key=session.db_key.redis_key)
                         if not fresh:
                             logger.info(
                                 "[chat:%s] Session %s no longer exists in Redis "
@@ -2108,7 +2108,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 stage = sessions[0].current_stage
         except Exception as e:
             logger.debug(
-                f"[{project_key}] current_stage lookup failed for "
+                f"[{session.project_key}] current_stage lookup failed for "
                 f"{session.session_id} (non-fatal): {e}"
             )
         resolved_branch, needs_wt = resolve_branch_for_stage(slug, stage)
