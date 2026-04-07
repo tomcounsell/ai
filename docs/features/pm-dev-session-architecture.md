@@ -223,6 +223,7 @@ Hook returns {"reason": "Pipeline state: {stage_states}"}
 | `PipelineStateMachine` | `bridge/pipeline_state.py` | Manages stage_states on the parent AgentSession |
 | `_extract_stage_from_prompt()` | `agent/hooks/pre_tool_use.py` | Parses "Stage: BUILD" patterns from dev-session prompts |
 | `classify_outcome()` | `bridge/pipeline_state.py` | Three-tier classification: OUTCOME contract, stop_reason, text patterns |
+| `user_prompt_submit.py` | `.claude/hooks/user_prompt_submit.py` | On first prompt of a Claude Code session, creates the `local-*` AgentSession record; reads `SESSION_TYPE` env var injected by `sdk_client.py` to register the correct persona (`teammate`, `pm`, or `dev`) |
 
 ### Stage Extraction
 
