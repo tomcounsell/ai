@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: bug
 appetite: Small
 owner: valor
@@ -152,8 +152,8 @@ No agent integration required — `_kill_agent_session` and `transition_status` 
 
 ## Documentation
 
-- [ ] Update docstring on `transition_status()` in `models/session_lifecycle.py` to note the `_saved_field_values` backfill and why it exists (lazy-load Popoto behavior)
-- [ ] Update docstring on `_kill_agent_session()` to note that `finalize_session()` is used instead of delete-and-recreate
+- [x] Update docstring on `transition_status()` in `models/session_lifecycle.py` to note the `_saved_field_values` backfill and why it exists (lazy-load Popoto behavior)
+- [x] Update docstring on `_kill_agent_session()` to note that `finalize_session()` is used instead of delete-and-recreate
 
 No new feature docs needed — this is a bug fix with no user-visible API changes.
 

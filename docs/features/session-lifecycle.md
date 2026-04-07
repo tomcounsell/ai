@@ -41,6 +41,8 @@ For terminal transitions. Executes all completion side effects in order:
 
 **Idempotent**: if the session is already in the target terminal state, logs and returns without re-executing side effects.
 
+**Lazy-load safety**: Before saving, `finalize_session()` backfills `session._saved_field_values["status"]` with the current status. Popoto's `_create_lazy_model()` only seeds `_saved_field_values` with KeyFields, so lazy-loaded sessions have no `"status"` entry. Without this backfill, `IndexedFieldMixin.on_save()` skips `srem()` and the session accumulates in both the old and new status index sets simultaneously (ghost sessions).
+
 **Skip flags**: The hooks subprocess paths (`stop.py`, `subagent_stop.py`) use `skip_auto_tag=True, skip_checkpoint=True` to avoid importing heavy dependencies that may not be available in the subprocess context.
 
 ### `transition_status(session, new_status, reason, *, reject_from_terminal=True)`
@@ -52,6 +54,8 @@ For non-terminal transitions. Logs the lifecycle transition and updates the stat
 3. **Status + save** -- sets `session.status`, calls `session.save()`
 
 **Idempotent**: if the session is already in the target state, logs and returns.
+
+**Lazy-load safety**: Before saving, `transition_status()` backfills `session._saved_field_values["status"]` with the current status. This mirrors the same backfill in `finalize_session()` — both functions share the same Popoto lazy-load coupling. See `finalize_session()` above for the full explanation.
 
 **Terminal respawn protection**: By default, `transition_status()` rejects transitions from terminal statuses (`completed`, `failed`, `killed`, `abandoned`, `cancelled`). This prevents accidental respawning of finished sessions. Callers that legitimately need terminal-to-non-terminal transitions must pass `reject_from_terminal=False` explicitly. Currently two callers use this opt-out:
 - `_mark_superseded()`: `completed->superseded` (intentional bookkeeping)
