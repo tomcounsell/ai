@@ -145,11 +145,11 @@ payload = json.dumps({
 
 ## Test Impact
 
-- [ ] `tests/integration/test_worker_concurrency.py::TestPerChatSerialization::test_three_sessions_same_chat_id_execute_serially` — UPDATE: session creation must set `session_type` explicitly; test logic remains valid for chat-keyed sessions
-- [ ] `tests/integration/test_worker_concurrency.py::TestJobHealthCheck` — UPDATE: `WORKER_KEY = "123"` comment documents chat_id assumption; after fix, health check will compute `worker_key` from session; verify test sessions have correct `session_type` so `worker_key` matches the asserted key
-- [ ] `tests/integration/test_agent_session_health_monitor.py` (line 136 comment) — UPDATE: update comment "health_check uses `chat_id or project_key`" to reflect `session.worker_key`
-- [ ] `tests/unit/test_worker_entry.py::test_worker_startup_sequence_order` — UPDATE: test checks `_ensure_worker(` is called; remains valid but may need to accommodate `worker_key` variable instead of `chat_id`
-- [ ] `tests/unit/test_agent_session_queue.py` — REVIEW: check for any tests that mock `_ensure_worker(chat_id=...)` explicitly; update mocks to accept `worker_key`
+- [x] `tests/integration/test_worker_concurrency.py::TestPerChatSerialization::test_three_sessions_same_chat_id_execute_serially` — test passes as-is (default is_project_keyed=False)
+- [x] `tests/integration/test_worker_concurrency.py::TestJobHealthCheck` — test passes; health check uses session.worker_key
+- [x] `tests/integration/test_agent_session_health_monitor.py` — health check now uses entry.worker_key
+- [x] `tests/unit/test_worker_entry.py::test_worker_startup_sequence_order` — test passes; _ensure_worker signature backward compatible
+- [x] `tests/unit/test_agent_session_queue.py` — reviewed; no explicit chat_id= mocks to update
 
 New tests to add:
 - `tests/integration/test_worker_concurrency.py::TestPMProjectKeySerialization` — two PM sessions from different `chat_id`s on same `project_key` execute serially
@@ -210,22 +210,22 @@ No agent integration required — this is a bridge-internal change to the worker
 
 ## Documentation
 
-- [ ] Update `docs/features/bridge-worker-architecture.md` — add section documenting `worker_key` routing: the three-way decision table, why `chat_id` is not the isolation key, and the two worker loop archetypes (project-keyed vs. chat-keyed)
-- [ ] Update inline docstrings for `_ensure_worker`, `_worker_loop`, and `_pop_agent_session` to reference `worker_key` instead of `chat_id`
+- [x] Update `docs/features/bridge-worker-architecture.md` — added Worker Key Routing section with decision table
+- [x] Update inline docstrings for `_ensure_worker`, `_worker_loop`, and `_pop_agent_session`
 
 ## Success Criteria
 
-- [ ] `AgentSession.worker_key` is a computed `@property`; no new stored field added
-- [ ] Two PM sessions for the same `project_key` arriving on different `chat_id`s execute sequentially
-- [ ] Two dev sessions with `slug` set for the same `project_key` on different `chat_id`s execute concurrently
-- [ ] A dev session without `slug` serializes with PM sessions for the same `project_key`
-- [ ] Teammate sessions on any `chat_id` always execute concurrently (no regression)
-- [ ] Pub/sub payload includes `worker_key`; `_session_notify_listener` uses it without a Redis lookup
-- [ ] Redis pop lock key updated to `worker:pop_lock:{worker_key}`
-- [ ] All existing worker serialization tests pass; new tests cover PM/dev cross-chat behavior
-- [ ] `docs/features/bridge-worker-architecture.md` updated to document `worker_key` routing
-- [ ] Tests pass (`/do-test`)
-- [ ] Lint clean (`python -m ruff check .`)
+- [x] `AgentSession.worker_key` is a computed `@property`; no new stored field added
+- [x] Two PM sessions for the same `project_key` arriving on different `chat_id`s execute sequentially
+- [x] Two dev sessions with `slug` set for the same `project_key` on different `chat_id`s execute concurrently
+- [x] A dev session without `slug` serializes with PM sessions for the same `project_key`
+- [x] Teammate sessions on any `chat_id` always execute concurrently (no regression)
+- [x] Pub/sub payload includes `worker_key`; `_session_notify_listener` uses it without a Redis lookup
+- [x] Redis pop lock key updated to `worker:pop_lock:{worker_key}`
+- [x] All existing worker serialization tests pass; new tests cover PM/dev cross-chat behavior
+- [x] `docs/features/bridge-worker-architecture.md` updated to document `worker_key` routing
+- [x] Tests pass (3334 unit tests, 169 affected tests)
+- [x] Lint clean (`python -m ruff check .`)
 
 ## Team Orchestration
 
