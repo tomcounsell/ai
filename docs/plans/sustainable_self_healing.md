@@ -6,6 +6,7 @@ owner: Valor Engels
 created: 2026-04-08
 tracking: https://github.com/tomcounsell/ai/issues/773
 last_comment_id: none
+revision_applied: true
 ---
 
 # Sustainable Self-Healing: CircuitBreaker + Queue Governance
@@ -33,6 +34,8 @@ Recon was conducted via direct code read (no prototypes needed).
 - **Finding**: Confirmed absent. `logs/sessions/*/complete.json` contains only `session_id`, `event`, `timestamp`, `project_key`, `branch_name`, `messages`, `task_summary`, `git_status`, `extra_context`. No token fields on AgentSession model either. The Claude Agent SDK does not surface per-session token usage in the current integration.
 - **Confidence**: high
 - **Impact on plan**: Token budget monitoring scoped to session-count throttling (sessions per hour) instead of actual token spend. No new SDK instrumentation required.
+
+> **Implementation Note (C3)**: Issue #773 AC item "Daily token spend is tracked and a `suspended` throttle level halts low-priority session starts" is superseded by session-count throttling per spike-1 findings. The protective outcome (halting low-priority sessions under runaway conditions) is identical; the measurement proxy changes from token count to session count. No additional code change required.
 
 ### spike-2: Where is the correct pause insertion point in the dequeue path?
 - **Assumption**: "The pause check belongs inside `_pop_agent_session()`"
@@ -67,11 +70,15 @@ Recon was conducted via direct code read (no prototypes needed).
 ### Queue Pause (api-health-gate → _pop_agent_session)
 
 1. **ReflectionScheduler tick (60s)**: calls `api_health_gate()` in `agent/sustainability.py`
-2. **`api_health_gate()`**: reads `DependencyHealth.get("anthropic").state` from `bridge/health.py`
-3. **If OPEN**: writes `{project_key}:sustainability:queue_paused = "1"` to Redis (TTL 3600s)
-4. **If CLOSED (was previously OPEN)**: deletes `queue_paused`, sets `{project_key}:recovery:active = "1"` (TTL 3600s)
+2. **`api_health_gate()`**: guards immediately — `cb = get_health().get("anthropic"); if cb is None: return` — then reads `cb.state`
+3. **If OPEN or HALF_OPEN**: writes `{project_key}:sustainability:queue_paused = "1"` to Redis (TTL 3600s). On first write (key did not previously exist), logs at WARNING level: `"[api-health-gate] Queue paused — Anthropic circuit OPEN"`
+4. **If CLOSED (`cb.state == CircuitState.CLOSED` — explicit equality, not `!= OPEN`)**: deletes `queue_paused`, sets `{project_key}:recovery:active = "1"` (TTL 3600s)
 5. **`_pop_agent_session()`**: reads `queue_paused` flag as first action; if set, returns `None`
 6. **`_worker_loop()`**: gets `None`, releases semaphore, waits for event — no session wasted
+
+> **Implementation Note (B2)**: `get_health().get("anthropic")` returns `None` if the circuit hasn't been registered (cold start, test environments). Always guard before accessing `.state`. This also ensures unit tests without a registered circuit work correctly.
+> **Implementation Note (C1)**: Use `cb.state == CircuitState.CLOSED` (import `CircuitState` from `bridge.resilience`) to clear the pause flag. `!= OPEN` would incorrectly lift the pause during `HALF_OPEN` state when recovery hasn't been confirmed yet.
+> **Implementation Note (C2)**: Use `r.exists(key)` to detect first-write transitions and emit WARNING-level log. This gives operators an immediate signal without spamming per-tick.
 
 ### Recovery Drip (recovery-drip → pending queue)
 
@@ -92,7 +99,7 @@ Recon was conducted via direct code read (no prototypes needed).
 
 1. **ReflectionScheduler tick (1hr)**: calls `failure_loop_detector()` in `agent/sustainability.py`
 2. Loads recently-failed `AgentSession` records (last 4 hours, `project_key`)
-3. Clusters by error fingerprint (HTTP status + first 80 chars of error message)
+3. Clusters by error fingerprint: `http_component = str(http_status) if http_status is not None else type(exc).__name__ if exc else "unknown"`, then `f"{http_component}:{error_message[:80]}"` hashed with SHA-256 (first 16 hex chars). Non-HTTP errors (e.g. `ConnectionError`, `TimeoutError`) cluster by exception class name rather than `None`, preventing spurious cross-class issue collisions.
 4. For each cluster with ≥ 3 failures:
    - Checks `{project_key}:sustainability:seen_fingerprints` Redis set — skip if fingerprint present
    - Calls `gh issue create` with fingerprint + session IDs
@@ -177,8 +184,12 @@ Same error 3+ times
 - All five functions in `agent/sustainability.py` are **synchronous** (run in executor via `asyncio.get_running_loop().run_in_executor(None, func)` inside the scheduler) — no new async complexity
 - Redis operations use the existing `popoto` Redis connection (`from popoto import redis`) — project-keyed via `os.environ.get("VALOR_PROJECT_KEY", "default")`
 - `_pop_agent_session()` guard uses `r.get(f"{project_key}:sustainability:queue_paused")` — one read, no lock needed
-- `paused_circuit` status: added to `TERMINAL_STATUSES`? No — it must be recoverable. Add to a new `PAUSABLE_STATUSES` set that the health check skips (so it doesn't requeue paused sessions)
-- Error fingerprint: `f"{http_status}:{error_message[:80]}"` hashed with `hashlib.sha256().hexdigest()[:16]`
+- `paused_circuit` status: add directly to `NON_TERMINAL_STATUSES` in `models/session_lifecycle.py` (confirmed by critique B1). Do NOT create a separate `PAUSABLE_STATUSES` set — it has no effect on `transition_status()` validation guard which raises `ValueError` for any status not in `NON_TERMINAL_STATUSES`. The health check already only scans `running` and `pending` indexes, so `paused_circuit` sessions will be naturally ignored by it without additional filtering.
+
+> **Implementation Note (B1)**: `transition_status(session, "paused_circuit")` will raise `ValueError` unless `"paused_circuit"` is in `NON_TERMINAL_STATUSES`. Add it there directly.
+- Error fingerprint: `http_component = str(http_status) if http_status is not None else type(exc).__name__ if exc else "unknown"`, then `f"{http_component}:{error_message[:80]}"` hashed with `hashlib.sha256().hexdigest()[:16]` — non-HTTP errors cluster by exception class name, not `None`
+
+> **Implementation Note (C4)**: All non-HTTP errors clustering under `None` http_status would create a single mega-cluster triggering spurious GitHub issues. Use exception class name as the discriminator component instead.
 - Throttle thresholds: configurable via env vars `SUSTAINABILITY_THROTTLE_MODERATE` (default 20 sessions/hr) and `SUSTAINABILITY_THROTTLE_SUSPENDED` (default 40 sessions/hr)
 
 ## Failure Path Test Strategy
@@ -201,7 +212,7 @@ Same error 3+ times
 
 - [ ] `tests/unit/test_agent_session_queue.py` — UPDATE: add test that `_pop_agent_session()` returns `None` when `queue_paused` flag is set in Redis; add test that throttle `suspended` blocks normal/low sessions
 - [ ] `tests/integration/test_session_queue_integration.py` — UPDATE if exists, else create: end-to-end test that a paused queue correctly drips sessions back on recovery
-- [ ] `tests/unit/test_agent_session_health_check.py` — UPDATE: verify health check skips `paused_circuit` sessions (does not requeue them)
+- [ ] `tests/unit/test_agent_session_health_check.py` — CREATE: this file does not exist yet. Test must assert health check never calls `transition_status(session, "pending")` for a session with `status="paused_circuit"` (i.e., paused sessions are not requeued).
 - No existing reflection tests exist — new `tests/unit/test_sustainability.py` must be created
 
 ## Rabbit Holes
@@ -286,6 +297,7 @@ No changes to `.mcp.json` needed.
 - [ ] When circuit closes, sessions resume at ≤1 per 30s until `paused_circuit` list drains
 - [ ] With > `SUSTAINABILITY_THROTTLE_SUSPENDED` sessions started in the last hour, `normal`/`low` sessions are not dequeued
 - [ ] ≥ 3 failures with the same error fingerprint produce exactly one GitHub issue (subsequent runs are no-ops)
+- [ ] Daily digest Telegram message must include: circuit state per dependency, current throttle level, session count last 24h, active failure cluster count — embed these required fields in the `sustainability-digest` YAML `command` field
 - [ ] All five reflections declared in `config/reflections.yaml`, enabled and valid
 - [ ] `paused_circuit` sessions are NOT requeued by the health check
 - [ ] Unit tests: pause flag blocks dequeue, throttle level blocks low-priority, bloom dedup, drip rate
@@ -343,12 +355,16 @@ No changes to `.mcp.json` needed.
 - **Agent Type**: async-specialist
 - **Parallel**: true
 - Create `agent/sustainability.py` with five functions: `api_health_gate`, `session_count_throttle`, `failure_loop_detector`, `recovery_drip`, `sustainability_digest`
-- Import `from bridge.health import get_health` for circuit state
+- Import `from bridge.health import get_health` and `from bridge.resilience import CircuitState` for circuit state
 - Use `os.environ.get("VALOR_PROJECT_KEY", "default")` for all Redis key prefixes
 - All functions must `except Exception: logger.error(...)` and never raise
-- `failure_loop_detector()`: check `queue_paused` flag before scanning — skip if API outage in progress
+- **`api_health_gate()` (B2)**: guard first — `cb = get_health().get("anthropic"); if cb is None: return` — before accessing `cb.state`
+- **`api_health_gate()` (C1)**: use `cb.state == CircuitState.CLOSED` (explicit equality) to clear queue_paused and set recovery:active. Keep queue paused during HALF_OPEN state.
+- **`api_health_gate()` (C2)**: detect first-write: `was_paused = r.exists(pause_key)` before `r.set(...)`. If `not was_paused`, log at WARNING level: `"[api-health-gate] Queue paused — Anthropic circuit OPEN"`.
+- **`failure_loop_detector()` (C4)**: use `type(exc).__name__` as fingerprint http_component when `http_status is None`; check `queue_paused` flag before scanning — skip if API outage in progress
 - `recovery_drip()`: read `{project_key}:recovery:active`; if absent, return immediately; otherwise pop one `paused_circuit` session to `pending` via `transition_status()`
-- Add `paused_circuit` as a non-terminal, non-health-check-requeue-able status to `models/session_lifecycle.py`
+- **`sustainability_digest()` (C5)**: YAML `command` field must specify required output fields: circuit state per dependency, current throttle level, session count last 24h, active failure cluster count
+- Add `paused_circuit` to `NON_TERMINAL_STATUSES` in `models/session_lifecycle.py` (B1 — do NOT use a separate `PAUSABLE_STATUSES` set)
 
 ### 2. Add queue guard to _pop_agent_session
 - **Task ID**: build-queue-guard
@@ -361,7 +377,7 @@ No changes to `.mcp.json` needed.
 - Add pause flag check at top of `_pop_agent_session()`: `if r.get(f"{project_key}:sustainability:queue_paused"): return None`
 - Add throttle check: if throttle_level is `suspended`, skip sessions with `priority in ("normal", "low")`; if `moderate`, skip `priority == "low"` only
 - Update health check (`_agent_session_health_check`) to skip `paused_circuit` sessions — do not requeue them
-- Add `paused_circuit` to session status transitions in `models/session_lifecycle.py`
+- **`paused_circuit` status (B1)**: add `"paused_circuit"` to `NON_TERMINAL_STATUSES` in `models/session_lifecycle.py`. The `transition_status()` guard raises `ValueError` for any unknown status — there is no `PAUSABLE_STATUSES` concept to create.
 
 ### 3. Register reflections in YAML
 - **Task ID**: build-reflections-yaml
