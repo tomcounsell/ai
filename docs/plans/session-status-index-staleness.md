@@ -119,19 +119,19 @@ health_task.add_done_callback(_health_task_done)
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] The existing `except Exception as exc` block in `_complete_agent_session()` (line 1030) already logs a warning and falls back. After the fix, verify the fallback still works correctly — the only change is the filter; the exception handler is unchanged.
-- [ ] The `_health_task_done` callback should be tested with a mock task that raises an exception to verify the ERROR log fires.
+- [x] The existing `except Exception as exc` block in `_complete_agent_session()` (line 1030) already logs a warning and falls back. After the fix, verify the fallback still works correctly — the only change is the filter; the exception handler is unchanged.
+- [x] The `_health_task_done` callback should be tested with a mock task that raises an exception to verify the ERROR log fires.
 
 ### Empty/Invalid Input Handling
-- [ ] `AgentSession.query.filter(session_id=session_id)` with no status filter may return sessions in any status. The existing `if fresh_records:` guard handles the empty case. Add assertion that when the filter returns empty, `finalize_session()` is called on the original in-memory object (same as before, correct fallback).
+- [x] `AgentSession.query.filter(session_id=session_id)` with no status filter may return sessions in any status. The existing `if fresh_records:` guard handles the empty case. Add assertion that when the filter returns empty, `finalize_session()` is called on the original in-memory object (same as before, correct fallback).
 
 ### Error State Rendering
-- [ ] Not applicable — this fix is internal lifecycle logic with no user-visible output paths.
+- [x] Not applicable — this fix is internal lifecycle logic with no user-visible output paths.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_agent_session_queue.py` — UPDATE: Any test mocking `AgentSession.query.filter(session_id=..., status="running")` in `_complete_agent_session` must be updated to mock `AgentSession.query.filter(session_id=...)` without the status parameter
-- [ ] `tests/integration/test_session_lifecycle.py` (if it exists) — CHECK: Verify tests for session completion don't assert the old filter signature
+- [x] `tests/unit/test_agent_session_queue.py` — UPDATE: Any test mocking `AgentSession.query.filter(session_id=..., status="running")` in `_complete_agent_session` must be updated to mock `AgentSession.query.filter(session_id=...)` without the status parameter
+- [x] `tests/integration/test_session_lifecycle.py` (if it exists) — CHECK: Verify tests for session completion don't assert the old filter signature
 
 ## Rabbit Holes
 
@@ -175,18 +175,18 @@ No agent integration required — this is a worker-internal lifecycle fix. No MC
 
 ## Documentation
 
-- [ ] Update docstring on `_complete_agent_session()` in `agent/agent_session_queue.py` to document that the re-query is status-filter-free and why
-- [ ] Update `docs/features/bridge-worker-architecture.md` if it describes the session completion flow (add note that re-query is intentionally unfiltered)
-- [ ] No new feature doc needed — this is a bug fix to existing behavior
+- [x] Update docstring on `_complete_agent_session()` in `agent/agent_session_queue.py` to document that the re-query is status-filter-free and why
+- [x] Update `docs/features/bridge-worker-architecture.md` if it describes the session completion flow (add note that re-query is intentionally unfiltered)
+- [x] No new feature doc needed — this is a bug fix to existing behavior
 
 ## Success Criteria
 
-- [ ] `valor_session list` and `AgentSession.query.filter(status=X)` return consistent results for the same session
-- [ ] `_complete_agent_session()` re-queries without a `status="running"` filter
-- [ ] A session that transitions status while `_complete_agent_session` is running does not end up in multiple index sets (verify via `redis-cli SMEMBERS valor:AgentSession:status:running` and `SMEMBERS valor:AgentSession:status:completed`)
-- [ ] `health_task` has a `done_callback` equivalent to `notify_task`'s callback
-- [ ] All unit tests pass
-- [ ] Ruff lint and format clean
+- [x] `valor_session list` and `AgentSession.query.filter(status=X)` return consistent results for the same session
+- [x] `_complete_agent_session()` re-queries without a `status="running"` filter
+- [x] A session that transitions status while `_complete_agent_session` is running does not end up in multiple index sets (verify via `redis-cli SMEMBERS valor:AgentSession:status:running` and `SMEMBERS valor:AgentSession:status:completed`)
+- [x] `health_task` has a `done_callback` equivalent to `notify_task`'s callback
+- [x] All unit tests pass
+- [x] Ruff lint and format clean
 
 ## Team Orchestration
 
