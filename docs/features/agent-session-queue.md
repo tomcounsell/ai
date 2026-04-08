@@ -43,9 +43,9 @@ The worker loop uses an Event-based drain strategy to reliably pick up pending s
 
 | Function | Purpose |
 |----------|---------|
-| `_pop_agent_session_with_fallback(chat_id)` | Tries `_pop_agent_session()` first, then sync Popoto query as fallback |
+| `_pop_agent_session_with_fallback(worker_key, is_project_keyed)` | Tries `_pop_agent_session()` first, then sync Popoto query as fallback |
 | `DRAIN_TIMEOUT` | Module constant (1.5s) controlling the Event wait timeout |
-| `_active_events` | Dict mapping chat_id to asyncio.Event for worker notification |
+| `_active_events` | Dict mapping worker_key to asyncio.Event for worker notification |
 
 ### Why the Original Drain Guard Failed
 
@@ -64,7 +64,7 @@ At startup, two cleanup passes run before session processing begins. These are c
 ### Caller: Worker Only
 
 The following execution functions are called exclusively from `worker/__main__.py`:
-- `_ensure_worker(chat_id)` — spawns per-chat worker loops
+- `_ensure_worker(worker_key, is_project_keyed)` — spawns per-worker-key worker loops
 - `_recover_interrupted_agent_sessions_startup()` — startup session recovery
 - `_agent_session_health_loop()` — background health monitor (safety net: every 5 min)
 - `_session_notify_listener()` — pub/sub subscriber for immediate session pickup (~1s latency); creates a dedicated `redis.Redis` connection with `socket_timeout=None` to avoid the global pool's 5s timeout (issue #824)

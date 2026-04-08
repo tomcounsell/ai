@@ -213,17 +213,17 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     from models.agent_session import AgentSession
 
     pending_sessions = list(AgentSession.query.filter(status="pending"))
-    started_chats: set[str] = set()
+    started_workers: set[str] = set()
     for session in pending_sessions:
-        chat_id = session.chat_id or session.project_key
-        if chat_id not in started_chats:
-            _ensure_worker(chat_id)
-            started_chats.add(chat_id)
+        wk = session.worker_key
+        if wk not in started_workers:
+            _ensure_worker(wk, is_project_keyed=session.is_project_keyed)
+            started_workers.add(wk)
 
     logger.info(
         f"Worker started: {len(projects)} project(s), "
         f"{len(pending_sessions)} pending session(s), "
-        f"{len(started_chats)} worker loop(s)"
+        f"{len(started_workers)} worker loop(s)"
     )
 
     # Start health monitor as background task

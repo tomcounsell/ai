@@ -221,6 +221,31 @@ class AgentSession(Model):
     class Meta:
         ttl = 7776000  # 90 days — matches existing cleanup_expired(max_age_days=90) threshold
 
+    # === Worker routing key ===
+
+    @property
+    def worker_key(self) -> str:
+        """Compute the worker loop routing key based on isolation level.
+
+        Teammate sessions and dev sessions with a slug (worktree-isolated) are
+        keyed by chat_id — they can run in parallel safely.  PM sessions and
+        dev sessions without a slug share the project's main working tree, so
+        they serialize by project_key.
+        """
+        if self.session_type == SessionType.TEAMMATE:
+            return self.chat_id or self.project_key
+        if self.session_type == SessionType.PM:
+            return self.project_key
+        # dev: isolated if slug present (worktree), serialized if not
+        if self.slug:
+            return self.chat_id or self.project_key
+        return self.project_key
+
+    @property
+    def is_project_keyed(self) -> bool:
+        """Whether this session routes to a project-keyed worker loop."""
+        return self.worker_key == self.project_key
+
     # === Backward-compatible field name mapping ===
 
     # DatetimeField names that should auto-convert float timestamps

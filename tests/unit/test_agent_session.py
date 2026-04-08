@@ -1,12 +1,12 @@
 """Unit tests for AgentSession model methods.
 
-Tests for create_local() behavior, including the chat_id defaulting logic.
+Tests for create_local() behavior, including the chat_id defaulting logic,
+and worker_key property behavior.
 """
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
+from config.enums import SessionType
 from models.agent_session import AgentSession
 
 
@@ -78,7 +78,6 @@ class TestCreateLocalChatId:
 
         Verifies the old collision-prone code path is gone.
         """
-        import time
 
         session_uuid = "claude-session-xyz789"
         original_save = AgentSession.save
@@ -136,3 +135,67 @@ class TestCreateLocalChatId:
             )
         finally:
             AgentSession.save = original_save
+
+
+def _make_session(**kwargs):
+    """Create a minimal AgentSession without saving to Redis."""
+    original_save = AgentSession.save
+    AgentSession.save = lambda self: None
+    try:
+        defaults = {
+            "project_key": "test-project",
+            "chat_id": "chat-123",
+            "session_id": "sid-1",
+            "working_dir": "/tmp/test",
+            "session_type": SessionType.PM,
+        }
+        defaults.update(kwargs)
+        return AgentSession(**defaults)
+    finally:
+        AgentSession.save = original_save
+
+
+class TestWorkerKeyProperty:
+    """Tests for AgentSession.worker_key computed property."""
+
+    def test_pm_session_uses_project_key(self):
+        s = _make_session(session_type=SessionType.PM, chat_id="chat-1")
+        assert s.worker_key == "test-project"
+        assert s.is_project_keyed is True
+
+    def test_teammate_session_uses_chat_id(self):
+        s = _make_session(session_type=SessionType.TEAMMATE, chat_id="chat-1")
+        assert s.worker_key == "chat-1"
+        assert s.is_project_keyed is False
+
+    def test_dev_with_slug_uses_chat_id(self):
+        s = _make_session(session_type=SessionType.DEV, chat_id="chat-1", slug="my-feature")
+        assert s.worker_key == "chat-1"
+        assert s.is_project_keyed is False
+
+    def test_dev_without_slug_uses_project_key(self):
+        s = _make_session(session_type=SessionType.DEV, chat_id="chat-1", slug=None)
+        assert s.worker_key == "test-project"
+        assert s.is_project_keyed is True
+
+    def test_none_session_type_uses_project_key(self):
+        """Legacy sessions without session_type fall through to project_key."""
+        s = _make_session(session_type=None, chat_id="chat-1")
+        assert s.worker_key == "test-project"
+
+    def test_teammate_no_chat_id_falls_back_to_project_key(self):
+        """When chat_id is None, falls back to project_key."""
+        s = _make_session(session_type=SessionType.TEAMMATE, chat_id=None)
+        assert s.worker_key == "test-project"
+
+    def test_two_pm_sessions_different_chats_same_worker_key(self):
+        """PM sessions from different chats share the same project-keyed worker."""
+        s1 = _make_session(session_type=SessionType.PM, chat_id="chat-A")
+        s2 = _make_session(session_type=SessionType.PM, chat_id="chat-B")
+        assert s1.worker_key == s2.worker_key == "test-project"
+
+    def test_two_slugged_dev_sessions_different_chats_different_worker_keys(self):
+        """Dev sessions with slugs on different chats get different worker keys."""
+        s1 = _make_session(session_type=SessionType.DEV, chat_id="chat-A", slug="feat-1")
+        s2 = _make_session(session_type=SessionType.DEV, chat_id="chat-B", slug="feat-2")
+        assert s1.worker_key != s2.worker_key
