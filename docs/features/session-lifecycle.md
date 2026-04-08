@@ -80,7 +80,11 @@ When a session finishes execution, all paths converge on `finalize_session()`:
 
 ### Worker Completion — Redis Re-read
 
-`_complete_agent_session()` re-reads the session record from Redis before calling `finalize_session()`. This ensures that any `stage_states` accumulated during execution (e.g., SDLC pipeline transitions written while the worker was running) are captured rather than overwritten by the stale in-memory snapshot. If no running record is found for the `session_id`, it falls back to the original in-memory object.
+`_complete_agent_session()` re-reads the session record from Redis before calling `finalize_session()`. This ensures that any `stage_states` accumulated during execution (e.g., SDLC pipeline transitions written while the worker was running) are captured rather than overwritten by the stale in-memory snapshot.
+
+The re-query is intentionally **status-filter-free** — it queries by `session_id` only, with no `status="running"` constraint. Filtering by status would return an empty list if the session had already transitioned away from `running` (via a concurrent path) before `_complete_agent_session()` fired, causing `finalize_session()` to operate on the stale in-memory object and corrupt the status index (the session would end up indexed under both the old and new status simultaneously). See issue #825.
+
+**Tie-breaking** when multiple records share the same `session_id`: prefer any record currently in `running` status (ensures the live session is finalized), then fall back to most-recent by `created_at` only if no running records exist. If no records are found at all, fall back to the original in-memory object.
 
 ## Side Effect Consolidation
 
