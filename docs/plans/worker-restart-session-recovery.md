@@ -97,20 +97,20 @@ No prerequisites — both fix sites are self-contained in the existing codebase.
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] The `transition_status(session, "pending", ...)` call in the cancel handler must not raise — `running` → `pending` is a valid non-terminal transition. Add a test asserting the call succeeds.
-- [ ] If `transition_status` raises (e.g., session already in terminal state from a concurrent finalize), the except clause should log and not re-raise, allowing the cancel to propagate normally.
+- [x] The `transition_status(session, "pending", ...)` call in the cancel handler must not raise — N/A per critique: simplified approach removes `transition_status` from cancel handler entirely; startup recovery handles re-queue instead, avoiding the race.
+- [x] If `transition_status` raises (e.g., session already in terminal state from a concurrent finalize), the except clause should log and not re-raise — N/A per critique: no `transition_status` call in cancel handler; startup recovery is the sole re-queue path.
 
 ### Empty/Invalid Input Handling
-- [ ] `_cleanup_stale_sessions` with an empty `pending` list — should no-op gracefully (already handled by `list()` iteration)
-- [ ] Cancel handler with a session that was already finalized by stale cleanup — `transition_status` will raise `ValueError` (terminal→non-terminal); catch and log
+- [x] `_cleanup_stale_sessions` with an empty `pending` list — N/A: `"pending"` removed from the loop entirely; empty list is never iterated.
+- [x] Cancel handler with a session that was already finalized by stale cleanup — N/A per critique: cancel handler leaves session in `running`; startup recovery re-queues or skips sessions already in terminal state.
 
 ### Error State Rendering
 - Not applicable — this is a background worker path with no user-visible output beyond logs.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_stale_cleanup.py` — UPDATE: all tests currently set `sessions_by_status = {"running": [stale_session], "pending": []}` with an empty `pending` list. After Fix 1, `pending` sessions are never passed to the cleanup loop. Add a new test: `test_pending_sessions_never_killed` — pass a stale `pending` session and verify `finalize_session` is NOT called.
-- [ ] `tests/unit/test_stale_cleanup.py::test_finalize_exception_does_not_abort_loop` — UPDATE: adjust `sessions_by_status` to confirm `pending` sessions are excluded before even reaching `finalize_session`
+- [x] `tests/unit/test_stale_cleanup.py` — UPDATE: added `TestCleanupPendingExclusion` class with `test_pending_sessions_never_killed` and `test_pending_sessions_excluded_from_loop`. All 16 targeted tests pass.
+- [x] `tests/unit/test_stale_cleanup.py::test_finalize_exception_does_not_abort_loop` — Existing test already passes with the updated loop; no change needed since `pending` sessions are excluded before the loop iterates.
 
 ## Rabbit Holes
 
@@ -155,17 +155,17 @@ No agent integration required — this is an internal worker lifecycle fix. No M
 
 ## Documentation
 
-- [ ] Update `docs/features/bridge-worker-architecture.md` — add a note to the "Session Lifecycle" or "Worker Restart" section explaining that `pending` sessions survive restarts and interrupted `running` sessions are re-queued, not terminated.
-- [ ] Add entry to `docs/features/README.md` if a new feature doc is created (no new doc needed here — this is an update to an existing doc).
+- [x] Update `docs/features/bridge-worker-architecture.md` — added "Worker Restart Recovery" section with `pending`/`running` semantics table and explanation of startup recovery path.
+- [x] Add entry to `docs/features/README.md` if a new feature doc is created — no new doc created; existing doc updated only.
 
 ## Success Criteria
 
-- [ ] `_cleanup_stale_sessions()` no longer iterates `"pending"` sessions — confirmed by reading `scripts/update/run.py:194` after the fix
-- [ ] After a simulated worker restart, a `pending` session remains `pending` in Redis
-- [ ] After a simulated worker cancellation, an interrupted `running` session is transitioned to `pending` (not `completed`, `failed`, or `killed`) and is available for the new worker to pop
-- [ ] `tests/unit/test_stale_cleanup.py::test_pending_sessions_never_killed` — new test passes
-- [ ] All existing stale cleanup tests still pass
-- [ ] Ruff lint and format clean
+- [x] `_cleanup_stale_sessions()` no longer iterates `"pending"` sessions — confirmed: `for status in ("running",):` at `scripts/update/run.py:194`
+- [x] After a simulated worker restart, a `pending` session remains `pending` in Redis — verified by `test_pending_sessions_never_killed`
+- [x] After a simulated worker cancellation, an interrupted `running` session is left in `running` state for startup recovery (not `completed`, `failed`, or `killed`) — verified by `test_cancel_handler_leaves_session_status_unchanged`
+- [x] `tests/unit/test_stale_cleanup.py::test_pending_sessions_never_killed` — new test passes (16/16 targeted tests pass)
+- [x] All existing stale cleanup tests still pass (3326 total unit tests pass)
+- [x] Ruff lint and format clean — all changed files pass `ruff check` and `ruff format --check`
 
 ## Team Orchestration
 
