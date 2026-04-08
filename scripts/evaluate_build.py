@@ -23,9 +23,14 @@ import subprocess
 import sys
 from pathlib import Path
 
-import anthropic
+# Ensure project root is in sys.path for standalone execution
+_project_root = str(Path(__file__).parent.parent)
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
 
-from config.models import HAIKU
+import anthropic  # noqa: E402
+
+from config.models import HAIKU  # noqa: E402
 
 # Configure logging to file and stderr
 LOG_FILE = Path("logs/evaluate_build.log")
