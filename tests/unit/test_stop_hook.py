@@ -195,12 +195,8 @@ class TestAgentSessionCompletion:
                 "hook_utils.memory_bridge.load_agent_session_sidecar",
                 return_value=mock_sidecar,
             ),
-            patch(
-                "models.agent_session.AgentSession.query"
-            ) as mock_query,
-            patch(
-                "models.session_lifecycle.finalize_session"
-            ) as mock_finalize,
+            patch("models.agent_session.AgentSession.query") as mock_query,
+            patch("models.session_lifecycle.finalize_session") as mock_finalize,
         ):
             mock_query.filter.return_value = [mock_session]
 
@@ -237,12 +233,8 @@ class TestAgentSessionCompletion:
                 "hook_utils.memory_bridge.load_agent_session_sidecar",
                 return_value=mock_sidecar,
             ),
-            patch(
-                "models.agent_session.AgentSession.query"
-            ) as mock_query,
-            patch(
-                "models.session_lifecycle.finalize_session"
-            ) as mock_finalize,
+            patch("models.agent_session.AgentSession.query") as mock_query,
+            patch("models.session_lifecycle.finalize_session") as mock_finalize,
         ):
             mock_query.filter.return_value = [mock_session]
 

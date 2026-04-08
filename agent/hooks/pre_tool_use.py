@@ -215,9 +215,7 @@ def _maybe_start_pipeline_stage(tool_input: dict[str, Any], claude_uuid: str | N
 
     parent_session_id = resolve(claude_uuid)
     if not parent_session_id:
-        logger.debug(
-            "[pre_tool_use] No bridge session in registry, skipping pipeline stage start"
-        )
+        logger.debug("[pre_tool_use] No bridge session in registry, skipping pipeline stage start")
         return
 
     # Wire PipelineStateMachine.start_stage() so subagent_stop can later
