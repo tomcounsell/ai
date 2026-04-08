@@ -74,7 +74,32 @@ TELEGRAM_PASSWORD=your_2fa_password  # if enabled
 # Bridge Configuration
 TELEGRAM_SESSION_NAME=valor_bridge
 ACTIVE_PROJECTS=valor
+
+# launchd label prefix (install-time only — see note below)
+SERVICE_LABEL_PREFIX=com.valor
 ```
+
+#### `SERVICE_LABEL_PREFIX`
+
+All macOS launchd plist `Label` fields and on-disk filenames in
+`~/Library/LaunchAgents/` are derived from this prefix. The canonical
+upstream uses `com.valor`; downstream forks should override it (e.g.
+`com.example`) so multiple installs can coexist on one machine.
+
+**This is an install-time setting.** launchd binds to the label baked at
+install time, so changing `SERVICE_LABEL_PREFIX` in `.env` on a running
+machine has no effect until you uninstall and reinstall the services
+(`./scripts/valor-service.sh uninstall` then `install`). `valor-service.sh`
+detects drift between the running install and `.env` and prints a loud
+warning.
+
+#### `mention_triggers` (in `projects.json`)
+
+Self-mention detection (`@valor`, `valor`, `valorengels`, etc.) is now
+**entirely** driven by `defaults.telegram.mention_triggers` in
+`projects.json`. There is no hardcoded constant. The bridge fails loudly
+at startup if `mention_triggers` is empty. To respond to a different
+handle, just edit `mention_triggers` in your `projects.json`.
 
 ### 3. Get Telegram Credentials
 
@@ -150,7 +175,7 @@ Example configuration:
       "respond_to_all": true,
       "respond_to_mentions": true,
       "respond_to_dms": true,
-      "mention_triggers": ["@valor", "valor", "hey valor"]
+      "mention_triggers": ["@valor", "valor", "valorengels", "hey valor"]
     },
     "response": {
       "typing_indicator": true,

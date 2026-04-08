@@ -5,6 +5,7 @@ intelligenttrading-datastore.json
 .idea/
 *credentials.json
 config/projects.json
+config/newsyslog.rendered.conf
 
 # Created by .ignore support plugin (hsz.mobi)
 ### Python template

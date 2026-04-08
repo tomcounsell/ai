@@ -11,8 +11,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-PLIST_NAME="com.valor.autoexperiment"
-PLIST_SRC="$PROJECT_DIR/$PLIST_NAME.plist"
+
+set -a
+# shellcheck disable=SC1091
+[ -f "$PROJECT_DIR/.env" ] && source "$PROJECT_DIR/.env"
+set +a
+: "${SERVICE_LABEL_PREFIX:=com.valor}"
+
+PLIST_NAME="${SERVICE_LABEL_PREFIX}.autoexperiment"
+PLIST_SRC="$PROJECT_DIR/com.valor.autoexperiment.plist"
 PLIST_DEST="$HOME/Library/LaunchAgents/$PLIST_NAME.plist"
 
 # Default target
@@ -40,7 +47,7 @@ if launchctl list | grep -q "$PLIST_NAME" 2>/dev/null; then
 fi
 
 # Copy plist (substitute target if needed)
-sed "s|__TARGET__|$TARGET|g; s|__PROJECT_DIR__|$PROJECT_DIR|g" "$PLIST_SRC" > "$PLIST_DEST"
+sed "s|__TARGET__|$TARGET|g; s|__PROJECT_DIR__|$PROJECT_DIR|g; s|__SERVICE_LABEL__|$PLIST_NAME|g" "$PLIST_SRC" > "$PLIST_DEST"
 
 # Load
 launchctl load "$PLIST_DEST"

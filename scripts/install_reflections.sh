@@ -6,9 +6,18 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+
+set -a
+# shellcheck disable=SC1091
+[ -f "$PROJECT_DIR/.env" ] && source "$PROJECT_DIR/.env"
+set +a
+: "${SERVICE_LABEL_PREFIX:=com.valor}"
+
 PLIST_SRC="$PROJECT_DIR/com.valor.reflections.plist"
-PLIST_DST="$HOME/Library/LaunchAgents/com.valor.reflections.plist"
-LABEL="com.valor.reflections"
+LABEL="${SERVICE_LABEL_PREFIX}.reflections"
+PLIST_DST="$HOME/Library/LaunchAgents/${LABEL}.plist"
+# Legacy daydream label is hard-pinned to com.valor — it only ever existed
+# under that prefix, so the cleanup runs regardless of the fork's prefix.
 OLD_LABEL="com.valor.daydream"
 OLD_PLIST_DST="$HOME/Library/LaunchAgents/com.valor.daydream.plist"
 
@@ -36,11 +45,22 @@ fi
 
 # Copy plist to LaunchAgents with path substitution
 echo "Installing plist to $PLIST_DST..."
-sed "s|__PROJECT_DIR__|$PROJECT_DIR|g; s|__HOME_DIR__|$HOME|g" "$PLIST_SRC" > "$PLIST_DST"
+sed "s|__PROJECT_DIR__|$PROJECT_DIR|g; s|__HOME_DIR__|$HOME|g; s|__SERVICE_LABEL__|$LABEL|g" "$PLIST_SRC" > "$PLIST_DST"
 
 # Load new version
 echo "Loading $LABEL..."
 launchctl bootstrap "gui/$(id -u)" "$PLIST_DST"
+
+# Render newsyslog config from template (Task 4) and print install instruction.
+NEWSYSLOG_TEMPLATE="$PROJECT_DIR/config/newsyslog.conf.template"
+NEWSYSLOG_RENDERED="$PROJECT_DIR/config/newsyslog.rendered.conf"
+if [ -f "$NEWSYSLOG_TEMPLATE" ]; then
+    sed "s|__PROJECT_DIR__|$PROJECT_DIR|g" "$NEWSYSLOG_TEMPLATE" > "$NEWSYSLOG_RENDERED"
+    echo ""
+    echo "Rendered newsyslog config to $NEWSYSLOG_RENDERED"
+    echo "To install (requires root — macOS newsyslog only reads /etc/newsyslog.d/):"
+    echo "  sudo cp $NEWSYSLOG_RENDERED /etc/newsyslog.d/valor.conf"
+fi
 
 echo ""
 echo "Reflections service installed successfully."

@@ -11,6 +11,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 LOCK_DIR="$PROJECT_DIR/data/update.lock"
 
+set -a
+# shellcheck disable=SC1091
+[ -f "$PROJECT_DIR/.env" ] && source "$PROJECT_DIR/.env"
+set +a
+: "${SERVICE_LABEL_PREFIX:=com.valor}"
+
 cd "$PROJECT_DIR"
 
 # Ensure data directory exists
@@ -52,9 +58,10 @@ fi
 
 # ── Reload reflections plist if present ──────────────────────────────
 REFLECTIONS_PLIST="$PROJECT_DIR/com.valor.reflections.plist"
-REFLECTIONS_DST="$HOME/Library/LaunchAgents/com.valor.reflections.plist"
-REFLECTIONS_LABEL="com.valor.reflections"
-# Unload old daydream service if still present (migration)
+REFLECTIONS_LABEL="${SERVICE_LABEL_PREFIX}.reflections"
+REFLECTIONS_DST="$HOME/Library/LaunchAgents/${REFLECTIONS_LABEL}.plist"
+# Hard-pin legacy daydream cleanup to com.valor — that label only ever
+# existed under the original prefix.
 OLD_DAYDREAM_DST="$HOME/Library/LaunchAgents/com.valor.daydream.plist"
 if launchctl list | grep -q "com.valor.daydream"; then
     launchctl bootout "gui/$(id -u)/com.valor.daydream" 2>/dev/null || true
@@ -66,7 +73,7 @@ if [ -f "$REFLECTIONS_PLIST" ]; then
             echo "ERROR: Failed to bootout $REFLECTIONS_LABEL"
         fi
     fi
-    cp "$REFLECTIONS_PLIST" "$REFLECTIONS_DST"
+    sed "s|__PROJECT_DIR__|$PROJECT_DIR|g; s|__HOME_DIR__|$HOME|g; s|__SERVICE_LABEL__|$REFLECTIONS_LABEL|g" "$REFLECTIONS_PLIST" > "$REFLECTIONS_DST"
     if ! launchctl bootstrap "gui/$(id -u)" "$REFLECTIONS_DST"; then
         echo "ERROR: Failed to bootstrap $REFLECTIONS_LABEL"
     fi
@@ -74,24 +81,24 @@ fi
 
 # ── Reload worker plist if present ───────────────────────────────────
 WORKER_PLIST="$PROJECT_DIR/com.valor.worker.plist"
-WORKER_DST="$HOME/Library/LaunchAgents/com.valor.worker.plist"
-WORKER_LABEL="com.valor.worker"
+WORKER_LABEL="${SERVICE_LABEL_PREFIX}.worker"
+WORKER_DST="$HOME/Library/LaunchAgents/${WORKER_LABEL}.plist"
 if [ -f "$WORKER_PLIST" ] && [ -f "$WORKER_DST" ]; then
     if launchctl list | grep -q "$WORKER_LABEL"; then
         if ! launchctl bootout "gui/$(id -u)/$WORKER_LABEL"; then
             echo "ERROR: Failed to bootout $WORKER_LABEL"
         fi
     fi
-    sed "s|__PROJECT_DIR__|$PROJECT_DIR|g; s|__HOME_DIR__|$HOME|g" "$WORKER_PLIST" > "$WORKER_DST"
+    sed "s|__PROJECT_DIR__|$PROJECT_DIR|g; s|__HOME_DIR__|$HOME|g; s|__SERVICE_LABEL__|$WORKER_LABEL|g" "$WORKER_PLIST" > "$WORKER_DST"
     launchctl bootstrap "gui/$(id -u)" "$WORKER_DST"
 fi
 
 # ── Sync newsyslog log rotation config if changed ────────────────────
-NEWSYSLOG_SRC="$PROJECT_DIR/config/newsyslog.valor.conf"
+NEWSYSLOG_SRC="$PROJECT_DIR/config/newsyslog.conf.template"
 NEWSYSLOG_DST="/etc/newsyslog.d/valor.conf"
 if [ -f "$NEWSYSLOG_SRC" ]; then
-    # Generate machine-specific config by replacing default path
-    NEWSYSLOG_RENDERED=$(sed "s|/Users/valorengels/src/ai|${PROJECT_DIR}|g" "$NEWSYSLOG_SRC")
+    # Render template by substituting __PROJECT_DIR__
+    NEWSYSLOG_RENDERED=$(sed "s|__PROJECT_DIR__|${PROJECT_DIR}|g" "$NEWSYSLOG_SRC")
     if [ ! -f "$NEWSYSLOG_DST" ] || [ "$(cat "$NEWSYSLOG_DST")" != "$NEWSYSLOG_RENDERED" ]; then
         echo "$NEWSYSLOG_RENDERED" | sudo tee "$NEWSYSLOG_DST" > /dev/null 2>&1 && \
             echo "newsyslog config updated at $NEWSYSLOG_DST" || \

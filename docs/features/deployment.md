@@ -37,7 +37,7 @@ This allows multiple machines to run Valor, each monitoring different groups.
       "respond_to_all": true,
       "respond_to_mentions": true,
       "respond_to_dms": true,
-      "mention_triggers": ["@valor", "valor", "hey valor"]
+      "mention_triggers": ["@valor", "valor", "valorengels", "hey valor"]
     },
     "response": {
       "typing_indicator": true,
@@ -142,12 +142,16 @@ For more details on the update polling mechanism, see [Bridge Self-Healing](brid
 
 Each machine runs a subset of these four services:
 
+All plist labels below use the `${SERVICE_LABEL_PREFIX}` configured in `.env`
+(default `com.valor`). Forks override this for coexistence — see
+`docs/guides/setup.md` for details.
+
 | Service | Plist | Purpose | Required On |
 |---------|-------|---------|-------------|
-| Bridge | `com.valor.bridge` | Telegram I/O only (no embedded worker) | Bridge machines |
-| Worker | `com.valor.worker` | Standalone session processing | All machines |
-| Watchdog | `com.valor.bridge-watchdog` | Health monitoring, crash recovery | Bridge machines |
-| Update | `com.valor.update` | Auto-pull from origin/main | All machines |
+| Bridge | `${SERVICE_LABEL_PREFIX}.bridge` | Telegram I/O only (no embedded worker) | Bridge machines |
+| Worker | `${SERVICE_LABEL_PREFIX}.worker` | Standalone session processing | All machines |
+| Watchdog | `${SERVICE_LABEL_PREFIX}.bridge-watchdog` | Health monitoring, crash recovery | Bridge machines |
+| Update | `${SERVICE_LABEL_PREFIX}.update` | Auto-pull from origin/main | All machines |
 
 **Dev workstations** run Worker + Update. Sessions are processed and output is written to `logs/worker/`.
 
@@ -170,6 +174,23 @@ Both Bridge and Worker must run on bridge machines. The bridge is I/O only and d
 ```
 
 See [Worker Service](worker-service.md) for full details.
+
+### Log Rotation (newsyslog)
+
+`config/newsyslog.conf.template` is a template — install scripts substitute
+`__PROJECT_DIR__` and write the rendered output to
+`config/newsyslog.rendered.conf` (gitignored). macOS `newsyslog` is root-only
+and only reads `/etc/newsyslog.d/*.conf`, so installing the rendered config
+requires sudo:
+
+```bash
+./scripts/install_reflections.sh   # renders the template
+sudo cp config/newsyslog.rendered.conf /etc/newsyslog.d/valor.conf
+```
+
+`valor-service.sh install` will attempt the `sudo cp` automatically; in
+non-interactive contexts (launchd, CI) it falls back to printing a warning
+and the operator must run the copy manually.
 
 ## See Also
 

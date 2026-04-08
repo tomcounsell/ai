@@ -8,13 +8,33 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 VENV="$PROJECT_DIR/.venv"
-PLIST_NAME="com.valor.bridge"
+
+# Source .env so SERVICE_LABEL_PREFIX (and other env vars) are available.
+# Failures are non-fatal — we fall back to defaults below.
+set -a
+# shellcheck disable=SC1091
+[ -f "$PROJECT_DIR/.env" ] && source "$PROJECT_DIR/.env"
+set +a
+: "${SERVICE_LABEL_PREFIX:=com.valor}"
+
+# Prefix-drift guard: if a service is already installed under a different
+# prefix (because launchd is bound to the label baked at install time), use
+# the installed prefix for launchctl ops and warn loudly. Reinstall to change.
+INSTALLED_PREFIX=$(ls "$HOME/Library/LaunchAgents/" 2>/dev/null \
+    | grep -oE '^[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.(bridge|worker|reflections|autoexperiment|bridge-watchdog)\.plist$' \
+    | head -1 | sed -E 's/\.(bridge|worker|reflections|autoexperiment|bridge-watchdog)\.plist$//')
+if [ -n "$INSTALLED_PREFIX" ] && [ "$INSTALLED_PREFIX" != "$SERVICE_LABEL_PREFIX" ]; then
+    echo "WARN: installed service prefix '$INSTALLED_PREFIX' differs from .env SERVICE_LABEL_PREFIX='$SERVICE_LABEL_PREFIX'; using installed prefix for launchctl ops. Reinstall to change."
+    SERVICE_LABEL_PREFIX="$INSTALLED_PREFIX"
+fi
+
+PLIST_NAME="${SERVICE_LABEL_PREFIX}.bridge"
 PLIST_PATH="$HOME/Library/LaunchAgents/${PLIST_NAME}.plist"
-UPDATE_PLIST_NAME="com.valor.update"
+UPDATE_PLIST_NAME="${SERVICE_LABEL_PREFIX}.update"
 UPDATE_PLIST_PATH="$HOME/Library/LaunchAgents/${UPDATE_PLIST_NAME}.plist"
-WATCHDOG_PLIST_NAME="com.valor.bridge-watchdog"
+WATCHDOG_PLIST_NAME="${SERVICE_LABEL_PREFIX}.bridge-watchdog"
 WATCHDOG_PLIST_PATH="$HOME/Library/LaunchAgents/${WATCHDOG_PLIST_NAME}.plist"
-WORKER_PLIST_NAME="com.valor.worker"
+WORKER_PLIST_NAME="${SERVICE_LABEL_PREFIX}.worker"
 WORKER_PLIST_PATH="$HOME/Library/LaunchAgents/${WORKER_PLIST_NAME}.plist"
 LOG_DIR="$PROJECT_DIR/logs"
 PID_FILE="$PROJECT_DIR/data/bridge.pid"
@@ -432,18 +452,18 @@ WATCHDOGEOF
     # files that grow large during long-running service uptime.
     echo ""
     echo "Installing newsyslog log rotation config..."
-    NEWSYSLOG_SRC="$PROJECT_DIR/config/newsyslog.valor.conf"
+    NEWSYSLOG_SRC="$PROJECT_DIR/config/newsyslog.conf.template"
     NEWSYSLOG_DST="/etc/newsyslog.d/valor.conf"
     if [ -f "$NEWSYSLOG_SRC" ]; then
-        # Update paths in the config to match this machine's project directory
-        # sudo may fail in non-interactive contexts (e.g. launchd, CI) — treat as non-fatal
-        if sed "s|/Users/valorengels/src/ai|${PROJECT_DIR}|g" "$NEWSYSLOG_SRC" | sudo tee "$NEWSYSLOG_DST" > /dev/null 2>&1; then
+        # Render template by substituting __PROJECT_DIR__ then install via sudo.
+        # sudo may fail in non-interactive contexts (e.g. launchd, CI) — treat as non-fatal.
+        if sed "s|__PROJECT_DIR__|${PROJECT_DIR}|g" "$NEWSYSLOG_SRC" | sudo tee "$NEWSYSLOG_DST" > /dev/null 2>&1; then
             echo "newsyslog config installed at $NEWSYSLOG_DST"
         else
             echo "WARNING: newsyslog config install skipped (sudo not available in this context)"
         fi
     else
-        echo "WARNING: newsyslog config not found at $NEWSYSLOG_SRC"
+        echo "WARNING: newsyslog template not found at $NEWSYSLOG_SRC"
     fi
 
     sleep 2
