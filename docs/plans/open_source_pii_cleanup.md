@@ -6,6 +6,7 @@ owner: Valor
 created: 2026-04-02
 tracking: https://github.com/tomcounsell/ai/issues/629
 last_comment_id:
+revision_applied: true
 ---
 
 # Move Hardcoded PII to Project Config
@@ -276,6 +277,14 @@ No agent integration required — this is a config/install infrastructure change
 - **Parallel**: true
 - Remove `VALOR_USERNAMES` constant from `bridge/routing.py:35`
 - Fold `"valor"` and `"valorengels"` into `defaults.telegram.mention_triggers` in `config/projects.example.json` (no new field)
+- **Implementation Note (C1) — `bridge/routing.py:250`**: the current body of `get_valor_usernames()` opens with `usernames = VALOR_USERNAMES.copy()` at line 250 and then layers config triggers on top. Replace that initializer with `usernames: set[str] = set()` and pull triggers from `DEFAULT_MENTIONS` when `project` has no `mention_triggers` of its own (not from the removed constant). Final shape:
+  ```python
+  def get_valor_usernames(project: dict | None) -> set[str]:
+      if project is None:
+          return set()
+      mentions = project.get("telegram", {}).get("mention_triggers", DEFAULT_MENTIONS)
+      return {t.lstrip("@").lower() for t in mentions}
+  ```
 - Modify `get_valor_usernames()` to build set from config `mention_triggers` only; `project=None` returns `set()` for test ergonomics
 - **Add fail-loud startup assertion** in `bridge/telegram_bridge.py`: immediately after `routing.load_config()`, assert `routing.DEFAULT_MENTIONS` is truthy; raise `RuntimeError("mention_triggers must be configured in projects.json defaults.telegram")` if empty. This preserves test inertness (tests that never load config stay silent) while making production misconfig fail loudly at bridge startup.
 - Write `tests/unit/test_routing.py` covering **all three states**: `project=None` → `set()`, `project={"telegram":{"mention_triggers":[]}}` → `set()`, `project={"telegram":{"mention_triggers":["x"]}}` → `{"x"}`. Also add a bridge startup test that verifies the assertion fires when `DEFAULT_MENTIONS` is empty.
