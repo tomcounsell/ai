@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Medium
 owner: Valor
@@ -15,9 +15,9 @@ last_comment_id:
 A new user cloning this repo must grep through source files to find and replace personal identifiers before the system works for them. Usernames, credentials, service labels, and paths are scattered across Python source, shell scripts, plist templates, and config files.
 
 **Current behavior:**
-- `.env.example` exposes a real Sentry DSN with working auth tokens
-- `bridge/routing.py:34` hardcodes `VALOR_USERNAMES = {"valor", "valorengels"}` for mention detection
-- Service label prefix `com.valor.*` is hardcoded in plist templates and install scripts
+- `.env.example:74` exposes a real Sentry DSN with working auth tokens
+- `bridge/routing.py:35` hardcodes `VALOR_USERNAMES = {"valor", "valorengels"}` for mention detection
+- Service label prefix `com.valor.*` is hardcoded across **every** service install path: `scripts/valor-service.sh` (bridge, update, bridge-watchdog, worker PLIST_NAMEs), `scripts/install_worker.sh`, `scripts/install_reflections.sh`, `scripts/install_autoexperiment.sh`, `scripts/remote-update.sh` (reflections/worker labels + legacy daydream cleanup), `scripts/update/service.py` (bridge, reflections, worker, update, caffeinate — inline-generated caffeinate plist via heredoc), and `scripts/update/run.py`. Committed plist templates at repo root: `com.valor.reflections.plist`, `com.valor.autoexperiment.plist` (bridge/worker/bridge-watchdog/caffeinate plists are generated inline by `service.py`, not committed)
 - `config/newsyslog.valor.conf` contains raw `/Users/valorengels/src/ai` paths
 - Manifest files in `tools/*/manifest.json` contain `github.com/tomcounsell/ai` URLs
 
@@ -45,9 +45,9 @@ This change touches the config loading and service installation paths:
 
 | PII Item | Current Location | Target Home | Rationale |
 |----------|-----------------|-------------|-----------|
-| Sentry DSN (real credential) | `.env.example:69` | Replace with placeholder `https://your-key@your-org.ingest.sentry.io/your-project` | Credentials never belong in example files |
-| `VALOR_USERNAMES` constant | `bridge/routing.py:34` | Derive entirely from `projects.json` `mention_triggers` + `defaults.telegram.mention_triggers` | Already partially redundant with config; remove the hardcoded constant |
-| Service label prefix | `valor-service.sh`, plist templates, install scripts | `.env` as `SERVICE_LABEL_PREFIX` (default: `com.valor`) | Install-time concern; `.env` is the right home for machine-specific settings |
+| Sentry DSN (real credential) | `.env.example:74` | Replace with placeholder `https://your-key@your-org.ingest.sentry.io/your-project` | Credentials never belong in example files |
+| `VALOR_USERNAMES` constant | `bridge/routing.py:35` | Derive entirely from `projects.json` `mention_triggers` + `defaults.telegram.mention_triggers` | Already partially redundant with config; remove the hardcoded constant |
+| Service label prefix (ALL services) | `scripts/valor-service.sh`, `scripts/install_worker.sh`, `scripts/install_reflections.sh`, `scripts/install_autoexperiment.sh`, `scripts/remote-update.sh`, `scripts/update/service.py`, `scripts/update/run.py`, committed plist templates (`com.valor.reflections.plist`, `com.valor.autoexperiment.plist`), and inline-generated plists in `service.py` (bridge, worker, bridge-watchdog, caffeinate, update) | `.env` as `SERVICE_LABEL_PREFIX` (default: `com.valor`) | Install-time concern; `.env` is the right home for machine-specific settings. ALL `com.valor.*` literals must be parameterized — half-migration violates Dev Principle #1 |
 | `/Users/valorengels` paths | `config/newsyslog.valor.conf` | Convert to template with `__PROJECT_DIR__` placeholder; sed-replace at install time | Same pattern already used by plist templates |
 | Manifest GitHub URLs | `tools/*/manifest.json` (4 files) | Low priority — leave as-is with a note in setup docs | Non-functional metadata; not fetched at runtime |
 
@@ -82,24 +82,62 @@ No prerequisites — this work modifies existing config loading and install scri
 
 1. **Sentry DSN** — This is a **live credential**, not just a text-cleanup. Required sequence:
    a. Rotate/revoke the exposed DSN in the Sentry dashboard (`o4508986235682816` org, project `4511091961888768`).
-   b. Verify the old DSN no longer accepts events (send a test event; confirm rejection).
-   c. Replace `.env.example:69` with placeholder `https://your-key@your-org.ingest.sentry.io/your-project`.
-   d. Git history scrubbing (`git filter-repo`) is **explicitly out of scope** — see No-Gos. The credential will remain in prior commits; rotation is the sole remediation.
+   b. **Verify rejection with HTTP status check** — the test event must return `HTTP 401` or `HTTP 403`, not `200 OK` with a server-side drop. Required curl: `curl -i -X POST "https://o4508986235682816.ingest.us.sentry.io/api/4511091961888768/store/" -H "X-Sentry-Auth: Sentry sentry_version=7,sentry_key=6c263d512a49826d9f4d63578d86d3d1" -H "Content-Type: application/json" -d '{"message":"rotation-test","level":"info"}'`. Paste the full curl response (status line + headers) into the PR description.
+   c. Replace `.env.example:74` with placeholder `https://your-key@your-org.ingest.sentry.io/your-project`. Add a comment above the placeholder explaining that historical commits still contain an old, revoked DSN.
+   d. Git history scrubbing (`git filter-repo`) is **explicitly out of scope** — see No-Gos. The credential will remain in prior commits; rotation (verified by 401/403) is the sole remediation.
 
 2. **VALOR_USERNAMES removal** — In `bridge/routing.py`:
-   - Remove the `VALOR_USERNAMES` constant at line 34
+   - Remove the `VALOR_USERNAMES` constant at line 35
    - Modify `get_valor_usernames()` to build the set entirely from config `mention_triggers` (already loaded from `projects.json` defaults)
    - **No new field** — fold the existing hardcoded handles (`"valor"`, `"valorengels"`) into `defaults.telegram.mention_triggers` in `config/projects.example.json`. The bridge runs as a Telethon userbot (user account, not a Telegram bot), so there is no separate "bot username" concept; `mention_triggers` is already the single source of truth for self-mention detection.
-   - Fallback: if no config is loaded (e.g., tests), use an empty set so mention detection is inert rather than crashing
+   - **Three-way fallback behavior** (fail-loud on production misconfig, inert in tests):
+     - `project is None` → return `set()` (test ergonomics — keeps unit tests from needing config fixtures)
+     - `project` is a dict but `mention_triggers` is missing/empty → return `set()` but this is a production misconfig signal
+     - **Startup assertion**: `bridge/telegram_bridge.py` must, immediately after `routing.load_config()`, assert that `routing.DEFAULT_MENTIONS` is truthy — raise `RuntimeError("mention_triggers must be configured in projects.json defaults.telegram")` otherwise. This makes production misconfig loud while preserving test inertness.
+   - Unit tests must cover all three states: `project=None`, `project={"telegram":{"mention_triggers":[]}}`, `project={"telegram":{"mention_triggers":["x"]}}`.
 
-3. **Service label prefix** — `SERVICE_LABEL_PREFIX` is an **install-time-only** concern. launchd sees only the `Label` baked into the plist at install time; runtime `.env` changes do not affect a registered service. Scope:
-   - Add `SERVICE_LABEL_PREFIX=com.valor` to `.env.example`.
-   - Install scripts (`install_reflections.sh`, `install_autoexperiment.sh`) explicitly source `.env` from the project root: `set -a; source "$(cd "$(dirname "$0")/.." && pwd)/.env"; set +a` (with graceful fallback to `com.valor` if `.env` is absent).
-   - Install scripts `sed`-replace a new `__SERVICE_LABEL__` placeholder in plist templates with `${SERVICE_LABEL_PREFIX}.reflections` / `${SERVICE_LABEL_PREFIX}.autoexperiment` **and rename the output file** to `${SERVICE_LABEL_PREFIX}.reflections.plist` (etc.) in `~/Library/LaunchAgents/`. This keeps the on-disk filename and internal `Label` in sync (resolves Open Question 2).
-   - `valor-service.sh` sources `.env` the same way, then uses `${SERVICE_LABEL_PREFIX:-com.valor}` **only** to compute the plist filename to pass to `launchctl load/unload`. It does not attempt to re-render plists at runtime.
-   - Template files in the repo remain named `com.valor.reflections.plist` / `com.valor.autoexperiment.plist` as source-of-truth templates; only the installed copy is renamed.
+3. **Service label prefix (ALL services)** — `SERVICE_LABEL_PREFIX` is an **install-time-only** concern for launchd. Scope covers **every** `com.valor.*` literal across shell and Python install/management code.
 
-4. **newsyslog.valor.conf** — Rename to `config/newsyslog.conf.template`, replace hardcoded paths with `__PROJECT_DIR__`. The sed-replace step is added to **`scripts/install_reflections.sh`** (the script that already installs log-related services), writing the rendered file to `~/Library/Logs/newsyslog.d/` (or documenting manual copy if root is required).
+   **a. Add `SERVICE_LABEL_PREFIX=com.valor` to `.env.example`.**
+
+   **b. Shell scripts** — Every shell script that references `com.valor.*` must source `.env` and compute labels from the prefix:
+   - Pattern: after sourcing `.env`, guard with `: "${SERVICE_LABEL_PREFIX:=com.valor}"` (POSIX default).
+   - Source line: `set -a; source "$(cd "$(dirname "$0")/.." && pwd)/.env" 2>/dev/null || true; set +a`
+   - Files to update:
+     - `scripts/valor-service.sh` — lines 11/13/15/17 (bridge, update, bridge-watchdog, worker PLIST_NAMEs)
+     - `scripts/install_worker.sh` — lines 12–14
+     - `scripts/install_reflections.sh` — reflections label + plist filename
+     - `scripts/install_autoexperiment.sh` — autoexperiment label + plist filename
+     - `scripts/remote-update.sh` — lines 54–78 (reflections/worker labels). **Legacy `com.valor.daydream` cleanup** at lines 58–60 must be handled explicitly: hard-pin to `com.valor.daydream` (not `${SERVICE_LABEL_PREFIX}.daydream`) because that legacy name only ever existed under `com.valor` and must be cleaned up regardless of the fork's current prefix.
+
+   **c. Python scripts** — `scripts/update/service.py` and `scripts/update/run.py` must load the prefix at module level, after the project `.env` is sourced:
+   ```python
+   import os
+   SERVICE_PREFIX = os.environ.get("SERVICE_LABEL_PREFIX", "com.valor")
+   ```
+   Rebuild every `"com.valor.<x>"` literal as an f-string. Specific call sites to fix:
+   - `scripts/update/service.py`: lines 93, 138–142, 175, 229–240, 297, 304, 366, 373, 390 — covers bridge, reflections, worker, update, and caffeinate labels and plist paths.
+   - **Inline-generated caffeinate plist**: `scripts/update/service.py:366–390` generates `caffeinate.plist` inline via Python heredoc — the Label `<string>com.valor.caffeinate</string>` inside the heredoc must use an f-string with `{SERVICE_PREFIX}` (both the `Label` and the output filename).
+   - `scripts/update/run.py`: lines 662, 666.
+
+   **d. Committed plist templates** — Add `__SERVICE_LABEL__` placeholder to `Label` field in:
+   - `com.valor.reflections.plist` (repo root)
+   - `com.valor.autoexperiment.plist` (repo root)
+   - Template files remain named `com.valor.*.plist` as source-of-truth (recognizability); only installed copies are renamed to `${SERVICE_LABEL_PREFIX}.*.plist` in `~/Library/LaunchAgents/`.
+   - **Pre-task enumeration**: run `find /Users/tomcounsell/src/ai -maxdepth 2 -name "com.valor.*.plist"` to confirm committed templates before starting. Bridge/worker/bridge-watchdog plists are **not** committed — they're generated inline by `service.py` (covered in item c).
+
+   **e. Install-time sed/f-string rename**: install scripts and `service.py` write rendered plists to `~/Library/LaunchAgents/` using `${SERVICE_LABEL_PREFIX}.<service>.plist` so the on-disk filename matches the internal `Label` (keeps `launchctl list/unload` sane for forks).
+
+   **f. `valor-service.sh` runtime usage**: `valor-service.sh` sources `.env`, then uses `${SERVICE_LABEL_PREFIX:-com.valor}` **only** to compute the installed plist filename for `launchctl load/unload`. It does not re-render plists at runtime.
+
+   **g. Install/runtime prefix drift guard (C1)**: `SERVICE_LABEL_PREFIX` cannot change post-install without reinstall — launchd is bound to the label baked at install time. `valor-service.sh` must detect drift: after sourcing `.env`, scan `~/Library/LaunchAgents/` for any installed `*.bridge.plist` / `*.worker.plist` / `*.reflections.plist` and extract the actual prefix. If the installed prefix differs from `$SERVICE_LABEL_PREFIX`, print a loud warning (`WARN: installed service prefix '$INSTALLED_PREFIX' differs from .env SERVICE_LABEL_PREFIX='$SERVICE_LABEL_PREFIX'; using installed prefix for launchctl ops. Reinstall to change.`) and use `$INSTALLED_PREFIX` for all `launchctl` commands. Detection pattern:
+   ```bash
+   INSTALLED_PREFIX=$(ls ~/Library/LaunchAgents/ 2>/dev/null \
+     | grep -oE '^[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.(bridge|worker|reflections|autoexperiment|bridge-watchdog)\.plist$' \
+     | head -1 | sed -E 's/\.(bridge|worker|reflections|autoexperiment|bridge-watchdog)\.plist$//')
+   ```
+
+4. **newsyslog.valor.conf** — Rename to `config/newsyslog.conf.template`, replace hardcoded paths with `__PROJECT_DIR__`. macOS newsyslog **only** reads `/etc/newsyslog.conf` and `/etc/newsyslog.d/*.conf` — there is no user-level `~/Library/Logs/newsyslog.d/` path. The install script (`scripts/install_reflections.sh`) renders the template to `config/newsyslog.rendered.conf` and prints an explicit instruction for the user to run `sudo cp config/newsyslog.rendered.conf /etc/newsyslog.d/valor.conf` (root required).
 
 ## Failure Path Test Strategy
 
@@ -223,9 +261,10 @@ No agent integration required — this is a config/install infrastructure change
 - **Assigned To**: config-builder (requires human-in-the-loop for Sentry dashboard access)
 - **Agent Type**: builder
 - **Parallel**: true
-- **Step 1 (HUMAN REQUIRED)**: Log into Sentry, rotate/revoke the exposed DSN (`o4508986235682816` / project `4511091961888768`). Send a test event with the old DSN key and confirm it is rejected.
-- **Step 2**: Replace real Sentry DSN in `.env.example:69` with placeholder `https://your-key@your-org.ingest.sentry.io/your-project`.
-- **Step 3**: Record in the PR description: "Old Sentry DSN rotated on {YYYY-MM-DD}; test event confirmed rejected."
+- **Step 1 (HUMAN REQUIRED)**: Log into Sentry, rotate/revoke the exposed DSN (`o4508986235682816` / project `4511091961888768`).
+- **Step 2 (HUMAN REQUIRED — verify rejection with HTTP status)**: Run `curl -i -X POST "https://o4508986235682816.ingest.us.sentry.io/api/4511091961888768/store/" -H "X-Sentry-Auth: Sentry sentry_version=7,sentry_key=6c263d512a49826d9f4d63578d86d3d1" -H "Content-Type: application/json" -d '{"message":"rotation-test","level":"info"}'`. **Must return HTTP 401 or 403** — a `200 OK` with silent server-side drop is NOT sufficient. Paste the full response (status line + headers) into the PR description.
+- **Step 3**: Replace real Sentry DSN in `.env.example:74` with placeholder `https://your-key@your-org.ingest.sentry.io/your-project`. Add a comment above the placeholder noting that historical commits still contain an old, revoked DSN.
+- **Step 4**: Record in the PR description: "Old Sentry DSN rotated on {YYYY-MM-DD}; test event confirmed rejected with HTTP {401|403}. Curl output: {paste}."
 - Do NOT attempt `git filter-repo` history scrubbing — see No-Gos.
 
 ### 2. Remove VALOR_USERNAMES and make mention detection config-only
@@ -235,27 +274,45 @@ No agent integration required — this is a config/install infrastructure change
 - **Assigned To**: config-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Remove `VALOR_USERNAMES` constant from `bridge/routing.py:34`
+- Remove `VALOR_USERNAMES` constant from `bridge/routing.py:35`
 - Fold `"valor"` and `"valorengels"` into `defaults.telegram.mention_triggers` in `config/projects.example.json` (no new field)
-- Modify `get_valor_usernames()` to build set from config `mention_triggers` only
-- Add fallback empty set when no config is loaded
-- Write unit test verifying config-only mention detection
+- Modify `get_valor_usernames()` to build set from config `mention_triggers` only; `project=None` returns `set()` for test ergonomics
+- **Add fail-loud startup assertion** in `bridge/telegram_bridge.py`: immediately after `routing.load_config()`, assert `routing.DEFAULT_MENTIONS` is truthy; raise `RuntimeError("mention_triggers must be configured in projects.json defaults.telegram")` if empty. This preserves test inertness (tests that never load config stay silent) while making production misconfig fail loudly at bridge startup.
+- Write `tests/unit/test_routing.py` covering **all three states**: `project=None` → `set()`, `project={"telegram":{"mention_triggers":[]}}` → `set()`, `project={"telegram":{"mention_triggers":["x"]}}` → `{"x"}`. Also add a bridge startup test that verifies the assertion fires when `DEFAULT_MENTIONS` is empty.
 
-### 3. Parametric service label prefix
+### 3. Parametric service label prefix (ALL services)
 - **Task ID**: build-service-labels
 - **Depends On**: none
-- **Validates**: `grep -c 'SERVICE_LABEL_PREFIX' scripts/valor-service.sh` returns >= 1
+- **Validates**:
+  - `grep -rn 'com\.valor\.' scripts/ com.valor.*.plist` returns ONLY template files or legacy-cleanup pins (e.g., `com.valor.daydream` cleanup in `remote-update.sh`); no live service labels.
+  - `grep -c 'SERVICE_LABEL_PREFIX\|SERVICE_PREFIX' scripts/valor-service.sh scripts/install_worker.sh scripts/install_reflections.sh scripts/install_autoexperiment.sh scripts/remote-update.sh scripts/update/service.py scripts/update/run.py` — all files > 0.
+  - Parametric test: install with `SERVICE_LABEL_PREFIX=com.example` produces `~/Library/LaunchAgents/com.example.{bridge,worker,reflections,autoexperiment,bridge-watchdog,caffeinate,update}.plist` with matching `Label` fields inside.
 - **Assigned To**: config-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add `SERVICE_LABEL_PREFIX=com.valor` to `.env.example`
-- Update `valor-service.sh` to read `SERVICE_LABEL_PREFIX` from env with `com.valor` default
-- Update `install_reflections.sh` and `install_autoexperiment.sh` to use `SERVICE_LABEL_PREFIX`
-- Add `__SERVICE_LABEL__` placeholder to plist templates and sed-replace it at install time
-- Update `com.valor.reflections.plist` and `com.valor.autoexperiment.plist` Label fields to use placeholder
-- **Install-time filename rename**: install scripts write rendered plists to `~/Library/LaunchAgents/` using `${SERVICE_LABEL_PREFIX}.reflections.plist` so the on-disk filename matches the internal `Label` (keeps launchctl list/unload sane for forks)
-- `valor-service.sh` sources `.env` via `set -a; source "$(cd "$(dirname "$0")/.." && pwd)/.env"; set +a` with fallback to `com.valor` if absent; uses the prefix only to compute the installed plist filename for `launchctl load/unload`
-- Update `tests/unit/test_reflections_scheduling.py` to validate both template (placeholder) and rendered (substituted) forms; add a parametric test with `SERVICE_LABEL_PREFIX=com.example`
+- **Step 0 — Enumerate templates**: run `find /Users/tomcounsell/src/ai -maxdepth 2 -name "com.valor.*.plist"` to list committed plist templates (expected: `com.valor.reflections.plist`, `com.valor.autoexperiment.plist`). Bridge/worker/bridge-watchdog/caffeinate/update plists are generated inline by `scripts/update/service.py` — covered in Step 3.
+- **Step 1 — `.env.example`**: Add `SERVICE_LABEL_PREFIX=com.valor`.
+- **Step 2 — Shell scripts**: In each of `scripts/valor-service.sh`, `scripts/install_worker.sh`, `scripts/install_reflections.sh`, `scripts/install_autoexperiment.sh`, `scripts/remote-update.sh`, source `.env` (`set -a; source "$(cd "$(dirname "$0")/.." && pwd)/.env" 2>/dev/null || true; set +a`) then `: "${SERVICE_LABEL_PREFIX:=com.valor}"`. Replace every `com.valor.<svc>` literal with `${SERVICE_LABEL_PREFIX}.<svc>`.
+  - `scripts/valor-service.sh`: lines 11/13/15/17 PLIST_NAMEs (bridge, update, bridge-watchdog, worker).
+  - `scripts/install_worker.sh`: lines 12–14.
+  - `scripts/remote-update.sh`: lines 54–78 (reflections/worker labels). **Hard-pin** `com.valor.daydream` cleanup at lines 58–60 — this is a legacy name that only ever existed under `com.valor`, so it does NOT use the prefix variable.
+- **Step 3 — Python scripts** (`scripts/update/service.py`, `scripts/update/run.py`): add module-level `SERVICE_PREFIX = os.environ.get("SERVICE_LABEL_PREFIX", "com.valor")` after `.env` is sourced. Convert every `"com.valor.<x>"` literal to an f-string `f"{SERVICE_PREFIX}.<x>"`. Specific sites:
+  - `scripts/update/service.py`: lines 93, 138–142, 175, 229–240, 297, 304, 366, 373, 390 (bridge, reflections, worker, update, caffeinate labels + plist paths).
+  - **Inline-generated caffeinate plist** (`service.py:366–390`): the Python heredoc that writes `caffeinate.plist` must use an f-string with `{SERVICE_PREFIX}` inside the `<string>…</string>` `Label` element AND in the output filename path.
+  - `scripts/update/run.py`: lines 662, 666.
+- **Step 4 — Committed plist templates**: add `__SERVICE_LABEL__` placeholder to `Label` field in `com.valor.reflections.plist` and `com.valor.autoexperiment.plist` (repo root). Install scripts sed-replace `__SERVICE_LABEL__` with `${SERVICE_LABEL_PREFIX}.reflections` / `.autoexperiment`. Template filenames remain `com.valor.*.plist` in repo; installed copies are renamed to `${SERVICE_LABEL_PREFIX}.*.plist`.
+- **Step 5 — Install-time filename rename**: all install scripts write rendered plists to `~/Library/LaunchAgents/${SERVICE_LABEL_PREFIX}.<service>.plist` so filename and internal `Label` stay in sync.
+- **Step 6 — Prefix drift guard in `valor-service.sh`** (C1): after sourcing `.env`, scan `~/Library/LaunchAgents/` for installed plists matching `*.{bridge,worker,reflections,autoexperiment,bridge-watchdog}.plist` and extract the actual prefix. If `$INSTALLED_PREFIX` differs from `$SERVICE_LABEL_PREFIX`, print a loud `WARN:` line and use `$INSTALLED_PREFIX` for `launchctl load/unload` operations. Detection pattern:
+  ```bash
+  INSTALLED_PREFIX=$(ls ~/Library/LaunchAgents/ 2>/dev/null \
+    | grep -oE '^[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.(bridge|worker|reflections|autoexperiment|bridge-watchdog)\.plist$' \
+    | head -1 | sed -E 's/\.(bridge|worker|reflections|autoexperiment|bridge-watchdog)\.plist$//')
+  if [ -n "$INSTALLED_PREFIX" ] && [ "$INSTALLED_PREFIX" != "$SERVICE_LABEL_PREFIX" ]; then
+    echo "WARN: installed service prefix '$INSTALLED_PREFIX' differs from .env SERVICE_LABEL_PREFIX='$SERVICE_LABEL_PREFIX'; using installed prefix. Reinstall to change."
+    SERVICE_LABEL_PREFIX="$INSTALLED_PREFIX"
+  fi
+  ```
+- **Step 7 — Tests**: update `tests/unit/test_reflections_scheduling.py` to validate both template (placeholder) and rendered (substituted) forms. Add a parametric test that runs install with `SERVICE_LABEL_PREFIX=com.example` and verifies rendered filename + internal `Label` both match. Add a test for the drift-guard warning path in `valor-service.sh`.
 
 ### 4. Convert newsyslog.valor.conf to template
 - **Task ID**: build-newsyslog-template
@@ -266,7 +323,7 @@ No agent integration required — this is a config/install infrastructure change
 - **Parallel**: true
 - Rename `config/newsyslog.valor.conf` to `config/newsyslog.conf.template`
 - Replace hardcoded `/Users/valorengels/src/ai` paths with `__PROJECT_DIR__`
-- Add install step to **`scripts/install_reflections.sh`** that sed-replaces `__PROJECT_DIR__` and writes the rendered config (document manual `sudo cp` step if root is required for `/etc/newsyslog.d/`)
+- Add install step to **`scripts/install_reflections.sh`** that sed-replaces `__PROJECT_DIR__` and writes the rendered config to `config/newsyslog.rendered.conf`. The script then prints an explicit instruction: `echo "Run: sudo cp config/newsyslog.rendered.conf /etc/newsyslog.d/valor.conf"`. macOS newsyslog only reads `/etc/newsyslog.conf` and `/etc/newsyslog.d/*.conf` — there is no user-level alternative.
 
 ### 5. Validate all changes
 - **Task ID**: validate-all-pii
@@ -315,8 +372,14 @@ No agent integration required — this is a config/install infrastructure change
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
-| CONCERN | [agent-type] | [The concern raised] | [How/whether it was addressed] |
+| Severity | Critic | Concern | Resolution |
+|----------|--------|---------|------------|
+| BLOCKER | Skeptic/Archaeologist/Adversary | B1: `SERVICE_LABEL_PREFIX` scope missed bridge/worker/bridge-watchdog/update/caffeinate labels across `valor-service.sh`, `install_worker.sh`, `remote-update.sh`, `scripts/update/service.py` (inc. inline-generated caffeinate plist), `scripts/update/run.py`. Half-migration would violate Dev Principle #1. | Technical Approach §3 rewritten to enumerate ALL affected files with specific line numbers. Task 3 expanded from 8 bullets to 7 steps covering shell, Python, inline-generated plists, committed templates, drift guard, and parametric tests. Config Allocation Table updated to list all file paths. |
+| BLOCKER | Operator/Adversary | B2: empty-set fallback silently broke mention detection on production misconfig. | Three-way fallback clarified: `project=None` → `set()` (test ergonomics); bridge startup now asserts `DEFAULT_MENTIONS` is non-empty after `routing.load_config()` and raises `RuntimeError` on production misconfig. Task 2 extended to include the assertion and three-state unit tests. |
+| CONCERN | Operator/Archaeologist | C1: prefix drift between install and runtime — `.env` changes post-install silently break `launchctl` ops. | Task 3 Step 6 adds prefix-drift guard in `valor-service.sh`: scans installed plists, detects drift, prints warning, and uses `$INSTALLED_PREFIX` for launchctl ops. |
+| CONCERN | Archaeologist | C2: wrong line numbers (`.env.example:69` should be `:74`; `routing.py:34` should be `:35`); plist templates not enumerated. | Line numbers corrected throughout plan. Task 3 Step 0 adds explicit `find` enumeration; Technical Approach §3d clarifies committed vs inline-generated plists. |
+| CONCERN | Skeptic/User | C3: Sentry rotation remediation didn't verify HTTP 401/403 (vs 200-with-silent-drop). | Technical Approach §1 and Task 1 now require curl-based HTTP status verification; exact curl command embedded in the plan; PR description must paste curl response. |
+| NIT | — | N1: bogus `~/Library/Logs/newsyslog.d/` path; macOS newsyslog is root-only at `/etc/newsyslog.d/`. | Technical Approach §4 and Task 4 corrected to render to `config/newsyslog.rendered.conf` and print explicit `sudo cp` instruction to `/etc/newsyslog.d/valor.conf`. |
 
 ---
 
