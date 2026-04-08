@@ -9,7 +9,9 @@ Also tests Redis pop lock acquisition and contention behavior.
 """
 
 from datetime import UTC, datetime
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 from agent.agent_session_queue import (
     _AGENT_SESSION_FIELDS,
