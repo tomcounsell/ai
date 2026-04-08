@@ -1,5 +1,5 @@
 ---
-status: In Progress
+status: Shipped
 type: bug
 appetite: Small
 owner: Valor
