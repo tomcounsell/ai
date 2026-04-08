@@ -6,6 +6,7 @@ owner: Valor Engels
 created: 2026-04-08
 tracking: https://github.com/tomcounsell/ai/issues/824
 last_comment_id:
+revision_applied: true
 ---
 
 # Fix pub/sub notify listener socket timeout regression
@@ -42,7 +43,7 @@ Observed in production: sessions `0_1775578955` and `0_1775578966` were stuck pe
 1. **Session creation** (`valor_session create` or bridge): calls `_push_agent_session()` → publishes JSON payload to `valor:sessions:new` via `POPOTO_REDIS_DB.publish()`
 2. **Notify listener thread** (`_listen_in_thread`): calls `POPOTO_REDIS_DB.pubsub()` → subscribes → iterates `pubsub.listen()` → on message: puts `chat_id` onto `notify_queue`
 3. **Bug location**: `pubsub.listen()` inherits `socket_timeout=5` from `POPOTO_REDIS_DB`'s connection pool → 5s idle raises exception → thread exits → `None` sentinel → 5s sleep → resubscribe
-4. **Fix**: create a fresh `redis.Redis` instance with `socket_timeout=None` inside `_listen_in_thread`, derive connection kwargs from `POPOTO_REDIS_DB.connection_pool.connection_kwargs` minus timeout fields
+4. **Fix**: create a fresh `redis.Redis` instance with explicit `socket_timeout=None` inside `_listen_in_thread`, reading host/port/db from `POPOTO_REDIS_DB.connection_pool.connection_kwargs` but passing timeout params explicitly
 5. **Worker pickup**: `notify_queue.get()` returns `chat_id` → `_ensure_worker(chat_id)` → session processing starts within ~1s
 
 ## Appetite
@@ -71,11 +72,13 @@ No prerequisites — this work has no external dependencies. Redis is already ru
 
 - In `_listen_in_thread` (inside `_session_notify_listener` in `agent/agent_session_queue.py`):
   - Import `redis` directly
-  - Copy `POPOTO_REDIS_DB.connection_pool.connection_kwargs` into a local dict
-  - Remove `socket_timeout` and `socket_connect_timeout` keys (set them to `None`)
-  - Instantiate `redis.Redis(**kwargs)` as a local variable `_pubsub_redis`
-  - Call `_pubsub_redis.pubsub()` instead of `POPOTO_REDIS_DB.pubsub()`
-  - Ensure `_pubsub_redis` is closed in the `finally` block
+  - Instantiate a dedicated connection: `conn = redis.Redis(host=..., port=..., db=..., socket_timeout=None, socket_connect_timeout=None)` — read host/port/db from `POPOTO_REDIS_DB.connection_pool.connection_kwargs` but pass `socket_timeout=None` and `socket_connect_timeout=None` explicitly. **Do NOT copy-and-modify the full kwargs dict** (avoids Risk 2 — unexpected keys causing `TypeError`). The explicit parameter approach is the canonical pattern.
+  - Call `conn.pubsub()` instead of `POPOTO_REDIS_DB.pubsub()`
+  - In the `finally` block, teardown in this exact order to avoid dangling Redis subscribers:
+    1. `pubsub.unsubscribe()` — remove subscription before closing
+    2. `pubsub.close()` — release pubsub resources
+    3. `conn.close()` — close the dedicated connection
+  - Then proceed with the reconnect sleep as before
 - In `worker/__main__.py`:
   - After `health_task = asyncio.create_task(...)`, define `_health_task_done` callback identical in structure to `_notify_task_done`
   - Call `health_task.add_done_callback(_health_task_done)`
@@ -96,8 +99,8 @@ No prerequisites — this work has no external dependencies. Redis is already ru
 
 ## Test Impact
 
-- [ ] `tests/integration/test_session_notify.py` — UPDATE: existing tests mock `POPOTO_REDIS_DB.pubsub()`. After the fix, `_listen_in_thread` calls `redis.Redis(**kwargs).pubsub()` instead. The mock target changes from `popoto.redis_db.POPOTO_REDIS_DB` to `redis.Redis` (or patch `redis.Redis` directly). Update mocks to match new call site.
-- [ ] Add new test `test_notify_listener_uses_no_socket_timeout` — verifies that the `redis.Redis` instance created in `_listen_in_thread` has `socket_timeout=None` (and is not the global `POPOTO_REDIS_DB`)
+- [ ] `tests/integration/test_session_notify.py` — existing **publish** tests (`test_push_agent_session_*`) mock `POPOTO_REDIS_DB.publish()` and test `_push_agent_session`. These tests target `_push_agent_session`, not `_listen_in_thread`, and **do not need mock changes**. No update required for publish-side tests.
+- [ ] Add new test `test_notify_listener_uses_no_socket_timeout` — verifies that the `redis.Redis` instance created inside `_listen_in_thread` has `socket_timeout=None`. This new test patches `redis.Redis` directly (not `POPOTO_REDIS_DB`) as the mock target, since the fix introduces a new `redis.Redis(...)` call site in `_listen_in_thread`.
 
 ## Rabbit Holes
 
@@ -186,10 +189,10 @@ No agent integration required — this is a worker-internal change. The fix is c
 - **Assigned To**: listener-fix-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- In `agent/agent_session_queue.py` inside `_listen_in_thread`: create a fresh `redis.Redis` instance with `socket_timeout=None` by copying and overriding `POPOTO_REDIS_DB.connection_pool.connection_kwargs`; use this instance for `pubsub`; close it in `finally`
+- In `agent/agent_session_queue.py` inside `_listen_in_thread`: create a fresh `redis.Redis` instance using explicit `socket_timeout=None` (read host/port/db from `POPOTO_REDIS_DB.connection_pool.connection_kwargs` but pass timeout params explicitly — do NOT spread full kwargs); use this instance for `pubsub`; in `finally` call `pubsub.unsubscribe()`, then `pubsub.close()`, then `conn.close()` in that order
 - In `worker/__main__.py`: add `_health_task_done` callback to `health_task` mirroring existing `_notify_task_done` pattern
-- Update `tests/integration/test_session_notify.py` mock targets to match new call site (`redis.Redis` instead of `POPOTO_REDIS_DB.pubsub`)
-- Add `test_notify_listener_uses_no_socket_timeout` asserting the pubsub connection has no socket timeout
+- Do NOT change existing publish-side tests in `tests/integration/test_session_notify.py` — they test `_push_agent_session` and are unaffected by this change
+- Add new test `test_notify_listener_uses_no_socket_timeout` that patches `redis.Redis` directly and asserts the instance passed to `pubsub()` has `socket_timeout=None`
 - Run `python -m ruff format . && python -m ruff check .`
 - Run `pytest tests/integration/test_session_notify.py -v`
 
@@ -216,9 +219,11 @@ No agent integration required — this is a worker-internal change. The fix is c
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | Adversary | Technical Approach says "copy and remove keys" but Risk 2 recommends "selective-override" — builder receives contradictory instructions | Technical Approach revised: use explicit `socket_timeout=None` param, do NOT spread full kwargs | `conn = redis.Redis(host=..., port=..., db=..., socket_timeout=None, socket_connect_timeout=None)` |
+| CONCERN | Archaeologist | Test Impact says existing publish tests need mock changes — they test `_push_agent_session`, not `_listen_in_thread`, so they are unaffected | Test Impact section corrected: publish tests unchanged; only new listener test patches `redis.Redis` | New test patches `redis.Redis` directly as mock target |
+| CONCERN | Operator | `finally` block closes `conn` but does not unsubscribe/close pubsub first — leaves dangling Redis subscriber on reconnect | Technical Approach updated with explicit teardown sequence | `pubsub.unsubscribe()` → `pubsub.close()` → `conn.close()` in `finally`, in that order |
 
 ---
 
