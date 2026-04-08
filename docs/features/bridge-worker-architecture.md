@@ -147,6 +147,8 @@ The fast path covers normal operation. The health check catches edge cases: miss
 **Bridge path**: `enqueue_agent_session()` → `_push_agent_session()` publishes notification → worker receives within ~1s.
 
 **CLI path** (`python -m tools.valor_session create`): Same — `_push_agent_session()` publishes to `valor:sessions:new` → worker receives within ~1s. Prior to issue #778, CLI-created sessions relied solely on the health check (worst case: 10 minutes).
+
+**Implementation note**: `_session_notify_listener` uses a **dedicated** `redis.Redis` connection (created inside `_listen_in_thread`) with `socket_timeout=None` and `socket_connect_timeout=None`. It reads `host`/`port`/`db` from `POPOTO_REDIS_DB.connection_pool.connection_kwargs` but passes both timeout parameters explicitly. This is required because the global `POPOTO_REDIS_DB` pool has `socket_timeout=5` (tuned for request-response commands), which would cause the blocking `pubsub.listen()` iterator to raise a socket timeout exception after 5 idle seconds — triggering an unnecessary reconnect cycle with a 5-second dead window during which any published notification would be lost (issue #824).
 ## Worker Restart Recovery
 
 Worker restarts (SIGTERM, crash, or explicit `./scripts/valor-service.sh worker-restart`) are non-destructive. Sessions in `pending` or `running` state at restart time are both preserved and will be executed by the new worker process.

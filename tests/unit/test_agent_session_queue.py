@@ -143,9 +143,7 @@ class TestPopLock:
             _release_pop_lock(chat_id)
 
             reacquired = _acquire_pop_lock(chat_id)
-            assert reacquired is True, (
-                "After release, lock must be acquirable again"
-            )
+            assert reacquired is True, "After release, lock must be acquirable again"
         finally:
             _release_pop_lock(chat_id)
 

@@ -67,7 +67,9 @@ class TestPreToolUseDevDetection:
 
         with patch("models.agent_session.AgentSession.create_child") as mock_create:
             with patch("agent.hooks.pre_tool_use._start_pipeline_stage") as mock_start_stage:
-                result = asyncio.run(pre_tool_use_hook(input_data, "tool-use-123", mock_hook_context))
+                result = asyncio.run(
+                    pre_tool_use_hook(input_data, "tool-use-123", mock_hook_context)
+                )
 
                 # create_child should NOT be called — child self-registers (issue #808)
                 mock_create.assert_not_called()

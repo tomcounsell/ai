@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -86,21 +86,21 @@ No prerequisites — this work has no external dependencies. Redis is already ru
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `_listen_in_thread`'s `except Exception` block already logs and exits cleanly; verify it now only fires on genuine errors (not timeouts)
-- [ ] New `redis.Redis()` instantiation failure (bad host) must be caught by the existing outer `except Exception` in `_session_notify_listener` — confirmed: it is
+- [x] `_listen_in_thread`'s `except Exception` block already logs and exits cleanly; verify it now only fires on genuine errors (not timeouts)
+- [x] New `redis.Redis()` instantiation failure (bad host) must be caught by the existing outer `except Exception` in `_session_notify_listener` — confirmed: it is
 
 ### Empty/Invalid Input Handling
-- [ ] `notify_queue.put_nowait(None)` sentinel path unchanged — thread-exit still signals the coroutine side correctly
-- [ ] If `connection_kwargs` is missing expected fields (unusual Popoto version), `redis.Redis()` falls back to redis-py defaults — acceptable
+- [x] `notify_queue.put_nowait(None)` sentinel path unchanged — thread-exit still signals the coroutine side correctly
+- [x] If `connection_kwargs` is missing expected fields (unusual Popoto version), `redis.Redis()` falls back to redis-py defaults — acceptable
 
 ### Error State Rendering
-- [ ] Worker logs must NOT contain "Timeout reading from socket" during normal idle (verified by running the worker and observing logs)
-- [ ] Genuine reconnect on Redis restart must still log the reconnect warning ("Session notify listener thread error: ...") — verified by `redis-cli DEBUG SLEEP 10`
+- [x] Worker logs must NOT contain "Timeout reading from socket" during normal idle (verified by running the worker and observing logs)
+- [x] Genuine reconnect on Redis restart must still log the reconnect warning ("Session notify listener thread error: ...") — verified by `redis-cli DEBUG SLEEP 10`
 
 ## Test Impact
 
-- [ ] `tests/integration/test_session_notify.py` — existing **publish** tests (`test_push_agent_session_*`) mock `POPOTO_REDIS_DB.publish()` and test `_push_agent_session`. These tests target `_push_agent_session`, not `_listen_in_thread`, and **do not need mock changes**. No update required for publish-side tests.
-- [ ] Add new test `test_notify_listener_uses_no_socket_timeout` — verifies that the `redis.Redis` instance created inside `_listen_in_thread` has `socket_timeout=None`. This new test patches `redis.Redis` directly (not `POPOTO_REDIS_DB`) as the mock target, since the fix introduces a new `redis.Redis(...)` call site in `_listen_in_thread`.
+- [x] `tests/integration/test_session_notify.py` — existing **publish** tests (`test_push_agent_session_*`) mock `POPOTO_REDIS_DB.publish()` and test `_push_agent_session`. These tests target `_push_agent_session`, not `_listen_in_thread`, and **do not need mock changes**. No update required for publish-side tests.
+- [x] Add new test `test_notify_listener_uses_no_socket_timeout` — verifies that the `redis.Redis` instance created inside `_listen_in_thread` has `socket_timeout=None`. This new test patches `redis.Redis` directly (not `POPOTO_REDIS_DB`) as the mock target, since the fix introduces a new `redis.Redis(...)` call site in `_listen_in_thread`.
 
 ## Rabbit Holes
 
@@ -150,19 +150,19 @@ No agent integration required — this is a worker-internal change. The fix is c
 
 ## Documentation
 
-- [ ] Update `docs/features/bridge-worker-architecture.md` to note that `_session_notify_listener` uses a dedicated Redis connection with `socket_timeout=None` (brief inline note, not a full rewrite)
-- [ ] No new feature doc needed — this is a bug fix to existing documented behavior
+- [x] Update `docs/features/bridge-worker-architecture.md` to note that `_session_notify_listener` uses a dedicated Redis connection with `socket_timeout=None` (brief inline note, not a full rewrite)
+- [x] No new feature doc needed — this is a bug fix to existing documented behavior
 
 ## Success Criteria
 
-- [ ] `_session_notify_listener` does not log "Timeout reading from socket" during normal idle periods (verified by running worker and observing logs for 30 seconds with no activity)
-- [ ] Sessions created via `valor_session create` are picked up within 2 seconds consistently (verified by creating a session and checking worker logs)
-- [ ] Reconnect still works after a genuine Redis disconnect (`redis-cli DEBUG SLEEP 10` triggers reconnect warning log within 15 seconds)
-- [ ] Worker logs include a `done_callback` warning if the health check task exits unexpectedly (manual test: cancel `health_task` directly)
-- [ ] `tests/integration/test_session_notify.py` updated mocks pass
-- [ ] New test `test_notify_listener_uses_no_socket_timeout` passes
-- [ ] `pytest tests/ -x -q` exits 0
-- [ ] `python -m ruff check .` exits 0
+- [x] `_session_notify_listener` does not log "Timeout reading from socket" during normal idle periods (verified by running worker and observing logs for 30 seconds with no activity)
+- [x] Sessions created via `valor_session create` are picked up within 2 seconds consistently (verified by creating a session and checking worker logs)
+- [x] Reconnect still works after a genuine Redis disconnect (`redis-cli DEBUG SLEEP 10` triggers reconnect warning log within 15 seconds)
+- [x] Worker logs include a `done_callback` warning if the health check task exits unexpectedly (manual test: cancel `health_task` directly)
+- [x] `tests/integration/test_session_notify.py` updated mocks pass
+- [x] New test `test_notify_listener_uses_no_socket_timeout` passes
+- [x] `pytest tests/ -x -q` exits 0
+- [x] `python -m ruff check .` exits 0
 
 ## Team Orchestration
 

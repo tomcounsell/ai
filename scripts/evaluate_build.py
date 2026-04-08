@@ -236,7 +236,9 @@ def main() -> int:
             pass_count += 1
             logger.info(f"AC criterion PASS — {criterion}: {evidence}")
 
-    logger.info(f"Evaluation complete: {pass_count} PASS, {partial_count} PARTIAL, {fail_count} FAIL")
+    logger.info(
+        f"Evaluation complete: {pass_count} PASS, {partial_count} PARTIAL, {fail_count} FAIL"
+    )
 
     if fail_count > 0:
         return 2

@@ -1466,11 +1466,34 @@ async def _session_notify_listener() -> None:
         loop = asyncio.get_running_loop()
 
         def _listen_in_thread() -> None:
-            """Blocking loop that drains pubsub and forwards chat_ids to the queue."""
-            try:
-                from popoto.redis_db import POPOTO_REDIS_DB
+            """Blocking loop that drains pubsub and forwards chat_ids to the queue.
 
-                pubsub = POPOTO_REDIS_DB.pubsub()
+            Uses a dedicated Redis connection with socket_timeout=None so that
+            pubsub.listen() blocks indefinitely between messages.  The global
+            POPOTO_REDIS_DB pool has socket_timeout=5 (tuned for request-response),
+            which would cause spurious "Timeout reading from socket" exceptions and
+            a 10-second reconnect cycle that drops notifications published during
+            the dead window.  We read host/port/db from the global pool's kwargs but
+            override both timeout parameters explicitly to avoid inheriting them.
+            """
+            import redis as _redis
+            from popoto.redis_db import POPOTO_REDIS_DB
+
+            conn: _redis.Redis | None = None
+            pubsub = None
+            try:
+                kw = POPOTO_REDIS_DB.connection_pool.connection_kwargs
+                conn = _redis.Redis(
+                    host=kw.get("host", "localhost"),
+                    port=kw.get("port", 6379),
+                    db=kw.get("db", 0),
+                    username=kw.get("username"),
+                    password=kw.get("password"),
+                    decode_responses=kw.get("decode_responses", False),
+                    socket_timeout=None,
+                    socket_connect_timeout=None,
+                )
+                pubsub = conn.pubsub()
                 pubsub.subscribe("valor:sessions:new")
                 logger.info("Session notify listener subscribed to valor:sessions:new")
                 for message in pubsub.listen():
@@ -1494,6 +1517,22 @@ async def _session_notify_listener() -> None:
             except Exception as e:
                 logger.warning("Session notify listener thread error: %s", e)
             finally:
+                # Teardown in order: unsubscribe → close pubsub → close connection
+                # This prevents dangling Redis subscribers on reconnect cycles.
+                if pubsub is not None:
+                    try:
+                        pubsub.unsubscribe()
+                    except Exception:
+                        pass
+                    try:
+                        pubsub.close()
+                    except Exception:
+                        pass
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
                 # Signal the coroutine side to restart
                 loop.call_soon_threadsafe(notify_queue.put_nowait, None)
 

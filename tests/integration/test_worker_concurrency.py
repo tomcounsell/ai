@@ -67,8 +67,7 @@ class TestPopLockContention:
             # Second pop attempt should return None (lock held)
             result = await _pop_agent_session(chat_id)
             assert result is None, (
-                "When pop lock is held, _pop_agent_session must return None "
-                "to prevent TOCTOU race"
+                "When pop lock is held, _pop_agent_session must return None to prevent TOCTOU race"
             )
         finally:
             _release_pop_lock(chat_id)
