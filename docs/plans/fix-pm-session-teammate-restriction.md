@@ -6,6 +6,7 @@ owner: Valor
 created: 2026-04-08
 tracking: https://github.com/tomcounsell/ai/issues/827
 last_comment_id: null
+revision_applied: true
 ---
 
 # Fix PM Session Teammate Restriction Injection
@@ -72,8 +73,9 @@ CLI creates PM session → Worker picks up session → `sdk_client.py` resolves 
 - Move `_session_type` resolution ~20 lines earlier in `sdk_client.py` (before line 1476)
 - Change `build_context_prefix` signature from `is_dm: bool` to `session_type: str | None`
 - Change restriction guard from `if is_dm:` to `if session_type == SessionType.TEAMMATE:`
-- Remove the `is_dm`-specific "Direct message to Valor" context line (replace with `if not project and not session_type:` or just remove — it was a fallback for DM-with-no-project context, not needed for structured sessions)
+- **Implementation Note (Concern 2):** Drop the `is_dm`-specific "Direct message to Valor" context line entirely — do NOT replace with `if not project and not session_type:` or any other condition. The restriction string already carries the Teammate DM signal; this line adds no value and its removal is unambiguous.
 - Update 3 call sites to pass `session_type` instead of `is_dm`
+- **Implementation Note (Concern 1):** After fixing the restriction injection, `_resolve_persona_mode` at `sdk_client.py:1523` still calls with `is_dm=(chat_title is None)`, which sets `_teammate_mode=True` for CLI-created PM sessions. After the `_resolve_persona_mode` call, add a guard: `if _session_type == SessionType.PM: _teammate_mode = False`. This prevents the persona mode from being contaminated even after the restriction injection is fixed.
 
 ## Failure Path Test Strategy
 
@@ -94,8 +96,8 @@ CLI creates PM session → Worker picks up session → `sdk_client.py` resolves 
 
 ## Test Impact
 
-- [ ] `tests/unit/test_bridge_logic.py::TestBuildContextPrefix` — UPDATE: replace all `is_dm=True/False` calls with `session_type="teammate"/"pm"/None`; update the local `build_context_prefix` stub (lines 91-111) to match new signature; add new tests for PM and Dev session types receiving no restriction
-- [ ] `tests/e2e/test_message_pipeline.py::TestContextBuilding` — UPDATE: update calls at lines 212-224 to use new signature (`session_type=None` for non-DM, `session_type="teammate"` for DM case)
+- [ ] `tests/unit/test_bridge_logic.py::TestBuildContextPrefix` — UPDATE: replace all `is_dm=True/False` calls with `session_type="teammate"/"pm"/None`; update the local `build_context_prefix` stub (lines 91-111) to match new signature; add new tests for PM and Dev session types receiving no restriction; add `test_teammate_dm_restriction_regression` (Risk 1 guard)
+- [ ] `tests/e2e/test_message_pipeline.py::TestContextBuilding` — UPDATE: update calls at lines 212-224 to use new signature (`session_type=None` for non-DM, `session_type="teammate"` for DM case); **CRITICAL: these call the real `build_context_prefix` (live import) and will raise `TypeError` if not updated before pytest runs** (Concern 3)
 - [ ] `tests/unit/test_pm_channels.py` — UPDATE: 3 `patch("bridge.context.build_context_prefix", return_value="")` patches (lines 90, 120, 152) do not use the signature and are unaffected; no changes needed
 - [ ] `tests/unit/test_cross_repo_gh_resolution.py:101` — UPDATE: `patch("bridge.context.build_context_prefix", ...)` — same: returns mock, signature not inspected; no change needed
 - [ ] `tests/integration/test_message_routing.py` — UPDATE: local `build_context_prefix` stub at line 96 uses `is_dm: bool` — update to `session_type: str | None`; update calls at lines 169, 384, 385
@@ -149,6 +151,7 @@ No agent integration changes required — this is a bridge/sdk-internal fix that
 - [ ] `session_type` is resolved BEFORE `build_context_prefix` is called in `sdk_client.py`
 - [ ] All 3 call sites updated: `sdk_client.py:1476`, `catchup.py:168`, `reconciler.py:148`
 - [ ] Unit tests in `test_bridge_logic.py` updated and passing with new assertion for PM/Dev/Teammate context prefixes
+- [ ] Regression test `test_teammate_dm_restriction_regression` in `test_bridge_logic.py` asserting that `session_type="teammate"` still injects the restriction (Risk 1 guard)
 - [ ] All affected tests updated and passing (`pytest tests/unit/ -x -q`)
 
 ## Team Orchestration
@@ -176,13 +179,13 @@ No agent integration changes required — this is a bridge/sdk-internal fix that
 - **Assigned To**: context-fix-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- In `bridge/context.py`: change `build_context_prefix(project, is_dm: bool, sender_id=None)` → `build_context_prefix(project, session_type: str | None, sender_id=None)`; change `if is_dm:` → `if session_type == SessionType.TEAMMATE:`; remove `is_dm`-specific "Direct message" context line (or replace with `if not project:` generic fallback)
-- In `agent/sdk_client.py`: move `_session_type` resolution block (lines 1493–1501) to before the `build_context_prefix` call (line 1476); update call to pass `_session_type` instead of `chat_title is None`
+- In `bridge/context.py`: change `build_context_prefix(project, is_dm: bool, sender_id=None)` → `build_context_prefix(project, session_type: str | None, sender_id=None)`; change `if is_dm:` → `if session_type == SessionType.TEAMMATE:`; **drop the "Direct message to Valor" context line entirely** (see Implementation Note, Concern 2 — do not replace with any other condition)
+- In `agent/sdk_client.py`: move `_session_type` resolution block (lines 1493–1501) to before the `build_context_prefix` call (line 1476); update call to pass `_session_type` instead of `chat_title is None`; **after the `_resolve_persona_mode` call (~line 1523), add `if _session_type == SessionType.PM: _teammate_mode = False`** (see Implementation Note, Concern 1)
 - In `bridge/catchup.py:168`: update call to pass `session_type=None`
 - In `bridge/reconciler.py:148`: update call to pass `session_type=None`
-- Update `tests/unit/test_bridge_logic.py`: replace `is_dm=True/False` with `session_type` calls; update local stub signature; add test `test_pm_session_no_restriction` and `test_teammate_session_restriction_present`
-- Update `tests/e2e/test_message_pipeline.py`: update calls at `TestContextBuilding` to new signature
-- Update `tests/integration/test_message_routing.py`: update local stub and call sites
+- Update `tests/unit/test_bridge_logic.py`: replace `is_dm=True/False` with `session_type` calls; update local stub signature; add test `test_pm_session_no_restriction` and `test_teammate_session_restriction_present`; add `test_teammate_dm_restriction_regression` asserting that `session_type="teammate"` still injects the restriction (Risk 1 regression guard — see Success Criteria)
+- **Update `tests/e2e/test_message_pipeline.py`**: update all `is_dm=` keyword calls at lines 212–224 to use `session_type=` BEFORE running pytest — these call the real `build_context_prefix` (live import, not a stub) and will raise `TypeError` at runtime if not updated (see Implementation Note, Concern 3)
+- Update `tests/integration/test_message_routing.py`: update local stub signature from `is_dm: bool` to `session_type: str | None`; update call sites at lines 169, 384, 385
 
 ### 2. Validate fix
 - **Task ID**: validate-fix
@@ -208,6 +211,9 @@ No agent integration changes required — this is a bridge/sdk-internal fix that
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | Archaeologist | `_teammate_mode` still contaminated for PM sessions after restriction fix — `_resolve_persona_mode` at `sdk_client.py:1523` still uses `is_dm=(chat_title is None)` | Technical Approach + Task 1 | Add `if _session_type == SessionType.PM: _teammate_mode = False` guard after `_resolve_persona_mode` call |
+| CONCERN | Operator | "Direct message to Valor" context line fate under-specified — plan said "remove or replace" but these have different behaviors | Technical Approach + Task 1 | Drop the line entirely; do not replace with any condition — restriction string already carries the Teammate DM signal |
+| CONCERN | Adversary | `test_message_pipeline.py` uses live import not stub — four `is_dm=` keyword calls at lines 212–224 will raise `TypeError` at runtime after signature change | Test Impact + Task 1 | Builder must update these calls before running pytest |
+| NIT | Skeptic | Risk 1 says "write a regression test" for Teammate DM restriction but no test appears in Success Criteria or Test Impact checklist | Success Criteria + Test Impact | Added `test_teammate_dm_restriction_regression` to both sections |
