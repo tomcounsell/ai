@@ -48,6 +48,23 @@ The health check loop starts automatically with the **worker process** (`python 
 - **Agent session health monitor** (`_agent_session_health_loop()` in `agent/agent_session_queue.py`): Runs every 5 minutes. Recovers sessions missed by pub/sub (Redis restart, worker not running at publish time, bypass paths). This is the safety net.
 - **Session watchdog** (`monitoring/session_watchdog.py`): Monitors `AgentSession` objects at the application level (separate from queue-level monitoring)
 
+### Done Callback — `_health_task_done`
+
+`health_task` is registered with a `_health_task_done` done_callback (added in #825, mirroring the identical pattern on `notify_task`):
+
+```python
+def _health_task_done(t: asyncio.Task) -> None:
+    if t.cancelled():
+        return  # Normal shutdown path
+    exc = t.exception()
+    if exc is not None:
+        logger.error("Health monitor task exited unexpectedly: %s", exc)
+
+health_task.add_done_callback(_health_task_done)
+```
+
+The callback guards against unexpected task exits that bypass the health loop's own `except Exception` handler — specifically `BaseException` subclasses (`SystemExit`, `KeyboardInterrupt`) and asyncio-internal exits. Ordinary exceptions are already caught inside the loop's `while True / try-except` block and cannot escape. On normal `SIGTERM` shutdown, `health_task.cancel()` triggers `CancelledError`, which the `if t.cancelled(): return` guard suppresses so no false ERROR is logged.
+
 ## CLI Usage
 
 ```bash

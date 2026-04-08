@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -179,9 +179,10 @@ No agent integration required — this is a worker-internal lifecycle fix. No MC
 
 ## Documentation
 
-- [ ] Update the inline comment block at line 1006 in `_complete_agent_session()` (`agent/agent_session_queue.py`) to explain the intentional no-status-filter re-query and the running-first tie-breaking logic (not the function docstring — it already has good coverage)
-- [ ] Update `docs/features/bridge-worker-architecture.md` if it describes the session completion flow (add note that re-query is intentionally unfiltered)
-- [ ] No new feature doc needed — this is a bug fix to existing behavior
+- [x] Update the inline comment block at line 1006 in `_complete_agent_session()` (`agent/agent_session_queue.py`) to explain the intentional no-status-filter re-query and the running-first tie-breaking logic (not the function docstring — it already has good coverage)
+- [x] Update `docs/features/session-lifecycle.md` line 83 — expanded the Worker Completion — Redis Re-read section to explain the no-status-filter re-query, running-first tie-breaking, and the bug (#825) it fixes
+- [x] Update `docs/features/agent-session-health-monitor.md` — added Done Callback section documenting `_health_task_done` pattern, guards, and shutdown behavior
+- [x] No new feature doc needed — this is a bug fix to existing behavior
 
 ## Success Criteria
 
