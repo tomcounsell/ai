@@ -428,9 +428,17 @@ No changes to `.mcp.json` needed.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room) on 2026-04-08. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Skeptic + Structural | `paused_circuit` incompatible with `transition_status()` validation guard — `NON_TERMINAL_STATUSES` guard raises ValueError | Task 2 (build-queue-guard) | Add `"paused_circuit"` to `NON_TERMINAL_STATUSES` in `models/session_lifecycle.py`. Remove `PAUSABLE_STATUSES` concept — not needed since health check only scans `running` and `pending` indexes. |
+| BLOCKER | Adversary | `DependencyHealth.get("anthropic")` returns `None` before circuit registration → `AttributeError` on `.state` access | Task 1 (build-sustainability-core) | In `api_health_gate()`: `cb = get_health().get("anthropic"); if cb is None: logger.debug("..."); return`. Also required for unit tests that don't have a registered circuit. |
+| CONCERN | Skeptic | HALF_OPEN circuit state causes premature pause-lift — plan checks `!= OPEN` but HALF_OPEN is not CLOSED | Task 1 (build-sustainability-core) | Use `cb.state == CircuitState.CLOSED` (import from `bridge.resilience`) as the condition to clear `queue_paused` and set `recovery:active`. Keep queue paused during HALF_OPEN. |
+| CONCERN | Operator | No immediate alert when queue enters paused state — debug log only, daily digest is 24h away | Task 1 (build-sustainability-core) | On first write of `queue_paused`: `was_already_paused = r.exists(key); r.set(key, "1", ex=3600); if not was_already_paused: logger.warning("[api-health-gate] Queue paused — Anthropic circuit OPEN")` |
+| CONCERN | Archaeologist | Issue #773 AC mentions token tracking — plan silently supersedes it without noting the delta | Problem / Spike Results section | Add sentence under spike-1: "Issue #773 AC item 'Daily token spend is tracked' is superseded by session-count throttling per spike-1 findings. No code change required." |
+| CONCERN | Adversary | Non-HTTP errors all cluster under `None` http_status → spurious GitHub issues | Task 1 (build-sustainability-core) | In fingerprint: `http_component = str(http_status) if http_status is not None else type(exc).__name__ if exc else "unknown"`. Verify AgentSession `extra_context` or `failed_reason` carries exception type. |
+| CONCERN | User | Daily digest success criterion has no content specification — builder may deliver uninformative message | Success Criteria section | Add: "Daily digest Telegram message must include: circuit state per dependency, current throttle level, session count last 24h, active failure cluster count." Embed this in the `sustainability-digest` YAML `command` field. |
+| CONCERN | Structural | `tests/unit/test_agent_session_health_check.py` does not exist — Test Impact says UPDATE but must CREATE | Test Impact section | Change disposition to CREATE. Test must assert health check never calls `transition_status(session, "pending")` for a session with `status="paused_circuit"`. |
 
 ---
 
