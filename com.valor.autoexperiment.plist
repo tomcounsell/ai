@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.valor.autoexperiment</string>
+    <string>__SERVICE_LABEL__</string>
 
     <key>ProgramArguments</key>
     <array>

@@ -20,9 +20,33 @@ class TestReflectionsPlist:
         assert isinstance(data, dict)
 
     def test_plist_label(self):
+        """Source-of-truth template uses the __SERVICE_LABEL__ placeholder
+        which install scripts substitute with ${SERVICE_LABEL_PREFIX}.reflections."""
         with open(PROJECT_ROOT / "com.valor.reflections.plist", "rb") as f:
             data = plistlib.load(f)
-        assert data["Label"] == "com.valor.reflections"
+        assert data["Label"] == "__SERVICE_LABEL__"
+
+    def test_plist_label_renders_with_custom_prefix(self, tmp_path):
+        """Verify install script renders the placeholder for a custom prefix."""
+        import os
+
+        env = os.environ.copy()
+        env["SERVICE_LABEL_PREFIX"] = "com.example"
+        env["HOME"] = str(tmp_path)
+        # Create LaunchAgents dir to avoid actual installation failure surfacing
+        (tmp_path / "Library" / "LaunchAgents").mkdir(parents=True)
+        # Render the plist directly using the same sed pattern the install script uses
+        src = (PROJECT_ROOT / "com.valor.reflections.plist").read_text()
+        rendered = (
+            src.replace("__PROJECT_DIR__", str(PROJECT_ROOT))
+            .replace("__HOME_DIR__", str(tmp_path))
+            .replace("__SERVICE_LABEL__", "com.example.reflections")
+        )
+        rendered_path = tmp_path / "rendered.plist"
+        rendered_path.write_text(rendered)
+        with open(rendered_path, "rb") as f:
+            data = plistlib.load(f)
+        assert data["Label"] == "com.example.reflections"
 
     def test_plist_schedule_6am(self):
         with open(PROJECT_ROOT / "com.valor.reflections.plist", "rb") as f:

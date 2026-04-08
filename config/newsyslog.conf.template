@@ -1,0 +1,27 @@
+# newsyslog configuration TEMPLATE for launchd-managed log files.
+#
+# These log files are written directly by launchd via StandardOutPath/StandardErrorPath
+# and cannot be rotated by Python's RotatingFileHandler. newsyslog (built into macOS)
+# handles rotation for these files.
+#
+# NOTE: launchd holds file descriptors open, so we use the "N" flag (no signal).
+# After rotation, launchd continues writing to the old inode until the service restarts.
+# The valor-service.sh rotate_log function handles active rotation on service start;
+# this newsyslog config provides a safety net for long-running services.
+#
+# Install scripts substitute __PROJECT_DIR__ then write the rendered output to
+# config/newsyslog.rendered.conf. macOS newsyslog only reads /etc/newsyslog.conf
+# and /etc/newsyslog.d/*.conf, so installation requires root:
+#
+#   sudo cp config/newsyslog.rendered.conf /etc/newsyslog.d/valor.conf
+#
+# Format: logfilename [owner:group] mode count size(KB) when flags
+# See newsyslog.conf(5) for details.
+#
+# logfilename                                  mode  count  size    when  flags
+__PROJECT_DIR__/logs/bridge.error.log          644   5      10240   *     NJ
+__PROJECT_DIR__/logs/watchdog.log              644   5      10240   *     NJ
+__PROJECT_DIR__/logs/reflections.log           644   5      10240   *     NJ
+__PROJECT_DIR__/logs/reflections_error.log     644   5      10240   *     NJ
+__PROJECT_DIR__/logs/worker.log                644   5      10240   *     NJ
+__PROJECT_DIR__/logs/worker_error.log          644   5      10240   *     NJ

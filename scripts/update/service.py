@@ -7,6 +7,10 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+# Service label prefix is install-time configurable via .env. Defaults to
+# com.valor for the canonical fork; downstream forks override via SERVICE_LABEL_PREFIX.
+SERVICE_PREFIX = os.environ.get("SERVICE_LABEL_PREFIX", "com.valor")
+
 
 @dataclass
 class ServiceStatus:
@@ -90,7 +94,7 @@ def get_service_status(project_dir: Path) -> ServiceStatus:
     # Check launchd
     try:
         result = run_cmd(["launchctl", "list"])
-        status.launchd_installed = "com.valor.bridge" in result.stdout
+        status.launchd_installed = f"{SERVICE_PREFIX}.bridge" in result.stdout
     except Exception:
         pass
 
@@ -136,8 +140,10 @@ def restart_service(project_dir: Path) -> bool:
 def install_reflections(project_dir: Path) -> bool:
     """Install/reload reflections plist. Returns True if successful."""
     plist_src = project_dir / "com.valor.reflections.plist"
-    plist_dst = Path.home() / "Library" / "LaunchAgents" / "com.valor.reflections.plist"
-    label = "com.valor.reflections"
+    label = f"{SERVICE_PREFIX}.reflections"
+    plist_dst = Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
+    # Legacy daydream label hard-pinned to com.valor — that name only ever
+    # existed under the original prefix.
     old_label = "com.valor.daydream"
     old_plist_dst = Path.home() / "Library" / "LaunchAgents" / "com.valor.daydream.plist"
 
@@ -157,11 +163,13 @@ def install_reflections(project_dir: Path) -> bool:
         if label in result.stdout:
             run_cmd(["launchctl", "bootout", f"gui/{uid}/{label}"])
 
-        # Copy and bootstrap
+        # Render template (substituting __SERVICE_LABEL__ etc.) and bootstrap
         plist_dst.parent.mkdir(parents=True, exist_ok=True)
-        import shutil
-
-        shutil.copy2(str(plist_src), str(plist_dst))
+        rendered = plist_src.read_text()
+        rendered = rendered.replace("__PROJECT_DIR__", str(project_dir))
+        rendered = rendered.replace("__HOME_DIR__", str(Path.home()))
+        rendered = rendered.replace("__SERVICE_LABEL__", label)
+        plist_dst.write_text(rendered)
         run_cmd(["launchctl", "bootstrap", f"gui/{uid}", str(plist_dst)])
         return True
     except Exception:
@@ -172,7 +180,7 @@ def is_reflections_installed() -> bool:
     """Check if reflections scheduler is installed."""
     try:
         result = run_cmd(["launchctl", "list"])
-        return "com.valor.reflections" in result.stdout
+        return f"{SERVICE_PREFIX}.reflections" in result.stdout
     except Exception:
         return False
 
@@ -226,7 +234,7 @@ def get_worker_status(project_dir: Path) -> ServiceStatus:
 
     try:
         result = run_cmd(["launchctl", "list"])
-        status.launchd_installed = "com.valor.worker" in result.stdout
+        status.launchd_installed = f"{SERVICE_PREFIX}.worker" in result.stdout
     except Exception:
         pass
 
@@ -236,8 +244,8 @@ def get_worker_status(project_dir: Path) -> ServiceStatus:
 def install_worker(project_dir: Path) -> bool:
     """Install/reload worker plist. Returns True if successful."""
     plist_src = project_dir / "com.valor.worker.plist"
-    plist_dst = Path.home() / "Library" / "LaunchAgents" / "com.valor.worker.plist"
-    label = "com.valor.worker"
+    label = f"{SERVICE_PREFIX}.worker"
+    plist_dst = Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
 
     if not plist_src.exists():
         return False
@@ -255,6 +263,7 @@ def install_worker(project_dir: Path) -> bool:
         plist_text = plist_src.read_text()
         plist_text = plist_text.replace("__PROJECT_DIR__", str(project_dir))
         plist_text = plist_text.replace("__HOME_DIR__", str(Path.home()))
+        plist_text = plist_text.replace("__SERVICE_LABEL__", label)
         plist_dst.write_text(plist_text)
 
         run_cmd(["launchctl", "bootstrap", f"gui/{uid}", str(plist_dst)])
@@ -285,7 +294,7 @@ def is_worker_installed() -> bool:
     """Check if worker service is installed in launchd."""
     try:
         result = run_cmd(["launchctl", "list"])
-        return "com.valor.worker" in result.stdout
+        return f"{SERVICE_PREFIX}.worker" in result.stdout
     except Exception:
         return False
 
@@ -294,14 +303,14 @@ def is_update_cron_installed() -> bool:
     """Check if update cron is installed."""
     try:
         result = run_cmd(["launchctl", "list"])
-        return "com.valor.update" in result.stdout
+        return f"{SERVICE_PREFIX}.update" in result.stdout
     except Exception:
         return False
 
 
 def get_caffeinate_status() -> CaffeinateStatus:
     """Get caffeinate service status."""
-    plist_path = Path.home() / "Library" / "LaunchAgents" / "com.valor.caffeinate.plist"
+    plist_path = Path.home() / "Library" / "LaunchAgents" / f"{SERVICE_PREFIX}.caffeinate.plist"
 
     installed = plist_path.exists()
 
@@ -363,14 +372,15 @@ def restart_webui(project_dir: Path) -> bool:
 
 def install_caffeinate() -> bool:
     """Install caffeinate service. Returns True if successful."""
-    plist_path = Path.home() / "Library" / "LaunchAgents" / "com.valor.caffeinate.plist"
+    label = f"{SERVICE_PREFIX}.caffeinate"
+    plist_path = Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
 
-    plist_content = """<?xml version="1.0" encoding="UTF-8"?>
+    plist_content = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.valor.caffeinate</string>
+    <string>{label}</string>
     <key>ProgramArguments</key>
     <array>
         <string>/usr/bin/caffeinate</string>
@@ -387,7 +397,6 @@ def install_caffeinate() -> bool:
 
     try:
         uid = os.getuid()
-        label = "com.valor.caffeinate"
 
         # Unload existing service if loaded
         result = run_cmd(["launchctl", "list"])

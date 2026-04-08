@@ -552,8 +552,13 @@ _routing_module.ALL_MONITORED_GROUPS = ALL_MONITORED_GROUPS
 _routing_module.RESPOND_TO_DMS = RESPOND_TO_DMS
 _routing_module.DM_WHITELIST = DM_WHITELIST
 _routing_module.DEFAULT_MENTIONS = DEFAULTS.get("telegram", {}).get(
-    "mention_triggers", ["@valor", "valor", "hey valor"]
+    "mention_triggers", ["@valor", "valor", "valorengels", "hey valor"]
 )
+# Fail loud on production misconfig: mention_triggers must be configured so
+# the bridge can actually detect self-mentions. An empty list silently disables
+# all mention-based routing, which is almost never what an operator wants.
+if not _routing_module.DEFAULT_MENTIONS:
+    raise RuntimeError("mention_triggers must be configured in projects.json defaults.telegram")
 # Re-export DEFAULT_MENTIONS for backward compat and use by other functions still in this module
 DEFAULT_MENTIONS = _routing_module.DEFAULT_MENTIONS
 

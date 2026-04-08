@@ -9,9 +9,19 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+
+set -a
+# shellcheck disable=SC1091
+[ -f "$PROJECT_DIR/.env" ] && source "$PROJECT_DIR/.env"
+set +a
+: "${SERVICE_LABEL_PREFIX:=com.valor}"
+
+# Source-of-truth template name remains com.valor.worker.plist for
+# recognizability; installed copy uses ${SERVICE_LABEL_PREFIX}.worker.plist
+# so the on-disk filename matches the internal Label.
 PLIST_SRC="$PROJECT_DIR/com.valor.worker.plist"
-PLIST_DST="$HOME/Library/LaunchAgents/com.valor.worker.plist"
-LABEL="com.valor.worker"
+LABEL="${SERVICE_LABEL_PREFIX}.worker"
+PLIST_DST="$HOME/Library/LaunchAgents/${LABEL}.plist"
 
 # Ensure logs directory exists
 mkdir -p "$PROJECT_DIR/logs"
@@ -51,7 +61,7 @@ fi
 
 # Copy plist to LaunchAgents with path substitution
 echo "Installing plist to $PLIST_DST..."
-sed "s|__PROJECT_DIR__|$PROJECT_DIR|g; s|__HOME_DIR__|$HOME|g" "$PLIST_SRC" > "$PLIST_DST"
+sed "s|__PROJECT_DIR__|$PROJECT_DIR|g; s|__HOME_DIR__|$HOME|g; s|__SERVICE_LABEL__|$LABEL|g" "$PLIST_SRC" > "$PLIST_DST"
 
 # Validate plist
 if ! plutil -lint "$PLIST_DST" > /dev/null; then

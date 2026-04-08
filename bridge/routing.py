@@ -31,10 +31,9 @@ DM_WHITELIST = set()
 # Pattern to detect @mentions in messages
 AT_MENTION_PATTERN = re.compile(r"@(\w+)")
 
-# Known Valor usernames for @mention detection
-VALOR_USERNAMES = {"valor", "valorengels"}
-
-# Default mention triggers (set after config loading)
+# Default mention triggers (set after config loading from
+# defaults.telegram.mention_triggers in projects.json). This is the single
+# source of truth for self-mention detection.
 DEFAULT_MENTIONS = []
 
 # =============================================================================
@@ -246,14 +245,19 @@ def extract_at_mentions(text: str) -> list[str]:
 
 
 def get_valor_usernames(project: dict | None) -> set[str]:
-    """Get all usernames that should be treated as Valor."""
-    usernames = VALOR_USERNAMES.copy()
-    if project:
-        mentions = project.get("telegram", {}).get("mention_triggers", DEFAULT_MENTIONS)
-        for trigger in mentions:
-            clean_trigger = trigger.lstrip("@").lower()
-            usernames.add(clean_trigger)
-    return usernames
+    """Get all usernames that should be treated as Valor.
+
+    Source of truth: ``project["telegram"]["mention_triggers"]`` from
+    ``projects.json``, falling back to ``DEFAULT_MENTIONS`` (loaded from
+    ``defaults.telegram.mention_triggers``). When ``project`` is ``None``
+    we return an empty set so unit tests that don't load a config stay
+    inert. Production startup must verify ``DEFAULT_MENTIONS`` is non-empty
+    (see ``bridge/telegram_bridge.py``).
+    """
+    if project is None:
+        return set()
+    mentions = project.get("telegram", {}).get("mention_triggers", DEFAULT_MENTIONS)
+    return {t.lstrip("@").lower() for t in mentions}
 
 
 def is_message_for_valor(text: str, project: dict | None) -> bool:

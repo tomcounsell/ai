@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: chore
 appetite: Medium
 owner: Valor
@@ -143,26 +143,26 @@ No prerequisites — this work modifies existing config loading and install scri
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `get_valor_usernames()` with no config loaded — must return empty set, not crash
-- [ ] Install scripts with missing `.env` — must use defaults, not fail silently
+- [x] `get_valor_usernames()` with no config loaded — must return empty set, not crash
+- [x] Install scripts with missing `.env` — must use defaults, not fail silently
 
 ### Empty/Invalid Input Handling
-- [ ] `get_valor_usernames()` with empty `mention_triggers` list — returns empty set
-- [ ] `is_message_for_valor()` with empty text — returns False (existing behavior, verify preserved)
+- [x] `get_valor_usernames()` with empty `mention_triggers` list — returns empty set
+- [x] `is_message_for_valor()` with empty text — returns False (existing behavior, verify preserved)
 
 ### Error State Rendering
-- [ ] If `SERVICE_LABEL_PREFIX` is unset, install scripts print the default being used
+- [x] If `SERVICE_LABEL_PREFIX` is unset, install scripts print the default being used
 
 ## Test Impact
 
 Audit command used: `grep -rn 'com\.valor\|VALOR_USERNAMES\|valorengels\|newsyslog\.valor\|is_message_for_valor\|get_valor_usernames' tests/`
 
-- [ ] `tests/unit/test_reflections_scheduling.py` — **UPDATE**: asserts `data["Label"] == "com.valor.reflections"` and reads the plist file by exact filename `com.valor.reflections.plist` (7+ references). After Task 3 the installed filename and Label are derived from `SERVICE_LABEL_PREFIX`. Rewrite assertions to load the source-of-truth template (still `com.valor.reflections.plist` in repo) and validate the placeholder form `__SERVICE_LABEL__` or the rendered form when checking an installed copy. Add a parametric test that runs the install script against a temp `.env` with `SERVICE_LABEL_PREFIX=com.example` and verifies the rendered plist has matching filename and Label.
-- [ ] `tests/e2e/test_message_pipeline.py` — **UPDATE**: calls `is_message_for_valor()` / `get_valor_usernames()`. Ensure every call passes a real project dict (not `None`), and add a regression assertion that with a loaded project the mention detection still resolves `@valor` correctly.
-- [ ] `tests/unit/test_routing.py` — **CREATE**: new file. Tests (a) `get_valor_usernames(project_with_triggers)` returns config-derived set, (b) `get_valor_usernames(None)` returns empty set without crashing, (c) `is_message_for_valor` behavior preserved end-to-end for loaded-config case.
-- [ ] `tests/integration/test_agent_session_lifecycle.py` — **REVIEW**: grep hit on `com.valor` (context unknown; confirm whether assertion or comment). UPDATE only if asserting service label literals.
-- [ ] `tests/integration/test_remote_update.py` — **REVIEW**: grep hit on `com.valor`. UPDATE only if asserting service label literals.
-- [ ] `tests/unit/test_memory_hook.py` — **REVIEW**: grep hit on `valorengels` (likely a fixture username, not PII wiring). UPDATE only if it references removed code paths.
+- [x] `tests/unit/test_reflections_scheduling.py` — **UPDATE**: asserts `data["Label"] == "com.valor.reflections"` and reads the plist file by exact filename `com.valor.reflections.plist` (7+ references). After Task 3 the installed filename and Label are derived from `SERVICE_LABEL_PREFIX`. Rewrite assertions to load the source-of-truth template (still `com.valor.reflections.plist` in repo) and validate the placeholder form `__SERVICE_LABEL__` or the rendered form when checking an installed copy. Add a parametric test that runs the install script against a temp `.env` with `SERVICE_LABEL_PREFIX=com.example` and verifies the rendered plist has matching filename and Label.
+- [x] `tests/e2e/test_message_pipeline.py` — **UPDATE**: calls `is_message_for_valor()` / `get_valor_usernames()`. Ensure every call passes a real project dict (not `None`), and add a regression assertion that with a loaded project the mention detection still resolves `@valor` correctly.
+- [x] `tests/unit/test_routing.py` — **CREATE**: new file. Tests (a) `get_valor_usernames(project_with_triggers)` returns config-derived set, (b) `get_valor_usernames(None)` returns empty set without crashing, (c) `is_message_for_valor` behavior preserved end-to-end for loaded-config case.
+- [x] `tests/integration/test_agent_session_lifecycle.py` — **REVIEW**: grep hit on `com.valor` (context unknown; confirm whether assertion or comment). UPDATE only if asserting service label literals.
+- [x] `tests/integration/test_remote_update.py` — **REVIEW**: grep hit on `com.valor`. UPDATE only if asserting service label literals.
+- [x] `tests/unit/test_memory_hook.py` — **REVIEW**: grep hit on `valorengels` (likely a fixture username, not PII wiring). UPDATE only if it references removed code paths.
 
 Callsite audit for `is_message_for_valor` / `get_valor_usernames` (production code, excluding worktrees):
 - `bridge/routing.py` (definition)
@@ -213,23 +213,23 @@ No agent integration required — this is a config/install infrastructure change
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/guides/setup.md` with new config fields (`SERVICE_LABEL_PREFIX`) and note that self-mention handles live in `mention_triggers`
-- [ ] Update `docs/guides/valor-name-references.md` to reflect removed hardcoded references
-- [ ] Update `docs/features/deployment.md` with newsyslog install step
+- [x] Update `docs/guides/setup.md` with new config fields (`SERVICE_LABEL_PREFIX`) and note that self-mention handles live in `mention_triggers`
+- [x] Update `docs/guides/valor-name-references.md` to reflect removed hardcoded references
+- [x] Update `docs/features/deployment.md` with newsyslog install step
 
 ### Inline Documentation
-- [ ] Code comments on `get_valor_usernames()` explaining config-only source
-- [ ] Updated docstrings for modified install scripts
+- [x] Code comments on `get_valor_usernames()` explaining config-only source
+- [x] Updated docstrings for modified install scripts
 
 ## Success Criteria
 
-- [ ] `.env.example` contains no real credentials (Sentry DSN replaced with placeholder)
-- [ ] `VALOR_USERNAMES` constant removed from `bridge/routing.py`; mention detection loads entirely from config
-- [ ] Service label prefix is configurable via `SERVICE_LABEL_PREFIX` env var; install scripts use it
-- [ ] No hardcoded `/Users/valorengels` paths remain in config files (newsyslog uses template)
-- [ ] Existing deployments continue working without config changes (backward compatible defaults)
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] `.env.example` contains no real credentials (Sentry DSN replaced with placeholder)
+- [x] `VALOR_USERNAMES` constant removed from `bridge/routing.py`; mention detection loads entirely from config
+- [x] Service label prefix is configurable via `SERVICE_LABEL_PREFIX` env var; install scripts use it
+- [x] No hardcoded `/Users/valorengels` paths remain in config files (newsyslog uses template)
+- [x] Existing deployments continue working without config changes (backward compatible defaults)
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 

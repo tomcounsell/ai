@@ -15,7 +15,7 @@ References where "Valor" is the **persona** that users interact with — the nam
 
 | File | Line(s) | Reference | Notes |
 |------|---------|-----------|-------|
-| `bridge/routing.py` | 33-34 | `VALOR_USERNAMES = {"valor", "valorengels"}` | Controls who the bot responds to |
+| `bridge/routing.py` | `get_valor_usernames()` | (removed — was `VALOR_USERNAMES = {"valor", "valorengels"}`) | Now config-only: reads `defaults.telegram.mention_triggers` from `projects.json`. The bridge fails loud at startup if `DEFAULT_MENTIONS` is empty. |
 | `bridge/routing.py` | 171-196 | `get_valor_usernames()`, `is_valor_mentioned()`, `is_directed_to_other()` | Mention routing functions |
 | `bridge/telegram_bridge.py` | 448 | `["@valor", "valor", "hey valor"]` | Default mention triggers |
 | `config/projects.example.json` | 147 | `"mention_triggers": ["@valor", "valor", "hey valor"]` | Config example |
@@ -195,7 +195,7 @@ If the goal is **"keep the Valor brand, but make the active persona configurable
 
 The key insight: Category A could be driven by a single config value (e.g., `persona.name` in `~/Desktop/Valor/projects.json` or `SOUL.md` metadata) that flows through ~5 source-of-truth constants:
 
-1. `bridge/routing.py` → `VALOR_USERNAMES` (read from config)
+1. `bridge/routing.py` → `get_valor_usernames()` (now config-only, reads `mention_triggers`)
 2. `bridge/telegram_bridge.py` → mention triggers (already partially configurable via `projects.json`)
 3. `bridge/context.py` → sender attribution string
 4. `agent/sdk_client.py` → fallback prompt name

@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.valor.worker</string>
+    <string>__SERVICE_LABEL__</string>
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
