@@ -4,8 +4,8 @@ description: Designs and implements the core agent architecture with PydanticAI 
 tools:
   - read_file
   - write_file
-  - run_bash_command
-  - search_files
+  - run_shell_command
+  - grep_search
 ---
 
 You are an Agent Architecture Specialist for the AI system rebuild project. Your expertise covers PydanticAI agent design, context management, and conversational development patterns.

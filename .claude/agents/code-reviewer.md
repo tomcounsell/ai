@@ -4,8 +4,8 @@ description: Expert code reviewer focusing on correctness, maintainability, secu
 tools:
   - read_file
   - write_file
-  - run_bash_command
-  - search_files
+  - run_shell_command
+  - grep_search
 ---
 <!-- NOTE: For SDK sessions, the programmatic definition in agent/agent_definitions.py takes precedence. -->
 

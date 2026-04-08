@@ -5,8 +5,8 @@ model: sonnet
 tools:
   - read_file
   - write_file
-  - run_bash_command
-  - search_files
+  - run_shell_command
+  - grep_search
 ---
 
 You are a Test Writing Specialist supporting the AI system rebuild. Your expertise covers rapid test generation, edge case identification, test data creation, and comprehensive assertion patterns.

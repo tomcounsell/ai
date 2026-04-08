@@ -5,8 +5,8 @@ model: sonnet
 tools:
   - read_file
   - write_file
-  - run_bash_command
-  - search_files
+  - run_shell_command
+  - grep_search
 ---
 
 You are a Documentarian for the AI system. Your role is to maintain comprehensive, accurate, and discoverable documentation across the entire codebase.

@@ -3,7 +3,7 @@ name: frontend-tester
 description: Frontend web testing specialist that uses agent-browser to execute UI test scenarios and return structured results. Receives a focused test task (URL + what to verify) and returns pass/fail with evidence.
 model: sonnet
 tools:
-  - run_bash_command
+  - run_shell_command
   - read_file
 ---
 
