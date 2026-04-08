@@ -139,12 +139,12 @@ The PM session owns all SDLC intelligence. The bridge just keeps it working.
 
 ## Queue Architecture
 
-Jobs are queued per `chat_id` so different chat groups (even for the same project) can process jobs in parallel. Within a chat, jobs run sequentially to prevent git conflicts.
+Workers are keyed by `worker_key` — either `project_key` (for PM and dev-without-slug sessions that share the main working tree) or `chat_id` (for teammate and slugged-dev sessions with isolated worktrees). Sessions sharing a working tree serialize; isolated sessions can run in parallel.
 
-### Per-Chat Workers
-- `_ensure_worker(chat_id)` -- starts a worker per chat
-- `_worker_loop(chat_id)` -- processes jobs for a chat
-- `_pop_agent_session(chat_id)` -- pops by chat_id
+### Per-Worker-Key Workers
+- `_ensure_worker(worker_key, is_project_keyed)` -- starts a worker per key
+- `_worker_loop(worker_key, event, is_project_keyed)` -- processes sessions for a key
+- `_pop_agent_session(worker_key, is_project_keyed)` -- pops by worker_key
 - Callbacks remain per `project_key` (Telegram client is project-scoped)
 
 ### Steering Messages
@@ -356,7 +356,7 @@ The `dev-session` agent is defined in `agent/agent_definitions.py`:
 |------|---------|
 | `models/agent_session.py` | AgentSession model with session_type discriminator |
 | `agent/agent_definitions.py` | Agent registry including dev-session |
-| `agent/agent_session_queue.py` | Queue with nudge loop and per-chat workers; reads `session.project_config` at execution time; zero module-level bridge imports |
+| `agent/agent_session_queue.py` | Queue with nudge loop and per-worker-key serialization; reads `session.project_config` at execution time; zero module-level bridge imports |
 | `agent/output_handler.py` | `OutputHandler` protocol for routing agent output; `FileOutputHandler` (logs to `logs/worker/`) and `LoggingOutputHandler` implementations |
 | `agent/constants.py` | Canonical location for `REACTION_SUCCESS/COMPLETE/ERROR` (re-exported from `bridge/response.py`) |
 | `agent/session_logs.py` | Canonical location for `save_session_snapshot()` (re-exported from `bridge/session_logs.py`) |

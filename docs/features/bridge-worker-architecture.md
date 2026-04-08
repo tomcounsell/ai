@@ -204,7 +204,7 @@ The bridge and worker share a single contract: the `AgentSession` Popoto model i
 |-------|--------------|-------------|
 | `status` | `pending` (on enqueue) | Transitions: pending → running → complete/failed |
 | `project_key` | Yes | Yes (routes to registered callbacks) |
-| `chat_id` | Yes | Yes (per-chat worker isolation) |
+| `chat_id` | Yes | Yes (used with `session_type`/`slug` to compute `worker_key` for isolation routing) |
 | `message_text` | Yes | Yes (passed to Claude) |
 | `session_type` | Yes | Yes (PM/dev/teammate persona selection) |
 | `queued_steering_messages` | Any process | Worker injects at turn boundary |

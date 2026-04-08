@@ -133,7 +133,7 @@ When a nudge (auto-continue) is enqueued during session execution, the session s
 
 **Fallback liveness check — `created_at` age (120-minute threshold):** When `updated_at` is `None` (sessions created before the heartbeat feature was added), the function falls back to checking `created_at` age. Sessions younger than 120 minutes are skipped. This preserves the original safety margin for legacy sessions.
 
-**Secondary defense — `_active_workers` registry:** Before either timestamp check, any session whose `chat_id` maps to a not-done asyncio Task in `_active_workers` is unconditionally skipped. This registry is only populated during in-process invocations and is always empty when the update script runs as a CLI subprocess.
+**Secondary defense — `_active_workers` registry:** Before either timestamp check, any session whose `worker_key` maps to a not-done asyncio Task in `_active_workers` is unconditionally skipped. Workers are keyed by `worker_key` (either `project_key` for PM/unslugged-dev sessions, or `chat_id` for teammate/slugged-dev sessions). This registry is only populated during in-process invocations and is always empty when the update script runs as a CLI subprocess.
 
 **Return value:** The function returns `(killed_count, skipped_live)` — both the number of sessions killed and the number skipped due to recent heartbeat activity.
 

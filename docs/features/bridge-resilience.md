@@ -41,9 +41,9 @@ The six competing recovery mechanisms from the old system were replaced with one
 
 **`_agent_session_health_check()`** in `agent/agent_session_queue.py` scans both `running` and `pending` sessions:
 
-- **Running sessions**: If the worker for `session.chat_id` is dead/missing and the session has been running longer than the minimum threshold, recover it (delete-and-recreate as pending)
-- **Pending sessions**: If no live worker exists for `session.chat_id` and the session has been pending longer than the minimum threshold, start a worker
-- **Key invariant**: Sessions with a live worker on the same `chat_id` are never touched
+- **Running sessions**: If the worker for `session.worker_key` is dead/missing and the session has been running longer than the minimum threshold, recover it (reset to pending)
+- **Pending sessions**: If no live worker exists for `session.worker_key` and the session has been pending longer than the minimum threshold, start a worker
+- **Key invariant**: Sessions with a live worker on the same `worker_key` are never touched
 
 ### Startup Recovery
 
@@ -78,7 +78,7 @@ The bridge's Telegram connection retry (`bridge/telegram_bridge.py`) now covers 
 python -m agent.agent_session_queue --status
 ```
 
-Shows all sessions grouped by chat_id with worker status, session IDs, correlation IDs, and dependency health summary.
+Shows all sessions grouped by worker_key with worker status, session IDs, correlation IDs, and dependency health summary.
 
 ## Reflections Pre-flight
 
