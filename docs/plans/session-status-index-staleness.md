@@ -6,6 +6,7 @@ owner: Valor Engels
 created: 2026-04-08
 tracking: https://github.com/tomcounsell/ai/issues/825
 last_comment_id:
+revision_applied: true
 ---
 
 # Session Status Index Staleness — Stale Re-query & Missing health_task Callback
@@ -92,6 +93,13 @@ if fresh_records:
 
 Update the variable name throughout the block (`running_records` → `fresh_records`) and update the docstring to reflect that the re-query is no longer status-filtered.
 
+> **Implementation Note (Concern 1 — Multi-record tie-breaking):** After dropping the `status="running"` filter, the sort-by-`created_at` heuristic could select a stale `completed` record if one shares the same `session_id` with a newer timestamp. Prefer `running` records first; fall back to most-recent only if none are running:
+> ```python
+> running = [r for r in fresh_records if getattr(r, "status", None) == "running"]
+> session = running[0] if running else sorted(fresh_records, key=lambda r: r.created_at, reverse=True)[0]
+> ```
+> This ensures the live running session is always selected for finalization, not a prior stale completed record.
+
 **Gap 2** (`worker/__main__.py` after line 230):
 
 Add immediately after `health_task = asyncio.create_task(...)`:
@@ -105,6 +113,8 @@ def _health_task_done(t: asyncio.Task) -> None:
 
 health_task.add_done_callback(_health_task_done)
 ```
+
+> **Implementation Note (Concern 2 — Callback insertion point):** The correct insertion point is after `health_task = asyncio.create_task(...)` and *before* `notify_task = asyncio.create_task(...)`. Do not insert after the `notify_task` line — the callback must be registered on `health_task` specifically, and inserting in the wrong location could accidentally reference the wrong task variable if the surrounding code is refactored.
 
 ## Failure Path Test Strategy
 
@@ -205,7 +215,8 @@ No agent integration required — this is a worker-internal lifecycle fix. No MC
 - **Parallel**: true
 - In `agent/agent_session_queue.py`, change `AgentSession.query.filter(session_id=session_id, status="running")` to `AgentSession.query.filter(session_id=session_id)` (line ~1014)
 - Rename `running_records` → `fresh_records` throughout the block for clarity
-- Update the block comment and function docstring to explain the intentional no-status-filter re-query
+- Apply multi-record tie-breaking: prefer running records first (`running = [r for r in fresh_records if getattr(r, "status", None) == "running"]`), fall back to most-recent by `created_at` only if none are running
+- Update the block comment and function docstring to explain the intentional no-status-filter re-query and the running-first tie-breaking logic
 
 ### 2. Apply Gap 2 Fix — Add `done_callback` to `health_task`
 - **Task ID**: build-gap2
@@ -214,7 +225,7 @@ No agent integration required — this is a worker-internal lifecycle fix. No MC
 - **Assigned To**: lifecycle-fix-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- In `worker/__main__.py`, add `_health_task_done` callback function and wire it to `health_task.add_done_callback(_health_task_done)` immediately after `health_task = asyncio.create_task(...)`
+- In `worker/__main__.py`, add `_health_task_done` callback function and wire it to `health_task.add_done_callback(_health_task_done)` immediately after `health_task = asyncio.create_task(...)` and before `notify_task = asyncio.create_task(...)`
 - Mirror the exact structure of `_notify_task_done` (cancelled check, exception check, ERROR log)
 
 ### 3. Validate and Test
@@ -259,9 +270,16 @@ No agent integration required — this is a worker-internal lifecycle fix. No MC
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room). -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | Skeptic/Adversary | After dropping `status="running"` filter, sort-by-`created_at` heuristic could select a stale `completed` record with a newer timestamp over the live `running` session | Embedded in Gap 1 Solution block | Prefer `running` records first; fall back to most-recent only if none running: `running = [r for r in fresh_records if getattr(r, "status", None) == "running"]` |
+| CONCERN | Operator/Skeptic | Plan says "after line 230" for callback insertion — surrounding code context makes exact insertion point ambiguous | Embedded in Gap 2 Solution block | Insert after `health_task = asyncio.create_task(...)` and before `notify_task = asyncio.create_task(...)` |
+| NIT | — | Grep output format inconsistency in Verification table (`output does not contain filter(`) | — | Minor wording; does not affect build |
+| NIT | — | Conditional doc task framing in Documentation section | — | Minor; does not affect build |
+| NIT | — | Phantom integration test checkbox in Test Impact section | — | Minor; does not affect build |
+
+**Verdict: READY TO BUILD (with concerns addressed via revision pass)**
 
 ---
 
