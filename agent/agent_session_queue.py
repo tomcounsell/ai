@@ -1970,15 +1970,21 @@ async def _worker_loop(chat_id: str, event: asyncio.Event) -> None:
                 await _execute_agent_session(session)
             except asyncio.CancelledError:
                 logger.warning(
-                    "[chat:%s] Worker cancelled during session %s — completing session",
+                    "[chat:%s] Worker cancelled during session %s — session interrupted, "
+                    "will be re-queued by startup recovery",
                     chat_id,
                     session.agent_session_id,
                 )
                 try:
-                    session.log_lifecycle_transition("failed", "worker cancelled")
+                    session.log_lifecycle_transition(
+                        "running", "worker cancelled — startup recovery will re-queue"
+                    )
                 except Exception:
                     pass
-                await _complete_agent_session(session, failed=True)
+                # Do NOT call _complete_agent_session here — leave session in `running`
+                # state so _recover_interrupted_agent_sessions_startup() can re-queue it
+                # on next worker startup. Calling transition_status here would race with
+                # the new worker's startup recovery.
                 session_completed = True
                 raise  # Re-raise to exit worker loop
             except Exception as e:

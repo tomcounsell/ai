@@ -147,6 +147,26 @@ The fast path covers normal operation. The health check catches edge cases: miss
 **Bridge path**: `enqueue_agent_session()` → `_push_agent_session()` publishes notification → worker receives within ~1s.
 
 **CLI path** (`python -m tools.valor_session create`): Same — `_push_agent_session()` publishes to `valor:sessions:new` → worker receives within ~1s. Prior to issue #778, CLI-created sessions relied solely on the health check (worst case: 10 minutes).
+## Worker Restart Recovery
+
+Worker restarts (SIGTERM, crash, or explicit `./scripts/valor-service.sh worker-restart`) are non-destructive. Sessions in `pending` or `running` state at restart time are both preserved and will be executed by the new worker process.
+
+### `pending` sessions survive restarts untouched
+
+`_cleanup_stale_sessions()` only iterates sessions in `running` state. A `pending` session has never been assigned to a worker process — there is no stale process to clean up. The new worker picks up pending sessions from the queue naturally as part of normal operation.
+
+### Interrupted `running` sessions are re-queued on next startup
+
+When the worker process is killed mid-execution, the `asyncio.CancelledError` handler does **not** finalize the session. The session remains in `running` state in Redis. On the next worker startup, step 3 of the startup sequence (`_recover_interrupted_agent_sessions_startup()`) detects stale `running` sessions and transitions them back to `pending` so they are retried by the new worker.
+
+### Summary
+
+| Session state at restart | What happens |
+|--------------------------|--------------|
+| `pending` | Left untouched; new worker picks it up naturally |
+| `running` | Stays `running`; new worker startup re-queues it to `pending` |
+| `complete` / `failed` / `killed` | Terminal — no action taken |
+
 ## Redis Communication Contract
 
 The bridge and worker share a single contract: the `AgentSession` Popoto model in Redis.

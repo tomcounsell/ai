@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Shipped
 type: bug
 appetite: Small
 owner: Valor
@@ -97,20 +97,20 @@ No prerequisites — both fix sites are self-contained in the existing codebase.
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] The `transition_status(session, "pending", ...)` call in the cancel handler must not raise — `running` → `pending` is a valid non-terminal transition. Add a test asserting the call succeeds.
-- [ ] If `transition_status` raises (e.g., session already in terminal state from a concurrent finalize), the except clause should log and not re-raise, allowing the cancel to propagate normally.
+- [x] The `transition_status(session, "pending", ...)` call in the cancel handler must not raise — N/A per critique: simplified approach removes `transition_status` from cancel handler entirely; startup recovery handles re-queue instead, avoiding the race.
+- [x] If `transition_status` raises (e.g., session already in terminal state from a concurrent finalize), the except clause should log and not re-raise — N/A per critique: no `transition_status` call in cancel handler; startup recovery is the sole re-queue path.
 
 ### Empty/Invalid Input Handling
-- [ ] `_cleanup_stale_sessions` with an empty `pending` list — should no-op gracefully (already handled by `list()` iteration)
-- [ ] Cancel handler with a session that was already finalized by stale cleanup — `transition_status` will raise `ValueError` (terminal→non-terminal); catch and log
+- [x] `_cleanup_stale_sessions` with an empty `pending` list — N/A: `"pending"` removed from the loop entirely; empty list is never iterated.
+- [x] Cancel handler with a session that was already finalized by stale cleanup — N/A per critique: cancel handler leaves session in `running`; startup recovery re-queues or skips sessions already in terminal state.
 
 ### Error State Rendering
 - Not applicable — this is a background worker path with no user-visible output beyond logs.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_stale_cleanup.py` — UPDATE: all tests currently set `sessions_by_status = {"running": [stale_session], "pending": []}` with an empty `pending` list. After Fix 1, `pending` sessions are never passed to the cleanup loop. Add a new test: `test_pending_sessions_never_killed` — pass a stale `pending` session and verify `finalize_session` is NOT called.
-- [ ] `tests/unit/test_stale_cleanup.py::test_finalize_exception_does_not_abort_loop` — UPDATE: adjust `sessions_by_status` to confirm `pending` sessions are excluded before even reaching `finalize_session`
+- [x] `tests/unit/test_stale_cleanup.py` — UPDATE: added `TestCleanupPendingExclusion` class with `test_pending_sessions_never_killed` and `test_pending_sessions_excluded_from_loop`. All 16 targeted tests pass.
+- [x] `tests/unit/test_stale_cleanup.py::test_finalize_exception_does_not_abort_loop` — Existing test already passes with the updated loop; no change needed since `pending` sessions are excluded before the loop iterates.
 
 ## Rabbit Holes
 
@@ -155,17 +155,17 @@ No agent integration required — this is an internal worker lifecycle fix. No M
 
 ## Documentation
 
-- [ ] Update `docs/features/bridge-worker-architecture.md` — add a note to the "Session Lifecycle" or "Worker Restart" section explaining that `pending` sessions survive restarts and interrupted `running` sessions are re-queued, not terminated.
-- [ ] Add entry to `docs/features/README.md` if a new feature doc is created (no new doc needed here — this is an update to an existing doc).
+- [x] Update `docs/features/bridge-worker-architecture.md` — added "Worker Restart Recovery" section with `pending`/`running` semantics table and explanation of startup recovery path.
+- [x] Add entry to `docs/features/README.md` if a new feature doc is created — no new doc created; existing doc updated only.
 
 ## Success Criteria
 
-- [ ] `_cleanup_stale_sessions()` no longer iterates `"pending"` sessions — confirmed by reading `scripts/update/run.py:194` after the fix
-- [ ] After a simulated worker restart, a `pending` session remains `pending` in Redis
-- [ ] After a simulated worker cancellation, an interrupted `running` session is transitioned to `pending` (not `completed`, `failed`, or `killed`) and is available for the new worker to pop
-- [ ] `tests/unit/test_stale_cleanup.py::test_pending_sessions_never_killed` — new test passes
-- [ ] All existing stale cleanup tests still pass
-- [ ] Ruff lint and format clean
+- [x] `_cleanup_stale_sessions()` no longer iterates `"pending"` sessions — confirmed: `for status in ("running",):` at `scripts/update/run.py:194`
+- [x] After a simulated worker restart, a `pending` session remains `pending` in Redis — verified by `test_pending_sessions_never_killed`
+- [x] After a simulated worker cancellation, an interrupted `running` session is left in `running` state for startup recovery (not `completed`, `failed`, or `killed`) — verified by `test_cancel_handler_leaves_session_status_unchanged`
+- [x] `tests/unit/test_stale_cleanup.py::test_pending_sessions_never_killed` — new test passes (16/16 targeted tests pass)
+- [x] All existing stale cleanup tests still pass (3326 total unit tests pass)
+- [x] Ruff lint and format clean — all changed files pass `ruff check` and `ruff format --check`
 
 ## Team Orchestration
 
@@ -258,9 +258,16 @@ No agent integration required — this is an internal worker lifecycle fix. No M
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| high | Skeptic | Fix 2 overlaps with startup recovery — `_recover_interrupted_agent_sessions_startup()` in `worker/__main__.py` already re-queues stale `running` sessions to `pending` on new-worker boot. If the cancel handler also calls `transition_status(session, "pending")`, both paths fire on the same record; if `transition_status` is not idempotent for `pending→pending` it will error. | Simplify Fix 2 | Remove `transition_status` call from cancel handler; rely entirely on startup recovery. Cancel handler only needs to suppress `_complete_agent_session(failed=True)` and set `session_completed=True`. |
+| high | Adversary | Race condition analysis is incorrect — `session_completed=True` only guards the coroutine stack in the dying worker; it does not stop the update-script subprocess from calling `finalize_session()` on the same Redis record after the cancel handler sets status to `pending`. | Verify before build | Confirm whether `finalize_session` re-reads current status from Redis before writing, or operates on the stale passed-in object. |
+| high | Archaeologist | `"pending"` was added to the cleanup loop deliberately in PR #739 — plan should document why it was wrong from the start, not just remove it. | Add comment | Add inline comment: `# pending sessions are never stale — they were never started; "pending" was added in PR #739 by mistake` |
+| medium | Skeptic | Failure Mode 2 data flow conflates two sub-cases: inner-handler cancel (during `_execute_agent_session`) vs. outer cancel (between sessions). Tests must cover both. | Test authorship | `test_worker_cancel_requeue.py` must test both cancel scenarios with different mocking strategies. |
+| medium | Operator | "SDLC sessions are idempotent by design" is asserted, not verified. `stage_states` init code exists but enforcement (skipping completed stages on retry) is not confirmed. | Verify in build | Read `_execute_agent_session` to confirm it checks `stage_states` before each stage. |
+| medium | User | Re-queued conversational sessions will send a duplicate Telegram reply with no user notification. | Acceptable risk | Log a warning in session output: "Session interrupted by worker restart — retrying." |
+| low | Simplifier | Fix 2 simplification: remove `_complete_agent_session(failed=True)` from cancel handler; leave session in `running`; startup recovery on new worker re-queues it. Avoids the new race entirely. | Adopt | This is the preferred Fix 2 implementation. |
+| low | Archaeologist | Task 2 prose says `log_lifecycle_transition` call is "immediately before" but it is inside the `except asyncio.CancelledError:` block. | Prose fix | Clarify: "inside the `except asyncio.CancelledError:` block, before `_complete_agent_session`". |
 
 ---
 
