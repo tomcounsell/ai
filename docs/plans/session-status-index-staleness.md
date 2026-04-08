@@ -46,7 +46,7 @@ The bug manifests at session completion time:
 5. **Popoto `on_save()`** → calls `srem(wrong_index_key)` removing from the wrong set; calls `sadd(completed_index_key)` → session is now indexed in **both** `running` and `completed` simultaneously
 6. **Observable result** → `valor_session list` shows `completed`, `AgentSession.query.filter(status='running')` still returns it
 
-**Gap 2 flow:** `health_task` runs `_agent_session_health_loop()` as an asyncio task. If an exception escapes the internal `while True / try-except`, the task exits silently — no log, no alert, health checks permanently stopped.
+**Gap 2 flow:** `health_task` runs `_agent_session_health_loop()` as an asyncio task. The internal `while True / try-except` already catches all ordinary `Exception` subclasses and continues the loop — so ordinary exceptions cannot escape. The health task only exits prematurely via `CancelledError` (expected shutdown) or `BaseException` subclasses that are not caught by `except Exception` (e.g., `SystemExit`, `KeyboardInterrupt`, asyncio internals). Without a `done_callback`, any such exit would be silent — no log, health checks permanently stopped with no alert.
 
 ## Appetite
 
@@ -102,7 +102,7 @@ Update the variable name throughout the block (`running_records` → `fresh_reco
 
 **Gap 2** (`worker/__main__.py` after line 230):
 
-Add immediately after `health_task = asyncio.create_task(...)`:
+Add immediately after `health_task = asyncio.create_task(..., name="session-health-monitor")`:
 ```python
 def _health_task_done(t: asyncio.Task) -> None:
     if t.cancelled():
@@ -114,7 +114,9 @@ def _health_task_done(t: asyncio.Task) -> None:
 health_task.add_done_callback(_health_task_done)
 ```
 
-> **Implementation Note (Concern 2 — Callback insertion point):** The correct insertion point is after `health_task = asyncio.create_task(...)` and *before* `notify_task = asyncio.create_task(...)`. Do not insert after the `notify_task` line — the callback must be registered on `health_task` specifically, and inserting in the wrong location could accidentally reference the wrong task variable if the surrounding code is refactored.
+> **Implementation Note (Gap 2 callback guards BaseException, not ordinary exceptions):** The `_agent_session_health_loop` internal `while True / try-except Exception` already prevents ordinary exceptions from escaping. The done_callback guards against `BaseException` subclasses (`SystemExit`, `KeyboardInterrupt`) and asyncio-internal exits that bypass the loop's own exception handler. The code comment added by the builder should read: "Guards against unexpected task exit — ordinary exceptions are already caught inside the loop's own try-except."
+
+> **Implementation Note (task name and insertion point):** Add `name="session-health-monitor"` to the `asyncio.create_task()` call for `health_task` (mirrors `notify_task`'s existing `name="session-notify-listener"`). Insert the callback registration after `health_task = asyncio.create_task(...)` and *before* `notify_task = asyncio.create_task(...)`. Do not insert after the `notify_task` line.
 
 ## Failure Path Test Strategy
 
@@ -130,8 +132,10 @@ health_task.add_done_callback(_health_task_done)
 
 ## Test Impact
 
-- [ ] `tests/unit/test_agent_session_queue.py` — UPDATE: Any test mocking `AgentSession.query.filter(session_id=..., status="running")` in `_complete_agent_session` must be updated to mock `AgentSession.query.filter(session_id=...)` without the status parameter
-- [ ] `tests/integration/test_session_lifecycle.py` (if it exists) — CHECK: Verify tests for session completion don't assert the old filter signature
+No existing tests affected — `tests/unit/test_agent_session_queue.py` has zero tests for `_complete_agent_session`; there is no prior mock of the `status="running"` filter call to update.
+
+New regression test required (ADD, not UPDATE):
+- [ ] `tests/unit/test_agent_session_queue.py` — ADD: New test `test_complete_agent_session_requery_no_status_filter` that mocks `AgentSession.query.filter` and calls `_complete_agent_session(session, failed=False)`. Assert the mock was called with `session_id=<id>` and NOT with `status="running"` — use `assert 'status' not in call_kwargs`. This prevents regression of the stale re-query bug.
 
 ## Rabbit Holes
 
@@ -175,7 +179,7 @@ No agent integration required — this is a worker-internal lifecycle fix. No MC
 
 ## Documentation
 
-- [ ] Update docstring on `_complete_agent_session()` in `agent/agent_session_queue.py` to document that the re-query is status-filter-free and why
+- [ ] Update the inline comment block at line 1006 in `_complete_agent_session()` (`agent/agent_session_queue.py`) to explain the intentional no-status-filter re-query and the running-first tie-breaking logic (not the function docstring — it already has good coverage)
 - [ ] Update `docs/features/bridge-worker-architecture.md` if it describes the session completion flow (add note that re-query is intentionally unfiltered)
 - [ ] No new feature doc needed — this is a bug fix to existing behavior
 
@@ -225,19 +229,23 @@ No agent integration required — this is a worker-internal lifecycle fix. No MC
 - **Assigned To**: lifecycle-fix-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- In `worker/__main__.py`, add `_health_task_done` callback function and wire it to `health_task.add_done_callback(_health_task_done)` immediately after `health_task = asyncio.create_task(...)` and before `notify_task = asyncio.create_task(...)`
+- In `worker/__main__.py`, add `name="session-health-monitor"` to the `asyncio.create_task()` call for `health_task` (mirrors `notify_task`'s `name="session-notify-listener"`)
+- Add `_health_task_done` callback function and wire it to `health_task.add_done_callback(_health_task_done)` immediately after `health_task = asyncio.create_task(...)` and before `notify_task = asyncio.create_task(...)`
 - Mirror the exact structure of `_notify_task_done` (cancelled check, exception check, ERROR log)
+- Add code comment: "Guards against unexpected task exit — ordinary exceptions are already caught inside the loop's own try-except."
 
-### 3. Validate and Test
+### 3. Write Regression Test and Validate
 - **Task ID**: validate-fixes
 - **Depends On**: build-gap1, build-gap2
 - **Assigned To**: lifecycle-fix-validator
 - **Agent Type**: validator
 - **Parallel**: false
+- Add `test_complete_agent_session_requery_no_status_filter` to `tests/unit/test_agent_session_queue.py`: mock `AgentSession.query.filter`, call `_complete_agent_session(session, failed=False)`, assert the mock was called with `session_id=<id>` and that `'status'` was NOT in the keyword arguments
 - Run `pytest tests/unit/ -x -q` and confirm pass
 - Run `python -m ruff check . && python -m ruff format --check .`
-- Grep confirm: `grep -n 'status="running"' agent/agent_session_queue.py` returns no match in the re-query block
+- Grep confirm: `grep -A3 'query.filter.*session_id' agent/agent_session_queue.py | grep 'status'` returns no output (no status arg in re-query block)
 - Grep confirm: `grep -n 'health_task.add_done_callback' worker/__main__.py` returns a match
+- Grep confirm: `grep -n 'session-health-monitor' worker/__main__.py` returns a match
 
 ### 4. Documentation
 - **Task ID**: document-fix
@@ -245,7 +253,7 @@ No agent integration required — this is a worker-internal lifecycle fix. No MC
 - **Assigned To**: lifecycle-fix-builder
 - **Agent Type**: documentarian
 - **Parallel**: false
-- Update docstring on `_complete_agent_session()` explaining status-filter-free re-query
+- Update the **inline comment block at line 1006** (not the function docstring — the function already has good docstring coverage) in `_complete_agent_session()` to explain that the re-query intentionally omits the `status` filter and why (`_saved_field_values` must reflect current Redis state regardless of what status the session is currently in)
 - Check `docs/features/bridge-worker-architecture.md` for session completion references; update if present
 
 ### 5. Final Validation
@@ -265,7 +273,7 @@ No agent integration required — this is a worker-internal lifecycle fix. No MC
 | Tests pass | `pytest tests/ -x -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| No status filter in re-query | `grep -n 'status="running"' agent/agent_session_queue.py` | output does not contain `filter(` |
+| No status filter in re-query | `grep -A3 'query.filter.*session_id' agent/agent_session_queue.py \| grep 'status'` | no output (no `status` arg in the re-query block) |
 | health_task callback wired | `grep -c 'health_task.add_done_callback' worker/__main__.py` | output contains 1 |
 
 ## Critique Results
@@ -275,9 +283,11 @@ No agent integration required — this is a worker-internal lifecycle fix. No MC
 |----------|--------|---------|--------------|---------------------|
 | CONCERN | Skeptic/Adversary | After dropping `status="running"` filter, sort-by-`created_at` heuristic could select a stale `completed` record with a newer timestamp over the live `running` session | Embedded in Gap 1 Solution block | Prefer `running` records first; fall back to most-recent only if none running: `running = [r for r in fresh_records if getattr(r, "status", None) == "running"]` |
 | CONCERN | Operator/Skeptic | Plan says "after line 230" for callback insertion — surrounding code context makes exact insertion point ambiguous | Embedded in Gap 2 Solution block | Insert after `health_task = asyncio.create_task(...)` and before `notify_task = asyncio.create_task(...)` |
-| NIT | — | Grep output format inconsistency in Verification table (`output does not contain filter(`) | — | Minor wording; does not affect build |
-| NIT | — | Conditional doc task framing in Documentation section | — | Minor; does not affect build |
-| NIT | — | Phantom integration test checkbox in Test Impact section | — | Minor; does not affect build |
+| CONCERN | Skeptic/Adversary | Gap 2 problem description overstates risk — `_agent_session_health_loop` already has `except Exception` inside `while True`, so ordinary exceptions cannot escape; the callback only guards against `BaseException`/asyncio-internal exits | Corrected in Problem section and Gap 2 Solution block | Builder code comment: "Guards against unexpected task exit — ordinary exceptions are already caught inside the loop's own try-except." |
+| CONCERN | Skeptic/User | Test Impact listed a non-existent test to update — `tests/unit/test_agent_session_queue.py` has zero tests for `_complete_agent_session`; the fix has no regression coverage | Corrected in Test Impact section | New test added: mock `AgentSession.query.filter`, call `_complete_agent_session`, assert `status` not in call kwargs |
+| NIT | — | `health_task` missing `name=` argument (unlike `notify_task` which has `name="session-notify-listener"`) | Embedded in Gap 2 Solution block | Add `name="session-health-monitor"` to `asyncio.create_task()` call |
+| NIT | — | Verification grep `grep -n 'status="running"'` has false-negative risk — matches any occurrence in file, not just re-query block | Corrected in Verification table | Use `grep -A3 'query.filter.*session_id' ... \| grep 'status'` instead |
+| NIT | — | Docstring update scope under-specified — function already has good docstring coverage; target is the inline comment block at line 1006 | Corrected in Documentation section and Task 4 | Specify "inline comment block at line 1006" explicitly |
 
 **Verdict: READY TO BUILD (with concerns addressed via revision pass)**
 
