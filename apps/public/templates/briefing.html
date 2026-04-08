@@ -1,0 +1,153 @@
+{% extends "base.html" %}
+
+{% block title %}AI Briefing — Know Everything Before the Meeting{% endblock %}
+
+{% block meta_description %}Get a custom AI-powered briefing before your next important meeting. Deep research, structured insights, and companion docs — delivered in minutes.{% endblock %}
+
+{% block main_header %}
+  <!-- Hero Section -->
+  <div class="section-hero">
+    <div class="text-technical-label" style="margin-bottom: var(--space-sm);">PRIVATE_BRIEFING_01</div>
+    <h1 class="text-sans" style="font-size: 2.5rem; font-weight: 700; letter-spacing: -0.01em; text-transform: none; margin-bottom: var(--space-md);">
+      Walk into any meeting knowing more than everyone else in the room.
+    </h1>
+    <p style="font-size: 1.125rem; line-height: 1.8; color: var(--color-text-charcoal); max-width: 640px; margin: 0 auto var(--space-xl);">
+      We run deep AI research on your topic and deliver a structured briefing — ready in minutes, not hours.
+    </p>
+    {% if user_is_authenticated %}
+      <a href="{% url 'podcast:list' %}" class="btn-brand btn-brand-accent" style="text-decoration: none; display: inline-block;">
+        Start a Briefing
+      </a>
+    {% else %}
+      <a href="/accounts/signup/" class="btn-brand btn-brand-accent" style="text-decoration: none; display: inline-block;">
+        Get Your First Briefing
+      </a>
+    {% endif %}
+  </div>
+{% endblock %}
+
+{% block content %}
+  <div style="max-width: 900px; margin: 0 auto;">
+
+    <!-- Divider -->
+    <div class="divider-technical" style="margin: var(--space-3xl) 0;"></div>
+
+    <!-- How It Works Section -->
+    <section style="margin-bottom: var(--space-3xl);">
+      <div class="text-technical-label" style="margin-bottom: var(--space-md);">HOW_IT_WORKS</div>
+      <h2 style="font-size: 1.375rem; font-weight: 600; letter-spacing: -0.01em; text-transform: none; margin-bottom: var(--space-xl);">
+        Three steps from topic to fully briefed.
+      </h2>
+
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: var(--space-lg);">
+
+        <!-- Step 1 -->
+        <div class="product-card">
+          <div class="text-technical-label" style="margin-bottom: var(--space-sm);">STEP_01</div>
+          <h3 style="font-size: 0.95rem; font-weight: 600; letter-spacing: 0; text-transform: none; margin-bottom: var(--space-sm); color: var(--color-text-black);">
+            Give us your topic
+          </h3>
+          <p style="font-size: 0.875rem; line-height: 1.7; color: var(--color-text-gray); margin: 0;">
+            Tell us what the meeting is about — a company, a deal, a technology, a person, a regulation. One sentence is enough.
+          </p>
+        </div>
+
+        <!-- Step 2 -->
+        <div class="product-card">
+          <div class="text-technical-label" style="margin-bottom: var(--space-sm);">STEP_02</div>
+          <h3 style="font-size: 0.95rem; font-weight: 600; letter-spacing: 0; text-transform: none; margin-bottom: var(--space-sm); color: var(--color-text-black);">
+            We run the research
+          </h3>
+          <p style="font-size: 0.875rem; line-height: 1.7; color: var(--color-text-gray); margin: 0;">
+            Multiple AI research tools sweep the web simultaneously — cross-validating sources, surfacing conflicts, and flagging gaps you'd never think to ask about.
+          </p>
+        </div>
+
+        <!-- Step 3 -->
+        <div class="product-card">
+          <div class="text-technical-label" style="margin-bottom: var(--space-sm);">STEP_03</div>
+          <h3 style="font-size: 0.95rem; font-weight: 600; letter-spacing: 0; text-transform: none; margin-bottom: var(--space-sm); color: var(--color-text-black);">
+            You arrive prepared
+          </h3>
+          <p style="font-size: 0.875rem; line-height: 1.7; color: var(--color-text-gray); margin: 0;">
+            Receive a structured briefing with the key facts, open questions, and sharp angles — formatted for how executives actually read before a meeting.
+          </p>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- Divider -->
+    <div class="divider-technical" style="margin: var(--space-3xl) 0;"></div>
+
+    <!-- What You Get Section -->
+    <section style="margin-bottom: var(--space-3xl);">
+      <div class="text-technical-label" style="margin-bottom: var(--space-md);">WHAT_YOU_GET</div>
+      <h2 style="font-size: 1.375rem; font-weight: 600; letter-spacing: -0.01em; text-transform: none; margin-bottom: var(--space-xl);">
+        Everything you need, nothing you don't.
+      </h2>
+
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: var(--space-lg);">
+
+        <!-- Your Briefing card -->
+        <div class="product-card">
+          <div class="text-technical-label" style="margin-bottom: var(--space-sm);">YOUR_BRIEFING</div>
+          <h3 style="font-size: 0.95rem; font-weight: 600; letter-spacing: 0; text-transform: none; margin-bottom: var(--space-sm); color: var(--color-text-black);">
+            The Briefing
+          </h3>
+          <p style="font-size: 0.875rem; line-height: 1.7; color: var(--color-text-gray); margin: 0 0 var(--space-md);">
+            A dense, structured document covering the landscape, the key players, the open questions, and the strategic angles most likely to matter in the room.
+          </p>
+          <ul style="font-size: 0.875rem; line-height: 1.8; color: var(--color-text-gray); margin: 0; padding-left: var(--space-md);">
+            <li>Executive summary</li>
+            <li>Verified key facts</li>
+            <li>Open questions to raise</li>
+            <li>Potential risks and blind spots</li>
+          </ul>
+        </div>
+
+        <!-- Companion Docs card -->
+        <div class="product-card">
+          <div class="text-technical-label" style="margin-bottom: var(--space-sm);">COMPANION_DOCS</div>
+          <h3 style="font-size: 0.95rem; font-weight: 600; letter-spacing: 0; text-transform: none; margin-bottom: var(--space-sm); color: var(--color-text-black);">
+            Companion Resources
+          </h3>
+          <p style="font-size: 0.875rem; line-height: 1.7; color: var(--color-text-gray); margin: 0 0 var(--space-md);">
+            Supporting materials that make the briefing immediately actionable — formatted for quick scanning, not careful reading.
+          </p>
+          <ul style="font-size: 0.875rem; line-height: 1.8; color: var(--color-text-gray); margin: 0; padding-left: var(--space-md);">
+            <li>One-page summary</li>
+            <li>Decision checklist</li>
+            <li>Key frameworks and models</li>
+            <li>Source citations</li>
+          </ul>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- Divider -->
+    <div class="divider-technical" style="margin: var(--space-3xl) 0;"></div>
+
+    <!-- Closing CTA Section -->
+    <section style="text-align: center; margin-bottom: var(--space-3xl);">
+      <div class="text-technical-label" style="margin-bottom: var(--space-sm);">GET_STARTED</div>
+      <h2 style="font-size: 1.375rem; font-weight: 600; letter-spacing: -0.01em; text-transform: none; margin-bottom: var(--space-md);">
+        Your next meeting is already scheduled.
+      </h2>
+      <p style="font-size: 1rem; line-height: 1.8; color: var(--color-text-charcoal); max-width: 520px; margin: 0 auto var(--space-xl);">
+        The people you're meeting have done their homework. Have yours done for you.
+      </p>
+      {% if user_is_authenticated %}
+        <a href="{% url 'podcast:list' %}" class="btn-brand btn-brand-accent" style="text-decoration: none; display: inline-block;">
+          Start a Briefing
+        </a>
+      {% else %}
+        <a href="/accounts/signup/" class="btn-brand btn-brand-accent" style="text-decoration: none; display: inline-block;">
+          Get Your First Briefing
+        </a>
+      {% endif %}
+    </section>
+
+  </div>
+{% endblock content %}

@@ -2,6 +2,7 @@
 
 | Feature | Doc | Description |
 |---------|-----|-------------|
+| Briefing Landing Page | [briefing-landing-page](../plans/briefing-landing-page.md) | Public marketing page at `/briefing/` — AI briefing product value prop with auth-aware CTA |
 | Blended Workforce Site | [blendedworkforce-site.md](blendedworkforce-site.md) | Book website for blendedworkforce.ai -- landing page, early reader funnel, Valor chat, draft chapters |
 | Deep Research Orchestrator | [deep-research-orchestrator.md](deep-research-orchestrator.md) | Multi-source research orchestration |
 | Episode Brief Editor | [episode-brief-editor.md](episode-brief-editor.md) | Podcast episode brief editing workflow |

@@ -3,6 +3,7 @@ from django.urls import path, reverse_lazy
 
 from .views import ComponentExamplesView, account, pages
 from .views.components.oob_examples import urlpatterns as oob_urlpatterns
+from .views.landing_views import BriefingLandingView
 from .views.teams.member_views import (
     add_team_member,
     change_member_role,
@@ -32,6 +33,12 @@ urlpatterns += [
 
 # Example pages
 urlpatterns += [
+    # Briefing landing page
+    path(
+        "briefing/",
+        BriefingLandingView.as_view(),
+        name="briefing",
+    ),
     # Pricing page
     path(
         "pricing/",
