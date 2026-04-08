@@ -20,9 +20,17 @@ set +a
 # Prefix-drift guard: if a service is already installed under a different
 # prefix (because launchd is bound to the label baked at install time), use
 # the installed prefix for launchctl ops and warn loudly. Reinstall to change.
-INSTALLED_PREFIX=$(ls "$HOME/Library/LaunchAgents/" 2>/dev/null \
+# Sort to ensure deterministic selection if multiple distinct prefixes coexist
+# (pathological half-installed case); warn loudly if so.
+INSTALLED_PREFIXES=$(ls "$HOME/Library/LaunchAgents/" 2>/dev/null \
     | grep -oE '^[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.(bridge|worker|reflections|autoexperiment|bridge-watchdog)\.plist$' \
-    | head -1 | sed -E 's/\.(bridge|worker|reflections|autoexperiment|bridge-watchdog)\.plist$//')
+    | sed -E 's/\.(bridge|worker|reflections|autoexperiment|bridge-watchdog)\.plist$//' \
+    | sort -u)
+INSTALLED_PREFIX_COUNT=$(printf '%s\n' "$INSTALLED_PREFIXES" | grep -c . || true)
+INSTALLED_PREFIX=$(printf '%s\n' "$INSTALLED_PREFIXES" | head -1)
+if [ "$INSTALLED_PREFIX_COUNT" -gt 1 ]; then
+    echo "WARN: multiple installed service prefixes detected: $(printf '%s ' $INSTALLED_PREFIXES); using deterministic first '$INSTALLED_PREFIX'. Reinstall to consolidate."
+fi
 if [ -n "$INSTALLED_PREFIX" ] && [ "$INSTALLED_PREFIX" != "$SERVICE_LABEL_PREFIX" ]; then
     echo "WARN: installed service prefix '$INSTALLED_PREFIX' differs from .env SERVICE_LABEL_PREFIX='$SERVICE_LABEL_PREFIX'; using installed prefix for launchctl ops. Reinstall to change."
     SERVICE_LABEL_PREFIX="$INSTALLED_PREFIX"

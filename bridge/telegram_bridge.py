@@ -558,9 +558,7 @@ _routing_module.DEFAULT_MENTIONS = DEFAULTS.get("telegram", {}).get(
 # the bridge can actually detect self-mentions. An empty list silently disables
 # all mention-based routing, which is almost never what an operator wants.
 if not _routing_module.DEFAULT_MENTIONS:
-    raise RuntimeError(
-        "mention_triggers must be configured in projects.json defaults.telegram"
-    )
+    raise RuntimeError("mention_triggers must be configured in projects.json defaults.telegram")
 # Re-export DEFAULT_MENTIONS for backward compat and use by other functions still in this module
 DEFAULT_MENTIONS = _routing_module.DEFAULT_MENTIONS
 
