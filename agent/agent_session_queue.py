@@ -297,9 +297,25 @@ async def _push_agent_session(
     try:
         from popoto.redis_db import POPOTO_REDIS_DB
 
-        payload = json.dumps({"chat_id": chat_id, "session_id": session_id})
+        # Compute worker_key inline from the same inputs as AgentSession.worker_key
+        if session_type == SessionType.TEAMMATE:
+            _wk = chat_id or project_key
+        elif session_type == SessionType.PM:
+            _wk = project_key
+        elif slug:
+            _wk = chat_id or project_key
+        else:
+            _wk = project_key
+        payload = json.dumps(
+            {
+                "chat_id": chat_id,
+                "session_id": session_id,
+                "worker_key": _wk,
+                "is_project_keyed": _wk == project_key,
+            }
+        )
         await asyncio.to_thread(POPOTO_REDIS_DB.publish, "valor:sessions:new", payload)
-        logger.debug(f"Published session notification for chat_id={chat_id}")
+        logger.debug(f"Published session notification for worker_key={_wk}")
     except Exception as e:
         logger.warning(f"Failed to publish session notification for {session_id}: {e}")
 
@@ -494,7 +510,7 @@ def dependency_status(session: AgentSession) -> dict[str, str]:
 _POP_LOCK_TTL_SECONDS = 5  # Long enough to cover transition_status write; short enough to self-heal
 
 
-def _acquire_pop_lock(chat_id: str) -> bool:
+def _acquire_pop_lock(worker_key: str) -> bool:
     """Acquire a Redis SETNX lock for the pop-and-transition block.
 
     Returns True if the lock was acquired, False if already held.
@@ -504,48 +520,51 @@ def _acquire_pop_lock(chat_id: str) -> bool:
     try:
         from popoto.redis_db import POPOTO_REDIS_DB
 
-        lock_key = f"worker:pop_lock:{chat_id}"
+        lock_key = f"worker:pop_lock:{worker_key}"
         # SETNX returns True if key was set (lock acquired), False if already exists
         acquired = POPOTO_REDIS_DB.set(lock_key, "1", nx=True, ex=_POP_LOCK_TTL_SECONDS)
         return bool(acquired)
     except Exception as e:
-        logger.warning(f"[chat:{chat_id}] Pop lock acquisition failed (non-fatal): {e}")
+        logger.warning(f"[worker:{worker_key}] Pop lock acquisition failed (non-fatal): {e}")
         # Fail open: allow the pop to proceed without the lock rather than blocking workers
         return True
 
 
-def _release_pop_lock(chat_id: str) -> None:
-    """Release the Redis pop lock for the given chat_id."""
+def _release_pop_lock(worker_key: str) -> None:
+    """Release the Redis pop lock for the given worker_key."""
     try:
         from popoto.redis_db import POPOTO_REDIS_DB
 
-        POPOTO_REDIS_DB.delete(f"worker:pop_lock:{chat_id}")
+        POPOTO_REDIS_DB.delete(f"worker:pop_lock:{worker_key}")
     except Exception as e:
-        logger.warning(f"[chat:{chat_id}] Pop lock release failed (non-fatal): {e}")
+        logger.warning(f"[worker:{worker_key}] Pop lock release failed (non-fatal): {e}")
 
 
-async def _pop_agent_session(chat_id: str) -> AgentSession | None:
-    """
-    Pop the highest priority pending session for a chat.
+async def _pop_agent_session(
+    worker_key: str, is_project_keyed: bool = False
+) -> AgentSession | None:
+    """Pop the highest priority pending session for a worker.
 
-    Queue is keyed by chat_id so different chat groups for the same project
-    can process sessions in parallel. Within a chat, sessions run sequentially.
+    Queue is keyed by worker_key (either project_key or chat_id depending on
+    session type).  Project-keyed workers filter by project_key and only pop
+    pm/dev-without-slug sessions.  Chat-keyed workers filter by chat_id as before.
 
     Order: urgent > high > normal > low, then within same priority FIFO (oldest first).
     Sessions with scheduled_at in the future are skipped (deferred execution).
-
-    Status is an IndexedField (not KeyField), so mutating and saving is safe --
-    no delete-and-recreate needed for status transitions.
     """
-    # Acquire pop lock to make the query→transition block atomic across concurrent
-    # workers (e.g., watchdog + manual start). If the lock is held, another worker
-    # is mid-transition for this chat_id — return None and let the caller retry.
-    if not _acquire_pop_lock(chat_id):
-        logger.debug(f"[chat:{chat_id}] Pop lock held by another worker, skipping pop")
+    if not _acquire_pop_lock(worker_key):
+        logger.debug(f"[worker:{worker_key}] Pop lock held by another worker, skipping pop")
         return None
 
     try:
-        pending = await AgentSession.query.async_filter(chat_id=chat_id, status="pending")
+        if is_project_keyed:
+            pending = await AgentSession.query.async_filter(
+                project_key=worker_key, status="pending"
+            )
+            # Only pop sessions that belong to project-keyed workers (pm, dev-without-slug)
+            pending = [s for s in pending if s.worker_key == worker_key]
+        else:
+            pending = await AgentSession.query.async_filter(chat_id=worker_key, status="pending")
         if not pending:
             return None
 
@@ -595,7 +614,7 @@ async def _pop_agent_session(chat_id: str) -> AgentSession | None:
         for candidate in eligible:
             if candidate.status in _TERMINAL_STATUSES:
                 logger.warning(
-                    f"[chat:{chat_id}] Skipping session {candidate.id} "
+                    f"[worker:{worker_key}] Skipping session {candidate.id} "
                     f"(session {candidate.session_id}): index says pending but actual "
                     f"status={candidate.status!r}. Stale index entry."
                 )
@@ -603,9 +622,9 @@ async def _pop_agent_session(chat_id: str) -> AgentSession | None:
                     rebuilt = True
                     try:
                         AgentSession.rebuild_indexes()
-                        logger.info(f"[chat:{chat_id}] Rebuilt indexes to repair stale entry")
+                        logger.info(f"[worker:{worker_key}] Rebuilt indexes to repair stale entry")
                     except Exception as rebuild_err:
-                        logger.warning(f"[chat:{chat_id}] Index rebuild failed: {rebuild_err}")
+                        logger.warning(f"[worker:{worker_key}] Index rebuild failed: {rebuild_err}")
                 continue
             chosen = candidate
             break
@@ -616,14 +635,14 @@ async def _pop_agent_session(chat_id: str) -> AgentSession | None:
         # Direct field mutation -- status is an IndexedField, not a KeyField,
         # so save() correctly updates the secondary index.
         logger.info(
-            f"[chat:{chat_id}] Transitioning session {chosen.id} "
+            f"[worker:{worker_key}] Transitioning session {chosen.id} "
             f"(session {chosen.session_id}) pending->running"
         )
 
         chosen.started_at = datetime.now(tz=UTC)
         transition_status(chosen, "running", reason="worker picked up session")
     finally:
-        _release_pop_lock(chat_id)
+        _release_pop_lock(worker_key)
 
     # Drain any steering messages queued during the pending window (#619).
     # Follow-up messages arriving while the session was pending get pushed to
@@ -641,20 +660,22 @@ async def _pop_agent_session(chat_id: str) -> AgentSession | None:
                 chosen.message_text = f"{original}\n\n{prepend}" if original else prepend
                 await chosen.async_save()
                 logger.info(
-                    f"[chat:{chat_id}] Drained {len(extra_texts)} steering message(s) "
+                    f"[worker:{worker_key}] Drained {len(extra_texts)} steering message(s) "
                     f"into session {chosen.id} message_text"
                 )
     except Exception as e:
         # Drain failure must not crash session start
         logger.warning(
-            f"[chat:{chat_id}] Failed to drain steering messages for session "
+            f"[worker:{worker_key}] Failed to drain steering messages for session "
             f"{chosen.id} (non-fatal): {e}"
         )
 
     return chosen
 
 
-async def _pop_agent_session_with_fallback(chat_id: str) -> AgentSession | None:
+async def _pop_agent_session_with_fallback(
+    worker_key: str, is_project_keyed: bool = False
+) -> AgentSession | None:
     """Pop a pending session using async_filter first, then sync fallback.
 
     This is a separate function from _pop_agent_session() to avoid changing the hot path.
@@ -665,26 +686,21 @@ async def _pop_agent_session_with_fallback(chat_id: str) -> AgentSession | None:
     that is the root cause of the pending session drain bug.
     """
     # Try the normal async path first
-    session = await _pop_agent_session(chat_id)
+    session = await _pop_agent_session(worker_key, is_project_keyed)
     if session is not None:
         return session
 
     # Sync fallback: bypass to_thread() to avoid the index visibility race.
-    # This runs a synchronous Popoto query directly, which blocks the event loop
-    # briefly (single Redis SINTER + HGETALL, microseconds). Acceptable tradeoff
-    # on the cold drain path for correctness.
-    #
-    # Acquire the pop lock for the sync fallback branch. This branch does its own
-    # independent AgentSession.query.filter() + transition_status() and is NOT
-    # covered by the lock already released inside _pop_agent_session(). This is
-    # NOT re-entrant: _pop_agent_session() acquired + released the lock before
-    # returning None, so we are acquiring a fresh lock here.
-    if not _acquire_pop_lock(chat_id):
-        logger.debug(f"[chat:{chat_id}] Sync fallback: pop lock held by another worker, skipping")
+    if not _acquire_pop_lock(worker_key):
+        logger.debug(f"[worker:{worker_key}] Sync fallback: pop lock held, skipping")
         return None
 
     try:
-        pending = AgentSession.query.filter(chat_id=chat_id, status="pending")
+        if is_project_keyed:
+            pending = AgentSession.query.filter(project_key=worker_key, status="pending")
+            pending = [s for s in pending if s.worker_key == worker_key]
+        else:
+            pending = AgentSession.query.filter(chat_id=worker_key, status="pending")
         if not pending:
             return None
 
@@ -732,7 +748,7 @@ async def _pop_agent_session_with_fallback(chat_id: str) -> AgentSession | None:
         for candidate in eligible:
             if candidate.status in _TERMINAL_STATUSES:
                 logger.warning(
-                    f"[chat:{chat_id}] Sync fallback: skipping session {candidate.id} "
+                    f"[worker:{worker_key}] Sync fallback: skipping session {candidate.id} "
                     f"(session {candidate.session_id}): index says pending but actual "
                     f"status={candidate.status!r}. Stale index entry."
                 )
@@ -740,9 +756,9 @@ async def _pop_agent_session_with_fallback(chat_id: str) -> AgentSession | None:
                     rebuilt = True
                     try:
                         AgentSession.rebuild_indexes()
-                        logger.info(f"[chat:{chat_id}] Rebuilt indexes to repair stale entry")
+                        logger.info(f"[worker:{worker_key}] Rebuilt indexes to repair stale entry")
                     except Exception as rebuild_err:
-                        logger.warning(f"[chat:{chat_id}] Index rebuild failed: {rebuild_err}")
+                        logger.warning(f"[worker:{worker_key}] Index rebuild failed: {rebuild_err}")
                 continue
             chosen = candidate
             break
@@ -752,7 +768,7 @@ async def _pop_agent_session_with_fallback(chat_id: str) -> AgentSession | None:
 
         # Direct field mutation -- status is an IndexedField, not a KeyField.
         logger.info(
-            f"[chat:{chat_id}] Sync fallback: transitioning session {chosen.id} "
+            f"[worker:{worker_key}] Sync fallback: transitioning session {chosen.id} "
             f"(session {chosen.session_id}) pending->running"
         )
 
@@ -772,21 +788,21 @@ async def _pop_agent_session_with_fallback(chat_id: str) -> AgentSession | None:
                     chosen.message_text = f"{original}\n\n{prepend}" if original else prepend
                     await chosen.async_save()
                     logger.info(
-                        f"[chat:{chat_id}] Sync fallback: drained {len(extra_texts)} "
+                        f"[worker:{worker_key}] Sync fallback: drained {len(extra_texts)} "
                         f"steering message(s) into session {chosen.id} message_text"
                     )
         except Exception as e:
             logger.warning(
-                f"[chat:{chat_id}] Sync fallback: failed to drain steering messages "
+                f"[worker:{worker_key}] Sync fallback: failed to drain steering messages "
                 f"for session {chosen.id} (non-fatal): {e}"
             )
 
         return chosen
     except Exception:
-        logger.exception(f"[chat:{chat_id}] Sync fallback query failed, falling through to exit")
+        logger.exception(f"[worker:{worker_key}] Sync fallback query failed, falling through")
         return None
     finally:
-        _release_pop_lock(chat_id)
+        _release_pop_lock(worker_key)
 
 
 async def _pending_depth(chat_id: str) -> int:
@@ -1149,13 +1165,13 @@ def _recover_interrupted_agent_sessions_startup() -> int:
 
     count = 0
     for entry in stale_sessions:
-        chat_id = entry.chat_id or entry.project_key
+        wk = entry.worker_key
         logger.warning(
             "[startup-recovery] Recovering interrupted session %s "
-            "(session=%s, chat=%s, msg=%.80r...)",
+            "(session=%s, worker=%s, msg=%.80r...)",
             entry.agent_session_id,
             entry.session_id,
-            chat_id,
+            wk,
             entry.message_text or "",
         )
         try:
@@ -1224,7 +1240,7 @@ async def _agent_session_health_check() -> None:
     for entry in running_sessions:
         checked += 1
         try:
-            worker_key = entry.chat_id or entry.project_key
+            worker_key = entry.worker_key
             worker = _active_workers.get(worker_key)
             worker_alive = worker is not None and not worker.done()
 
@@ -1301,7 +1317,7 @@ async def _agent_session_health_check() -> None:
                         entry.agent_session_id,
                         worker_key,
                     )
-                    _ensure_worker(worker_key)
+                    _ensure_worker(worker_key, is_project_keyed=entry.is_project_keyed)
                 recovered += 1
         except Exception:
             logger.exception(
@@ -1314,7 +1330,7 @@ async def _agent_session_health_check() -> None:
     for entry in pending_sessions:
         checked += 1
         try:
-            worker_key = entry.chat_id or entry.project_key
+            worker_key = entry.worker_key
             worker = _active_workers.get(worker_key)
             worker_alive = worker is not None and not worker.done()
 
@@ -1353,7 +1369,7 @@ async def _agent_session_health_check() -> None:
                         worker_key,
                         pending_seconds,
                     )
-                    _ensure_worker(worker_key)
+                    _ensure_worker(worker_key, is_project_keyed=entry.is_project_keyed)
                 workers_started += 1
         except Exception:
             logger.exception(
@@ -1529,15 +1545,16 @@ async def _session_notify_listener() -> None:
                         continue
                     try:
                         data = json.loads(message["data"])
-                        chat_id = data.get("chat_id")
+                        wk = data.get("worker_key") or data.get("chat_id")
+                        is_pk = data.get("is_project_keyed", False)
                         session_id = data.get("session_id")
-                        if chat_id is not None:
+                        if wk is not None:
                             logger.info(
-                                "Received session notify: chat_id=%s session_id=%s",
-                                chat_id,
+                                "Received session notify: worker_key=%s session_id=%s",
+                                wk,
                                 session_id,
                             )
-                            loop.call_soon_threadsafe(notify_queue.put_nowait, chat_id)
+                            loop.call_soon_threadsafe(notify_queue.put_nowait, (wk, is_pk))
                     except json.JSONDecodeError as e:
                         logger.warning("Session notify: bad JSON payload: %s", e)
                     except Exception as e:
@@ -1570,12 +1587,13 @@ async def _session_notify_listener() -> None:
             task = asyncio.create_task(listener_future)
 
             while True:
-                chat_id = await notify_queue.get()
-                if chat_id is None:
+                item = await notify_queue.get()
+                if item is None:
                     # Thread exited (error path); restart after delay
                     break
-                _ensure_worker(chat_id)
-                event = _active_events.get(chat_id)
+                wk, is_pk = item
+                _ensure_worker(wk, is_project_keyed=is_pk)
+                event = _active_events.get(wk)
                 if event is not None:
                     event.set()
 
@@ -1616,12 +1634,12 @@ DRAIN_TIMEOUT = 1.5  # seconds
 _active_workers: dict[str, asyncio.Task] = {}
 _active_events: dict[str, asyncio.Event] = {}
 
-# Tracks chat_ids for which asyncio.create_task() has been called but the task
+# Tracks worker_keys for which asyncio.create_task() has been called but the task
 # has not yet registered itself in _active_workers (i.e., the spawn is in-flight).
 # Since _ensure_worker() is synchronous (no await), check-and-set within the
 # function is atomic in the cooperative event loop, preventing duplicate workers
 # from being spawned when the health check iterates multiple pending sessions
-# sharing the same chat_id before either task is live in _active_workers.
+# sharing the same worker_key before either task is live in _active_workers.
 _starting_workers: set[str] = set()
 
 # Global concurrency ceiling: limits total simultaneously executing sessions
@@ -1715,15 +1733,11 @@ def _check_restart_flag() -> bool:
     if not _RESTART_FLAG.exists():
         return False
 
-    # Check all chats for running sessions
-    for chat_key in list(_active_workers.keys()):
-        running = AgentSession.query.filter(chat_id=chat_key, status="running")
-        if running:
-            logger.info(
-                f"[chat:{chat_key}] Restart requested but "
-                f"{len(running)} session(s) still running — deferring"
-            )
-            return False
+    # Check all workers for running sessions
+    running = list(AgentSession.query.filter(status="running"))
+    if running:
+        logger.info(f"Restart requested but {len(running)} session(s) still running — deferring")
+        return False
 
     flag_content = _RESTART_FLAG.read_text().strip()
     logger.info(f"Restart flag found ({flag_content}), no running sessions — restarting bridge")
@@ -1814,102 +1828,85 @@ async def enqueue_agent_session(
         session_type=session_type,
         project_config=project_config,
     )
-    _ensure_worker(chat_id)
+    # Compute worker_key from the same inputs the property uses, without re-querying Redis
+    if session_type == SessionType.TEAMMATE:
+        wk = chat_id or project_key
+    elif session_type == SessionType.PM:
+        wk = project_key
+    elif slug:
+        wk = chat_id or project_key
+    else:
+        wk = project_key
+    is_pk = wk == project_key
 
-    # Signal the worker that new work is available. asyncio.Event is level-triggered:
-    # set() latches until clear(), so even if the worker is busy executing a session,
-    # it will see the event when it next checks.
-    event = _active_events.get(chat_id)
+    _ensure_worker(wk, is_project_keyed=is_pk)
+
+    event = _active_events.get(wk)
     if event is not None:
         event.set()
 
     log_prefix = f"[{correlation_id}]" if correlation_id else f"[{project_key}]"
     logger.info(
-        f"{log_prefix} Enqueued session (priority={priority}, depth={depth}, chat={chat_id})"
+        f"{log_prefix} Enqueued session (priority={priority}, depth={depth}, "
+        f"worker={wk}, chat={chat_id})"
     )
     return depth
 
 
-def _ensure_worker(chat_id: str) -> None:
-    """Start a worker for this chat if one isn't already running.
+def _ensure_worker(worker_key: str, is_project_keyed: bool = False) -> None:
+    """Start a worker for this worker_key if one isn't already running.
 
-    Workers are per-chat so different chat groups (even for the same project)
-    can process sessions in parallel. Within a chat, sessions run sequentially.
+    Workers are keyed by worker_key — either project_key (for PM and
+    dev-without-slug sessions that share the main working tree) or chat_id
+    (for teammate and slugged-dev sessions with isolated worktrees).
 
-    Creates an asyncio.Event for the chat if one doesn't exist. The event is
-    used by _worker_loop to wait for new work notifications from enqueue_agent_session().
+    Creates an asyncio.Event for the key if one doesn't exist. The event is
+    used by _worker_loop to wait for new work notifications.
 
     Idempotency guarantee (two-guard mechanism):
-    1. _active_workers[chat_id]: task exists and is not done — steady-state guard.
-    2. _starting_workers: chat_id was added here before create_task() and removed
+    1. _active_workers[worker_key]: task exists and is not done — steady-state guard.
+    2. _starting_workers: worker_key was added here before create_task() and removed
        once the task is live — startup-race guard.
-
-    Because this function is synchronous (no await), the check-and-set of both
-    guards is atomic within the cooperative asyncio event loop.  The health check
-    loop may call _ensure_worker() for every pending session sharing a chat_id
-    before any task registers itself in _active_workers; _starting_workers
-    prevents the second (and any subsequent) call from spawning a duplicate worker.
     """
-    existing = _active_workers.get(chat_id)
+    existing = _active_workers.get(worker_key)
     if existing and not existing.done():
         return
-    if chat_id in _starting_workers:
-        logger.warning(f"[chat:{chat_id}] Duplicate worker spawn blocked — spawn already in-flight")
+    if worker_key in _starting_workers:
+        logger.warning(f"[worker:{worker_key}] Duplicate worker spawn blocked — in-flight")
         return
-    # Mark the spawn as in-flight before create_task() so any re-entrant
-    # call within the same event-loop turn sees it immediately.
-    _starting_workers.add(chat_id)
+    _starting_workers.add(worker_key)
     try:
-        # Create or reset the event for this chat's worker
         event = asyncio.Event()
-        _active_events[chat_id] = event
-        task = asyncio.create_task(_worker_loop(chat_id, event))
-        _active_workers[chat_id] = task
-        # Once the task is live in _active_workers the steady-state guard takes
-        # over; remove from _starting_workers via done_callback for safety, but
-        # also do it here immediately so the set doesn't grow unbounded for
-        # long-lived workers.
-        _starting_workers.discard(chat_id)
-        task.add_done_callback(lambda _: _starting_workers.discard(chat_id))
-        logger.info(f"[chat:{chat_id}] Started session queue worker")
+        _active_events[worker_key] = event
+        task = asyncio.create_task(_worker_loop(worker_key, event, is_project_keyed))
+        _active_workers[worker_key] = task
+        _starting_workers.discard(worker_key)
+        task.add_done_callback(lambda _: _starting_workers.discard(worker_key))
+        logger.info(f"[worker:{worker_key}] Started session queue worker")
     except Exception:
-        # Ensure _starting_workers never leaks on unexpected create_task failure.
-        _starting_workers.discard(chat_id)
+        _starting_workers.discard(worker_key)
         raise
 
 
-async def _worker_loop(chat_id: str, event: asyncio.Event) -> None:
-    """
-    Process sessions sequentially for one chat.
+async def _worker_loop(
+    worker_key: str, event: asyncio.Event, is_project_keyed: bool = False
+) -> None:
+    """Process sessions sequentially for one worker_key.
 
-    In bridge mode (default): runs until queue is empty, then exits
-    (restarted on next enqueue via _ensure_worker).
+    Workers are keyed by worker_key — either project_key (PM and dev-without-slug)
+    or chat_id (teammate and dev-with-slug).  Project-keyed workers serialize
+    sessions that share the main working tree.  Chat-keyed workers handle
+    sessions with isolated worktrees or no shared state.
 
-    In standalone mode (VALOR_WORKER_MODE=standalone): waits indefinitely
-    for new work — never exits on empty queue. This eliminates the 10s
-    launchd restart gap that breaks nudge cycles in multi-turn pipelines.
-
-    After each session, checks for a restart flag written by remote-update.sh.
-
-    Workers are per-chat_id so different chat groups can run in parallel.
-    Within a chat, sessions run sequentially to prevent git conflicts.
-
-    Uses an Event-based drain strategy to reliably pick up pending sessions:
-    1. After completing a session, clear the event and wait for it (with DRAIN_TIMEOUT).
-    2. If the event fires (new work enqueued), pop the next session via _pop_agent_session().
-    3. If the timeout expires, use _pop_agent_session_with_fallback() which includes a
-       synchronous Popoto query that bypasses the to_thread() index visibility race.
-    4. (Bridge mode only) Before exiting, run a final _pop_agent_session_with_fallback().
-
-    CancelledError is caught explicitly to ensure proper session completion
-    and worker cleanup instead of silent death.
+    In standalone mode (VALOR_WORKER_MODE=standalone): waits indefinitely for new work.
+    In bridge mode (default): runs until queue is empty, then exits.
     """
     standalone = os.environ.get("VALOR_WORKER_MODE") == "standalone"
     try:
         while True:
             # Check shutdown flag before starting new work
             if _shutdown_requested:
-                logger.info(f"[chat:{chat_id}] Shutdown requested, worker exiting")
+                logger.info(f"[worker:{worker_key}] Shutdown requested, worker exiting")
                 break
 
             # Acquire global concurrency slot BEFORE popping — ensures that
@@ -1921,7 +1918,7 @@ async def _worker_loop(chat_id: str, event: asyncio.Event) -> None:
             _semaphore_acquired = semaphore is not None
 
             try:
-                session = await _pop_agent_session(chat_id)
+                session = await _pop_agent_session(worker_key, is_project_keyed)
             except BaseException:
                 if _semaphore_acquired:
                     semaphore.release()
@@ -1941,14 +1938,14 @@ async def _worker_loop(chat_id: str, event: asyncio.Event) -> None:
                     # Persistent mode: wait indefinitely for new work
                     await event.wait()
                     if _shutdown_requested:
-                        logger.info(f"[chat:{chat_id}] Woke from wait, shutdown requested")
+                        logger.info(f"[worker:{worker_key}] Woke from wait, shutdown requested")
                         break
                     # Re-acquire semaphore before retry pop
                     if semaphore is not None:
                         await semaphore.acquire()
                         _semaphore_acquired = True
                     try:
-                        session = await _pop_agent_session(chat_id)
+                        session = await _pop_agent_session(worker_key, is_project_keyed)
                     except BaseException:
                         if _semaphore_acquired:
                             semaphore.release()
@@ -1969,7 +1966,7 @@ async def _worker_loop(chat_id: str, event: asyncio.Event) -> None:
                             await semaphore.acquire()
                             _semaphore_acquired = True
                         try:
-                            session = await _pop_agent_session(chat_id)
+                            session = await _pop_agent_session(worker_key, is_project_keyed)
                         except BaseException:
                             if _semaphore_acquired:
                                 semaphore.release()
@@ -1986,7 +1983,9 @@ async def _worker_loop(chat_id: str, event: asyncio.Event) -> None:
                             await semaphore.acquire()
                             _semaphore_acquired = True
                         try:
-                            session = await _pop_agent_session_with_fallback(chat_id)
+                            session = await _pop_agent_session_with_fallback(
+                                worker_key, is_project_keyed
+                            )
                         except BaseException:
                             if _semaphore_acquired:
                                 semaphore.release()
@@ -1998,9 +1997,7 @@ async def _worker_loop(chat_id: str, event: asyncio.Event) -> None:
                                 _semaphore_acquired = False
 
                 if session is not None:
-                    logger.info(
-                        f"[chat:{chat_id}] Drain guard caught session that would have been lost"
-                    )
+                    logger.info(f"[worker:{worker_key}] Drain guard caught session")
                 elif standalone:
                     # Persistent mode: event fired but no session found — loop back
                     continue
@@ -2011,7 +2008,9 @@ async def _worker_loop(chat_id: str, event: asyncio.Event) -> None:
                         await semaphore.acquire()
                         _semaphore_acquired = True
                     try:
-                        session = await _pop_agent_session_with_fallback(chat_id)
+                        session = await _pop_agent_session_with_fallback(
+                            worker_key, is_project_keyed
+                        )
                     except BaseException:
                         if _semaphore_acquired:
                             semaphore.release()
@@ -2019,14 +2018,14 @@ async def _worker_loop(chat_id: str, event: asyncio.Event) -> None:
                         raise
                     if session is not None:
                         logger.warning(
-                            f"[chat:{chat_id}] Found pending session at exit time: "
+                            f"[worker:{worker_key}] Found pending session at exit time: "
                             f"{session.agent_session_id} — processing instead of exiting"
                         )
                     else:
                         if _semaphore_acquired:
                             semaphore.release()
                             _semaphore_acquired = False
-                        logger.info(f"[chat:{chat_id}] Queue empty, worker exiting")
+                        logger.info(f"[worker:{worker_key}] Queue empty, worker exiting")
                         if _check_restart_flag():
                             _trigger_restart()
                         break
@@ -2037,9 +2036,9 @@ async def _worker_loop(chat_id: str, event: asyncio.Event) -> None:
                 await _execute_agent_session(session)
             except asyncio.CancelledError:
                 logger.warning(
-                    "[chat:%s] Worker cancelled during session %s — session interrupted, "
+                    "[worker:%s] Worker cancelled during session %s — session interrupted, "
                     "will be re-queued by startup recovery",
-                    chat_id,
+                    worker_key,
                     session.agent_session_id,
                 )
                 try:
@@ -2060,16 +2059,18 @@ async def _worker_loop(chat_id: str, event: asyncio.Event) -> None:
 
                 if isinstance(e, CircuitOpenError):
                     logger.warning(
-                        "[chat:%s] Session %s deferred (circuit open) — "
+                        "[worker:%s] Session %s deferred (circuit open) — "
                         "will retry when service recovers",
-                        chat_id,
+                        worker_key,
                         session.agent_session_id,
                     )
                     # Don't complete the session — leave it for health check to retry
                     session_completed = True
                     break  # Exit worker loop; health check will restart
                 else:
-                    logger.error(f"[chat:{chat_id}] Session {session.agent_session_id} failed: {e}")
+                    logger.error(
+                        f"[worker:{worker_key}] Session {session.agent_session_id} failed: {e}"
+                    )
                     session_failed = True
             finally:
                 if not session_completed:
@@ -2120,27 +2121,27 @@ async def _worker_loop(chat_id: str, event: asyncio.Event) -> None:
                         fresh = AgentSession.query.get(redis_key=session.db_key.redis_key)
                         if not fresh:
                             logger.info(
-                                "[chat:%s] Session %s no longer exists in Redis "
+                                "[worker:%s] Session %s no longer exists in Redis "
                                 "(likely recreated by nudge fallback) — skipping "
                                 "completion",
-                                chat_id,
+                                worker_key,
                                 session.agent_session_id,
                             )
                         elif fresh.status == "pending":
                             logger.info(
-                                "[chat:%s] Session %s has status 'pending' in Redis "
+                                "[worker:%s] Session %s has status 'pending' in Redis "
                                 "(nudge was enqueued) — skipping completion to "
                                 "preserve nudge",
-                                chat_id,
+                                worker_key,
                                 session.agent_session_id,
                             )
                         else:
                             await _complete_agent_session(session, failed=session_failed)
                     except Exception as guard_err:
                         logger.warning(
-                            "[chat:%s] Nudge guard check failed for %s: %s "
+                            "[worker:%s] Nudge guard check failed for %s: %s "
                             "— completing session as fallback",
-                            chat_id,
+                            worker_key,
                             session.agent_session_id,
                             guard_err,
                         )
@@ -2155,7 +2156,7 @@ async def _worker_loop(chat_id: str, event: asyncio.Event) -> None:
 
             # Check shutdown flag after each completed session
             if _shutdown_requested:
-                logger.info(f"[chat:{chat_id}] Shutdown requested after session, exiting")
+                logger.info(f"[worker:{worker_key}] Shutdown requested after session, exiting")
                 break
 
             # Check restart flag after each completed session
@@ -2164,10 +2165,10 @@ async def _worker_loop(chat_id: str, event: asyncio.Event) -> None:
                 break
 
     except asyncio.CancelledError:
-        logger.info("[chat:%s] Worker loop cancelled", chat_id)
+        logger.info("[worker:%s] Worker loop cancelled", worker_key)
     finally:
-        _active_workers.pop(chat_id, None)
-        _active_events.pop(chat_id, None)
+        _active_workers.pop(worker_key, None)
+        _active_events.pop(worker_key, None)
 
 
 def _find_valor_calendar() -> str:
@@ -2352,7 +2353,7 @@ async def _enqueue_nudge(
         fields["priority"] = "high"
         fields["task_list_id"] = task_list_id
         await AgentSession.async_create(**fields)
-        _ensure_worker(session.chat_id)
+        _ensure_worker(session.worker_key, is_project_keyed=session.is_project_keyed)
         logger.info(
             f"[{session.project_key}] Recreated session "
             f"{session.session_id} from AgentSession metadata "
@@ -2387,7 +2388,7 @@ async def _enqueue_nudge(
         reason=f"nudge re-enqueue (auto_continue_count={auto_continue_count})",
     )
 
-    _ensure_worker(session.chat_id)
+    _ensure_worker(session.worker_key, is_project_keyed=session.is_project_keyed)
     logger.info(
         f"[{session.project_key}] Reused session {session.session_id} for continuation "
         f"(auto_continue_count={auto_continue_count})"
@@ -2472,7 +2473,7 @@ def steer_session(session_id: str, message: str) -> dict:
             }
 
         session.push_steering_message(message)
-        _ensure_worker(session.chat_id)
+        _ensure_worker(session.worker_key, is_project_keyed=session.is_project_keyed)
         logger.info(
             f"[steering] Queued steering message for session {session_id}: "
             f"{message[:80]!r} (status={current_status})"

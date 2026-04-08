@@ -113,7 +113,7 @@ class TestPersistentMode:
         pop_results = [session1, None, session2, None]
         pop_index = 0
 
-        async def mock_pop(cid):
+        async def mock_pop(cid, is_project_keyed=False):
             nonlocal pop_index
             if pop_index < len(pop_results):
                 result = pop_results[pop_index]
@@ -221,7 +221,7 @@ class TestGracefulShutdown:
         # Pop returns session1 first, then session2
         pop_results = iter([session1, session2])
 
-        async def mock_pop(cid):
+        async def mock_pop(cid, is_project_keyed=False):
             return next(pop_results, None)
 
         async def fake_execute(session):

@@ -52,22 +52,49 @@ The worker's startup sequence is deterministic:
 | 2 | `cleanup_corrupted_agent_sessions()` | Remove malformed session records |
 | 3 | `_recover_interrupted_agent_sessions_startup()` | Reset running sessions to pending (orphaned from prior process) |
 | 4 | `_cleanup_orphaned_claude_processes()` | Kill orphaned Claude SDK subprocesses (PPID=1) |
-| 5 | `_ensure_worker(chat_id)` for each pending session | Kick per-chat worker loops for queued sessions |
+| 5 | `_ensure_worker(worker_key)` for each pending session | Kick per-worker-key loops for queued sessions |
 | 6 | `_agent_session_health_loop()` | Background task: periodic session health checks, orphan detection (safety net) |
 | 7 | `_session_notify_listener()` | Background task: subscribe to `valor:sessions:new` pub/sub, wake worker on new session (~1s pickup) |
 
-At runtime, the worker processes sessions via `_worker_loop(chat_id)` until the queue is empty, then waits for new enqueue events.
+At runtime, the worker processes sessions via `_worker_loop(worker_key)` until the queue is empty, then waits for new enqueue events.
 
-## Chat Serialization and Worker Deduplication
+## Worker Key Routing (issue #831)
 
-Each `chat_id` has at most one active `_worker_loop` task at any time. This is the **chat serialization invariant**: all sessions belonging to the same chat are processed strictly in FIFO order, never concurrently. The invariant is enforced by `_ensure_worker()` through a dual-guard mechanism:
+Workers are keyed by `worker_key` — a computed property on `AgentSession` that reflects the session's actual isolation level, not its Telegram communication topology. This prevents PM sessions from different Telegram threads (different `chat_id`s) from racing each other when they share the same git working tree.
+
+### Decision Table
+
+| Session type | Slug? | `worker_key` | Behavior |
+|---|---|---|---|
+| `pm` | N/A | `project_key` | Serialized per project |
+| `dev` | yes (worktree) | `chat_id` | Parallel-safe, isolated worktree |
+| `dev` | no (main repo) | `project_key` | Serialized per project |
+| `teammate` | N/A | `chat_id` | Always parallel-safe |
+
+### Why `chat_id` Is Not the Isolation Key
+
+`chat_id` is a communication topology concept — it tells you which Telegram thread a message came from. But isolation depends on whether sessions share mutable state (the git working tree). Two PM sessions from different threads both write to the same `main` branch; they must serialize regardless of their `chat_id`.
+
+### Two Worker Loop Archetypes
+
+1. **Project-keyed worker** (`worker_key == project_key`): Handles PM sessions and dev sessions without a slug. These share the main repo working tree and must run one at a time per project. The `_pop_agent_session` function filters by `project_key` and only pops sessions whose `worker_key` matches.
+
+2. **Chat-keyed worker** (`worker_key == chat_id`): Handles teammate sessions and slugged dev sessions. These either have no shared state (teammate) or use isolated worktrees (slugged dev), so they can run in parallel across different `chat_id`s.
+
+### `is_project_keyed` Discriminator
+
+Since `worker_key` is an opaque string, callers pass `is_project_keyed: bool` alongside it so `_pop_agent_session` can use the correct filter predicate. This avoids fragile string-comparison against known project keys.
+
+## Worker Serialization and Deduplication
+
+Each `worker_key` has at most one active `_worker_loop` task at any time. This is the **serialization invariant**: all sessions belonging to the same worker key are processed strictly in FIFO order, never concurrently. The invariant is enforced by `_ensure_worker()` through a dual-guard mechanism:
 
 | Guard | What it covers |
 |-------|---------------|
-| `_active_workers[chat_id]` | **Steady-state**: task exists and `.done()` is False — already running, do nothing. |
+| `_active_workers[worker_key]` | **Steady-state**: task exists and `.done()` is False — already running, do nothing. |
 | `_starting_workers` (set) | **Startup race**: `create_task()` has been called but the task has not yet registered itself in `_active_workers`. A second call that arrives in the same event-loop turn sees this flag and returns without spawning another task. |
 
-Because `_ensure_worker()` is a plain synchronous function (no `await`), the check-and-set of both guards is atomic within the cooperative asyncio event loop. This is particularly important during the health-check loop, which may iterate many pending sessions sharing the same `chat_id` and call `_ensure_worker()` for each one before any task is live in `_active_workers`.
+Because `_ensure_worker()` is a plain synchronous function (no `await`), the check-and-set of both guards is atomic within the cooperative asyncio event loop. This is particularly important during the health-check loop, which may iterate many pending sessions sharing the same `worker_key` and call `_ensure_worker()` for each one before any task is live in `_active_workers`.
 
 **Lifecycle of `_starting_workers`:**
 
@@ -80,13 +107,13 @@ The `_worker_loop` removes itself from `_active_workers` in its `finally` block.
 
 ## Concurrency Controls (issue #810)
 
-### Per-Chat Serialization Guarantee
+### Per-Worker-Key Serialization Guarantee
 
-Sessions belonging to the same `chat_id` always execute **strictly one at a time**. This is enforced by the chat serialization invariant: each `chat_id` has exactly one `_worker_loop` task (see Worker Deduplication above), and that task pops and executes sessions sequentially.
+Sessions belonging to the same `worker_key` always execute **strictly one at a time**. This is enforced by the serialization invariant: each `worker_key` has exactly one `_worker_loop` task (see Worker Serialization above), and that task pops and executes sessions sequentially.
 
 ### Global Session Ceiling (`MAX_CONCURRENT_SESSIONS`)
 
-A global asyncio semaphore limits how many sessions can execute simultaneously across **all** `chat_id` values:
+A global asyncio semaphore limits how many sessions can execute simultaneously across **all** worker keys:
 
 ```bash
 # Set the ceiling (default: 3)
@@ -106,7 +133,7 @@ MAX_CONCURRENT_SESSIONS=3
 
 ### Redis Pop Lock (TOCTOU Prevention)
 
-A short-lived Redis lock (`SETNX worker:pop_lock:{chat_id}`) wraps the query→transition block in both pop paths:
+A short-lived Redis lock (`SETNX worker:pop_lock:{worker_key}`) wraps the query→transition block in both pop paths:
 
 | Pop path | Lock coverage |
 |----------|--------------|
@@ -139,8 +166,8 @@ The worker uses two mechanisms to discover new sessions:
 
 | Mechanism | Latency | How It Works |
 |-----------|---------|-------------|
-| **Redis pub/sub** (fast path) | ~1 second | `_push_agent_session()` publishes `{"chat_id", "session_id"}` to `valor:sessions:new`. `_session_notify_listener()` subscribes and calls `_ensure_worker(chat_id)` immediately. |
-| **Health check loop** (safety net) | Up to 10 minutes | `_agent_session_health_loop()` fires every 300s. Sessions pending longer than 300s trigger `_ensure_worker(chat_id)` recovery. |
+| **Redis pub/sub** (fast path) | ~1 second | `_push_agent_session()` publishes `{"chat_id", "session_id", "worker_key", "is_project_keyed"}` to `valor:sessions:new`. `_session_notify_listener()` subscribes and calls `_ensure_worker(worker_key)` immediately. |
+| **Health check loop** (safety net) | Up to 10 minutes | `_agent_session_health_loop()` fires every 300s. Sessions pending longer than 300s trigger `_ensure_worker(worker_key)` recovery. |
 
 The fast path covers normal operation. The health check catches edge cases: missed pub/sub messages (network blip, worker restart during publish), sessions created by paths that bypass `_push_agent_session()`, and sessions orphaned from a prior worker process.
 

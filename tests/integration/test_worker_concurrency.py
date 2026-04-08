@@ -4,6 +4,8 @@ Validates:
 1. Sessions with the same chat_id execute strictly one at a time (per-chat serialization)
 2. At most MAX_CONCURRENT_SESSIONS sessions run simultaneously across all chat_ids
 3. The global semaphore prevents resource exhaustion when multiple chat_ids are active
+4. PM sessions from different chat_ids but same project_key serialize (project-keyed workers)
+5. Dev sessions with slug from different chat_ids run concurrently (chat-keyed workers)
 
 All tests use redis_test_db fixture (autouse=True in conftest.py) for Redis isolation.
 """
@@ -21,6 +23,7 @@ from agent.agent_session_queue import (
     _pop_agent_session,
     _starting_workers,
 )
+from config.enums import SessionType
 from models.agent_session import AgentSession
 
 
@@ -299,6 +302,110 @@ class TestPerChatSerialization:
                 f"Peak concurrent sessions ({peak_running[0]}) exceeded "
                 f"MAX_CONCURRENT_SESSIONS={max_sessions}. "
                 "Global semaphore is not working correctly."
+            )
+        finally:
+            _queue._global_session_semaphore = original_semaphore
+            for cid in chat_ids:
+                task = _active_workers.pop(cid, None)
+                if task:
+                    task.cancel()
+                _starting_workers.discard(cid)
+
+
+class TestPMProjectKeySerialization:
+    """Two PM sessions from different chat_ids but same project_key must serialize."""
+
+    @pytest.mark.asyncio
+    async def test_two_pm_sessions_different_chats_execute_serially(self):
+        """PM sessions from different Telegram threads for the same project must
+        serialize via the project-keyed worker, preventing git conflicts."""
+        project_key = "test-pm-serial"
+
+        running_count = [0]
+        peak_running = [0]
+        count_lock = asyncio.Lock()
+
+        for i, cid in enumerate(["pm-chat-A", "pm-chat-B"]):
+            _create_test_session(
+                chat_id=cid,
+                session_id=f"pm-serial-{i}",
+                project_key=project_key,
+                session_type=SessionType.PM,
+                created_at=time.time() + i * 0.001,
+            )
+
+        async def fake_execute(session):
+            async with count_lock:
+                running_count[0] += 1
+                peak_running[0] = max(peak_running[0], running_count[0])
+            await asyncio.sleep(0.05)
+            async with count_lock:
+                running_count[0] -= 1
+
+        original_semaphore = _queue._global_session_semaphore
+        try:
+            _queue._global_session_semaphore = asyncio.Semaphore(5)
+            with patch("agent.agent_session_queue._execute_agent_session", new=fake_execute):
+                # Both PM sessions should route to the same project-keyed worker
+                _ensure_worker(project_key, is_project_keyed=True)
+                await asyncio.sleep(0.5)
+
+            assert peak_running[0] <= 1, (
+                f"Peak concurrent PM sessions was {peak_running[0]}, expected ≤ 1. "
+                "Project-keyed serialization is broken."
+            )
+        finally:
+            _queue._global_session_semaphore = original_semaphore
+            task = _active_workers.pop(project_key, None)
+            if task:
+                task.cancel()
+            _starting_workers.discard(project_key)
+
+
+class TestDevWorktreeParallelism:
+    """Dev sessions with slug (worktree-isolated) on different chat_ids run concurrently."""
+
+    @pytest.mark.asyncio
+    async def test_two_slugged_dev_sessions_execute_concurrently(self):
+        """Dev sessions with slug set should use chat_id as worker_key,
+        allowing parallel execution across different chats."""
+        project_key = "test-dev-parallel"
+        chat_ids = ["dev-chat-A", "dev-chat-B"]
+
+        running_count = [0]
+        peak_running = [0]
+        count_lock = asyncio.Lock()
+
+        for i, cid in enumerate(chat_ids):
+            _create_test_session(
+                chat_id=cid,
+                session_id=f"dev-parallel-{i}",
+                project_key=project_key,
+                session_type=SessionType.DEV,
+                slug=f"feat-{i}",
+                created_at=time.time() + i * 0.001,
+            )
+
+        async def fake_execute(session):
+            async with count_lock:
+                running_count[0] += 1
+                peak_running[0] = max(peak_running[0], running_count[0])
+            await asyncio.sleep(0.1)
+            async with count_lock:
+                running_count[0] -= 1
+
+        original_semaphore = _queue._global_session_semaphore
+        try:
+            _queue._global_session_semaphore = asyncio.Semaphore(5)
+            with patch("agent.agent_session_queue._execute_agent_session", new=fake_execute):
+                # Each slugged dev session gets its own chat-keyed worker
+                for cid in chat_ids:
+                    _ensure_worker(cid, is_project_keyed=False)
+                await asyncio.sleep(0.5)
+
+            assert peak_running[0] == 2, (
+                f"Peak concurrent dev sessions was {peak_running[0]}, expected 2. "
+                "Slugged dev sessions should run in parallel."
             )
         finally:
             _queue._global_session_semaphore = original_semaphore

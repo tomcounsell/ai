@@ -45,15 +45,21 @@ class TestWorkerDrainEventNotification:
 
     @pytest.mark.asyncio
     async def test_event_set_when_job_enqueued(self):
-        """enqueue_agent_session should set the Event for the chat_id after pushing."""
+        """enqueue_agent_session should set the Event for the worker_key after pushing.
+
+        For a teammate session, worker_key == chat_id. For a PM session,
+        worker_key == project_key. This test uses teammate to verify the
+        event is keyed by the computed worker_key.
+        """
+        from config.enums import SessionType
+
         chat_id = "event_test_chat"
         event = asyncio.Event()
+        # For teammate sessions, worker_key == chat_id
         _active_events[chat_id] = event
 
-        # Event should not be set initially
         assert not event.is_set()
 
-        # Mock _push_agent_session and _ensure_worker to isolate the event.set() call
         with (
             patch(
                 "agent.agent_session_queue._push_agent_session",
@@ -70,12 +76,11 @@ class TestWorkerDrainEventNotification:
                 sender_name="Test",
                 chat_id=chat_id,
                 telegram_message_id=1,
+                session_type=SessionType.TEAMMATE,
             )
 
-        # Event should now be set
         assert event.is_set()
 
-        # Cleanup
         _active_events.pop(chat_id, None)
 
     @pytest.mark.asyncio
@@ -204,14 +209,14 @@ class TestExitTimeDiagnostic:
         async def fake_execute(session):
             sessions_executed.append(session.message_text)
 
-        async def mock_pop_agent_session_with_fallback(cid):
+        async def mock_pop_agent_session_with_fallback(cid, is_project_keyed=False):
             nonlocal call_count
             call_count += 1
             if call_count <= 1:
                 # First fallback call (drain timeout): return None
                 return None
             # Second call (exit-time safety): find the orphaned session
-            return await original_fallback(cid)
+            return await original_fallback(cid, is_project_keyed)
 
         with (
             patch("agent.agent_session_queue._execute_agent_session", side_effect=fake_execute),
