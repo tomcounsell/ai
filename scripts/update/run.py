@@ -146,7 +146,7 @@ RECENT_ACTIVITY_WINDOW = (
 
 
 def _cleanup_stale_sessions(project_dir: Path, age_minutes: int = 120) -> tuple[int, int]:
-    """Kill running/pending sessions with no live process.
+    """Kill running sessions with no live process.
 
     Primary liveness check: ``updated_at`` recency. Sessions whose ``updated_at``
     timestamp is within ``RECENT_ACTIVITY_WINDOW`` (30 min) are skipped — they have
@@ -191,7 +191,9 @@ def _cleanup_stale_sessions(project_dir: Path, age_minutes: int = 120) -> tuple[
     killed_count = 0
     skipped_live = 0
 
-    for status in ("running", "pending"):
+    # pending sessions are never stale — they were never started;
+    # "pending" was added in PR #739 by mistake
+    for status in ("running",):
         sessions = list(AgentSession.query.filter(status=status))
         for s in sessions:
             # Secondary defense: skip sessions with a live worker in the registry

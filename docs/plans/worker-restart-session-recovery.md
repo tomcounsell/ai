@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: In Progress
 type: bug
 appetite: Small
 owner: Valor
@@ -258,9 +258,16 @@ No agent integration required — this is an internal worker lifecycle fix. No M
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| high | Skeptic | Fix 2 overlaps with startup recovery — `_recover_interrupted_agent_sessions_startup()` in `worker/__main__.py` already re-queues stale `running` sessions to `pending` on new-worker boot. If the cancel handler also calls `transition_status(session, "pending")`, both paths fire on the same record; if `transition_status` is not idempotent for `pending→pending` it will error. | Simplify Fix 2 | Remove `transition_status` call from cancel handler; rely entirely on startup recovery. Cancel handler only needs to suppress `_complete_agent_session(failed=True)` and set `session_completed=True`. |
+| high | Adversary | Race condition analysis is incorrect — `session_completed=True` only guards the coroutine stack in the dying worker; it does not stop the update-script subprocess from calling `finalize_session()` on the same Redis record after the cancel handler sets status to `pending`. | Verify before build | Confirm whether `finalize_session` re-reads current status from Redis before writing, or operates on the stale passed-in object. |
+| high | Archaeologist | `"pending"` was added to the cleanup loop deliberately in PR #739 — plan should document why it was wrong from the start, not just remove it. | Add comment | Add inline comment: `# pending sessions are never stale — they were never started; "pending" was added in PR #739 by mistake` |
+| medium | Skeptic | Failure Mode 2 data flow conflates two sub-cases: inner-handler cancel (during `_execute_agent_session`) vs. outer cancel (between sessions). Tests must cover both. | Test authorship | `test_worker_cancel_requeue.py` must test both cancel scenarios with different mocking strategies. |
+| medium | Operator | "SDLC sessions are idempotent by design" is asserted, not verified. `stage_states` init code exists but enforcement (skipping completed stages on retry) is not confirmed. | Verify in build | Read `_execute_agent_session` to confirm it checks `stage_states` before each stage. |
+| medium | User | Re-queued conversational sessions will send a duplicate Telegram reply with no user notification. | Acceptable risk | Log a warning in session output: "Session interrupted by worker restart — retrying." |
+| low | Simplifier | Fix 2 simplification: remove `_complete_agent_session(failed=True)` from cancel handler; leave session in `running`; startup recovery on new worker re-queues it. Avoids the new race entirely. | Adopt | This is the preferred Fix 2 implementation. |
+| low | Archaeologist | Task 2 prose says `log_lifecycle_transition` call is "immediately before" but it is inside the `except asyncio.CancelledError:` block. | Prose fix | Clarify: "inside the `except asyncio.CancelledError:` block, before `_complete_agent_session`". |
 
 ---
 

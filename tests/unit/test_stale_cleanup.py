@@ -271,6 +271,62 @@ class TestCleanupUsesLifecycleLayer:
         assert killed == 1
 
 
+class TestCleanupPendingExclusion:
+    """pending sessions are never iterated — they have no process to clean up."""
+
+    def test_pending_sessions_never_killed(self):
+        """A stale pending session is not killed — _cleanup_stale_sessions skips it."""
+        stale_pending = _make_session(
+            session_id="p1",
+            agent_session_id="ap1",
+            status="pending",
+            age_seconds=10800,  # 3 hours old
+            updated_at_seconds_ago=3600,  # 1 hour since last update
+        )
+        # Only pending sessions in the mock — no running sessions
+        sessions_by_status = {"running": [], "pending": [stale_pending]}
+
+        killed, skipped, mock_finalize = _run_cleanup(sessions_by_status)
+
+        assert killed == 0, "pending sessions must never be killed"
+        assert skipped == 0
+        mock_finalize.assert_not_called()
+
+    def test_pending_sessions_excluded_from_loop(self):
+        """AgentSession.query.filter is never called with status='pending'."""
+        stale_pending = _make_session(status="pending", age_seconds=10800)
+        sessions_by_status = {"running": [], "pending": [stale_pending]}
+
+        from unittest.mock import call
+
+        from scripts.update.run import _cleanup_stale_sessions
+
+        with (
+            patch("models.agent_session.AgentSession") as mock_as_class,
+            patch("models.session_lifecycle.finalize_session"),
+        ):
+
+            def mock_filter(status=None):
+                return sessions_by_status.get(status, [])
+
+            mock_as_class.query.filter.side_effect = mock_filter
+
+            import agent.agent_session_queue as queue_module
+
+            original = getattr(queue_module, "_active_workers", {})
+            try:
+                queue_module._active_workers = {}
+                _cleanup_stale_sessions(Path("/tmp"))
+            finally:
+                queue_module._active_workers = original
+
+        # filter must only be called with status="running"
+        pending_calls = [
+            c for c in mock_as_class.query.filter.call_args_list if c == call(status="pending")
+        ]
+        assert len(pending_calls) == 0, "filter(status='pending') must never be called"
+
+
 class TestCleanupAgeThreshold:
     """Sessions younger than the threshold are not killed (via created_at fallback)."""
 
