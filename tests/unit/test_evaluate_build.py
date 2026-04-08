@@ -8,9 +8,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import patch
 
 # Add scripts to path for direct imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
@@ -19,7 +17,6 @@ import evaluate_build
 from evaluate_build import (
     _make_dry_run_verdicts,
     extract_section,
-    get_git_diff,
 )
 
 PLAN_WITH_AC = """\
@@ -161,7 +158,9 @@ class TestExitCodes:
             text=True,
             cwd=str(Path(__file__).parent.parent.parent),
         )
-        assert result.returncode == 3, f"Expected exit 3, got {result.returncode}. stderr: {result.stderr}"
+        assert result.returncode == 3, (
+            f"Expected exit 3, got {result.returncode}. stderr: {result.stderr}"
+        )
         assert "no Acceptance Criteria section" in result.stderr or "empty diff" in result.stderr
 
     def test_exit_code_3_on_empty_ac_section(self, tmp_path):
@@ -175,12 +174,16 @@ class TestExitCodes:
             text=True,
             cwd=str(Path(__file__).parent.parent.parent),
         )
-        assert result.returncode == 3, f"Expected exit 3, got {result.returncode}. stderr: {result.stderr}"
+        assert result.returncode == 3, (
+            f"Expected exit 3, got {result.returncode}. stderr: {result.stderr}"
+        )
 
     def test_exit_code_1_on_missing_plan(self):
         """Runs evaluate_build.py on a nonexistent file path, exits 1."""
         result = self._run_script(["/nonexistent/path/to/plan.md"])
-        assert result.returncode == 1, f"Expected exit 1, got {result.returncode}. stderr: {result.stderr}"
+        assert result.returncode == 1, (
+            f"Expected exit 1, got {result.returncode}. stderr: {result.stderr}"
+        )
 
     def test_exit_code_0_on_dry_run_with_ac(self, tmp_path):
         """Uses --dry-run flag on a plan with AC, exits 0 (all PASS)."""
@@ -190,7 +193,11 @@ class TestExitCodes:
         # We need to run in the worktree or repo root so git diff runs
         # In dry-run mode with AC section, it still needs a non-empty diff
         # Mock get_git_diff to return non-empty diff
-        with patch.object(evaluate_build, "get_git_diff", return_value="diff --git a/foo.py b/foo.py\n+some change"):
+        with patch.object(
+            evaluate_build,
+            "get_git_diff",
+            return_value="diff --git a/foo.py b/foo.py\n+some change",
+        ):
             with patch.object(sys, "argv", ["evaluate_build.py", "--dry-run", str(plan_file)]):
                 exit_code = evaluate_build.main()
         assert exit_code == 0
@@ -209,14 +216,17 @@ class TestVerdictFormatting:
             {"criterion": "criterion 2", "verdict": "PARTIAL", "evidence": "Partially found."},
         ]
 
-        with patch.object(evaluate_build, "get_git_diff", return_value="diff --git a/foo.py b/foo.py\n+change"):
+        with patch.object(
+            evaluate_build, "get_git_diff", return_value="diff --git a/foo.py b/foo.py\n+change"
+        ):
             with patch.object(evaluate_build, "evaluate_criteria", return_value=mock_verdicts):
                 with patch.object(sys, "argv", ["evaluate_build.py", str(plan_file)]):
                     import io
                     from contextlib import redirect_stdout
+
                     captured = io.StringIO()
                     with redirect_stdout(captured):
-                        exit_code = evaluate_build.main()
+                        evaluate_build.main()
 
         output = captured.getvalue()
         data = json.loads(output)
@@ -229,14 +239,21 @@ class TestVerdictFormatting:
         plan_file.write_text(PLAN_WITH_AC)
 
         mock_verdicts = [
-            {"criterion": "criterion 1", "verdict": "PARTIAL", "evidence": "Partially implemented."},
+            {
+                "criterion": "criterion 1",
+                "verdict": "PARTIAL",
+                "evidence": "Partially implemented.",
+            },
         ]
 
-        with patch.object(evaluate_build, "get_git_diff", return_value="diff --git a/foo.py\n+change"):
+        with patch.object(
+            evaluate_build, "get_git_diff", return_value="diff --git a/foo.py\n+change"
+        ):
             with patch.object(evaluate_build, "evaluate_criteria", return_value=mock_verdicts):
                 with patch.object(sys, "argv", ["evaluate_build.py", str(plan_file)]):
                     import io
                     from contextlib import redirect_stdout
+
                     captured = io.StringIO()
                     with redirect_stdout(captured):
                         exit_code = evaluate_build.main()
@@ -254,11 +271,14 @@ class TestVerdictFormatting:
             {"criterion": "criterion 1", "verdict": "FAIL", "evidence": "Not found in diff."},
         ]
 
-        with patch.object(evaluate_build, "get_git_diff", return_value="diff --git a/foo.py\n+change"):
+        with patch.object(
+            evaluate_build, "get_git_diff", return_value="diff --git a/foo.py\n+change"
+        ):
             with patch.object(evaluate_build, "evaluate_criteria", return_value=mock_verdicts):
                 with patch.object(sys, "argv", ["evaluate_build.py", str(plan_file)]):
                     import io
                     from contextlib import redirect_stdout
+
                     captured = io.StringIO()
                     with redirect_stdout(captured):
                         exit_code = evaluate_build.main()
@@ -270,11 +290,16 @@ class TestVerdictFormatting:
         plan_file = tmp_path / "test_plan.md"
         plan_file.write_text(PLAN_WITH_AC)
 
-        with patch.object(evaluate_build, "get_git_diff", return_value="diff --git a/foo.py\n+change"):
-            with patch.object(evaluate_build, "evaluate_criteria", side_effect=Exception("API timeout")):
+        with patch.object(
+            evaluate_build, "get_git_diff", return_value="diff --git a/foo.py\n+change"
+        ):
+            with patch.object(
+                evaluate_build, "evaluate_criteria", side_effect=Exception("API timeout")
+            ):
                 with patch.object(sys, "argv", ["evaluate_build.py", str(plan_file)]):
                     import io
                     from contextlib import redirect_stdout
+
                     captured = io.StringIO()
                     with redirect_stdout(captured):
                         exit_code = evaluate_build.main()
@@ -286,11 +311,16 @@ class TestVerdictFormatting:
         plan_file = tmp_path / "test_plan.md"
         plan_file.write_text(PLAN_WITH_AC)
 
-        with patch.object(evaluate_build, "get_git_diff", return_value="diff --git a/foo.py\n+change"):
-            with patch.object(evaluate_build, "evaluate_criteria", side_effect=json.JSONDecodeError("bad", "", 0)):
+        with patch.object(
+            evaluate_build, "get_git_diff", return_value="diff --git a/foo.py\n+change"
+        ):
+            with patch.object(
+                evaluate_build, "evaluate_criteria", side_effect=json.JSONDecodeError("bad", "", 0)
+            ):
                 with patch.object(sys, "argv", ["evaluate_build.py", str(plan_file)]):
                     import io
                     from contextlib import redirect_stdout
+
                     captured = io.StringIO()
                     with redirect_stdout(captured):
                         exit_code = evaluate_build.main()

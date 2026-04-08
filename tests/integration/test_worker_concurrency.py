@@ -10,8 +10,7 @@ All tests use redis_test_db fixture (autouse=True in conftest.py) for Redis isol
 
 import asyncio
 import time
-from datetime import UTC, datetime
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -67,8 +66,7 @@ class TestPopLockContention:
             # Second pop attempt should return None (lock held)
             result = await _pop_agent_session(chat_id)
             assert result is None, (
-                "When pop lock is held, _pop_agent_session must return None "
-                "to prevent TOCTOU race"
+                "When pop lock is held, _pop_agent_session must return None to prevent TOCTOU race"
             )
         finally:
             _release_pop_lock(chat_id)

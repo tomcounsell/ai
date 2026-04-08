@@ -30,6 +30,7 @@ ALLOWLIST = (
     "docs/plans/",
 )
 
+
 def _find_repo_root() -> Path:
     """Walk up from this file looking for a ``pyproject.toml`` marker."""
     here = Path(__file__).resolve()

@@ -84,7 +84,7 @@ When a session finishes execution, all paths converge on `finalize_session()`:
 
 The re-query is intentionally **status-filter-free** — it queries by `session_id` only, with no `status="running"` constraint. Filtering by status would return an empty list if the session had already transitioned away from `running` (via a concurrent path) before `_complete_agent_session()` fired, causing `finalize_session()` to operate on the stale in-memory object and corrupt the status index (the session would end up indexed under both the old and new status simultaneously). See issue #825.
 
-**Tie-breaking** when multiple records share the same `session_id`: prefer any record currently in `running` status (ensures the live session is finalized), then fall back to most-recent by `created_at` only if no running records exist. If no records are found at all, fall back to the original in-memory object.
+**Tie-breaking** when multiple records share the same `session_id`: prefer any record currently in `running` status (ensures the live session is finalized), then fall back to most-recent by `created_at` only if no running records exist. If no records are found at all, `finalize_session()` is called on the original in-memory object.
 
 ## Side Effect Consolidation
 

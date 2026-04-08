@@ -240,6 +240,15 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
 
     health_task.add_done_callback(_health_task_done)
 
+    def _health_task_done(t: asyncio.Task) -> None:
+        if t.cancelled():
+            return  # Normal shutdown path
+        exc = t.exception()
+        if exc is not None:
+            logger.error("Health monitor exited unexpectedly: %s", exc)
+
+    health_task.add_done_callback(_health_task_done)
+
     # Start pub/sub listener — delivers ~1s session pickup vs 5-minute health check
     notify_task = asyncio.create_task(_session_notify_listener(), name="session-notify-listener")
 

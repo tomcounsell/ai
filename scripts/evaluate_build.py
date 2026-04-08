@@ -92,7 +92,8 @@ def evaluate_criteria(criteria_text: str, diff_text: str) -> list[dict]:
 
     Returns a list of verdict dicts: {"criterion": str, "verdict": str, "evidence": str}
     """
-    prompt = f"""You are a build acceptance evaluator. Given a list of acceptance criteria and a git diff, assess each criterion.
+    prompt = f"""You are a build acceptance evaluator. Given a list of acceptance criteria \
+and a git diff, assess each criterion.
 
 For each criterion output:
 - verdict: "PASS" if clearly met, "PARTIAL" if partially met or uncertain, "FAIL" if not met
@@ -105,7 +106,8 @@ Git Diff (main..HEAD):
 {diff_text}
 
 Respond with valid JSON only:
-{{"verdicts": [{{"criterion": "<text>", "verdict": "PASS|PARTIAL|FAIL", "evidence": "<sentence>"}}]}}"""
+{{"verdicts": [{{"criterion": "<text>", "verdict": "PASS|PARTIAL|FAIL", \
+"evidence": "<sentence>"}}]}}"""
 
     client = anthropic.Anthropic()
     message = client.messages.create(
@@ -236,7 +238,9 @@ def main() -> int:
             pass_count += 1
             logger.info(f"AC criterion PASS — {criterion}: {evidence}")
 
-    logger.info(f"Evaluation complete: {pass_count} PASS, {partial_count} PARTIAL, {fail_count} FAIL")
+    logger.info(
+        f"Evaluation complete: {pass_count} PASS, {partial_count} PARTIAL, {fail_count} FAIL"
+    )
 
     if fail_count > 0:
         return 2
