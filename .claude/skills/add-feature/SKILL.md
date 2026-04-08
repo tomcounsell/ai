@@ -46,6 +46,61 @@ Step-by-step instructions for the most common use of this skill.
 - `do-pr-review/SKILL.md` - PR review and implementation validation
 - `setup/SKILL.md` - New machine configuration
 
+## Adding a Claude Code Agent
+
+Agents live in `.claude/agents/<name>.md`:
+
+```markdown
+---
+name: agent-name
+description: "One-sentence description. Used by the harness to select this agent — be specific about when to invoke it."
+model: sonnet
+color: cyan
+tools: ['*']
+---
+
+# Agent Name
+
+## Purpose
+
+What this agent does and when it's used.
+
+## Instructions
+
+- Focused behavioral instructions
+- What to do, what NOT to do
+- How to signal completion
+```
+
+### Read-only agents
+
+Use `disallowedTools` instead of restricting `tools`:
+
+```markdown
+---
+name: auditor
+description: Read-only agent that inspects and reports without modifying anything.
+disallowedTools: Write, Edit, NotebookEdit
+---
+```
+
+Do NOT use a specific tool list (e.g. `tools: [Read, Grep]`) — those names don't match Claude Code's internal tool identifiers and will be silently ignored.
+
+### Optional frontmatter fields
+
+| Field | Example | When to use |
+|-------|---------|-------------|
+| `model` | `sonnet`, `haiku` | Override default model |
+| `color` | `cyan`, `yellow`, `red` | Visual distinction in UI |
+| `disallowedTools` | `Write, Edit, NotebookEdit` | Read-only agents |
+| `hooks` | See builder.md | Post-tool side effects |
+
+### Examples (in `.claude/agents/`)
+
+- `builder.md` — full tool access, PostToolUse format hook
+- `validator.md` — read-only via `disallowedTools`
+- `dev-session.md` — SDK-driven session agent
+
 ## Adding to the Telegram Bridge
 
 The bridge is in `bridge/telegram_bridge.py`.
