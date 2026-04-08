@@ -73,7 +73,7 @@
       "respond_to_mentions": true,
       "respond_to_dms": false,
       "dm_persona": "teammate",
-      "mention_triggers": ["@valor", "valor", "hey valor"]
+      "mention_triggers": ["@valor", "valor", "valorengels", "hey valor"]
     },
     "response": {
       "typing_indicator": true,
