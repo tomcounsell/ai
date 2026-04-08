@@ -5,7 +5,7 @@ appetite: Large
 owner: Valor Engels
 created: 2026-04-08
 tracking: https://github.com/tomcounsell/ai/issues/773
-last_comment_id:
+last_comment_id: none
 ---
 
 # Sustainable Self-Healing: CircuitBreaker + Queue Governance
