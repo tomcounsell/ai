@@ -4,8 +4,7 @@ description: |
   Handles cloud infrastructure, deployments, and service management via Render.
   Invoke for queries about deploying services, checking logs, scaling instances,
   managing environment variables, or infrastructure operations.
-tools:
-  - render_*
+tools: ['*']
 model: haiku
 permissions:
   - mode: accept

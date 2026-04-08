@@ -2,6 +2,7 @@
 name: baseline-verifier
 description: "Subagent dispatched by do-test to classify test failures as regressions vs pre-existing by running failing tests against main. Returns structured JSON classification."
 color: yellow
+tools: ['*']
 ---
 
 # Baseline Verifier

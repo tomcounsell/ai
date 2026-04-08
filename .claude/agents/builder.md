@@ -8,6 +8,7 @@ hooks:
       hooks:
         - type: command
           command: "python $CLAUDE_PROJECT_DIR/.claude/hooks/format_file.py || true"
+tools: ['*']
 ---
 <!-- NOTE: For SDK sessions, the programmatic definition in agent/agent_definitions.py takes precedence. -->
 

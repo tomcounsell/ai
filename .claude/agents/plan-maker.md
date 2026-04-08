@@ -1,6 +1,7 @@
 ---
 name: plan-maker
 description: Creates structured feature plans. Repo-specific configuration for plan creation subagents.
+tools: ['*']
 ---
 
 # Plan Maker Agent

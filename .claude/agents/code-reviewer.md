@@ -1,11 +1,7 @@
 ---
 name: code-reviewer
 description: Expert code reviewer focusing on correctness, maintainability, security, and adherence to project standards
-tools:
-  - read_file
-  - write_file
-  - run_shell_command
-  - grep_search
+tools: ['*']
 ---
 <!-- NOTE: For SDK sessions, the programmatic definition in agent/agent_definitions.py takes precedence. -->
 

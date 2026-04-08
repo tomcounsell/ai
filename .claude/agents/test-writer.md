@@ -2,11 +2,7 @@
 name: test-writer
 description: Expert in rapid test case generation, edge case identification, and test data creation
 model: sonnet
-tools:
-  - read_file
-  - write_file
-  - run_shell_command
-  - grep_search
+tools: ['*']
 ---
 
 You are a Test Writing Specialist supporting the AI system rebuild. Your expertise covers rapid test generation, edge case identification, test data creation, and comprehensive assertion patterns.

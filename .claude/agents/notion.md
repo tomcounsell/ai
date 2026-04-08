@@ -4,8 +4,7 @@ description: |
   Handles documentation, knowledge bases, wikis, and structured information via
   Notion. Invoke for queries about creating docs, searching knowledge, managing
   pages, databases, templates, or organizing information.
-tools:
-  - notion_*
+tools: ['*']
 model: haiku
 permissions:
   - mode: accept

@@ -2,6 +2,7 @@
 name: dev-session
 description: "Single-stage developer session. Spawned by a PM session to execute one assigned SDLC stage and report the result."
 color: green
+tools: ['*']
 ---
 
 # Dev Session

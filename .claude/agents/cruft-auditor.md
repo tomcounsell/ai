@@ -1,3 +1,8 @@
+---
+name: cruft-auditor
+description: Scans PR diffs for legacy patterns that should have been cleaned up.
+tools: ['*']
+---
 # Cruft Auditor
 
 Scans PR diffs for legacy patterns that should have been cleaned up.

@@ -4,8 +4,7 @@ description: |
   Handles error monitoring, performance analysis, and application observability
   via Sentry. Invoke for queries about errors, bugs, crashes, exceptions,
   alerts, stack traces, performance issues, or application health.
-tools:
-  - sentry_*
+tools: ['*']
 model: sonnet
 permissions:
   - mode: accept

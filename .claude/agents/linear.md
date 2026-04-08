@@ -4,8 +4,7 @@ description: |
   Handles project management, issue tracking, sprint planning, and team
   coordination via Linear. Invoke for queries about issues, tickets, sprints,
   cycles, roadmaps, backlogs, or team velocity.
-tools:
-  - linear_*
+tools: ['*']
 model: haiku
 permissions:
   - mode: accept

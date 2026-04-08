@@ -4,8 +4,7 @@ description: |
   Handles payment processing, subscriptions, billing, and revenue analytics via
   Stripe API. Invoke for queries about payments, refunds, customers, MRR, ARR,
   invoices, or any financial operations related to Stripe.
-tools:
-  - stripe_*
+tools: ['*']
 model: sonnet
 permissions:
   - mode: accept
