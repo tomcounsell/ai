@@ -347,9 +347,14 @@ No agent integration required — this is a bridge-internal change to the worker
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room) on 2026-04-08. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | Skeptic, Adversary | `_pop_agent_session` cannot distinguish project_key from chat_id at runtime — branching on key type requires caller to pass a discriminator | Task 2 | Add `is_project_keyed: bool` parameter to `_pop_agent_session` (and `_with_fallback`). Callers in `_worker_loop` derive it once from the worker_key origin. Do NOT string-compare against known project keys — that's fragile. |
+| CONCERN | Skeptic | `enqueue_agent_session` and `_push_agent_session` lack access to the `AgentSession` object after `async_create` — cannot compute `session.worker_key` for `_ensure_worker` or pub/sub | Tasks 3, 4 | Compute `worker_key` from the same inputs used by the property: `chat_id if (session_type == "teammate" or (session_type == "dev" and slug)) else project_key`. Pass as a local variable; do NOT re-query Redis. |
+| CONCERN | Operator | Log prefix changes from `[chat:...]` to `[worker:...]` silently break any log-based grep/alert patterns | Task 3 | Keep `chat_id` in the log line as a secondary field: `[worker:{worker_key} chat:{chat_id}]`. This preserves grepability while adding the new key. |
+| NIT | Simplifier | Task 4 is marked `Parallel: true` but depends on `build-worker-key-property` AND requires resolving the session-object-availability question that also affects Task 3 — effectively sequential | Task 4 | No action needed if Task 3 resolves the `worker_key` computation inline (as suggested above); Task 4 then only adds the field to the pub/sub payload. |
+| NIT | Archaeologist | Plan references `agent_session_queue.py` without `agent/` prefix in some places (e.g., Data Flow step 2) — inconsistent with actual path | Multiple | Use `agent/agent_session_queue.py` consistently. |
 
 ---
 
