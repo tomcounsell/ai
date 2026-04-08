@@ -993,9 +993,16 @@ async def _complete_agent_session(session: AgentSession, *, failed: bool = False
     parent finalization, status save) to finalize_session() from the lifecycle module.
 
     Re-reads the session from Redis before finalizing to capture any stage events
-    written during execution (e.g., SDLC pipeline transitions). This prevents the
-    stale in-memory snapshot from overwriting accumulated stage_states when
-    _cleanup_stale_sessions ran and created a new Redis record mid-execution.
+    written during execution (e.g., SDLC pipeline transitions). The re-query is
+    intentionally status-filter-free: filtering by status="running" would return an
+    empty list if the session transitioned away from "running" (e.g., via a concurrent
+    path) before _complete_agent_session fires — causing finalize_session() to operate
+    on the stale in-memory object and corrupt the status index (session ends up indexed
+    under both the old and new status simultaneously). See issue #825.
+
+    Tie-breaking when multiple records share the same session_id: prefer any record
+    currently in "running" status (ensures the live session is finalized), fall back
+    to most-recent by created_at only if no running records exist.
 
     Args:
         session: The AgentSession to complete.
@@ -1010,23 +1017,44 @@ async def _complete_agent_session(session: AgentSession, *, failed: bool = False
     session_id = getattr(session, "session_id", None)
     if session_id:
         try:
-            running_records = list(
-                AgentSession.query.filter(session_id=session_id, status="running")
-            )
-            if running_records:
-                if len(running_records) > 1:
-                    # Multiple running records — take most recent by created_at
-                    running_records.sort(
-                        key=lambda r: r.created_at or 0,
-                        reverse=True,
-                    )
-                    logger.warning(
-                        "[lifecycle] Multiple running records for session_id=%s — "
-                        "using most recent (id=%s)",
-                        session_id,
-                        getattr(running_records[0], "id", "?"),
-                    )
-                session = running_records[0]
+            # Re-query without status filter: the session may have transitioned away
+            # from "running" (e.g., via a concurrent path) before _complete_agent_session
+            # fires. Filtering by status="running" would return an empty list in that
+            # scenario, causing finalize_session() to operate on the stale in-memory
+            # snapshot and corrupt the status index (session ends up indexed under both
+            # the old and new status simultaneously).
+            #
+            # Tie-breaking: prefer any record currently in "running" status first
+            # (ensures the live session is selected), then fall back to most-recent
+            # by created_at only if no running records exist.
+            fresh_records = list(AgentSession.query.filter(session_id=session_id))
+            if fresh_records:
+                running = [r for r in fresh_records if getattr(r, "status", None) == "running"]
+                if running:
+                    if len(running) > 1:
+                        # Multiple running records — take most recent by created_at
+                        running.sort(key=lambda r: r.created_at or 0, reverse=True)
+                        logger.warning(
+                            "[lifecycle] Multiple running records for session_id=%s — "
+                            "using most recent (id=%s)",
+                            session_id,
+                            getattr(running[0], "id", "?"),
+                        )
+                    session = running[0]
+                else:
+                    if len(fresh_records) > 1:
+                        # Multiple non-running records — take most recent by created_at
+                        fresh_records.sort(
+                            key=lambda r: r.created_at or 0,
+                            reverse=True,
+                        )
+                        logger.warning(
+                            "[lifecycle] Multiple records for session_id=%s, none running — "
+                            "using most recent (id=%s)",
+                            session_id,
+                            getattr(fresh_records[0], "id", "?"),
+                        )
+                    session = fresh_records[0]
         except Exception as exc:
             logger.warning(
                 "[lifecycle] Redis re-read failed for session_id=%s, falling back to "

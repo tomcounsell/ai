@@ -82,9 +82,9 @@ When a session finishes execution, all paths converge on `finalize_session()`:
 
 `_complete_agent_session()` re-reads the session record from Redis before calling `finalize_session()`. This ensures that any `stage_states` accumulated during execution (e.g., SDLC pipeline transitions written while the worker was running) are captured rather than overwritten by the stale in-memory snapshot.
 
-The re-query uses `AgentSession.query.filter(session_id=session_id)` with **no status filter** — intentionally. Filtering by `status="running"` caused a bug (#825) where sessions that had transitioned status before `_complete_agent_session` ran would return an empty result, forcing a fallback to the stale in-memory object and producing index corruption. Without the status filter, the re-query always retrieves the current Redis state.
+The re-query is intentionally **status-filter-free** — it queries by `session_id` only, with no `status="running"` constraint. Filtering by status would return an empty list if the session had already transitioned away from `running` (via a concurrent path) before `_complete_agent_session()` fired, causing `finalize_session()` to operate on the stale in-memory object and corrupt the status index (the session would end up indexed under both the old and new status simultaneously). See issue #825.
 
-When multiple records share the same `session_id` (e.g., a prior stale `completed` record alongside the live session), tie-breaking prefers `running` records first; it falls back to most-recent by `created_at` only if no running record is found. If the filter returns no records at all, `finalize_session()` is called on the original in-memory object.
+**Tie-breaking** when multiple records share the same `session_id`: prefer any record currently in `running` status (ensures the live session is finalized), then fall back to most-recent by `created_at` only if no running records exist. If no records are found at all, `finalize_session()` is called on the original in-memory object.
 
 ## Side Effect Consolidation
 

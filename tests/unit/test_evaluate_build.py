@@ -8,9 +8,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import patch
 
 # Add scripts to path for direct imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
@@ -19,7 +17,6 @@ import evaluate_build
 from evaluate_build import (
     _make_dry_run_verdicts,
     extract_section,
-    get_git_diff,
 )
 
 PLAN_WITH_AC = """\
@@ -229,7 +226,7 @@ class TestVerdictFormatting:
 
                     captured = io.StringIO()
                     with redirect_stdout(captured):
-                        exit_code = evaluate_build.main()
+                        evaluate_build.main()
 
         output = captured.getvalue()
         data = json.loads(output)

@@ -10,8 +10,7 @@ All tests use redis_test_db fixture (autouse=True in conftest.py) for Redis isol
 
 import asyncio
 import time
-from datetime import UTC, datetime
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 

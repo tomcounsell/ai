@@ -132,7 +132,7 @@ class TestCreateLocalFactory:
     """AgentSession.create_local() should create a local CLI session."""
 
     def test_creates_session_with_correct_fields(self):
-        """create_local() sets session_type=dev by default (no SESSION_TYPE env var), status, and required fields."""
+        """create_local() sets session_type=dev by default, plus status and required fields."""
         with patch("models.agent_session.AgentSession.save"):
             from models.agent_session import AgentSession
 
