@@ -146,7 +146,7 @@ def cmd_create(args: argparse.Namespace) -> int:
         parent_id = getattr(args, "parent", None)
 
         # Derive a session_id from timestamp + role
-        ts_suffix = str(int(utc_now().timestamp()))
+        ts_suffix = str(int(utc_now().timestamp() * 1000))
         session_id = f"{chat_id}_{ts_suffix}"
 
         working_dir = args.working_dir or str(_repo_root)
