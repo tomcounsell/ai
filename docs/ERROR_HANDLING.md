@@ -191,10 +191,12 @@ Error codes follow a standardized format:
 6. **Don't Expose Internals**: Hide implementation details from users
 7. **Use Decorators**: Apply error handling decorators to all views
 
-## Perplexity API Error Surfacing
+## Research Tool Error Surfacing
 
-When the Perplexity API returns a non-200 response or an empty 200 response, errors are surfaced
+When any research tool API returns an error or empty response, failures are surfaced
 directly in the artifact content rather than being silently swallowed into a generic skipped state.
+This applies uniformly across all six research sources: Perplexity, Grok, Gemini, GPT-Researcher,
+Together, and Claude.
 
 ### Artifact Prefix Conventions
 
@@ -202,24 +204,34 @@ Two prefixes are used to distinguish intentional degradation from unexpected fai
 
 | Prefix | Meaning | Example |
 |--------|---------|---------|
-| `[SKIPPED: ...]` | Intentional graceful degradation — the feature is not configured or explicitly unavailable | `[SKIPPED: PERPLEXITY_API_KEY not configured]` |
+| `[SKIPPED: ...]` | Intentional graceful degradation — the API key is not configured or the service is explicitly unavailable | `[SKIPPED: PERPLEXITY_API_KEY not configured]` |
 | `[FAILED: ...]` | Unexpected error — the API was called but returned an error or empty content | `[FAILED: Perplexity API 429 - rate_limit_exceeded]` |
 
 #### When `[SKIPPED: ...]` is written
 
-- `PERPLEXITY_API_KEY` is not set in the environment — the feature degrades intentionally.
+- The tool's API key environment variable is not set (e.g. `PERPLEXITY_API_KEY`, `GROK_API_KEY`, `GEMINI_API_KEY`).
+- The service is explicitly configured as unavailable.
+
+`[SKIPPED: ...]` is **never** written for API call failures — those always use `[FAILED: ...]`.
 
 #### When `[FAILED: ...]` is written
 
-- The API returns a non-200 HTTP status (e.g. 401, 429, 500):
-  `[FAILED: Perplexity API {status_code} - {error_type}]`
-  where `{error_type}` is the `error` or `type` field from the JSON response body.
-- The API returns 200 but with empty content:
-  `[FAILED: Perplexity API returned empty content]`
+HTTP-based tools (Perplexity, Grok, Gemini):
+- Non-200 HTTP status: `[FAILED: {ToolName} API {status_code} - {error_type}]`
+- 200 with empty content: `[FAILED: {ToolName} API returned empty content]`
+
+Framework/exception-based tools (GPT-Researcher, Claude):
+- Exception raised: `[FAILED: {ToolName} {ExceptionType} - {message}]`
+- Empty return: `[FAILED: {ToolName} returned empty content]`
+
+Together (hybrid):
+- Timeout: `[FAILED: Together TIMEOUT - timed out after {n}s]`
+- Exception: `[FAILED: Together {ExceptionType} - {message}]`
+- Empty: `[FAILED: Together returned empty content]`
 
 ### Error Metadata
 
-When a `[FAILED: ...]` artifact is written, the raw API error message is stored in
+When a `[FAILED: ...]` artifact is written, the raw error details are stored in
 `artifact.metadata["error"]` for debugging:
 
 ```python
@@ -250,14 +262,25 @@ This means:
 
 ### Implementation
 
-The error surfacing is implemented across two files:
+The error surfacing pattern is implemented consistently across the tool and service layers:
 
-- **`apps/podcast/tools/perplexity_deep_research.py`** — `_handle_error_response()` extracts
-  `_error_status`, `_error_message`, and `_error_body` from the API response and returns them as
-  dict keys instead of returning bare `None`.
-- **`apps/podcast/services/research.py`** — inspects `response_data` for `_error_status` after
-  `run_perplexity_research()` returns `(None, response_data)`, then writes the appropriate
-  `[FAILED: ...]` or `[SKIPPED: ...]` artifact content.
+**Tool layer** — each tool returns `tuple[str | None, dict]`:
+- On success: `(content_text, {})`  or `(content_text, metadata_dict)`
+- On API error: `(None, {"_error_status": <code>, "_error_message": <reason>, "_error_body": <raw>})`
+- On exception (GPT-Researcher, Claude): raises exception (service layer catches it)
+
+**Service layer** (`apps/podcast/services/research.py`) — each `run_*_research()` function:
+1. Checks for the API key before calling the tool (writes `[SKIPPED: ...]` if missing)
+2. Calls the tool and unpacks `(content_text, response_data)`
+3. On `None` or empty content: reads `_error_status`/`_error_message` from `response_data`, writes `[FAILED: ...]`
+4. On success: writes the content as the artifact body
+
+**Tool files:**
+- `apps/podcast/tools/perplexity_deep_research.py` — reference implementation
+- `apps/podcast/tools/grok_deep_research.py` — `_handle_error_response()` returns structured error dict
+- `apps/podcast/tools/gemini_deep_research.py` — `submit_research()` returns `tuple` (no longer raises `GeminiQuotaError`)
+- `apps/podcast/tools/gpt_researcher_run.py` — `run_research()` wraps library call in try/except, returns `tuple`
+- `apps/podcast/tools/together_deep_research/runner.py` — error metadata enriched with `_error_status`/`_error_message`
 
 ## Testing Errors
 

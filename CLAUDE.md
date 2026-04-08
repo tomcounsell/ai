@@ -341,7 +341,7 @@ Django `@task`-per-step pipeline for autonomous episode production.
 
 **Entry point:** `produce_episode.enqueue(episode_id=42)`
 
-**Graceful degradation:** Research steps handle failures at two layers. Service-level: missing API keys or known errors create `[SKIPPED: ...]` artifacts (Gemini, Claude, MiroFish, Together) or `[FAILED: ...]` artifacts (Perplexity — API errors surface the HTTP status and error type; only a missing `PERPLEXITY_API_KEY` produces `[SKIPPED: PERPLEXITY_API_KEY not configured]`). Task-level: unexpected exceptions are caught by `fail_research_source()` which writes `[FAILED: error]` to the artifact without halting the workflow. The fan-in signal uses threshold-based advancement: all p2-* artifacts must be non-empty (task resolved) and at least one must have real content (not SKIPPED/FAILED). Per-source retry is available via `RetryResearchSourceView`. Additionally, `step_question_discovery` auto-retries Perplexity research if no usable p2-* artifacts exist (all empty, SKIPPED, or FAILED), so Phase 3 self-heals without manual intervention.
+**Graceful degradation:** Research steps handle failures at two layers. Service-level: `[SKIPPED: ...]` artifacts are written only when an API key is missing (intentional degradation); all API errors and unexpected failures write `[FAILED: ToolName API {status} - {reason}]` artifacts. This applies uniformly across Perplexity, Grok, Gemini, GPT-Researcher, Together, and Claude. Task-level: unexpected exceptions are caught by `fail_research_source()` which writes `[FAILED: error]` to the artifact without halting the workflow. The fan-in signal uses threshold-based advancement: all p2-* artifacts must be non-empty (task resolved) and at least one must have real content (not SKIPPED/FAILED). Per-source retry is available via `RetryResearchSourceView`. Additionally, `step_question_discovery` auto-retries Perplexity research if no usable p2-* artifacts exist (all empty, SKIPPED, or FAILED), so Phase 3 self-heals without manual intervention.
 
 ### Models
 
@@ -400,7 +400,7 @@ OPENROUTER_API_KEY=your_key    # Cover art generation (Gemini via OpenRouter)
 NOTEBOOKLM_AUTH_JSON='{...}'   # NotebookLM browser auth (JSON, for headless envs)
 ```
 
-If optional keys are missing, the pipeline logs a warning, creates a "[SKIPPED: ...]" artifact, and continues with other research sources. Gemini and Claude also degrade gracefully on API errors.
+If optional keys are missing, the pipeline logs a warning, creates a `[SKIPPED: <KEY> not configured]` artifact, and continues with other research sources. If an API key is present but the API call fails, the pipeline writes a `[FAILED: ...]` artifact and continues — all research tools degrade gracefully on API errors.
 
 ## Render Infrastructure
 

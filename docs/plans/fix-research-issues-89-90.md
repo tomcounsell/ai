@@ -41,11 +41,11 @@ Currently `gemini_deep_research.py` returns `None` for both quota errors and gen
 - `apps/podcast/tools/gemini_deep_research.py` — `submit_research()` and `run_gemini_research()`: return structured error info instead of bare `None`
 - `apps/podcast/services/research.py` — `run_gemini_research()`: use structured error to create more specific skip artifact metadata
 
-**Approach:**
-- Make `submit_research()` raise a custom `GeminiQuotaError` on 429 responses instead of returning `None`
-- Make `run_gemini_research()` (the tool function) catch `GeminiQuotaError` separately from other errors
-- In the service layer, create skip artifacts with specific `reason` metadata: `"quota_exceeded"` vs `"api_error"` vs `"empty_response"`
-- Log a clear actionable message: `"Gemini API quota exceeded. Upgrade billing at https://aistudio.google.com/apikey"`
+**Approach (superseded by PR #232):** The `GeminiQuotaError` exception-based approach was the original plan, but PR #232 (error-surfacing normalization) implemented a different pattern:
+- `submit_research()` now returns `(None, {"_error_status": 429, "_error_message": "quota_exceeded"})` instead of raising `GeminiQuotaError`
+- `GeminiQuotaError` class is kept in the codebase but is no longer raised
+- Service layer writes `[FAILED: Gemini API 429 - quota_exceeded]` artifact using the standard error-dict pattern
+- `[SKIPPED: ...]` is reserved only for missing API key; quota errors use `[FAILED: ...]`
 
 ### Task 2: Upgrade Gemini API billing (requires human action)
 

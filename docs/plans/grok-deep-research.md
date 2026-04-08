@@ -8,7 +8,7 @@
 
 Add a standalone Grok deep research CLI tool (`apps/podcast/tools/grok_deep_research.py`) and a corresponding Claude Code skill file (`.claude/skills/grok-deep-research/SKILL.md`). The tool calls the xAI API (OpenAI-compatible endpoint at `api.x.ai/v1/chat/completions`) to automate Grok research that is currently manual (copy-paste from `x.com/i/grok`). This is the last remaining research source without CLI automation.
 
-**Explicitly out of scope:** Podcast pipeline integration (no `run_grok_research()` service function in `research.py`, no task step wiring). That is a separate future issue. The tool must be designed with a compatible function signature so integration is trivial later.
+**Podcast pipeline integration:** `run_grok_research()` service function has been added to `research.py` (landed in PR #232 as part of the error-surfacing normalization work). Task step wiring into `tasks.py`/`signals.py` is still deferred — confirm with Tom before adding Grok as a live pipeline step, as it changes fan-in thresholds.
 
 ## Prior Art
 
