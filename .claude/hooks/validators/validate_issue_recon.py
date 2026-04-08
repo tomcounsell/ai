@@ -68,10 +68,10 @@ SKIP_PATTERNS = [
 
 # Bucket headers expected in a complete recon summary
 BUCKET_PATTERNS = [
-    r"\*\*Confirmed\*\*",
-    r"\*\*Revised\*\*",
-    r"\*\*Pre-requisites?\*\*",
-    r"\*\*Dropped\*\*",
+    r"\*\*Confirmed\*\*:?",
+    r"\*\*Revised\*\*:?",
+    r"\*\*Pre-requisites?\*\*:?",
+    r"\*\*Dropped\*\*:?",
 ]
 
 

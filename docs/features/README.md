@@ -90,7 +90,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [SDLC Critique Stage](sdlc-critique-stage.md) | Automated plan validation between PLAN and BUILD stages with parallel war-room critics and inline source file verification | Shipped |
 | [SDLC Enforcement](sdlc-enforcement.md) | Quality gates for code sessions: user-level hooks, pipeline stage model, settings merger, cross-repo enforcement | Shipped |
 | [SDLC Observer](sdlc-observer.md) | Web dashboard for real-time SDLC pipeline tracking with stage indicators, event timelines, and artifact links at `/sdlc/` | Shipped |
-| [SDLC Pipeline Integrity](sdlc-pipeline-integrity.md) | Session continuation hardening, deterministic URL construction, merge guard hook, and MERGE pipeline stage | Shipped |
+| [SDLC Pipeline Integrity](sdlc-pipeline-integrity.md) | Session continuation hardening, deterministic URL construction, merge guard hook, MERGE pipeline stage, and structured review comment enforcement | Shipped |
 | [SDLC Stage Handoff](sdlc-stage-handoff.md) | Structured GitHub issue comments for cross-stage context relay -- each stage posts findings on completion and reads prior stage context on start | Shipped |
 | [SDLC Stage Tracking](sdlc-stage-tracking.md) | Stored-state-only stage completion: artifact inference removed, skill stage markers added, do-merge gate strengthened | Shipped |
 | [SDLC-First Routing](sdlc-first-routing.md) | Automatic work request classification (Ollama/Haiku) and orchestrator routing for SDLC vs conversational requests, with cross-repo `gh` resolution via `GH_REPO` env var | Shipped |
