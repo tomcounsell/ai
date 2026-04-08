@@ -16,6 +16,7 @@ import pytest
 from agent.agent_session_queue import (
     _AGENT_SESSION_FIELDS,
     _acquire_pop_lock,
+    _complete_agent_session,
     _extract_agent_session_fields,
     _release_pop_lock,
 )
@@ -143,9 +144,7 @@ class TestPopLock:
             _release_pop_lock(chat_id)
 
             reacquired = _acquire_pop_lock(chat_id)
-            assert reacquired is True, (
-                "After release, lock must be acquirable again"
-            )
+            assert reacquired is True, "After release, lock must be acquirable again"
         finally:
             _release_pop_lock(chat_id)
 
@@ -191,3 +190,81 @@ class TestPopLock:
             )
         finally:
             _release_pop_lock(chat_id)
+
+
+class TestCompleteAgentSessionRequeryNoStatusFilter:
+    """Regression tests for _complete_agent_session re-query fix (issue #825).
+
+    The bug: _complete_agent_session() filtered re-query by status="running".
+    If the session had already transitioned to another status, the filter
+    returned empty and the code fell back to the stale in-memory object.
+    finalize_session() would then backfill _saved_field_values from that stale
+    object, recording the wrong old status. On save, Popoto removed the session
+    from the wrong index set, orphaning it in multiple index sets simultaneously.
+
+    The fix: re-query without status filter so a fresh Redis object is always
+    retrieved regardless of current status.
+    """
+
+    @pytest.mark.asyncio
+    async def test_complete_agent_session_does_not_filter_by_running_status(self):
+        """_complete_agent_session must not pass status='running' to filter().
+
+        When the session has already transitioned away from 'running' before
+        _complete_agent_session executes, a status-filtered re-query returns
+        nothing, causing fallback to the stale in-memory object.
+        """
+        session = _make_session(status="completed")
+
+        with patch("agent.agent_session_queue.AgentSession") as mock_agent_session_cls:
+            mock_query = MagicMock()
+            mock_agent_session_cls.query = mock_query
+            mock_filter = MagicMock()
+            mock_filter.__iter__ = MagicMock(return_value=iter([session]))
+            mock_query.filter.return_value = mock_filter
+
+            with patch("models.session_lifecycle.finalize_session") as mock_finalize:
+                mock_finalize.return_value = None
+                await _complete_agent_session(session)
+
+            # The filter call must NOT include status="running"
+            call_kwargs_list = mock_query.filter.call_args_list
+            for call_args in call_kwargs_list:
+                _, kwargs = call_args
+                assert "status" not in kwargs, (
+                    "_complete_agent_session must not filter by status='running'; "
+                    "doing so causes stale fallback when the session has already transitioned"
+                )
+
+    @pytest.mark.asyncio
+    async def test_complete_agent_session_uses_fresh_record_when_session_already_completed(self):
+        """Fresh re-query is used even when session.status != 'running' at call time.
+
+        This simulates the race condition: session transitions to 'completed'
+        before _complete_agent_session runs. Without the fix the filter would
+        have returned nothing; with the fix a fresh record is always fetched.
+        """
+        stale_session = _make_session(status="running")
+        fresh_session = _make_session(status="completed")
+        fresh_session.session_id = stale_session.session_id
+
+        with patch("agent.agent_session_queue.AgentSession") as mock_agent_session_cls:
+            mock_query = MagicMock()
+            mock_agent_session_cls.query = mock_query
+            mock_filter = MagicMock()
+            # Fresh record returned (status-independent query)
+            mock_filter.__iter__ = MagicMock(return_value=iter([fresh_session]))
+            mock_query.filter.return_value = mock_filter
+
+            finalize_called_with = []
+
+            with patch("models.session_lifecycle.finalize_session") as mock_finalize:
+                mock_finalize.side_effect = lambda s, *args, **kw: finalize_called_with.append(s)
+                await _complete_agent_session(stale_session)
+
+            # finalize_session must have been called with the fresh record, not the stale one
+            if finalize_called_with:
+                assert finalize_called_with[0].status == "completed", (
+                    "finalize_session should receive the fresh Redis record (status=completed), "
+                    "not the stale in-memory object (status=running)"
+                )
