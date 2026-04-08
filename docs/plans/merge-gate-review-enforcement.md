@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
 created: 2026-04-08
 tracking: https://github.com/tomcounsell/ai/issues/823
 last_comment_id:
+revision_applied: true
 ---
 
 # Merge Gate: Enforce Structured Review Comment Check
@@ -80,7 +81,8 @@ Add the following block to `/do-merge` in the **Prerequisites Check** section, i
 # Structured review comment check
 REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
 LAST_REVIEW=$(gh api repos/$REPO/issues/$ARGUMENTS/comments \
-  --jq '[.[] | select(.body | startswith("## Review:"))] | last | .body // ""')
+  --jq '[.[] | select(.body | startswith("## Review:"))] | last | .body // ""' \
+  2>/dev/null) || { echo "REVIEW_COMMENT: FAIL — gh api call failed (network/auth error)"; echo "GATES_FAILED"; return 1; }
 
 if [ -z "$LAST_REVIEW" ]; then
   echo "REVIEW_COMMENT: FAIL — No '## Review:' comment found on PR #$ARGUMENTS"
@@ -96,24 +98,43 @@ else
 fi
 ```
 
+> **Implementation Note (Concern 1 — Fail-closed guard):** The `gh api` call must be wrapped with an explicit `|| { ... }` error handler so that API failures (network outage, auth expiry) cause a hard block rather than silently returning an empty string. An empty string from a *failed* call would be indistinguishable from "no review found" without this guard. The `2>/dev/null` suppresses stderr noise; the `|| { ... }` block catches the non-zero exit and emits `GATES_FAILED` explicitly.
+
 Key decisions:
 - Use `gh api repos/$REPO/issues/$ARGUMENTS/comments` (issue comments endpoint) — covers both self-authored PRs (which use `gh pr comment`) and non-self-authored PRs (which may also have comments)
 - Filter with `jq` for `.body | startswith("## Review:")` — exact match against the structured format
 - Take `last` — only the most recent review comment counts; earlier rounds are superseded
 - Extract `- [ ]` lines from a `Changes Requested` comment to surface the specific blockers
+- The `grep -q "^## Review: Changes Requested"` prefix match correctly captures all variants including `## Review: Changes Requested — Tech Debt` (see Failure Path Test Strategy for test case)
 
-Also fix `validate_issue_recon.py`: change the four `BUCKET_PATTERNS` entries from exact `\*\*Confirmed\*\*` to `\*\*Confirmed\*\*` → `\*\*Confirmed\b` (or allow the colon suffix) so the `**Confirmed:** N items` format that the recon routine actually produces is recognized as valid.
+Also fix `validate_issue_recon.py`: change the four `BUCKET_PATTERNS` entries from `r"\*\*Confirmed\b"` to `r"\*\*Confirmed\*\*:?"` so the pattern matches both `**Confirmed**` and `**Confirmed:** N items` without false-positiving on prose like `**Confirmed in step 3**`.
+
+> **Implementation Note (Concern 3 — Regex fix):** The current plan text said `r"\*\*Confirmed\b"` but this is wrong — `\b` is a word boundary that matches after the `d` in `Confirmed`, so it would also match `**Confirmed in step 3**`. The correct fix is `r"\*\*Confirmed\*\*:?"` (literal closing `**` then optional `:`). This matches `**Confirmed**` and `**Confirmed:**` but not arbitrary prose containing `**Confirmed`.
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
 - No new `except` blocks introduced — shell error handling via `gh` exit codes
-- If `gh api` fails (network error, auth), it returns non-zero; the script should treat an unreachable API as a blocking condition (fail closed), not a pass-through
+- If `gh api` fails (network error, auth), it returns non-zero; the explicit `|| { echo "GATES_FAILED"; }` guard ensures this is treated as a blocking condition (fail closed), not a pass-through
 
 ### Empty/Invalid Input Handling
 - Empty comment list → `jq` returns `""` → treated as "no review found" → blocks
 - PR with only non-`## Review:` comments → same empty-string path → blocks
 - PR with `## Review: Approved\n\nsome text` → `startswith` check passes → correctly approved
+
+### Tech Debt Variant Test Case
+
+> **Implementation Note (Concern 2 — Tech Debt variant):** The `## Review: Changes Requested — Tech Debt` variant must be explicitly verified. The `grep -q "^## Review: Changes Requested"` prefix match handles this correctly because `Tech Debt` is a suffix, but this should be confirmed in the validator step.
+
+Test case for validator (Task 3):
+```bash
+# Verify "Changes Requested — Tech Debt" is blocked
+FAKE_COMMENT="## Review: Changes Requested — Tech Debt
+
+- [ ] Remove dead import in agent/foo.py"
+echo "$FAKE_COMMENT" | grep -q "^## Review: Changes Requested" && echo "PASS: Tech Debt variant blocked" || echo "FAIL"
+```
+Expected output: `PASS: Tech Debt variant blocked`
 
 ### Error State Rendering
 - Block messages are printed to stdout (visible in PM session output) before `GATES_FAILED`
@@ -209,7 +230,7 @@ No agent integration required — `/do-merge` is a Claude Code skill invoked dir
 - **Assigned To**: merge-gate-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Edit `BUCKET_PATTERNS` in `validate_issue_recon.py`: change `r"\*\*Confirmed\*\*"` to `r"\*\*Confirmed\b"` (and likewise for Revised, Pre-requisites, Dropped) so patterns match both `**Confirmed**` and `**Confirmed:** N items`
+- Edit `BUCKET_PATTERNS` in `validate_issue_recon.py`: change `r"\*\*Confirmed\b"` (word boundary — too broad) to `r"\*\*Confirmed\*\*:?"` (and likewise for Revised, Pre-requisites, Dropped) so patterns match `**Confirmed**` and `**Confirmed:** N items` but NOT prose like `**Confirmed in step 3**`
 
 ### 3. Validate both changes
 - **Task ID**: validate-all
@@ -232,9 +253,14 @@ No agent integration required — `/do-merge` is a Claude Code skill invoked dir
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Verdict: READY TO BUILD (with concerns)** — 0 blockers, 3 concerns, 1 nit. Revision pass applied.
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | Operator | Fail-closed guard not explicit — `gh api` failure path works by accident (empty string → block) but has no explicit `\|\|` guard | Technical Approach updated | Added `\|\| { echo "REVIEW_COMMENT: FAIL — gh api call failed"; echo "GATES_FAILED"; return 1; }` after the `gh api` command |
+| CONCERN | Adversary | `## Review: Changes Requested — Tech Debt` variant not mentioned in Failure Path section; no test case for it | Failure Path Test Strategy updated | Added explicit test case verifying prefix match handles Tech Debt suffix correctly |
+| CONCERN | Archaeologist | Regex fix uses `r"\*\*Confirmed\b"` (word boundary) which false-positives on `**Confirmed in step 3**`; correct fix is `r"\*\*Confirmed\*\*:?"` (optional colon) | Technical Approach + Task 2 updated | Corrected regex in both plan text and task step to `r"\*\*Confirmed\*\*:?"` |
+| NIT | Simplifier | Task 2 description said "change `r"\*\*Confirmed\*\*"` to `r"\*\*Confirmed\b"`" — had the before/after backwards | Task 2 updated | Task now correctly says change FROM word-boundary TO literal `\*\*:?` pattern |
 
 ---
 
