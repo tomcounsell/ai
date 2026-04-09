@@ -277,7 +277,8 @@ class TestWorkerStartupSequence:
         """worker/__main__.py must use run_cleanup() to rebuild all model indexes."""
         source = (Path(__file__).parent.parent.parent / "worker" / "__main__.py").read_text()
         assert "run_cleanup" in source, (
-            "worker/__main__.py must call run_cleanup() at startup to rebuild all Popoto model indexes"
+            "worker/__main__.py must call run_cleanup() at startup"
+            " to rebuild all Popoto model indexes"
         )
         assert "popoto_index_cleanup" in source, (
             "worker/__main__.py must import from scripts.popoto_index_cleanup"
