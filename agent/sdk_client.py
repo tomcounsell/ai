@@ -1470,10 +1470,24 @@ async def get_agent_response_sdk(
     logger.info(f"[{request_id}] SDK query for {project_name}")
     logger.debug(f"[{request_id}] Working directory: {working_dir}")
 
+    # Resolve session_type FIRST — it determines permission restrictions injected below.
+    # PM session (session_type="pm") gets full pipeline instructions.
+    # PM sessions orchestrate via dev-session subagent
+    _session_type = None
+    if session_id:
+        try:
+            from models.agent_session import AgentSession as _AgentSession
+
+            _sessions = list(_AgentSession.query.filter(session_id=session_id))
+            if _sessions:
+                _session_type = getattr(_sessions[0], "session_type", None)
+        except Exception:
+            pass
+
     # Build context-enriched message (includes user permission restrictions)
     from bridge.context import build_context_prefix
 
-    context = build_context_prefix(project, chat_title is None, sender_id)
+    context = build_context_prefix(project, _session_type, sender_id)
     enriched_message = context
     enriched_message += f"\n\nFROM: {sender_name}"
     if chat_title:
@@ -1487,19 +1501,6 @@ async def get_agent_response_sdk(
         "work initiated in this specific session. Do not include work, PRs, or "
         "requests from other sessions, other senders, or prior conversation threads."
     )
-    # For SDLC-routed requests, inject target repo context (never for PM mode).
-    # PM session (session_type="pm") gets full pipeline instructions.
-    # PM sessions orchestrate via dev-session subagent
-    _session_type = None
-    if session_id:
-        try:
-            from models.agent_session import AgentSession as _AgentSession
-
-            _sessions = list(_AgentSession.query.filter(session_id=session_id))
-            if _sessions:
-                _session_type = getattr(_sessions[0], "session_type", None)
-        except Exception:
-            pass
 
     # Cross-repo SDLC: inject target repo context
     if project_mode != "pm" and classification == ClassificationType.SDLC and is_cross_repo:
@@ -1592,6 +1593,11 @@ async def get_agent_response_sdk(
                 logger.warning(
                     f"[{request_id}] Intent classification failed, defaulting to PM dispatch: {e}"
                 )
+
+        # PM sessions must never be forced into Teammate mode by DM origin signal.
+        # session_type is the authoritative permission signal, not chat_title.
+        if _session_type == SessionType.PM:
+            _teammate_mode = False
 
         # Inject classification context as advisory information
         if _classification_context:
