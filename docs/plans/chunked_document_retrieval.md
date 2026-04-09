@@ -6,6 +6,7 @@ owner: Valor
 created: 2026-04-09
 tracking: https://github.com/tomcounsell/ai/issues/861
 last_comment_id:
+plan_link: https://github.com/tomcounsell/ai/blob/main/docs/plans/chunked_document_retrieval.md
 ---
 
 # Chunked Document Retrieval
