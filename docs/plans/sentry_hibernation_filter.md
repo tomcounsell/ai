@@ -6,6 +6,7 @@ owner: Valor
 created: 2026-04-09
 tracking: https://github.com/tomcounsell/ai/issues/858
 last_comment_id:
+revision_applied: true
 ---
 
 # Sentry Hibernation Filter
@@ -76,10 +77,15 @@ No prerequisites -- this work has no external dependencies. The `sentry_sdk` and
 ### Technical Approach
 
 - Define a `_sentry_before_send(event, hint)` function in `bridge/telegram_bridge.py` near the Sentry init block
-- The function calls `bridge.hibernation.is_hibernating()`. If `True`, it inspects the event's exception type or message for known auth-related patterns (the VALOR-1 env-var message and VALOR-Y hibernation message). If matched, return `None` to drop. Otherwise, return `event` unchanged.
+- The function calls `bridge.hibernation.is_hibernating()`. If `True`, it extracts the error message from the event and checks for known auth-related patterns. If matched, return `None` to drop. Otherwise, return `event` unchanged.
+- **Dual event structure check (critical):** Sentry captures errors in two different event structures depending on the source. The filter MUST check both:
+  - `event.get("logentry", {}).get("formatted", "")` -- for `logger.error()` captures (VALOR-1 env-var error, 2,702 events). The Sentry logging integration stores these under the `logentry` key, NOT under `exception`.
+  - `event.get("exception", {}).get("values", [{}])[0].get("value", "")` -- for exception captures (VALOR-Y hibernation `SystemExit`, 102 events). Standard exception events use the `exception.values` array.
+  - Extract message from both paths and check against known auth-error substrings. Without checking the `logentry` path, the largest source of noise (VALOR-1) passes through unfiltered.
 - Register the function via `before_send=_sentry_before_send` in the `sentry_sdk.init()` call
-- Add `enter_hibernation()` call to the env-var guard at line 673, before `sys.exit(1)`, changing the exit code to `sys.exit(2)` for consistency with the runtime auth failure path
+- Add `enter_hibernation()` call to the env-var guard at line 673, before `sys.exit(1)`. Keep the exit code as `sys.exit(1)` to avoid a behavior change for external monitoring consumers (per Simplifier nit).
 - The auth-error string matching uses substring checks against known messages ("TELEGRAM_API_ID and TELEGRAM_API_HASH must be set", "Bridge hibernating: auth required") rather than exception type checks, since these are logged errors, not typed exceptions
+- Add a `logger.debug()` call when the filter drops an event, for operator visibility into suppression activity (per Operator nit)
 
 ## Failure Path Test Strategy
 
@@ -149,7 +155,7 @@ No agent integration required -- this is a bridge-internal change. No new tools,
 - [ ] Non-auth events pass through even when hibernating
 - [ ] The env-var-missing path (line 673) calls `enter_hibernation()` before exiting
 - [ ] The `before_send` callback is wrapped in try/except and passes through on internal error
-- [ ] Unit tests cover: hibernating + auth event (dropped), hibernating + non-auth event (passed), not hibernating + auth event (passed), callback crash (passed)
+- [ ] Unit tests cover: hibernating + logentry auth event (dropped), hibernating + exception auth event (dropped), hibernating + non-auth event (passed), not hibernating + auth event (passed), callback crash (passed), event with no logentry/exception keys (passed)
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 
@@ -178,10 +184,10 @@ No agent integration required -- this is a bridge-internal change. No new tools,
 - **Assigned To**: sentry-filter-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Define `_sentry_before_send(event, hint)` function in `bridge/telegram_bridge.py` near the Sentry init block (around line 47-57). The function: (1) calls `from bridge.hibernation import is_hibernating`, (2) if `is_hibernating()` is True, inspects the event for known auth-error messages, (3) returns `None` to drop auth events during hibernation, (4) returns `event` for all other cases. Wrap the body in `try/except Exception` returning `event` on failure.
+- Define `_sentry_before_send(event, hint)` function in `bridge/telegram_bridge.py` near the Sentry init block (around line 47-57). The function: (1) calls `from bridge.hibernation import is_hibernating`, (2) if `is_hibernating()` is True, extracts error message from BOTH `event.get("logentry", {}).get("formatted", "")` (for logger.error captures like VALOR-1) AND `event.get("exception", {}).get("values", [{}])[0].get("value", "")` (for exception captures like VALOR-Y), (3) checks combined message text for known auth-error substrings, (4) returns `None` to drop auth events during hibernation with a `logger.debug()` noting suppression, (5) returns `event` for all other cases. Wrap the body in `try/except Exception` returning `event` on failure.
 - Register `before_send=_sentry_before_send` in the `sentry_sdk.init()` call at line 52
-- Add `from bridge.hibernation import enter_hibernation` and call `enter_hibernation()` before the `sys.exit(1)` at line 674 (the env-var-missing guard). Change exit code to `sys.exit(2)` for consistency.
-- Create `tests/unit/test_sentry_hibernation_filter.py` with test cases: (a) drops auth event when hibernating, (b) passes non-auth event when hibernating, (c) passes auth event when NOT hibernating, (d) passes all events when `is_hibernating()` raises an exception, (e) handles events with no exception info gracefully
+- Add `from bridge.hibernation import enter_hibernation` and call `enter_hibernation()` before the `sys.exit(1)` at line 674 (the env-var-missing guard). Keep exit code as `sys.exit(1)` to avoid behavior change for external consumers.
+- Create `tests/unit/test_sentry_hibernation_filter.py` with test cases: (a) drops logentry auth event when hibernating (VALOR-1 structure), (b) drops exception auth event when hibernating (VALOR-Y structure), (c) passes non-auth event when hibernating, (d) passes auth event when NOT hibernating, (e) passes all events when `is_hibernating()` raises an exception, (f) handles events with no exception or logentry key gracefully
 
 ### 2. Validate implementation
 - **Task ID**: validate-sentry-filter
