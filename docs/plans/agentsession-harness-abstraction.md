@@ -26,11 +26,13 @@ Decouple dev session execution from the Claude Agent SDK by making `AgentSession
 
 ### Phase 1: Worker harness routing (Critical)
 
-Add `_get_response_via_harness()` to `agent/sdk_client.py` that runs `claude -p --output-format stream-json`, streams assistant events to the OutputHandler in real time, and returns final result text.
+Add `_get_response_via_harness()` to `agent/sdk_client.py` that runs `claude -p --verbose --output-format stream-json`, streams assistant events directly to the Telegram send callback in real time (bypassing the nudge loop entirely), and returns final result text.
 
-- [ ] Add `_get_response_via_harness(session, output_handler, working_dir, env)` function in `agent/sdk_client.py`
-- [ ] Function runs `claude -p --output-format stream-json` as a subprocess with the session's message as prompt
-- [ ] Parse stdout line-by-line: forward `assistant` events (text blocks) to the OutputHandler in real time
+- [ ] Add `_get_response_via_harness(session, send_cb, working_dir, env)` function in `agent/sdk_client.py`
+- [ ] Function runs `claude -p --verbose --output-format stream-json` as a subprocess with the session's message as prompt
+- [ ] Parse stdout line-by-line: forward `assistant` events (text blocks) directly to `send_cb()` -- NOT through `send_to_chat()` or the nudge loop
+- [ ] **Output bypass**: Dev sessions do not need auto-continue, nudge loop, stop_reason inspection, or `route_session_output()`. The harness streams chunks directly to `send_cb()` (the raw Telegram delivery callback) during execution, then delivers the final result. The `send_to_chat()` closure and its nudge loop remain unchanged for PM/teammate sessions only.
+- [ ] **Time/size-based batching**: Buffer assistant text chunks in `_get_response_via_harness()`. Flush to `send_cb()` when: (a) 3 seconds elapsed since last flush, (b) accumulated text exceeds 2000 chars, or (c) a `result` event arrives (final flush). This prevents flooding Telegram with hundreds of small messages.
 - [ ] Capture `result` event's `session_id` field for potential resume support
 - [ ] Return final result text extracted from the `result` event
 - [ ] No timeout -- dev sessions run as long as they need
@@ -39,20 +41,22 @@ Add `_get_response_via_harness()` to `agent/sdk_client.py` that runs `claude -p 
 
 ### Phase 2: Worker routing by role (Critical)
 
-Modify `_execute_agent_session()` in `agent/agent_session_queue.py` to route dev role sessions to the new harness instead of `get_agent_response_sdk()`.
+Modify `_execute_agent_session()` in `agent/agent_session_queue.py` to route dev role sessions to the new harness instead of `get_agent_response_sdk()`. Introduce the `DEV_SESSION_HARNESS` env var here (moved from Phase 6) with `sdk` as the default, preserving current behavior until explicitly switched.
 
 - [ ] In `_execute_agent_session()`, check `session.session_type` (or `session.role`) for `"dev"`
-- [ ] Dev sessions call `_get_response_via_harness()` instead of `get_agent_response_sdk()`
-- [ ] PM and teammate sessions continue using `get_agent_response_sdk()` unchanged
-- [ ] Harness selection reads `DEV_SESSION_HARNESS` env var (default: `claude-cli`)
-- [ ] Build the harness command from the env var: `claude-cli` maps to `claude -p`, `opencode` maps to `opencode`, etc.
-- [ ] Pass the registered OutputHandler to the harness function for real-time streaming
+- [ ] Harness selection reads `DEV_SESSION_HARNESS` env var (default: `sdk` -- preserves current `get_agent_response_sdk()` path)
+- [ ] When `DEV_SESSION_HARNESS=sdk` (default): dev sessions use `get_agent_response_sdk()` unchanged (rollback-safe)
+- [ ] When `DEV_SESSION_HARNESS=claude-cli`: dev sessions call `_get_response_via_harness()` with `send_cb()` (the raw Telegram callback, NOT `send_to_chat()`)
+- [ ] PM and teammate sessions always use `get_agent_response_sdk()` regardless of env var
+- [ ] Build the harness command from the env var: `claude-cli` maps to `claude -p --verbose`, `opencode` maps to `opencode`, etc.
+- [ ] Pass `send_cb()` directly to the harness function -- dev sessions bypass the nudge loop and auto-continue logic entirely
 
 ### Phase 3: Post-completion SDLC handling in worker (Critical)
 
 Move SDLC stage completion logic from `SubagentStop` hook into the worker's post-completion path for dev sessions.
 
-- [ ] After `_get_response_via_harness()` returns, worker calls `PipelineStateMachine.classify_outcome()` on the output
+- [ ] **Move `pipeline_state.py` from `bridge/` to `agent/`** -- it operates on AgentSession records with no Telegram dependencies, so it belongs in `agent/`. Update the 3 existing import sites (`bridge/telegram_bridge.py`, `agent/hooks/pre_tool_use.py`, `agent/hooks/subagent_stop.py`) to import from `agent.pipeline_state`.
+- [ ] After `_get_response_via_harness()` returns, worker calls `PipelineStateMachine.classify_outcome()` on the output (now from `agent.pipeline_state`)
 - [ ] Route to `complete_stage()` or `fail_stage()` based on outcome classification
 - [ ] Post structured stage comment to the tracking GitHub issue via `utils.issue_comments.post_stage_comment()`
 - [ ] Send a steering message to the parent PM session with pipeline state update (uses `steer_session()`)
@@ -68,10 +72,11 @@ Update the PM persona to create dev sessions via `valor_session create` CLI inst
 - [ ] PM includes stage assignment, issue URL, and plan context in the `--message` argument
 - [ ] PM waits for dev session completion by monitoring steering messages (the worker steers the PM when the dev session finishes)
 - [ ] Remove any instructions about using Agent tool with `subagent_type="dev-session"`
+- [ ] **Startup validation**: Add a check in `sdk_client.py` PM session startup path that greps the resolved persona prompt for `subagent_type="dev-session"`. If found, log `WARNING: PM persona still contains Agent tool dispatch instructions -- update ~/Desktop/Valor/personas/project-manager.md`. This guards against stale persona files on machines that pulled code but did not update the iCloud-synced persona.
 
-### Phase 5: Remove legacy hook wiring (Cleanup)
+### Phase 5: Remove legacy hook wiring (Cleanup -- gated on production validation)
 
-Delete the code that only existed to support SDK-mediated dev session execution.
+**Gate**: Phase 5 cleanup ONLY proceeds after successful production runs with `DEV_SESSION_HARNESS=claude-cli`. The rollback path is to set `DEV_SESSION_HARNESS=sdk` (default), which routes dev sessions through the existing `get_agent_response_sdk()` path. Because Phases 1-4 are purely additive (no deletions), reverting to `sdk` requires zero code changes.
 
 - [ ] Delete `agent/hooks/session_registry.py` entirely (250 lines)
 - [ ] Remove `_maybe_start_pipeline_stage()` from `agent/hooks/pre_tool_use.py` (the Agent tool dev-session interception path, lines 199-238)
@@ -82,23 +87,22 @@ Delete the code that only existed to support SDK-mediated dev session execution.
 - [ ] Remove `_post_stage_comment_on_completion()` from `agent/hooks/subagent_stop.py` (lines 283-310)
 - [ ] Simplify `subagent_stop_hook()` to only log subagent completion and inject stage state -- no more dev-session-specific logic
 - [ ] Remove `session_registry` imports from `pre_tool_use.py`, `subagent_stop.py`, `post_tool_use.py`, `health_check.py`, `messenger.py`
-- [ ] Remove `dev-session` entry from `agent/agent_definitions.py` if it exists
+- [ ] Delete `dev-session` entry from `agent/agent_definitions.py` (lines 121-131)
 - [ ] Keep `_handle_skill_tool_start()` in `pre_tool_use.py` -- Skill tool stage tracking is still needed for PM sessions running skills directly
 
-### Phase 6: Env var harness selection (Enhancement)
+### Phase 6: Extended harness config (Enhancement)
 
-Make the harness binary configurable so switching to opencode, Gemini CLI, or any other tool requires no code changes.
+The `DEV_SESSION_HARNESS` env var and basic routing were added in Phase 2. This phase adds multi-harness config and validation.
 
-- [ ] `DEV_SESSION_HARNESS` env var controls which binary to invoke (default: `claude-cli`)
-- [ ] Harness config maps names to command templates: `{"claude-cli": ["claude", "-p", "--output-format", "stream-json"], "opencode": ["opencode", "--non-interactive"]}`
+- [ ] Harness config maps names to command templates: `{"sdk": null, "claude-cli": ["claude", "-p", "--verbose", "--output-format", "stream-json"], "opencode": ["opencode", "--non-interactive"]}`
 - [ ] Add harness config to `config/` or inline in `sdk_client.py` as a simple dict
 - [ ] Validate harness binary exists on PATH at worker startup (log warning if not found)
 - [ ] Document supported harness values in `.env.example`
 
 ## Success Criteria
 
-- [ ] `agent/sdk_client.py` has `_get_response_via_harness()` that runs `claude -p --output-format stream-json`, streams assistant events to Telegram, and returns final result text
-- [ ] Worker routes `AgentSession` with `role="dev"` to `_get_response_via_harness()` instead of `get_agent_response_sdk()`
+- [ ] `agent/sdk_client.py` has `_get_response_via_harness()` that runs `claude -p --verbose --output-format stream-json`, streams assistant events to Telegram via `send_cb()` (bypassing nudge loop), with time/size-based batching, and returns final result text
+- [ ] Worker routes `AgentSession` with `role="dev"` to `_get_response_via_harness()` when `DEV_SESSION_HARNESS=claude-cli`; defaults to `sdk` (current behavior) for safe rollback
 - [ ] `DEV_SESSION_HARNESS=opencode` causes worker to invoke a different binary with no other code changes
 - [ ] `agent/hooks/pre_tool_use.py` no longer contains dev session registration logic (Agent tool interception removed)
 - [ ] `agent/hooks/subagent_stop.py` no longer drives SDLC stage transitions (logic moved to worker post-completion handler)
@@ -120,10 +124,10 @@ Make the harness binary configurable so switching to opencode, Gemini CLI, or an
 
 The update script (`scripts/remote-update.sh`) and update skill need minor changes:
 
-- Add `DEV_SESSION_HARNESS` to `.env.example` with default value `claude-cli`
+- Add `DEV_SESSION_HARNESS` to `.env.example` with default value `sdk` (safe default preserving current behavior; set to `claude-cli` to activate new harness)
 - After update, restart the worker service so the new harness routing takes effect (`valor-service.sh worker-restart`)
 - No new dependencies -- `claude -p` is already available on all machines with Claude Code installed
-- No migration steps for existing installations -- the default harness (`claude-cli`) matches current behavior
+- No migration steps for existing installations -- the default harness (`sdk`) preserves current behavior; operators opt in to `claude-cli` when ready
 
 ## Agent Integration
 
@@ -191,50 +195,30 @@ The update script (`scripts/remote-update.sh`) and update skill need minor chang
 **Round**: 1
 **Verdict**: NEEDS REVISION -- 1 blocker, 4 concerns, 2 nits
 
-### BLOCKER: send_to_chat / nudge loop incompatible with harness streaming path
+### BLOCKER: send_to_chat / nudge loop incompatible with harness streaming path -- RESOLVED
 
-**Phases**: 1, 2
+Phases 1 and 2 now explicitly state that dev sessions bypass `send_to_chat()` and the nudge loop entirely. The harness streams chunks directly to `send_cb()` (the raw Telegram delivery callback). Time/size-based batching (3s / 2000 chars) added to Phase 1 to prevent flooding.
 
-The plan says "forward assistant events to the OutputHandler in real time" but `_execute_agent_session()` does not use an OutputHandler directly. It wraps output through a complex `send_to_chat()` closure implementing the nudge loop, auto-continue logic, outbox draining, stop_reason inspection, and `route_session_output()` decision tree (lines 2728-2894 of `agent_session_queue.py`). If `_get_response_via_harness()` calls `handler.send()` directly, it bypasses all delivery logic. If it goes through `send_to_chat()`, the harness needs to produce `stop_reason` values and integrate with `get_stop_reason()`.
+### CONCERN: No rollback strategy between phases -- RESOLVED
 
-**Resolution**: Dev sessions do not need the nudge loop (no auto-continue). The harness function should call `send_cb()` directly for each streamed assistant chunk, bypassing `send_to_chat()` entirely. The plan must explicitly state that harness-routed dev sessions use a separate, simpler output path: stream chunks directly to `send_cb()` during execution, then deliver the final result. The `send_to_chat()` closure and its nudge loop remain unchanged for PM/teammate sessions.
+`DEV_SESSION_HARNESS` env var moved from Phase 6 to Phase 2 with `sdk` as default (preserves current behavior). Phases 1-4 are purely additive. Phase 5 cleanup is gated on successful production runs with `DEV_SESSION_HARNESS=claude-cli`.
 
-### CONCERN: No rollback strategy between phases
+### CONCERN: PipelineStateMachine lives in bridge/ -- RESOLVED
 
-**Phases**: All
+Phase 3 now includes moving `pipeline_state.py` from `bridge/` to `agent/` and updating all 3 import sites.
 
-Phase 5 deletes `session_registry.py` and removes hook logic. If Phase 4 (PM persona update) has issues in production, reverting requires restoring deleted code.
+### CONCERN: PM persona file lives outside the repo -- RESOLVED
 
-**Resolution**: Move `DEV_SESSION_HARNESS` env var from Phase 6 to Phase 2. Add an `sdk` value (default) that preserves the current `get_agent_response_sdk()` path. Phases 1-4 become purely additive (no deletions). Phase 5 cleanup only runs after production validation with `DEV_SESSION_HARNESS=claude-cli`.
+Phase 4 now includes a startup validation check in `sdk_client.py` that warns if the PM persona still contains `subagent_type="dev-session"` Agent tool dispatch instructions.
 
-### CONCERN: PipelineStateMachine lives in bridge/, creates new worker-to-bridge dependency
+### CONCERN: No backpressure or buffering for streamed output -- RESOLVED
 
-**Phase**: 3
+Phase 1 now includes time/size-based batching: buffer assistant text, flush to `send_cb()` on 3-second timer, 2000-char threshold, or `result` event (final flush).
 
-Phase 3 has the worker call `PipelineStateMachine.classify_outcome()` from `bridge/pipeline_state.py`. This contradicts the stated goal of decoupling worker from bridge. `agent_session_queue.py` line 7 says "This module has no module-level bridge/ imports."
+### NIT: stream-json requires --verbose flag -- RESOLVED
 
-**Resolution**: Move `pipeline_state.py` from `bridge/` to `agent/` (it operates on AgentSession records with no Telegram dependencies). Update the 3 existing import sites as part of Phase 3.
+All references to `claude -p` now include `--verbose` flag: Phase 1 command, Phase 6 harness config template, and Success Criteria.
 
-### CONCERN: PM persona file lives outside the repo
+### NIT: dev-session entry in agent_definitions.py definitely exists -- RESOLVED
 
-**Phase**: 4
-
-`~/Desktop/Valor/personas/project-manager.md` is iCloud-synced, not version-controlled. If out of sync after a git pull on a different machine, PM uses Agent tool dispatch while worker expects valor_session dispatch.
-
-**Resolution**: Add a validation check at PM session startup in `sdk_client.py`: grep the resolved persona prompt for `subagent_type="dev-session"`. If found, log WARNING about stale persona.
-
-### CONCERN: No backpressure or buffering for streamed output
-
-**Phase**: 1
-
-`claude -p --output-format stream-json` can produce hundreds of assistant events. Each triggers a Redis `rpush` via `TelegramRelayOutputHandler.send()`, potentially flooding Telegram with separate messages.
-
-**Resolution**: Buffer assistant text in `_get_response_via_harness()`. Flush to `handler.send()` when: (a) 5 seconds elapsed since last flush, (b) accumulated text exceeds 2000 chars, or (c) a `result` event arrives (final flush).
-
-### NIT: stream-json requires --verbose flag
-
-Verified empirically: `claude -p --output-format stream-json` returns an error without `--verbose`. The command must be `claude -p --verbose --output-format stream-json`. Update Phase 1 task and Phase 6 harness config template.
-
-### NIT: dev-session entry in agent_definitions.py definitely exists
-
-Phase 5 says "if it exists" -- the entry exists at lines 121-131 of `agent/agent_definitions.py`. Change to unconditional deletion.
+Phase 5 now states unconditional deletion of `dev-session` entry at lines 121-131 of `agent/agent_definitions.py`.
