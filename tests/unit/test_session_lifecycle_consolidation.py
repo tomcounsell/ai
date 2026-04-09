@@ -363,6 +363,7 @@ class TestStatusConstants:
             "waiting_for_children",
             "superseded",
             "paused_circuit",
+            "paused",
         }
 
     def test_no_overlap(self):
@@ -373,9 +374,9 @@ class TestStatusConstants:
         """ALL_STATUSES is the union of terminal and non-terminal."""
         assert ALL_STATUSES == TERMINAL_STATUSES | NON_TERMINAL_STATUSES
 
-    def test_eleven_total_statuses(self):
-        """There are exactly 12 statuses documented in the plan."""
-        assert len(ALL_STATUSES) == 12
+    def test_thirteen_total_statuses(self):
+        """There are exactly 13 statuses (5 terminal + 8 non-terminal)."""
+        assert len(ALL_STATUSES) == 13
 
 
 class TestImportSafety:
