@@ -45,8 +45,7 @@ load_dotenv(env_path)
 load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")
 
 # Initialize Sentry error tracking (skip gracefully if DSN not configured)
-from bridge.hibernation import enter_hibernation, is_hibernating  # noqa: E402
-
+from bridge.hibernation import is_hibernating  # noqa: E402
 
 # Known auth-error substrings used by the Sentry before_send filter.
 # Checked against both logentry.formatted (logger.error captures like VALOR-1)
@@ -717,6 +716,8 @@ async def main():
     """Main entry point."""
     if not API_ID or not API_HASH:
         logger.error("TELEGRAM_API_ID and TELEGRAM_API_HASH must be set")
+        from bridge.hibernation import enter_hibernation
+
         enter_hibernation()
         sys.exit(1)
 

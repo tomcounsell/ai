@@ -251,7 +251,9 @@ Without this distinction, auth expiry hits the same 8-attempt retry loop, exits 
 
 **Sentry noise suppression** (`before_send` filter in `bridge/telegram_bridge.py`):
 
-When the bridge is hibernating, the watchdog or launchd may still restart the process repeatedly. Each restart hits the same auth error and reports it to Sentry, generating thousands of duplicate events. The `_sentry_before_send` callback registered on `sentry_sdk.init()` checks `is_hibernating()` and drops all events while the flag file is present. When the bridge is not hibernating, all events pass through unchanged. The callback includes a `try/except` safety net so that if `is_hibernating()` itself raises, events still pass through rather than being silently lost.
+When the bridge is hibernating, the watchdog or launchd may still restart the process repeatedly. Each restart hits the same auth error and reports it to Sentry, generating thousands of duplicate events. The `_sentry_before_send` callback registered on `sentry_sdk.init()` checks `is_hibernating()` and, if true, inspects the event for known auth-error substrings in both `logentry.formatted` (for `logger.error()` captures like VALOR-1) and `exception.values[].value` (for exception captures like VALOR-Y). Only matching auth events are dropped; non-auth events pass through even during hibernation so novel errors are never silently lost. When the bridge is not hibernating, all events pass through unchanged. The callback includes a `try/except` safety net so that if `is_hibernating()` itself raises, events still pass through rather than being silently lost.
+
+The env-var-missing guard (`if not API_ID or not API_HASH`) also calls `enter_hibernation()` before `sys.exit(1)`, ensuring the flag file is set and subsequent Sentry events from watchdog restarts are filtered.
 
 **Check hibernation state**:
 ```bash
