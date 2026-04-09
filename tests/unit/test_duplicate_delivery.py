@@ -231,3 +231,93 @@ class TestCatchupCodeStructure:
         assert record_pos > enqueue_pos, (
             "Dedup record should be after enqueue (don't record if enqueue fails)"
         )
+
+    def test_seen_chat_ids_guard_exists(self):
+        """Catchup must have a seen_chat_ids dedup to handle Telethon returning
+        the same supergroup twice (once as channel, once as linked discussion group)."""
+        from pathlib import Path
+
+        catchup_code = Path("bridge/catchup.py").read_text()
+        assert "seen_chat_ids" in catchup_code, (
+            "seen_chat_ids guard missing from catchup.py — Telethon can return the same "
+            "supergroup twice, causing duplicate messages without this guard"
+        )
+        assert "dialog.id in seen_chat_ids" in catchup_code, (
+            "seen_chat_ids guard must check dialog.id before scanning each group"
+        )
+        assert "seen_chat_ids.add(dialog.id)" in catchup_code, (
+            "seen_chat_ids guard must record dialog.id after first scan to block duplicates"
+        )
+
+
+class TestTelethonDuplicateDialogDedup:
+    """Regression test: Telethon returns same supergroup twice in get_dialogs()."""
+
+    @pytest.mark.asyncio
+    async def test_catchup_skips_duplicate_dialog_id(self):
+        """When get_dialogs() returns the same chat twice (channel + linked discussion),
+        catchup must only scan it once — not queue messages twice."""
+        from bridge.catchup import scan_for_missed_messages
+
+        mock_client = AsyncMock()
+
+        # Simulate Telethon returning PM: Valor twice with the same underlying id
+        mock_entity = MagicMock()
+        mock_entity.title = "PM: Valor"
+        mock_entity.id = -1003449100931
+
+        mock_dialog_a = MagicMock()
+        mock_dialog_a.entity = mock_entity
+        mock_dialog_a.id = -1003449100931
+
+        mock_dialog_b = MagicMock()
+        mock_dialog_b.entity = mock_entity
+        mock_dialog_b.id = -1003449100931  # same id — duplicate
+
+        mock_client.get_dialogs = AsyncMock(return_value=[mock_dialog_a, mock_dialog_b])
+
+        from datetime import UTC, datetime
+
+        mock_message = MagicMock()
+        mock_message.id = 999
+        mock_message.date = datetime.now(UTC)
+        mock_message.out = False
+        mock_message.text = "Hello"
+        mock_sender = MagicMock()
+        mock_sender.first_name = "Valor"
+        mock_sender.username = "valorengels"
+        mock_sender.id = 179144806
+        mock_message.get_sender = AsyncMock(return_value=mock_sender)
+
+        mock_client.get_messages = AsyncMock(return_value=[mock_message])
+
+        mock_project = {"_key": "valor", "working_directory": "/src/ai"}
+        find_project = MagicMock(return_value=mock_project)
+        enqueue_fn = AsyncMock()
+
+        with (
+            patch("bridge.dedup.is_duplicate_message", new_callable=AsyncMock) as mock_dedup,
+            patch("bridge.dedup.record_message_processed", new_callable=AsyncMock),
+            patch("bridge.catchup._check_if_handled", new_callable=AsyncMock) as mock_handled,
+        ):
+            mock_dedup.return_value = False
+            mock_handled.return_value = False
+
+            await scan_for_missed_messages(
+                client=mock_client,
+                monitored_groups=["pm: valor"],
+                projects_config={},
+                should_respond_fn=AsyncMock(return_value=(True, False)),
+                enqueue_agent_session_fn=enqueue_fn,
+                find_project_fn=find_project,
+            )
+
+        # get_messages should only be called ONCE despite two dialogs with same id
+        assert mock_client.get_messages.call_count == 1, (
+            f"get_messages called {mock_client.get_messages.call_count} times — "
+            "duplicate dialog dedup not working; Telethon returned same group twice"
+        )
+        # Message should be enqueued exactly once
+        assert enqueue_fn.call_count == 1, (
+            f"enqueue called {enqueue_fn.call_count} times — same message queued multiple times"
+        )
