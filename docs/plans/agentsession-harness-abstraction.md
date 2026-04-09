@@ -28,7 +28,8 @@ Decouple dev session execution from the Claude Agent SDK by making `AgentSession
 
 Add `_get_response_via_harness()` to `agent/sdk_client.py` that runs `claude -p --verbose --output-format stream-json`, streams assistant events directly to the Telegram send callback in real time (bypassing the nudge loop entirely), and returns final result text.
 
-- [ ] Add `_get_response_via_harness(session, send_cb, working_dir, env)` function in `agent/sdk_client.py`
+- [ ] Add `async _get_response_via_harness(session, send_cb, working_dir, env)` function in `agent/sdk_client.py`
+- [ ] **Async subprocess**: Use `asyncio.create_subprocess_exec()` to spawn the process, since the worker event loop is already async and `send_cb()` is an async callback. Read stdout via `async for line in process.stdout:` for natural backpressure. This avoids thread-pool complexity and integrates cleanly with the existing async worker loop. Stderr is read separately via `process.stderr` and logged on non-zero exit.
 - [ ] Function runs `claude -p --verbose --output-format stream-json` as a subprocess with the session's message as prompt
 - [ ] Parse stdout line-by-line: forward `assistant` events (text blocks) directly to `send_cb()` -- NOT through `send_to_chat()` or the nudge loop
 - [ ] **Output bypass**: Dev sessions do not need auto-continue, nudge loop, stop_reason inspection, or `route_session_output()`. The harness streams chunks directly to `send_cb()` (the raw Telegram delivery callback) during execution, then delivers the final result. The `send_to_chat()` closure and its nudge loop remain unchanged for PM/teammate sessions only.
@@ -55,7 +56,14 @@ Modify `_execute_agent_session()` in `agent/agent_session_queue.py` to route dev
 
 Move SDLC stage completion logic from `SubagentStop` hook into the worker's post-completion path for dev sessions.
 
-- [ ] **Move `pipeline_state.py` from `bridge/` to `agent/`** -- it operates on AgentSession records with no Telegram dependencies, so it belongs in `agent/`. Update the 3 existing import sites (`bridge/telegram_bridge.py`, `agent/hooks/pre_tool_use.py`, `agent/hooks/subagent_stop.py`) to import from `agent.pipeline_state`.
+- [ ] **Move `pipeline_state.py` and `pipeline_graph.py` from `bridge/` to `agent/`** -- both are pure pipeline logic with zero Telegram dependencies. `pipeline_state.py` imports from `pipeline_graph.py`, so they must move together to avoid `agent/` depending on `bridge/`. Update ALL import sites listed below.
+  - **`pipeline_state.py` production import sites (7):** `agent/hooks/pre_tool_use.py`, `agent/hooks/subagent_stop.py`, `agent/hooks/post_tool_use.py`, `agent/agent_session_queue.py`, `models/agent_session.py` (3 sites), `tools/sdlc_stage_query.py`, `tools/sdlc_stage_marker.py`, `ui/data/sdlc.py`
+  - **`pipeline_state.py` test import sites (7 files):** `tests/unit/test_pipeline_state_machine.py`, `tests/unit/test_pre_tool_use_start_stage.py`, `tests/unit/test_post_tool_use_stage_completion.py`, `tests/unit/test_ui_sdlc_data.py`, `tests/unit/test_subagent_stop_hook.py`, `tests/integration/test_artifact_inference.py`, `tests/integration/test_parent_child_round_trip.py`, `tests/integration/test_stage_aware_auto_continue.py`
+  - **`pipeline_graph.py` production import sites (2):** `ui/data/sdlc.py`, `bridge/pipeline_state.py` (becomes `agent/pipeline_state.py` internal import after move)
+  - **`pipeline_graph.py` test import sites (4 files):** `tests/unit/test_pipeline_integrity.py`, `tests/unit/test_pipeline_graph.py`, `tests/integration/test_artifact_inference.py`, `tests/e2e/test_routing.py`
+  - **NOT imported by `bridge/telegram_bridge.py`** (confirmed: zero pipeline imports)
+  - Update `bridge/pipeline_state.py` self-import in doctest to `agent.pipeline_state`
+  - Update `bridge/pipeline_graph.py` self-import in doctest to `agent.pipeline_graph`
 - [ ] After `_get_response_via_harness()` returns, worker calls `PipelineStateMachine.classify_outcome()` on the output (now from `agent.pipeline_state`)
 - [ ] Route to `complete_stage()` or `fail_stage()` based on outcome classification
 - [ ] Post structured stage comment to the tracking GitHub issue via `utils.issue_comments.post_stage_comment()`
@@ -69,10 +77,12 @@ Update the PM persona to create dev sessions via `valor_session create` CLI inst
 
 - [ ] Update PM persona file (`~/Desktop/Valor/personas/project-manager.md`) to replace Agent tool dev-session dispatch with `python -m tools.valor_session create --role dev --parent $AGENT_SESSION_ID --message "Stage: BUILD\n..."` 
 - [ ] PM uses Bash tool to run the valor_session CLI command
+- [ ] **`--parent` takes the AgentSession popoto model ID** (the string stored in `AgentSession.id`, e.g. `"abc123def"`), NOT a Claude SDK session_id. The env var `AGENT_SESSION_ID` already holds this value for the running PM session. The CLI sets `parent_agent_session_id` on the new AgentSession record, which the worker uses for steering messages back to the PM.
 - [ ] PM includes stage assignment, issue URL, and plan context in the `--message` argument
 - [ ] PM waits for dev session completion by monitoring steering messages (the worker steers the PM when the dev session finishes)
 - [ ] Remove any instructions about using Agent tool with `subagent_type="dev-session"`
 - [ ] **Startup validation**: Add a check in `sdk_client.py` PM session startup path that greps the resolved persona prompt for `subagent_type="dev-session"`. If found, log `WARNING: PM persona still contains Agent tool dispatch instructions -- update ~/Desktop/Valor/personas/project-manager.md`. This guards against stale persona files on machines that pulled code but did not update the iCloud-synced persona.
+- [ ] **Runtime guard**: In the `agent_definitions.py` `get_definition()` lookup, if the requested subagent type is `"dev-session"` and it has been deleted, return a synthetic error definition that tells the PM: "Dev sessions are now created via `python -m tools.valor_session create --role dev`. The Agent tool dispatch path has been removed." This ensures a stale PM persona gets an actionable error instead of an opaque crash.
 
 ### Phase 5: Remove legacy hook wiring (Cleanup -- gated on production validation)
 
@@ -82,11 +92,19 @@ Update the PM persona to create dev sessions via `valor_session create` CLI inst
 - [ ] Remove `_maybe_start_pipeline_stage()` from `agent/hooks/pre_tool_use.py` (the Agent tool dev-session interception path, lines 199-238)
 - [ ] Remove `_maybe_register_dev_session` backward-compatible alias from `pre_tool_use.py`
 - [ ] Remove the `if tool_name == "Agent"` block from `pre_tool_use_hook()` (lines 256-259)
+- [ ] **Refactor `_handle_skill_tool_start()` in `pre_tool_use.py`** to resolve the AgentSession ID from the `AGENT_SESSION_ID` env var (via `os.environ.get("AGENT_SESSION_ID")`) instead of calling `session_registry.resolve()`. This function is kept for PM Skill tool stage tracking but its `session_registry` dependency must be removed before the registry is deleted.
 - [ ] Remove `_register_dev_session_completion()` from `agent/hooks/subagent_stop.py` (lines 55-128)
 - [ ] Remove `_record_stage_on_parent()` from `agent/hooks/subagent_stop.py` (lines 131-192)
 - [ ] Remove `_post_stage_comment_on_completion()` from `agent/hooks/subagent_stop.py` (lines 283-310)
 - [ ] Simplify `subagent_stop_hook()` to only log subagent completion and inject stage state -- no more dev-session-specific logic
-- [ ] Remove `session_registry` imports from `pre_tool_use.py`, `subagent_stop.py`, `post_tool_use.py`, `health_check.py`, `messenger.py`
+- [ ] Remove `session_registry` imports from ALL production files:
+  - `agent/hooks/pre_tool_use.py` (lines 187, 210: `resolve`)
+  - `agent/hooks/subagent_stop.py` (lines 79, 339: `resolve`)
+  - `agent/hooks/post_tool_use.py` (line 81: `resolve`)
+  - `agent/health_check.py` (line 494: `record_tool_use`, `resolve`)
+  - `agent/messenger.py` (line 197: `get_activity`)
+  - `agent/sdk_client.py` (line 1028: `register_pending`; line 1235: `cleanup_stale`, `unregister`)
+  - `agent/agent_session_queue.py` (line 2181: `get_activity`)
 - [ ] Delete `dev-session` entry from `agent/agent_definitions.py` (lines 121-131)
 - [ ] Keep `_handle_skill_tool_start()` in `pre_tool_use.py` -- Skill tool stage tracking is still needed for PM sessions running skills directly
 
@@ -167,12 +185,19 @@ The update script (`scripts/remote-update.sh`) and update skill need minor chang
 - [ ] `tests/unit/test_session_registry.py` -- DELETE: session_registry.py is being deleted entirely
 - [ ] `tests/unit/test_session_registry_fallback.py` -- DELETE: session_registry.py is being deleted entirely
 - [ ] `tests/unit/test_dev_session_registration.py` -- DELETE: dev session registration via PreToolUse hook is being removed
-- [ ] `tests/unit/test_pre_tool_use_start_stage.py` -- UPDATE: remove test cases for Agent tool dev-session interception; keep Skill tool stage tracking tests
-- [ ] `tests/unit/test_subagent_stop_hook.py` -- UPDATE: remove tests for `_register_dev_session_completion` and `_record_stage_on_parent`; keep basic subagent logging tests
-- [ ] `tests/unit/test_post_tool_use_stage_completion.py` -- UPDATE: remove any session_registry imports/usage
-- [ ] `tests/unit/test_worker_persistent.py` -- UPDATE: add test cases for dev role routing to harness path
-- [ ] `tests/integration/test_parent_child_round_trip.py` -- REPLACE: rewrite to test valor_session create -> worker harness execution -> parent steering flow
-- [ ] `tests/e2e/test_session_spawning.py` -- REPLACE: rewrite for new PM -> valor_session -> worker -> harness flow
+- [ ] `tests/unit/test_pre_tool_use_start_stage.py` -- UPDATE: remove test cases for Agent tool dev-session interception; keep Skill tool stage tracking tests; update `session_registry.resolve` patches to use `AGENT_SESSION_ID` env var
+- [ ] `tests/unit/test_subagent_stop_hook.py` -- UPDATE: remove tests for `_register_dev_session_completion` and `_record_stage_on_parent`; remove `session_registry.resolve` patches; keep basic subagent logging tests
+- [ ] `tests/unit/test_post_tool_use_stage_completion.py` -- UPDATE: remove `session_registry.resolve` patches, update to use `AGENT_SESSION_ID` env var
+- [ ] `tests/unit/test_worker_persistent.py` -- UPDATE: add test cases for dev role routing to harness path; remove `session_registry.get_activity` patches
+- [ ] `tests/unit/test_pipeline_state_machine.py` -- UPDATE: change all `bridge.pipeline_state` imports to `agent.pipeline_state`
+- [ ] `tests/unit/test_pipeline_graph.py` -- UPDATE: change all `bridge.pipeline_graph` imports to `agent.pipeline_graph`
+- [ ] `tests/unit/test_pipeline_integrity.py` -- UPDATE: change all `bridge.pipeline_graph` imports to `agent.pipeline_graph`
+- [ ] `tests/unit/test_ui_sdlc_data.py` -- UPDATE: change `bridge.pipeline_state` patch targets to `agent.pipeline_state`
+- [ ] `tests/integration/test_parent_child_round_trip.py` -- REPLACE: rewrite to test valor_session create -> worker harness execution -> parent steering flow; update `bridge.pipeline_state` imports to `agent.pipeline_state`
+- [ ] `tests/integration/test_artifact_inference.py` -- UPDATE: change `bridge.pipeline_state` and `bridge.pipeline_graph` imports to `agent.*`
+- [ ] `tests/integration/test_stage_aware_auto_continue.py` -- UPDATE: change `bridge.pipeline_state` imports to `agent.pipeline_state`
+- [ ] `tests/e2e/test_session_spawning.py` -- REPLACE: rewrite for new PM -> valor_session -> worker -> harness flow; remove all `session_registry` usage
+- [ ] `tests/e2e/test_routing.py` -- UPDATE: change `bridge.pipeline_graph` imports to `agent.pipeline_graph`
 
 ## Rabbit Holes
 
@@ -229,36 +254,26 @@ Phase 5 now states unconditional deletion of `dev-session` entry at lines 121-13
 **Date**: 2026-04-09
 **Verdict**: NEEDS REVISION -- 2 blockers, 4 concerns
 
-#### BLOCKER: Phase 3 undercounts pipeline_state import sites by 7x
+#### BLOCKER: Phase 3 undercounts pipeline_state import sites by 7x -- RESOLVED
 
-Plan says "Update the 3 existing import sites (`bridge/telegram_bridge.py`, `agent/hooks/pre_tool_use.py`, `agent/hooks/subagent_stop.py`)". Actual count:
+Phase 3 now enumerates all actual import sites verified by grep: 7 production files for `pipeline_state.py`, 7 test files, plus 2 production and 4 test files for `pipeline_graph.py`. `bridge/telegram_bridge.py` removed (confirmed zero imports). Both `pipeline_state.py` and `pipeline_graph.py` move together to `agent/`.
 
-**Production files (10):** `agent/agent_session_queue.py`, `agent/hooks/pre_tool_use.py`, `agent/hooks/subagent_stop.py`, `agent/hooks/post_tool_use.py`, `bridge/pipeline_state.py` (self-import in doctest), `models/agent_session.py` (3 sites), `tools/sdlc_stage_query.py`, `tools/sdlc_stage_marker.py`, `ui/data/sdlc.py`
+#### BLOCKER: Phase 5 deletes session_registry.py but _handle_skill_tool_start depends on it -- RESOLVED
 
-**Test files (3 unique):** `tests/unit/test_pipeline_state_machine.py`, `tests/integration/test_parent_child_round_trip.py` (5 imports), `tests/integration/test_artifact_inference.py`, `tests/integration/test_stage_aware_auto_continue.py`
+Phase 5 now includes explicit refactoring of `_handle_skill_tool_start()` to use `os.environ.get("AGENT_SESSION_ID")` instead of `session_registry.resolve()`. All 7 production files with `session_registry` imports are now enumerated with exact line numbers: `pre_tool_use.py`, `subagent_stop.py`, `post_tool_use.py`, `health_check.py`, `messenger.py`, `sdk_client.py`, and `agent_session_queue.py`.
 
-`bridge/telegram_bridge.py` is listed but has **zero** pipeline_state imports -- it should be removed from the list. The plan must enumerate all actual import sites to avoid a broken build after the move.
+#### CONCERN: send_cb is async but plan does not specify async subprocess streaming design -- RESOLVED
 
-Additionally, `pipeline_graph.py` has zero Telegram dependencies (it is a pure graph/config module) and `pipeline_state.py` imports from it. If `pipeline_state.py` moves to `agent/` but `pipeline_graph.py` stays in `bridge/`, `agent/` now depends on `bridge/` -- the opposite of the intended decoupling. Both files should move together.
+Phase 1 now specifies `asyncio.create_subprocess_exec()` with `async for line in process.stdout:` for natural backpressure integration with the existing async worker loop. Stderr handled separately via `process.stderr`.
 
-#### BLOCKER: Phase 5 deletes session_registry.py but _handle_skill_tool_start depends on it
+#### CONCERN: pipeline_graph.py should move with pipeline_state.py -- RESOLVED
 
-Phase 5 says to keep `_handle_skill_tool_start()` in `pre_tool_use.py` for PM Skill tool stage tracking. But `_handle_skill_tool_start()` at line 187 calls `session_registry.resolve()` -- deleting `session_registry.py` breaks this function. The plan must either: (a) rewrite `_handle_skill_tool_start` to resolve sessions without the registry, or (b) keep the minimal `resolve()` function somewhere.
+Phase 3 now includes `pipeline_graph.py` in the move from `bridge/` to `agent/`, with all import sites enumerated.
 
-Phase 5 also lists removal sites as `pre_tool_use.py`, `subagent_stop.py`, `post_tool_use.py`, `health_check.py`, `messenger.py` -- but misses `sdk_client.py` (lines 1028, 1235: `register_pending`, `cleanup_stale`, `unregister`) and `agent_session_queue.py` (line 2181: `get_activity`).
+#### CONCERN: Stale persona file on production machines could break PM dispatch with no fallback -- RESOLVED
 
-#### CONCERN: send_cb is async but plan does not specify async subprocess streaming design
+Phase 4 now adds a runtime guard in `agent_definitions.py`: if the deleted `"dev-session"` type is requested, return an actionable error message directing the PM to use `valor_session create` instead. This provides graceful degradation rather than an opaque crash.
 
-`_get_response_via_harness()` must stream stdout line-by-line and call `send_cb()` which is an async callback. The plan does not specify whether the subprocess reading loop uses `asyncio.create_subprocess_exec` with async stdout iteration or runs `subprocess.Popen` in a thread. This affects error handling, cancellation, and integration with the existing async worker loop.
+#### CONCERN: PM needs clarity on which ID to pass as --parent -- RESOLVED
 
-#### CONCERN: pipeline_graph.py should move with pipeline_state.py
-
-`pipeline_graph.py` defines `STAGE_TO_SKILL`, `get_next_stage`, `DISPLAY_STAGES` -- pure pipeline configuration with zero Telegram/bridge dependencies. `pipeline_state.py` imports from it. Moving only `pipeline_state.py` to `agent/` creates a cross-package dependency (`agent/` -> `bridge/`) that contradicts the decoupling goal. Both should move to `agent/` together. Import sites for `pipeline_graph.py`: `ui/data/sdlc.py`, `bridge/pipeline_state.py`, `tests/e2e/test_routing.py`, `tests/integration/test_artifact_inference.py`, `tests/unit/test_pipeline_graph.py`, `tests/unit/test_pipeline_integrity.py`.
-
-#### CONCERN: Stale persona file on production machines could break PM dispatch with no fallback
-
-Phase 4 adds a startup WARNING log if the persona still references `subagent_type="dev-session"`. But a warning log is easily missed. If the persona is stale, PM sessions will attempt Agent tool dispatch which will fail (since Phase 5 deletes the `dev-session` agent definition). The plan should specify what happens at runtime when the PM actually tries Agent tool dispatch after the definition is deleted -- does it error? Does the PM retry? A runtime guard or graceful degradation path is needed, not just a startup warning.
-
-#### CONCERN: PM needs clarity on which ID to pass as --parent
-
-The plan says PM runs `python -m tools.valor_session create --role dev --parent $AGENT_SESSION_ID`. But `AGENT_SESSION_ID` is the PM's own AgentSession UUID. The `valor_session create` CLI `--parent` flag needs to be documented: does it accept the UUID string? Is it the same as `parent_agent_session_id` on the model? This is a minor detail but ambiguity here will cause wiring bugs.
+Phase 4 now documents that `--parent` takes the AgentSession popoto model ID string (from `AGENT_SESSION_ID` env var), which maps to `parent_agent_session_id` on the model. Not a Claude SDK session_id.
