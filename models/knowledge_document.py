@@ -72,6 +72,9 @@ class KnowledgeDocument(Model):
             content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
             mtime = os.path.getmtime(abs_path)
 
+            # Truncate content to avoid exceeding OpenAI embedding token limit
+            content = content[:30000]
+
             # Check for existing document with same content hash
             existing = cls.query.filter(file_path=abs_path)
             if existing:

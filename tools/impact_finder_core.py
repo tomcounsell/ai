@@ -129,6 +129,8 @@ def _embed_openai(texts: list[str]) -> list[list[float]]:
 
     client = openai.OpenAI()
 
+    texts = [t[:30000] for t in texts]
+
     if len(texts) <= EMBEDDING_BATCH_SIZE:
         response = client.embeddings.create(model="text-embedding-3-small", input=texts)
         return [item.embedding for item in response.data]
