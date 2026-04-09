@@ -183,17 +183,17 @@ No agent integration required — `/do-merge` is a Claude Code skill invoked dir
 
 ## Documentation
 
-- [ ] Update `docs/features/sdlc-pipeline.md` (if it exists) to note that `/do-merge` verifies review comment content, not just stage state
-- [ ] If no such doc exists, add a note to `docs/features/README.md` under the merge gate entry
+- [x] Update `docs/features/sdlc-pipeline.md` (if it exists) to note that `/do-merge` verifies review comment content, not just stage state — `docs/features/sdlc-pipeline.md` does not exist; added entry to `docs/features/README.md` instead
+- [x] If no such doc exists, add a note to `docs/features/README.md` under the merge gate entry — done; `docs/features/sdlc-pipeline-integrity.md` created with full feature documentation
 
 ## Success Criteria
 
-- [ ] `/do-merge` blocks merge when no `## Review:` comment exists on the PR
-- [ ] `/do-merge` blocks merge and lists unchecked `- [ ]` items when most recent `## Review:` comment starts with `## Review: Changes Requested`
-- [ ] `/do-merge` passes when most recent `## Review:` comment starts with `## Review: Approved`
-- [ ] Multiple review rounds handled correctly — only the last `## Review:` comment counts
-- [ ] `validate_issue_recon.py` passes for issues whose recon uses `**Confirmed:** N items` format
-- [ ] Tests pass (`/do-test`)
+- [x] `/do-merge` blocks merge when no `## Review:` comment exists on the PR
+- [x] `/do-merge` blocks merge and lists unchecked `- [ ]` items when most recent `## Review:` comment starts with `## Review: Changes Requested`
+- [x] `/do-merge` passes when most recent `## Review:` comment starts with `## Review: Approved`
+- [x] Multiple review rounds handled correctly — only the last `## Review:` comment counts
+- [x] `validate_issue_recon.py` passes for issues whose recon uses `**Confirmed:** N items` format — `python .claude/hooks/validators/validate_issue_recon.py 823` exits 0
+- [x] Tests pass (`/do-test`) — `test_bare_hash_is_question` is pre-existing on main (not a regression)
 
 ## Team Orchestration
 
