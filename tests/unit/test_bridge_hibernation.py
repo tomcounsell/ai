@@ -15,12 +15,9 @@ from __future__ import annotations
 import asyncio
 import time
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, call, patch
-
-import pytest
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from bridge.hibernation import (
-    AUTH_REQUIRED_FLAG,
     _parse_log_file,
     enter_hibernation,
     exit_hibernation,
@@ -28,7 +25,6 @@ from bridge.hibernation import (
     is_hibernating,
     replay_buffered_output,
 )
-
 
 # ── is_auth_error ──────────────────────────────────────────────────────────
 
@@ -262,9 +258,7 @@ class TestReplayBufferedOutput:
 
         # Write a log file with an old mtime (not recent)
         log = tmp_path / "session-abc.log"
-        log.write_text(
-            "[2024-01-15 10:00:00] chat=123456 reply_to=42\nHello from agent!\n---\n"
-        )
+        log.write_text("[2024-01-15 10:00:00] chat=123456 reply_to=42\nHello from agent!\n---\n")
         # Set mtime to 2 hours ago so it qualifies for replay
         old_mtime = time.time() - 7200
         import os
@@ -285,9 +279,7 @@ class TestReplayBufferedOutput:
         client = AsyncMock()
 
         log = tmp_path / "session-recent.log"
-        log.write_text(
-            "[2024-01-15 10:00:00] chat=123456 reply_to=42\nRecent output\n---\n"
-        )
+        log.write_text("[2024-01-15 10:00:00] chat=123456 reply_to=42\nRecent output\n---\n")
         # mtime is now — very recent
 
         result = self._run(replay_buffered_output(client))
@@ -301,9 +293,7 @@ class TestReplayBufferedOutput:
         client = AsyncMock()
 
         log = tmp_path / "session-old.log"
-        log.write_text(
-            "[2024-01-15 10:00:00] chat=123456 reply_to=42\nOld output\n---\n"
-        )
+        log.write_text("[2024-01-15 10:00:00] chat=123456 reply_to=42\nOld output\n---\n")
         # Set mtime to 30 hours ago
         import os
 
@@ -320,9 +310,7 @@ class TestReplayBufferedOutput:
         client = AsyncMock()
 
         log = tmp_path / "session-done.log"
-        log.write_text(
-            "[2024-01-15 10:00:00] chat=123456 reply_to=42\nAlready sent\n---\n"
-        )
+        log.write_text("[2024-01-15 10:00:00] chat=123456 reply_to=42\nAlready sent\n---\n")
         marker = tmp_path / "session-done.replayed"
         marker.write_text(str(time.time()))
 
@@ -341,9 +329,7 @@ class TestReplayBufferedOutput:
         client.send_message = AsyncMock()
 
         log = tmp_path / "session-abc.log"
-        log.write_text(
-            "[2024-01-15 10:00:00] chat=123456 reply_to=42\nHello!\n---\n"
-        )
+        log.write_text("[2024-01-15 10:00:00] chat=123456 reply_to=42\nHello!\n---\n")
         import os
 
         old_mtime = time.time() - 7200
@@ -361,9 +347,7 @@ class TestReplayBufferedOutput:
         client.send_message = AsyncMock(side_effect=Exception("network error"))
 
         log = tmp_path / "session-fail.log"
-        log.write_text(
-            "[2024-01-15 10:00:00] chat=123456 reply_to=42\nHello!\n---\n"
-        )
+        log.write_text("[2024-01-15 10:00:00] chat=123456 reply_to=42\nHello!\n---\n")
         import os
 
         old_mtime = time.time() - 7200
@@ -386,9 +370,7 @@ class TestParseLogFile:
 
     def test_parses_valid_entry(self, tmp_path):
         log = tmp_path / "test.log"
-        log.write_text(
-            "[2024-01-15 10:00:00] chat=123456 reply_to=42\nHello world\n---\n"
-        )
+        log.write_text("[2024-01-15 10:00:00] chat=123456 reply_to=42\nHello world\n---\n")
         entries = _parse_log_file(log)
         assert len(entries) == 1
         chat_id, reply_to, text, timestamp = entries[0]
@@ -408,9 +390,7 @@ class TestParseLogFile:
 
     def test_skips_reaction_entries(self, tmp_path):
         log = tmp_path / "test.log"
-        log.write_text(
-            "[2024-01-15 10:00:00] REACTION chat=123 msg=42 emoji=👍\n"
-        )
+        log.write_text("[2024-01-15 10:00:00] REACTION chat=123 msg=42 emoji=👍\n")
         entries = _parse_log_file(log)
         assert len(entries) == 0
 

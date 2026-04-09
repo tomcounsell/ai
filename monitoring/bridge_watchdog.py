@@ -636,8 +636,7 @@ def main():
         print(f"Hibernating: {hibernating}")
         if hibernating:
             print(
-                "Hibernation: auth required — "
-                "run 'python scripts/telegram_login.py' then restart"
+                "Hibernation: auth required — run 'python scripts/telegram_login.py' then restart"
             )
 
         status = check_bridge_health()
