@@ -1,5 +1,5 @@
 ---
-status: Building
+status: Complete
 type: feature
 appetite: Small
 owner: Valor
@@ -167,35 +167,35 @@ For `teammate`: Unchanged behavior -- Teammate handler.
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `_parse_classifier_response()` in `intent_classifier.py` falls through to "work" with confidence 0.0 for unrecognized intents -- after this change, it falls through for intents not in the extended whitelist. Verify with test cases for "unknown 0.5 reason" and "gibberish"
-- [ ] `classify_intent()` wraps the entire API call in try/except, returning work intent on failure -- unchanged, conservative default preserved
-- [ ] `_classify_work_request_llm()` try/except blocks for Ollama and Haiku fallbacks -- existing fallback behavior preserved; new tests verify collaboration/other parsing within the same error handling
+- [x] `_parse_classifier_response()` in `intent_classifier.py` falls through to "work" with confidence 0.0 for unrecognized intents -- after this change, it falls through for intents not in the extended whitelist. Verify with test cases for "unknown 0.5 reason" and "gibberish"
+- [x] `classify_intent()` wraps the entire API call in try/except, returning work intent on failure -- unchanged, conservative default preserved
+- [x] `_classify_work_request_llm()` try/except blocks for Ollama and Haiku fallbacks -- existing fallback behavior preserved; new tests verify collaboration/other parsing within the same error handling
 
 ### Empty/Invalid Input Handling
-- [ ] `classify_work_request("")` and `classify_work_request(None)` already return "passthrough" -- unchanged by this work
-- [ ] `classify_intent("")` goes through the API call which handles empty strings naturally
-- [ ] New classification types only apply to the LLM paths, which require non-empty text
+- [x] `classify_work_request("")` and `classify_work_request(None)` already return "passthrough" -- unchanged by this work
+- [x] `classify_intent("")` goes through the API call which handles empty strings naturally
+- [x] New classification types only apply to the LLM paths, which require non-empty text
 
 ### Error State Rendering
-- [ ] If intent classification fails entirely, the fallback is "work" (full SDLC) -- unchanged fail-safe
-- [ ] If bridge-level classification fails, the fallback is QUESTION -- unchanged
-- [ ] No user-visible output changes; routing is invisible to the end user
+- [x] If intent classification fails entirely, the fallback is "work" (full SDLC) -- unchanged fail-safe
+- [x] If bridge-level classification fails, the fallback is QUESTION -- unchanged
+- [x] No user-visible output changes; routing is invisible to the end user
 
 ### Default Behavior Risk Assessment
-- [ ] The "if in doubt, classify as collaboration" default shifts failure mode from over-triggering dev-sessions to PM trying tasks directly. This is strictly cheaper when wrong: PM tries directly (seconds) vs. dev-session timeout (60 minutes). The PM retains access to the Agent tool and can spawn a dev-session on demand. Bridge-level `is_sdlc` property and issue/PR fast-path detection are unchanged, so explicit SDLC references always route correctly.
+- [x] The "if in doubt, classify as collaboration" default shifts failure mode from over-triggering dev-sessions to PM trying tasks directly. This is strictly cheaper when wrong: PM tries directly (seconds) vs. dev-session timeout (60 minutes). The PM retains access to the Agent tool and can spawn a dev-session on demand. Bridge-level `is_sdlc` property and issue/PR fast-path detection are unchanged, so explicit SDLC references always route correctly.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_enums.py::TestClassificationType::test_all_members` -- UPDATE: change assertion from `len == 2` to `len == 4`
-- [ ] `tests/unit/test_enums.py::TestClassificationType::test_string_equality` -- UPDATE: add assertions for COLLABORATION and OTHER
-- [ ] `tests/unit/test_work_request_classifier.py::TestLlmClassification` -- UPDATE: add parametrized test cases for collaboration-type messages
-- [ ] `tests/unit/test_intent_classifier.py::TestParseClassifierResponse::test_unknown_intent` -- UPDATE: "collaboration" and "other" are no longer unknown intents; add new test cases for valid parsing of these intents
-- [ ] `tests/unit/test_intent_classifier.py::TestIntentResult` -- UPDATE: add tests for `is_collaboration` and `is_other` properties; update `is_work` tests to verify it returns False for collaboration/other intents
-- [ ] `tests/unit/test_intent_classifier.py::TestClassifyIntent` -- UPDATE: add mocked API test for collaboration classification
-- [ ] `tests/unit/test_intent_classifier.py::TestGoldenExamples` -- UPDATE: add golden examples for collaboration and other intents
-- [ ] `tests/unit/test_pm_session_factory.py::TestBridgeSessionTypeRouting` -- REVIEW: tests reference `ClassificationType` members but only check PM/Dev session type routing; may need new test for collaboration classification not changing session_type
-- [ ] `tests/unit/test_sdlc_mode.py::TestIsSdlcJobClassificationType` -- UPDATE: add explicit test cases verifying `is_sdlc` returns False for "collaboration" and "other" classification_type values
-- [ ] `tests/unit/test_pm_channels.py` -- REVIEW: tests focus on system prompt loading and do not test dispatch logic; likely no changes needed
+- [x] `tests/unit/test_enums.py::TestClassificationType::test_all_members` -- UPDATE: change assertion from `len == 2` to `len == 4`
+- [x] `tests/unit/test_enums.py::TestClassificationType::test_string_equality` -- UPDATE: add assertions for COLLABORATION and OTHER
+- [x] `tests/unit/test_work_request_classifier.py::TestLlmClassification` -- UPDATE: add parametrized test cases for collaboration-type messages
+- [x] `tests/unit/test_intent_classifier.py::TestParseClassifierResponse::test_unknown_intent` -- UPDATE: "collaboration" and "other" are no longer unknown intents; add new test cases for valid parsing of these intents
+- [x] `tests/unit/test_intent_classifier.py::TestIntentResult` -- UPDATE: add tests for `is_collaboration` and `is_other` properties; update `is_work` tests to verify it returns False for collaboration/other intents
+- [x] `tests/unit/test_intent_classifier.py::TestClassifyIntent` -- UPDATE: add mocked API test for collaboration classification
+- [x] `tests/unit/test_intent_classifier.py::TestGoldenExamples` -- UPDATE: add golden examples for collaboration and other intents
+- [x] `tests/unit/test_pm_session_factory.py::TestBridgeSessionTypeRouting` -- REVIEW: tests reference `ClassificationType` members but only check PM/Dev session type routing; may need new test for collaboration classification not changing session_type
+- [x] `tests/unit/test_sdlc_mode.py::TestIsSdlcJobClassificationType` -- UPDATE: add explicit test cases verifying `is_sdlc` returns False for "collaboration" and "other" classification_type values
+- [x] `tests/unit/test_pm_channels.py` -- REVIEW: tests focus on system prompt loading and do not test dispatch logic; likely no changes needed
 
 ## Rabbit Holes
 
@@ -256,18 +256,18 @@ No agent integration required -- this is a routing/dispatch change internal to t
 
 ## Success Criteria
 
-- [ ] `ClassificationType` enum has 4 members: SDLC, QUESTION, COLLABORATION, OTHER
-- [ ] Intent classifier (`agent/intent_classifier.py`) prompt requests one of four intents with clear examples
-- [ ] Intent classifier parser whitelist accepts "collaboration" and "other"
-- [ ] `IntentResult` has `is_collaboration` and `is_other` properties; `is_work` returns False for collaboration/other
-- [ ] Bridge-level classifier (`bridge/routing.py`) prompt requests one of four outcomes with clear examples
-- [ ] "If in doubt, classify as collaboration" replaces "If in doubt, classify as sdlc/work" in BOTH classifiers
-- [ ] PM sessions classified as collaboration/other get direct-action instructions, not SDLC orchestration
-- [ ] Config-driven PM groups read `AgentSession.classification_type` and route collaboration/other to direct-action
-- [ ] PM sessions classified as sdlc/work get unchanged SDLC orchestration instructions
-- [ ] PM persona template documents: memory_search, work-vault path, valor_session, gws, officecli
-- [ ] "Add this to knowledge base and draft an issue" classifies as collaboration in BOTH `classify_intent()` AND `classify_work_request()`
-- [ ] Tests pass (`/do-test`)
+- [x] `ClassificationType` enum has 4 members: SDLC, QUESTION, COLLABORATION, OTHER
+- [x] Intent classifier (`agent/intent_classifier.py`) prompt requests one of four intents with clear examples
+- [x] Intent classifier parser whitelist accepts "collaboration" and "other"
+- [x] `IntentResult` has `is_collaboration` and `is_other` properties; `is_work` returns False for collaboration/other
+- [x] Bridge-level classifier (`bridge/routing.py`) prompt requests one of four outcomes with clear examples
+- [x] "If in doubt, classify as collaboration" replaces "If in doubt, classify as sdlc/work" in BOTH classifiers
+- [x] PM sessions classified as collaboration/other get direct-action instructions, not SDLC orchestration
+- [x] Config-driven PM groups read `AgentSession.classification_type` and route collaboration/other to direct-action
+- [x] PM sessions classified as sdlc/work get unchanged SDLC orchestration instructions
+- [x] PM persona template documents: memory_search, work-vault path, valor_session, gws, officecli
+- [x] "Add this to knowledge base and draft an issue" classifies as collaboration in BOTH `classify_intent()` AND `classify_work_request()`
+- [x] Tests pass (`/do-test`)
 - [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
