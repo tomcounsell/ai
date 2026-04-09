@@ -45,6 +45,28 @@ load_dotenv(env_path)
 load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")
 
 # Initialize Sentry error tracking (skip gracefully if DSN not configured)
+from bridge.hibernation import is_hibernating  # noqa: E402
+
+
+def _sentry_before_send(event, hint):
+    """Drop all Sentry events when the bridge is hibernating.
+
+    During hibernation (auth failure), the watchdog restarts the bridge repeatedly,
+    generating thousands of duplicate error events. This filter suppresses them all.
+
+    Safety net: if is_hibernating() itself raises, pass the event through unchanged
+    so we never silently lose novel errors due to a bug in the filter.
+    """
+    try:
+        if is_hibernating():
+            logger.debug("Sentry event dropped: bridge is hibernating")
+            return None
+    except Exception:
+        # Filter crash must not suppress real errors
+        pass
+    return event
+
+
 _sentry_dsn = os.getenv("SENTRY_DSN")
 if _sentry_dsn:
     import sentry_sdk  # noqa: E402
@@ -54,6 +76,7 @@ if _sentry_dsn:
         release=subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
         traces_sample_rate=0.1,
         environment=os.getenv("SENTRY_ENVIRONMENT", "production"),
+        before_send=_sentry_before_send,
     )
 
 # Claude Agent SDK is always used (legacy mode removed)
