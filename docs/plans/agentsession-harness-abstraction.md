@@ -184,3 +184,57 @@ The update script (`scripts/remote-update.sh`) and update skill need minor chang
 - [ ] Update `docs/features/bridge-worker-architecture.md` to add harness routing to the worker architecture diagram
 - [ ] Update `CLAUDE.md` System Architecture section to reflect the new execution path
 - [ ] Add `DEV_SESSION_HARNESS` to `.env.example` with documentation comment
+
+## Critique Results
+
+**Date**: 2026-04-09
+**Round**: 1
+**Verdict**: NEEDS REVISION -- 1 blocker, 4 concerns, 2 nits
+
+### BLOCKER: send_to_chat / nudge loop incompatible with harness streaming path
+
+**Phases**: 1, 2
+
+The plan says "forward assistant events to the OutputHandler in real time" but `_execute_agent_session()` does not use an OutputHandler directly. It wraps output through a complex `send_to_chat()` closure implementing the nudge loop, auto-continue logic, outbox draining, stop_reason inspection, and `route_session_output()` decision tree (lines 2728-2894 of `agent_session_queue.py`). If `_get_response_via_harness()` calls `handler.send()` directly, it bypasses all delivery logic. If it goes through `send_to_chat()`, the harness needs to produce `stop_reason` values and integrate with `get_stop_reason()`.
+
+**Resolution**: Dev sessions do not need the nudge loop (no auto-continue). The harness function should call `send_cb()` directly for each streamed assistant chunk, bypassing `send_to_chat()` entirely. The plan must explicitly state that harness-routed dev sessions use a separate, simpler output path: stream chunks directly to `send_cb()` during execution, then deliver the final result. The `send_to_chat()` closure and its nudge loop remain unchanged for PM/teammate sessions.
+
+### CONCERN: No rollback strategy between phases
+
+**Phases**: All
+
+Phase 5 deletes `session_registry.py` and removes hook logic. If Phase 4 (PM persona update) has issues in production, reverting requires restoring deleted code.
+
+**Resolution**: Move `DEV_SESSION_HARNESS` env var from Phase 6 to Phase 2. Add an `sdk` value (default) that preserves the current `get_agent_response_sdk()` path. Phases 1-4 become purely additive (no deletions). Phase 5 cleanup only runs after production validation with `DEV_SESSION_HARNESS=claude-cli`.
+
+### CONCERN: PipelineStateMachine lives in bridge/, creates new worker-to-bridge dependency
+
+**Phase**: 3
+
+Phase 3 has the worker call `PipelineStateMachine.classify_outcome()` from `bridge/pipeline_state.py`. This contradicts the stated goal of decoupling worker from bridge. `agent_session_queue.py` line 7 says "This module has no module-level bridge/ imports."
+
+**Resolution**: Move `pipeline_state.py` from `bridge/` to `agent/` (it operates on AgentSession records with no Telegram dependencies). Update the 3 existing import sites as part of Phase 3.
+
+### CONCERN: PM persona file lives outside the repo
+
+**Phase**: 4
+
+`~/Desktop/Valor/personas/project-manager.md` is iCloud-synced, not version-controlled. If out of sync after a git pull on a different machine, PM uses Agent tool dispatch while worker expects valor_session dispatch.
+
+**Resolution**: Add a validation check at PM session startup in `sdk_client.py`: grep the resolved persona prompt for `subagent_type="dev-session"`. If found, log WARNING about stale persona.
+
+### CONCERN: No backpressure or buffering for streamed output
+
+**Phase**: 1
+
+`claude -p --output-format stream-json` can produce hundreds of assistant events. Each triggers a Redis `rpush` via `TelegramRelayOutputHandler.send()`, potentially flooding Telegram with separate messages.
+
+**Resolution**: Buffer assistant text in `_get_response_via_harness()`. Flush to `handler.send()` when: (a) 5 seconds elapsed since last flush, (b) accumulated text exceeds 2000 chars, or (c) a `result` event arrives (final flush).
+
+### NIT: stream-json requires --verbose flag
+
+Verified empirically: `claude -p --output-format stream-json` returns an error without `--verbose`. The command must be `claude -p --verbose --output-format stream-json`. Update Phase 1 task and Phase 6 harness config template.
+
+### NIT: dev-session entry in agent_definitions.py definitely exists
+
+Phase 5 says "if it exists" -- the entry exists at lines 121-131 of `agent/agent_definitions.py`. Change to unconditional deletion.
