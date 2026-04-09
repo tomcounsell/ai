@@ -652,15 +652,15 @@ class TestHibernationSuppression:
 
         with patch("bridge.hibernation.AUTH_REQUIRED_FLAG", tmp_path / "bridge-auth-required"):
             # Flag file does NOT exist
-            result = run_health_check()
+            run_health_check()
 
         mock_recovery.assert_called_once()
 
     def test_hibernating_logs_message(self, tmp_path, caplog):
         """Watchdog logs a clear message when suppressing recovery due to hibernation."""
-        from monitoring.bridge_watchdog import run_health_check
-
         import logging
+
+        from monitoring.bridge_watchdog import run_health_check
 
         with (
             patch("bridge.hibernation.AUTH_REQUIRED_FLAG", tmp_path / "bridge-auth-required"),
