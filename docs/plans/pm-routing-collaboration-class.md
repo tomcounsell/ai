@@ -268,9 +268,14 @@ No agent integration required -- this is a bridge-internal routing change. The c
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room) on 2026-04-09. Verdict: NEEDS REVISION (2 blockers). -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Skeptic, Archaeologist | Plan targets wrong dispatch mechanism -- two separate classifiers exist. `_classification_context` is a descriptive string, not a `ClassificationType` enum, so the proposed check would never match. The actual PM-vs-Teammate decision is in `agent/intent_classifier.py::classify_intent()` via `_teammate_mode` flag. Plan only addresses bridge-level classifier but claims the change flows through to PM dispatch, which it does not. | Task 3 rewrite needed | Dispatch block at sdk_client.py line 1626 (`else:` branch). `_classification_context` set at line 1519 holds a string. Must thread `classification` or new intent result into `_teammate_mode` else-block. |
+| BLOCKER | Skeptic, Operator | `agent/intent_classifier.py` missing from touched-files inventory and data flow. This file controls PM dispatch for unconfigured groups. Without addressing it, collaboration-type messages still hit `classify_intent()` which returns `"work"` for messages like "Add this to the knowledge base" (confidence ~0.97). | Add to file inventory, update data flow | `intent_classifier.py` lines 23-60 contain `CLASSIFIER_PROMPT` with `"teammate"` vs `"work"` examples. Either add `"collaboration"` intent or check bridge-level `classification_type` before falling through. |
+| CONCERN | Operator, Adversary | Config-driven PM/Dev groups (via `resolve_persona()`) bypass both classifiers entirely at sdk_client.py lines 1556-1559. The new classification would be stored on AgentSession but never consulted during dispatch. The plan's failure example likely came from a config-driven PM group. | Task 3 must add classification_type check inside config-driven path | Config-driven path at sdk_client.py line 1556-1559 sets `_classification_context` but does NOT set `_teammate_mode = True`, so else-block runs unconditionally. |
+| CONCERN | Skeptic, Adversary | Fallback default changed from `sdlc` to `collaboration` without safety analysis. Flips failure mode: ambiguous messages skip dev-sessions instead of over-triggering them. PM may drop real coding tasks. Plan's own problem statement contradicts the mitigation. | Keep default as `sdlc` for initial rollout; improve collaboration examples instead | In `bridge/routing.py` line 526, current prompt says "If in doubt, classify as sdlc." Add log line at fallback path for monitoring if default must change. |
+| NIT | Operator | Test Impact section references test methods but omits `test_pm_session_factory.py` and `test_sdlc_mode.py` which are referenced as validation targets in Task 3. | Add to Test Impact section with dispositions | Minor: ensure all referenced test files appear in Test Impact. |
 
 ---
 
