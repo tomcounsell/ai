@@ -249,6 +249,10 @@ Without this distinction, auth expiry hits the same 8-attempt retry loop, exits 
 - If hibernating: logs "Bridge hibernating: auth required. Run 'python scripts/telegram_login.py'..." and returns True (suppresses all recovery levels)
 - `--check-only` output includes `Hibernating: True/False` and recovery instructions
 
+**Sentry noise suppression** (`before_send` filter in `bridge/telegram_bridge.py`):
+
+When the bridge is hibernating, the watchdog or launchd may still restart the process repeatedly. Each restart hits the same auth error and reports it to Sentry, generating thousands of duplicate events. The `_sentry_before_send` callback registered on `sentry_sdk.init()` checks `is_hibernating()` and drops all events while the flag file is present. When the bridge is not hibernating, all events pass through unchanged. The callback includes a `try/except` safety net so that if `is_hibernating()` itself raises, events still pass through rather than being silently lost.
+
 **Check hibernation state**:
 ```bash
 python monitoring/bridge_watchdog.py --check-only
