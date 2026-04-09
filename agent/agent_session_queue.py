@@ -557,21 +557,26 @@ async def _pop_agent_session(
     - Throttle level affects which priority tiers are eligible.
     """
     try:
-        from popoto.redis_db import POPOTO_REDIS_DB as _r
+        from popoto.redis_db import POPOTO_REDIS_DB as _R
 
         _project_key = os.environ.get("VALOR_PROJECT_KEY", "default")
         _pause_key = f"{_project_key}:sustainability:queue_paused"
         _throttle_key = f"{_project_key}:sustainability:throttle_level"
 
-        if _r.get(_pause_key):
+        if _R.get(_pause_key):
             logger.debug("[worker:%s] Queue paused (API circuit open) — skipping pop", worker_key)
             return None
 
-        _throttle_raw = _r.get(_throttle_key)
-        _throttle = _throttle_raw.decode() if isinstance(_throttle_raw, bytes) else (_throttle_raw or "none")
+        _throttle_raw = _R.get(_throttle_key)
+        _throttle_raw_decoded = (
+            _throttle_raw.decode() if isinstance(_throttle_raw, bytes) else _throttle_raw
+        )
+        _throttle = _throttle_raw_decoded or "none"
     except Exception as _guard_err:
         # Fail open: if Redis is unavailable, allow the pop to proceed normally
-        logger.warning("[worker:%s] Sustainability guard failed (proceeding): %s", worker_key, _guard_err)
+        logger.warning(
+            "[worker:%s] Sustainability guard failed (proceeding): %s", worker_key, _guard_err
+        )
         _throttle = "none"
 
     if not _acquire_pop_lock(worker_key):

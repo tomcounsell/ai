@@ -6,10 +6,11 @@ in-place mutation via transition_status() and does NOT go through
 _extract_agent_session_fields.
 
 Also tests Redis pop lock acquisition and contention behavior.
+Also tests sustainability throttle guards in _pop_agent_session.
 """
 
 from datetime import UTC, datetime
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -18,6 +19,7 @@ from agent.agent_session_queue import (
     _acquire_pop_lock,
     _complete_agent_session,
     _extract_agent_session_fields,
+    _pop_agent_session,
     _release_pop_lock,
 )
 from models.agent_session import AgentSession
@@ -268,3 +270,106 @@ class TestCompleteAgentSessionRequeryNoStatusFilter:
                     "finalize_session should receive the fresh Redis record (status=completed), "
                     "not the stale in-memory object (status=running)"
                 )
+
+
+class TestPopAgentSessionThrottleGuard:
+    """Tests for sustainability throttle-level guard inside _pop_agent_session.
+
+    When the Redis throttle_level key is 'suspended', both normal and low
+    priority sessions must be blocked (function returns None without dequeuing).
+    When throttle_level is 'moderate', only low priority sessions are blocked.
+
+    These tests mock both the Redis throttle-level key read and AgentSession
+    queries so they run as pure unit tests without a live Redis connection.
+    """
+
+    def _make_mock_redis(self, throttle_value: str | None):
+        """Return a MagicMock Redis client that returns throttle_value for GET calls.
+
+        Returns None for the pause-key check (circuit not open) and the
+        encoded throttle_value for the throttle-level key check.
+        """
+        mock_r = MagicMock()
+        # First call: pause key → None (circuit not open)
+        # Second call: throttle key → encoded throttle level
+        if throttle_value is None:
+            mock_r.get.side_effect = [None, None]
+        else:
+            mock_r.get.side_effect = [None, throttle_value.encode()]
+        return mock_r
+
+    def _make_pending_session(self, priority: str) -> AgentSession:
+        """Build a pending AgentSession with the given priority."""
+        return _make_session(status="pending", priority=priority)
+
+    @pytest.mark.asyncio
+    async def test_suspended_throttle_blocks_normal_priority(self):
+        """When throttle_level is 'suspended', _pop_agent_session returns None
+        even when a normal-priority pending session exists."""
+        normal_session = self._make_pending_session("normal")
+        mock_r = self._make_mock_redis("suspended")
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB", mock_r):
+            with patch("agent.agent_session_queue.AgentSession") as mock_cls:
+                mock_query = MagicMock()
+                mock_cls.query = mock_query
+                mock_query.async_filter = AsyncMock(return_value=[normal_session])
+
+                with patch("agent.agent_session_queue._acquire_pop_lock", return_value=True):
+                    with patch("agent.agent_session_queue._release_pop_lock"):
+                        result = await _pop_agent_session(
+                            worker_key="test-suspended-normal", is_project_keyed=False
+                        )
+
+        assert result is None, (
+            "_pop_agent_session must return None when throttle='suspended' "
+            "and only normal-priority sessions are available"
+        )
+
+    @pytest.mark.asyncio
+    async def test_suspended_throttle_blocks_low_priority(self):
+        """When throttle_level is 'suspended', _pop_agent_session returns None
+        even when a low-priority pending session exists."""
+        low_session = self._make_pending_session("low")
+        mock_r = self._make_mock_redis("suspended")
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB", mock_r):
+            with patch("agent.agent_session_queue.AgentSession") as mock_cls:
+                mock_query = MagicMock()
+                mock_cls.query = mock_query
+                mock_query.async_filter = AsyncMock(return_value=[low_session])
+
+                with patch("agent.agent_session_queue._acquire_pop_lock", return_value=True):
+                    with patch("agent.agent_session_queue._release_pop_lock"):
+                        result = await _pop_agent_session(
+                            worker_key="test-suspended-low", is_project_keyed=False
+                        )
+
+        assert result is None, (
+            "_pop_agent_session must return None when throttle='suspended' "
+            "and only low-priority sessions are available"
+        )
+
+    @pytest.mark.asyncio
+    async def test_moderate_throttle_blocks_low_priority(self):
+        """When throttle_level is 'moderate', _pop_agent_session returns None
+        when only low-priority pending sessions exist."""
+        low_session = self._make_pending_session("low")
+        mock_r = self._make_mock_redis("moderate")
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB", mock_r):
+            with patch("agent.agent_session_queue.AgentSession") as mock_cls:
+                mock_query = MagicMock()
+                mock_cls.query = mock_query
+                mock_query.async_filter = AsyncMock(return_value=[low_session])
+
+                with patch("agent.agent_session_queue._acquire_pop_lock", return_value=True):
+                    with patch("agent.agent_session_queue._release_pop_lock"):
+                        result = await _pop_agent_session(
+                            worker_key="test-moderate-low", is_project_keyed=False
+                        )
+
+        assert result is None, (
+            "_pop_agent_session must return None when throttle='moderate' "
+            "and only low-priority sessions are available"
+        )
