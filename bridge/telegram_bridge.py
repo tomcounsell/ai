@@ -1654,16 +1654,20 @@ async def main():
             await asyncio.sleep(remaining)
             logger.info("[flood-backoff] Backoff period complete, proceeding with connect")
 
+    from bridge.hibernation import (
+        enter_hibernation,
+        exit_hibernation,
+        is_auth_error,
+        replay_buffered_output,
+    )
+
     max_attempts = 8
     for _attempt in range(1, max_attempts + 1):
         try:
             await client.connect()
             if not await client.is_user_authorized():
-                logger.error(
-                    "Telegram session is not authorized. "
-                    "Run 'python scripts/telegram_login.py' to authenticate first."
-                )
-                raise SystemExit(1)
+                enter_hibernation()
+                raise SystemExit(2)
             break
         except FloodWaitError as e:
             logger.warning(
@@ -1676,6 +1680,9 @@ async def main():
         except (SystemExit, KeyboardInterrupt):
             raise
         except Exception as e:
+            if is_auth_error(e):
+                enter_hibernation()
+                raise SystemExit(2)
             if _attempt >= max_attempts:
                 logger.error(
                     "Failed to connect to Telegram after %d attempts: %s",
@@ -1702,6 +1709,14 @@ async def main():
     global _bridge_was_connected
     _bridge_was_connected = True
     _clear_flood_backoff()
+    # Clear hibernation flag and replay any buffered output from downtime
+    exit_hibernation()
+    try:
+        replayed = await replay_buffered_output(client)
+        if replayed:
+            logger.info("[hibernation] Replayed %d buffered output entries", replayed)
+    except Exception as e:
+        logger.error("[hibernation] Buffered output replay failed: %s", e)
     # Read last_connected BEFORE writing new timestamp so catchup gets the real gap
     global _catchup_last_connected
     _catchup_last_connected = _read_last_connected()
