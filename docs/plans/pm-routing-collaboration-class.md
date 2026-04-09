@@ -136,7 +136,7 @@ For `teammate`: Unchanged behavior -- Teammate instructions.
 - [ ] `tests/unit/test_sdlc_mode.py::TestIsSdlcJobClassificationType::test_classification_type_chat_returns_false` -- REVIEW: verify "collaboration" and "other" classification_type values also return `is_sdlc == False`
 - [ ] `tests/unit/test_sdlc_mode.py` -- UPDATE: add parametrized cases for "collaboration" and "other" classification types confirming they are not SDLC
 
-No existing test files exist for `test_work_request_classifier.py`, `test_pm_channels.py`, or `test_pm_session_factory.py` -- these are new test files to be created, not updates to existing tests.
+`tests/unit/test_work_request_classifier.py` and `tests/unit/test_intent_classifier.py` already exist and will be updated (not created from scratch). `test_pm_channels.py` and `test_pm_session_factory.py` are new test files to be created.
 
 ## Rabbit Holes
 
@@ -234,7 +234,7 @@ No agent integration required -- this is a bridge-internal routing change. The c
 ### 2. Update Bridge Classifier LLM Prompt
 - **Task ID**: build-bridge-classifier
 - **Depends On**: build-enum
-- **Validates**: tests/unit/test_work_request_classifier.py (create)
+- **Validates**: tests/unit/test_work_request_classifier.py (update)
 - **Assigned To**: routing-builder
 - **Agent Type**: builder
 - **Parallel**: false
@@ -247,7 +247,7 @@ No agent integration required -- this is a bridge-internal routing change. The c
 ### 3. Update Intent Classifier
 - **Task ID**: build-intent-classifier
 - **Depends On**: build-enum
-- **Validates**: tests/unit/test_intent_classifier.py (create)
+- **Validates**: tests/unit/test_intent_classifier.py (update)
 - **Assigned To**: routing-builder
 - **Agent Type**: builder
 - **Parallel**: true (parallel with build-bridge-classifier)
@@ -334,7 +334,8 @@ No agent integration required -- this is a bridge-internal routing change. The c
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room) on 2026-04-09. Verdict: NEEDS REVISION (2 blockers). Revised 2026-04-09. -->
+### Round 1 (2026-04-09) -- NEEDS REVISION (2 blockers). Revised 2026-04-09.
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
 | BLOCKER | Skeptic, Archaeologist | Plan targets wrong dispatch mechanism -- two separate classifiers exist. `_classification_context` is a descriptive string, not a `ClassificationType` enum, so the proposed check would never match. The actual PM-vs-Teammate decision is in `agent/intent_classifier.py::classify_intent()` via `_teammate_mode` flag. | **RESOLVED (v2)**: Plan now targets both classifiers. Task 3 adds "collaboration" intent to `intent_classifier.py`. Task 4 checks `_intent_result.is_collaboration` (not `_classification_context` string). | Dispatch uses new `_collaboration_mode` flag set from either intent classifier result or bridge classification. |
@@ -343,8 +344,16 @@ No agent integration required -- this is a bridge-internal routing change. The c
 | CONCERN | Skeptic, Adversary | Fallback default changed from `sdlc` to `collaboration` without safety analysis. Flips failure mode unsafely. | **RESOLVED (v2)**: Bridge default kept as "If in doubt, classify as sdlc" (unchanged). Intent classifier default kept as "work" for unparseable/low-confidence. No default changes. | Added to Success Criteria and No-Gos for explicit tracking. |
 | NIT | Operator | Test Impact section omits `test_sdlc_mode.py` which is referenced as validation target in Task 3. | **RESOLVED (v2)**: `test_sdlc_mode.py` added to Test Impact with UPDATE disposition. Clarified that `test_work_request_classifier.py`, `test_pm_channels.py`, and `test_pm_session_factory.py` are new files to create, not existing files to update. | All referenced test files now appear in Test Impact with correct dispositions. |
 
+### Round 2 (2026-04-09) -- APPROVED (0 blockers, 2 concerns, 1 nit)
+
+| Severity | Critic | Finding | Implementation Note |
+|----------|--------|---------|---------------------|
+| CONCERN | Adversary, Skeptic | Bridge classifier result parsing order not specified for four outcomes. Substring matching (`if "collaboration" in result`) risks collision when LLM returns multi-word text (e.g., "not collaboration, classify as sdlc"). | **ACCEPT**: In Task 2, use first-token extraction (`result = result.split()[0]`) then exact match (`result == "collaboration"`) instead of substring matching. Apply to both Ollama path (line 541) and Haiku path (line 564). Eliminates substring collision entirely. |
+| CONCERN | Simplifier | `OTHER` classification type has no distinct behavioral path. Bridge `OTHER` falls through to intent classifier which has no "other" intent, making it meaningless. | **ACCEPT**: In Task 4, treat `OTHER` same as `COLLABORATION` in the config-driven path: `if classification in (ClassificationType.COLLABORATION, ClassificationType.OTHER)`. For unconfigured groups, `OTHER` from bridge is irrelevant since intent classifier makes the dispatch decision. |
+| NIT | Operator | Test Impact section claims `test_work_request_classifier.py` and `test_intent_classifier.py` are "new files to create" but they already exist with substantive coverage. | **ACCEPT**: Task 2 Validates changed to "tests/unit/test_work_request_classifier.py (update)" and Task 3 Validates changed to "tests/unit/test_intent_classifier.py (update)". |
+
 ---
 
 ## Open Questions
 
-No open questions -- all critique blockers have been resolved. The plan targets both classifiers correctly, adds `intent_classifier.py` to the file inventory, addresses config-driven group bypass, and preserves the safe "sdlc" default.
+No open questions -- all critique blockers resolved in round 1, round 2 concerns accepted with implementation notes. Plan is approved for build.
