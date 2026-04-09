@@ -54,6 +54,9 @@ reflections:
     description: "Rebuild Popoto model indexes to clean orphaned entries from crashes/TTL expiry"
     interval: 86400  # daily
     priority: low
+    # execution_type/callable: dispatched by ReflectionScheduler (agent/reflection_scheduler.py)
+    # Also wired as step_popoto_index_cleanup in ReflectionRunner (scripts/reflections.py)
+    # See docs/features/popoto-index-hygiene.md
     execution_type: function
     callable: "scripts.popoto_index_cleanup.run_cleanup"
     enabled: true

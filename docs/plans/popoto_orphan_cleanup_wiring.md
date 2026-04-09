@@ -244,4 +244,4 @@ No agent integration required -- this is an internal maintenance fix to existing
 
 ## Open Questions
 
-1. The issue mentions considering removing the YAML `callable` pattern as "dead infrastructure." However, the `ReflectionScheduler` actively uses it to dispatch function-type reflections. Should we add a code comment to `config/reflections.yaml` clarifying that these fields ARE used by `agent/reflection_scheduler.py`, to prevent future confusion?
+1. ~~Should we add a code comment to `config/reflections.yaml` clarifying that the `callable` fields ARE used by `agent/reflection_scheduler.py`?~~ **RESOLVED**: Yes — added inline comments cross-referencing `agent/reflection_scheduler.py`, `scripts/reflections.py`, and `docs/features/popoto-index-hygiene.md`.
