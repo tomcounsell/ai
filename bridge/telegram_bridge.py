@@ -45,22 +45,44 @@ load_dotenv(env_path)
 load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")
 
 # Initialize Sentry error tracking (skip gracefully if DSN not configured)
-from bridge.hibernation import is_hibernating  # noqa: E402
+from bridge.hibernation import enter_hibernation, is_hibernating  # noqa: E402
+
+
+# Known auth-error substrings used by the Sentry before_send filter.
+# Checked against both logentry.formatted (logger.error captures like VALOR-1)
+# and exception.values[].value (exception captures like VALOR-Y).
+_AUTH_ERROR_PATTERNS = (
+    "TELEGRAM_API_ID and TELEGRAM_API_HASH must be set",
+    "Bridge hibernating: auth required",
+)
 
 
 def _sentry_before_send(event, hint):
-    """Drop all Sentry events when the bridge is hibernating.
+    """Drop auth-related Sentry events when the bridge is hibernating.
 
     During hibernation (auth failure), the watchdog restarts the bridge repeatedly,
-    generating thousands of duplicate error events. This filter suppresses them all.
+    generating thousands of duplicate auth error events. This filter drops only
+    known auth-error events during hibernation; non-auth events pass through so
+    novel errors are never silently lost.
+
+    Checks both event structures that Sentry uses:
+    - logentry.formatted: for logger.error() captures (VALOR-1, env-var error)
+    - exception.values[].value: for exception captures (VALOR-Y, hibernation SystemExit)
 
     Safety net: if is_hibernating() itself raises, pass the event through unchanged
-    so we never silently lose novel errors due to a bug in the filter.
+    so we never silently lose events due to a bug in the filter.
     """
     try:
         if is_hibernating():
-            logger.debug("Sentry event dropped: bridge is hibernating")
-            return None
+            # Extract message from both possible Sentry event structures
+            logentry_msg = event.get("logentry", {}).get("formatted", "")
+            exception_values = event.get("exception", {}).get("values", [{}])
+            exception_msg = exception_values[0].get("value", "") if exception_values else ""
+            combined = f"{logentry_msg} {exception_msg}"
+
+            if any(pattern in combined for pattern in _AUTH_ERROR_PATTERNS):
+                logger.debug("Sentry event dropped: hibernation filter matched auth error")
+                return None
     except Exception:
         # Filter crash must not suppress real errors
         pass
@@ -695,6 +717,7 @@ async def main():
     """Main entry point."""
     if not API_ID or not API_HASH:
         logger.error("TELEGRAM_API_ID and TELEGRAM_API_HASH must be set")
+        enter_hibernation()
         sys.exit(1)
 
     # Validate agent definition files exist on disk. Missing files are not
