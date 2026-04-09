@@ -1,6 +1,6 @@
 # PM Routing: Collaboration and Other Classifier Buckets
 
-Extends the PM routing system from a binary classification to a four-way bridge classification and three-way intent classification, enabling the PM to handle direct tasks without spawning a full SDLC dev-session.
+Extends the PM routing system from a binary classification to a four-way classification at both the bridge and intent classifier levels, enabling the PM to handle direct tasks without spawning a full SDLC dev-session.
 
 ## Problem
 
@@ -13,13 +13,17 @@ Previously, the bridge classifier only distinguished "sdlc" and "question", and 
 **Bridge classifier** (`bridge/routing.py::classify_work_request()`):
 - Four outcomes: `sdlc`, `collaboration`, `other`, `question`
 - Uses first-token extraction with exact match (no substring collisions)
-- Default remains "If in doubt, classify as sdlc" for safety
+- Default: "If in doubt, classify as collaboration"
 - Result stored as `classification_type` on the AgentSession
 
 **Intent classifier** (`agent/intent_classifier.py::classify_intent()`):
-- Three outcomes: `teammate`, `collaboration`, `work`
-- `is_collaboration` property with same confidence threshold as `is_teammate` (0.90)
-- Default remains "work" for unparseable/low-confidence responses
+- Four outcomes: `teammate`, `collaboration`, `other`, `work`
+- `is_collaboration` property (no confidence threshold -- any collaboration intent routes)
+- `is_other` property (no confidence threshold)
+- `is_direct_action` convenience property (True for collaboration or other)
+- `is_teammate` retains the 0.90 confidence threshold
+- `is_work` returns True only when intent is literally "work"
+- Default for unparseable/low-confidence: "work" (fail-safe to dev-session)
 
 ### Three-Way PM Dispatch
 
@@ -36,7 +40,7 @@ else:
 
 **Config-driven PM groups** check the bridge-level classification for `COLLABORATION` or `OTHER`, since they bypass the intent classifier.
 
-**Unconfigured groups** use the intent classifier result (`is_collaboration`).
+**Unconfigured groups** use the intent classifier result (`is_direct_action`, which covers both collaboration and other).
 
 ### ClassificationType Enum
 
@@ -52,22 +56,23 @@ When a PM session enters collaboration mode, it receives direct-action instructi
 
 ## Safety
 
-- Bridge classifier default unchanged: "If in doubt, classify as sdlc"
-- Intent classifier default unchanged: "work" for unparseable/low-confidence
+- Bridge classifier default: "If in doubt, classify as collaboration" (cheaper when wrong -- PM tries directly in seconds vs 60-min dev-session timeout)
+- Intent classifier fail-safe: "work" for unparseable/error responses (conservative)
 - Double classification (bridge + intent) provides two chances to catch misroutes
 - PM guard still prevents PM sessions from entering Teammate mode
+- `is_sdlc` property on AgentSession unchanged -- explicit SDLC references (issue/PR numbers) always fast-path to SDLC
 
 ## Files Changed
 
-- `config/enums.py` — COLLABORATION and OTHER enum members
-- `bridge/routing.py` — Four-outcome prompt, first-token exact match parsing
-- `agent/intent_classifier.py` — Three-outcome prompt, `is_collaboration` property
-- `agent/sdk_client.py` — `_collaboration_mode` flag, three-way dispatch
-- `config/personas/project-manager.md` — Available Tools section
+- `config/enums.py` -- COLLABORATION and OTHER enum members
+- `bridge/routing.py` -- Four-outcome prompt, collaboration default, first-token exact match parsing
+- `agent/intent_classifier.py` -- Four-outcome prompt (teammate/collaboration/other/work), `is_collaboration`, `is_other`, `is_direct_action` properties, narrowed `is_work`
+- `agent/sdk_client.py` -- `_collaboration_mode` flag, three-way dispatch, `is_direct_action` check
+- `config/personas/project-manager.md` -- Available Tools section
 
 ## Related
 
-- [SDLC-First Routing](sdlc-first-routing.md) — Original two-way bridge classifier
-- [PM session Teammate Mode](pm-teammate-mode.md) — Intent classifier for Teammate routing
-- [Config-Driven Chat Mode](config-driven-chat-mode.md) — Persona-based classifier bypass
-- [PM Channels](pm-channels.md) — PM channel routing
+- [SDLC-First Routing](sdlc-first-routing.md) -- Original two-way bridge classifier
+- [PM session Teammate Mode](pm-teammate-mode.md) -- Intent classifier for Teammate routing
+- [Config-Driven Chat Mode](config-driven-chat-mode.md) -- Persona-based classifier bypass
+- [PM Channels](pm-channels.md) -- PM channel routing

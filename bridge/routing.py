@@ -509,8 +509,9 @@ def _get_principal_priorities_for_classification() -> str:
 def _classify_work_request_llm(text: str) -> str:
     """Use LLM to classify a message into sdlc, collaboration, other, or question.
 
-    Tries Ollama first (fast, local), falls back to Haiku (cheap, reliable).
-    Includes principal context (project priorities) when available.
+    Four-way classification with "collaboration" as the default for ambiguous
+    messages. Tries Ollama first (fast, local), falls back to Haiku (cheap,
+    reliable). Includes principal context (project priorities) when available.
     Uses first-token extraction with exact match to avoid substring collisions.
     """
     # Inject principal context for better classification of project-related messages
@@ -531,7 +532,7 @@ def _classify_work_request_llm(text: str) -> str:
         '- "other" = ambiguous task that does not clearly fit sdlc or collaboration\n'
         '- "question" = purely asking for info, explanation, opinion,\n'
         "  how does X work, what is Y, conversational/social\n\n"
-        "If in doubt, classify as sdlc.\n\n"
+        "If in doubt, classify as collaboration.\n\n"
         f"{principal_hint}"
         f"Message: {text[:300]}\n\n"
         "Classification:"

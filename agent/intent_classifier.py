@@ -1,12 +1,14 @@
-"""Three-way intent classifier for PM session routing.
+"""Four-way intent classifier for PM session routing.
 
 Uses Haiku to classify incoming messages as informational queries (Teammate),
-direct collaboration tasks, or work requests. Conservative threshold (0.90)
-ensures ambiguous messages default to the full Dev-session pipeline.
+direct collaboration tasks, ambiguous discussions (Other), or work requests.
+Conservative threshold (0.90) ensures ambiguous messages default to the full
+Dev-session pipeline.
 
 Intents:
 - teammate: informational query -> Teammate mode (direct response)
 - collaboration: direct task PM can handle without a dev-session
+- other: ambiguous task, discussion, brainstorming -> PM uses judgment
 - work: action/work request -> SDLC pipeline (dev-session)
 
 All operations are async and wrapped in try/except -- classifier failures
@@ -27,15 +29,19 @@ TEAMMATE_CONFIDENCE_THRESHOLD = 0.90
 
 CLASSIFIER_PROMPT = """\
 You are an intent classifier. Classify the user message as "teammate", \
-"collaboration", or "work".
+"collaboration", "other", or "work".
 
 RULES:
 - "teammate" = the user wants information, explanation, status, or lookup
 - "collaboration" = the user wants a direct task done that does NOT require code \
 changes: save to knowledge base, draft an issue, send a message, write a doc, \
 search memory, look something up and act on it
+- "other" = ambiguous task, discussion, brainstorming, or open-ended thinking \
+that does not clearly fit teammate, collaboration, or work
 - "work" = the user wants something created, fixed, changed, deployed, or built \
 in the codebase (code changes, PRs, SDLC pipeline)
+
+If in doubt, classify as collaboration.
 
 EXAMPLES:
 
@@ -64,6 +70,13 @@ collaboration examples:
 - "Check my calendar and tell me what's next" -> collaboration 0.92
 - "File a GitHub issue about the flaky test" -> collaboration 0.96
 
+other examples:
+- "Let's think about this" -> other 0.94
+- "What should we do about the architecture?" -> other 0.92
+- "I have an idea for improving the pipeline" -> other 0.93
+- "We need to discuss the deployment strategy" -> other 0.91
+- "Should we prioritize feature X or bug Y?" -> other 0.95
+
 work examples:
 - "Fix the bridge" -> work 0.99
 - "Add a new endpoint for health checks" -> work 0.98
@@ -81,8 +94,8 @@ work examples:
 Respond with EXACTLY one line in the format:
 INTENT confidence REASONING
 
-Where INTENT is "teammate", "collaboration", or "work", confidence is a float \
-between 0.0 and 1.0, and REASONING is a brief explanation.
+Where INTENT is "teammate", "collaboration", "other", or "work", confidence \
+is a float between 0.0 and 1.0, and REASONING is a brief explanation.
 
 Example response: teammate 0.97 User is asking for information about system architecture"""
 
@@ -91,7 +104,7 @@ Example response: teammate 0.97 User is asking for information about system arch
 class IntentResult:
     """Result of intent classification."""
 
-    intent: str  # "teammate", "collaboration", or "work"
+    intent: str  # "teammate", "collaboration", "other", or "work"
     confidence: float
     reasoning: str
 
@@ -101,15 +114,28 @@ class IntentResult:
 
     @property
     def is_collaboration(self) -> bool:
-        return self.intent == "collaboration" and self.confidence >= TEAMMATE_CONFIDENCE_THRESHOLD
+        return self.intent == "collaboration"
+
+    @property
+    def is_other(self) -> bool:
+        return self.intent == "other"
+
+    @property
+    def is_direct_action(self) -> bool:
+        """True for collaboration or other -- PM handles directly without dev-session."""
+        return self.is_collaboration or self.is_other
 
     @property
     def is_work(self) -> bool:
-        return self.intent == "work" or self.confidence < TEAMMATE_CONFIDENCE_THRESHOLD
+        return self.intent == "work"
 
 
 def _parse_classifier_response(raw: str) -> IntentResult:
-    """Parse the classifier's single-line response into an IntentResult."""
+    """Parse the classifier's single-line response into an IntentResult.
+
+    Accepts four intents: teammate, collaboration, other, work.
+    Unknown intents fall through to work with confidence 0.0.
+    """
     raw = raw.strip()
     parts = raw.split(None, 2)
     if len(parts) < 2:
@@ -117,7 +143,7 @@ def _parse_classifier_response(raw: str) -> IntentResult:
         return IntentResult(intent="work", confidence=0.0, reasoning="unparseable response")
 
     intent_str = parts[0].lower().strip()
-    if intent_str not in ("teammate", "collaboration", "work"):
+    if intent_str not in ("teammate", "collaboration", "other", "work"):
         logger.warning(f"[intent_classifier] Unknown intent: {intent_str!r}")
         return IntentResult(
             intent="work", confidence=0.0, reasoning=f"unknown intent: {intent_str}"
@@ -137,7 +163,11 @@ async def classify_intent(
     message: str,
     context: dict | None = None,
 ) -> IntentResult:
-    """Classify a message as Teammate or work request using Haiku.
+    """Classify a message into one of four intents using Haiku.
+
+    Returns one of: teammate, collaboration, other, or work.
+    Teammate routes to direct response; collaboration/other route to
+    PM direct-action mode; work routes to SDLC pipeline (dev-session).
 
     Args:
         message: The incoming user message text.

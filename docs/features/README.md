@@ -72,7 +72,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Plan Completion Gate](plan-completion-gate.md) | Deterministic validation preventing plan completion and PR merge while checkboxes remain unchecked | Shipped |
 | [Plan Prerequisites Validation](plan-prerequisites.md) | Declare and validate environment requirements before plan execution | Shipped |
 | [PM Channels](pm-channels.md) | Project manager mode routing Telegram groups to work-vault folders with SDLC bypass | Shipped |
-| [PM Routing: Collaboration](pm-routing-collaboration.md) | Four-way bridge classification and three-way intent classification enabling PM to handle direct tasks without SDLC dev-session | Shipped |
+| [PM Routing: Collaboration](pm-routing-collaboration.md) | Four-way classification at bridge and intent levels (sdlc/collaboration/other/question) enabling PM to handle direct tasks without SDLC dev-session | Shipped |
 | [PM SDLC Decision Rules](pm-sdlc-decision-rules.md) | PM outcome parsing (success/partial/fail), auto-merge on clean gates, annotate-rather-than-skip for review findings | Shipped |
 | [PM session Teammate Mode](pm-teammate-mode.md) | Haiku-based intent classifier routing informational queries to direct PM session response without Dev session spawn | Shipped |
 | [PM Telegram Tool](pm-telegram-tool.md) | PM session composes and sends its own Telegram messages (text, file attachments, and multi-file albums) via Redis IPC, with summarizer as fallback | Shipped |

@@ -1591,9 +1591,12 @@ async def get_agent_response_sdk(
                 if _intent_result.is_teammate:
                     _teammate_mode = True
                     logger.info(f"[{request_id}] Routing to Teammate mode (direct response)")
-                elif _intent_result.is_collaboration:
+                elif _intent_result.is_direct_action:
                     _collaboration_mode = True
-                    logger.info(f"[{request_id}] Routing to collaboration mode (direct action)")
+                    logger.info(
+                        f"[{request_id}] Routing to collaboration mode "
+                        f"(direct action, intent={_intent_result.intent})"
+                    )
                     # Update session mode so nudge loop uses reduced cap
                     if session_id:
                         try:
