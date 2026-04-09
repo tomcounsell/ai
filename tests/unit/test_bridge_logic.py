@@ -4,7 +4,9 @@ Unit tests for Telegram bridge logic.
 Tests the core decision-making functions without requiring Telegram connectivity.
 """
 
+import asyncio
 import re
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # Import the functions we're testing (we'll test them in isolation)
 # These are re-implemented here to test the logic without importing the module
@@ -559,3 +561,150 @@ class TestMessageRouting:
         assert "PROJECT: Popoto" in context
         assert "TECH: Python, Redis" in context
         assert "REPO: tomcounsell/popoto" in context
+
+
+# ============================================================================
+# Tests for connect_with_retry() hibernation behavior
+#
+# The retry loop lives inside bridge/telegram_bridge.py:main() and cannot be
+# imported directly (import has side effects). We replicate the core retry
+# logic here — exactly as test_bridge_logic.py does for all other bridge
+# functions — and verify that the hibernation contract is upheld:
+#
+#   1. is_user_authorized() == False → enter_hibernation() called, SystemExit(2) raised
+#   2. Permanent auth exception (e.g. AuthKeyUnregisteredError) → same
+#   3. Transient exception (e.g. ConnectionError) → enter_hibernation() NOT called
+#
+# Mocks: bridge.hibernation.enter_hibernation is patched to avoid flag-file
+# writes and osascript calls. Telethon error classes are imported from
+# telethon.errors directly.
+# ============================================================================
+
+
+async def _connect_with_retry(client, enter_hibernation_fn, is_auth_error_fn, max_attempts=8):
+    """Minimal replica of the connect-with-retry loop from telegram_bridge.main().
+
+    This mirrors lines 1664-1707 of bridge/telegram_bridge.py exactly, with
+    asyncio.sleep replaced by a no-op so tests run instantly. It is the basis
+    for the hibernation contract tests below.
+    """
+    for _attempt in range(1, max_attempts + 1):
+        try:
+            await client.connect()
+            if not await client.is_user_authorized():
+                enter_hibernation_fn()
+                raise SystemExit(2)
+            break
+        except SystemExit:
+            raise
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            if is_auth_error_fn(e):
+                enter_hibernation_fn()
+                raise SystemExit(2)
+            if _attempt >= max_attempts:
+                raise
+            # No sleep in tests — just continue
+            continue
+
+
+class TestConnectWithRetryHibernation:
+    """Tests for the hibernation contract inside the bridge retry loop.
+
+    Verifies that:
+    - Unauthorized state triggers enter_hibernation() and SystemExit(2)
+    - Permanent auth exceptions trigger enter_hibernation() and SystemExit(2)
+    - Transient exceptions do NOT trigger enter_hibernation()
+    """
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def test_unauthorized_calls_enter_hibernation_and_exits_2(self):
+        """When is_user_authorized() returns False, enter_hibernation() is called
+        and SystemExit(2) is raised.
+        """
+        client = AsyncMock()
+        client.connect = AsyncMock()
+        client.is_user_authorized = AsyncMock(return_value=False)
+
+        mock_enter = MagicMock()
+
+        from bridge.hibernation import is_auth_error
+
+        with patch("bridge.hibernation.enter_hibernation", mock_enter):
+            import pytest
+
+            with pytest.raises(SystemExit) as exc_info:
+                self._run(
+                    _connect_with_retry(
+                        client,
+                        enter_hibernation_fn=mock_enter,
+                        is_auth_error_fn=is_auth_error,
+                    )
+                )
+
+        assert exc_info.value.code == 2
+        mock_enter.assert_called_once()
+
+    def test_permanent_auth_exception_calls_enter_hibernation_and_exits_2(self):
+        """When a permanent auth exception (AuthKeyUnregisteredError) is raised during
+        connect(), enter_hibernation() is called and SystemExit(2) is raised.
+        """
+        from telethon.errors import AuthKeyUnregisteredError
+
+        client = AsyncMock()
+        client.connect = AsyncMock(side_effect=AuthKeyUnregisteredError(None))
+        client.is_user_authorized = AsyncMock()
+
+        mock_enter = MagicMock()
+
+        import pytest
+
+        from bridge.hibernation import is_auth_error
+
+        with pytest.raises(SystemExit) as exc_info:
+            self._run(
+                _connect_with_retry(
+                    client,
+                    enter_hibernation_fn=mock_enter,
+                    is_auth_error_fn=is_auth_error,
+                )
+            )
+
+        assert exc_info.value.code == 2
+        mock_enter.assert_called_once()
+
+    def test_transient_error_does_not_call_enter_hibernation(self):
+        """When a transient error (ConnectionError) occurs, enter_hibernation() is
+        NOT called — the retry loop continues as normal.
+        """
+        client = AsyncMock()
+        # Fail on first attempt with transient error, succeed on second
+        call_count = 0
+
+        async def flaky_connect():
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise ConnectionError("temporary network failure")
+
+        client.connect = flaky_connect
+        client.is_user_authorized = AsyncMock(return_value=True)
+
+        mock_enter = MagicMock()
+
+        from bridge.hibernation import is_auth_error
+
+        # Should complete without raising
+        self._run(
+            _connect_with_retry(
+                client,
+                enter_hibernation_fn=mock_enter,
+                is_auth_error_fn=is_auth_error,
+                max_attempts=3,
+            )
+        )
+
+        mock_enter.assert_not_called()
