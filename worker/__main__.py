@@ -168,7 +168,7 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
         )
         return
 
-    # Register FileOutputHandler for each project
+    # Register TelegramRelayOutputHandler for each project
     for project_key in projects:
         register_callbacks(project_key, handler=handler)
         logger.info(f"[{project_key}] Registered TelegramRelayOutputHandler")
