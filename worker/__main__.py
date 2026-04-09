@@ -173,15 +173,24 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
         register_callbacks(project_key, handler=handler)
         logger.info(f"[{project_key}] Registered FileOutputHandler")
 
-    # Step 1: Rebuild AgentSession indexes (SCAN-based, production-safe)
-    # Cleans up stale index entries from crashed/expired sessions
+    # Step 1: Rebuild indexes for ALL Popoto models (SCAN-based, production-safe)
+    # Cleans up stale/orphaned index entries across all models, not just AgentSession
     try:
-        from models.agent_session import AgentSession
+        import time as _time
 
-        rebuilt = AgentSession.rebuild_indexes()
-        logger.info(f"Rebuilt AgentSession indexes ({rebuilt} records reindexed)")
+        from scripts.popoto_index_cleanup import run_cleanup
+
+        _t0 = _time.monotonic()
+        cleanup_result = run_cleanup()
+        _elapsed = _time.monotonic() - _t0
+        logger.info(
+            f"Rebuilt indexes for all Popoto models "
+            f"({cleanup_result.get('models_processed', 0)} models, "
+            f"{cleanup_result.get('total_orphans_found', 0)} orphans cleaned, "
+            f"{_elapsed:.1f}s)"
+        )
     except Exception as e:
-        logger.warning(f"AgentSession index rebuild failed (non-fatal): {e}")
+        logger.warning(f"Popoto index rebuild failed (non-fatal): {e}")
 
     # Step 2: Clean up corrupted sessions before recovery (prevents error spam)
     try:

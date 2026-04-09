@@ -13,6 +13,8 @@ Provides fast, queryable Redis models for all persistent data:
 - DedupRecord: per-chat message deduplication tracking
 - Memory: subconscious memory records (human instructions, agent observations)
 - TeammateMetrics: teammate mode classification counters and response times
+- KnowledgeDocument: knowledge base indexed documents with embeddings
+- PRReviewAudit: deduplication tracker for PR review audit findings
 """
 
 from models.agent_session import AgentSession
@@ -20,10 +22,11 @@ from models.bridge_event import BridgeEvent
 from models.chat import Chat
 from models.dead_letter import DeadLetter
 from models.dedup import DedupRecord
+from models.knowledge_document import KnowledgeDocument
 from models.link import Link
 from models.memory import Memory
 from models.reflection import Reflection
-from models.reflections import ReflectionIgnore, ReflectionRun
+from models.reflections import PRReviewAudit, ReflectionIgnore, ReflectionRun
 from models.teammate_metrics import TeammateMetrics
 from models.telegram import TelegramMessage
 
@@ -36,6 +39,8 @@ __all__ = [
     "DedupRecord",
     "DeadLetter",
     "BridgeEvent",
+    "KnowledgeDocument",
+    "PRReviewAudit",
     "Reflection",
     "ReflectionIgnore",
     "ReflectionRun",
