@@ -8,330 +8,423 @@ tracking: https://github.com/tomcounsell/ai/issues/839
 last_comment_id: none
 ---
 
-# Worker Hibernation: Pause Sessions and Quiesce Queue on Transient API/Auth Failures
+# Worker Hibernation: Mid-Turn Session Pause + Drip Resume
 
 ## Problem
 
-When external dependencies fail temporarily — Anthropic API downtime, auth token expiration, credit exhaustion — the system has no graceful pause mechanism. Sessions hit API errors mid-execution and are marked `failed`. The health check requeues them. The worker pops them again. They fail again. This is a tight failure loop with no circuit gate at the dequeue level and no safe suspend-and-resume path for in-flight sessions.
+When the Anthropic API goes down mid-execution, the worker marks the in-flight session as stuck in `running` and exits the worker loop. Startup recovery re-queues it to `pending`, the worker picks it up again, and the session fails again immediately — a tight failure loop with no backoff and no quiesce.
 
-**Current behavior:** API down → worker pops session → mid-turn failure → session marked `failed` → health check requeues → repeat. No quiesce, no pause, no controlled wake.
+**Current behavior:** Anthropic API goes down → `sdk_client.py` raises `CircuitOpenError` or auth error mid-execution → worker loop catches, sets `session_completed = True`, breaks loop → session left in `running` → startup recovery re-queues to `pending` → worker pops again → repeat. No quiesce, no controlled wake.
 
-**Desired outcome:** API down → health-check reflection detects failure → worker enters hibernation (queue pop blocked by Redis flag) → in-flight sessions transition to `paused` (not `failed`) → next health-check tick confirms recovery → sessions resume one-at-a-time via drip reflection.
+**Desired outcome:** API down → health-check reflection writes hibernation Redis flag → worker stops popping sessions → in-flight session transitions to `paused` (not left in `running`), preserving full context → next health-check tick clears flag on confirmed recovery → drip-resume reflection transitions one `paused` session to `pending` per tick → Telegram notification on enter/exit.
 
 ## Prior Art
 
-No prior issues or PRs found for worker hibernation or mid-execution session pause.
+No closed issues or merged PRs found for worker hibernation or mid-turn session pause. The circuit breaker (`CircuitBreaker`, `CircuitOpenError`) was introduced in PR #502.
 
-Related: `docs/plans/sustainable_self_healing.md` (tracking issue #773) — plans `paused_circuit` status for circuit-based queue pause at dequeue time. This issue (#839) is complementary: it handles mid-execution session-level pause and worker hibernation. The two statuses coexist without conflict. #839 can ship independently; #773 can reference it as a completed sub-item.
+Issue #773 (sustainable self-healing) covers overlapping territory — it adds `paused_circuit` status, `{project_key}:sustainability:queue_paused` Redis flag, `api-health-gate` (60s), and `recovery-drip` (30s). This plan (#839) builds alongside #773. See the Relationship to #773 subsection under Solution.
+
+## Spike Results
+
+### spike-1: Where does CircuitOpenError currently leave the session?
+
+- **Assumption**: "Auth error mid-execution marks session failed via finalize_session()"
+- **Method**: code-read (`agent/agent_session_queue.py:2056-2069`)
+- **Finding**: The catch block sets `session_completed = True` and `break`s. The `finally` block skips `finalize_session()` when `session_completed = True`. Session is left in `running` state — not `failed`. Auth errors in `sdk_client.py` line 1205 re-raise, hit the same catch. Session stays `running` indefinitely if worker dies without restart; startup recovery re-queues it if the process restarts.
+- **Confidence**: high
+- **Impact on plan**: Fix intercepts at the same catch block — add `transition_status(session, "paused")` before `break`. Write hibernation flag at the same site.
+
+### spike-2: Does transition_status() accept new statuses without other changes?
+
+- **Assumption**: "`paused` works once added to NON_TERMINAL_STATUSES"
+- **Method**: code-read (`models/session_lifecycle.py:197`)
+- **Finding**: Confirmed. `ValueError` raised for any status not in `NON_TERMINAL_STATUSES`. Single frozenset addition is the only required change. `finalize_session()` is terminal-only and unaffected.
+- **Confidence**: high
+- **Impact on plan**: `NON_TERMINAL_STATUSES` change must ship in Task 1, before any call to `transition_status(session, "paused")`.
+
+### spike-3: Does health-check or startup recovery touch paused sessions?
+
+- **Assumption**: "Health check or startup recovery might re-queue paused sessions"
+- **Method**: code-read (`agent/agent_session_queue.py` health check and startup recovery functions)
+- **Finding**: Existing `health-check` reflection scans `running` and `pending` statuses only. Startup recovery scans `running` only. Adding `paused` to `NON_TERMINAL_STATUSES` gives it a valid status without adding it to either scan — `paused` sessions are naturally excluded from both requeue paths.
+- **Confidence**: high
+- **Impact on plan**: No changes to health-check or startup recovery logic required.
+
+### spike-4: Do #773 and #839 health gate reflections conflict?
+
+- **Assumption**: "#773 api-health-gate and #839 worker-health-gate may duplicate work"
+- **Method**: code-read (`docs/plans/sustainable_self_healing.md`)
+- **Finding**: #773 writes `{project_key}:sustainability:queue_paused`; #839 uses `{project_key}:worker:hibernating`. Both block `_pop_agent_session()`. They are additive — `_pop_agent_session()` can check both with OR logic. The two status names (`paused_circuit` for #773, `paused` for #839) are semantically distinct: `paused_circuit` = blocked before dequeue ever happened; `paused` = interrupted mid-execution. Keep them separate.
+- **Confidence**: high
+- **Impact on plan**: `_pop_agent_session()` checks both flags if both keys exist. `session-resume-drip` (this plan) only restores `paused` sessions; #773's `recovery-drip` only restores `paused_circuit` sessions. No coordination conflict.
 
 ## Data Flow
 
-**Failure path:**
-1. **Entry**: `sdk_client.py` raises `AuthenticationError` or detects API unavailability mid-execution
-2. **Queue exception handler** (`agent_session_queue.py`): catches the error, calls `transition_status(session, "paused")` instead of `finalize_session(session, "failed")`
-3. **Session state**: session moves to `paused` in Redis; context (branch, plan URL, steering queue) preserved
-4. **Worker loop**: session is not requeued; worker continues to next session
+### Hibernation Entry (API failure path)
 
-**Hibernation path:**
-1. **Entry**: `worker_health_gate` reflection fires on 60s tick
-2. **Detection**: checks circuit state (OPEN) or auth error in recent logs
-3. **Flag write**: writes `{project_key}:worker:hibernating = "1"` (TTL 10min) to POPOTO_REDIS_DB
-4. **Guard**: `_pop_agent_session()` reads flag first; returns `None` if set — no sessions dequeued
-5. **Notification**: Telegram message sent on first hibernation entry
+1. **`sdk_client.py` `query()`**: Raises `CircuitOpenError` (circuit OPEN before query) or auth error pattern detected mid-stream
+2. **`_worker_loop()` catch (`agent_session_queue.py:2060`)**: Catches `CircuitOpenError`. **NEW**: calls `transition_status(session, "paused", "circuit open — hibernating")` then writes `{project_key}:worker:hibernating = "1"` (TTL 600s) to Redis. Sets `session_completed = True`, breaks.
+3. **Telegram notification**: On first flag write (key did not previously exist), enqueues notification session: "Worker hibernating — N sessions paused"
+4. **Worker loop exits**: semaphore released. Worker waits for event signal.
 
-**Recovery path:**
-1. **Entry**: `worker_health_gate` reflection fires; circuit now CLOSED, auth succeeds
-2. **Flag swap**: clears `hibernating` flag, writes `{project_key}:worker:recovering = "1"` (TTL 30min)
-3. **Notification**: Telegram wake message sent
-4. **Drip**: `session_resume_drip` reflection (30s tick) pops one `paused` session → `pending` per tick
-5. **Drain**: when `paused` list is empty, `recovering` flag is cleared
+### Hibernation Gate (pop path)
+
+1. **`_pop_agent_session()` top**: reads `{project_key}:worker:hibernating` from Redis before `_acquire_pop_lock()`. If set → `logger.debug("[pop] Hibernating — skipping pop")` → return `None`
+2. **Worker loop**: gets `None`, releases semaphore, waits — no sessions consumed
+
+### Recovery (health-check → drip path)
+
+1. **`worker-health-gate` reflection (60s)**: reads `{project_key}:worker:hibernating`. If set, checks Anthropic circuit state. If `CircuitState.CLOSED`: deletes `hibernating`, writes `{project_key}:worker:recovering = "1"` (TTL 3600s). Enqueues notification: "Worker woke — beginning drip resume"
+2. **`session-resume-drip` reflection (30s)**: reads `recovering` flag — if absent, no-op. If set, queries `AgentSession.query.filter(status="paused")`, pops one (oldest first), `transition_status(session, "pending", "drip resume")`
+3. **When `paused` list drains**: `session-resume-drip` deletes `recovering` flag
+4. **`_pop_agent_session()`**: flag absent → proceeds normally
+
+## Relationship to #773 (Sustainable Self-Healing)
+
+#773 adds `paused_circuit` status and `queue_paused` Redis flag. #839 adds `paused` status and `hibernating` Redis flag. The two are additive:
+
+| Concern | #773 | #839 |
+|---------|------|------|
+| Status | `paused_circuit` (blocked before dequeue) | `paused` (interrupted mid-execution) |
+| Redis gate key | `{pk}:sustainability:queue_paused` | `{pk}:worker:hibernating` |
+| Gate written by | `api-health-gate` reflection (60s) | `_worker_loop()` catch + `worker-health-gate` (60s) |
+| Drip recovery | `recovery-drip` (30s) | `session-resume-drip` (30s) |
+
+`_pop_agent_session()` checks both flags with OR logic: return `None` if either is set. The two recovery drips are independent and do not interfere — each only transitions its own status type.
 
 ## Architectural Impact
 
-- **New status value**: `paused` added to `NON_TERMINAL_STATUSES` in `models/session_lifecycle.py` — enables `transition_status(session, "paused")` calls without ValueError
-- **New Redis flags**: `{project_key}:worker:hibernating` and `{project_key}:worker:recovering` — plain Redis keys (not Popoto models), scoped by project key, with TTL
-- **New reflections**: two new entries in `config/reflections.yaml` — `worker-health-gate` (60s) and `session-resume-drip` (30s)
-- **New callables**: two new functions in a new module `agent/worker_hibernation.py` (or inline in `agent/agent_session_queue.py`)
-- **Modified**: `_pop_agent_session()` gets a one-line guard at the top; exception handler in worker loop catches auth errors and transitions to `paused`
-- **Coupling**: low — hibernation flag is a Redis key readable by any component; no new cross-module dependencies
+- **Modified**: `agent/agent_session_queue.py` — `_pop_agent_session()` top (one Redis GET), `_worker_loop()` catch block (add `transition_status` call + flag write)
+- **Modified**: `models/session_lifecycle.py` — `NON_TERMINAL_STATUSES` (add `"paused"`)
+- **New module**: `agent/hibernation.py` — three functions. Kept separate from `sustainability.py` (#773) to prevent merge conflicts between the two plans.
+- **New entries**: `config/reflections.yaml` — two new reflections
+- **No new external dependencies**: Redis only
+- **Coupling**: `hibernation.py` imports from `bridge.health` (already used in `sdk_client.py`) and `bridge.resilience` — minimal new coupling
+- **Reversibility**: Remove two Redis reads from `_pop_agent_session()`, delete `agent/hibernation.py`, remove YAML entries, revert `NON_TERMINAL_STATUSES` change. Any `paused` sessions would need manual status reset.
 
 ## Appetite
 
 **Size:** Medium
 
-**Team:** Solo dev
+**Team:** Solo dev, async-specialist
 
 **Interactions:**
-- PM check-ins: 1 (scope alignment on `paused` vs `paused_circuit` boundary with #773)
+- PM check-ins: 1
 - Review rounds: 1
 
 ## Prerequisites
 
-No prerequisites — this work uses existing infrastructure (POPOTO_REDIS_DB, ReflectionScheduler, transition_status, CircuitBreaker).
-
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
-| Redis running | `python -c "from popoto.redis_db import POPOTO_REDIS_DB; POPOTO_REDIS_DB.ping()"` | Redis must be available for flag reads/writes |
+| Redis running | `redis-cli ping` | Hibernation flags stored in Redis |
+| Anthropic circuit registered | `python -c "from bridge.health import get_health; print(get_health().summary())"` | Circuit state readable for health gate |
 
 ## Solution
 
 ### Key Elements
 
-- **`paused` status**: New non-terminal status in `models/session_lifecycle.py` — semantics: session interrupted by transient external failure, waiting for conditions to improve. Distinct from `dormant` (awaits human) and `paused_circuit` (circuit-level queue pause from #773).
-- **Auth error catch**: In `agent_session_queue.py` worker exception handler, catch auth errors (`_is_auth_error`) and `CircuitOpenError`; call `transition_status(session, "paused")` instead of `finalize_session(session, "failed")`.
-- **Hibernation flag**: Redis key `{project_key}:worker:hibernating` (TTL 10min, renewed each tick while unhealthy). Checked at the top of `_pop_agent_session()` — returns `None` when set.
-- **`worker_health_gate` reflection**: 60s tick function. Detects failure (circuit OPEN or recent auth error), writes/renews hibernation flag. On recovery: clears flag, writes `recovering` flag. Sends Telegram on state change.
-- **`session_resume_drip` reflection**: 30s tick function. Active only when `recovering` flag set. Pops one `paused` session per tick, transitions to `pending`. Clears `recovering` when list drains.
+- **`paused` status**: New entry in `NON_TERMINAL_STATUSES`. Semantics: session interrupted by transient external failure; full context preserved; not terminal.
+- **`_pop_agent_session()` guard**: First action (before `_acquire_pop_lock()`), reads `{project_key}:worker:hibernating`. If set, returns `None`. O(1) Redis GET.
+- **`_worker_loop()` rescue**: On `CircuitOpenError`, calls `transition_status(session, "paused")` and writes hibernation flag before breaking. Session stays in Redis with full context.
+- **`agent/hibernation.py`**: Contains `worker_health_gate()` (60s reflection), `session_resume_drip()` (30s reflection), and `send_hibernation_notification()` (helper, not a reflection).
+- **Telegram notification**: Enqueued as a session — reflections cannot call bridge directly (they run inside the worker process).
 
 ### Flow
 
-API error detected → session transitions to `paused` → worker_health_gate writes hibernation flag → `_pop_agent_session()` returns None (queue quiesced) → Telegram: "hibernating" → health-gate confirms recovery → recovering flag written → Telegram: "awake" → session_resume_drip ticks every 30s: one paused session → pending → queue resumes normal operation
+```
+Anthropic API down
+  → CircuitOpenError raised in sdk_client.py
+  → _worker_loop catch: transition_status(session, "paused") + write worker:hibernating (TTL 600s)
+  → Telegram notification enqueued: "Worker hibernating, N sessions paused"
+  → _pop_agent_session reads hibernating flag → returns None
+  → worker waits (no sessions consumed)
+
+Anthropic API recovers
+  → worker-health-gate (60s): circuit CLOSED → delete hibernating, write recovering (TTL 3600s)
+  → Telegram notification enqueued: "Worker woke, beginning drip resume"
+  → session-resume-drip (30s): one paused → pending per tick (~2 sessions/min)
+  → when paused list empty: delete recovering flag
+```
 
 ### Technical Approach
 
-- Add `"paused"` to `NON_TERMINAL_STATUSES` frozenset in `models/session_lifecycle.py`
-- In `_pop_agent_session()`: add guard at line 555 (before `_acquire_pop_lock`): read `{project_key}:worker:hibernating` from POPOTO_REDIS_DB; return `None` if set
-- Worker exception handler (around line 2056): extend the existing `CircuitOpenError` catch block to also catch auth-error exceptions; call `transition_status(session, "paused", reason="transient API failure")` instead of setting `session_failed = True`
-- New module `agent/worker_hibernation.py` with two functions: `worker_health_gate()` and `session_resume_drip()` — keeps queue module size manageable
-- Project key: read from `os.environ.get("VALOR_PROJECT_KEY", "valor")` — same pattern as `agent/memory_extraction.py`
-- Telegram notification: use existing `send_telegram_message` or equivalent already used in the bridge/worker
-- Two new YAML entries in `config/reflections.yaml` with `execution_type: function` and intervals 60 and 30 respectively
+- All functions in `agent/hibernation.py` are **synchronous** (run in executor via reflection scheduler) — no new async complexity
+- Redis operations use `from popoto import redis as r` — project-keyed via `os.environ.get("VALOR_PROJECT_KEY", "default")`
+- All functions `except Exception: logger.error(...)` and never raise — reflection tick survives any failure
+- Hibernation flag TTL 600s (10min): auto-expires if reflection stops running, unblocking worker automatically
+- Guard in `worker_health_gate()`: `cb = get_health().get("anthropic"); if cb is None: return` — handles cold-start / test environments
+- Use `cb.state == CircuitState.CLOSED` (explicit equality, import from `bridge.resilience`) to clear hibernation flag — NOT `!= OPEN` which would incorrectly fire during `HALF_OPEN`
+- On first-write detection in `_worker_loop()` catch: `was_hibernating = r.exists(key)` before `r.set(key, "1", ex=600)`. If `not was_hibernating`, enqueue notification.
+- `valor-session list --status paused` works without changes — the status index is updated correctly by `transition_status()`.
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
 
-- `worker_health_gate()` and `session_resume_drip()` must catch all exceptions internally and log (never crash the scheduler tick). Add test asserting that a Redis failure inside `worker_health_gate()` is caught and logged, not propagated.
-- `_pop_agent_session()` hibernation flag read: wrap in try/except — Redis unavailability must not block the pop path (fail open, not closed).
+- [ ] `worker_health_gate()` must `except Exception: logger.error(...)` — never crash the reflection tick
+- [ ] `session_resume_drip()` must `except Exception` around `transition_status()` call — session may be deleted concurrently
+- [ ] Redis `GET` in `_pop_agent_session()` must catch `redis.RedisError` and **fail open** (log warning, proceed with pop) — Redis down must not block session execution
+- [ ] `transition_status(session, "paused")` in `_worker_loop()` catch: if it raises, log error and fall back to current behavior (leave session in `running`); do not crash worker
 
 ### Empty/Invalid Input Handling
 
-- `session_resume_drip()`: when no `paused` sessions exist, must clear `recovering` flag and return cleanly — no error, no loop.
-- `worker_health_gate()`: when circuit state is indeterminate (e.g., circuit not yet initialized), must treat as healthy (fail open).
+- [ ] `session_resume_drip()` with zero `paused` sessions: deletes `recovering` flag and returns — no crash
+- [ ] `worker_health_gate()` with no registered Anthropic circuit (`cb is None`): returns immediately — no `AttributeError`
+- [ ] `_pop_agent_session()` when hibernating flag has unexpected value (non-"1"): any truthy value blocks pop — treat as hibernating
 
 ### Error State Rendering
 
-- Telegram notifications on hibernation start/wake must not crash if the Telegram send fails — wrap in try/except.
-- `valor-session list --status paused` must render without error when status index contains `paused` sessions.
+- [ ] Telegram notification on hibernation: must reach the ops channel with failure reason and session count
+- [ ] If notification enqueue fails (e.g., worker is fully down), log error but do not prevent status transition or flag write
 
 ## Test Impact
 
-- [ ] `tests/unit/test_session_lifecycle_consolidation.py::TestStatusSets::test_non_terminal_statuses` — UPDATE: add `"paused"` to expected set
-- [ ] `tests/unit/test_session_lifecycle_consolidation.py::TestStatusSets::test_eleven_total_statuses` — UPDATE: assert `len(ALL_STATUSES) == 12` (one new status added)
-- [ ] `tests/unit/test_session_lifecycle_consolidation.py::TestStatusSets::test_all_statuses_is_union` — passes as-is (derived from union, no hardcoded count)
-- [ ] `tests/unit/test_agent_session_queue.py` — UPDATE: add test for hibernation flag blocking `_pop_agent_session()` (new unit test case)
-
-New tests to create:
-- `tests/unit/test_worker_hibernation.py`: hibernation flag blocks pop, drip resumes one per tick, auth error → `paused` transition (not `failed`), recovery flag cleared when paused list drains
+- [ ] `tests/unit/test_agent_session_queue.py` — UPDATE: add test that `_pop_agent_session()` returns `None` when `worker:hibernating` flag set; add test flag absent → proceeds normally
+- [ ] `tests/unit/test_session_lifecycle.py` (if exists) or `tests/unit/test_hibernation.py` — UPDATE/CREATE: assert `"paused"` in `NON_TERMINAL_STATUSES`; assert `transition_status(session, "paused")` succeeds
+- [ ] `tests/unit/test_hibernation.py` — CREATE: `worker_health_gate()` circuit OPEN → writes flag; circuit CLOSED → clears flag + writes `recovering`; `cb is None` → no-op; `session_resume_drip()` one `paused` session → `pending`; empty list → clears `recovering`
+- [ ] `tests/unit/test_agent_session_queue.py` — UPDATE: add test that `CircuitOpenError` in worker loop transitions session to `paused` (not left in `running`)
 
 ## Rabbit Holes
 
-- **Persisting reason/context on the paused session**: tempting to add a `pause_reason` field to AgentSession — not worth it for this slice; the lifecycle log already captures the reason.
-- **Backoff with jitter on drip rate**: starting with one-per-tick (30s) is sufficient; don't build a configurable drip rate governor yet.
-- **Merging with #773's `paused_circuit` flow**: they are separate statuses with different triggers and resume paths. Keep them separate to avoid entangled state machines.
-- **Detecting API recovery without a live call**: circuit state is sufficient; don't build a synthetic health-probe to Anthropic — it would consume quota during a quota issue.
+- **Merging `paused` and `paused_circuit` into one status**: They have different semantics. Keep separate.
+- **Persistent (no-TTL) hibernation flag**: If the reflection stops, the queue is permanently blocked. TTL is the correct safety valve.
+- **Per-session retry budgets**: Tracking how many times a session has been `paused` and abandoning after N attempts is a separate concern.
+- **Dashboard widgets for hibernation state**: Dashboard can read Redis — defer to a follow-up.
+- **Merging the two Redis dequeue flags** (`queue_paused` from #773 + `hibernating` from #839): Would require coordinating two independent plans. Keep them additive — two independent OR checks in `_pop_agent_session()`.
+- **Auth error detection improvements**: `_AUTH_ERROR_PATTERNS` list is sufficient for current needs. Not in scope.
 
 ## Risks
 
-### Risk 1: `paused` sessions never resume if `recovering` flag expires before drip completes
-**Impact:** Sessions stuck in `paused` indefinitely after a long outage with many paused sessions
-**Mitigation:** `session_resume_drip` renews the `recovering` flag on each tick while paused sessions remain. If the flag expires (worker crash), the next `worker_health_gate` tick that detects a healthy circuit will re-enter the recovery path and re-set `recovering`.
+### Risk 1: `paused` sessions accumulate if both reflections stop
 
-### Risk 2: Auth error catch is too broad — non-transient auth errors (e.g., permanently invalid key) put sessions in `paused` forever
-**Impact:** Sessions never resume; drip keeps transitioning them to pending where they fail again
-**Mitigation:** Add a `paused_count` ceiling: if a session has been paused more than N times (tracked via lifecycle log or a counter field), fall through to `failed` on the next auth error. Start with N=3.
+**Impact:** If `worker-health-gate` stops running (bridge restart), the `hibernating` flag expires after 10min (worker resumes popping). But if `session-resume-drip` also stopped before draining the `paused` list, sessions are stuck until the next restart brings the reflection back.
 
-### Risk 3: Hibernation flag read in `_pop_agent_session()` adds Redis round-trip to every dequeue
-**Impact:** Marginal latency on dequeue path
-**Mitigation:** Flag read is a single `GET` call — sub-millisecond in practice. Acceptable trade-off. Can cache in-process with 5s TTL if profiling reveals an issue.
+**Mitigation:** `session-resume-drip` activates on `recovering` flag (TTL 3600s), which is set when `worker-health-gate` detects circuit recovery. After bridge restart, the next `worker-health-gate` tick will re-evaluate. Acceptable: sessions are not lost, only delayed.
+
+### Risk 2: Race between startup recovery and `paused` transition
+
+**Impact:** A session left in `running` (process crashed before `transition_status("paused")`) is re-queued to `pending` by startup recovery instead of staying `paused`.
+
+**Mitigation:** The `transition_status("paused")` call is the first action in the catch block, before `break`. Process crash between the two lines means session stays `running` — startup recovery handles it as an interrupted running session (re-queues to `pending`). This is acceptable degraded behavior; the session will be retried rather than lost.
+
+### Risk 3: Telegram notification failure blocks flag write
+
+**Impact:** If enqueuing the notification raises an exception, it could prevent the hibernation flag from being written.
+
+**Mitigation:** Notification enqueue is wrapped in `try/except` and called after the flag write, not before. Flag write always happens first.
+
+### Risk 4: Two dequeue flags cause debugging confusion
+
+**Impact:** Operators see `queue_paused` (from #773) AND `hibernating` (from #839) in Redis, unsure which is blocking.
+
+**Mitigation:** Distinct log messages per flag: `"[pop] Hibernating (worker:hibernating)"` vs `"[pop] Queue paused (sustainability:queue_paused)"`. Document both in feature docs.
 
 ## Race Conditions
 
-### Race 1: Two workers both check hibernation flag before either sets it
-**Location:** `agent/worker_hibernation.py::worker_health_gate()`
-**Trigger:** Two concurrent health-gate ticks check the flag simultaneously; neither sees it set; both attempt to write
-**Data prerequisite:** Flag must be written atomically before first dequeue check
-**State prerequisite:** Redis SET with NX semantics
-**Mitigation:** Use `POPOTO_REDIS_DB.set(key, "1", nx=True, ex=TTL)` — only one writer succeeds; the other's write is a no-op. Idempotent outcome.
+### Race 1: Two workers read `hibernating = None` before either writes it
 
-### Race 2: Session transitions to `paused` while drip concurrently pops it back to `pending`
-**Location:** `agent/agent_session_queue.py` exception handler + `agent/worker_hibernation.py::session_resume_drip()`
-**Trigger:** Worker pauses a session at the same moment drip is transitioning it to `pending`
-**Data prerequisite:** Drip only touches sessions currently in `paused` status index
-**State prerequisite:** `transition_status()` is idempotent for same-state transitions; Popoto index update is atomic per-session
-**Mitigation:** `transition_status()` checks current status before writing; worst case session ends up in `pending` and gets picked up cleanly by the next pop.
+**Location:** `agent/agent_session_queue.py` — `_pop_agent_session()` top
+**Trigger:** Two workers wake simultaneously; both check the flag before the `_worker_loop()` catch block writes it
+**Data prerequisite:** Flag written by catch block or health-gate before workers check it
+**State prerequisite:** Flag value consistent across all Redis-sharing workers
+**Mitigation:** Redis `GET` is atomic. Workers are readers of the flag; only `_worker_loop()` catch and `worker_health_gate()` write it. No race in the read path.
+
+### Race 2: `session-resume-drip` transitions a session being deleted by cleanup
+
+**Location:** `agent/hibernation.py` `session_resume_drip()`
+**Trigger:** Concurrent cleanup deletes session while drip calls `transition_status("pending")`
+**Mitigation:** `transition_status()` uses Popoto's atomic save; if session deleted, save fails silently. Wrap `transition_status()` in `try/except` in `session_resume_drip()`.
+
+### Race 3: Worker writes `hibernating` while health gate concurrently clears it
+
+**Location:** `agent/hibernation.py` `worker_health_gate()` + `_worker_loop()` catch
+**Trigger:** Health gate runs during circuit recovery at the exact moment worker writes the flag
+**Mitigation:** Both are single atomic Redis operations. Worst case: flag is re-written on next failure and cleared on next health gate tick (60s). Not harmful.
 
 ## No-Gos (Out of Scope)
 
-- Session-count throttle (belongs in #773)
-- Failure fingerprinting / dedup GitHub issues (belongs in #773)
-- Daily digest / operator summary (belongs in #773)
-- Configurable drip rate or backoff algorithm
-- `paused_count` circuit for permanently-invalid auth (can be added in a follow-up)
-- Hibernation across multiple projects simultaneously (each project key is independent — this is already true by design)
+- Session-count throttling (belongs to #773)
+- Failure fingerprint deduplication / GitHub issue auto-creation (belongs to #773)
+- Daily digest Telegram message (belongs to #773)
+- Per-session retry budgets
+- Dashboard widgets for hibernation state
+- Merging `paused` and `paused_circuit` statuses
+- Merging `hibernating` and `queue_paused` Redis flags
+- Auth error pattern improvements (`_AUTH_ERROR_PATTERNS`)
 
 ## Update System
 
-No update system changes required. The new reflection callables are internal Python functions registered in `config/reflections.yaml`. The YAML file is already tracked in git and deployed via the standard `git pull` update path. No new environment variables, dependencies, or config migration needed.
+No update script changes required. New reflection entries in `config/reflections.yaml` are picked up on next bridge restart automatically. `agent/hibernation.py` ships with the code.
+
+New env vars: none. TTL (600s) and drip interval (30s) are hardcoded to sensible defaults; no per-machine configuration needed.
 
 ## Agent Integration
 
-No agent integration required. Worker hibernation is a bridge-internal/worker-internal change. The `valor-session list --status paused` command works automatically once `paused` is a valid status — the CLI reads Popoto status indexes directly.
+No new MCP server required. Hibernation functions run inside the bridge process via `ReflectionScheduler`.
 
-No MCP server changes needed. No `.mcp.json` changes needed.
+Telegram notifications are enqueued as sessions via the existing session queue — no new bridge wiring needed.
+
+`valor-session list --status paused` works immediately once `paused` is added to `NON_TERMINAL_STATUSES`. No scheduler or list-command changes needed.
+
+No changes to `.mcp.json`.
 
 ## Documentation
 
-- [ ] Create `docs/features/worker-hibernation.md` describing the hibernation lifecycle, Redis flags, status transitions, and recovery flow
-- [ ] Add entry to `docs/features/README.md` index table for worker-hibernation
-- [ ] Update `docs/features/reflections.md` to document the two new reflection entries (`worker-health-gate`, `session-resume-drip`)
+- [ ] Create `docs/features/worker-hibernation.md` describing: hibernation flow, Redis key schema (`worker:hibernating`, `worker:recovering`), `paused` status semantics, relationship to #773 (`paused_circuit` / `queue_paused`), drip resume rate
+- [ ] Add entry to `docs/features/README.md` index table
+- [ ] Add inline docstrings to all public functions in `agent/hibernation.py`
 
 ## Success Criteria
 
-- [ ] `paused` status added to `NON_TERMINAL_STATUSES`; `transition_status(session, "paused")` succeeds without ValueError
-- [ ] Auth error or API-down condition mid-execution → session transitions to `paused` (not `failed`); worker moves on without requeuing
-- [ ] `_pop_agent_session()` returns `None` when hibernation flag set in Redis
-- [ ] `worker_health_gate` reflection (60s) writes/renews hibernation flag on failure; clears on confirmed recovery
-- [ ] `session_resume_drip` reflection (30s) transitions one `paused` session to `pending` per tick when `recovering` flag is active; clears `recovering` when list drains
-- [ ] Telegram notification sent on hibernation start and on wake
-- [ ] `valor-session list --status paused` works
-- [ ] Unit tests pass: hibernation flag blocks pop, drip resumes one per tick, auth error → `paused` transition
+- [ ] `"paused"` in `NON_TERMINAL_STATUSES`: `python -c "from models.session_lifecycle import NON_TERMINAL_STATUSES; assert 'paused' in NON_TERMINAL_STATUSES"`
+- [ ] `transition_status(session, "paused")` succeeds without `ValueError` (unit test)
+- [ ] `_pop_agent_session()` returns `None` when `{project_key}:worker:hibernating` is set (unit test)
+- [ ] `CircuitOpenError` in `_worker_loop()` transitions session to `paused`, not left in `running` (unit test)
+- [ ] `worker_health_gate()` with circuit `CLOSED` clears `hibernating` and writes `recovering` (unit test)
+- [ ] `session_resume_drip()` with one `paused` session transitions it to `pending`; with empty list clears `recovering` (unit test)
+- [ ] Both reflections declared in `config/reflections.yaml`, enabled and valid: `python -c "from agent.reflection_scheduler import load_registry; r=load_registry(); assert any(e.name=='worker-health-gate' for e in r)"`
+- [ ] `valor-session list --status paused` returns without error
+- [ ] Telegram notification sent on hibernation entry and on wake
 - [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [ ] Documentation created (`/do-docs`)
 
 ## Team Orchestration
 
 ### Team Members
 
-- **Builder (hibernation-core)**
-  - Name: hibernation-builder
-  - Role: Implement `paused` status, hibernation flag guard, auth-error catch, and two reflection callables
+- **Builder (lifecycle)**
+  - Name: lifecycle-builder
+  - Role: Add `paused` to `NON_TERMINAL_STATUSES`; update `_worker_loop()` catch to transition to `paused` and write hibernation flag; add hibernation flag guard to `_pop_agent_session()` top
   - Agent Type: builder
   - Resume: true
 
-- **Validator (hibernation-core)**
-  - Name: hibernation-validator
-  - Role: Verify implementation meets all acceptance criteria; run unit tests
-  - Agent Type: validator
+- **Builder (hibernation-module)**
+  - Name: hibernation-builder
+  - Role: Create `agent/hibernation.py` with `worker_health_gate`, `session_resume_drip`, and `send_hibernation_notification`
+  - Agent Type: async-specialist
   - Resume: true
 
-- **Test Engineer (hibernation)**
-  - Name: hibernation-test-engineer
-  - Role: Write `tests/unit/test_worker_hibernation.py` and update affected existing tests
+- **Builder (reflections-yaml)**
+  - Name: reflections-yaml-builder
+  - Role: Add `worker-health-gate` and `session-resume-drip` entries to `config/reflections.yaml`
+  - Agent Type: builder
+  - Resume: true
+
+- **Test Engineer**
+  - Name: hibernation-tester
+  - Role: Write unit tests covering: hibernation flag blocks pop, drip resumes one per tick, `CircuitOpenError` → `paused` transition, `paused` in `NON_TERMINAL_STATUSES`
   - Agent Type: test-engineer
   - Resume: true
 
 - **Documentarian**
   - Name: hibernation-documentarian
-  - Role: Create feature docs and update reflections doc
+  - Role: Write `docs/features/worker-hibernation.md` and update `docs/features/README.md`
   - Agent Type: documentarian
+  - Resume: true
+
+- **Validator**
+  - Name: hibernation-validator
+  - Role: Verify all success criteria, run tests, confirm YAML entries load cleanly
+  - Agent Type: validator
   - Resume: true
 
 ## Step by Step Tasks
 
-### 1. Add `paused` status and update lifecycle module
-- **Task ID**: build-status
+### 1. Add `paused` status and lifecycle changes
+- **Task ID**: build-lifecycle
 - **Depends On**: none
-- **Validates**: `tests/unit/test_session_lifecycle_consolidation.py`
-- **Assigned To**: hibernation-builder
+- **Validates**: `tests/unit/test_session_lifecycle.py` (create or update), `tests/unit/test_agent_session_queue.py` (update)
+- **Informed By**: spike-2 (`NON_TERMINAL_STATUSES` only change needed), spike-1 (`_worker_loop()` catch at line 2060 is the fix site), spike-3 (startup recovery not affected), spike-4 (both flags checked with OR logic)
+- **Assigned To**: lifecycle-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add `"paused"` to `NON_TERMINAL_STATUSES` frozenset in `models/session_lifecycle.py`
-- Verify `transition_status(session, "paused")` no longer raises ValueError
+- Add `"paused"` to `NON_TERMINAL_STATUSES` in `models/session_lifecycle.py`
+- In `agent/agent_session_queue.py` `_worker_loop()` catch block (line 2060): before `session_completed = True; break`, add: `try: transition_status(session, "paused", "circuit open — hibernating"); except Exception as e: logger.error(...)`. Then write hibernation flag: `was_hibernating = r.exists(f"{pk}:worker:hibernating"); r.set(f"{pk}:worker:hibernating", "1", ex=600)`. If `not was_hibernating`, call `send_hibernation_notification()`.
+- Add at top of `_pop_agent_session()` (before `_acquire_pop_lock()`): `if r.get(f"{pk}:worker:hibernating"): logger.debug("[pop] Hibernating — skipping pop"); return None`. Also add check for `{pk}:sustainability:queue_paused` (from #773, if that key exists in production) with same OR logic.
+- Import `from popoto import redis as r` at top of `agent_session_queue.py` if not already present; `pk = os.environ.get("VALOR_PROJECT_KEY", "default")`
+- Check whether #773 has already shipped (`queue_paused` key pattern present) and add the additive guard accordingly
 
-### 2. Add hibernation flag guard to `_pop_agent_session()`
-- **Task ID**: build-pop-guard
-- **Depends On**: build-status
-- **Validates**: new unit test in `tests/unit/test_worker_hibernation.py`
+### 2. Create `agent/hibernation.py`
+- **Task ID**: build-hibernation-module
+- **Depends On**: build-lifecycle (`paused` status must exist before `transition_status("paused")` can be called)
+- **Validates**: `tests/unit/test_hibernation.py` (create)
+- **Informed By**: spike-4 (flag naming, #773 coordination pattern), spike-1 (circuit check pattern from sustainable_self_healing.md)
 - **Assigned To**: hibernation-builder
+- **Agent Type**: async-specialist
+- **Parallel**: false
+- Create `agent/hibernation.py` with:
+  - `worker_health_gate()`: guard `cb = get_health().get("anthropic"); if cb is None: return`. If OPEN or HALF_OPEN: write/renew `hibernating` (ex=600). If `CircuitState.CLOSED`: delete `hibernating`, write `recovering` (ex=3600), call `send_hibernation_notification("waking", count)`. Wrap all in `except Exception: logger.error(...)`
+  - `session_resume_drip()`: read `recovering` — if absent, return. Query `AgentSession.query.filter(status="paused")`, sort oldest first, pop one, `try: transition_status(session, "pending", "drip resume"); except Exception: logger.error(...)`. When list empty, delete `recovering`. Wrap all in `except Exception: logger.error(...)`
+  - `send_hibernation_notification(event, count)`: enqueue a lightweight session with pre-composed message string. Wrap in `try/except` — never raises.
+- Use `CircuitState.CLOSED` (imported from `bridge.resilience`) for closed-state check — not `!= OPEN`
+- Use `cb.state == CircuitState.CLOSED` pattern explicitly
+
+### 3. Register reflections in YAML
+- **Task ID**: build-reflections-yaml
+- **Depends On**: build-hibernation-module
+- **Validates**: `python -c "from agent.reflection_scheduler import load_registry; r=load_registry(); assert any(e.name=='worker-health-gate' for e in r)"`
+- **Assigned To**: reflections-yaml-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- At top of `_pop_agent_session()` (before `_acquire_pop_lock`): read `{project_key}:worker:hibernating` from POPOTO_REDIS_DB; return `None` if set
-- Project key sourced from `os.environ.get("VALOR_PROJECT_KEY", "valor")`
+- Add to `config/reflections.yaml`:
+  - `worker-health-gate`: interval 60, priority high, execution_type function, callable `agent.hibernation.worker_health_gate`, enabled true
+  - `session-resume-drip`: interval 30, priority high, execution_type function, callable `agent.hibernation.session_resume_drip`, enabled true
 
-### 3. Catch auth errors mid-execution and transition to `paused`
-- **Task ID**: build-auth-catch
-- **Depends On**: build-status
-- **Validates**: new unit test asserting `paused` (not `failed`) on auth error
-- **Assigned To**: hibernation-builder
-- **Agent Type**: builder
-- **Parallel**: true
-- In worker loop exception handler (around line 2056 in `agent_session_queue.py`): extend `CircuitOpenError` block to also handle auth errors detected via `_is_auth_error(str(e))`
-- Call `transition_status(session, "paused", reason="transient API failure — auth error")` and set `session_completed = True` (do not set `session_failed`)
-
-### 4. Implement `worker_health_gate` and `session_resume_drip` callables
-- **Task ID**: build-reflections
-- **Depends On**: build-pop-guard, build-auth-catch
-- **Validates**: new unit tests for both callables
-- **Assigned To**: hibernation-builder
-- **Agent Type**: builder
-- **Parallel**: false
-- Create `agent/worker_hibernation.py` with `worker_health_gate()` and `session_resume_drip()`
-- `worker_health_gate()`: check circuit state; write/renew `hibernating` flag (TTL 600s) on failure; clear and write `recovering` on recovery; send Telegram on state change; all exceptions caught and logged
-- `session_resume_drip()`: if `recovering` flag set, pop one `paused` session → `pending`; clear `recovering` when list is empty; all exceptions caught and logged
-- Add two entries to `config/reflections.yaml`: `worker-health-gate` (interval: 60) and `session-resume-drip` (interval: 30)
-
-### 5. Write unit tests
+### 4. Write unit tests
 - **Task ID**: build-tests
-- **Depends On**: build-reflections
-- **Validates**: `tests/unit/test_worker_hibernation.py`, updated `test_session_lifecycle_consolidation.py`
-- **Assigned To**: hibernation-test-engineer
+- **Depends On**: build-lifecycle, build-hibernation-module
+- **Validates**: `tests/unit/test_hibernation.py`, `tests/unit/test_agent_session_queue.py`, `tests/unit/test_session_lifecycle.py`
+- **Assigned To**: hibernation-tester
 - **Agent Type**: test-engineer
 - **Parallel**: false
-- Create `tests/unit/test_worker_hibernation.py`: hibernation flag blocks pop, drip resumes one per tick, auth error → `paused`, recovering flag cleared on drain
-- Update `tests/unit/test_session_lifecycle_consolidation.py`: add `"paused"` to expected NON_TERMINAL set; update count to 12
+- `tests/unit/test_session_lifecycle.py`: assert `"paused" in NON_TERMINAL_STATUSES`
+- `tests/unit/test_agent_session_queue.py`: `_pop_agent_session()` returns `None` when `hibernating` set; returns session when flag absent; `CircuitOpenError` in `_worker_loop()` catch leaves session in `paused` (not `running`)
+- `tests/unit/test_hibernation.py` (create): `worker_health_gate()` with circuit OPEN → writes flag; CLOSED → clears + writes `recovering`; `cb is None` → no-op; `session_resume_drip()` one `paused` → `pending`; empty list → clears `recovering`
+- Use `fakeredis` or test Redis; never touch production data
 
-### 6. Validate implementation
-- **Task ID**: validate-core
-- **Depends On**: build-tests
-- **Assigned To**: hibernation-validator
-- **Agent Type**: validator
-- **Parallel**: false
-- Run `pytest tests/unit/test_worker_hibernation.py tests/unit/test_session_lifecycle_consolidation.py -v`
-- Verify all success criteria are met
-- Verify no regressions in `test_agent_session_queue.py` and `test_circuit_breaker.py`
-
-### 7. Documentation
+### 5. Documentation
 - **Task ID**: document-feature
-- **Depends On**: validate-core
+- **Depends On**: build-lifecycle, build-hibernation-module, build-reflections-yaml
 - **Assigned To**: hibernation-documentarian
 - **Agent Type**: documentarian
 - **Parallel**: false
-- Create `docs/features/worker-hibernation.md`
-- Add entry to `docs/features/README.md`
-- Update `docs/features/reflections.md` with new reflection entries
+- Create `docs/features/worker-hibernation.md` covering: hibernation flow, Redis key schema, `paused` status semantics, relationship to #773, recovery drip rate
+- Add entry to `docs/features/README.md` index table
 
-### 8. Final Validation
+### 6. Final Validation
 - **Task ID**: validate-all
-- **Depends On**: document-feature
+- **Depends On**: build-tests, document-feature
 - **Assigned To**: hibernation-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run `pytest tests/ -x -q`
-- Run `python -m ruff check . && python -m ruff format --check .`
-- Verify all documentation files exist on disk
-- Generate final pass/fail report
+- Run `pytest tests/unit/test_hibernation.py tests/unit/test_agent_session_queue.py tests/unit/test_session_lifecycle.py -v`
+- Check `paused` in statuses: `python -c "from models.session_lifecycle import NON_TERMINAL_STATUSES; assert 'paused' in NON_TERMINAL_STATUSES"`
+- Check reflections: `python -c "from agent.reflection_scheduler import load_registry; r=load_registry(); assert any(e.name=='worker-health-gate' for e in r)"`
+- Check imports: `python -c "from agent.hibernation import worker_health_gate, session_resume_drip; print('ok')"`
+- Run `python -m ruff check agent/hibernation.py` — exit 0
+- Report pass/fail for all success criteria
 
 ## Verification
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| Tests pass | `pytest tests/ -x -q` | exit code 0 |
-| Lint clean | `python -m ruff check .` | exit code 0 |
-| Format clean | `python -m ruff format --check .` | exit code 0 |
-| `paused` in NON_TERMINAL | `python -c "from models.session_lifecycle import NON_TERMINAL_STATUSES; assert 'paused' in NON_TERMINAL_STATUSES"` | exit code 0 |
-| Hibernation module exists | `python -c "import agent.worker_hibernation"` | exit code 0 |
-| Reflection entries present | `python -c "import yaml; r=yaml.safe_load(open('config/reflections.yaml')); names=[x['name'] for x in r['reflections']]; assert 'worker-health-gate' in names and 'session-resume-drip' in names"` | exit code 0 |
-| Feature doc exists | `test -f docs/features/worker-hibernation.md` | exit code 0 |
+| Tests pass | `pytest tests/unit/test_hibernation.py tests/unit/test_agent_session_queue.py -x -q` | exit code 0 |
+| Lint clean | `python -m ruff check agent/hibernation.py` | exit code 0 |
+| Format clean | `python -m ruff format --check agent/hibernation.py` | exit code 0 |
+| `paused` in statuses | `python -c "from models.session_lifecycle import NON_TERMINAL_STATUSES; assert 'paused' in NON_TERMINAL_STATUSES"` | exit code 0 |
+| Reflections load | `python -c "from agent.reflection_scheduler import load_registry; r=load_registry(); assert any(e.name=='worker-health-gate' for e in r)"` | exit code 0 |
+| Module imports | `python -c "from agent.hibernation import worker_health_gate, session_resume_drip"` | exit code 0 |
 
 ## Critique Results
 
+<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| | | | | |
 
 ---
 
 ## Open Questions
 
-None — recon and issue analysis resolved all unknowns before planning.
+1. **#773 ship order**: Should this plan wait for #773 to merge? If #773 ships first, Task 1 must check whether `api-health-gate` and `queue_paused` already exist and confirm the additive OR logic. If #839 ships first, #773's queue guard task adopts the same OR pattern. Both orderings work — but the builder must check for existing keys/reflections before adding new ones.
+
+2. **Telegram notification delivery**: Should hibernation/wake notifications be enqueued as agent sessions (depends on worker being partially up, adds latency) or sent via a direct Redis pub/sub write that the bridge picks up independently? Direct bridge notification would be more reliable when the worker is quiescing. This is a design decision that could affect notification architecture.
