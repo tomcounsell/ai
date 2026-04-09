@@ -556,6 +556,22 @@ def execute_recovery(level: int, issues: list[str]) -> bool:
 
 def run_health_check() -> bool:
     """Run a single health check cycle. Returns True if healthy."""
+    # Check hibernation state before any recovery action.
+    # When hibernating, the bridge is intentionally stopped awaiting human
+    # re-authentication — suppress the restart loop entirely.
+    try:
+        from bridge.hibernation import is_hibernating
+
+        if is_hibernating():
+            logger.info(
+                "[hibernation] Bridge hibernating: auth required. "
+                "Run 'python scripts/telegram_login.py' then "
+                "'./scripts/valor-service.sh restart' to resume."
+            )
+            return True  # Suppress all recovery actions
+    except Exception as e:
+        logger.debug("[hibernation] Could not check hibernation state: %s", e)
+
     # Skip if recovery already in progress
     if RECOVERY_LOCK.exists():
         try:
@@ -609,6 +625,20 @@ def main():
     args = parser.parse_args()
 
     if args.check_only:
+        # Check hibernation state first
+        hibernating = False
+        try:
+            from bridge.hibernation import is_hibernating
+
+            hibernating = is_hibernating()
+        except Exception:
+            pass
+        print(f"Hibernating: {hibernating}")
+        if hibernating:
+            print(
+                "Hibernation: auth required — run 'python scripts/telegram_login.py' then restart"
+            )
+
         status = check_bridge_health()
         print(f"Healthy: {status.healthy}")
         print(f"Process running: {status.process_running}")

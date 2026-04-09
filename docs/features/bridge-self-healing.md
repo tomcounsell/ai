@@ -201,6 +201,64 @@ tail -f logs/update.log
 
 **Manual override**: The Telegram `/update` command continues to work for immediate updates.
 
+### 13. Bridge Hibernation (`bridge/hibernation.py`)
+
+**Problem**: The bridge has no distinction between two fundamentally different failure modes:
+1. **Auth expiry** — Telegram session token expired or revoked; requires human intervention (`python scripts/telegram_login.py`). The bridge cannot self-recover.
+2. **Transient connectivity** — network blip, DC migration, short Telegram outage. Launchd restart + Telethon reconnect handles this automatically.
+
+Without this distinction, auth expiry hits the same 8-attempt retry loop, exits with code 1, and causes the watchdog to restart the bridge indefinitely — making the situation worse and producing no actionable signal.
+
+**Solution**: `bridge/hibernation.py` classifies errors and implements a hibernation state:
+
+**Permanent auth errors → hibernation**:
+`AuthKeyUnregisteredError`, `AuthKeyError`, `AuthKeyInvalidError`, `AuthKeyPermEmptyError`, `SessionExpiredError`, `SessionRevokedError`, `UnauthorizedError`
+
+**Transient errors → existing retry loop**:
+`NetworkMigrateError`, `ConnectionError`, `OSError`, `FloodWaitError`
+
+**Hibernation sequence** (auth expiry detected):
+1. `enter_hibernation()` writes `data/bridge-auth-required` flag file atomically (temp + `os.replace`)
+2. macOS notification fires via `osascript` with the exact command to run
+3. Bridge logs: "Bridge hibernating: auth required. Run 'python scripts/telegram_login.py'..."
+4. Bridge exits with **code 2** (distinct from crash exit code 1)
+5. Watchdog detects flag file on next 60s check, logs hibernation state, and **suppresses restart loop**
+6. Worker continues executing queued sessions; `FileOutputHandler` writes output to `logs/worker/{session_id}.log`
+
+**Recovery sequence** (human re-authenticates):
+1. Human runs `python scripts/telegram_login.py` — session file updated
+2. Human runs `./scripts/valor-service.sh restart`
+3. Bridge connects → `is_user_authorized()` succeeds → `exit_hibernation()` clears flag file
+4. `replay_buffered_output(client)` scans `logs/worker/*.log` files from last 24h
+5. Files modified < 5 minutes ago are skipped (may still be active sessions)
+6. Each replayed entry is delivered to Telegram with a header: `--- Buffered output from {timestamp} ---`
+7. `.replayed` marker files prevent duplicate delivery on subsequent reconnects
+
+**Safety guards**:
+- `enter_hibernation()` is non-fatal: if `data/` dir is missing or read-only, logs warning and continues to `SystemExit(2)`
+- `osascript` failure is non-fatal and logged as warning — `bridge.log` always contains hibernation message
+- `replay_buffered_output()` skips unreadable/malformed log files per file with warning
+- `is_auth_error(None)` returns False safely (no TypeError)
+
+**Watchdog integration** (`monitoring/bridge_watchdog.py`):
+- `run_health_check()` checks `is_hibernating()` before any recovery action
+- If hibernating: logs "Bridge hibernating: auth required. Run 'python scripts/telegram_login.py'..." and returns True (suppresses all recovery levels)
+- `--check-only` output includes `Hibernating: True/False` and recovery instructions
+
+**Check hibernation state**:
+```bash
+python monitoring/bridge_watchdog.py --check-only
+# Output includes: Hibernating: True/False
+
+ls data/bridge-auth-required  # flag file presence
+```
+
+**Manual recovery**:
+```bash
+python scripts/telegram_login.py  # re-authenticate
+./scripts/valor-service.sh restart  # restart bridge
+```
+
 ## Recovery Lock
 
 During recovery, `data/recovery-in-progress` is created to prevent:
@@ -243,12 +301,15 @@ rm data/auto-revert-enabled
 |------|---------|
 | `monitoring/crash_tracker.py` | Crash event logging and pattern detection |
 | `monitoring/bridge_watchdog.py` | External health monitor |
+| `bridge/hibernation.py` | Auth-expiry hibernation: classifier, flag file, replay |
 | `scripts/auto-revert.sh` | Git revert and restart |
 | `data/recovery-in-progress` | Recovery lock file |
 | `data/auto-revert-enabled` | Auto-revert enable flag |
+| `data/bridge-auth-required` | Hibernation flag file (presence = auth required) |
 | `data/flood-backoff` | Flood-backoff expiry (JSON) |
 | `data/last_connected` | Last-connected timestamp (ISO 8601) |
 | `logs/watchdog.log` | Watchdog output |
+| `logs/worker/{session_id}.log` | FileOutputHandler output during bridge downtime |
 
 ## Design Principles
 
