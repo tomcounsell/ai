@@ -195,24 +195,24 @@ Same error 3+ times
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] All five sustainability functions must `except Exception` and log — never crash the reflection tick
-- [ ] Redis connection errors in `_pop_agent_session()` guard must log and allow session to proceed (fail open, not fail closed)
-- [ ] `gh issue create` failure in failure-loop-detector must log and continue — does not re-raise
+- [x] All five sustainability functions must `except Exception` and log — never crash the reflection tick
+- [x] Redis connection errors in `_pop_agent_session()` guard must log and allow session to proceed (fail open, not fail closed)
+- [x] `gh issue create` failure in failure-loop-detector must log and continue — does not re-raise
 
 ### Empty/Invalid Input Handling
-- [ ] `failure_loop_detector()` with zero failed sessions: no-op, no crash
-- [ ] `recovery_drip()` with empty `paused_circuit` list: clears `recovery:active` flag and returns
-- [ ] `session_count_throttle()` with zero recent sessions: writes `none` throttle level
+- [x] `failure_loop_detector()` with zero failed sessions: no-op, no crash
+- [x] `recovery_drip()` with empty `paused_circuit` list: clears `recovery:active` flag and returns
+- [x] `session_count_throttle()` with zero recent sessions: writes `none` throttle level
 
 ### Error State Rendering
-- [ ] When `queue_paused` is set, `_pop_agent_session()` logs a debug message at every skip
-- [ ] When throttle level is `suspended`, `_pop_agent_session()` logs which session was skipped and why
+- [x] When `queue_paused` is set, `_pop_agent_session()` logs a debug message at every skip
+- [x] When throttle level is `suspended`, `_pop_agent_session()` logs which session was skipped and why
 
 ## Test Impact
 
-- [ ] `tests/unit/test_agent_session_queue.py` — UPDATE: add test that `_pop_agent_session()` returns `None` when `queue_paused` flag is set in Redis; add test that throttle `suspended` blocks normal/low sessions
-- [ ] `tests/integration/test_session_queue_integration.py` — UPDATE if exists, else create: end-to-end test that a paused queue correctly drips sessions back on recovery
-- [ ] `tests/unit/test_agent_session_health_check.py` — CREATE: this file does not exist yet. Test must assert health check never calls `transition_status(session, "pending")` for a session with `status="paused_circuit"` (i.e., paused sessions are not requeued).
+- [x] `tests/unit/test_agent_session_queue.py` — UPDATE: add test that `_pop_agent_session()` returns `None` when `queue_paused` flag is set in Redis; add test that throttle `suspended` blocks normal/low sessions
+- [x] `tests/integration/test_session_queue_integration.py` — UPDATE if exists, else create: end-to-end test that a paused queue correctly drips sessions back on recovery
+- [x] `tests/unit/test_agent_session_health_check.py` — CREATE: this file does not exist yet. Test must assert health check never calls `transition_status(session, "pending")` for a session with `status="paused_circuit"` (i.e., paused sessions are not requeued).
 - No existing reflection tests exist — new `tests/unit/test_sustainability.py` must be created
 
 ## Rabbit Holes
@@ -287,22 +287,22 @@ No changes to `.mcp.json` needed.
 
 ## Documentation
 
-- [ ] Create `docs/features/sustainable-self-healing.md` describing the five reflections, Redis key schema, throttle levels, and failure-loop dedup
-- [ ] Update `docs/features/bridge-self-healing.md` to reference this feature as the queue-layer complement to the process-layer watchdog
-- [ ] Add entry to `docs/features/README.md` index table
+- [x] Create `docs/features/sustainable-self-healing.md` describing the five reflections, Redis key schema, throttle levels, and failure-loop dedup
+- [x] Update `docs/features/bridge-self-healing.md` to reference this feature as the queue-layer complement to the process-layer watchdog
+- [x] Add entry to `docs/features/README.md` index table
 
 ## Success Criteria
 
-- [ ] When the Anthropic circuit is OPEN, `_pop_agent_session()` returns `None` and logs a skip message
-- [ ] When circuit closes, sessions resume at ≤1 per 30s until `paused_circuit` list drains
-- [ ] With > `SUSTAINABILITY_THROTTLE_SUSPENDED` sessions started in the last hour, `normal`/`low` sessions are not dequeued
-- [ ] ≥ 3 failures with the same error fingerprint produce exactly one GitHub issue (subsequent runs are no-ops)
-- [ ] Daily digest Telegram message must include: circuit state per dependency, current throttle level, session count last 24h, active failure cluster count — embed these required fields in the `sustainability-digest` YAML `command` field
-- [ ] All five reflections declared in `config/reflections.yaml`, enabled and valid
-- [ ] `paused_circuit` sessions are NOT requeued by the health check
-- [ ] Unit tests: pause flag blocks dequeue, throttle level blocks low-priority, bloom dedup, drip rate
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation created (`/do-docs`)
+- [x] When the Anthropic circuit is OPEN, `_pop_agent_session()` returns `None` and logs a skip message
+- [x] When circuit closes, sessions resume at ≤1 per 30s until `paused_circuit` list drains
+- [x] With > `SUSTAINABILITY_THROTTLE_SUSPENDED` sessions started in the last hour, `normal`/`low` sessions are not dequeued
+- [x] ≥ 3 failures with the same error fingerprint produce exactly one GitHub issue (subsequent runs are no-ops)
+- [x] Daily digest Telegram message must include: circuit state per dependency, current throttle level, session count last 24h, active failure cluster count — embed these required fields in the `sustainability-digest` YAML `command` field
+- [x] All five reflections declared in `config/reflections.yaml`, enabled and valid
+- [x] `paused_circuit` sessions are NOT requeued by the health check
+- [x] Unit tests: pause flag blocks dequeue, throttle level blocks low-priority, bloom dedup, drip rate
+- [x] Tests pass (`/do-test`)
+- [x] Documentation created (`/do-docs`)
 
 ## Team Orchestration
 
