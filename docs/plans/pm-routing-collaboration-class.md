@@ -250,9 +250,9 @@ No agent integration required -- this is a routing/dispatch change internal to t
 
 ## Documentation
 
-- [ ] Create `docs/features/pm-routing-collaboration.md` describing the four-way classification and conditional dispatch, covering both classifiers
-- [ ] Add entry to `docs/features/README.md` index table
-- [ ] Update inline docstrings for `classify_intent()`, `_parse_classifier_response()`, `classify_work_request()`, and `_classify_work_request_llm()`
+- [x] Create `docs/features/pm-routing-collaboration.md` describing the four-way classification and conditional dispatch, covering both classifiers
+- [x] Add entry to `docs/features/README.md` index table
+- [x] Update inline docstrings for `classify_intent()`, `_parse_classifier_response()`, `classify_work_request()`, and `_classify_work_request_llm()`
 
 ## Success Criteria
 
@@ -268,7 +268,7 @@ No agent integration required -- this is a routing/dispatch change internal to t
 - [ ] PM persona template documents: memory_search, work-vault path, valor_session, gws, officecli
 - [ ] "Add this to knowledge base and draft an issue" classifies as collaboration in BOTH `classify_intent()` AND `classify_work_request()`
 - [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
