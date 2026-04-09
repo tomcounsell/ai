@@ -41,7 +41,7 @@ Scans failed/abandoned sessions from the last 4 hours. Groups them by error fing
 2. If new: files one GitHub issue via `gh issue create --label bug`
 3. Marks affected sessions with `extra_context["loop_detected"] = True`
 
-- **Interval:** 1800s (30 minutes)
+- **Interval:** 3600s (60 minutes)
 - **Redis key:** `{project_key}:sustainability:seen_fingerprints` (TTL 7 days)
 - **Skips:** during active API outage (`queue_paused` set)
 
@@ -87,7 +87,7 @@ In `config/reflections.yaml`:
 
 - name: failure-loop-detector
   function: agent.sustainability:failure_loop_detector
-  interval: 1800
+  interval: 3600
 
 - name: recovery-drip
   function: agent.sustainability:recovery_drip

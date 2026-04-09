@@ -130,6 +130,63 @@ class TestApiHealthGate(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# TestSessionCountThrottle
+# ---------------------------------------------------------------------------
+
+
+class TestSessionCountThrottle(unittest.TestCase):
+    def _make_session(self, started_at_offset: float = -60.0):
+        """Return a fake AgentSession with started_at set relative to now."""
+        import time as _time
+
+        s = MagicMock()
+        s.started_at = _time.time() + started_at_offset
+        return s
+
+    def _run_throttle(self, session_count: int, moderate: int = 20, suspended: int = 40):
+        """Run session_count_throttle with `session_count` recent sessions."""
+        import models.agent_session as asm
+        from agent.sustainability import session_count_throttle
+
+        r = MagicMock()
+        sessions = [self._make_session() for _ in range(session_count)]
+
+        env_patch = {
+            "SUSTAINABILITY_THROTTLE_MODERATE": str(moderate),
+            "SUSTAINABILITY_THROTTLE_SUSPENDED": str(suspended),
+            "VALOR_PROJECT_KEY": "testproj",
+        }
+
+        with (
+            patch("agent.sustainability._get_redis", return_value=r),
+            patch("agent.sustainability._get_project_key", return_value="testproj"),
+            patch.object(asm.AgentSession, "query", new_callable=MagicMock) as mock_query,
+            patch.dict(os.environ, env_patch),
+        ):
+            mock_query.filter.return_value = sessions
+            session_count_throttle()
+
+        return r
+
+    def test_below_threshold_does_not_set_throttle_flag(self):
+        """Session count below moderate threshold → throttle_level written as 'none'."""
+        r = self._run_throttle(session_count=5, moderate=20, suspended=40)
+        r.set.assert_called_once_with("testproj:sustainability:throttle_level", "none", ex=7200)
+
+    def test_at_moderate_threshold_sets_moderate_flag(self):
+        """Session count == moderate threshold → throttle_level written as 'moderate'."""
+        r = self._run_throttle(session_count=20, moderate=20, suspended=40)
+        r.set.assert_called_once_with("testproj:sustainability:throttle_level", "moderate", ex=7200)
+
+    def test_at_suspended_threshold_sets_suspended_flag(self):
+        """Session count == suspended threshold → throttle_level written as 'suspended'."""
+        r = self._run_throttle(session_count=40, moderate=20, suspended=40)
+        r.set.assert_called_once_with(
+            "testproj:sustainability:throttle_level", "suspended", ex=7200
+        )
+
+
+# ---------------------------------------------------------------------------
 # TestPopAgentSessionGuard
 # ---------------------------------------------------------------------------
 

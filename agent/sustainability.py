@@ -61,7 +61,8 @@ def api_health_gate() -> None:
             r.delete(pause_key)
             if was_paused:
                 logger.info(
-                    "[api-health-gate] Anthropic circuit CLOSED — queue unpaused, starting recovery drip"  # noqa: E501
+                    "[api-health-gate] Anthropic circuit CLOSED — queue unpaused,"
+                    " starting recovery drip"
                 )
                 r.set(recovery_key, "1", ex=3600)
             else:
@@ -398,11 +399,13 @@ def sustainability_digest() -> None:
         command = (
             "You are generating the daily sustainability digest for the Valor AI system. "
             "Collect and report the following required fields:\n"
-            "1. Circuit state per dependency (anthropic, telegram, redis) — use get_health().summary()\n"  # noqa: E501
+            "1. Circuit state per dependency (anthropic, telegram, redis)"
+            " — use get_health().summary()\n"
             "2. Current throttle level — read from Redis key "
             f"'{project_key}:sustainability:throttle_level' (current: {throttle_level})\n"
             "3. Queue paused status — read from Redis key "
-            f"'{project_key}:sustainability:queue_paused' (currently: {'paused' if queue_paused else 'active'})\n"  # noqa: E501
+            f"'{project_key}:sustainability:queue_paused'"
+            f" (currently: {'paused' if queue_paused else 'active'})\n"
             "4. Session count in last 24 hours — query AgentSession records\n"
             "5. Active failure cluster count — count entries in Redis set "
             f"'{project_key}:sustainability:seen_fingerprints'\n\n"
