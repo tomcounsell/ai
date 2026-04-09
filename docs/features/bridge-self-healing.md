@@ -264,3 +264,4 @@ rm data/auto-revert-enabled
 - [Message Pipeline](message-pipeline.md) — deferred enrichment and zero-loss restart mechanisms
 - [Message Reconciler](message-reconciler.md) — periodic scan for messages missed during live connection (complements startup catchup)
 - [Session Transcripts](session-transcripts.md) — session lifecycle logging via AgentSession model
+- [Sustainable Self-Healing](sustainable-self-healing.md) — circuit breaker and queue governance for long-term system health under load
