@@ -48,6 +48,8 @@ The merge guard is a PreToolUse hook that regex-matches `\bgh\s+pr\s+merge\b` in
 
 MERGE is now a proper pipeline stage routed after DOCS completes. The `/do-merge` skill checks prerequisites (TEST, REVIEW, DOCS completed) before presenting the PR for human merge authorization.
 
+**Structured review comment check** (added in #823): Before authorizing merge, `/do-merge` scans PR issue comments for the most recent `## Review:` comment. Blocks if no such comment exists (review never ran), or if the most recent comment starts with `## Review: Changes Requested` (lists unchecked `- [ ]` items as blockers). Passes only if the most recent comment starts with `## Review: Approved`. This closes the gap where the REVIEW stage could be marked `completed` in Redis without an actual approval comment existing on the PR.
+
 ## Pipeline Flow
 
 ```

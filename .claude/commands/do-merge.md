@@ -103,6 +103,33 @@ print('ALL_GATES_PASS' if all_pass else 'GATES_FAILED')
 "
 ```
 
+### Structured Review Comment Check
+
+Before authorizing merge, scan PR issue comments for the most recent `## Review:` comment:
+
+```bash
+REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
+LAST_REVIEW=$(gh api repos/$REPO/issues/$ARGUMENTS/comments \
+  --jq '[.[] | select(.body | startswith("## Review:"))] | last | .body // ""' \
+  2>/dev/null) || { echo "REVIEW_COMMENT: FAIL — gh api call failed (network/auth error)"; echo "GATES_FAILED"; exit 1; }
+
+if [ -z "$LAST_REVIEW" ]; then
+  echo "REVIEW_COMMENT: FAIL — No '## Review:' comment found on PR #$ARGUMENTS"
+  echo "Run /do-pr-review before merging."
+  echo "GATES_FAILED"
+elif echo "$LAST_REVIEW" | grep -q "^## Review: Changes Requested"; then
+  BLOCKERS=$(echo "$LAST_REVIEW" | grep "^- \[ \]" | head -20)
+  echo "REVIEW_COMMENT: FAIL — Most recent review is 'Changes Requested'"
+  echo "Unchecked blockers:"
+  echo "$BLOCKERS"
+  echo "GATES_FAILED"
+else
+  echo "REVIEW_COMMENT: PASS — Most recent review is 'Approved'"
+fi
+```
+
+If the review comment check prints GATES_FAILED, report the specific blocker and do NOT proceed with the merge.
+
 ### Plan Completion Gate
 
 Before merging, scan the plan document for unchecked items that indicate unfinished work:
