@@ -3,7 +3,7 @@
 All session status mutations should go through this module:
 - finalize_session() for terminal transitions (completed, failed, killed, abandoned, cancelled)
 - transition_status() for non-terminal transitions (pending, running, active, dormant,
-  waiting_for_children, superseded)
+  waiting_for_children, superseded, paused_circuit)
 
 This ensures consistent lifecycle logging, auto-tagging, branch checkpointing,
 and parent finalization regardless of which code path triggers the transition.
@@ -24,7 +24,15 @@ TERMINAL_STATUSES = frozenset({"completed", "failed", "killed", "abandoned", "ca
 
 # Non-terminal statuses — sessions in these states are still active or paused
 NON_TERMINAL_STATUSES = frozenset(
-    {"pending", "running", "active", "dormant", "waiting_for_children", "superseded"}
+    {
+        "pending",
+        "running",
+        "active",
+        "dormant",
+        "waiting_for_children",
+        "superseded",
+        "paused_circuit",  # paused by api-health-gate when Anthropic circuit is OPEN
+    }
 )
 
 # All known statuses

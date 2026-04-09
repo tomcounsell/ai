@@ -57,3 +57,51 @@ reflections:
     execution_type: function
     callable: "scripts.popoto_index_cleanup.run_cleanup"
     enabled: true
+
+  # === Sustainable Self-Healing (issue #773) ===
+
+  - name: api-health-gate
+    description: "Check Anthropic circuit state; set/clear queue_paused flag to block/allow session dequeue"
+    interval: 60  # 1 minute
+    priority: high
+    execution_type: function
+    callable: "agent.sustainability.api_health_gate"
+    enabled: true
+
+  - name: session-count-throttle
+    description: "Count sessions started in last hour; write throttle_level (none/moderate/suspended)"
+    interval: 3600  # 1 hour
+    priority: normal
+    execution_type: function
+    callable: "agent.sustainability.session_count_throttle"
+    enabled: true
+
+  - name: failure-loop-detector
+    description: "Scan failed sessions for repeated error fingerprints; file one GitHub issue per novel cluster"
+    interval: 3600  # 1 hour
+    priority: normal
+    execution_type: function
+    callable: "agent.sustainability.failure_loop_detector"
+    enabled: true
+
+  - name: recovery-drip
+    description: "Drip one paused_circuit session back to pending per tick (only when recovery:active flag set)"
+    interval: 30  # 30 seconds
+    priority: high
+    execution_type: function
+    callable: "agent.sustainability.recovery_drip"
+    enabled: true
+
+  - name: sustainability-digest
+    description: "Daily Telegram health summary: circuit states, throttle level, session counts, failure clusters"
+    interval: 86400  # daily
+    priority: low
+    execution_type: agent
+    command: >
+      Generate and send the daily sustainability digest for the Valor AI system.
+      Required output fields: (1) circuit state per dependency (anthropic, telegram, redis),
+      (2) current throttle level from Redis, (3) queue paused status,
+      (4) session count in last 24 hours, (5) active failure cluster count from Redis set.
+      Format as a concise Telegram message (3-8 lines) and send to the 'Dev: Valor' chat.
+      Subject line: Daily System Health Digest.
+    enabled: true
