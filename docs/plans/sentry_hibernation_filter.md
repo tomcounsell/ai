@@ -228,9 +228,11 @@ No agent integration required -- this is a bridge-internal change. No new tools,
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room) on 2026-04-09. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | Skeptic | Sentry event field for message matching not specified — logging-captured events store text in different fields than exception-captured events | Task 1 (build-sentry-filter) | `before_send(event, hint)` receives logging events with message in `event.get("logentry", {}).get("message")` or `event.get("message")`; exception events in `event["exception"]["values"][0]["value"]`. Check all three paths: `event.get("message", "") or event.get("logentry", {}).get("message", "")` plus `str(exc_value)` from `hint.get("exc_info", (None,None,None))[1]`. |
+| NIT | Operator | No observability for the filter — when `before_send` drops an event, nothing is logged or counted, making it indistinguishable from "no errors occurring" vs "filter silently dropping everything" | Task 1 (build-sentry-filter) | Add `logger.debug("[sentry-filter] Dropped auth event during hibernation: %s", msg[:80])` inside the drop path. |
 
 ---
 
