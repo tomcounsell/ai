@@ -35,6 +35,8 @@ Intent classification results from the work request classifier.
 | Member | Value | Usage |
 |--------|-------|-------|
 | `ClassificationType.SDLC` | `"sdlc"` | Work request routed to SDLC pipeline |
+| `ClassificationType.COLLABORATION` | `"collaboration"` | Direct task PM can handle without a dev-session |
+| `ClassificationType.OTHER` | `"other"` | Ambiguous task; PM uses judgment |
 | `ClassificationType.QUESTION` | `"question"` | Informational query, direct response |
 
 ## Import Pattern

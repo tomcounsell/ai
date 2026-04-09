@@ -55,7 +55,12 @@ resolve_persona(project, chat_title, is_dm)
             |-- Read-only, PM persona
             |
             v
-        Intent Classifier (Haiku, binary)
+        Intent Classifier (Haiku, four-way)
+            |
+            |-- Collaboration/Other --> Direct-action mode (PM handles with tools)
+            |                               |
+            |                               v
+            |                           Telegram Response
             |
             |-- Work (or low confidence)
                     |-- Stage-by-stage SDLC orchestration

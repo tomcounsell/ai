@@ -73,10 +73,16 @@ class TestPersonaType:
 class TestClassificationType:
     def test_string_equality(self):
         assert ClassificationType.SDLC == "sdlc"
+        assert ClassificationType.COLLABORATION == "collaboration"
+        assert ClassificationType.OTHER == "other"
         assert ClassificationType.QUESTION == "question"
 
     def test_all_members(self):
-        assert len(list(ClassificationType)) == 2
+        assert len(list(ClassificationType)) == 4
+
+    def test_construction_from_string(self):
+        assert ClassificationType("collaboration") == ClassificationType.COLLABORATION
+        assert ClassificationType("other") == ClassificationType.OTHER
 
 
 class TestEnvVarCompatibility:

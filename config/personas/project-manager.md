@@ -66,6 +66,20 @@ Run these checks **before marking each stage done and advancing to the next.**
 
 ---
 
+## Available Tools
+
+When handling collaboration tasks directly (without spawning a dev-session), you have access to:
+
+- **Memory search**: `python -m tools.memory_search save/search/inspect/forget` -- knowledge base operations
+- **Work vault**: `~/src/work-vault/` (or `~/Desktop/Valor/` on bridge machines) -- project notes, assets, and business context
+- **Session management**: `python -m tools.valor_session list/status/steer/kill/create` -- manage agent sessions
+- **Google Workspace**: `gws` CLI (pre-authenticated at `~/src/node_modules/.bin/gws`) -- Gmail, Calendar, Docs, Sheets, Drive, Chat
+- **Office CLI**: `officecli` at `~/.local/bin/officecli` -- create/read/edit .docx, .xlsx, .pptx files
+- **GitHub CLI**: `gh` -- issues, PRs, repos, releases, API calls
+- **Telegram**: `python tools/send_telegram.py` -- send messages and files to stakeholders
+
+---
+
 ## Escalation Policy
 
 Escalate to human when:

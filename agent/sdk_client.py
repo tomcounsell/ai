@@ -1516,6 +1516,7 @@ async def get_agent_response_sdk(
     # PM/Teammate routing: classify intent and choose Teammate or PM dispatch path.
     # Teammate mode answers informational queries directly without spawning a Dev session.
     _teammate_mode = False
+    _collaboration_mode = False
     _classification_context = ""  # Advisory routing context for the agent
     if _session_type in (SessionType.PM, SessionType.TEAMMATE):
         # Config-driven persona bypass: skip classifier when persona is already known
@@ -1541,8 +1542,8 @@ async def get_agent_response_sdk(
                 )
             except Exception:
                 pass  # Best-effort metrics
-            # Update session mode flag
-            if session_id:
+            # Update session mode flag (skip PM sessions — they must stay PM)
+            if session_id and _session_type != SessionType.PM:
                 try:
                     from models.agent_session import AgentSession as _TMSession
 
@@ -1554,9 +1555,22 @@ async def get_agent_response_sdk(
                 except Exception:
                     pass  # Best-effort
         elif _config_persona in (PersonaType.PROJECT_MANAGER, PersonaType.DEVELOPER):
-            # PM/Dev persona groups: skip classifier, use PM dispatch (not Teammate)
-            _classification_context = f"{_config_persona} (config-driven)"
-            logger.info(f"[{request_id}] Config-driven {_config_persona} mode, skipping classifier")
+            # PM/Dev persona groups: skip intent classifier, but check bridge-level
+            # classification for collaboration/other to avoid unnecessary SDLC overhead
+            if classification in (ClassificationType.COLLABORATION, ClassificationType.OTHER):
+                _collaboration_mode = True
+                _classification_context = (
+                    f"{_config_persona} (config-driven, collaboration via bridge classifier)"
+                )
+                logger.info(
+                    f"[{request_id}] Config-driven {_config_persona} mode, "
+                    f"collaboration detected (bridge={classification})"
+                )
+            else:
+                _classification_context = f"{_config_persona} (config-driven)"
+                logger.info(
+                    f"[{request_id}] Config-driven {_config_persona} mode, skipping classifier"
+                )
         else:
             # Unconfigured: fall through to intent classifier
             try:
@@ -1577,8 +1591,15 @@ async def get_agent_response_sdk(
                 if _intent_result.is_teammate:
                     _teammate_mode = True
                     logger.info(f"[{request_id}] Routing to Teammate mode (direct response)")
+                elif _intent_result.is_direct_action:
+                    _collaboration_mode = True
+                    logger.info(
+                        f"[{request_id}] Routing to collaboration mode "
+                        f"(direct action, intent={_intent_result.intent})"
+                    )
                     # Update session mode so nudge loop uses reduced cap
-                    if session_id:
+                    # (skip PM sessions — they must stay PM)
+                    if session_id and _session_type != SessionType.PM:
                         try:
                             from models.agent_session import AgentSession as _TMSession
 
@@ -1598,18 +1619,6 @@ async def get_agent_response_sdk(
         # session_type is the authoritative permission signal, not chat_title.
         if _session_type == SessionType.PM:
             _teammate_mode = False
-            # Undo any session_mode=TEAMMATE that was set above by config-driven routing
-            if session_id:
-                try:
-                    from models.agent_session import AgentSession as _PMFixSession
-
-                    for _s in _PMFixSession.query.filter(session_id=session_id):
-                        if getattr(_s, "session_mode", None) == PersonaType.TEAMMATE:
-                            _s.session_mode = PersonaType.PROJECT_MANAGER
-                            _s.save()
-                            break
-                except Exception:
-                    pass
 
         # Inject classification context as advisory information
         if _classification_context:
@@ -1623,6 +1632,41 @@ async def get_agent_response_sdk(
             from agent.teammate_handler import build_teammate_instructions
 
             enriched_message += build_teammate_instructions()
+        elif _collaboration_mode:
+            # Collaboration mode: PM handles the task directly without a dev-session
+            enriched_message += (
+                "\n\nHandle this task directly using your available tools. "
+                "You have access to Bash, file operations, GitHub CLI (gh), "
+                "Google Workspace (gws), memory search "
+                "(python -m tools.memory_search), Office CLI (officecli), "
+                "and session management (python -m tools.valor_session). "
+                "No dev-session needed unless you determine the task requires "
+                "code changes to the repository.\n\n"
+                "If you determine this task actually requires code changes, "
+                "spawn a dev-session via the Agent tool instead.\n\n"
+                "**Communicating with the stakeholder:**\n"
+                "You can send Telegram messages directly using:\n"
+                '  `python tools/send_telegram.py "Your message here"`\n'
+                "To attach a file (screenshot, document, image):\n"
+                '  `python tools/send_telegram.py "Caption text" --file /path/to/file.png`\n'
+                "Multiple files as an album (max 10):\n"
+                "  `python tools/send_telegram.py"
+                ' "Album caption" --file a.png --file b.png --file c.png`\n'
+                "File-only (no caption):\n"
+                "  `python tools/send_telegram.py --file /path/to/file.png`\n"
+                "Use --file to attach screenshots, images, or documents. "
+                "Repeat --file for albums. Telethon auto-detects the media type.\n"
+                "Use this tool for:\n"
+                "- Status updates and progress reports\n"
+                "- Questions that need human input\n"
+                "- Final delivery summaries\n"
+                "- Sharing screenshots or files\n"
+                "Write in business terms — never expose SDLC stage names, "
+                "pipeline internals, or implementation details. "
+                "Speak like a project manager updating a stakeholder.\n"
+                "If you don't call this tool, your return text will be "
+                "automatically summarized and sent (fallback behavior)."
+            )
         else:
             # PM dispatch: orchestrate SDLC work stage-by-stage
             enriched_message += (

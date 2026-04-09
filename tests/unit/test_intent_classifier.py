@@ -1,6 +1,7 @@
-"""Tests for the intent classifier (Teammate vs work routing).
+"""Tests for the intent classifier (four-way PM routing).
 
-Tests the parsing logic, threshold behavior, and golden examples.
+Tests the parsing logic, threshold behavior, and golden examples
+for teammate, collaboration, other, and work intents.
 The actual Haiku API call is mocked for unit tests.
 """
 
@@ -24,16 +25,54 @@ class TestIntentResult:
         r = IntentResult(intent="teammate", confidence=0.95, reasoning="asking for info")
         assert r.is_teammate is True
         assert r.is_work is False
+        assert r.is_collaboration is False
+        assert r.is_other is False
+        assert r.is_direct_action is False
 
-    def test_teammate_low_confidence_defaults_to_work(self):
+    def test_teammate_low_confidence(self):
         r = IntentResult(intent="teammate", confidence=0.85, reasoning="ambiguous")
         assert r.is_teammate is False
-        assert r.is_work is True
+        assert r.is_work is False
+        assert r.is_collaboration is False
+        assert r.is_other is False
 
     def test_work_intent(self):
         r = IntentResult(intent="work", confidence=0.98, reasoning="action request")
         assert r.is_teammate is False
+        assert r.is_collaboration is False
+        assert r.is_other is False
         assert r.is_work is True
+        assert r.is_direct_action is False
+
+    def test_collaboration_high_confidence(self):
+        r = IntentResult(intent="collaboration", confidence=0.95, reasoning="direct task")
+        assert r.is_collaboration is True
+        assert r.is_teammate is False
+        assert r.is_work is False
+        assert r.is_other is False
+        assert r.is_direct_action is True
+
+    def test_collaboration_low_confidence(self):
+        """Collaboration is not gated by confidence threshold (unlike teammate)."""
+        r = IntentResult(intent="collaboration", confidence=0.50, reasoning="low conf")
+        assert r.is_collaboration is True
+        assert r.is_direct_action is True
+        assert r.is_work is False
+
+    def test_other_intent(self):
+        r = IntentResult(intent="other", confidence=0.92, reasoning="ambiguous discussion")
+        assert r.is_other is True
+        assert r.is_direct_action is True
+        assert r.is_teammate is False
+        assert r.is_collaboration is False
+        assert r.is_work is False
+
+    def test_other_low_confidence(self):
+        """Other is not gated by confidence threshold (unlike teammate)."""
+        r = IntentResult(intent="other", confidence=0.50, reasoning="low conf")
+        assert r.is_other is True
+        assert r.is_direct_action is True
+        assert r.is_work is False
 
     def test_threshold_boundary(self):
         # Exactly at threshold: is teammate (needs to meet or exceed)
@@ -68,9 +107,25 @@ class TestParseClassifierResponse:
         assert r.intent == "work"
         assert r.confidence == 0.99
 
+    def test_valid_collaboration_response(self):
+        r = _parse_classifier_response("collaboration 0.96 User wants a direct task done")
+        assert r.intent == "collaboration"
+        assert r.confidence == 0.96
+        assert "direct task" in r.reasoning
+
+    def test_valid_other_response(self):
+        r = _parse_classifier_response("other 0.92 Ambiguous discussion topic")
+        assert r.intent == "other"
+        assert r.confidence == 0.92
+        assert "discussion" in r.reasoning
+
     def test_case_insensitive_intent(self):
         r = _parse_classifier_response("TEAMMATE 0.95 question about system")
         assert r.intent == "teammate"
+
+    def test_case_insensitive_other(self):
+        r = _parse_classifier_response("OTHER 0.91 brainstorming")
+        assert r.intent == "other"
 
     def test_no_reasoning(self):
         r = _parse_classifier_response("work 0.88")
@@ -141,6 +196,34 @@ class TestClassifyIntent:
                 assert result.confidence == 0.99
                 assert result.is_work is True
 
+    def test_collaboration_classification(self):
+        with patch("utils.api_keys.get_anthropic_api_key", return_value="test-key"):
+            mock_client = MagicMock()
+            mock_client.messages.create.return_value = _make_mock_response(
+                "collaboration 0.96 User wants to draft an issue"
+            )
+            with patch("anthropic.Anthropic", return_value=mock_client):
+                result = asyncio.run(classify_intent("Draft an issue for the flaky test"))
+                assert result.intent == "collaboration"
+                assert result.confidence == 0.96
+                assert result.is_collaboration is True
+                assert result.is_direct_action is True
+                assert result.is_work is False
+
+    def test_other_classification(self):
+        with patch("utils.api_keys.get_anthropic_api_key", return_value="test-key"):
+            mock_client = MagicMock()
+            mock_client.messages.create.return_value = _make_mock_response(
+                "other 0.93 User is brainstorming"
+            )
+            with patch("anthropic.Anthropic", return_value=mock_client):
+                result = asyncio.run(classify_intent("What should we do about the architecture?"))
+                assert result.intent == "other"
+                assert result.confidence == 0.93
+                assert result.is_other is True
+                assert result.is_direct_action is True
+                assert result.is_work is False
+
     def test_no_api_key_defaults_to_work(self):
         with patch("utils.api_keys.get_anthropic_api_key", return_value=""):
             result = asyncio.run(classify_intent("What time is it?"))
@@ -201,6 +284,26 @@ GOLDEN_TEAMMATE_EXAMPLES = [
     ("teammate 0.96", "List the MCP servers"),
 ]
 
+GOLDEN_COLLABORATION_EXAMPLES = [
+    ("collaboration 0.97", "Add this to the knowledge base"),
+    ("collaboration 0.96", "Draft an issue for the flaky test"),
+    ("collaboration 0.95", "Send a status update to the team"),
+    ("collaboration 0.94", "Write a summary doc"),
+    ("collaboration 0.98", "Save this to memory"),
+    ("collaboration 0.93", "Look up the project priorities and send me a summary"),
+    ("collaboration 0.95", "Create a Google Doc with meeting notes"),
+    ("collaboration 0.92", "Check my calendar and tell me what's next"),
+    ("collaboration 0.96", "File a GitHub issue about the flaky test"),
+]
+
+GOLDEN_OTHER_EXAMPLES = [
+    ("other 0.94", "Let's think about this"),
+    ("other 0.92", "What should we do about the architecture?"),
+    ("other 0.93", "I have an idea for improving the pipeline"),
+    ("other 0.91", "We need to discuss the deployment strategy"),
+    ("other 0.95", "Should we prioritize feature X or bug Y?"),
+]
+
 GOLDEN_WORK_EXAMPLES = [
     ("work 0.99", "Fix the bridge"),
     ("work 0.98", "Add a new endpoint for health checks"),
@@ -225,6 +328,18 @@ class TestGoldenExamples:
     def test_teammate_examples_parse_correctly(self, response, description):
         result = _parse_classifier_response(response)
         assert result.intent == "teammate", f"Expected teammate for: {description}"
+        assert result.confidence >= 0.90, f"Expected high confidence for: {description}"
+
+    @pytest.mark.parametrize("response,description", GOLDEN_COLLABORATION_EXAMPLES)
+    def test_collaboration_examples_parse_correctly(self, response, description):
+        result = _parse_classifier_response(response)
+        assert result.intent == "collaboration", f"Expected collaboration for: {description}"
+        assert result.confidence >= 0.90, f"Expected high confidence for: {description}"
+
+    @pytest.mark.parametrize("response,description", GOLDEN_OTHER_EXAMPLES)
+    def test_other_examples_parse_correctly(self, response, description):
+        result = _parse_classifier_response(response)
+        assert result.intent == "other", f"Expected other for: {description}"
         assert result.confidence >= 0.90, f"Expected high confidence for: {description}"
 
     @pytest.mark.parametrize("response,description", GOLDEN_WORK_EXAMPLES)

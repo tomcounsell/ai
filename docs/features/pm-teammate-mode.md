@@ -4,7 +4,7 @@
 
 PM session teammate mode adds a fast path for informational queries. When a user asks a question (e.g., "where is the observer prompt?", "what tests are failing?"), the PM session answers directly using read-only tools instead of spawning a full Dev session. This reduces latency and cost for simple lookups while preserving the full SDLC pipeline for actual work requests.
 
-Teammate mode is now a first-class session type (`SessionType.TEAMMATE`). It was previously a routing decision within the PM session, gated by a binary intent classifier. Teammate sessions are indicated by the `session_mode` field set to `PersonaType.TEAMMATE` (from `config/enums.py`). The `ChatMode` enum has been removed -- `PersonaType` is the sole persona identifier.
+Teammate mode is now a first-class session type (`SessionType.TEAMMATE`). It was previously a routing decision within the PM session, gated by an intent classifier. Teammate sessions are indicated by the `session_mode` field set to `PersonaType.TEAMMATE` (from `config/enums.py`). The `ChatMode` enum has been removed -- `PersonaType` is the sole persona identifier.
 
 ## Architecture
 
@@ -15,12 +15,17 @@ Telegram Message
 PM session receives message
     |
     v
-Intent Classifier (Haiku, ~$0.0001/call)
+Intent Classifier (Haiku, four-way, ~$0.0001/call)
     |
     |-- Teammate (confidence > 0.90) --> Teammate Handler (read-only tools)
     |                                       |
     |                                       v
     |                                   Direct response to Telegram
+    |
+    |-- Collaboration/Other --> PM direct-action mode (handle with tools)
+    |                               |
+    |                               v
+    |                           Telegram Response
     |
     |-- Work request (or low confidence) --> Normal Dev session spawn
 ```
@@ -29,10 +34,11 @@ Intent Classifier (Haiku, ~$0.0001/call)
 
 ### Intent Classifier (`agent/intent_classifier.py`)
 
-A lightweight Haiku-based binary classifier that determines whether a message is an informational query or a work request.
+A lightweight Haiku-based four-way classifier that determines message intent for PM routing.
 
 - **Input**: message text, optional conversation context (last 3 messages)
-- **Output**: `IntentResult` with `intent` ("teammate" or "work"), `confidence` (0.0-1.0), and `reasoning`
+- **Output**: `IntentResult` with `intent` ("teammate", "collaboration", "other", or "work"), `confidence` (0.0-1.0), and `reasoning`
+- **Collaboration/Other**: direct tasks the PM can handle without a dev-session; see [PM Routing: Collaboration](pm-routing-collaboration.md)
 - **Threshold**: teammate routing requires confidence above `TEAMMATE_CONFIDENCE_THRESHOLD` (0.90)
 - **Fail-safe**: any error, timeout, or low confidence defaults to Dev session (current behavior preserved)
 - **API**: uses the Anthropic API directly (not Claude Code SDK) for low-latency classification via `MODEL_FAST`
@@ -107,7 +113,7 @@ In the output router (`route_session_output()`), checks the `is_teammate` flag:
 
 | File | Purpose |
 |------|---------|
-| `agent/intent_classifier.py` | Haiku-based binary classifier with few-shot prompt |
+| `agent/intent_classifier.py` | Haiku-based four-way classifier (teammate/collaboration/other/work) |
 | `agent/teammate_handler.py` | Teammate instruction builder (research-first) and nudge cap constant |
 | `bridge/summarizer.py` | Teammate prose bypass in `_compose_structured_summary()` and prompt context |
 | `agent/teammate_metrics.py` | Popoto-backed classification and response time counters (see [Popoto Index Hygiene](popoto-index-hygiene.md)) |

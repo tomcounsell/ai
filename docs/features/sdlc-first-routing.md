@@ -16,7 +16,7 @@ A two-stage routing system: fast-path pattern matching for obvious cases, LLM cl
 
 ### Classification (`bridge/routing.py`)
 
-`classify_work_request(message, project_slug)` returns `"sdlc"` or `"question"`:
+`classify_work_request(message, project_slug)` returns `"sdlc"`, `"collaboration"`, `"other"`, `"question"`, or `"passthrough"`:
 
 1. **Fast paths** (no LLM call needed):
    - Slash commands (`/sdlc`, `/do-build`, `/do-plan`, etc.) → `sdlc`
@@ -26,7 +26,8 @@ A two-stage routing system: fast-path pattern matching for obvious cases, LLM cl
 2. **LLM classification** (for everything else):
    - Primary: Ollama (gemma4:e2b, fast, local, free)
    - Fallback: Anthropic Haiku (when Ollama unavailable)
-   - Prompt asks for single-word `sdlc` or `question` response
+   - Prompt asks for single-word `sdlc`, `collaboration`, `other`, or `question` response
+   - Default for ambiguous messages: `collaboration` (cheaper when wrong than SDLC)
    - Any classification failure defaults to `question` (safe fallback)
 
 ### Orchestrator Routing (`agent/sdk_client.py`)
@@ -36,6 +37,8 @@ Based on classification result:
 | Classification | Working Directory | Behavior |
 |---|---|---|
 | `sdlc` | `ai/` repo root | Full SDLC pipeline access, TARGET_REPO context injected |
+| `collaboration` | `ai/` repo root | PM direct-action mode (handles with available tools, no dev-session) |
+| `other` | `ai/` repo root | PM uses judgment (may handle directly or spawn dev-session) |
 | `question` | Target project dir | Direct project context, no SDLC overhead |
 
 The SDK client reads `classification_type` from the `AgentSession` stored by the bridge. If not set (e.g., async classifier lost the race with session pickup), a synchronous fast-path regex checks the message for PR/issue references before falling back to `"question"`. This prevents messages like "Complete PR 478" from being misrouted.
@@ -109,3 +112,4 @@ After fetching an issue, the SDLC skill verifies the issue URL matches the expec
 - [SDLC Enforcement](sdlc-enforcement.md) -- Quality gates and pipeline stage model
 - [Summarizer Format](summarizer-format.md) -- Process narration stripping added alongside routing
 - [Chat Dev Session Architecture](pm-dev-session-architecture.md) -- Session routing and orchestration
+- [PM Routing: Collaboration](pm-routing-collaboration.md) -- Four-way classification extending this two-way system

@@ -43,6 +43,24 @@ class TestIsSdlcJobClassificationType:
         )
         assert session.is_sdlc is False
 
+    def test_classification_type_collaboration_returns_false(self):
+        """Collaboration classification should not be SDLC."""
+        session = AgentSession(
+            session_id="test_collab_846",
+            project_key="test",
+            classification_type="collaboration",
+        )
+        assert session.is_sdlc is False
+
+    def test_classification_type_other_returns_false(self):
+        """Other classification should not be SDLC."""
+        session = AgentSession(
+            session_id="test_other_846",
+            project_key="test",
+            classification_type="other",
+        )
+        assert session.is_sdlc is False
+
     def test_stage_states_triggers_sdlc(self):
         """stage_states with active stages should trigger SDLC."""
         import json
