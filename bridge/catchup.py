@@ -64,6 +64,8 @@ async def scan_for_missed_messages(
     logger.info(f"[catchup] Got {len(dialogs)} total dialogs")
 
     matched_groups = []
+    # Telethon can return the same group twice (channel + linked discussion group)
+    seen_chat_ids: set[int] = set()
     for dialog in dialogs:
         chat_title = getattr(dialog.entity, "title", None)
         if not chat_title:
@@ -74,6 +76,13 @@ async def scan_for_missed_messages(
         if chat_title.lower() not in monitored_groups:
             logger.debug(f"[catchup] Skipping non-monitored group: {chat_title}")
             continue
+
+        # Deduplicate by dialog ID — Telethon may return the same supergroup
+        # twice (once as a channel, once as a linked discussion group).
+        if dialog.id in seen_chat_ids:
+            logger.warning(f"[catchup] Skipping duplicate dialog for {chat_title} (id={dialog.id})")
+            continue
+        seen_chat_ids.add(dialog.id)
 
         logger.info(f"[catchup] Found monitored group: {chat_title}")
         matched_groups.append(chat_title)

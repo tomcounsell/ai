@@ -498,7 +498,13 @@ try:
 except ImportError:
     file_handler.setFormatter(logging.Formatter(FILE_FORMAT))
 file_handler.addFilter(InternalDebugFilter())
-root_logger.addHandler(file_handler)
+# Guard against double-import adding the handler twice (e.g. __main__ + bridge.telegram_bridge)
+if not any(
+    isinstance(h, logging.handlers.RotatingFileHandler)
+    and getattr(h, "baseFilename", None) == str(LOG_DIR / "bridge.log")
+    for h in root_logger.handlers
+):
+    root_logger.addHandler(file_handler)
 
 # Module logger for this file. It inherits the root logger's file handler,
 # so we only need to set its level to DEBUG for verbose local output.
