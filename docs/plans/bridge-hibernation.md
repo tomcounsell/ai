@@ -111,7 +111,7 @@ No external service prerequisites.
   - `enter_hibernation()`: atomic write to `data/bridge-auth-required`; fire `osascript` notification; log error
   - `exit_hibernation()`: delete `data/bridge-auth-required` if present
   - `is_hibernating() -> bool`: check flag file existence
-  - `replay_buffered_output(client, max_age_hours=24)`: parse `logs/worker/*.log`, send via Telegram client
+  - `replay_buffered_output(client, max_age_hours=24)`: parse `logs/worker/*.log`, send via Telegram client with header `"--- Buffered output from [timestamp] ---"` before each session's replayed content. Max age hardcoded at 24h (no env var — easy to add later if needed).
 
 - **Permanent auth errors** (→ hibernation): `AuthKeyUnregisteredError`, `AuthKeyError`, `AuthKeyInvalidError`, `AuthKeyPermEmptyError`, `SessionExpiredError`, `SessionRevokedError`, `UnauthorizedError`
 
