@@ -228,9 +228,12 @@ No agent integration required -- this is a bridge-internal change. No new tools,
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room). 2026-04-09 -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | Skeptic | `before_send` must check both `logentry` and `exception` event structures | Task 1 | Sentry logging integration captures `logger.error()` as `logentry.formatted`, not `exception.values[].value`. Filter must check both paths or VALOR-1 env-var errors (2,702 events) pass through unfiltered. |
+| NIT | Operator | No logging when filter drops an event — operators have no suppression visibility | Task 1 | Add `logger.debug("Sentry event dropped: hibernation filter matched auth error")` on `return None` |
+| NIT | Simplifier | Exit code change from `sys.exit(1)` to `sys.exit(2)` in env-var guard is a behavior change | Task 1 | Consider keeping `sys.exit(1)` unless exit code consumers exist; if changed, document in self-healing doc |
 
 ---
 
