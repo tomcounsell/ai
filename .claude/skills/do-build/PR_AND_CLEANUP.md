@@ -81,6 +81,10 @@ gh pr create --head session/{slug} --title "[plan title]" --body "$(cat <<'EOF'
 - [x] Docs created per plan requirements
 - [x] Related docs scanned for updates
 
+## Sentry
+[List any Sentry issues resolved by this PR, e.g. "Fixes VALOR-2", "Fixes VALOR-12".
+Sentry auto-resolves these when the PR merges. Omit this section if no Sentry issues apply.]
+
 ## Definition of Done
 - [x] Built: Code implemented and working
 - [x] Tested: All tests passing

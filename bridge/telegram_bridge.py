@@ -51,6 +51,7 @@ if _sentry_dsn:
 
     sentry_sdk.init(
         dsn=_sentry_dsn,
+        release=subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
         traces_sample_rate=0.1,
         environment=os.getenv("SENTRY_ENVIRONMENT", "production"),
     )
