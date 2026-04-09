@@ -138,8 +138,8 @@ No agent integration required -- this is a worker-internal output routing change
 
 ## Documentation
 
-- [ ] Update `docs/features/bridge-worker-architecture.md` to document the `TelegramRelayOutputHandler` and the worker's output delivery path
-- [ ] Add inline docstrings to `TelegramRelayOutputHandler` class and methods
+- [x] Update `docs/features/bridge-worker-architecture.md` to document the `TelegramRelayOutputHandler` and the worker's output delivery path
+- [x] Add inline docstrings to `TelegramRelayOutputHandler` class and methods
 
 ## Success Criteria
 

@@ -20,10 +20,58 @@ Telegram → Bridge (Telethon)
               ↓ worker health loop / event
            Worker (_ensure_worker → _worker_loop)
               ↓ Claude Agent SDK
-           Output (FileOutputHandler writes session output)
-              ↓ registered callbacks
-           Bridge (delivers reply to Telegram)
+           TelegramRelayOutputHandler
+              ↓ rpush JSON to telegram:outbox:{session_id}
+              ↓ dual-write to FileOutputHandler (logs/worker/)
+           Redis outbox (polled by bridge relay)
+              ↓ bridge/telegram_relay.py
+           Telegram (delivered via Telethon)
 ```
+
+## Worker Output Delivery
+
+The worker uses `TelegramRelayOutputHandler` to deliver session output to Telegram without importing any Telegram client code. This preserves the bridge/worker separation boundary: the worker writes to Redis, and the bridge reads from Redis and delivers via Telethon.
+
+### Output Handler Chain
+
+```
+Stop hook fires (agent/hooks/stop.py)
+    ↓ writes delivery_action, delivery_text, delivery_emoji to AgentSession
+send_to_chat() (agent_session_queue.py)
+    ↓ reads delivery fields, formats message, calls send_cb()
+TelegramRelayOutputHandler.send() (agent/output_handler.py)
+    ↓ writes JSON payload to Redis
+    ↓ also writes to FileOutputHandler (dual-write for audit/fallback)
+Redis key: telegram:outbox:{session_id}
+    ↓ polled by bridge relay
+bridge/telegram_relay.py
+    ↓ delivers via Telethon to Telegram
+```
+
+### `TelegramRelayOutputHandler`
+
+Defined in `agent/output_handler.py`. Implements the `OutputHandler` protocol.
+
+| Aspect | Detail |
+|--------|--------|
+| Redis key | `telegram:outbox:{session_id}` |
+| Payload format | `{"chat_id", "reply_to", "text", "session_id", "timestamp"}` -- same as `tools/send_telegram.py` |
+| TTL | 3600 seconds (1 hour) |
+| Redis operation | `RPUSH` (append to list) + `EXPIRE` |
+| Error handling | Caught and logged; never propagates to caller |
+| Dual-write | Wraps `FileOutputHandler` internally for local log persistence |
+
+### Registration
+
+At worker startup (`worker/__main__.py`), `TelegramRelayOutputHandler` is created with a `FileOutputHandler` as its inner handler, then registered for every project via `register_callbacks()`. This means all worker-executed sessions -- regardless of origin -- route output through the Redis outbox. The bridge relay picks up the messages and delivers them to Telegram.
+
+### Relationship to `FileOutputHandler`
+
+`FileOutputHandler` is not replaced -- it is wrapped. Every call to `TelegramRelayOutputHandler.send()` or `.react()` also forwards to the inner `FileOutputHandler`, so output is always persisted to `logs/worker/{session_id}.log` even if Redis is unavailable. This dual-write pattern provides:
+
+- **Audit trail**: Local logs survive Redis TTL expiry.
+- **Fallback**: If Redis is down, the output is still captured on disk (though not delivered to Telegram).
+- **Dev environments**: On machines without a bridge, the file log is the only record.
 
 ## Bridge Responsibilities (only)
 
