@@ -30,14 +30,17 @@ Add `_get_response_via_harness()` to `agent/sdk_client.py` that runs `claude -p 
 
 - [ ] Add `async _get_response_via_harness(session, send_cb, working_dir, env)` function in `agent/sdk_client.py`
 - [ ] **Async subprocess**: Use `asyncio.create_subprocess_exec()` to spawn the process, since the worker event loop is already async and `send_cb()` is an async callback. Read stdout via `async for line in process.stdout:` for natural backpressure. This avoids thread-pool complexity and integrates cleanly with the existing async worker loop. Stderr is read separately via `process.stderr` and logged on non-zero exit.
-- [ ] Function runs `claude -p --verbose --output-format stream-json` as a subprocess with the session's message as prompt
-- [ ] Parse stdout line-by-line: forward `assistant` events (text blocks) directly to `send_cb()` -- NOT through `send_to_chat()` or the nudge loop
+- [ ] Function runs `claude -p --verbose --output-format stream-json --include-partial-messages` as a subprocess with the session's message as prompt
+- [ ] **Permission mode**: Pass `--permission-mode bypassPermissions` to match the dev session's full-write-access behavior
+- [ ] Parse stdout line-by-line as JSON. For real-time streaming, handle `stream_event` lines where `event.type == "content_block_delta"` and `event.delta.type == "text_delta"`: extract `event.delta.text` and append to the batching buffer. The `assistant` event is a post-hoc summary that arrives once at the end -- ignore it for streaming purposes (it duplicates content already streamed). The `result` event triggers the final flush.
+- [ ] **Event type filter**: Explicitly handle only `stream_event` with `content_block_delta` + `text_delta` for Telegram output. Silently skip all other `stream_event` subtypes: `tool_use`, `tool_result`, `input_json_delta`, `content_block_start`, `content_block_stop`, `message_start`, `message_delta`, `message_stop`. These are tool execution artifacts that must not be sent to Telegram.
+- [ ] Stream parsed text chunks to `send_cb()` -- NOT through `send_to_chat()` or the nudge loop
 - [ ] **Output bypass**: Dev sessions do not need auto-continue, nudge loop, stop_reason inspection, or `route_session_output()`. The harness streams chunks directly to `send_cb()` (the raw Telegram delivery callback) during execution, then delivers the final result. The `send_to_chat()` closure and its nudge loop remain unchanged for PM/teammate sessions only.
 - [ ] **Time/size-based batching**: Buffer assistant text chunks in `_get_response_via_harness()`. Flush to `send_cb()` when: (a) 3 seconds elapsed since last flush, (b) accumulated text exceeds 2000 chars, or (c) a `result` event arrives (final flush). This prevents flooding Telegram with hundreds of small messages.
 - [ ] Capture `result` event's `session_id` field for potential resume support
 - [ ] Return final result text extracted from the `result` event
 - [ ] No timeout -- dev sessions run as long as they need
-- [ ] Pass through working directory, env vars (SDLC context, AGENT_SESSION_ID, etc.)
+- [ ] Pass through working directory, env vars (SDLC context, AGENT_SESSION_ID, etc.). Note: `claude -p` inherits all configuration from the working directory's `.claude/` files (hooks, settings, MCP servers). During Phases 1-4 (before Phase 5 cleanup), hooks that call `session_registry.resolve()` will return `None` for CLI-harness sessions since `register_pending()` is only called in the SDK path. This is intentional: Phase 3 moves SDLC completion logic to the worker, so hook-based stage tracking silently degrades for CLI-harness sessions with no functional impact.
 - [ ] Handle subprocess errors (non-zero exit, stderr) gracefully with logging
 
 ### Phase 2: Worker routing by role (Critical)
@@ -49,8 +52,9 @@ Modify `_execute_agent_session()` in `agent/agent_session_queue.py` to route dev
 - [ ] When `DEV_SESSION_HARNESS=sdk` (default): dev sessions use `get_agent_response_sdk()` unchanged (rollback-safe)
 - [ ] When `DEV_SESSION_HARNESS=claude-cli`: dev sessions call `_get_response_via_harness()` with `send_cb()` (the raw Telegram callback, NOT `send_to_chat()`)
 - [ ] PM and teammate sessions always use `get_agent_response_sdk()` regardless of env var
-- [ ] Build the harness command from the env var: `claude-cli` maps to `claude -p --verbose`, `opencode` maps to `opencode`, etc.
+- [ ] Build the harness command from the env var: `claude-cli` maps to `claude -p --verbose --output-format stream-json --include-partial-messages --permission-mode bypassPermissions`, `opencode` maps to `opencode`, etc.
 - [ ] Pass `send_cb()` directly to the harness function -- dev sessions bypass the nudge loop and auto-continue logic entirely
+- [ ] **Startup health check**: At worker startup (when `DEV_SESSION_HARNESS=claude-cli`), verify `claude` is on PATH and authenticated. Run a cheap validation: `claude -p "test" --verbose --output-format stream-json` and parse the `system` init event. Check `apiKeySource` field -- `"none"` means Max subscription mode (expected); any other value means API key billing (log a warning). If the CLI binary is not found or not authenticated, log a clear error and fall back to `sdk` harness.
 
 ### Phase 3: Post-completion SDLC handling in worker (Critical)
 
@@ -66,7 +70,7 @@ Move SDLC stage completion logic from `SubagentStop` hook into the worker's post
   - Update `bridge/pipeline_graph.py` self-import in doctest to `agent.pipeline_graph`
 - [ ] After `_get_response_via_harness()` returns, worker calls `PipelineStateMachine.classify_outcome()` on the output (now from `agent.pipeline_state`)
 - [ ] Route to `complete_stage()` or `fail_stage()` based on outcome classification
-- [ ] Post structured stage comment to the tracking GitHub issue via `utils.issue_comments.post_stage_comment()`
+- [ ] Post structured stage comment to the tracking GitHub issue via `from utils.issue_comments import post_stage_comment` (consistent with existing import pattern in `agent/hooks/subagent_stop.py:298`)
 - [ ] Send a steering message to the parent PM session with pipeline state update (uses `steer_session()`)
 - [ ] Extract tracking issue number from the dev session's env vars or parent session
 - [ ] All SDLC post-completion logic is in a dedicated `_handle_dev_session_completion(session, result, parent_session)` function
@@ -112,16 +116,16 @@ Update the PM persona to create dev sessions via `valor_session create` CLI inst
 
 The `DEV_SESSION_HARNESS` env var and basic routing were added in Phase 2. This phase adds multi-harness config and validation.
 
-- [ ] Harness config maps names to command templates: `{"sdk": null, "claude-cli": ["claude", "-p", "--verbose", "--output-format", "stream-json"], "opencode": ["opencode", "--non-interactive"]}`
+- [ ] Harness config maps names to command templates: `{"sdk": null, "claude-cli": ["claude", "-p", "--verbose", "--output-format", "stream-json", "--include-partial-messages", "--permission-mode", "bypassPermissions"], "opencode": ["opencode", "--non-interactive"]}`
 - [ ] Add harness config to `config/` or inline in `sdk_client.py` as a simple dict
 - [ ] Validate harness binary exists on PATH at worker startup (log warning if not found)
 - [ ] Document supported harness values in `.env.example`
 
 ## Success Criteria
 
-- [ ] `agent/sdk_client.py` has `_get_response_via_harness()` that runs `claude -p --verbose --output-format stream-json`, streams assistant events to Telegram via `send_cb()` (bypassing nudge loop), with time/size-based batching, and returns final result text
+- [ ] `agent/sdk_client.py` has `_get_response_via_harness()` that runs `claude -p --verbose --output-format stream-json --include-partial-messages`, streams `content_block_delta` text events to Telegram via `send_cb()` (bypassing nudge loop), with time/size-based batching, and returns final result text
 - [ ] Worker routes `AgentSession` with `role="dev"` to `_get_response_via_harness()` when `DEV_SESSION_HARNESS=claude-cli`; defaults to `sdk` (current behavior) for safe rollback
-- [ ] `DEV_SESSION_HARNESS=opencode` causes worker to invoke a different binary with no other code changes
+- [ ] `DEV_SESSION_HARNESS=opencode` causes worker harness routing to select the `opencode` binary (full e2e functionality requires a harness-specific parser adapter, deferred to Phase 6)
 - [ ] `agent/hooks/pre_tool_use.py` no longer contains dev session registration logic (Agent tool interception removed)
 - [ ] `agent/hooks/subagent_stop.py` no longer drives SDLC stage transitions (logic moved to worker post-completion handler)
 - [ ] `agent/hooks/session_registry.py` deleted
@@ -283,44 +287,26 @@ Phase 4 now documents that `--parent` takes the AgentSession popoto model ID str
 **Date**: 2026-04-09
 **Verdict**: NEEDS REVISION -- 1 blocker, 3 concerns, 2 nits
 
-#### BLOCKER: Phase 1 streaming parser targets wrong event type -- real-time streaming will not work
+#### BLOCKER: Phase 1 streaming parser targets wrong event type -- RESOLVED
 
-Phase 1 says "Parse stdout line-by-line: forward `assistant` events (text blocks) directly to `send_cb()`". Verified empirically: with `claude -p --verbose --output-format stream-json`, the `assistant` event arrives only ONCE at the end containing the full completed text. It does not stream incrementally. Real-time streaming chunks arrive as `type: "stream_event"` with nested `event.type: "content_block_delta"` -- but ONLY when the `--include-partial-messages` flag is also passed. Without that flag, no incremental output is emitted.
+Phase 1 now specifies `--include-partial-messages` flag and corrected event parsing: handle `stream_event` lines where `event.type == "content_block_delta"` and `event.delta.type == "text_delta"`. The `assistant` event is explicitly documented as a post-hoc summary to be ignored for streaming. An explicit event type filter lists all handled vs ignored event types (tool_use, tool_result, input_json_delta, content_block_start/stop, message_start/delta/stop all silently skipped). Phase 6 harness config and Success Criteria also updated.
 
-**Consequences**: As written, the harness would buffer the entire dev session output and deliver it as one giant Telegram message at the end -- defeating the stated success criterion "Intermediate assistant messages from dev role sessions appear in Telegram in real time."
+#### CONCERN: Auth/subscription propagation for claude -p not addressed -- RESOLVED
 
-**Suggestion**: (1) Add `--include-partial-messages` to the command in Phase 1 and Phase 6 harness config. (2) Rewrite the streaming parser description: parse `stream_event` lines where `event.type == "content_block_delta"`, extract `event.delta.text`, and buffer per the existing time/size batching logic. The `assistant` event should be ignored for streaming purposes (it is a duplicate summary). The `result` event remains the final-flush trigger.
+Phase 2 now includes a startup health check: verify `claude` is on PATH and authenticated by parsing the `system` init event's `apiKeySource` field. `"none"` = Max subscription (expected); other values = API billing (warning). CLI not found or not authenticated = clear error + fallback to `sdk`.
 
-**Implementation Note**: The corrected command is `claude -p --verbose --output-format stream-json --include-partial-messages`. The parser loop should be: `if line_json["type"] == "stream_event" and line_json["event"]["type"] == "content_block_delta": buffer += line_json["event"]["delta"]["text"]`. The `type: "assistant"` event is a post-hoc summary and should NOT trigger a send.
+#### CONCERN: Dev session env/hook/config propagation through claude -p unspecified -- RESOLVED
 
-#### CONCERN: Dev sessions using claude -p will run under the Max subscription model by default, not API billing
+Phase 1 now specifies `--permission-mode bypassPermissions` for full-write-access dev sessions. A note documents that `claude -p` inherits all config from `.claude/` directory, and that `session_registry.resolve()` returns `None` for CLI-harness sessions during Phases 1-4 transition -- this is intentional since Phase 3 moves SDLC completion to the worker, so hook-based stage tracking silently degrades with no functional impact.
 
-The problem statement says "Anthropic plans to enforce API-only billing for programmatic SDK usage." However, `claude -p` (Claude Code CLI) runs under the user's Claude Code subscription (Max plan), not the API. The plan correctly identifies this as the goal -- switching dev sessions FROM the SDK (API billing) TO `claude -p` (subscription billing). But the plan does not mention that `claude -p` inherits the logged-in user's authentication context and model selection. If the worker runs under a service account or a user without an active Max subscription, `claude -p` will fail silently or use a different model than expected.
+#### CONCERN: Tool use events produce non-text stream data the parser must filter -- RESOLVED
 
-**Suggestion**: Add a Phase 2 prerequisite check: at worker startup, run `claude --version` and verify the CLI is authenticated (check for `apiKeySource` in the `system` init event). Log a clear warning if `apiKeySource` is `"none"` (meaning no API key -- subscription mode) vs other values.
+Phase 1 now includes an explicit event type filter: only `stream_event` with `content_block_delta` + `text_delta` is processed for Telegram output. All other subtypes (tool_use, tool_result, input_json_delta, content_block_start/stop, message_start/delta/stop) are silently skipped.
 
-**Implementation Note**: The `system` init event from `claude -p --verbose --output-format stream-json` includes `"apiKeySource": "none"` when running on Max subscription. If this field shows an API key source instead, the worker may be burning API credits rather than using the flat-rate subscription. A startup validation of `claude -p "test" --verbose --output-format stream-json 2>/dev/null | head -1 | python3 -c "import sys,json; d=json.load(sys.stdin); assert d.get('apiKeySource')=='none', f'Unexpected apiKeySource: {d.get(\"apiKeySource\")}'"` provides a cheap health check.
+#### NIT: "opencode" success criterion overpromises -- RESOLVED
 
-#### CONCERN: Plan does not address how dev session environment variables (CLAUDE.md, hooks, MCP servers) propagate through claude -p
+Success criterion reworded to: "harness routing selects the `opencode` binary (full e2e functionality requires a harness-specific parser adapter, deferred to Phase 6)."
 
-The current SDK path (`get_agent_response_sdk`) configures the Claude Code session with specific options: system prompt, allowed tools, model selection, permission mode, and MCP server configuration. When dev sessions switch to `claude -p`, all of this configuration comes from the working directory's `.claude/` directory instead. The plan says "Pass through working directory, env vars" but does not address whether `.claude/settings.json`, `.claude/hooks/`, and `.mcp.json` in the working directory will produce the correct behavior for dev sessions vs PM sessions.
+#### NIT: Phase 3 import reference uses dotted notation inconsistent with codebase -- RESOLVED
 
-**Suggestion**: Add a note to Phase 1 clarifying that `claude -p` inherits all configuration from the working directory's `.claude/` files. Specify which permission mode flag to pass (`--permission-mode bypassPermissions` to match current dev session behavior of full write access). Acknowledge that hooks will fire in the `claude -p` subprocess, and that `session_registry` (which maps Claude UUIDs to bridge sessions) will NOT be populated for CLI-harness sessions -- this is intentional since Phase 5 removes it, but during the transition (Phases 1-4), hooks that call `session_registry.resolve()` will return `None` for CLI-harness dev sessions.
-
-**Implementation Note**: The command should include `--permission-mode bypassPermissions` to match the dev session's full-write-access behavior. During Phases 1-4 (before Phase 5 cleanup), `session_registry.resolve()` will return `None` for CLI-harness sessions since `register_pending()` is only called in the SDK path. This means `pre_tool_use` Agent tool interception and `subagent_stop` completion recording will silently skip for CLI-harness sessions -- which is correct since Phase 3 moves that logic to the worker. But any OTHER hook depending on `session_registry.resolve()` (e.g., `post_tool_use.py` line 81 for stage completion tracking) will also silently skip. Verify this is acceptable during the transition.
-
-#### CONCERN: Tool use events during multi-turn dev sessions produce additional event types the parser must handle
-
-A dev session running a BUILD stage will use tools (Bash, Edit, Read, etc.) extensively. With `--include-partial-messages`, tool use produces `stream_event` lines with `event.type` values of `"tool_use"`, `"tool_result"`, and additional `content_block_start`/`content_block_stop` events. The plan only mentions parsing `assistant` events and the `result` event. If the parser does not filter these, it could attempt to send raw JSON tool_use data to Telegram, or the batching buffer could accumulate non-text content.
-
-**Suggestion**: Explicitly list the event types the parser should handle vs ignore. At minimum: process `content_block_delta` with `delta.type == "text_delta"` for streaming text; ignore `tool_use`, `tool_result`, `input_json_delta` events; use `result` event for final flush.
-
-**Implementation Note**: The parser filter should be: `if line_json["type"] == "stream_event" and line_json.get("event", {}).get("type") == "content_block_delta" and line_json["event"].get("delta", {}).get("type") == "text_delta"`. All other `stream_event` subtypes (tool_use, tool_result, input_json_delta, content_block_start, content_block_stop, message_start, message_delta, message_stop) should be silently skipped for Telegram output purposes.
-
-#### NIT: Success criterion "DEV_SESSION_HARNESS=opencode causes worker to invoke a different binary with no other code changes" is misleading
-
-The `opencode` harness would require a different stdout parser since `opencode --non-interactive` does not emit `stream-json` format. "No other code changes" only applies to the routing logic, not the streaming parser. This criterion should be scoped to "harness routing selects the correct binary" rather than implying full end-to-end functionality.
-
-#### NIT: Phase 3 references `utils.issue_comments.post_stage_comment()` but the actual import path in existing code is `from utils.issue_comments import post_stage_comment`
-
-The function exists at `utils/issue_comments.py:143`. The plan's dotted reference is correct as documentation but the task description should note that the import pattern to use is `from utils.issue_comments import post_stage_comment` (not a direct `utils.issue_comments.post_stage_comment()` call), consistent with the existing pattern in `agent/hooks/subagent_stop.py:298`.
+Phase 3 task now uses `from utils.issue_comments import post_stage_comment` pattern consistent with existing code.
