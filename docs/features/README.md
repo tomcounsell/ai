@@ -116,6 +116,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Steering Queue](steering-queue.md) | Mid-execution course correction via Telegram reply threads and parent-child PM session-to-Dev session steering | Shipped |
 | [Structured Logging & Telemetry](structured-logging-telemetry.md) | Redis-backed telemetry counters, structured log lines, and health check integration for Observer Agent observability | Shipped |
 | [Subconscious Memory](subconscious-memory.md) | Automatic and intentional memory with structured metadata (category, file paths, tags), dismissal tracking with importance decay, multi-query decomposition for broader retrieval, and category-weighted recall re-ranking | Shipped |
+| [sustainable-self-healing.md](sustainable-self-healing.md) | Queue governance: circuit-based pause, drip resume, throttle, failure dedup, daily digest | Shipped |
 | [Summarizer Format](summarizer-format.md) | Structured bullet-point output with SDLC stage progress and markdown links for Telegram delivery | Shipped |
 | [SuperWhisper Transcription](superwhisper-transcription.md) | Dual-backend audio transcription with local SuperWhisper primary and OpenAI Whisper API fallback | Shipped |
 | [System Overview](system-overview.md) | High-level architecture and design principles | Archived |

@@ -61,7 +61,7 @@ def api_health_gate() -> None:
             r.delete(pause_key)
             if was_paused:
                 logger.info(
-                    "[api-health-gate] Anthropic circuit CLOSED — queue unpaused, starting recovery drip"
+                    "[api-health-gate] Anthropic circuit CLOSED — queue unpaused, starting recovery drip"  # noqa: E501
                 )
                 r.set(recovery_key, "1", ex=3600)
             else:
@@ -110,7 +110,7 @@ def session_count_throttle() -> None:
             started_at = getattr(s, "started_at", None)
             if started_at is None:
                 continue
-            if isinstance(started_at, (int, float)):
+            if isinstance(started_at, int | float):
                 ts = started_at
             else:
                 try:
@@ -151,7 +151,6 @@ def failure_loop_detector() -> None:
     """
     try:
         from models.agent_session import AgentSession
-        from models.session_lifecycle import TERMINAL_STATUSES
 
         r = _get_redis()
         project_key = _get_project_key()
@@ -160,9 +159,7 @@ def failure_loop_detector() -> None:
 
         # Skip during acknowledged API outages
         if r.exists(pause_key):
-            logger.info(
-                "[failure-loop-detector] Queue paused (API outage) — skipping failure scan"
-            )
+            logger.info("[failure-loop-detector] Queue paused (API outage) — skipping failure scan")
             return
 
         cutoff = time.time() - (4 * 3600)  # 4 hours ago
@@ -174,7 +171,7 @@ def failure_loop_detector() -> None:
             completed_at = getattr(s, "completed_at", None)
             if completed_at is None:
                 continue
-            if isinstance(completed_at, (int, float)):
+            if isinstance(completed_at, int | float):
                 ts = completed_at
             else:
                 try:
@@ -344,7 +341,7 @@ def recovery_drip() -> None:
             ca = getattr(session, "created_at", None)
             if ca is None:
                 return 0.0
-            if isinstance(ca, (int, float)):
+            if isinstance(ca, int | float):
                 return float(ca)
             try:
                 return ca.timestamp()
@@ -401,11 +398,11 @@ def sustainability_digest() -> None:
         command = (
             "You are generating the daily sustainability digest for the Valor AI system. "
             "Collect and report the following required fields:\n"
-            "1. Circuit state per dependency (anthropic, telegram, redis) — use get_health().summary()\n"
+            "1. Circuit state per dependency (anthropic, telegram, redis) — use get_health().summary()\n"  # noqa: E501
             "2. Current throttle level — read from Redis key "
             f"'{project_key}:sustainability:throttle_level' (current: {throttle_level})\n"
             "3. Queue paused status — read from Redis key "
-            f"'{project_key}:sustainability:queue_paused' (currently: {'paused' if queue_paused else 'active'})\n"
+            f"'{project_key}:sustainability:queue_paused' (currently: {'paused' if queue_paused else 'active'})\n"  # noqa: E501
             "4. Session count in last 24 hours — query AgentSession records\n"
             "5. Active failure cluster count — count entries in Redis set "
             f"'{project_key}:sustainability:seen_fingerprints'\n\n"
