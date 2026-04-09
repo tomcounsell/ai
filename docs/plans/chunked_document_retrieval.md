@@ -70,7 +70,11 @@ The new model is straightforward (follows `KnowledgeDocument` patterns exactly),
 
 ## Prerequisites
 
-No prerequisites -- all dependencies (`popoto`, `openai`, `tiktoken`, `numpy`) are already installed. `OPENAI_API_KEY` is configured.
+| Requirement | Check Command | Purpose |
+|-------------|---------------|---------|
+| `OPENAI_API_KEY` | `python -c "import os; assert os.environ.get('OPENAI_API_KEY')"` | Embedding generation via OpenAI provider |
+| PR #863 merged | `git log --oneline main \| grep -q 'popoto orphan cleanup'` | #863 modifies `models/__init__.py` -- rebase needed before building |
+| `tiktoken` available | `python -c "import tiktoken"` | Token counting for chunk boundaries |
 
 ## Solution
 
