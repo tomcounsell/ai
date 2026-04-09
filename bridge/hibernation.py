@@ -209,19 +209,15 @@ async def replay_buffered_output(
         file_replayed = 0
         for chat_id, reply_to, text, timestamp in entries:
             try:
-                header = f"[Buffered output from {timestamp}]\n"
+                header = f"--- Buffered output from {timestamp} ---\n"
                 await client.send_message(int(chat_id), header + text, reply_to=reply_to)
                 file_replayed += 1
             except Exception as e:
-                logger.warning(
-                    "[hibernation] Failed to replay entry (chat=%s): %s", chat_id, e
-                )
+                logger.warning("[hibernation] Failed to replay entry (chat=%s): %s", chat_id, e)
 
         if file_replayed:
             replayed_count += file_replayed
-            logger.info(
-                "[hibernation] Replayed %d entries from %s", file_replayed, log_path.name
-            )
+            logger.info("[hibernation] Replayed %d entries from %s", file_replayed, log_path.name)
             # Write marker to prevent re-delivery
             try:
                 marker.write_text(str(time.time()))
@@ -318,10 +314,7 @@ def _fire_notification() -> None:
 
     Non-fatal: wrapped in try/except for non-macOS or permission denied.
     """
-    message = (
-        "Bridge hibernating: auth required. "
-        "Run: python scripts/telegram_login.py"
-    )
+    message = "Bridge hibernating: auth required. Run: python scripts/telegram_login.py"
     script = (
         f'display notification "{message}" '
         f'with title "Valor Bridge" subtitle "Authentication Required"'

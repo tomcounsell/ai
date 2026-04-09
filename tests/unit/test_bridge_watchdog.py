@@ -603,3 +603,120 @@ class TestCrashDetectionOnBridgeDeath:
         status = check_bridge_health()
         assert not status.process_running
         assert status.recovery_level >= 1
+
+
+# --- Hibernation suppression tests ---
+
+
+class TestHibernationSuppression:
+    """Tests that watchdog suppresses restart loop when bridge is hibernating."""
+
+    @patch("monitoring.bridge_watchdog.check_bridge_health")
+    @patch("monitoring.bridge_watchdog.execute_recovery")
+    def test_hibernating_suppresses_recovery(self, mock_recovery, mock_health, tmp_path):
+        """When hibernating, run_health_check returns True without executing recovery."""
+        from monitoring.bridge_watchdog import run_health_check
+
+        mock_health.return_value = HealthStatus(
+            healthy=False,
+            process_running=False,
+            logs_fresh=False,
+            no_crash_pattern=True,
+            issues=["Bridge not running"],
+            recovery_level=1,
+        )
+
+        with patch("bridge.hibernation.AUTH_REQUIRED_FLAG", tmp_path / "bridge-auth-required") as _:
+            flag = tmp_path / "bridge-auth-required"
+            flag.write_text("auth-required")
+            result = run_health_check()
+
+        assert result is True
+        mock_recovery.assert_not_called()
+
+    @patch("monitoring.bridge_watchdog.check_bridge_health")
+    @patch("monitoring.bridge_watchdog.execute_recovery")
+    def test_not_hibernating_proceeds_to_recovery(self, mock_recovery, mock_health, tmp_path):
+        """Without hibernation flag, normal recovery proceeds."""
+        from monitoring.bridge_watchdog import run_health_check
+
+        mock_health.return_value = HealthStatus(
+            healthy=False,
+            process_running=False,
+            logs_fresh=False,
+            no_crash_pattern=True,
+            issues=["Bridge not running"],
+            recovery_level=1,
+        )
+        mock_recovery.return_value = True
+
+        with patch("bridge.hibernation.AUTH_REQUIRED_FLAG", tmp_path / "bridge-auth-required"):
+            # Flag file does NOT exist
+            result = run_health_check()
+
+        mock_recovery.assert_called_once()
+
+    def test_hibernating_logs_message(self, tmp_path, caplog):
+        """Watchdog logs a clear message when suppressing recovery due to hibernation."""
+        from monitoring.bridge_watchdog import run_health_check
+
+        import logging
+
+        with (
+            patch("bridge.hibernation.AUTH_REQUIRED_FLAG", tmp_path / "bridge-auth-required"),
+            caplog.at_level(logging.INFO, logger="monitoring.bridge_watchdog"),
+        ):
+            flag = tmp_path / "bridge-auth-required"
+            flag.write_text("auth-required")
+            run_health_check()
+
+        assert any("hibernating" in r.message.lower() for r in caplog.records)
+
+    @patch("monitoring.bridge_watchdog.check_bridge_health")
+    def test_check_only_shows_hibernating_state(self, mock_health, tmp_path, capsys):
+        """--check-only output includes hibernation state."""
+        from monitoring.bridge_watchdog import main
+
+        mock_health.return_value = HealthStatus(
+            healthy=True,
+            process_running=True,
+            logs_fresh=True,
+            no_crash_pattern=True,
+            issues=[],
+            recovery_level=0,
+        )
+
+        with (
+            patch("bridge.hibernation.AUTH_REQUIRED_FLAG", tmp_path / "bridge-auth-required"),
+            patch("sys.argv", ["bridge_watchdog.py", "--check-only"]),
+        ):
+            flag = tmp_path / "bridge-auth-required"
+            flag.write_text("auth-required")
+            main()
+
+        output = capsys.readouterr().out
+        assert "Hibernating: True" in output
+
+    @patch("monitoring.bridge_watchdog.check_bridge_health")
+    def test_check_only_shows_not_hibernating(self, mock_health, tmp_path, capsys):
+        """--check-only shows Hibernating: False when flag absent."""
+        from monitoring.bridge_watchdog import main
+
+        mock_health.return_value = HealthStatus(
+            healthy=True,
+            process_running=True,
+            logs_fresh=True,
+            no_crash_pattern=True,
+            issues=[],
+            recovery_level=0,
+        )
+
+        with (
+            patch("bridge.hibernation.AUTH_REQUIRED_FLAG", tmp_path / "bridge-auth-required"),
+            patch("sys.argv", ["bridge_watchdog.py", "--check-only"]),
+        ):
+            # Flag does NOT exist
+            main()
+
+        output = capsys.readouterr().out
+        assert "Hibernating: False" in output
