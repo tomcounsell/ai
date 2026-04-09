@@ -1598,6 +1598,18 @@ async def get_agent_response_sdk(
         # session_type is the authoritative permission signal, not chat_title.
         if _session_type == SessionType.PM:
             _teammate_mode = False
+            # Undo any session_mode=TEAMMATE that was set above by config-driven routing
+            if session_id:
+                try:
+                    from models.agent_session import AgentSession as _PMFixSession
+
+                    for _s in _PMFixSession.query.filter(session_id=session_id):
+                        if getattr(_s, "session_mode", None) == PersonaType.TEAMMATE:
+                            _s.session_mode = PersonaType.PROJECT_MANAGER
+                            _s.save()
+                            break
+                except Exception:
+                    pass
 
         # Inject classification context as advisory information
         if _classification_context:
