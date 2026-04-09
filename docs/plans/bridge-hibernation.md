@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Building
 type: feature
 appetite: Medium
 owner: valorengels
@@ -349,5 +349,8 @@ No agent integration required. This is bridge-internal resilience. The agent exe
 
 ## Open Questions
 
-1. Should buffered output replay prepend a header ("--- Buffered output from [time] ---") to indicate delay? Or deliver silently? Leaning toward header to avoid confusion about message timing.
-2. Is 24 hours the right replay window? Could expose as `BRIDGE_REPLAY_MAX_AGE_HOURS=24` in `.env` if flexibility needed.
+~~1. Should buffered output replay prepend a header ("--- Buffered output from [time] ---") to indicate delay? Or deliver silently?~~
+**Decision:** Add timestamp header. Replayed messages delivered silently look current but may be hours old — actively misleading. Use `"--- Buffered output from [time] ---"` to make delay explicit.
+
+~~2. Is 24 hours the right replay window? Could expose as `BRIDGE_REPLAY_MAX_AGE_HOURS=24` in `.env` if flexibility needed.~~
+**Decision:** Hardcode 24h, no env var. If the bridge has been down for more than a day, the output is stale enough that selective replay becomes a manual decision. Easy to add env var later if a consistent tuning need arises.
