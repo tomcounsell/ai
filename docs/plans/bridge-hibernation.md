@@ -1,5 +1,5 @@
 ---
-status: Building
+status: docs_complete
 type: feature
 appetite: Medium
 owner: valorengels
@@ -207,8 +207,8 @@ No agent integration required. This is bridge-internal resilience. The agent exe
 
 ## Documentation
 
-- [ ] Update `docs/features/bridge-self-healing.md` — add "13. Bridge Hibernation" section covering auth-expiry detection, flag file, watchdog suppression, output replay, and manual recovery steps
-- [ ] Add entry to `docs/features/README.md` under bridge resilience features
+- [x] Update `docs/features/bridge-self-healing.md` — add "13. Bridge Hibernation" section covering auth-expiry detection, flag file, watchdog suppression, output replay, and manual recovery steps
+- [x] Add entry to `docs/features/README.md` under bridge resilience features
 
 ## Success Criteria
 
