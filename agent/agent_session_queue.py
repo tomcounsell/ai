@@ -551,7 +551,29 @@ async def _pop_agent_session(
 
     Order: urgent > high > normal > low, then within same priority FIFO (oldest first).
     Sessions with scheduled_at in the future are skipped (deferred execution).
+
+    Sustainability guards (checked before acquiring pop lock):
+    - If queue_paused flag is set (Anthropic circuit OPEN/HALF_OPEN), return None.
+    - Throttle level affects which priority tiers are eligible.
     """
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB as _r
+
+        _project_key = os.environ.get("VALOR_PROJECT_KEY", "default")
+        _pause_key = f"{_project_key}:sustainability:queue_paused"
+        _throttle_key = f"{_project_key}:sustainability:throttle_level"
+
+        if _r.get(_pause_key):
+            logger.debug("[worker:%s] Queue paused (API circuit open) — skipping pop", worker_key)
+            return None
+
+        _throttle_raw = _r.get(_throttle_key)
+        _throttle = _throttle_raw.decode() if isinstance(_throttle_raw, bytes) else (_throttle_raw or "none")
+    except Exception as _guard_err:
+        # Fail open: if Redis is unavailable, allow the pop to proceed normally
+        logger.warning("[worker:%s] Sustainability guard failed (proceeding): %s", worker_key, _guard_err)
+        _throttle = "none"
+
     if not _acquire_pop_lock(worker_key):
         logger.debug(f"[worker:{worker_key}] Pop lock held by another worker, skipping pop")
         return None
@@ -612,6 +634,23 @@ async def _pop_agent_session(
         rebuilt = False
         chosen = None
         for candidate in eligible:
+            # Sustainability throttle: skip candidates below the allowed priority tier
+            if _throttle == "suspended" and candidate.priority in ("normal", "low"):
+                logger.debug(
+                    "[worker:%s] Throttle=suspended — skipping session %s (priority=%s)",
+                    worker_key,
+                    candidate.session_id,
+                    candidate.priority,
+                )
+                continue
+            if _throttle == "moderate" and candidate.priority == "low":
+                logger.debug(
+                    "[worker:%s] Throttle=moderate — skipping session %s (priority=low)",
+                    worker_key,
+                    candidate.session_id,
+                )
+                continue
+
             if candidate.status in _TERMINAL_STATUSES:
                 logger.warning(
                     f"[worker:{worker_key}] Skipping session {candidate.id} "
