@@ -277,3 +277,50 @@ Phase 4 now adds a runtime guard in `agent_definitions.py`: if the deleted `"dev
 #### CONCERN: PM needs clarity on which ID to pass as --parent -- RESOLVED
 
 Phase 4 now documents that `--parent` takes the AgentSession popoto model ID string (from `AGENT_SESSION_ID` env var), which maps to `parent_agent_session_id` on the model. Not a Claude SDK session_id.
+
+### Round 3
+
+**Date**: 2026-04-09
+**Verdict**: NEEDS REVISION -- 1 blocker, 3 concerns, 2 nits
+
+#### BLOCKER: Phase 1 streaming parser targets wrong event type -- real-time streaming will not work
+
+Phase 1 says "Parse stdout line-by-line: forward `assistant` events (text blocks) directly to `send_cb()`". Verified empirically: with `claude -p --verbose --output-format stream-json`, the `assistant` event arrives only ONCE at the end containing the full completed text. It does not stream incrementally. Real-time streaming chunks arrive as `type: "stream_event"` with nested `event.type: "content_block_delta"` -- but ONLY when the `--include-partial-messages` flag is also passed. Without that flag, no incremental output is emitted.
+
+**Consequences**: As written, the harness would buffer the entire dev session output and deliver it as one giant Telegram message at the end -- defeating the stated success criterion "Intermediate assistant messages from dev role sessions appear in Telegram in real time."
+
+**Suggestion**: (1) Add `--include-partial-messages` to the command in Phase 1 and Phase 6 harness config. (2) Rewrite the streaming parser description: parse `stream_event` lines where `event.type == "content_block_delta"`, extract `event.delta.text`, and buffer per the existing time/size batching logic. The `assistant` event should be ignored for streaming purposes (it is a duplicate summary). The `result` event remains the final-flush trigger.
+
+**Implementation Note**: The corrected command is `claude -p --verbose --output-format stream-json --include-partial-messages`. The parser loop should be: `if line_json["type"] == "stream_event" and line_json["event"]["type"] == "content_block_delta": buffer += line_json["event"]["delta"]["text"]`. The `type: "assistant"` event is a post-hoc summary and should NOT trigger a send.
+
+#### CONCERN: Dev sessions using claude -p will run under the Max subscription model by default, not API billing
+
+The problem statement says "Anthropic plans to enforce API-only billing for programmatic SDK usage." However, `claude -p` (Claude Code CLI) runs under the user's Claude Code subscription (Max plan), not the API. The plan correctly identifies this as the goal -- switching dev sessions FROM the SDK (API billing) TO `claude -p` (subscription billing). But the plan does not mention that `claude -p` inherits the logged-in user's authentication context and model selection. If the worker runs under a service account or a user without an active Max subscription, `claude -p` will fail silently or use a different model than expected.
+
+**Suggestion**: Add a Phase 2 prerequisite check: at worker startup, run `claude --version` and verify the CLI is authenticated (check for `apiKeySource` in the `system` init event). Log a clear warning if `apiKeySource` is `"none"` (meaning no API key -- subscription mode) vs other values.
+
+**Implementation Note**: The `system` init event from `claude -p --verbose --output-format stream-json` includes `"apiKeySource": "none"` when running on Max subscription. If this field shows an API key source instead, the worker may be burning API credits rather than using the flat-rate subscription. A startup validation of `claude -p "test" --verbose --output-format stream-json 2>/dev/null | head -1 | python3 -c "import sys,json; d=json.load(sys.stdin); assert d.get('apiKeySource')=='none', f'Unexpected apiKeySource: {d.get(\"apiKeySource\")}'"` provides a cheap health check.
+
+#### CONCERN: Plan does not address how dev session environment variables (CLAUDE.md, hooks, MCP servers) propagate through claude -p
+
+The current SDK path (`get_agent_response_sdk`) configures the Claude Code session with specific options: system prompt, allowed tools, model selection, permission mode, and MCP server configuration. When dev sessions switch to `claude -p`, all of this configuration comes from the working directory's `.claude/` directory instead. The plan says "Pass through working directory, env vars" but does not address whether `.claude/settings.json`, `.claude/hooks/`, and `.mcp.json` in the working directory will produce the correct behavior for dev sessions vs PM sessions.
+
+**Suggestion**: Add a note to Phase 1 clarifying that `claude -p` inherits all configuration from the working directory's `.claude/` files. Specify which permission mode flag to pass (`--permission-mode bypassPermissions` to match current dev session behavior of full write access). Acknowledge that hooks will fire in the `claude -p` subprocess, and that `session_registry` (which maps Claude UUIDs to bridge sessions) will NOT be populated for CLI-harness sessions -- this is intentional since Phase 5 removes it, but during the transition (Phases 1-4), hooks that call `session_registry.resolve()` will return `None` for CLI-harness dev sessions.
+
+**Implementation Note**: The command should include `--permission-mode bypassPermissions` to match the dev session's full-write-access behavior. During Phases 1-4 (before Phase 5 cleanup), `session_registry.resolve()` will return `None` for CLI-harness sessions since `register_pending()` is only called in the SDK path. This means `pre_tool_use` Agent tool interception and `subagent_stop` completion recording will silently skip for CLI-harness sessions -- which is correct since Phase 3 moves that logic to the worker. But any OTHER hook depending on `session_registry.resolve()` (e.g., `post_tool_use.py` line 81 for stage completion tracking) will also silently skip. Verify this is acceptable during the transition.
+
+#### CONCERN: Tool use events during multi-turn dev sessions produce additional event types the parser must handle
+
+A dev session running a BUILD stage will use tools (Bash, Edit, Read, etc.) extensively. With `--include-partial-messages`, tool use produces `stream_event` lines with `event.type` values of `"tool_use"`, `"tool_result"`, and additional `content_block_start`/`content_block_stop` events. The plan only mentions parsing `assistant` events and the `result` event. If the parser does not filter these, it could attempt to send raw JSON tool_use data to Telegram, or the batching buffer could accumulate non-text content.
+
+**Suggestion**: Explicitly list the event types the parser should handle vs ignore. At minimum: process `content_block_delta` with `delta.type == "text_delta"` for streaming text; ignore `tool_use`, `tool_result`, `input_json_delta` events; use `result` event for final flush.
+
+**Implementation Note**: The parser filter should be: `if line_json["type"] == "stream_event" and line_json.get("event", {}).get("type") == "content_block_delta" and line_json["event"].get("delta", {}).get("type") == "text_delta"`. All other `stream_event` subtypes (tool_use, tool_result, input_json_delta, content_block_start, content_block_stop, message_start, message_delta, message_stop) should be silently skipped for Telegram output purposes.
+
+#### NIT: Success criterion "DEV_SESSION_HARNESS=opencode causes worker to invoke a different binary with no other code changes" is misleading
+
+The `opencode` harness would require a different stdout parser since `opencode --non-interactive` does not emit `stream-json` format. "No other code changes" only applies to the routing logic, not the streaming parser. This criterion should be scoped to "harness routing selects the correct binary" rather than implying full end-to-end functionality.
+
+#### NIT: Phase 3 references `utils.issue_comments.post_stage_comment()` but the actual import path in existing code is `from utils.issue_comments import post_stage_comment`
+
+The function exists at `utils/issue_comments.py:143`. The plan's dotted reference is correct as documentation but the task description should note that the import pattern to use is `from utils.issue_comments import post_stage_comment` (not a direct `utils.issue_comments.post_stage_comment()` call), consistent with the existing pattern in `agent/hooks/subagent_stop.py:298`.
