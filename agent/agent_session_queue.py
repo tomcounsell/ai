@@ -2568,7 +2568,10 @@ def steer_session(session_id: str, message: str) -> dict:
             }
 
         session.push_steering_message(message)
-        _ensure_worker(session.worker_key, is_project_keyed=session.is_project_keyed)
+        try:
+            _ensure_worker(session.worker_key, is_project_keyed=session.is_project_keyed)
+        except RuntimeError:
+            pass  # No event loop (CLI context) — worker will pick it up on next loop
         logger.info(
             f"[steering] Queued steering message for session {session_id}: "
             f"{message[:80]!r} (status={current_status})"
