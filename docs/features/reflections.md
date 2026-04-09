@@ -455,7 +455,7 @@ The scheduler picks it up on the next tick. No code changes or service restarts 
 
 ### Session Log Cleanup
 
-After the daily maintenance pipeline completes, `main()` calls `bridge.session_logs.cleanup_old_snapshots()` to prune session log directories older than 7 days from `logs/sessions/`. The count of removed directories is logged. Failures are caught and logged as non-fatal -- they never block the rest of the pipeline.
+After the daily maintenance pipeline completes, `main()` calls `agent.session_logs.cleanup_old_snapshots()` to prune session log directories older than 7 days from `logs/sessions/`. The count of removed directories is logged. Failures are caught and logged as non-fatal -- they never block the rest of the pipeline.
 
 ### Output Locations
 

@@ -2072,8 +2072,9 @@ class ReflectionRunner:
         """
         import time as _time
 
-        from models.agent_session import AgentSession
         from models.cyclic_episode import CyclicEpisode
+
+        from models.agent_session import AgentSession
         from scripts.fingerprint_classifier import classify_session
 
         cutoff = _time.time() - 86400  # past 24 hours
@@ -3014,7 +3015,7 @@ async def main() -> None:
 
     # Clean up old session log directories (7+ days old)
     try:
-        from bridge.session_logs import cleanup_old_snapshots
+        from agent.session_logs import cleanup_old_snapshots
 
         removed = cleanup_old_snapshots()
         if removed:
