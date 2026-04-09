@@ -31,7 +31,16 @@ class PersonaType(StrEnum):
 
 
 class ClassificationType(StrEnum):
-    """Intent classification results from the work request classifier."""
+    """Intent classification results from the work request classifier.
+
+    Four-way classification:
+    - SDLC: Work request that could result in code changes or a PR
+    - COLLABORATION: Direct task the PM can handle without a dev-session
+    - OTHER: Ambiguous task — PM uses judgment
+    - QUESTION: Informational query, explanation, or opinion request
+    """
 
     SDLC = "sdlc"
+    COLLABORATION = "collaboration"
+    OTHER = "other"
     QUESTION = "question"

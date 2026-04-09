@@ -33,6 +33,18 @@ class TestIntentResult:
     def test_work_intent(self):
         r = IntentResult(intent="work", confidence=0.98, reasoning="action request")
         assert r.is_teammate is False
+        assert r.is_collaboration is False
+        assert r.is_work is True
+
+    def test_collaboration_high_confidence(self):
+        r = IntentResult(intent="collaboration", confidence=0.95, reasoning="direct task")
+        assert r.is_collaboration is True
+        assert r.is_teammate is False
+        assert r.is_work is False
+
+    def test_collaboration_low_confidence_defaults_to_work(self):
+        r = IntentResult(intent="collaboration", confidence=0.85, reasoning="ambiguous")
+        assert r.is_collaboration is False
         assert r.is_work is True
 
     def test_threshold_boundary(self):
@@ -82,6 +94,12 @@ class TestParseClassifierResponse:
         r = _parse_classifier_response("gibberish")
         assert r.intent == "work"
         assert r.confidence == 0.0
+
+    def test_valid_collaboration_response(self):
+        r = _parse_classifier_response("collaboration 0.96 User wants a direct task done")
+        assert r.intent == "collaboration"
+        assert r.confidence == 0.96
+        assert "direct task" in r.reasoning
 
     def test_unknown_intent(self):
         r = _parse_classifier_response("maybe 0.50 unsure")
@@ -147,6 +165,19 @@ class TestClassifyIntent:
             assert result.intent == "work"
             assert result.is_work is True
 
+    def test_collaboration_classification(self):
+        with patch("utils.api_keys.get_anthropic_api_key", return_value="test-key"):
+            mock_client = MagicMock()
+            mock_client.messages.create.return_value = _make_mock_response(
+                "collaboration 0.96 User wants to draft an issue"
+            )
+            with patch("anthropic.Anthropic", return_value=mock_client):
+                result = asyncio.run(classify_intent("Draft an issue for the flaky test"))
+                assert result.intent == "collaboration"
+                assert result.confidence == 0.96
+                assert result.is_collaboration is True
+                assert result.is_work is False
+
     def test_api_error_defaults_to_work(self):
         with patch("utils.api_keys.get_anthropic_api_key", return_value="test-key"):
             with patch("anthropic.Anthropic", side_effect=RuntimeError("API down")):
@@ -201,6 +232,18 @@ GOLDEN_TEAMMATE_EXAMPLES = [
     ("teammate 0.96", "List the MCP servers"),
 ]
 
+GOLDEN_COLLABORATION_EXAMPLES = [
+    ("collaboration 0.97", "Add this to the knowledge base"),
+    ("collaboration 0.96", "Draft an issue for the flaky test"),
+    ("collaboration 0.95", "Send a status update to the team"),
+    ("collaboration 0.94", "Write a summary doc"),
+    ("collaboration 0.98", "Save this to memory"),
+    ("collaboration 0.93", "Look up the project priorities and send me a summary"),
+    ("collaboration 0.95", "Create a Google Doc with meeting notes"),
+    ("collaboration 0.92", "Check my calendar and tell me what's next"),
+    ("collaboration 0.96", "File a GitHub issue about the flaky test"),
+]
+
 GOLDEN_WORK_EXAMPLES = [
     ("work 0.99", "Fix the bridge"),
     ("work 0.98", "Add a new endpoint for health checks"),
@@ -225,6 +268,12 @@ class TestGoldenExamples:
     def test_teammate_examples_parse_correctly(self, response, description):
         result = _parse_classifier_response(response)
         assert result.intent == "teammate", f"Expected teammate for: {description}"
+        assert result.confidence >= 0.90, f"Expected high confidence for: {description}"
+
+    @pytest.mark.parametrize("response,description", GOLDEN_COLLABORATION_EXAMPLES)
+    def test_collaboration_examples_parse_correctly(self, response, description):
+        result = _parse_classifier_response(response)
+        assert result.intent == "collaboration", f"Expected collaboration for: {description}"
         assert result.confidence >= 0.90, f"Expected high confidence for: {description}"
 
     @pytest.mark.parametrize("response,description", GOLDEN_WORK_EXAMPLES)

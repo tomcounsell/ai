@@ -440,11 +440,13 @@ _PASSTHROUGH_EXACT = {
 
 
 def classify_work_request(message: str) -> str:
-    """Classify if a message is a work request that should go through SDLC.
+    """Classify a message into one of four routing buckets (or passthrough).
 
     Returns:
-        "sdlc" - Work request -> orchestrator in ai/, prepend SDLC directive
-        "question" - informational query -> direct in target project, pass through as-is
+        "sdlc" - Work request that could result in code changes or a PR
+        "collaboration" - Direct task the PM can handle without a dev-session
+        "other" - Ambiguous task; PM uses judgment
+        "question" - Informational query, pass through as-is
         "passthrough" - Already has skill invocation or is conversational
     """
     if not message or not message.strip():
@@ -505,10 +507,11 @@ def _get_principal_priorities_for_classification() -> str:
 
 
 def _classify_work_request_llm(text: str) -> str:
-    """Use LLM to classify whether a message is a work request.
+    """Use LLM to classify a message into sdlc, collaboration, other, or question.
 
     Tries Ollama first (fast, local), falls back to Haiku (cheap, reliable).
     Includes principal context (project priorities) when available.
+    Uses first-token extraction with exact match to avoid substring collisions.
     """
     # Inject principal context for better classification of project-related messages
     principal = _get_principal_priorities_for_classification()
@@ -517,10 +520,15 @@ def _classify_work_request_llm(text: str) -> str:
         principal_hint = f"\n\nContext — active projects and priorities:\n{principal[:500]}\n\n"
 
     prompt = (
-        'Classify this message. Reply with ONLY one word: "sdlc" or "question".\n\n'
+        "Classify this message. Reply with ONLY one word: "
+        '"sdlc", "collaboration", "other", or "question".\n\n'
         '- "sdlc" = work request that could result in code changes or a PR:\n'
         "  fix bug, add feature, implement, refactor, investigate issue,\n"
         "  create/update codebase, deploy, resolve problem, continue/resume work\n"
+        '- "collaboration" = direct task the PM can handle without coding:\n'
+        "  add this to the knowledge base, draft an issue, send a status update,\n"
+        "  write a doc about Y, save this file, search memory, look up info and act\n"
+        '- "other" = ambiguous task that does not clearly fit sdlc or collaboration\n'
         '- "question" = purely asking for info, explanation, opinion,\n'
         "  how does X work, what is Y, conversational/social\n\n"
         "If in doubt, classify as sdlc.\n\n"
@@ -538,10 +546,14 @@ def _classify_work_request_llm(text: str) -> str:
             messages=[{"role": "user", "content": prompt}],
             options={"temperature": 0, "num_predict": 10},
         )
-        result = response["message"]["content"].strip().lower()
-        if "sdlc" in result:
+        result = response["message"]["content"].strip().lower().split()[0]
+        if result == "sdlc":
             return ClassificationType.SDLC
-        if "question" in result:
+        if result == "collaboration":
+            return ClassificationType.COLLABORATION
+        if result == "other":
+            return ClassificationType.OTHER
+        if result == "question":
             return ClassificationType.QUESTION
         logger.debug(f"Ollama returned ambiguous classification: {result}")
     except Exception as e:
@@ -561,9 +573,13 @@ def _classify_work_request_llm(text: str) -> str:
             max_tokens=10,
             messages=[{"role": "user", "content": prompt}],
         )
-        result = response.content[0].text.strip().lower()
-        if "sdlc" in result:
+        result = response.content[0].text.strip().lower().split()[0]
+        if result == "sdlc":
             return ClassificationType.SDLC
+        if result == "collaboration":
+            return ClassificationType.COLLABORATION
+        if result == "other":
+            return ClassificationType.OTHER
         return ClassificationType.QUESTION
     except Exception as e:
         logger.debug(f"Haiku classification fallback also failed: {e}")

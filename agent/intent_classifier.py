@@ -1,8 +1,13 @@
-"""Binary intent classifier for PM session Teammate mode.
+"""Three-way intent classifier for PM session routing.
 
-Uses Haiku to classify incoming messages as informational queries (Teammate)
-or work requests. Conservative threshold (0.90) ensures ambiguous messages
-default to the full Dev-session pipeline.
+Uses Haiku to classify incoming messages as informational queries (Teammate),
+direct collaboration tasks, or work requests. Conservative threshold (0.90)
+ensures ambiguous messages default to the full Dev-session pipeline.
+
+Intents:
+- teammate: informational query -> Teammate mode (direct response)
+- collaboration: direct task PM can handle without a dev-session
+- work: action/work request -> SDLC pipeline (dev-session)
 
 All operations are async and wrapped in try/except -- classifier failures
 must never prevent normal Dev-session processing.
@@ -21,12 +26,16 @@ logger = logging.getLogger(__name__)
 TEAMMATE_CONFIDENCE_THRESHOLD = 0.90
 
 CLASSIFIER_PROMPT = """\
-You are a binary intent classifier. Classify the user message as either \
-"teammate" (informational query) or "work" (action/work request).
+You are an intent classifier. Classify the user message as "teammate", \
+"collaboration", or "work".
 
 RULES:
 - "teammate" = the user wants information, explanation, status, or lookup
-- "work" = the user wants something created, fixed, changed, deployed, or built
+- "collaboration" = the user wants a direct task done that does NOT require code \
+changes: save to knowledge base, draft an issue, send a message, write a doc, \
+search memory, look something up and act on it
+- "work" = the user wants something created, fixed, changed, deployed, or built \
+in the codebase (code changes, PRs, SDLC pipeline)
 
 EXAMPLES:
 
@@ -44,10 +53,20 @@ teammate examples:
 - "How many open issues do we have?" -> teammate 0.96
 - "What model does the classifier use?" -> teammate 0.97
 
+collaboration examples:
+- "Add this to the knowledge base" -> collaboration 0.97
+- "Draft an issue for X" -> collaboration 0.96
+- "Send a status update to the team" -> collaboration 0.95
+- "Write a summary doc" -> collaboration 0.94
+- "Save this to memory" -> collaboration 0.98
+- "Look up the project priorities and send me a summary" -> collaboration 0.93
+- "Create a Google Doc with meeting notes" -> collaboration 0.95
+- "Check my calendar and tell me what's next" -> collaboration 0.92
+- "File a GitHub issue about the flaky test" -> collaboration 0.96
+
 work examples:
 - "Fix the bridge" -> work 0.99
 - "Add a new endpoint for health checks" -> work 0.98
-- "Create an issue for the memory leak" -> work 0.97
 - "Deploy the latest changes" -> work 0.99
 - "Update the README" -> work 0.96
 - "The observer prompt has a bug" -> work 0.88
@@ -62,8 +81,8 @@ work examples:
 Respond with EXACTLY one line in the format:
 INTENT confidence REASONING
 
-Where INTENT is "teammate" or "work", confidence is a float between 0.0 and 1.0, \
-and REASONING is a brief explanation.
+Where INTENT is "teammate", "collaboration", or "work", confidence is a float \
+between 0.0 and 1.0, and REASONING is a brief explanation.
 
 Example response: teammate 0.97 User is asking for information about system architecture"""
 
@@ -72,13 +91,17 @@ Example response: teammate 0.97 User is asking for information about system arch
 class IntentResult:
     """Result of intent classification."""
 
-    intent: str  # "teammate" or "work"
+    intent: str  # "teammate", "collaboration", or "work"
     confidence: float
     reasoning: str
 
     @property
     def is_teammate(self) -> bool:
         return self.intent == "teammate" and self.confidence >= TEAMMATE_CONFIDENCE_THRESHOLD
+
+    @property
+    def is_collaboration(self) -> bool:
+        return self.intent == "collaboration" and self.confidence >= TEAMMATE_CONFIDENCE_THRESHOLD
 
     @property
     def is_work(self) -> bool:
@@ -94,7 +117,7 @@ def _parse_classifier_response(raw: str) -> IntentResult:
         return IntentResult(intent="work", confidence=0.0, reasoning="unparseable response")
 
     intent_str = parts[0].lower().strip()
-    if intent_str not in ("teammate", "work"):
+    if intent_str not in ("teammate", "collaboration", "work"):
         logger.warning(f"[intent_classifier] Unknown intent: {intent_str!r}")
         return IntentResult(
             intent="work", confidence=0.0, reasoning=f"unknown intent: {intent_str}"
