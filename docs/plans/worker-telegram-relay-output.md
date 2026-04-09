@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Done
 type: bug
 appetite: Small
 owner: Valor
@@ -75,6 +75,7 @@ No prerequisites -- Redis is already required and connected by the worker at sta
 - `send()` builds the same JSON payload as `tools/send_telegram.py:145-151`: `{"chat_id", "reply_to", "text", "session_id", "timestamp"}`. Uses `rpush` to `telegram:outbox:{session_id}` and sets TTL of 3600s.
 - `react()` builds a reaction payload: `{"type": "reaction", "chat_id", "reply_to", "emoji", "session_id", "timestamp"}`. Uses `rpush` to the same outbox key.
 - The `session_id` is extracted from `session.session_id` (the `AgentSession` object passed as the `session` parameter), falling back to `chat_id`.
+- `reply_to_msg_id` may be None or 0; the handler passes it through as-is matching `tools/send_telegram.py` which uses `int(reply_to) if reply_to else None`.
 - Connection uses `redis.Redis.from_url()` matching the pattern in `tools/send_telegram.py:40-45`.
 - If Redis write fails, log the error but do not crash the session -- output delivery is best-effort. The file handler fallback ensures output is never lost.
 - Worker registration in `worker/__main__.py` creates `TelegramRelayOutputHandler(file_handler=FileOutputHandler())` and registers it for all projects.
@@ -124,7 +125,7 @@ No race conditions identified -- `rpush` is atomic in Redis, and the relay reads
 
 - Do not modify `bridge/telegram_relay.py` -- it already works
 - Do not modify the stop hook delivery gate (`agent/hooks/stop.py`)
-- Do not add Telegram-specific logic to `agent_session_queue.py`
+- Do not add Telegram-specific routing logic to `agent_session_queue.py` (cosmetic log message fixes are allowed)
 - Do not remove `FileOutputHandler` -- it remains for dev/non-Telegram use
 
 ## Update System
@@ -185,7 +186,7 @@ No agent integration required -- this is a worker-internal output routing change
 - `react()` uses `rpush` to same outbox key pattern
 - All Redis errors caught and logged, never propagated
 
-### 2. Update worker registration
+### 2. Update worker registration and fix misleading log
 - **Task ID**: build-worker-registration
 - **Depends On**: build-relay-handler
 - **Validates**: worker starts without error
@@ -196,6 +197,7 @@ No agent integration required -- this is a worker-internal output routing change
 - Create `TelegramRelayOutputHandler(file_handler=FileOutputHandler())` as the handler
 - Register it for all projects (same loop, just different handler instance)
 - Update log message from `"Registered FileOutputHandler"` to `"Registered TelegramRelayOutputHandler"`
+- In `agent_session_queue.py`, update the misleading `"Delivered to Telegram"` log message to handler-agnostic text: `"Output delivered ({len(text)} chars)"` -- this is a cosmetic fix scoped as a minimal exception to the No-Go
 
 ### 3. Add unit tests
 - **Task ID**: build-tests
@@ -231,6 +233,7 @@ No agent integration required -- this is a worker-internal output routing change
 - Run `pytest tests/ -x -q` -- full suite passes
 - Verify `TelegramRelayOutputHandler` import works in worker context
 - Verify payload format matches `tools/send_telegram.py` contract
+- Manual verification: confirm the outbox key pattern written by the handler (`telegram:outbox:{session_id}`) matches the relay's SCAN pattern (`telegram:outbox:*`) in `bridge/telegram_relay.py`
 
 ## Verification
 
@@ -244,9 +247,13 @@ No agent integration required -- this is a worker-internal output routing change
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room) on 2026-04-09. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | Skeptic | Plan references "Delivered to Telegram" log at unspecified location -- success criterion #3 says "removed or replaced" but no task explicitly addresses editing `agent_session_queue.py:2889` | Task 2 or new sub-task | The log at `agent_session_queue.py:2889` says "Delivered to Telegram" regardless of handler. The builder should update this message to reflect the actual handler type (e.g., "Output routed via TelegramRelayOutputHandler") or make it handler-agnostic ("Output delivered"). This is in `send_to_chat()` which the plan's No-Gos say not to modify, creating a contradiction with Success Criterion #3. Resolve by scoping the log message edit as a minimal exception to the No-Go. |
+| CONCERN | Operator | No end-to-end validation that the relay actually picks up and delivers the worker's outbox messages -- all tests are unit-level with mocked Redis | Task 5 | Add a manual verification step to Task 5: after deploying, trigger a test session via the worker and confirm the bridge relay delivers it. Alternatively, add an integration test that writes to the outbox and verifies `bridge/telegram_relay.py:process_outbox()` reads it. The payload format match is necessary but not sufficient -- the relay's key scanning pattern (`telegram:outbox:*`) must match the key the handler writes to. |
+| NIT | Simplifier | Task 4 (Documentation) and Task 5 (Final Validation) are sequential dependencies but could run in parallel -- docs don't block test execution | -- | Minor scheduling optimization; not blocking. |
+| NIT | Adversary | Plan does not specify behavior when `reply_to_msg_id` is None or 0 -- `tools/send_telegram.py:149` converts to `int(reply_to) if reply_to else None` but the handler receives it already as `int` from `send_to_chat()` at line 2886 | -- | The `telegram_message_id` field on the session could be None. The handler should pass it through as-is (matching `tools/send_telegram.py` which uses `int(reply_to) if reply_to else None`). |
 
 ---
 
