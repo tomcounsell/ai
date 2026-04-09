@@ -92,6 +92,24 @@ reflections:
     callable: "agent.sustainability.recovery_drip"
     enabled: true
 
+  # === Worker Hibernation (issue #839) ===
+
+  - name: worker-health-gate
+    description: "Check Anthropic circuit; renew/clear worker:hibernating flag; trigger drip resume on recovery"
+    interval: 60  # 1 minute
+    priority: high
+    execution_type: function
+    callable: "agent.hibernation.worker_health_gate"
+    enabled: true
+
+  - name: session-resume-drip
+    description: "Drip one paused session back to pending per tick (only when worker:recovering flag set)"
+    interval: 30  # 30 seconds
+    priority: high
+    execution_type: function
+    callable: "agent.hibernation.session_resume_drip"
+    enabled: true
+
   - name: sustainability-digest
     description: "Daily Telegram health summary: circuit states, throttle level, session counts, failure clusters"
     interval: 86400  # daily

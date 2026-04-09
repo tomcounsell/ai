@@ -554,6 +554,7 @@ async def _pop_agent_session(
 
     Sustainability guards (checked before acquiring pop lock):
     - If queue_paused flag is set (Anthropic circuit OPEN/HALF_OPEN), return None.
+    - If worker:hibernating flag is set (mid-execution API failure), return None.
     - Throttle level affects which priority tiers are eligible.
     """
     try:
@@ -561,10 +562,15 @@ async def _pop_agent_session(
 
         _project_key = os.environ.get("VALOR_PROJECT_KEY", "default")
         _pause_key = f"{_project_key}:sustainability:queue_paused"
+        _hibernating_key = f"{_project_key}:worker:hibernating"
         _throttle_key = f"{_project_key}:sustainability:throttle_level"
 
         if _R.get(_pause_key):
             logger.debug("[worker:%s] Queue paused (API circuit open) — skipping pop", worker_key)
+            return None
+
+        if _R.get(_hibernating_key):
+            logger.debug("[worker:%s] Hibernating (worker:hibernating) — skipping pop", worker_key)
             return None
 
         _throttle_raw = _R.get(_throttle_key)
@@ -2103,14 +2109,59 @@ async def _worker_loop(
 
                 if isinstance(e, CircuitOpenError):
                     logger.warning(
-                        "[worker:%s] Session %s deferred (circuit open) — "
-                        "will retry when service recovers",
+                        "[worker:%s] Session %s paused (circuit open) — "
+                        "will resume when service recovers",
                         worker_key,
                         session.agent_session_id,
                     )
-                    # Don't complete the session — leave it for health check to retry
+                    # Transition session to paused so it is preserved and can be drip-resumed
+                    try:
+                        from models.session_lifecycle import transition_status
+
+                        transition_status(
+                            session,
+                            "paused",
+                            reason="circuit open — worker hibernating",
+                        )
+                    except Exception as _ts_err:
+                        logger.error(
+                            "[worker:%s] Failed to transition session %s to paused: %s",
+                            worker_key,
+                            session.agent_session_id,
+                            _ts_err,
+                        )
+                    # Write hibernation flag to stop further session pops
+                    try:
+                        from popoto.redis_db import POPOTO_REDIS_DB as _R
+
+                        _pk = os.environ.get("VALOR_PROJECT_KEY", "default")
+                        _hib_key = f"{_pk}:worker:hibernating"
+                        _was_hibernating = _R.exists(_hib_key)
+                        _R.set(_hib_key, "1", ex=600)
+                        if not _was_hibernating:
+                            logger.warning(
+                                "[worker:%s] Worker entering hibernation — circuit open",
+                                worker_key,
+                            )
+                            # Enqueue notification asynchronously (best-effort)
+                            try:
+                                from agent.hibernation import send_hibernation_notification
+
+                                send_hibernation_notification("hibernating", project_key=_pk)
+                            except Exception as _notif_err:
+                                logger.error(
+                                    "[worker:%s] Failed to enqueue hibernation notification: %s",
+                                    worker_key,
+                                    _notif_err,
+                                )
+                    except Exception as _hib_err:
+                        logger.error(
+                            "[worker:%s] Failed to write hibernation flag: %s",
+                            worker_key,
+                            _hib_err,
+                        )
                     session_completed = True
-                    break  # Exit worker loop; health check will restart
+                    break  # Exit worker loop; health gate will clear flag when recovered
                 else:
                     logger.error(
                         f"[worker:{worker_key}] Session {session.agent_session_id} failed: {e}"
