@@ -93,14 +93,23 @@ def clean_message(text: str, project: dict | None, default_mentions: list[str]) 
     return result.strip()
 
 
-def build_context_prefix(project: dict | None, is_dm: bool) -> str:
+def build_context_prefix(project: dict | None, session_type: str | None = None) -> str:
     """Build project context to inject into agent prompt."""
-    if not project:
-        if is_dm:
-            return "CONTEXT: Direct message to Valor (no specific project context)"
-        return ""
+    context_parts = []
 
-    context_parts = [f"PROJECT: {project.get('name', project.get('_key', 'Unknown'))}"]
+    if session_type == "teammate":
+        context_parts.append(
+            "RESTRICTION: This user has read-only Teammate access. "
+            "Do NOT make any code changes, file edits, git commits, or run destructive commands. "
+            "Answer questions, explain code, and provide guidance only. "
+            "If they ask you to make changes, politely explain you can only help with "
+            "informational queries for them."
+        )
+
+    if not project:
+        return "\n".join(context_parts) if context_parts else ""
+
+    context_parts.append(f"PROJECT: {project.get('name', project.get('_key', 'Unknown'))}")
 
     project_context = project.get("context", {})
     if project_context.get("description"):
@@ -166,7 +175,7 @@ class TestMessageRoutingIntegration:
         group_map = build_group_to_project_map(sample_config, active)
         project = find_project_for_chat("Dev: Valor", group_map)
 
-        context = build_context_prefix(project, is_dm=False)
+        context = build_context_prefix(project, session_type=None)
 
         assert "PROJECT: Valor AI" in context
         assert "FOCUS:" in context
@@ -381,8 +390,8 @@ class TestMultiMachineScenarios:
         valor_project = find_project_for_chat("Dev: Valor", group_map)
         popoto_project = find_project_for_chat("Dev: Popoto", group_map)
 
-        valor_context = build_context_prefix(valor_project, is_dm=False)
-        popoto_context = build_context_prefix(popoto_project, is_dm=False)
+        valor_context = build_context_prefix(valor_project, session_type=None)
+        popoto_context = build_context_prefix(popoto_project, session_type=None)
 
         # Valor context
         assert "Valor AI" in valor_context

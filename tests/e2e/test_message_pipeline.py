@@ -209,19 +209,19 @@ class TestContextBuilding:
     """Test context prefix building from project config."""
 
     def test_project_context_includes_name(self, valor_project):
-        ctx = build_context_prefix(valor_project, is_dm=False)
+        ctx = build_context_prefix(valor_project, session_type=None)
         assert "Valor AI" in ctx
 
     def test_project_context_includes_tech(self, valor_project):
-        ctx = build_context_prefix(valor_project, is_dm=False)
+        ctx = build_context_prefix(valor_project, session_type=None)
         assert "Python" in ctx
 
-    def test_dm_without_project(self):
-        ctx = build_context_prefix(None, is_dm=True)
-        assert "Direct message" in ctx
+    def test_teammate_without_project(self):
+        ctx = build_context_prefix(None, session_type="teammate")
+        assert "RESTRICTION" in ctx
 
-    def test_no_project_no_dm(self):
-        ctx = build_context_prefix(None, is_dm=False)
+    def test_no_project_no_session_type(self):
+        ctx = build_context_prefix(None, session_type=None)
         assert ctx == ""
 
     def test_status_question_detection(self):

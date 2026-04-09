@@ -88,14 +88,23 @@ def clean_message(text: str, project: dict | None, default_mentions: list[str]) 
     return result.strip()
 
 
-def build_context_prefix(project: dict | None, is_dm: bool) -> str:
+def build_context_prefix(project: dict | None, session_type: str | None = None) -> str:
     """Build project context to inject into agent prompt."""
-    if not project:
-        if is_dm:
-            return "CONTEXT: Direct message to Valor (no specific project context)"
-        return ""
+    context_parts = []
 
-    context_parts = [f"PROJECT: {project.get('name', project.get('_key', 'Unknown'))}"]
+    if session_type == "teammate":
+        context_parts.append(
+            "RESTRICTION: This user has read-only Teammate access. "
+            "Do NOT make any code changes, file edits, git commits, or run destructive commands. "
+            "Answer questions, explain code, and provide guidance only. "
+            "If they ask you to make changes, politely explain you can only help with "
+            "informational queries for them."
+        )
+
+    if not project:
+        return "\n".join(context_parts) if context_parts else ""
+
+    context_parts.append(f"PROJECT: {project.get('name', project.get('_key', 'Unknown'))}")
 
     project_context = project.get("context", {})
     if project_context.get("description"):
@@ -374,40 +383,52 @@ class TestCleanMessage:
 class TestBuildContextPrefix:
     """Tests for context prefix generation."""
 
-    def test_dm_without_project(self):
-        """DM without project should get generic context."""
-        result = build_context_prefix(None, is_dm=True)
-        assert "Direct message" in result
-        assert "no specific project context" in result
+    def test_teammate_without_project(self):
+        """Teammate session without project should get restriction but no project context."""
+        result = build_context_prefix(None, session_type="teammate")
+        assert "RESTRICTION" in result
+        assert "read-only Teammate access" in result
 
-    def test_group_without_project(self):
-        """Group message without project match should get empty context."""
-        result = build_context_prefix(None, is_dm=False)
+    def test_no_session_type_without_project(self):
+        """No session type without project match should get empty context."""
+        result = build_context_prefix(None, session_type=None)
         assert result == ""
+
+    def test_pm_session_without_project(self):
+        """PM session without project should get no restriction."""
+        result = build_context_prefix(None, session_type="pm")
+        assert result == ""
+        assert "RESTRICTION" not in result
+
+    def test_dev_session_without_project(self):
+        """Dev session without project should get no restriction."""
+        result = build_context_prefix(None, session_type="dev")
+        assert result == ""
+        assert "RESTRICTION" not in result
 
     def test_includes_project_name(self, valor_project):
         """Context should include project name."""
-        result = build_context_prefix(valor_project, is_dm=False)
+        result = build_context_prefix(valor_project, session_type=None)
         assert "PROJECT: Valor AI" in result
 
     def test_includes_focus_description(self, valor_project):
         """Context should include focus description."""
-        result = build_context_prefix(valor_project, is_dm=False)
+        result = build_context_prefix(valor_project, session_type=None)
         assert "FOCUS: Focus on agentic systems" in result
 
     def test_includes_tech_stack(self, valor_project):
         """Context should include tech stack."""
-        result = build_context_prefix(valor_project, is_dm=False)
+        result = build_context_prefix(valor_project, session_type=None)
         assert "TECH: Python, Claude Agent SDK, Telethon" in result
 
     def test_includes_repo(self, valor_project):
         """Context should include GitHub repo."""
-        result = build_context_prefix(valor_project, is_dm=False)
+        result = build_context_prefix(valor_project, session_type=None)
         assert "REPO: tomcounsell/ai" in result
 
     def test_all_fields_present(self, valor_project):
         """All context fields should be present."""
-        result = build_context_prefix(valor_project, is_dm=False)
+        result = build_context_prefix(valor_project, session_type=None)
         lines = result.split("\n")
         assert len(lines) == 4  # PROJECT, FOCUS, TECH, REPO
 
@@ -417,11 +438,35 @@ class TestBuildContextPrefix:
             "name": "Test Project",
             "_key": "test",
         }
-        result = build_context_prefix(minimal_project, is_dm=False)
+        result = build_context_prefix(minimal_project, session_type=None)
         assert "PROJECT: Test Project" in result
         assert "FOCUS:" not in result  # No context.description
         assert "TECH:" not in result  # No context.tech_stack
         assert "REPO:" not in result  # No github.repo
+
+    def test_pm_session_no_restriction(self, valor_project):
+        """PM session should never receive Teammate read-only restriction."""
+        result = build_context_prefix(valor_project, session_type="pm")
+        assert "RESTRICTION" not in result
+        assert "PROJECT: Valor AI" in result
+
+    def test_teammate_session_restriction_present(self):
+        """Teammate session should receive read-only restriction."""
+        result = build_context_prefix(None, session_type="teammate")
+        assert "RESTRICTION" in result
+        assert "read-only Teammate access" in result
+
+    def test_teammate_dm_restriction_regression(self):
+        """Regression: Teammate DM sessions (real Telegram users) still get restriction.
+
+        Risk 1 guard: Telegram DM messages set session_type="teammate" via bridge routing.
+        Passing session_type="teammate" must correctly inject the restriction, so real DM
+        users never gain unrestricted access.
+        """
+        result = build_context_prefix(None, session_type="teammate")
+        assert "RESTRICTION" in result
+        assert "read-only Teammate access" in result
+        assert "Do NOT make any code changes" in result
 
 
 # ============================================================================
@@ -510,7 +555,7 @@ class TestMessageRouting:
         project = find_project_for_chat("Dev: Popoto", group_map)
 
         assert project is not None
-        context = build_context_prefix(project, is_dm=False)
+        context = build_context_prefix(project, session_type=None)
         assert "PROJECT: Popoto" in context
         assert "TECH: Python, Redis" in context
         assert "REPO: tomcounsell/popoto" in context

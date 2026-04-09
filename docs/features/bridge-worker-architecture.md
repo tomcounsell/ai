@@ -211,6 +211,16 @@ The bridge and worker share a single contract: the `AgentSession` Popoto model i
 
 The bridge also reads `AgentSession.status` to determine if a session is already active (dedup logic).
 
+### Context Prefix and Permission Guards
+
+`build_context_prefix()` in `bridge/context.py` builds the permission restriction injected into the agent's first message. It uses `session_type` (not `is_dm`) as the authoritative signal:
+
+- `session_type="teammate"` → injects read-only Teammate restriction
+- `session_type="pm"` or `"dev"` → no restriction
+- `session_type=None` → no restriction (e.g., catchup/reconciler paths)
+
+In `agent/sdk_client.py`, `session_type` is resolved from Redis **before** `build_context_prefix()` is called, so the restriction decision is always based on the session's actual role, not on whether the message arrived via a DM channel.
+
 ## Import Boundary
 
 The bridge imports from `agent.agent_session_queue` are allowlisted to these functions only:

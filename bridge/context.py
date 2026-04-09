@@ -122,12 +122,16 @@ def filter_tool_logs(response: str) -> str:
 # =============================================================================
 
 
-def build_context_prefix(project: dict | None, is_dm: bool, sender_id: int | None = None) -> str:
+def build_context_prefix(
+    project: dict | None, session_type: str | None, sender_id: int | None = None
+) -> str:
     """Build project context to inject into agent prompt."""
+    from config.enums import SessionType
+
     context_parts = []
 
-    # All DM users get uniform read-only Teammate access - no per-user permission levels
-    if is_dm:
+    # Teammate sessions get uniform read-only access - no per-user permission levels
+    if session_type == SessionType.TEAMMATE:
         context_parts.append(
             "RESTRICTION: This user has read-only Teammate access. "
             "Do NOT make any code changes, file edits, git commits, or run destructive commands. "
@@ -137,8 +141,6 @@ def build_context_prefix(project: dict | None, is_dm: bool, sender_id: int | Non
         )
 
     if not project:
-        if is_dm:
-            context_parts.append("CONTEXT: Direct message to Valor (no specific project context)")
         return "\n".join(context_parts) if context_parts else ""
 
     context_parts.append(f"PROJECT: {project.get('name', project.get('_key', 'Unknown'))}")
