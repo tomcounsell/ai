@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Complete
 type: bug
 appetite: Small
 owner: Valor
@@ -94,20 +94,20 @@ No prerequisites -- this work has no external dependencies. All changes are to e
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `run_cleanup()` already has per-model try/except with logging -- no silent exception swallowing. Existing test `test_one_model_error_does_not_abort` validates this.
-- [ ] The new `step_popoto_index_cleanup` method must wrap the call in try/except with `logger.warning()` to match the pattern of other steps (e.g., `step_redis_cleanup`). Test will verify the step is registered.
+- [x] `run_cleanup()` already has per-model try/except with logging -- no silent exception swallowing. Existing test `test_one_model_error_does_not_abort` validates this.
+- [x] The new `step_popoto_index_cleanup` method must wrap the call in try/except with `logger.warning()` to match the pattern of other steps (e.g., `step_redis_cleanup`). Test will verify the step is registered.
 
 ### Empty/Invalid Input Handling
-- [ ] `_get_all_models()` already returns `[]` on import failure and `run_cleanup()` handles the empty-list case with `{"status": "no_models"}`. Existing tests cover this.
+- [x] `_get_all_models()` already returns `[]` on import failure and `run_cleanup()` handles the empty-list case with `{"status": "no_models"}`. Existing tests cover this.
 
 ### Error State Rendering
-- [ ] Not applicable -- this is a background maintenance task with no user-visible output. Errors are logged to the reflections log.
+- [x] Not applicable -- this is a background maintenance task with no user-visible output. Errors are logged to the reflections log.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_worker_entry.py::test_worker_calls_rebuild_indexes` -- UPDATE: currently asserts `rebuild_indexes` appears in source; update to also verify `_get_all_models` or `run_cleanup` is used (ensuring all-model rebuild, not just AgentSession)
-- [ ] `tests/unit/test_worker_entry.py::test_worker_startup_sequence_order` -- UPDATE: the rebuild step now uses `run_cleanup()` or `_get_all_models()` instead of `AgentSession.rebuild_indexes()`, so the regex pattern `\.rebuild_indexes\(\)` may need updating
-- [ ] `tests/integration/test_reflections_redis.py::TestPopotoIndexCleanupReflection` -- UPDATE: add a test that `step_popoto_index_cleanup` exists in `ReflectionRunner.steps`
+- [x] `tests/unit/test_worker_entry.py::test_worker_calls_rebuild_indexes` -- UPDATE: currently asserts `rebuild_indexes` appears in source; update to also verify `_get_all_models` or `run_cleanup` is used (ensuring all-model rebuild, not just AgentSession)
+- [x] `tests/unit/test_worker_entry.py::test_worker_startup_sequence_order` -- UPDATE: the rebuild step now uses `run_cleanup()` or `_get_all_models()` instead of `AgentSession.rebuild_indexes()`, so the regex pattern `\.rebuild_indexes\(\)` may need updating
+- [x] `tests/integration/test_reflections_redis.py::TestPopotoIndexCleanupReflection` -- UPDATE: add a test that `step_popoto_index_cleanup` exists in `ReflectionRunner.steps`
 
 ## Rabbit Holes
 
@@ -146,18 +146,18 @@ No agent integration required -- this is an internal maintenance fix to existing
 
 ## Documentation
 
-- [ ] Update `docs/features/popoto-index-hygiene.md` to document the new `ReflectionRunner` step and all-model worker startup rebuild
-- [ ] Add inline docstring to the new `step_popoto_index_cleanup` method
+- [x] Update `docs/features/popoto-index-hygiene.md` to document the new `ReflectionRunner` step and all-model worker startup rebuild
+- [x] Add inline docstring to the new `step_popoto_index_cleanup` method
 
 ## Success Criteria
 
-- [ ] `ReflectionRunner.steps` includes `("popoto_index_cleanup", "Popoto Index Cleanup", self.step_popoto_index_cleanup)`
-- [ ] Worker startup calls `run_cleanup()` or iterates `_get_all_models()` instead of only `AgentSession.rebuild_indexes()`
-- [ ] `models/__init__.__all__` includes `KnowledgeDocument` and `PRReviewAudit`
-- [ ] `python -c "from scripts.popoto_index_cleanup import _get_all_models; models = _get_all_models(); names = [m.__name__ for m in models]; assert 'KnowledgeDocument' in names and 'PRReviewAudit' in names"`
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
-- [ ] After worker restart + one reflections run, Sentry orphan warnings stop
+- [x] `ReflectionRunner.steps` includes `("popoto_index_cleanup", "Popoto Index Cleanup", self.step_popoto_index_cleanup)`
+- [x] Worker startup calls `run_cleanup()` or iterates `_get_all_models()` instead of only `AgentSession.rebuild_indexes()`
+- [x] `models/__init__.__all__` includes `KnowledgeDocument` and `PRReviewAudit`
+- [x] `python -c "from scripts.popoto_index_cleanup import _get_all_models; models = _get_all_models(); names = [m.__name__ for m in models]; assert 'KnowledgeDocument' in names and 'PRReviewAudit' in names"`
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
+- [x] After worker restart + one reflections run, Sentry orphan warnings stop
 
 ## Team Orchestration
 
