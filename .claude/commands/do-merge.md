@@ -191,6 +191,26 @@ else:
 
 If the completion gate prints GATES_FAILED, report the unchecked items as blockers and do NOT proceed with the merge. The plan must have all checkbox items checked (except those in Open Questions and Critique Results sections) before merge is allowed.
 
+### Lockfile Sync Check
+
+Verify `uv.lock` matches `pyproject.toml` so the merge doesn't leave every
+machine with a dirty working tree after `uv sync`. `uv lock --locked` is
+read-only — it exits non-zero if a regeneration would produce changes, and
+never modifies files:
+
+```bash
+if uv lock --locked >/dev/null 2>&1; then
+  echo "LOCKFILE: PASS"
+else
+  echo "LOCKFILE: FAIL — uv.lock is out of sync with pyproject.toml"
+  echo "Run 'uv lock' and commit the result before merging."
+  echo "GATES_FAILED"
+fi
+```
+
+If this check prints GATES_FAILED, report it as a blocker and do NOT proceed
+with the merge. Fix: `uv lock && git add uv.lock && git commit -m "Sync uv.lock"`.
+
 Also verify the PR is mergeable:
 
 ```bash
