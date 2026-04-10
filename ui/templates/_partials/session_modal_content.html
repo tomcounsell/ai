@@ -2,9 +2,17 @@
 <div class="modal-content">
     <div class="modal-header">
         <h2 class="modal-title">{{ pipeline.display_name }}</h2>
-        {% if pipeline.status %}
-        <span class="badge badge-{{ pipeline.status }}{% if pipeline.is_stale %} stale{% endif %}">{{ pipeline.status }}</span>
-        {% endif %}
+        <div class="flex gap-2" style="align-items: center;">
+            {% if pipeline.status %}
+            <span class="badge badge-{{ pipeline.status }}{% if pipeline.is_stale %} stale{% endif %}">{{ pipeline.status }}</span>
+            {% endif %}
+            <button class="btn-copy"
+                    data-session-id="{{ pipeline.agent_session_id }}"
+                    data-thread="{{ pipeline.session_id or '-' }}"
+                    data-project="{{ pipeline.project_key or '-' }}"
+                    onclick="copySessionDetails(this)"
+                    title="Copy identification details">&#128203;</button>
+        </div>
     </div>
 
     <div class="modal-body">
@@ -28,6 +36,11 @@
                         <span class="badge badge-{{ 'blue' if pipeline.session_type == 'Developer' else ('green' if pipeline.session_type == 'Teammate' else 'purple') }}">{{ pipeline.session_type }}</span>
                     </td></tr>
                     {% endif %}
+                </table>
+            </div>
+            <div>
+                <h3>Timing</h3>
+                <table class="data-table compact">
                     <tr><td class="text-secondary">Created</td><td class="mono">{{ pipeline.created_at | format_timestamp if pipeline.created_at else '-' }}</td></tr>
                     <tr><td class="text-secondary">Started</td><td class="mono">{{ pipeline.started_at | format_timestamp if pipeline.started_at else '-' }}</td></tr>
                     {% if pipeline.completed_at %}
@@ -40,10 +53,9 @@
                     <tr><td class="text-secondary">Tool calls</td><td class="mono">{{ pipeline.tool_call_count }}</td></tr>
                     {% endif %}
                 </table>
-            </div>
-            <div>
+
                 {% if pipeline.issue_url or pipeline.plan_url or pipeline.pr_url %}
-                <h3>Links</h3>
+                <h3 class="mt-4">Links</h3>
                 <table class="data-table compact">
                     {% if pipeline.issue_url %}
                     <tr><td class="text-secondary">Issue</td><td><a href="{{ pipeline.issue_url }}" class="link" target="_blank">{{ pipeline.issue_url }}</a></td></tr>
@@ -57,22 +69,22 @@
                 </table>
                 {% endif %}
 
-                {% if pipeline.stages %}
-                <h3 class="{{ 'mt-4' if pipeline.issue_url or pipeline.plan_url or pipeline.pr_url else '' }}">Stage Progress</h3>
-                <div class="stage-indicator mt-2" style="flex-wrap: wrap; gap: 6px;">
-                    {% for stage in pipeline.stages %}
-                    {% if not loop.first %}<span class="stage-arrow">&#9654;</span>{% endif %}
-                    <span class="stage-dot {{ 'completed' if stage.is_done else ('in-progress' if stage.is_active else ('failed' if stage.is_failed else '')) }}" style="font-size: 12px;">{{ stage.name }}</span>
-                    {% endfor %}
-                </div>
-                {% endif %}
-
                 {% if pipeline.expectations %}
                 <h3 class="mt-4">Waiting for</h3>
                 <div class="text-secondary" style="font-size: 13px; font-style: italic;">{{ pipeline.expectations }}</div>
                 {% endif %}
             </div>
         </div>
+
+        {% if pipeline.stages %}
+        <h3>SDLC</h3>
+        <div class="stage-indicator mt-2 mb-4" style="flex-wrap: wrap; gap: 6px;">
+            {% for stage in pipeline.stages %}
+            {% if not loop.first %}<span class="stage-arrow">&#9654;</span>{% endif %}
+            <span class="stage-dot {{ 'completed' if stage.is_done else ('in-progress' if stage.is_active else ('failed' if stage.is_failed else '')) }}" style="font-size: 12px;">{{ stage.name }}</span>
+            {% endfor %}
+        </div>
+        {% endif %}
 
         {% if pipeline.message_text %}
         <h3>Original Message</h3>
@@ -97,6 +109,20 @@
         {% endif %}
     </div>
 </div>
+<script>
+function copySessionDetails(btn) {
+    var text = [
+        'Session ID    ' + btn.dataset.sessionId,
+        'Thread    ' + btn.dataset.thread,
+        'Project    ' + btn.dataset.project
+    ].join('\n');
+    navigator.clipboard.writeText(text).then(function() {
+        var orig = btn.textContent;
+        btn.textContent = '\u2713';
+        setTimeout(function() { btn.textContent = orig; }, 1500);
+    });
+}
+</script>
 {% else %}
 <div class="modal-content">
     <div class="modal-body">

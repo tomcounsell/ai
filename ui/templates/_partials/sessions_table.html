@@ -93,11 +93,20 @@
 
 {% if sessions %}
 <script>
+window._expandedSessions = window._expandedSessions || new Set();
+
 function toggleChildren(el) {
     var sid = el.dataset.session;
     var rows = document.querySelectorAll('tr[data-parent="' + sid + '"]');
     var collapsed = el.classList.toggle('collapsed');
-    el.innerHTML = collapsed ? '&#9654; ' : '&#9660; ';
+    if (collapsed) {
+        window._expandedSessions.delete(sid);
+    } else {
+        window._expandedSessions.add(sid);
+    }
+    var countEl = el.querySelector('.child-count');
+    var countHtml = countEl ? ' <span class="child-count">' + countEl.textContent + '</span>' : '';
+    el.innerHTML = (collapsed ? '&#9654;' : '&#9660;') + countHtml;
     el.title = collapsed ? 'Show child sessions' : 'Hide child sessions';
     for (var i = 0; i < rows.length; i++) {
         rows[i].style.display = collapsed ? 'none' : '';
