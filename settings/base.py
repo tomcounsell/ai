@@ -45,6 +45,7 @@ THIRD_PARTY_APPS = [
     "drf_yasg",
     "django_extensions",
     "django_tasks_db",
+    "anymail",
 ]
 
 PROJECT_APPS = [

@@ -42,6 +42,9 @@ It should contain only the settings that differ from the defaults.
 # For example:
 # MY_CUSTOM_SETTING = 'custom value'
 
+# Email backend — use console backend in development so no real mail is sent
+# EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
+
 # Auto-enable Supabase storage when credentials are available
 # import os
 # if (

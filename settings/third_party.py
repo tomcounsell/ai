@@ -61,8 +61,12 @@ if not LOCAL and AWS_S3_BUCKET_NAME:
     STATICFILES_STORAGE = DEFAULT_FILE_STORAGE
 
 # Email configuration
-DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL", "noreply@example.com")
-SERVER_EMAIL = os.environ.get("SERVER_EMAIL", "server@example.com")
+DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL", "podcast@mail.ai.yuda.me")
+SERVER_EMAIL = DEFAULT_FROM_EMAIL
+EMAIL_BACKEND = "anymail.backends.postmark.EmailBackend"
+ANYMAIL = {
+    "POSTMARK_SERVER_TOKEN": os.environ.get("POSTMARK_SERVER_TOKEN", ""),
+}
 
 # Loops integration
 LOOPS_API_KEY = os.environ.get("LOOPS_API_KEY", "")
