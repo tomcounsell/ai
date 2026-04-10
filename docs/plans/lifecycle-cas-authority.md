@@ -1,5 +1,5 @@
 ---
-status: Critiqued
+status: Completed
 type: feature
 appetite: Medium
 owner: Valor
